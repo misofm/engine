@@ -239,6 +239,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-graph-audit"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-effect-contract",
+ "miso-engine-graph",
+]
+
+[[package]]
 name = "miso-engine-graph-compiler"
 version = "0.1.0"
 dependencies = [
