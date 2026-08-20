@@ -300,6 +300,7 @@ impl CompensationDelay {
 }
 
 pub struct PreparedGraphPlan {
+    plan_id: u64,
     pub spec: GraphSpec,
     pub sequential_schedule: Vec<GraphNodeId>,
     pub dependency_levels: Vec<DependencyLevel>,
@@ -318,29 +319,19 @@ pub struct GraphPreparedEffect {
     pub processor: Box<dyn PreparedNativeEffect>,
 }
 impl PreparedGraphPlan {
-    pub fn new(
-        spec: GraphSpec,
-        sequential_schedule: Vec<GraphNodeId>,
-        dependency_levels: Vec<DependencyLevel>,
-        route_timings: Vec<RouteTiming>,
-        buffer_assignments: Vec<BufferAssignment>,
-        estimate: GraphResourceEstimate,
-        envelope: RenderEnvelope,
-        required_bindings: Vec<GraphNodeId>,
-        scratch_buffers: u64,
-        effects: Vec<GraphPreparedEffect>,
-    ) -> Self {
+    pub fn new(parts: PreparedGraphPlanParts) -> Self {
         Self {
-            spec,
-            sequential_schedule,
-            dependency_levels,
-            route_timings,
-            buffer_assignments,
-            estimate,
-            envelope,
-            required_bindings,
-            scratch_buffers,
-            effects,
+            plan_id: parts.plan_id,
+            spec: parts.spec,
+            sequential_schedule: parts.sequential_schedule,
+            dependency_levels: parts.dependency_levels,
+            route_timings: parts.route_timings,
+            buffer_assignments: parts.buffer_assignments,
+            estimate: parts.estimate,
+            envelope: parts.envelope,
+            required_bindings: parts.required_bindings,
+            scratch_buffers: parts.scratch_buffers,
+            effects: parts.effects,
             _not_sync: Cell::new(()),
         }
     }
@@ -350,10 +341,12 @@ impl PreparedGraphPlan {
     ) -> Result<PreparedRenderPlan, GraphBindFailure> {
         let supplied: BTreeSet<_> = bindings.nodes.iter().cloned().collect();
         let required: BTreeSet<_> = self.required_bindings.iter().cloned().collect();
-        if bindings.envelope != self.envelope || supplied != required {
+        let duplicate_binding = supplied.len() != bindings.nodes.len();
+        if bindings.envelope != self.envelope || supplied != required || duplicate_binding {
             let envelope_mismatch = bindings.envelope != self.envelope;
             return Err(GraphBindFailure {
-                plan: self,
+                plan: Box::new(self),
+                bindings,
                 code: if envelope_mismatch {
                     "graph.plan.envelope_mismatch"
                 } else {
@@ -376,7 +369,7 @@ impl PreparedGraphPlan {
         };
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
-                plan_id: bindings.plan_id,
+                plan_id: self.plan_id,
                 envelope,
                 scratch: &specs,
                 parameter_defaults: &[],
@@ -387,13 +380,26 @@ impl PreparedGraphPlan {
         .expect("prevalidated graph plan"))
     }
 }
-pub struct GraphRuntimeBindings {
+pub struct PreparedGraphPlanParts {
     pub plan_id: u64,
+    pub spec: GraphSpec,
+    pub sequential_schedule: Vec<GraphNodeId>,
+    pub dependency_levels: Vec<DependencyLevel>,
+    pub route_timings: Vec<RouteTiming>,
+    pub buffer_assignments: Vec<BufferAssignment>,
+    pub estimate: GraphResourceEstimate,
+    pub envelope: RenderEnvelope,
+    pub required_bindings: Vec<GraphNodeId>,
+    pub scratch_buffers: u64,
+    pub effects: Vec<GraphPreparedEffect>,
+}
+pub struct GraphRuntimeBindings {
     pub envelope: RenderEnvelope,
     pub nodes: Vec<GraphNodeId>,
 }
 pub struct GraphBindFailure {
-    pub plan: PreparedGraphPlan,
+    pub plan: Box<PreparedGraphPlan>,
+    pub bindings: GraphRuntimeBindings,
     pub code: &'static str,
 }
 struct GraphExecutor {
@@ -405,6 +411,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         _arena: &mut BufferArena,
         _input: Option<PlanarBufferRef<'_>>,
         mut output: PlanarBufferMut<'_>,
+        _time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
         for channel in 0..output.channels() {
             output.plane_mut(channel)?.fill(0.0);
@@ -420,6 +427,66 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_estimate() -> GraphResourceEstimate {
+        GraphResourceEstimate {
+            logical_nodes: 0,
+            materialized_nodes: 0,
+            edges: 0,
+            schedule_items: 0,
+            dependency_levels: 0,
+            audio_buffer_samples: 0,
+            total_delay_samples: 0,
+            delay_bytes: 0,
+            graph_metadata_bytes: 0,
+            declared_effect_bytes: 0,
+            largest_allocation_bytes: 0,
+            incremental_plan_bytes: 0,
+            session_plus_plan_bytes: 0,
+        }
+    }
+
+    fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {
+        let input = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("track").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(1),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let required = vec![input.clone(), output.clone()];
+        (
+            PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 42,
+                spec: GraphSpec {
+                    nodes: Vec::new(),
+                    ports: Vec::new(),
+                    edges: Vec::new(),
+                },
+                sequential_schedule: Vec::new(),
+                dependency_levels: Vec::new(),
+                route_timings: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: empty_estimate(),
+                envelope,
+                required_bindings: required.clone(),
+                scratch_buffers: 0,
+                effects: Vec::new(),
+            }),
+            GraphRuntimeBindings {
+                envelope,
+                nodes: required,
+            },
+            input,
+        )
+    }
+
     #[test]
     fn delay_is_exact_and_lane_independent() {
         let mut delay = CompensationDelay::new(2);
@@ -434,5 +501,40 @@ mod tests {
         let mut values = [1.0, 2.0, 3.0];
         let mut sanitized = 0;
         assert_eq!(balanced_pairwise_sum(&mut values, &mut sanitized), 6.0);
+    }
+
+    #[test]
+    fn binding_rejects_duplicates_and_returns_all_ownership() {
+        let (plan, mut bindings, duplicate) = binding_plan();
+        bindings.nodes.push(duplicate);
+        let failure = match plan.bind(bindings) {
+            Ok(_) => panic!("duplicate binding unexpectedly accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.binding");
+        assert_eq!(failure.bindings.nodes.len(), 3);
+        assert_eq!(failure.plan.plan_id, 42);
+    }
+
+    #[test]
+    fn compile_request_plan_id_survives_binding() {
+        let (plan, bindings, _) = binding_plan();
+        let mut plan = match plan.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => panic!("exact bindings rejected"),
+        };
+        let mut samples = [1.0_f32; 2];
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 1, 1).expect("output");
+        let report = plan
+            .render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output,
+                },
+                miso_engine_core::realtime::RenderTime { absolute_sample: 9 },
+            )
+            .expect("render");
+        assert_eq!(report.plan_id, 42);
+        assert_eq!(report.next_absolute_sample, 10);
     }
 }

@@ -9,8 +9,8 @@ use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSam
 use miso_engine_graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
-    GraphPreparedEffect, GraphResourceEstimate, GraphSpec, PreparedGraphPlan, RackId, RouteTiming,
-    StableGraphId, TrackStage,
+    GraphPreparedEffect, GraphResourceEstimate, GraphSpec, PreparedGraphPlan,
+    PreparedGraphPlanParts, RackId, RouteTiming, StableGraphId, TrackStage,
 };
 use miso_engine_session::{
     ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration,
@@ -46,11 +46,14 @@ pub struct GraphCompileReport {
 }
 
 impl GraphCompiler {
+    // The frozen transactional API returns the complete prepared-effect input by value on
+    // failure. Boxing it would change that ownership contract solely to optimize a cold path.
+    #[allow(clippy::result_large_err)]
     pub fn compile(
         request: GraphCompileRequest,
     ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
         let GraphCompileRequest {
-            plan_id: _,
+            plan_id,
             effects,
             caps,
         } = request;
@@ -396,17 +399,17 @@ impl GraphCompiler {
                 vec![diag("graph.resource.limit", "$.limits.memory_bytes")],
             ));
         }
-        let debug = canonical_bytes(
-            session.sample_rate().0,
-            session.quantum().0,
-            &nodes,
-            &edges,
-            &schedule,
-            &levels,
-            &timing.routes,
-            &buffers,
-            &estimate,
-        );
+        let debug = canonical_bytes(CanonicalParts {
+            rate: session.sample_rate().0,
+            quantum: session.quantum().0,
+            nodes: &nodes,
+            edges: &edges,
+            schedule: &schedule,
+            levels: &levels,
+            routes: &timing.routes,
+            buffers: &buffers,
+            estimate: &estimate,
+        });
         let sha256 = hex_sha256(&debug);
         let dot = dot(&nodes, &edges);
         let effect_nodes = into_effects(effects.entries, &effect_ids);
@@ -428,23 +431,24 @@ impl GraphCompiler {
             })
             .cloned()
             .collect();
-        let graph = PreparedGraphPlan::new(
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id,
             spec,
-            schedule.clone(),
-            levels.clone(),
-            timing.routes.clone(),
-            buffers.clone(),
-            estimate.clone(),
-            RenderEnvelope {
+            sequential_schedule: schedule.clone(),
+            dependency_levels: levels.clone(),
+            route_timings: timing.routes.clone(),
+            buffer_assignments: buffers.clone(),
+            estimate: estimate.clone(),
+            envelope: RenderEnvelope {
                 sample_rate: session.sample_rate(),
                 quantum: session.quantum(),
                 input_channels: None,
                 output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
             },
             required_bindings,
-            buffers.len() as u64,
-            effect_nodes,
-        );
+            scratch_buffers: buffers.len() as u64,
+            effects: effect_nodes,
+        });
         Ok(PreparedGraphArtifact {
             graph,
             report: GraphCompileReport {
@@ -549,10 +553,10 @@ fn timings(
                 .map(TailSamples::Finite)
                 .ok_or_else(|| diag("graph.tail.arithmetic_overflow", "$.graph"))?,
         };
-        if let TailSamples::Finite(value) = extent {
-            if value > caps.maximum_finite_tail_samples {
-                return Err(diag("graph.tail.limit", "$.graph"));
-            }
+        if let TailSamples::Finite(value) = extent
+            && value > caps.maximum_finite_tail_samples
+        {
+            return Err(diag("graph.tail.limit", "$.graph"));
         }
         extents.insert(node.clone(), extent);
     }
@@ -922,19 +926,24 @@ fn node_text(node: &GraphNodeId) -> String {
         GraphNodeId::CompensationDelay { edge_id } => format!("delay:{edge_id:?}"),
     }
 }
-fn canonical_bytes(
+struct CanonicalParts<'a> {
     rate: u32,
     quantum: u32,
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-    schedule: &[GraphNodeId],
-    levels: &[DependencyLevel],
-    routes: &[RouteTiming],
-    buffers: &[BufferAssignment],
-    estimate: &GraphResourceEstimate,
-) -> Vec<u8> {
-    let mut text = format!("MISO-GRAPH-V1\nenvelope\t{rate}\t{quantum}\n");
-    for node in nodes {
+    nodes: &'a [GraphNode],
+    edges: &'a [GraphEdge],
+    schedule: &'a [GraphNodeId],
+    levels: &'a [DependencyLevel],
+    routes: &'a [RouteTiming],
+    buffers: &'a [BufferAssignment],
+    estimate: &'a GraphResourceEstimate,
+}
+
+fn canonical_bytes(parts: CanonicalParts<'_>) -> Vec<u8> {
+    let mut text = format!(
+        "MISO-GRAPH-V1\nenvelope\t{}\t{}\n",
+        parts.rate, parts.quantum
+    );
+    for node in parts.nodes {
         text.push_str(&format!(
             "node\t{}\t{}\t{:?}\n",
             node_text(&node.id),
@@ -942,7 +951,7 @@ fn canonical_bytes(
             node.tail
         ));
     }
-    for edge in edges {
+    for edge in parts.edges {
         text.push_str(&format!(
             "edge\t{:?}\t{}\t{}\n",
             edge.id,
@@ -950,15 +959,15 @@ fn canonical_bytes(
             node_text(&edge.destination.node)
         ));
     }
-    for node in schedule {
+    for node in parts.schedule {
         text.push_str(&format!("order\t{}\n", node_text(node)));
     }
-    for level in levels {
+    for level in parts.levels {
         for node in &level.nodes {
             text.push_str(&format!("level\t{}\t{}\n", level.level, node_text(node)));
         }
     }
-    for route in routes {
+    for route in parts.routes {
         text.push_str(&format!(
             "route\t{}\t{}\t{}\t{}\n",
             route.route_id.as_str(),
@@ -967,7 +976,7 @@ fn canonical_bytes(
             route.destination_arrival.0
         ));
     }
-    for buffer in buffers {
+    for buffer in parts.buffers {
         text.push_str(&format!(
             "buffer\t{}\t{}\n",
             node_text(&buffer.port.node),
@@ -976,7 +985,7 @@ fn canonical_bytes(
     }
     text.push_str(&format!(
         "estimate\t{}\t{}\t{}\n",
-        estimate.logical_nodes, estimate.edges, estimate.incremental_plan_bytes
+        parts.estimate.logical_nodes, parts.estimate.edges, parts.estimate.incremental_plan_bytes
     ));
     text.into_bytes()
 }

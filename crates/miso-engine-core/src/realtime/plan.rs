@@ -85,6 +85,7 @@ pub trait PreparedPlanExecutor: Send {
         arena: &mut BufferArena,
         input: Option<PlanarBufferRef<'_>>,
         output: PlanarBufferMut<'_>,
+        time: RenderTime,
     ) -> Result<(), RenderError>;
 }
 /// Absolute sample time supplied by the host; no wall clock is used.
@@ -246,7 +247,7 @@ impl PreparedRenderPlan {
             .checked_add(u64::from(envelope.quantum.0))
             .ok_or(RenderError::TimeOverflow)?;
         if let Some(executor) = &mut self.executor {
-            executor.render(&mut self.arena, io.input, io.output)?;
+            executor.render(&mut self.arena, io.input, io.output, time)?;
         } else {
             let mut channel = 0;
             while channel < envelope.output_channels.get() {
