@@ -330,7 +330,7 @@ impl GraphCompiler {
         if nodes.len() as u64 > caps.maximum_nodes || edges.len() as u64 > caps.maximum_edges {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
-        if let Some(cycle) = cycle_witness(&nodes, &edges) {
+        for cycle in cycle_witnesses(&nodes, &edges) {
             diagnostics.push(GraphDiagnostic {
                 code: "graph.cycle",
                 path: cycle.1.first().cloned().unwrap_or_else(|| "$".to_owned()),
@@ -831,39 +831,102 @@ fn topo(
         ))
     }
 }
+#[cfg(test)]
 fn cycle_witness(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
 ) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
-    let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
+    cycle_witnesses(nodes, edges).into_iter().next()
+}
+fn cycle_witnesses(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> Vec<(Vec<GraphNodeId>, Vec<String>)> {
     let mut adjacency: BTreeMap<_, Vec<_>> = nodes
         .iter()
         .map(|node| (node.id.clone(), Vec::new()))
         .collect();
-    for edge in edges {
-        *degree.get_mut(&edge.destination.node)? += 1;
-        adjacency.get_mut(&edge.source.node)?.push(edge);
-    }
-    let mut ready: BTreeSet<_> = degree
+    let mut reverse: BTreeMap<_, Vec<_>> = nodes
         .iter()
-        .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
+        .map(|node| (node.id.clone(), Vec::new()))
         .collect();
-    while let Some(node) = ready.pop_first() {
-        for edge in &adjacency[&node] {
-            let degree = degree.get_mut(&edge.destination.node)?;
-            *degree -= 1;
-            if *degree == 0 {
-                ready.insert(edge.destination.node.clone());
+    for edge in edges {
+        let Some(outgoing) = adjacency.get_mut(&edge.source.node) else {
+            return Vec::new();
+        };
+        outgoing.push(edge);
+        let Some(incoming) = reverse.get_mut(&edge.destination.node) else {
+            return Vec::new();
+        };
+        incoming.push(edge);
+    }
+    for outgoing in adjacency.values_mut() {
+        outgoing.sort_by(|left, right| left.id.cmp(&right.id));
+    }
+    for incoming in reverse.values_mut() {
+        incoming.sort_by(|left, right| left.id.cmp(&right.id));
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut finish = Vec::with_capacity(nodes.len());
+    for start in nodes.iter().map(|node| &node.id) {
+        if !visited.insert(start.clone()) {
+            continue;
+        }
+        let mut stack = vec![(start.clone(), 0usize)];
+        while let Some((node, next_edge)) = stack.last_mut() {
+            let outgoing = &adjacency[node];
+            if *next_edge == outgoing.len() {
+                finish.push(stack.pop().expect("nonempty DFS stack").0);
+                continue;
+            }
+            let destination = outgoing[*next_edge].destination.node.clone();
+            *next_edge += 1;
+            if visited.insert(destination.clone()) {
+                stack.push((destination, 0));
             }
         }
     }
-    let remaining: BTreeSet<_> = degree
+
+    let mut assigned = BTreeSet::new();
+    let mut components = Vec::new();
+    for start in finish.into_iter().rev() {
+        if !assigned.insert(start.clone()) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            component.push(node.clone());
+            for edge in reverse[&node].iter().rev() {
+                let predecessor = edge.source.node.clone();
+                if assigned.insert(predecessor.clone()) {
+                    stack.push(predecessor);
+                }
+            }
+        }
+        component.sort();
+        let cyclic = component.len() > 1
+            || adjacency[&component[0]]
+                .iter()
+                .any(|edge| edge.destination.node == component[0]);
+        if cyclic {
+            components.push(component);
+        }
+    }
+    components.sort_by(|left, right| left[0].cmp(&right[0]));
+    components
         .into_iter()
-        .filter_map(|(node, degree)| (degree != 0).then_some(node))
-        .collect();
-    // Kahn's residual can include acyclic nodes downstream of a cycle. Search each residual node
-    // in semantic order instead of assuming the smallest residual node itself lies on a cycle.
-    for start in &remaining {
+        .filter_map(|component| cycle_witness_in_component(&component, &adjacency))
+        .collect()
+}
+fn cycle_witness_in_component(
+    component: &[GraphNodeId],
+    adjacency: &BTreeMap<GraphNodeId, Vec<&GraphEdge>>,
+) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
+    let members: BTreeSet<_> = component.iter().cloned().collect();
+    let start = component.first()?;
+    {
         let mut nodes_path = vec![start.clone()];
         let mut edge_path = Vec::new();
         let mut on_path = BTreeSet::from([start.clone()]);
@@ -871,7 +934,7 @@ fn cycle_witness(
         while let Some((node, next_edge)) = stack.last_mut() {
             let outgoing = &adjacency[node];
             while *next_edge < outgoing.len()
-                && !remaining.contains(&outgoing[*next_edge].destination.node)
+                && !members.contains(&outgoing[*next_edge].destination.node)
             {
                 *next_edge += 1;
             }
@@ -1548,6 +1611,31 @@ mod tests {
         let (witness, paths) = cycle_witness(&nodes, &edges).expect("cycle");
         assert_eq!(witness, [node("b"), node("c"), node("b")]);
         assert_eq!(paths, ["$.routes[id=to-c]", "$.routes[id=to-b]"]);
+    }
+
+    #[test]
+    fn every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths() {
+        let nodes: Vec<_> = ["a", "b", "c", "d", "e", "z"]
+            .into_iter()
+            .map(|name| graph_node(name, 0, TailSamples::Finite(0)))
+            .collect();
+        let mut edges = vec![
+            edge("ab", "a", "b"),
+            edge("ba", "b", "a"),
+            edge("cc", "c", "c"),
+            edge("de", "d", "e"),
+            edge("ed", "e", "d"),
+            edge("za", "a", "z"),
+        ];
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let witnesses = cycle_witnesses(&nodes, &edges);
+        assert_eq!(witnesses.len(), 3);
+        assert_eq!(witnesses[0].0, [node("a"), node("b"), node("a")]);
+        assert_eq!(witnesses[0].1, ["$.routes[id=ab]", "$.routes[id=ba]"]);
+        assert_eq!(witnesses[1].0, [node("c"), node("c")]);
+        assert_eq!(witnesses[1].1, ["$.routes[id=cc]"]);
+        assert_eq!(witnesses[2].0, [node("d"), node("e"), node("d")]);
+        assert_eq!(witnesses[2].1, ["$.routes[id=de]", "$.routes[id=ed]"]);
     }
 
     #[test]
