@@ -12,5 +12,8 @@ name = "miso_engine_graph"
 miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 
+[dev-dependencies]
+miso-engine-conformance.workspace = true
+
 [lints]
 workspace = true

@@ -233,6 +233,7 @@ dependencies = [
 name = "miso-engine-graph"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-contract",
 ]

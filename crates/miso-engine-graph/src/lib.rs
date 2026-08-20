@@ -673,6 +673,11 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_conformance::DualAccumulatorDelayFactory;
+    use miso_engine_effect_contract::{
+        EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
+        PortId, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+    };
 
     struct Noop;
     impl GraphRuntimeProcessor for Noop {
@@ -684,6 +689,24 @@ mod tests {
     struct FixedSource {
         left: [f32; 4],
         right: [f32; 4],
+    }
+
+    struct OneShotSource {
+        emitted: bool,
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for OneShotSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            if !self.emitted {
+                block.left[0] = self.left;
+                block.right[0] = self.right;
+                self.emitted = true;
+            }
+            Ok(())
+        }
     }
     impl GraphRuntimeProcessor for FixedSource {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -997,5 +1020,258 @@ mod tests {
         )
         .expect("render");
         assert_eq!(samples, [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 30.0, 0.0]);
+    }
+
+    fn effect_pdc_plan(rate: u32, quantum: u32, bypass: bool) -> PreparedRenderPlan {
+        let input_effect = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("effect-path").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let input_direct = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("direct-path").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let effect_id = EffectNodeId {
+            track_id: StableGraphId::parse("effect-path").expect("ID"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse("delay").expect("ID"),
+        };
+        let effect_node = GraphNodeId::Effect(effect_id.clone());
+        let route_effect = GraphNodeId::Route {
+            route_id: StableGraphId::parse("effect-route").expect("ID"),
+        };
+        let route_direct = GraphNodeId::Route {
+            route_id: StableGraphId::parse("direct-route").expect("ID"),
+        };
+        let output_node = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let factory = DualAccumulatorDelayFactory::correct();
+        let initial_values = [
+            InitialParameterValue {
+                parameter_index: 0,
+                channel: ParameterChannel::Left,
+                value: 1.0,
+            },
+            InitialParameterValue {
+                parameter_index: 0,
+                channel: ParameterChannel::Right,
+                value: 1.0,
+            },
+        ];
+        let processor = factory
+            .prepare(PrepareEffectRequest {
+                sample_rate: rate,
+                quantum,
+                quality: EffectQuality::Normal,
+                bypass,
+                link_mode: LinkMode::DualMono,
+                ports: PreparedPortsV1 {
+                    sidechain: PreparedSidechainPort::Unconnected {
+                        id: PortId::new("sidechain-in").expect("port"),
+                        required: false,
+                    },
+                },
+                initial_values: &initial_values,
+                limits: PrepareEffectLimits {
+                    maximum_total_state_bytes: 1_000,
+                    maximum_scratch_bytes: 1_000,
+                    maximum_automation_spans_per_block: 1,
+                },
+            })
+            .expect("effect");
+        let metadata = processor.metadata();
+        let direct_destination = GraphEdgeId::RouteDestination {
+            route_id: StableGraphId::parse("direct-route").expect("ID"),
+        };
+        let make_edge =
+            |id: GraphEdgeId, source: GraphNodeId, destination: GraphNodeId| GraphEdge {
+                id,
+                source: GraphPortId {
+                    node: source,
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: destination,
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.pdc".to_owned(),
+            };
+        let edges = vec![
+            make_edge(
+                GraphEdgeId::TrackMain {
+                    target: effect_node.clone(),
+                },
+                input_effect.clone(),
+                effect_node.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("effect-route").expect("ID"),
+                },
+                effect_node.clone(),
+                route_effect.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: StableGraphId::parse("effect-route").expect("ID"),
+                },
+                route_effect.clone(),
+                output_node.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("direct-route").expect("ID"),
+                },
+                input_direct.clone(),
+                route_direct.clone(),
+            ),
+            make_edge(
+                direct_destination.clone(),
+                route_direct.clone(),
+                output_node.clone(),
+            ),
+        ];
+        let schedule = vec![
+            input_direct.clone(),
+            input_effect.clone(),
+            effect_node.clone(),
+            route_direct.clone(),
+            route_effect.clone(),
+            output_node.clone(),
+        ];
+        let graph_nodes = schedule
+            .iter()
+            .cloned()
+            .map(|id| GraphNode {
+                latency: if id == effect_node {
+                    metadata.latency
+                } else {
+                    LatencySamples(0)
+                },
+                tail: if id == effect_node {
+                    metadata.tail
+                } else {
+                    TailSamples::Finite(0)
+                },
+                id,
+            })
+            .collect();
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(rate),
+            quantum: QuantumFrames(quantum),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let identity = RouteTransform {
+            gain: 1.0,
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+        };
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: u64::from(rate) + u64::from(quantum),
+            spec: GraphSpec {
+                nodes: graph_nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: Vec::new(),
+            route_timings: Vec::new(),
+            inserted_delays: vec![InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(direct_destination.clone()),
+                },
+                edge_id: direct_destination,
+                samples: metadata.latency,
+            }],
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: vec![
+                input_direct.clone(),
+                input_effect.clone(),
+                output_node.clone(),
+            ],
+            routes: vec![
+                PreparedRoute {
+                    node: route_direct,
+                    transform: identity,
+                },
+                PreparedRoute {
+                    node: route_effect,
+                    transform: identity,
+                },
+            ],
+            effects: vec![GraphPreparedEffect {
+                id: effect_id,
+                metadata,
+                processor,
+            }],
+        });
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes: vec![
+                GraphNodeBinding::new(
+                    input_direct,
+                    Box::new(OneShotSource {
+                        emitted: false,
+                        left: 1.0,
+                        right: 2.0,
+                    }),
+                ),
+                GraphNodeBinding::new(
+                    input_effect,
+                    Box::new(OneShotSource {
+                        emitted: false,
+                        left: 1.0,
+                        right: 2.0,
+                    }),
+                ),
+                GraphNodeBinding::new(output_node, Box::new(Noop)),
+            ],
+        };
+        match graph.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => panic!("bindings"),
+        }
+    }
+
+    #[test]
+    fn enabled_and_bypass_pdc_align_at_all_rates_and_quanta() {
+        for rate in miso_engine_core::realtime::SUPPORTED_SAMPLE_RATES {
+            for quantum in [1, 127, 128, 255, 1024] {
+                for bypass in [false, true] {
+                    let mut plan = effect_pdc_plan(rate, quantum, bypass);
+                    let mut rendered_left = Vec::new();
+                    let mut rendered_right = Vec::new();
+                    let blocks = 4_u32.div_ceil(quantum);
+                    for block in 0..blocks {
+                        let frames = quantum as usize;
+                        let mut pcm = vec![0.0_f32; frames * 2];
+                        let output =
+                            PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output");
+                        plan.render(
+                            miso_engine_core::realtime::RenderIo {
+                                input: None,
+                                output,
+                            },
+                            miso_engine_core::realtime::RenderTime {
+                                absolute_sample: u64::from(block) * u64::from(quantum),
+                            },
+                        )
+                        .expect("render");
+                        rendered_left.extend_from_slice(&pcm[..frames]);
+                        rendered_right.extend_from_slice(&pcm[frames..]);
+                    }
+                    assert_eq!(&rendered_left[..4], &[0.0, 0.0, 0.0, 2.0]);
+                    assert_eq!(&rendered_right[..4], &[0.0, 0.0, 0.0, 4.0]);
+                }
+            }
+        }
     }
 }
