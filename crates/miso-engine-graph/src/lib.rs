@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 use core::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use miso_engine_core::{
     QuantumFrames,
@@ -15,7 +15,7 @@ use miso_engine_core::{
     },
 };
 use miso_engine_effect_contract::{
-    LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
+    EffectProcessBlock, LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -133,6 +133,12 @@ pub struct RouteTiming {
     pub source_arrival: LatencySamples,
     pub compensation_delay: LatencySamples,
     pub destination_arrival: LatencySamples,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsertedDelay {
+    pub node: GraphNodeId,
+    pub edge_id: GraphEdgeId,
+    pub samples: LatencySamples,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufferAssignment {
@@ -305,11 +311,12 @@ pub struct PreparedGraphPlan {
     pub sequential_schedule: Vec<GraphNodeId>,
     pub dependency_levels: Vec<DependencyLevel>,
     pub route_timings: Vec<RouteTiming>,
+    pub inserted_delays: Vec<InsertedDelay>,
     pub buffer_assignments: Vec<BufferAssignment>,
     pub estimate: GraphResourceEstimate,
     pub envelope: RenderEnvelope,
     pub required_bindings: Vec<GraphNodeId>,
-    scratch_buffers: u64,
+    routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
     _not_sync: Cell<()>,
 }
@@ -326,11 +333,12 @@ impl PreparedGraphPlan {
             sequential_schedule: parts.sequential_schedule,
             dependency_levels: parts.dependency_levels,
             route_timings: parts.route_timings,
+            inserted_delays: parts.inserted_delays,
             buffer_assignments: parts.buffer_assignments,
             estimate: parts.estimate,
             envelope: parts.envelope,
             required_bindings: parts.required_bindings,
-            scratch_buffers: parts.scratch_buffers,
+            routes: parts.routes,
             effects: parts.effects,
             _not_sync: Cell::new(()),
         }
@@ -339,7 +347,11 @@ impl PreparedGraphPlan {
         self,
         bindings: GraphRuntimeBindings,
     ) -> Result<PreparedRenderPlan, GraphBindFailure> {
-        let supplied: BTreeSet<_> = bindings.nodes.iter().cloned().collect();
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
         let required: BTreeSet<_> = self.required_bindings.iter().cloned().collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
         if bindings.envelope != self.envelope || supplied != required || duplicate_binding {
@@ -354,24 +366,21 @@ impl PreparedGraphPlan {
                 },
             });
         }
-        let specs: Vec<_> = (0..self.scratch_buffers)
-            .map(|_| miso_engine_core::realtime::PlanarBufferSpec {
-                channels: core::num::NonZeroUsize::new(2).expect("constant nonzero"),
-                frame_capacity: self.envelope.quantum,
-            })
-            .collect();
-        // The compiler admitted the envelope and all buffer counts before this point.  Hence the
-        // core constructor cannot reject this exact request; keeping the fallible work before the
-        // ownership transfer preserves the failure-return contract above.
         let envelope = self.envelope;
-        let executor = GraphExecutor {
-            _effects: self.effects,
-        };
+        let executor = GraphExecutor::new(
+            self.spec,
+            self.sequential_schedule,
+            self.inserted_delays,
+            self.routes,
+            self.effects,
+            bindings.nodes,
+            envelope.quantum.0 as usize,
+        );
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id: self.plan_id,
                 envelope,
-                scratch: &specs,
+                scratch: &[],
                 parameter_defaults: &[],
                 event_capacity: 0,
             },
@@ -386,24 +395,213 @@ pub struct PreparedGraphPlanParts {
     pub sequential_schedule: Vec<GraphNodeId>,
     pub dependency_levels: Vec<DependencyLevel>,
     pub route_timings: Vec<RouteTiming>,
+    pub inserted_delays: Vec<InsertedDelay>,
     pub buffer_assignments: Vec<BufferAssignment>,
     pub estimate: GraphResourceEstimate,
     pub envelope: RenderEnvelope,
     pub required_bindings: Vec<GraphNodeId>,
-    pub scratch_buffers: u64,
+    pub routes: Vec<PreparedRoute>,
     pub effects: Vec<GraphPreparedEffect>,
 }
 pub struct GraphRuntimeBindings {
     pub envelope: RenderEnvelope,
-    pub nodes: Vec<GraphNodeId>,
+    pub nodes: Vec<GraphNodeBinding>,
 }
 pub struct GraphBindFailure {
     pub plan: Box<PreparedGraphPlan>,
     pub bindings: GraphRuntimeBindings,
     pub code: &'static str,
 }
+pub struct GraphNodeBinding {
+    pub node: GraphNodeId,
+    processor: Box<dyn GraphRuntimeProcessor>,
+}
+impl GraphNodeBinding {
+    pub fn new(node: GraphNodeId, processor: Box<dyn GraphRuntimeProcessor>) -> Self {
+        Self { node, processor }
+    }
+}
+pub struct GraphBindingBlock<'a> {
+    pub left: &'a mut [f32],
+    pub right: &'a mut [f32],
+    pub first_sample: u64,
+}
+pub trait GraphRuntimeProcessor: Send {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedRoute {
+    pub node: GraphNodeId,
+    pub transform: RouteTransform,
+}
+
+struct StereoBuffer {
+    left: Box<[f32]>,
+    right: Box<[f32]>,
+}
+impl StereoBuffer {
+    fn new(frames: usize) -> Self {
+        Self {
+            left: vec![0.0; frames].into_boxed_slice(),
+            right: vec![0.0; frames].into_boxed_slice(),
+        }
+    }
+}
+struct RuntimeEdge {
+    source: usize,
+    sidechain: bool,
+    delay: Option<CompensationDelay>,
+    contribution: StereoBuffer,
+}
+enum RuntimeNodeKind {
+    Identity,
+    Bound(Box<dyn GraphRuntimeProcessor>),
+    Effect(GraphPreparedEffect),
+    Route(RouteTransform),
+    Reduction,
+}
+struct RuntimeNode {
+    incoming: Vec<RuntimeEdge>,
+    output: StereoBuffer,
+    kind: RuntimeNodeKind,
+}
 struct GraphExecutor {
-    _effects: Vec<GraphPreparedEffect>,
+    nodes: Vec<RuntimeNode>,
+    output_node: usize,
+    reduction_scratch: Box<[f32]>,
+    sanitized_samples: u64,
+}
+impl GraphExecutor {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        spec: GraphSpec,
+        schedule: Vec<GraphNodeId>,
+        inserted_delays: Vec<InsertedDelay>,
+        routes: Vec<PreparedRoute>,
+        effects: Vec<GraphPreparedEffect>,
+        bindings: Vec<GraphNodeBinding>,
+        frames: usize,
+    ) -> Self {
+        let indexes: BTreeMap<_, _> = schedule
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, node)| (node, index))
+            .collect();
+        let delays: BTreeMap<_, _> = inserted_delays
+            .into_iter()
+            .map(|delay| (delay.edge_id, delay.samples.0))
+            .collect();
+        let mut routes: BTreeMap<_, _> = routes
+            .into_iter()
+            .map(|route| (route.node, route.transform))
+            .collect();
+        let mut effects: BTreeMap<_, _> = effects
+            .into_iter()
+            .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
+            .collect();
+        let mut bindings: BTreeMap<_, _> = bindings
+            .into_iter()
+            .map(|binding| (binding.node, binding.processor))
+            .collect();
+        let mut maximum_inputs = 1usize;
+        let mut nodes = Vec::with_capacity(schedule.len());
+        for node_id in &schedule {
+            let incoming: Vec<_> = spec
+                .edges
+                .iter()
+                .filter(|edge| edge.destination.node == *node_id)
+                .map(|edge| RuntimeEdge {
+                    source: indexes[&edge.source.node],
+                    sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
+                    delay: delays
+                        .get(&edge.id)
+                        .copied()
+                        .filter(|samples| *samples != 0)
+                        .map(|samples| CompensationDelay::new(samples as usize)),
+                    contribution: StereoBuffer::new(frames),
+                })
+                .collect();
+            maximum_inputs = maximum_inputs.max(incoming.len());
+            let kind = if let Some(processor) = bindings.remove(node_id) {
+                RuntimeNodeKind::Bound(processor)
+            } else if let Some(effect) = effects.remove(node_id) {
+                RuntimeNodeKind::Effect(effect)
+            } else if let Some(transform) = routes.remove(node_id) {
+                RuntimeNodeKind::Route(transform)
+            } else if matches!(
+                node_id,
+                GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
+            ) {
+                RuntimeNodeKind::Reduction
+            } else {
+                RuntimeNodeKind::Identity
+            };
+            nodes.push(RuntimeNode {
+                incoming,
+                output: StereoBuffer::new(frames),
+                kind,
+            });
+        }
+        let output_node = schedule
+            .iter()
+            .position(|node| matches!(node, GraphNodeId::Output { .. }))
+            .expect("validated single output");
+        Self {
+            nodes,
+            output_node,
+            reduction_scratch: vec![0.0; maximum_inputs].into_boxed_slice(),
+            sanitized_samples: 0,
+        }
+    }
+
+    fn prepare_inputs(&mut self, node_index: usize) {
+        let (before, current_and_after) = self.nodes.split_at_mut(node_index);
+        let current = &mut current_and_after[0];
+        for edge in &mut current.incoming {
+            let source = &before[edge.source].output;
+            edge.contribution.left.copy_from_slice(&source.left);
+            edge.contribution.right.copy_from_slice(&source.right);
+            if let Some(delay) = &mut edge.delay {
+                delay.process(&mut edge.contribution.left, &mut edge.contribution.right);
+            }
+        }
+    }
+
+    fn reduce_main_inputs(&mut self, node_index: usize) {
+        let current = &mut self.nodes[node_index];
+        let main_inputs = current
+            .incoming
+            .iter()
+            .filter(|edge| !edge.sidechain)
+            .count();
+        for frame in 0..current.output.left.len() {
+            for (slot, edge) in current
+                .incoming
+                .iter()
+                .filter(|edge| !edge.sidechain)
+                .enumerate()
+            {
+                self.reduction_scratch[slot] = edge.contribution.left[frame];
+            }
+            current.output.left[frame] = balanced_pairwise_sum(
+                &mut self.reduction_scratch[..main_inputs],
+                &mut self.sanitized_samples,
+            );
+            for (slot, edge) in current
+                .incoming
+                .iter()
+                .filter(|edge| !edge.sidechain)
+                .enumerate()
+            {
+                self.reduction_scratch[slot] = edge.contribution.right[frame];
+            }
+            current.output.right[frame] = balanced_pairwise_sum(
+                &mut self.reduction_scratch[..main_inputs],
+                &mut self.sanitized_samples,
+            );
+        }
+    }
 }
 impl PreparedPlanExecutor for GraphExecutor {
     fn render(
@@ -411,11 +609,51 @@ impl PreparedPlanExecutor for GraphExecutor {
         _arena: &mut BufferArena,
         _input: Option<PlanarBufferRef<'_>>,
         mut output: PlanarBufferMut<'_>,
-        _time: miso_engine_core::realtime::RenderTime,
+        time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
-        for channel in 0..output.channels() {
-            output.plane_mut(channel)?.fill(0.0);
+        for node_index in 0..self.nodes.len() {
+            self.prepare_inputs(node_index);
+            self.reduce_main_inputs(node_index);
+            let current = &mut self.nodes[node_index];
+            match &mut current.kind {
+                RuntimeNodeKind::Identity | RuntimeNodeKind::Reduction => {}
+                RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
+                    left: &mut current.output.left,
+                    right: &mut current.output.right,
+                    first_sample: time.absolute_sample,
+                })?,
+                RuntimeNodeKind::Route(transform) => {
+                    for frame in 0..current.output.left.len() {
+                        (current.output.left[frame], current.output.right[frame]) = transform
+                            .transform(
+                                current.output.left[frame],
+                                current.output.right[frame],
+                                &mut self.sanitized_samples,
+                            );
+                    }
+                }
+                RuntimeNodeKind::Effect(effect) => {
+                    let sidechain = current
+                        .incoming
+                        .iter()
+                        .find(|edge| edge.sidechain)
+                        .map(|edge| (&*edge.contribution.left, &*edge.contribution.right));
+                    let block = EffectProcessBlock::new(
+                        &mut current.output.left,
+                        &mut current.output.right,
+                        sidechain,
+                        time.absolute_sample,
+                        &[],
+                        effect.metadata.quantum,
+                    )
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+                    let _ = effect.processor.process(block);
+                }
+            }
         }
+        let rendered = &self.nodes[self.output_node].output;
+        output.plane_mut(0)?.copy_from_slice(&rendered.left);
+        output.plane_mut(1)?.copy_from_slice(&rendered.right);
         Ok(())
     }
 }
@@ -427,6 +665,25 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Noop;
+    impl GraphRuntimeProcessor for Noop {
+        fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    struct FixedSource {
+        left: [f32; 4],
+        right: [f32; 4],
+    }
+    impl GraphRuntimeProcessor for FixedSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            block.left.copy_from_slice(&self.left);
+            block.right.copy_from_slice(&self.right);
+            Ok(())
+        }
+    }
 
     fn empty_estimate() -> GraphResourceEstimate {
         GraphResourceEstimate {
@@ -461,27 +718,59 @@ mod tests {
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
         let required = vec![input.clone(), output.clone()];
+        let graph_nodes = vec![
+            GraphNode {
+                id: input.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            },
+            GraphNode {
+                id: output.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            },
+        ];
+        let edge = GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: output.clone(),
+            },
+            source: GraphPortId {
+                node: input.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.test".to_owned(),
+        };
         (
             PreparedGraphPlan::new(PreparedGraphPlanParts {
                 plan_id: 42,
                 spec: GraphSpec {
-                    nodes: Vec::new(),
+                    nodes: graph_nodes,
                     ports: Vec::new(),
-                    edges: Vec::new(),
+                    edges: vec![edge],
                 },
-                sequential_schedule: Vec::new(),
+                sequential_schedule: vec![input.clone(), output.clone()],
                 dependency_levels: Vec::new(),
                 route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
                 buffer_assignments: Vec::new(),
                 estimate: empty_estimate(),
                 envelope,
                 required_bindings: required.clone(),
-                scratch_buffers: 0,
+                routes: Vec::new(),
                 effects: Vec::new(),
             }),
             GraphRuntimeBindings {
                 envelope,
-                nodes: required,
+                nodes: required
+                    .into_iter()
+                    .map(|node| GraphNodeBinding::new(node, Box::new(Noop)))
+                    .collect(),
             },
             input,
         )
@@ -506,7 +795,9 @@ mod tests {
     #[test]
     fn binding_rejects_duplicates_and_returns_all_ownership() {
         let (plan, mut bindings, duplicate) = binding_plan();
-        bindings.nodes.push(duplicate);
+        bindings
+            .nodes
+            .push(GraphNodeBinding::new(duplicate, Box::new(Noop)));
         let failure = match plan.bind(bindings) {
             Ok(_) => panic!("duplicate binding unexpectedly accepted"),
             Err(failure) => failure,
@@ -536,5 +827,164 @@ mod tests {
             .expect("render");
         assert_eq!(report.plan_id, 42);
         assert_eq!(report.next_absolute_sample, 10);
+    }
+
+    #[test]
+    fn executor_applies_exact_pdc_then_fixed_pairwise_reduction() {
+        let input_a = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("a").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let input_b = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("b").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let route_a = GraphNodeId::Route {
+            route_id: StableGraphId::parse("a").expect("ID"),
+        };
+        let route_b = GraphNodeId::Route {
+            route_id: StableGraphId::parse("b").expect("ID"),
+        };
+        let output_node = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let edge = |id: GraphEdgeId, source: GraphNodeId, destination: GraphNodeId| GraphEdge {
+            id,
+            source: GraphPortId {
+                node: source,
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: destination,
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.test".to_owned(),
+        };
+        let delayed_edge = GraphEdgeId::RouteDestination {
+            route_id: StableGraphId::parse("a").expect("ID"),
+        };
+        let edges = vec![
+            edge(
+                GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("a").expect("ID"),
+                },
+                input_a.clone(),
+                route_a.clone(),
+            ),
+            edge(
+                GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("b").expect("ID"),
+                },
+                input_b.clone(),
+                route_b.clone(),
+            ),
+            edge(delayed_edge.clone(), route_a.clone(), output_node.clone()),
+            edge(
+                GraphEdgeId::RouteDestination {
+                    route_id: StableGraphId::parse("b").expect("ID"),
+                },
+                route_b.clone(),
+                output_node.clone(),
+            ),
+        ];
+        let schedule = vec![
+            input_a.clone(),
+            input_b.clone(),
+            route_a.clone(),
+            route_b.clone(),
+            output_node.clone(),
+        ];
+        let identity = RouteTransform {
+            gain: 1.0,
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let nodes = schedule
+            .iter()
+            .cloned()
+            .map(|id| GraphNode {
+                id,
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            })
+            .collect();
+        let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 77,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: Vec::new(),
+            route_timings: Vec::new(),
+            inserted_delays: vec![InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(delayed_edge.clone()),
+                },
+                edge_id: delayed_edge,
+                samples: LatencySamples(2),
+            }],
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: vec![input_a.clone(), input_b.clone(), output_node.clone()],
+            routes: vec![
+                PreparedRoute {
+                    node: route_a,
+                    transform: identity,
+                },
+                PreparedRoute {
+                    node: route_b,
+                    transform: identity,
+                },
+            ],
+            effects: Vec::new(),
+        });
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes: vec![
+                GraphNodeBinding::new(
+                    input_a,
+                    Box::new(FixedSource {
+                        left: [1.0, 0.0, 0.0, 0.0],
+                        right: [10.0, 0.0, 0.0, 0.0],
+                    }),
+                ),
+                GraphNodeBinding::new(
+                    input_b,
+                    Box::new(FixedSource {
+                        left: [0.0, 0.0, 2.0, 0.0],
+                        right: [0.0, 0.0, 20.0, 0.0],
+                    }),
+                ),
+                GraphNodeBinding::new(output_node, Box::new(Noop)),
+            ],
+        };
+        let mut plan = match plan.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => panic!("bindings"),
+        };
+        let mut samples = [0.0_f32; 8];
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+        plan.render(
+            miso_engine_core::realtime::RenderIo {
+                input: None,
+                output,
+            },
+            miso_engine_core::realtime::RenderTime { absolute_sample: 0 },
+        )
+        .expect("render");
+        assert_eq!(samples, [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 30.0, 0.0]);
     }
 }

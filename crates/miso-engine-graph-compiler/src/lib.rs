@@ -9,8 +9,9 @@ use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSam
 use miso_engine_graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
-    GraphPreparedEffect, GraphResourceEstimate, GraphSpec, PreparedGraphPlan,
-    PreparedGraphPlanParts, RackId, RouteTiming, StableGraphId, TrackStage,
+    GraphPreparedEffect, GraphResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
+    PreparedGraphPlanParts, PreparedRoute, RackId, RouteTiming, RouteTransform, StableGraphId,
+    TrackStage,
 };
 use miso_engine_session::{
     ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration,
@@ -38,6 +39,7 @@ pub struct GraphCompileReport {
     pub sequential_schedule: Vec<GraphNodeId>,
     pub dependency_levels: Vec<DependencyLevel>,
     pub route_timings: Vec<RouteTiming>,
+    pub inserted_delays: Vec<InsertedDelay>,
     pub buffer_assignments: Vec<BufferAssignment>,
     pub estimate: GraphResourceEstimate,
     pub canonical_debug_bytes: Vec<u8>,
@@ -125,6 +127,7 @@ impl GraphCompiler {
         let mut node_latency = BTreeMap::new();
         let mut node_tail = BTreeMap::new();
         let mut effect_ids = BTreeMap::new();
+        let mut route_transforms = Vec::new();
         for track in &model.tracks {
             for stage in stages() {
                 let id = track_node(track.id.as_str(), stage);
@@ -237,13 +240,13 @@ impl GraphCompiler {
             );
         }
         for route in &model.routes {
-            if !valid_route_transform(route.gain_db, &route.channel_matrix) {
+            let Some(transform) = route_transform(route.gain_db, &route.channel_matrix) else {
                 diagnostics.push(diag(
                     "graph.gain.non_finite",
                     &format!("$.routes[id={}].gain_db", route.id),
                 ));
                 continue;
-            }
+            };
             let route_node = GraphNodeId::Route {
                 route_id: gid(route.id.as_str()),
             };
@@ -271,6 +274,12 @@ impl GraphCompiler {
             };
             add_route_source_edge(&mut edges, source, route_node.clone(), route.id.as_str());
             add_route_destination_edge(&mut edges, route_node, destination, route.id.as_str());
+            route_transforms.push(PreparedRoute {
+                node: GraphNodeId::Route {
+                    route_id: gid(route.id.as_str()),
+                },
+                transform,
+            });
         }
         for track in &model.tracks {
             for (rack, values) in [
@@ -437,6 +446,7 @@ impl GraphCompiler {
             sequential_schedule: schedule.clone(),
             dependency_levels: levels.clone(),
             route_timings: timing.routes.clone(),
+            inserted_delays: timing.delays.clone(),
             buffer_assignments: buffers.clone(),
             estimate: estimate.clone(),
             envelope: RenderEnvelope {
@@ -446,7 +456,7 @@ impl GraphCompiler {
                 output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
             },
             required_bindings,
-            scratch_buffers: buffers.len() as u64,
+            routes: route_transforms,
             effects: effect_nodes,
         });
         Ok(PreparedGraphArtifact {
@@ -457,6 +467,7 @@ impl GraphCompiler {
                 sequential_schedule: schedule,
                 dependency_levels: levels,
                 route_timings: timing.routes,
+                inserted_delays: timing.delays,
                 buffer_assignments: buffers,
                 estimate,
                 canonical_debug_bytes: debug,
@@ -469,6 +480,7 @@ impl GraphCompiler {
 
 struct TimingResult {
     routes: Vec<RouteTiming>,
+    delays: Vec<InsertedDelay>,
     total_delay: u64,
     delay_count: u64,
 }
@@ -484,6 +496,7 @@ fn timings(
     let mut total_delay: u64 = 0;
     let mut delay_count: u64 = 0;
     let mut routes = Vec::new();
+    let mut delays = Vec::new();
     for node in schedule {
         let incoming: Vec<_> = edges
             .iter()
@@ -510,6 +523,13 @@ fn timings(
             }
             if delay > 0 {
                 delay_count += 1;
+                delays.push(InsertedDelay {
+                    node: GraphNodeId::CompensationDelay {
+                        edge_id: Box::new(edge.id.clone()),
+                    },
+                    edge_id: edge.id.clone(),
+                    samples: LatencySamples(delay),
+                });
             }
             if let GraphEdgeId::RouteDestination { route_id } = &edge.id {
                 routes.push(RouteTiming {
@@ -561,8 +581,10 @@ fn timings(
         extents.insert(node.clone(), extent);
     }
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
+    delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
     Ok(TimingResult {
         routes,
+        delays,
         total_delay,
         delay_count,
     })
@@ -863,14 +885,21 @@ fn sidechain_matches(declaration: &SidechainDeclaration, entry: &EffectPreparedE
         _ => false,
     }
 }
-fn valid_route_transform(gain_db: f32, matrix: &ChannelMatrix) -> bool {
+fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<RouteTransform> {
     let gain = 10_f64.powf(f64::from(gain_db) / 20.0) as f32;
-    gain_db.is_finite()
+    (gain_db.is_finite()
         && gain.is_finite()
         && !gain.is_subnormal()
         && [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
             .into_iter()
-            .all(|v| v.is_finite() && !v.is_subnormal())
+            .all(|v| v.is_finite() && !v.is_subnormal()))
+    .then_some(RouteTransform {
+        gain,
+        ll: matrix.ll,
+        lr: matrix.lr,
+        rl: matrix.rl,
+        rr: matrix.rr,
+    })
 }
 fn into_effects(
     entries: Vec<EffectPreparedEntry>,
