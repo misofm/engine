@@ -351,58 +351,43 @@ impl GraphCompiler {
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
         let buffers = buffer_assignments(&schedule);
-        let Some(delay_bytes) = timing.total_delay.checked_mul(8) else {
+        let Some(estimate) = resource_estimate(
+            session.quantum().0,
+            session.resource_estimate().requested_runtime_bytes,
+            &nodes,
+            &edges,
+            &schedule,
+            &levels,
+            &buffers,
+            &timing,
+            &effects.entries,
+        ) else {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
             ));
         };
-        let Some(audio_samples) = u64::from(session.quantum().0).checked_mul(buffers.len() as u64)
-        else {
+        if !estimate_fits_platform(&estimate) {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-            ));
-        };
-        if audio_samples > caps.maximum_audio_buffer_samples {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.limit",
-                    "$.graph_compile_caps.maximum_audio_buffer_samples",
-                )],
             ));
         }
-        let estimate = GraphResourceEstimate {
-            logical_nodes: nodes.len() as u64,
-            materialized_nodes: match (nodes.len() as u64).checked_add(timing.delay_count) {
-                Some(value) => value,
-                None => {
-                    return Err(failure(
-                        effects,
-                        vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-                    ));
-                }
-            },
-            edges: edges.len() as u64,
-            schedule_items: schedule.len() as u64,
-            dependency_levels: levels.len() as u64,
-            audio_buffer_samples: audio_samples,
-            total_delay_samples: timing.total_delay,
-            delay_bytes,
-            graph_metadata_bytes: 0,
-            declared_effect_bytes: 0,
-            largest_allocation_bytes: delay_bytes,
-            incremental_plan_bytes: delay_bytes,
-            session_plus_plan_bytes: session
-                .resource_estimate()
-                .requested_runtime_bytes
-                .saturating_add(delay_bytes),
-        };
-        if estimate.incremental_plan_bytes > caps.maximum_plan_bytes
+        if estimate.materialized_nodes > caps.maximum_nodes
+            || estimate.edges > caps.maximum_edges
+            || estimate.schedule_items > caps.maximum_schedule_items
+            || estimate.dependency_levels > caps.maximum_dependency_levels
+            || estimate.audio_buffer_samples > caps.maximum_audio_buffer_samples
+            || estimate.graph_metadata_bytes > caps.maximum_graph_bytes
+            || estimate.incremental_plan_bytes > caps.maximum_plan_bytes
             || estimate.largest_allocation_bytes > caps.maximum_single_allocation_bytes
-            || estimate.session_plus_plan_bytes > model.limits.memory_bytes
         {
+            return Err(failure(
+                effects,
+                vec![diag("graph.resource.limit", "$.graph_compile_caps")],
+            ));
+        }
+        if estimate.session_plus_plan_bytes > model.limits.memory_bytes {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.limit", "$.limits.memory_bytes")],
@@ -423,7 +408,7 @@ impl GraphCompiler {
         let dot = dot(&nodes, &edges);
         let effect_nodes = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
-            ports: ports_for(&nodes),
+            ports: ports_for(&nodes, &edges),
             nodes: nodes.clone(),
             edges: edges.clone(),
         };
@@ -433,7 +418,10 @@ impl GraphCompiler {
                 matches!(
                     node,
                     GraphNodeId::TrackStage {
-                        stage: TrackStage::Input,
+                        stage: TrackStage::Input
+                            | TrackStage::PostInputBuiltins
+                            | TrackStage::PostFader
+                            | TrackStage::PostMatrix,
                         ..
                     } | GraphNodeId::Output { .. }
                 )
@@ -484,6 +472,176 @@ struct TimingResult {
     total_delay: u64,
     delay_count: u64,
 }
+
+#[allow(clippy::too_many_arguments)]
+fn resource_estimate(
+    quantum: u32,
+    session_bytes: u64,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    schedule: &[GraphNodeId],
+    levels: &[DependencyLevel],
+    buffers: &[BufferAssignment],
+    timing: &TimingResult,
+    effects: &[EffectPreparedEntry],
+) -> Option<GraphResourceEstimate> {
+    let count = |value: usize| u64::try_from(value).ok();
+    let logical_nodes = count(nodes.len())?;
+    let logical_edges = count(edges.len())?;
+    let materialized_nodes = logical_nodes.checked_add(timing.delay_count)?;
+    let materialized_edges = logical_edges.checked_add(timing.delay_count)?;
+    let schedule_items = count(schedule.len())?.checked_add(timing.delay_count)?;
+    let dependency_levels = count(levels.len())?;
+    let reductions = count(
+        nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.id,
+                    GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
+                ) && edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.destination.node == node.id
+                            && edge.destination.kind == GraphPortKind::MainInput
+                    })
+                    .nth(1)
+                    .is_some()
+            })
+            .count(),
+    )?;
+    let routes = count(
+        nodes
+            .iter()
+            .filter(|node| matches!(node.id, GraphNodeId::Route { .. }))
+            .count(),
+    )?;
+    let effect_count = count(effects.len())?;
+    let maximum_inputs = nodes
+        .iter()
+        .map(|node| {
+            edges
+                .iter()
+                .filter(|edge| edge.destination.node == node.id)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let maximum_inputs = count(maximum_inputs)?;
+    let quantum = u64::from(quantum);
+    // The scalar executor owns one dual-mono output per logical node and one dual-mono
+    // contribution buffer per logical edge, plus one scalar pairwise-reduction work array.
+    let audio_buffer_samples = logical_nodes
+        .checked_add(logical_edges)?
+        .checked_mul(2)?
+        .checked_mul(quantum)?
+        .checked_add(maximum_inputs)?;
+    let audio_bytes = audio_buffer_samples.checked_mul(4)?;
+    let delay_bytes = timing.total_delay.checked_mul(8)?;
+    let mut declared_effect_bytes = 0_u64;
+    for effect in effects {
+        declared_effect_bytes = declared_effect_bytes
+            .checked_add(effect.metadata.state_sizes.total()?)?
+            .checked_add(effect.metadata.scratch_bytes)?;
+    }
+    let graph_metadata_bytes =
+        graph_metadata_bytes(nodes, edges, schedule, levels, buffers, timing)?;
+    let incremental_plan_bytes = audio_bytes
+        .checked_add(delay_bytes)?
+        .checked_add(declared_effect_bytes)?
+        .checked_add(graph_metadata_bytes)?;
+    let lane_bytes = quantum.checked_mul(4)?;
+    let mut delay_lane_bytes = 0_u64;
+    for delay in &timing.delays {
+        delay_lane_bytes = delay_lane_bytes.max(delay.samples.0.checked_mul(4)?);
+    }
+    let reduction_bytes = maximum_inputs.checked_mul(4)?;
+    let largest_allocation_bytes = graph_metadata_bytes
+        .max(lane_bytes)
+        .max(delay_lane_bytes)
+        .max(reduction_bytes);
+    Some(GraphResourceEstimate {
+        logical_nodes,
+        materialized_nodes,
+        edges: materialized_edges,
+        schedule_items,
+        dependency_levels,
+        reductions,
+        routes,
+        effects: effect_count,
+        audio_buffer_samples,
+        total_delay_samples: timing.total_delay,
+        delay_bytes,
+        graph_metadata_bytes,
+        declared_effect_bytes,
+        largest_allocation_bytes,
+        incremental_plan_bytes,
+        session_plus_plan_bytes: session_bytes.checked_add(incremental_plan_bytes)?,
+    })
+}
+
+fn graph_metadata_bytes(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    schedule: &[GraphNodeId],
+    levels: &[DependencyLevel],
+    buffers: &[BufferAssignment],
+    timing: &TimingResult,
+) -> Option<u64> {
+    let sized = |count: usize, bytes: usize| {
+        u64::try_from(count)
+            .ok()?
+            .checked_mul(u64::try_from(bytes).ok()?)
+    };
+    let mut total = sized(nodes.len(), core::mem::size_of::<GraphNode>())?
+        .checked_add(sized(edges.len(), core::mem::size_of::<GraphEdge>())?)?
+        .checked_add(sized(schedule.len(), core::mem::size_of::<GraphNodeId>())?)?
+        .checked_add(sized(
+            levels.len(),
+            core::mem::size_of::<DependencyLevel>(),
+        )?)?
+        .checked_add(sized(
+            buffers.len(),
+            core::mem::size_of::<BufferAssignment>(),
+        )?)?
+        .checked_add(sized(
+            timing.routes.len(),
+            core::mem::size_of::<RouteTiming>(),
+        )?)?
+        .checked_add(sized(
+            timing.delays.len(),
+            core::mem::size_of::<InsertedDelay>(),
+        )?)?;
+    for node in nodes {
+        total = total.checked_add(u64::try_from(node_text(&node.id).len()).ok()?)?;
+    }
+    for edge in edges {
+        total = total
+            .checked_add(u64::try_from(edge.path.len()).ok()?)?
+            .checked_add(u64::try_from(node_text(&edge.source.node).len()).ok()?)?
+            .checked_add(u64::try_from(node_text(&edge.destination.node).len()).ok()?)?;
+    }
+    Some(total)
+}
+
+fn estimate_fits_platform(estimate: &GraphResourceEstimate) -> bool {
+    [
+        estimate.materialized_nodes,
+        estimate.edges,
+        estimate.schedule_items,
+        estimate.audio_buffer_samples,
+        estimate.total_delay_samples,
+        estimate.delay_bytes,
+        estimate.graph_metadata_bytes,
+        estimate.declared_effect_bytes,
+        estimate.largest_allocation_bytes,
+        estimate.incremental_plan_bytes,
+        estimate.session_plus_plan_bytes,
+    ]
+    .into_iter()
+    .all(|value| usize::try_from(value).is_ok() && isize::try_from(value).is_ok())
+}
+
 fn timings(
     schedule: &[GraphNodeId],
     edges: &[GraphEdge],
@@ -736,12 +894,20 @@ fn buffer_assignments(schedule: &[GraphNodeId]) -> Vec<BufferAssignment> {
         })
         .collect()
 }
-fn ports_for(nodes: &[GraphNode]) -> Vec<GraphPortId> {
+fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     let mut ports = Vec::new();
     for node in nodes {
         ports.push(port(node.id.clone(), GraphPortKind::MainInput));
         ports.push(port(node.id.clone(), GraphPortKind::MainOutput));
     }
+    ports.extend(
+        edges
+            .iter()
+            .filter(|edge| edge.destination.kind == GraphPortKind::SidechainInput)
+            .map(|edge| edge.destination.clone()),
+    );
+    ports.sort();
+    ports.dedup();
     ports
 }
 fn add_node(
@@ -1046,6 +1212,38 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+    use miso_engine_effect_compiler::EffectPreparedSession;
+    use miso_engine_graph::{
+        GraphBindingBlock, GraphNodeBinding, GraphRuntimeBindings, GraphRuntimeProcessor,
+    };
+    use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
+
+    const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+
+    struct IdentityBinding;
+    impl GraphRuntimeProcessor for IdentityBinding {
+        fn process(
+            &mut self,
+            _block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            Ok(())
+        }
+    }
+
+    struct ImpulseBinding;
+    impl GraphRuntimeProcessor for ImpulseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            block.left[0] = 1.0;
+            block.right[0] = -1.0;
+            Ok(())
+        }
+    }
 
     fn node(name: &str) -> GraphNodeId {
         GraphNodeId::Submix {
@@ -1088,6 +1286,22 @@ mod tests {
         }
     }
 
+    fn integration_caps() -> GraphCompileCaps {
+        GraphCompileCaps {
+            maximum_nodes: 10_000,
+            maximum_edges: 10_000,
+            maximum_schedule_items: 10_000,
+            maximum_dependency_levels: 10_000,
+            maximum_audio_buffer_samples: 10_000_000,
+            maximum_delay_samples_per_edge: 1_000_000,
+            maximum_total_delay_samples: 10_000_000,
+            maximum_graph_bytes: 10_000_000,
+            maximum_plan_bytes: 100_000_000,
+            maximum_single_allocation_bytes: 10_000_000,
+            maximum_finite_tail_samples: 10_000_000,
+        }
+    }
+
     #[test]
     fn cycle_witness_skips_acyclic_residual_nodes_downstream_of_cycle() {
         let nodes = [
@@ -1126,5 +1340,83 @@ mod tests {
             .err()
             .expect("latency plus tail exceeds cap");
         assert_eq!(error.code, "graph.tail.limit");
+    }
+
+    #[test]
+    fn accepted_session_compiles_binds_and_renders_direct_route() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled session");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 123,
+            effects: EffectPreparedSession {
+                session: compiled,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        assert_eq!(artifact.report.estimate.routes, 1);
+        assert_eq!(artifact.report.estimate.effects, 0);
+        assert_eq!(artifact.report.estimate.reductions, 0);
+        assert!(artifact.report.estimate.audio_buffer_samples > 0);
+        assert!(artifact.report.estimate.graph_metadata_bytes > 0);
+        assert!(artifact.report.estimate.incremental_plan_bytes > 0);
+        assert_eq!(artifact.graph.required_bindings.len(), 5);
+        let envelope = artifact.graph.envelope;
+        let nodes = artifact
+            .graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor: Box<dyn GraphRuntimeProcessor> = if matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                ) {
+                    Box::new(ImpulseBinding)
+                } else {
+                    Box::new(IdentityBinding)
+                };
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let mut plan = match artifact
+            .graph
+            .bind(GraphRuntimeBindings { envelope, nodes })
+        {
+            Ok(plan) => plan,
+            Err(failure) => panic!("bind: {}", failure.code),
+        };
+        let frames = envelope.quantum.0 as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        let output = PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output");
+        plan.render(
+            RenderIo {
+                input: None,
+                output,
+            },
+            RenderTime { absolute_sample: 0 },
+        )
+        .expect("render");
+        assert_eq!(pcm[0], 1.0);
+        assert_eq!(pcm[frames], -1.0);
+        assert!(pcm[1..frames].iter().all(|sample| *sample == 0.0));
+        assert!(pcm[frames + 1..].iter().all(|sample| *sample == 0.0));
     }
 }
