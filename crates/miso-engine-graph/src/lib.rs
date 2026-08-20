@@ -512,13 +512,24 @@ impl GraphExecutor {
             .into_iter()
             .map(|binding| (binding.node, binding.processor))
             .collect();
+        let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
+            .iter()
+            .cloned()
+            .map(|node| (node, Vec::new()))
+            .collect();
+        for edge in spec.edges {
+            incoming_by_node
+                .get_mut(&edge.destination.node)
+                .expect("validated destination")
+                .push(edge);
+        }
         let mut maximum_inputs = 1usize;
         let mut nodes = Vec::with_capacity(schedule.len());
         for node_id in &schedule {
-            let incoming: Vec<_> = spec
-                .edges
-                .iter()
-                .filter(|edge| edge.destination.node == *node_id)
+            let incoming: Vec<_> = incoming_by_node
+                .remove(node_id)
+                .expect("validated schedule node")
+                .into_iter()
                 .map(|edge| RuntimeEdge {
                     source: indexes[&edge.source.node],
                     sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
