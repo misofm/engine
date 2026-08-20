@@ -505,6 +505,12 @@ fn resource_estimate(
     let materialized_edges = logical_edges.checked_add(timing.delay_count)?;
     let schedule_items = count(schedule.len())?.checked_add(timing.delay_count)?;
     let dependency_levels = count(levels.len())?;
+    let mut input_counts: BTreeMap<_, u64> =
+        nodes.iter().map(|node| (node.id.clone(), 0_u64)).collect();
+    for edge in edges {
+        let count = input_counts.get_mut(&edge.destination.node)?;
+        *count = count.checked_add(1)?;
+    }
     let reductions = count(
         nodes
             .iter()
@@ -512,14 +518,7 @@ fn resource_estimate(
                 matches!(
                     node.id,
                     GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-                ) && edges
-                    .iter()
-                    .filter(|edge| {
-                        edge.destination.node == node.id
-                            && edge.destination.kind == GraphPortKind::MainInput
-                    })
-                    .nth(1)
-                    .is_some()
+                ) && input_counts[&node.id] > 1
             })
             .count(),
     )?;
@@ -530,17 +529,7 @@ fn resource_estimate(
             .count(),
     )?;
     let effect_count = count(effects.len())?;
-    let maximum_inputs = nodes
-        .iter()
-        .map(|node| {
-            edges
-                .iter()
-                .filter(|edge| edge.destination.node == node.id)
-                .count()
-        })
-        .max()
-        .unwrap_or(0);
-    let maximum_inputs = count(maximum_inputs)?;
+    let maximum_inputs = input_counts.values().copied().max().unwrap_or(0);
     let quantum = u64::from(quantum);
     // The scalar executor owns one dual-mono output per logical node and one dual-mono
     // contribution buffer per logical edge, plus one scalar pairwise-reduction work array.
@@ -662,6 +651,17 @@ fn timings(
     tails: &BTreeMap<GraphNodeId, TailSamples>,
     caps: &GraphCompileCaps,
 ) -> Result<TimingResult, GraphDiagnostic> {
+    let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
+        .iter()
+        .cloned()
+        .map(|node| (node, Vec::new()))
+        .collect();
+    for edge in edges {
+        incoming_by_node
+            .get_mut(&edge.destination.node)
+            .ok_or_else(|| diag("graph.internal.invariant", &edge.path))?
+            .push(edge);
+    }
     let mut arrivals = BTreeMap::<GraphNodeId, u64>::new();
     let mut extents = BTreeMap::<GraphNodeId, TailSamples>::new();
     let mut total_delay: u64 = 0;
@@ -669,16 +669,13 @@ fn timings(
     let mut routes = Vec::new();
     let mut delays = Vec::new();
     for node in schedule {
-        let incoming: Vec<_> = edges
-            .iter()
-            .filter(|edge| edge.destination.node == *node)
-            .collect();
+        let incoming = &incoming_by_node[node];
         let max = incoming
             .iter()
             .filter_map(|edge| arrivals.get(&edge.source.node).copied())
             .max()
             .unwrap_or(0);
-        for edge in &incoming {
+        for edge in incoming {
             let source = arrivals.get(&edge.source.node).copied().unwrap_or(0);
             let delay = max
                 .checked_sub(source)
@@ -718,7 +715,7 @@ fn timings(
                 .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", "$.graph"))?,
         );
         let mut extent = TailSamples::Finite(0);
-        for edge in &incoming {
+        for edge in incoming {
             let source_arrival = arrivals.get(&edge.source.node).copied().unwrap_or(0);
             let compensation_delay = max
                 .checked_sub(source_arrival)
@@ -780,8 +777,22 @@ fn topo(
     edges: &[GraphEdge],
 ) -> Option<(Vec<GraphNodeId>, Vec<DependencyLevel>)> {
     let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
+    let mut successors: BTreeMap<_, Vec<_>> = nodes
+        .iter()
+        .map(|node| (node.id.clone(), Vec::new()))
+        .collect();
+    let mut predecessors: BTreeMap<_, Vec<_>> = nodes
+        .iter()
+        .map(|node| (node.id.clone(), Vec::new()))
+        .collect();
     for edge in edges {
         *degree.get_mut(&edge.destination.node)? += 1;
+        successors
+            .get_mut(&edge.source.node)?
+            .push(edge.destination.node.clone());
+        predecessors
+            .get_mut(&edge.destination.node)?
+            .push(edge.source.node.clone());
     }
     let mut ready: BTreeSet<_> = degree
         .iter()
@@ -791,21 +802,20 @@ fn topo(
     let mut levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
     let mut node_levels = BTreeMap::new();
     while let Some(node) = ready.pop_first() {
-        let level = edges
+        let level = predecessors[&node]
             .iter()
-            .filter(|edge| edge.destination.node == node)
-            .filter_map(|edge| node_levels.get(&edge.source.node))
+            .filter_map(|predecessor| node_levels.get(predecessor))
             .copied()
             .max()
             .map_or(0, |value| value + 1);
         node_levels.insert(node.clone(), level);
         levels.entry(level).or_default().push(node.clone());
         schedule.push(node.clone());
-        for edge in edges.iter().filter(|edge| edge.source.node == node) {
-            let degree = degree.get_mut(&edge.destination.node)?;
+        for successor in &successors[&node] {
+            let degree = degree.get_mut(successor)?;
             *degree -= 1;
             if *degree == 0 {
-                ready.insert(edge.destination.node.clone());
+                ready.insert(successor.clone());
             }
         }
     }
@@ -826,15 +836,20 @@ fn cycle_witness(
     edges: &[GraphEdge],
 ) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
     let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
+    let mut adjacency: BTreeMap<_, Vec<_>> = nodes
+        .iter()
+        .map(|node| (node.id.clone(), Vec::new()))
+        .collect();
     for edge in edges {
         *degree.get_mut(&edge.destination.node)? += 1;
+        adjacency.get_mut(&edge.source.node)?.push(edge);
     }
     let mut ready: BTreeSet<_> = degree
         .iter()
         .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
         .collect();
     while let Some(node) = ready.pop_first() {
-        for edge in edges.iter().filter(|edge| edge.source.node == node) {
+        for edge in &adjacency[&node] {
             let degree = degree.get_mut(&edge.destination.node)?;
             *degree -= 1;
             if *degree == 0 {
@@ -846,20 +861,6 @@ fn cycle_witness(
         .into_iter()
         .filter_map(|(node, degree)| (degree != 0).then_some(node))
         .collect();
-    let adjacency: BTreeMap<_, Vec<_>> = remaining
-        .iter()
-        .map(|node| {
-            let mut outgoing: Vec<_> = edges
-                .iter()
-                .filter(|edge| {
-                    edge.source.node == *node && remaining.contains(&edge.destination.node)
-                })
-                .collect();
-            outgoing.sort_by(|left, right| left.id.cmp(&right.id));
-            (node.clone(), outgoing)
-        })
-        .collect();
-
     // Kahn's residual can include acyclic nodes downstream of a cycle. Search each residual node
     // in semantic order instead of assuming the smallest residual node itself lies on a cycle.
     for start in &remaining {
@@ -869,6 +870,11 @@ fn cycle_witness(
         let mut stack = vec![(start.clone(), 0usize)];
         while let Some((node, next_edge)) = stack.last_mut() {
             let outgoing = &adjacency[node];
+            while *next_edge < outgoing.len()
+                && !remaining.contains(&outgoing[*next_edge].destination.node)
+            {
+                *next_edge += 1;
+            }
             if *next_edge == outgoing.len() {
                 stack.pop();
                 if let Some(removed) = nodes_path.pop() {
@@ -924,17 +930,27 @@ fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     ports
 }
 fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ReductionRecord> {
+    let mut contributions_by_node: BTreeMap<_, Vec<_>> = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.id,
+                GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
+            )
+        })
+        .map(|node| (node.id.clone(), Vec::new()))
+        .collect();
+    for edge in edges {
+        if edge.destination.kind == GraphPortKind::MainInput
+            && let Some(contributions) = contributions_by_node.get_mut(&edge.destination.node)
+        {
+            contributions.push(edge.id.clone());
+        }
+    }
     nodes
         .iter()
         .filter_map(|node| {
-            let mut contributions: Vec<_> = edges
-                .iter()
-                .filter(|edge| {
-                    edge.destination.node == node.id
-                        && edge.destination.kind == GraphPortKind::MainInput
-                })
-                .map(|edge| edge.id.clone())
-                .collect();
+            let mut contributions = contributions_by_node.remove(&node.id)?;
             contributions.sort();
             (contributions.len() > 1).then(|| ReductionRecord {
                 node: node.id.clone(),
