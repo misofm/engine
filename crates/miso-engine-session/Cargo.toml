@@ -1,0 +1,20 @@
+[package]
+name = "miso-engine-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_session"
+
+[features]
+default = []
+
+[dependencies]
+miso-engine-core.workspace = true
+serde = { version = "=1.0.228", features = ["derive"] }
+toml = { version = "=0.9.9", default-features = false, features = ["parse", "serde"] }
+
+[lints]
+workspace = true

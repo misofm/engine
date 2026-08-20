@@ -1,0 +1,12 @@
+miso-engine-fixture-manifest-v1
+115b0c4a	2096	v1/multitone-near-nyquist-096000-dual-mono.mepcm
+8a9dd3bf	2096	v1/prng-noise-048000-dual-mono.mepcm
+3aedaa18	1072	v1/rate-044100-impulse-dual-mono.mepcm
+4365886f	1072	v1/rate-048000-impulse-dual-mono.mepcm
+beaf135d	1072	v1/rate-088200-impulse-dual-mono.mepcm
+4dbf57b3	1072	v1/rate-096000-impulse-dual-mono.mepcm
+b3c61726	1072	v1/rate-176400-impulse-dual-mono.mepcm
+500ae80b	1072	v1/rate-192000-impulse-dual-mono.mepcm
+a9141fd0	1072	v1/rate-352800-impulse-dual-mono.mepcm
+6b61977b	1072	v1/rate-384000-impulse-dual-mono.mepcm
+798879c1	1072	v1/sine-048000-mono.mepcm

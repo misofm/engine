@@ -1,0 +1,20 @@
+[package]
+name = "miso-engine-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_conformance"
+
+[dependencies]
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-dsp-reference.workspace = true
+miso-engine-effect-contract.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

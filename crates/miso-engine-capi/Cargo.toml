@@ -1,0 +1,16 @@
+[package]
+name = "miso-engine-capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_capi"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+
+[lints]
+workspace = true

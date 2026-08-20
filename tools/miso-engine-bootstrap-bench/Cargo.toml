@@ -1,0 +1,19 @@
+[package]
+name = "miso-engine-bootstrap-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_bootstrap_bench"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-core.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

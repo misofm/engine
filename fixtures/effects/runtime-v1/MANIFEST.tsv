@@ -1,0 +1,5 @@
+path	length	sha256
+invalid/automation-overlap.txt	177	924dbfacad69fe9746bfab3b4c8246d964fe404865fd849f0d88de65fcc376c4
+invalid/descriptor-zero-id.toml	98	4b007c6842447a934c2b8ad8dee2672d7fecc8993bbb3a7477dc59bc87045a57
+valid/automation.txt	153	2f622f536664d181e718a0342fc8695e461bc5140da63032ca239f5c039fb3aa
+valid/descriptor.toml	219	7d195c79505680a457bfd392f4f4e83400826fef9adf9f6f01a7dbb4813b6172

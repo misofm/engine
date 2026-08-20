@@ -1,0 +1,17 @@
+[package]
+name = "miso-engine-protocol-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_protocol_audit"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-protocol.workspace = true
+miso-engine-session.workspace = true
+
+[lints]
+workspace = true

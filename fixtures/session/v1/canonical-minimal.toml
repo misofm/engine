@@ -1,0 +1,21 @@
+schema_version = 1
+session_id = "minimal.session"
+revision = 0
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "single", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 1, control_queue_messages = 1, memory_bytes = 4096 }
+sources = [
+]
+tracks = [
+]
+submixes = [
+]
+outputs = [
+  { id = "main-out" },
+]
+routes = [
+]
+automation = [
+]

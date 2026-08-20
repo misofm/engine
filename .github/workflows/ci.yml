@@ -1,0 +1,213 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  host:
+    name: host quality and native shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked --workspace --all-targets --all-features
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace --all-targets
+      - name: Documentation
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+      - name: Workspace policy
+        run: bash scripts/check-workspace-policy.sh
+      - name: Session dependency and compiler boundary policy
+        run: bash scripts/check-session-policy.sh
+      - name: Workspace policy mutation tests
+        run: bash scripts/test-workspace-policy.sh
+      - name: Protocol control typed-boundary policy and mutation tests
+        run: |
+          bash scripts/check-protocol-control-policy.sh
+          bash scripts/test-protocol-control-policy.sh
+      - name: Realtime source policy and mutation tests
+        run: |
+          bash scripts/check-realtime-policy.sh
+          bash scripts/test-realtime-policy.sh
+      - name: Native effect runtime policy, fixtures, conformance, and mutations
+        run: bash scripts/check-effect-contract.sh
+      - name: Protocol caller-buffer allocation audit
+        run: bash scripts/run-protocol-allocation-audit.sh
+      - name: Protocol benchmark runner build and negative argument checks (no benchmark)
+        run: |
+          cargo check --locked -p miso-engine-protocol-bench --all-targets
+          bash scripts/test-protocol-benchmark.sh
+      - name: Realtime race model
+        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p miso-engine-core spsc_loom
+      - name: Realtime audit hooks and syscall trace
+        run: |
+          cargo build --locked --release -p miso-engine-realtime-audit
+          bash scripts/test-realtime-audit-hooks.sh target/release/miso_engine_realtime_audit
+          timeout 120s bash scripts/trace-realtime-audit.sh target/release/miso_engine_realtime_audit 1000000
+      - name: Native effect one-million-call allocation and syscall audit
+        run: |
+          cargo build --locked --release -p miso-engine-effect-contract-bench
+          timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/miso_engine_effect_contract_bench 1000000
+      - name: Conformance boundaries and research corpus
+        run: |
+          bash scripts/check-conformance-boundaries.sh
+          bash scripts/check-dsp-research.sh
+          cargo run --locked -p miso-engine-conformance --example miso_engine_conformance_fixtures -- --check
+      - name: Feature-resolution tree
+        run: cargo tree --locked --workspace -e features
+      - name: Metadata report
+        run: cargo metadata --locked --format-version 1 --no-deps
+      - name: Native host smoke
+        run: cargo run --locked -p miso-engine-host-native
+
+  x86-probes:
+    name: x86 scalar and SIMD compile probes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Scalar compile probe and cfg assertion
+        run: |
+          CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="avx2"'
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="fma"'
+      - name: AVX2 without FMA compile probe and cfg assertion
+        run: |
+          CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="avx2"'
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
+      - name: AVX2 with FMA compile probe and cfg assertion
+        run: |
+          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
+
+  wasm:
+    name: browser Wasm artifact probes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y wabt
+      - name: Browser-local realtime path has no atomic opcodes
+        run: bash scripts/check-wasm-realtime-atomics.sh
+      - name: Scalar Wasm release artifact
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance
+          ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
+      - name: SIMD128 Wasm release artifact
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance
+          rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
+      - name: Issue-005 scalar and SIMD protocol golden parity
+        run: bash scripts/check-protocol-wasm-parity.sh
+      - name: Issue-005 protocol benchmark corpus Wasm parity (no timings)
+        run: bash scripts/check-protocol-benchmark-wasm-parity.sh
+
+  android-check:
+    name: Android pure-Rust compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and Android target standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 aarch64-linux-android
+      - name: Check mobile host without linking
+        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance
+
+  ios-check:
+    name: iOS pure-Rust compile check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and iOS target standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 aarch64-apple-ios
+      - name: Check mobile host without linking
+        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance
+
+  session-fuzz:
+    name: bounded session parser and compiler fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
+      - name: Build both fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Run bounded parser fuzz target
+        run: |
+          mkdir -p target/ci/session-fuzz/parse
+          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.toml
+      - name: Run bounded compiler fuzz target
+        run: |
+          mkdir -p target/ci/session-fuzz/compile
+          cargo +nightly-2026-08-20 fuzz run session_compile target/ci/session-fuzz/compile -- -runs=10000 -seed=557074002 -seed_inputs=fixtures/session/v1/canonical.toml
+
+  protocol-fuzz:
+    name: bounded issue-005 protocol decoder fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust and cargo-fuzz toolchains
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
+      - name: Build bounded protocol fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Run fixed-count native sanitizer fuzzing
+        run: bash scripts/run-protocol-fuzz.sh
+      - name: Upload protocol fuzz evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-fuzz-evidence
+          path: target/ci/protocol-fuzz/evidence.json
+
+  benchmark:
+    name: bounded descriptive benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Run one descriptive two-round benchmark
+        run: bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
+      - name: Build issue-003 audit harness
+        run: cargo build --locked --release -p miso-engine-realtime-audit
+      - name: Run one descriptive two-round realtime benchmark
+        run: bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
+      - name: Run session benchmark once with two internal rounds
+        run: bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
+      - name: Run native effect benchmark once with two internal rounds
+        run: bash scripts/run-effect-contract-benchmark.sh
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-benchmark
+          path: |
+            target/conformance-benchmark.jsonl
+            target/realtime-benchmark.jsonl
+            target/session-benchmark.jsonl
+            target/issue11/effect-contract-benchmark.jsonl

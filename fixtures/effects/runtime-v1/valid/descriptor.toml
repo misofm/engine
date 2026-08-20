@@ -1,0 +1,7 @@
+effect_id = "conformance.delay"
+contract_major = 1
+state_layout_version = 1
+link_modes = ["dual_mono"]
+sample_rates_hz = [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]
+latency_samples = 3
+tail_samples = 3

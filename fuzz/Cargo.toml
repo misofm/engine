@@ -1,0 +1,73 @@
+[package]
+name = "miso-engine-session-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+miso-engine-session = { path = "../crates/miso-engine-session" }
+miso-engine-protocol = { path = "../crates/miso-engine-protocol" }
+miso-engine-effect-package = { path = "../crates/miso-engine-effect-package" }
+
+[[bin]]
+name = "session_parse"
+path = "fuzz_targets/session_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_compile"
+path = "fuzz_targets/session_compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_command"
+path = "fuzz_targets/protocol_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_session_transaction"
+path = "fuzz_targets/protocol_session_transaction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_event"
+path = "fuzz_targets/protocol_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_response"
+path = "fuzz_targets/protocol_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "effect_package"
+path = "fuzz_targets/effect_package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "effect_state"
+path = "fuzz_targets/effect_state.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

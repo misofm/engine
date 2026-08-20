@@ -1,0 +1,25 @@
+schema_version = 1
+session_id = "demo.session"
+revision = 7
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "native", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 1024, control_queue_messages = 64, memory_bytes = 1048576 }
+sources = [
+  { id = "voice", sample_rate_hz = 48000, content = { identity = "sha256:demo", locator = "host:voice" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+]
+tracks = [
+  { id = "vocal", source_id = "voice", left_source_channel = 0, right_source_channel = 1, builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }, simd1 = { effects = [] }, dynamic = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }, simd2 = { effects = [] }, fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }, pan = { left = 1.0, right = 1.0, smoothing_samples = 16 } },
+]
+submixes = [
+]
+outputs = [
+  { id = "main-out" },
+]
+routes = [
+  { id = "to-main", source = { kind = "track", track_id = "vocal", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+]
+automation = [
+  { id = "eq-gain", target = { entity_id = "vocal", rack = "dynamic", effect_id = "eq", parameter_id = 1, channel = "both" }, segments = [{ shape = "linear", start_sample = 0, end_sample = 480, start_value = 0.0, end_value = -3.0, unit = "db" }] },
+]

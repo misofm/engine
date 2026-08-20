@@ -1,0 +1,2 @@
+point left parameter_index=0 start=64 end=64 start_value=1.0 end_value=1.0
+linear right parameter_index=0 start=96 end=128 start_value=0.5 end_value=1.5

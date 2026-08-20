@@ -1,0 +1,22 @@
+schema_version = 1
+session_id = "toml.fixture"
+revision = 0
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "single", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 1, control_queue_messages = 1, memory_bytes = 4096 }
+sources = [
+  { id = "escaped", sample_rate_hz = 44100, content = { identity = "sha256:\u03b1", locator = 'host:C:\audio' }, mapping = { channel_count = 1, region = { start_sample = 0, length_samples = 1 } } },
+]
+tracks = [
+]
+submixes = [
+]
+outputs = [
+  { id = "main-out" },
+]
+routes = [
+]
+automation = [
+]

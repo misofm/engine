@@ -1,0 +1,23 @@
+// Bounded comparison-only semantic schema. Keys pack (field:u16, subfield:u16, index:u32).
+// Parallel typed vectors carry registered logical leaves; text_utf8 contains only the UTF-8
+// values delimited by text_offsets/text_lengths. No BTLV frame or payload bytes are embedded.
+namespace miso.engine.protocol.benchmark;
+
+table WireFrame {
+  kind:uint;
+  request_id:ulong;
+  revision:ulong;
+  status:uint;
+  automation_records:uint;
+  unsigned_keys:[ulong];
+  unsigned_values:[ulong];
+  float_keys:[ulong];
+  float_bits:[uint];
+  text_keys:[ulong];
+  text_offsets:[uint];
+  text_lengths:[uint];
+  text_utf8:[ubyte];
+}
+
+root_type WireFrame;
+file_identifier "MPCB";

@@ -1,0 +1,15 @@
+# MISO control protocol conformance record
+
+This manifest records Issue 005 non-benchmark evidence and its limits. The normative corpus is `complete_schema_corpus()`: 46 canonical frames covering 11 commands (including one transaction with all 42 edit opcodes), 11 success responses, 18 non-OK statuses including typed backpressure, and six events. Its FNV-1a-64 label-and-byte hash is `88a8ee6a6d9e4acc`. Auditable seed frames are checked in under [`fuzz/corpus`](../fuzz/corpus/README.md).
+
+| Evidence | Recorded result | Limitation |
+| --- | --- | --- |
+| caller-buffer allocation audit | complete typed command/success/non-OK/event paths, a 64-edit transaction, and 10,000 automation records in 40 batches were checked with pre-prepared corpus, queues, output, and scratch | allocation gate, not timing data; owned convenience decode and renderer work are outside it |
+| typed mutation/property corpus | one million deterministic mutations select command, response, event, or transaction decoder; truncation, malformed values, ordering, limits, and PCM-forbidden cases are represented by conformance tests | does not prove every future adapter or provider implementation |
+| native fuzz | invocation 4 used nightly-2026-08-20 and cargo-fuzz 0.13.2: four typed targets × 10,000 runs, no crash; 40,000 new executions and 140,000 cumulative including two older-schema runs | bounded execution evidence, not proof of absence of defects; 80,000 executions are the current four-target schema runs |
+| Wasm | scalar and `simd128` artifacts execute and validate the same complete corpus | not browser/AudioWorklet deployment evidence |
+| Android/iOS | Rust `cargo check` metadata artifacts for `aarch64-linux-android` and `aarch64-apple-ios` were recorded | neither target was linked, installed, or run on a device |
+
+The native audit's forwarding allocator exists only in its standalone executable and forwards to `System`; the workspace policy/mutation test rejects unsafe code outside that narrow audit scope. The generic borrowed outer decoder and borrowed automation decoder are audited; allocating typed convenience decoders intentionally run on control threads.
+
+No timing benchmark result is claimed here. The prepared BTLV-versus-FlatBuffers runner uses the same 54-frame normalized logical corpus with checksum `9eee4fcb61be3b9e`; the FlatBuffers side is a semantic typed key/value schema rather than a wrapped BTLV byte payload. Scalar and `simd128` Wasm assert corpus parity only, and the output schema labels the measured timing scope `native-host-harness` and Wasm timing `not-measured-corpus-parity-only`. The required two-round, one-invocation descriptive comparison remains distinct from these non-benchmark checks and has not run. The corpus establishes deterministic schema behavior, bounded admission, and caller-buffer allocation evidence; it does not establish network interoperability, an exported C ABI, host adapter behavior, device performance, audio quality, or render-thread correctness.
