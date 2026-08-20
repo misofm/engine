@@ -63,6 +63,8 @@ Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar to
 
 Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  Do not make cross-cutting architecture changes without a new or amended issue.
 
+Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
+
 1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
 2. **Terra implements attempt 1** and attaches required evidence.
 3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, and evidence.
