@@ -838,6 +838,60 @@ mod tests {
     }
 
     #[test]
+    fn pairwise_reduction_meets_analytic_bound_and_ignores_completion_order() {
+        let fixtures = [
+            vec![1.0_f32; 257],
+            (0..257)
+                .map(|index| if index % 2 == 0 { 1.0 } else { -1.0 })
+                .collect(),
+            (0..257)
+                .map(|index| 2.0_f32.powi(-index.min(120)))
+                .collect(),
+            vec![1.0e20, 1.0, -1.0e20, 3.0, -2.0, 0.5, -0.5],
+        ];
+        for fixture in fixtures {
+            let reference = fixture.iter().map(|value| f64::from(*value)).sum::<f64>();
+            let sum_abs = fixture
+                .iter()
+                .map(|value| f64::from(value.abs()))
+                .sum::<f64>();
+            let levels = fixture.len().next_power_of_two().ilog2();
+            let u = 2.0_f64.powi(-24);
+            let gamma = f64::from(levels) * u / (1.0 - f64::from(levels) * u);
+            let bound = gamma * sum_abs + fixture.len() as f64 * f64::from(f32::MIN_POSITIVE);
+            let mut values = fixture;
+            let mut sanitized = 0;
+            let actual = balanced_pairwise_sum(&mut values, &mut sanitized);
+            assert_eq!(sanitized, 0);
+            assert!((f64::from(actual) - reference).abs() <= bound);
+        }
+
+        let canonical: Vec<_> = (0..65)
+            .map(|index| (index, (index as f32 + 1.0).recip()))
+            .collect();
+        let mut baseline_values: Vec<_> = canonical.iter().map(|(_, value)| *value).collect();
+        let baseline = balanced_pairwise_sum(&mut baseline_values, &mut 0).to_bits();
+        let mut state = 0x6d69_736f_6772_6170_u64;
+        for _ in 0..100 {
+            let mut completed = canonical.clone();
+            for index in (1..completed.len()).rev() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                completed.swap(index, state as usize % (index + 1));
+            }
+            // Worker completion order is discarded; the frozen semantic ID order controls the
+            // reduction tree.
+            completed.sort_by_key(|(id, _)| *id);
+            let mut values: Vec<_> = completed.iter().map(|(_, value)| *value).collect();
+            assert_eq!(
+                balanced_pairwise_sum(&mut values, &mut 0).to_bits(),
+                baseline
+            );
+        }
+    }
+
+    #[test]
     fn binding_rejects_duplicates_and_returns_all_ownership() {
         let (plan, mut bindings, duplicate) = binding_plan();
         bindings

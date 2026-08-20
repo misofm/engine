@@ -1705,4 +1705,78 @@ mod tests {
             baseline.canonical_debug_bytes
         );
     }
+
+    #[test]
+    fn ten_thousand_graph_mutations_are_panic_free_and_repeatable() {
+        let mut state = 0x6d69_736f_6d75_7461_u64;
+        for mutation in 0..10_000_u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let node_count = (state as usize % 8) + 1;
+            let nodes: Vec<_> = (0..node_count)
+                .map(|index| {
+                    graph_node(
+                        &format!("n{index}"),
+                        (state >> (index % 16)) & 7,
+                        TailSamples::Finite((state >> ((index + 3) % 16)) & 7),
+                    )
+                })
+                .collect();
+            let mut edges = Vec::new();
+            for edge_index in 0..node_count.saturating_mul(2) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let source = state as usize % node_count;
+                let destination = (state >> 11) as usize % node_count;
+                edges.push(edge(
+                    &format!("m{mutation}-{edge_index}"),
+                    &format!("n{source}"),
+                    &format!("n{destination}"),
+                ));
+            }
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+            let first_cycle = cycle_witness(&nodes, &edges);
+            let second_cycle = cycle_witness(&nodes, &edges);
+            assert_eq!(first_cycle, second_cycle);
+            if first_cycle.is_none() {
+                let (first_schedule, first_levels) = topo(&nodes, &edges).expect("acyclic");
+                let (second_schedule, second_levels) = topo(&nodes, &edges).expect("repeat");
+                assert_eq!(first_schedule, second_schedule);
+                assert_eq!(first_levels, second_levels);
+                let latencies = nodes
+                    .iter()
+                    .map(|node| (node.id.clone(), node.latency))
+                    .collect();
+                let tails = nodes
+                    .iter()
+                    .map(|node| (node.id.clone(), node.tail))
+                    .collect();
+                let first = timings(
+                    &first_schedule,
+                    &edges,
+                    &latencies,
+                    &tails,
+                    &caps(1_000_000),
+                );
+                let second = timings(
+                    &second_schedule,
+                    &edges,
+                    &latencies,
+                    &tails,
+                    &caps(1_000_000),
+                );
+                assert_eq!(
+                    first
+                        .as_ref()
+                        .map(|result| (&result.routes, &result.delays)),
+                    second
+                        .as_ref()
+                        .map(|result| (&result.routes, &result.delays))
+                );
+                assert_eq!(first.err(), second.err());
+            }
+        }
+    }
 }
