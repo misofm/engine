@@ -10,8 +10,8 @@ use miso_engine_graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
     GraphPreparedEffect, GraphResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
-    PreparedGraphPlanParts, PreparedRoute, RackId, RouteTiming, RouteTransform, StableGraphId,
-    TrackStage,
+    PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
+    StableGraphId, TrackStage,
 };
 use miso_engine_session::{
     ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration,
@@ -32,14 +32,17 @@ pub struct GraphCompileFailure {
     pub effects: EffectPreparedSession,
     pub diagnostics: GraphDiagnosticSet,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GraphCompileReport {
     pub nodes: Vec<GraphNode>,
+    pub ports: Vec<GraphPortId>,
     pub edges: Vec<GraphEdge>,
     pub sequential_schedule: Vec<GraphNodeId>,
     pub dependency_levels: Vec<DependencyLevel>,
     pub route_timings: Vec<RouteTiming>,
     pub inserted_delays: Vec<InsertedDelay>,
+    pub reductions: Vec<ReductionRecord>,
+    pub route_transforms: Vec<PreparedRoute>,
     pub buffer_assignments: Vec<BufferAssignment>,
     pub estimate: GraphResourceEstimate,
     pub canonical_debug_bytes: Vec<u8>,
@@ -321,6 +324,7 @@ impl GraphCompiler {
                 }
             }
         }
+        route_transforms.sort_by(|left, right| left.node.cmp(&right.node));
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
         edges.sort_by(|a, b| a.id.cmp(&b.id));
         if nodes.len() as u64 > caps.maximum_nodes || edges.len() as u64 > caps.maximum_edges {
@@ -351,6 +355,8 @@ impl GraphCompiler {
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
         let buffers = buffer_assignments(&schedule);
+        let ports = ports_for(&nodes, &edges);
+        let reductions = reduction_records(&nodes, &edges);
         let Some(estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
@@ -397,18 +403,22 @@ impl GraphCompiler {
             rate: session.sample_rate().0,
             quantum: session.quantum().0,
             nodes: &nodes,
+            ports: &ports,
             edges: &edges,
             schedule: &schedule,
             levels: &levels,
             routes: &timing.routes,
+            route_transforms: &route_transforms,
+            delays: &timing.delays,
+            reductions: &reductions,
             buffers: &buffers,
             estimate: &estimate,
         });
         let sha256 = hex_sha256(&debug);
-        let dot = dot(&nodes, &edges);
+        let dot = dot(&nodes, &edges, &timing.delays);
         let effect_nodes = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
-            ports: ports_for(&nodes, &edges),
+            ports: ports.clone(),
             nodes: nodes.clone(),
             edges: edges.clone(),
         };
@@ -444,18 +454,21 @@ impl GraphCompiler {
                 output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
             },
             required_bindings,
-            routes: route_transforms,
+            routes: route_transforms.clone(),
             effects: effect_nodes,
         });
         Ok(PreparedGraphArtifact {
             graph,
             report: GraphCompileReport {
                 nodes,
+                ports,
                 edges,
                 sequential_schedule: schedule,
                 dependency_levels: levels,
                 route_timings: timing.routes,
                 inserted_delays: timing.delays,
+                reductions,
+                route_transforms,
                 buffer_assignments: buffers,
                 estimate,
                 canonical_debug_bytes: debug,
@@ -910,6 +923,26 @@ fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     ports.dedup();
     ports
 }
+fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ReductionRecord> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let mut contributions: Vec<_> = edges
+                .iter()
+                .filter(|edge| {
+                    edge.destination.node == node.id
+                        && edge.destination.kind == GraphPortKind::MainInput
+                })
+                .map(|edge| edge.id.clone())
+                .collect();
+            contributions.sort();
+            (contributions.len() > 1).then(|| ReductionRecord {
+                node: node.id.clone(),
+                contributions,
+            })
+        })
+        .collect()
+}
 fn add_node(
     nodes: &mut Vec<GraphNode>,
     latencies: &mut BTreeMap<GraphNodeId, LatencySamples>,
@@ -1104,31 +1137,100 @@ fn failure(
         diagnostics: GraphDiagnosticSet::sorted(diagnostics),
     }
 }
+fn stage_token(stage: TrackStage) -> &'static str {
+    match stage {
+        TrackStage::Input => "input",
+        TrackStage::PostInputBuiltins => "post-input-builtins",
+        TrackStage::PostSimd1 => "post-simd1",
+        TrackStage::PostDynamic => "post-dynamic",
+        TrackStage::PostSimd2PreFader => "post-simd2-pre-fader",
+        TrackStage::PostFader => "post-fader",
+        TrackStage::PostMatrix => "post-matrix",
+    }
+}
+fn rack_token(rack: RackId) -> &'static str {
+    match rack {
+        RackId::Simd1 => "simd1",
+        RackId::Dynamic => "dynamic",
+        RackId::Simd2 => "simd2",
+    }
+}
 fn node_text(node: &GraphNodeId) -> String {
     match node {
         GraphNodeId::TrackStage { track_id, stage } => {
-            format!("track:{}:{stage:?}", track_id.as_str())
+            format!("track:{}:{}", track_id.as_str(), stage_token(*stage))
         }
         GraphNodeId::Effect(effect) => format!(
-            "effect:{}:{:?}:{}",
+            "effect:{}:{}:{}",
             effect.track_id.as_str(),
-            effect.rack,
+            rack_token(effect.rack),
             effect.effect_id.as_str()
         ),
         GraphNodeId::Route { route_id } => format!("route:{}", route_id.as_str()),
         GraphNodeId::Submix { submix_id } => format!("submix:{}", submix_id.as_str()),
         GraphNodeId::Output { output_id } => format!("output:{}", output_id.as_str()),
-        GraphNodeId::CompensationDelay { edge_id } => format!("delay:{edge_id:?}"),
+        GraphNodeId::CompensationDelay { edge_id } => format!("delay:{}", edge_text(edge_id)),
+    }
+}
+fn node_kind_token(node: &GraphNodeId) -> &'static str {
+    match node {
+        GraphNodeId::TrackStage { .. } => "track-stage",
+        GraphNodeId::Effect(_) => "effect",
+        GraphNodeId::Route { .. } => "route",
+        GraphNodeId::Submix { .. } => "submix",
+        GraphNodeId::Output { .. } => "output",
+        GraphNodeId::CompensationDelay { .. } => "compensation-delay",
+    }
+}
+fn port_kind_token(kind: GraphPortKind) -> &'static str {
+    match kind {
+        GraphPortKind::MainInput => "main-input",
+        GraphPortKind::MainOutput => "main-output",
+        GraphPortKind::SidechainInput => "sidechain-input",
+    }
+}
+fn port_text(port: &GraphPortId) -> String {
+    format!(
+        "{}:{}:{}",
+        node_text(&port.node),
+        port_kind_token(port.kind),
+        port.effect_port.as_deref().unwrap_or("-")
+    )
+}
+fn edge_text(edge: &GraphEdgeId) -> String {
+    match edge {
+        GraphEdgeId::TrackMain { target } => format!("track-main:{}", node_text(target)),
+        GraphEdgeId::RouteSource { route_id } => format!("route-source:{}", route_id.as_str()),
+        GraphEdgeId::RouteDestination { route_id } => {
+            format!("route-destination:{}", route_id.as_str())
+        }
+        GraphEdgeId::EffectSidechain { effect, port } => format!(
+            "effect-sidechain:{}:{}:{}:{}",
+            effect.track_id.as_str(),
+            rack_token(effect.rack),
+            effect.effect_id.as_str(),
+            port
+        ),
+    }
+}
+fn tail_text(tail: TailSamples) -> String {
+    match tail {
+        TailSamples::Finite(samples) => format!("finite:{samples}"),
+        TailSamples::Infinite => "infinite".to_owned(),
     }
 }
 struct CanonicalParts<'a> {
     rate: u32,
     quantum: u32,
     nodes: &'a [GraphNode],
+    ports: &'a [GraphPortId],
     edges: &'a [GraphEdge],
     schedule: &'a [GraphNodeId],
     levels: &'a [DependencyLevel],
     routes: &'a [RouteTiming],
+    route_transforms: &'a [PreparedRoute],
+    delays: &'a [InsertedDelay],
+    reductions: &'a [ReductionRecord],
     buffers: &'a [BufferAssignment],
     estimate: &'a GraphResourceEstimate,
 }
@@ -1140,64 +1242,149 @@ fn canonical_bytes(parts: CanonicalParts<'_>) -> Vec<u8> {
     );
     for node in parts.nodes {
         text.push_str(&format!(
-            "node\t{}\t{}\t{:?}\n",
+            "node\t{}\t{}\t{}\t{}\n",
             node_text(&node.id),
+            node_kind_token(&node.id),
             node.latency.0,
-            node.tail
+            tail_text(node.tail)
         ));
+    }
+    for port in parts.ports {
+        text.push_str(&format!("port\t{}\n", port_text(port)));
     }
     for edge in parts.edges {
         text.push_str(&format!(
-            "edge\t{:?}\t{}\t{}\n",
-            edge.id,
-            node_text(&edge.source.node),
-            node_text(&edge.destination.node)
+            "edge\t{}\t{}\t{}\t{}\n",
+            edge_text(&edge.id),
+            port_text(&edge.source),
+            port_text(&edge.destination),
+            edge.path
         ));
     }
-    for node in parts.schedule {
-        text.push_str(&format!("order\t{}\n", node_text(node)));
+    for delay in parts.delays {
+        text.push_str(&format!(
+            "delay\t{}\t{}\t{}\n",
+            node_text(&delay.node),
+            edge_text(&delay.edge_id),
+            delay.samples.0
+        ));
+    }
+    for (index, node) in parts.schedule.iter().enumerate() {
+        text.push_str(&format!("order\t{index}\t{}\n", node_text(node)));
     }
     for level in parts.levels {
         for node in &level.nodes {
             text.push_str(&format!("level\t{}\t{}\n", level.level, node_text(node)));
         }
     }
+    for reduction in parts.reductions {
+        for (rank, edge) in reduction.contributions.iter().enumerate() {
+            text.push_str(&format!(
+                "reduction\t{}\t{rank}\t{}\n",
+                node_text(&reduction.node),
+                edge_text(edge)
+            ));
+        }
+    }
+    for route in parts.route_transforms {
+        text.push_str(&format!(
+            "route-transform\t{}\t{:08x}\t{:08x}\t{:08x}\t{:08x}\t{:08x}\n",
+            node_text(&route.node),
+            route.transform.gain.to_bits(),
+            route.transform.ll.to_bits(),
+            route.transform.lr.to_bits(),
+            route.transform.rl.to_bits(),
+            route.transform.rr.to_bits()
+        ));
+    }
     for route in parts.routes {
         text.push_str(&format!(
-            "route\t{}\t{}\t{}\t{}\n",
+            "route-timing\t{}\t{}\t{}\t{}\n",
             route.route_id.as_str(),
             route.source_arrival.0,
             route.compensation_delay.0,
             route.destination_arrival.0
         ));
     }
+    for node in parts.nodes {
+        text.push_str(&format!(
+            "tail\t{}\t{}\n",
+            node_text(&node.id),
+            tail_text(node.tail)
+        ));
+    }
     for buffer in parts.buffers {
         text.push_str(&format!(
             "buffer\t{}\t{}\n",
-            node_text(&buffer.port.node),
+            port_text(&buffer.port),
             buffer.buffer_index
         ));
     }
+    let estimate = parts.estimate;
     text.push_str(&format!(
-        "estimate\t{}\t{}\t{}\n",
-        parts.estimate.logical_nodes, parts.estimate.edges, parts.estimate.incremental_plan_bytes
+        "estimate\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        estimate.logical_nodes,
+        estimate.materialized_nodes,
+        estimate.edges,
+        estimate.schedule_items,
+        estimate.dependency_levels,
+        estimate.reductions,
+        estimate.routes,
+        estimate.effects,
+        estimate.audio_buffer_samples,
+        estimate.total_delay_samples,
+        estimate.delay_bytes,
+        estimate.graph_metadata_bytes,
+        estimate.declared_effect_bytes,
+        estimate.largest_allocation_bytes,
+        estimate.incremental_plan_bytes,
+        estimate.session_plus_plan_bytes
     ));
     text.into_bytes()
 }
-fn dot(nodes: &[GraphNode], edges: &[GraphEdge]) -> String {
+fn dot(nodes: &[GraphNode], edges: &[GraphEdge], delays: &[InsertedDelay]) -> String {
     let mut text = String::from("digraph miso_engine_graph_v1 {\n");
     for node in nodes {
-        text.push_str(&format!("  \"{}\";\n", node_text(&node.id)));
+        let id = dot_escape(&node_text(&node.id));
+        let label = dot_escape(&format!(
+            "{}|{}|latency={}|tail={}",
+            node_text(&node.id),
+            node_kind_token(&node.id),
+            node.latency.0,
+            tail_text(node.tail)
+        ));
+        text.push_str(&format!("  \"{id}\" [label=\"{label}\"];\n"));
+    }
+    let delay_by_edge: BTreeMap<_, _> =
+        delays.iter().map(|delay| (&delay.edge_id, delay)).collect();
+    for delay in delays {
+        let id = dot_escape(&node_text(&delay.node));
+        text.push_str(&format!(
+            "  \"{id}\" [shape=box,label=\"pdc|{} samples\"];\n",
+            delay.samples.0
+        ));
     }
     for edge in edges {
-        text.push_str(&format!(
-            "  \"{}\" -> \"{}\";\n",
-            node_text(&edge.source.node),
-            node_text(&edge.destination.node)
-        ));
+        let source = dot_escape(&node_text(&edge.source.node));
+        let destination = dot_escape(&node_text(&edge.destination.node));
+        let style = if edge.destination.kind == GraphPortKind::SidechainInput {
+            " [style=dashed]"
+        } else {
+            ""
+        };
+        if let Some(delay) = delay_by_edge.get(&edge.id) {
+            let delay = dot_escape(&node_text(&delay.node));
+            text.push_str(&format!("  \"{source}\" -> \"{delay}\"{style};\n"));
+            text.push_str(&format!("  \"{delay}\" -> \"{destination}\"{style};\n"));
+        } else {
+            text.push_str(&format!("  \"{source}\" -> \"{destination}\"{style};\n"));
+        }
     }
     text.push_str("}\n");
     text
+}
+fn dot_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -1302,6 +1489,33 @@ mod tests {
         }
     }
 
+    fn compile_fixture(plan_id: u64) -> PreparedGraphArtifact {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled session");
+        GraphCompiler::compile(GraphCompileRequest {
+            plan_id,
+            effects: EffectPreparedSession {
+                session: compiled,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
     #[test]
     fn cycle_witness_skips_acyclic_residual_nodes_downstream_of_cycle() {
         let nodes = [
@@ -1344,30 +1558,7 @@ mod tests {
 
     #[test]
     fn accepted_session_compiles_binds_and_renders_direct_route() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
-        model.automation.clear();
-        let compiled = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled session");
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
-            plan_id: 123,
-            effects: EffectPreparedSession {
-                session: compiled,
-                entries: Vec::new(),
-            },
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        let artifact = compile_fixture(123);
         assert_eq!(artifact.report.estimate.routes, 1);
         assert_eq!(artifact.report.estimate.effects, 0);
         assert_eq!(artifact.report.estimate.reductions, 0);
@@ -1418,5 +1609,84 @@ mod tests {
         assert_eq!(pcm[frames], -1.0);
         assert!(pcm[1..frames].iter().all(|sample| *sample == 0.0));
         assert!(pcm[frames + 1..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn canonical_artifacts_are_complete_and_repeatable_100_times() {
+        let baseline = compile_fixture(0).report;
+        let canonical = core::str::from_utf8(&baseline.canonical_debug_bytes).expect("UTF-8");
+        for section in [
+            "envelope\t",
+            "node\t",
+            "port\t",
+            "edge\t",
+            "order\t",
+            "level\t",
+            "route-transform\t",
+            "route-timing\t",
+            "tail\t",
+            "buffer\t",
+            "estimate\t",
+        ] {
+            assert!(canonical.contains(section), "missing {section}");
+        }
+        assert!(!canonical.contains("Simd"));
+        assert!(!canonical.contains("Finite"));
+        assert!(
+            baseline
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(baseline.sha256.len(), 64);
+        assert!(baseline.dot.ends_with("}\n"));
+        for plan_id in 1..=100 {
+            let candidate = compile_fixture(plan_id).report;
+            assert_eq!(
+                candidate.canonical_debug_bytes,
+                baseline.canonical_debug_bytes
+            );
+            assert_eq!(candidate.sha256, baseline.sha256);
+            assert_eq!(candidate.sequential_schedule, baseline.sequential_schedule);
+            assert_eq!(candidate.dependency_levels, baseline.dependency_levels);
+            assert_eq!(candidate.route_timings, baseline.route_timings);
+            assert_eq!(candidate.buffer_assignments, baseline.buffer_assignments);
+            assert_eq!(candidate.dot, baseline.dot);
+        }
+    }
+
+    #[test]
+    fn route_transform_bits_participate_in_semantic_hash() {
+        let baseline = compile_fixture(1).report;
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        model.routes[0].gain_db = -6.0;
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("session");
+        let changed = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1,
+            effects: EffectPreparedSession {
+                session,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        assert_ne!(changed.report.sha256, baseline.sha256);
+        assert_ne!(
+            changed.report.canonical_debug_bytes,
+            baseline.canonical_debug_bytes
+        );
     }
 }
