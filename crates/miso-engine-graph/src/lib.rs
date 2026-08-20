@@ -141,6 +141,11 @@ pub struct InsertedDelay {
     pub samples: LatencySamples,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReductionRecord {
+    pub node: GraphNodeId,
+    pub contributions: Vec<GraphEdgeId>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufferAssignment {
     pub port: GraphPortId,
     pub buffer_index: u64,
