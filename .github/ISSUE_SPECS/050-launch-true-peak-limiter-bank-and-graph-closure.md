@@ -138,3 +138,20 @@ table; bank validation and unavailable-fallback results; scalar/W4/W8 PCM/state/
 reset/restore/recovery/isolation rows; ten-track bank/tail/latency/PDC/resource/cap report; focused
 and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS/FAIL; and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 bank implementation checkpoint — incomplete
+
+- Base candidate: `34e4b7c`; the accepted Issue-016 scalar descriptor, FIR, guarded gain/hold
+  law, latency, state layout, reset/recovery and scalar path were not changed.
+- Added fixed-array `PreparedTruePeakLimiterBank<W>` binding and rendering for W4/W8. Every member
+  is metadata/default-validated before the prepared gate-gain token is acquired; changed immutable
+  program signatures reject, and a valid unavailable backend returns `Ok(None)`.
+- Detector, linking, ramps, required-gain hold/release, delay, reports and state remain scalar and
+  independent per track/lane. Only delayed sample/gain/identity selection uses the accepted packed
+  `PreparedGateGainKernelV1`; no core API or kernel changed.
+- Focused `cargo fmt --check --package miso-engine-core --package
+  miso-engine-true-peak-limiter`, locked core+limiter library tests (27 core and 5 limiter), and
+  locked all-target warning-denied Clippy for both packages: PASS.
+- The direct W4/W8 scalar-parity, snapshot/restore, recovery/isolation and resource tests were
+  intentionally not added after the scope-freeze instruction, and registry/graph work did not
+  start. This is not a full Issue-050 PASS verdict. `timed_benchmark_invocations=0`.

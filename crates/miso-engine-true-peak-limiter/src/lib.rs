@@ -3,15 +3,17 @@
 //! The audible path remains at the host sample rate. The frozen Annex-2 FIR is detector-only.
 #![allow(missing_docs)]
 
+use miso_engine_core::{GateGainKernelError, PreparedGateGainKernelV1};
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, sanitize_sample,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata, sanitize_sample,
 };
 
 const PARAMETER_COUNT: usize = 3;
@@ -304,6 +306,20 @@ pub struct PreparedTruePeakLimiter {
     right: Lane,
 }
 
+/// A fixed-width limiter cohort with scalar detector and state work per track/lane.
+///
+/// Only the final delayed-sample/gain/identity operation is packed through the prepared core
+/// token. The arrays contain no padding tracks and retain exactly one full scalar state per lane.
+struct PreparedTruePeakLimiterBank<const W: usize> {
+    metadata: PreparedBankMetadata,
+    effect_metadata: PreparedEffectMetadata,
+    kernel: PreparedGateGainKernelV1,
+    left_defaults: [[f32; PARAMETER_COUNT]; W],
+    right_defaults: [[f32; PARAMETER_COUNT]; W],
+    left: [Lane; W],
+    right: [Lane; W],
+}
+
 impl NativeEffectFactory for TruePeakLimiterFactory {
     fn descriptor(&self) -> &'static EffectDescriptorV1 {
         &TRUE_PEAK_LIMITER_DESCRIPTOR_V1
@@ -341,12 +357,68 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
                 code: "effect.bank.requests",
             });
         }
-        for member in request.requests.iter().copied() {
-            expected_prepared_metadata(self.descriptor(), member)?;
-            initial_defaults(member.initial_values)?;
+        match request.width {
+            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
+            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
         }
-        Ok(None)
     }
+}
+
+fn prepare_homogeneous_bank<const W: usize>(
+    factory: &TruePeakLimiterFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    let first = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(factory.descriptor(), first)?;
+    let (first_left, first_right) = initial_defaults(first.initial_values)?;
+    let mut left_defaults = [first_left; W];
+    let mut right_defaults = [first_right; W];
+    for (track, member) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), member)?;
+        if candidate.program_key() != metadata.program_key() {
+            return Err(EffectPrepareError {
+                code: "effect.bank.program",
+            });
+        }
+        let (left, right) = initial_defaults(member.initial_values)?;
+        left_defaults[track] = left;
+        right_defaults[track] = right;
+    }
+    let kernel = match PreparedGateGainKernelV1::try_new(request.backend) {
+        Ok(kernel) => kernel,
+        Err(GateGainKernelError::BackendUnavailable) => return Ok(None),
+        Err(_) => {
+            return Err(EffectPrepareError {
+                code: "effect.bank.backend",
+            });
+        }
+    };
+    let left = core::array::from_fn(|track| {
+        Lane::new(&left_defaults[track], metadata.sample_rate)
+            .expect("validated limiter bank left lane")
+    });
+    let right = core::array::from_fn(|track| {
+        Lane::new(&right_defaults[track], metadata.sample_rate)
+            .expect("validated limiter bank right lane")
+    });
+    Ok(Some(Box::new(PreparedTruePeakLimiterBank::<W> {
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+        effect_metadata: metadata,
+        kernel,
+        left_defaults,
+        right_defaults,
+        left,
+        right,
+    })))
 }
 
 impl PreparedNativeEffect for PreparedTruePeakLimiter {
@@ -454,6 +526,115 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
     }
 }
 
+impl<const W: usize> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<W> {
+    fn metadata(&self) -> PreparedBankMetadata {
+        self.metadata.clone()
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        for track in 0..W {
+            match kind {
+                ResetKind::FullToDefaults => {
+                    self.left[track]
+                        .full_reset(&self.left_defaults[track], self.effect_metadata.sample_rate);
+                    self.right[track].full_reset(
+                        &self.right_defaults[track],
+                        self.effect_metadata.sample_rate,
+                    );
+                }
+                ResetKind::DiscontinuityKeepParameters => {
+                    self.left[track].discontinuity_reset();
+                    self.right[track].discontinuity_reset();
+                }
+            }
+        }
+    }
+
+    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.metadata.width);
+        if block.width != self.metadata.width
+            || block.frames > self.effect_metadata.quantum
+            || block.sidechain.is_some()
+            || W != self.metadata.width.lanes() as usize
+        {
+            return report;
+        }
+        for track in 0..W {
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.effect_metadata,
+                block.first_sample,
+                &mut self.left[track],
+                &mut self.right[track],
+                &mut report.reports[track],
+            );
+        }
+        for frame in 0..block.frames as usize {
+            let start = frame * W;
+            process_bank_frame(
+                &mut self.left,
+                &mut self.right,
+                self.kernel,
+                self.effect_metadata,
+                &mut report,
+                &mut block.left[start..start + W],
+                &mut block.right[start..start + W],
+            );
+        }
+        report
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        validate_state_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        write_lane(output.left, &self.left[track]);
+        write_lane(output.right, &self.right[track]);
+        Ok(())
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        if state_layout_version != 1 {
+            return Err(state_error("effect.state.version"));
+        }
+        validate_state_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        let left = read_lane(input.left, self.effect_metadata.sample_rate)?;
+        let right = read_lane(input.right, self.effect_metadata.sample_rate)?;
+        self.left[track] = left;
+        self.right[track] = right;
+        Ok(())
+    }
+}
+
+fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
+    let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
+    if track >= width {
+        return Err(state_error("effect.state.track"));
+    }
+    Ok(track)
+}
+
 fn dimensions(sample_rate: u32) -> Option<(usize, usize, usize)> {
     let maximum = usize::try_from(sample_rate / 100).ok()?;
     let main_length = maximum.checked_add(7)?;
@@ -559,6 +740,14 @@ fn detector_peak(lane: &mut Lane, input: f32) -> Option<f32> {
     finite_or_zero(peak)
 }
 
+#[derive(Clone, Copy)]
+struct GainFrame {
+    delayed: f32,
+    gain: f32,
+    identity: bool,
+    forced_zero: bool,
+}
+
 fn process_lane(
     input: f32,
     peak: Option<f32>,
@@ -567,22 +756,164 @@ fn process_lane(
     bypass: bool,
     recovered: &mut u64,
 ) -> f32 {
+    let frame = prepare_lane_gain(input, peak, lane, sample_rate, bypass, recovered);
+    finish_lane_output(frame.delayed * frame.gain, frame, lane, recovered)
+}
+
+fn prepare_lane_gain(
+    input: f32,
+    peak: Option<f32>,
+    lane: &mut Lane,
+    sample_rate: u32,
+    bypass: bool,
+    recovered: &mut u64,
+) -> GainFrame {
     let required = peak.and_then(|peak| required_gain(peak, lane.ramps[0].current));
     let gain = required.and_then(|required| advance_gain(lane, required, sample_rate));
     let delayed = delay_main(lane, input);
     let Some(gain) = gain else {
         recover(lane, recovered);
-        return if bypass { delayed } else { 0.0 };
+        return GainFrame {
+            delayed,
+            gain: 0.0,
+            identity: bypass,
+            forced_zero: true,
+        };
     };
-    if bypass || gain == 1.0 {
-        return delayed;
+    GainFrame {
+        delayed,
+        gain,
+        identity: bypass || gain == 1.0,
+        forced_zero: false,
     }
-    match finite_or_zero(delayed * gain) {
+}
+
+fn finish_lane_output(value: f32, frame: GainFrame, lane: &mut Lane, recovered: &mut u64) -> f32 {
+    if frame.forced_zero {
+        return if frame.identity { frame.delayed } else { 0.0 };
+    }
+    if frame.identity {
+        return frame.delayed;
+    }
+    match finite_or_zero(value) {
         Some(output) => output,
         None => {
             recover(lane, recovered);
             0.0
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_bank_frame<const W: usize>(
+    left_lanes: &mut [Lane; W],
+    right_lanes: &mut [Lane; W],
+    kernel: PreparedGateGainKernelV1,
+    metadata: PreparedEffectMetadata,
+    report: &mut BankProcessReport,
+    left_samples: &mut [f32],
+    right_samples: &mut [f32],
+) {
+    let empty = GainFrame {
+        delayed: 0.0,
+        gain: 1.0,
+        identity: true,
+        forced_zero: false,
+    };
+    let mut left_frames = [empty; W];
+    let mut right_frames = [empty; W];
+    let mut left_gains = [1.0; W];
+    let mut right_gains = [1.0; W];
+    let mut left_identity = [0_u32; W];
+    let mut right_identity = [0_u32; W];
+    for track in 0..W {
+        left_lanes[track].ramps.iter_mut().for_each(Ramp::advance);
+        right_lanes[track].ramps.iter_mut().for_each(Ramp::advance);
+        let left = sanitize(
+            left_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+        let right = sanitize(
+            right_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+        let left_peak = detector_peak(&mut left_lanes[track], left);
+        let right_peak = detector_peak(&mut right_lanes[track], right);
+        let (left_peak, right_peak) = match metadata.link_mode {
+            LinkMode::DualMono => (left_peak, right_peak),
+            LinkMode::Maximum => match (left_peak, right_peak) {
+                (Some(left_peak), Some(right_peak)) => {
+                    let peak = canonical_max(left_peak, right_peak);
+                    (Some(peak), Some(peak))
+                }
+                _ => (left_peak, right_peak),
+            },
+            LinkMode::Average => (left_peak, right_peak),
+        };
+        let left_frame = prepare_lane_gain(
+            left,
+            left_peak,
+            &mut left_lanes[track],
+            metadata.sample_rate,
+            metadata.bypass,
+            &mut report.reports[track].recovered_left_samples,
+        );
+        let right_frame = prepare_lane_gain(
+            right,
+            right_peak,
+            &mut right_lanes[track],
+            metadata.sample_rate,
+            metadata.bypass,
+            &mut report.reports[track].recovered_right_samples,
+        );
+        left_frames[track] = left_frame;
+        right_frames[track] = right_frame;
+        left_samples[track] = if left_frame.forced_zero && !left_frame.identity {
+            0.0
+        } else {
+            left_frame.delayed
+        };
+        right_samples[track] = if right_frame.forced_zero && !right_frame.identity {
+            0.0
+        } else {
+            right_frame.delayed
+        };
+        left_gains[track] = left_frame.gain;
+        right_gains[track] = right_frame.gain;
+        left_identity[track] =
+            u32::from(left_frame.identity || left_frame.forced_zero).wrapping_neg();
+        right_identity[track] =
+            u32::from(right_frame.identity || right_frame.forced_zero).wrapping_neg();
+    }
+    let left_ok = kernel
+        .process_gain(left_samples, &left_gains, &left_identity)
+        .is_ok();
+    let right_ok = kernel
+        .process_gain(right_samples, &right_gains, &right_identity)
+        .is_ok();
+    for track in 0..W {
+        let left_value = if left_ok {
+            left_samples[track]
+        } else {
+            left_frames[track].delayed * left_frames[track].gain
+        };
+        let right_value = if right_ok {
+            right_samples[track]
+        } else {
+            right_frames[track].delayed * right_frames[track].gain
+        };
+        left_samples[track] = finish_lane_output(
+            left_value,
+            left_frames[track],
+            &mut left_lanes[track],
+            &mut report.reports[track].recovered_left_samples,
+        );
+        right_samples[track] = finish_lane_output(
+            right_value,
+            right_frames[track],
+            &mut right_lanes[track],
+            &mut report.reports[track].recovered_right_samples,
+        );
     }
 }
 

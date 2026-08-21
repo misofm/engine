@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_true_peak_limiter"
 
 [dependencies]
+miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 
 [lints]
