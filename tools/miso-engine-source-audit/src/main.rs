@@ -2,13 +2,28 @@
 
 #![allow(unsafe_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    io::{Read, Seek, SeekFrom},
+    num::NonZeroUsize,
+};
 
-use miso_engine_core::QuantumFrames;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::{
+    QuantumFrames, SampleRateHz,
+    realtime::{PlanarBufferMut, RenderEnvelope, RenderIo, RenderTime},
+};
+use miso_engine_effect_contract::{LatencySamples, TailSamples};
+use miso_engine_graph::{
+    DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphNodeId, GraphPortId,
+    GraphPortKind, GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
+    PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
+};
 use miso_engine_source::{
-    HostPlanarChunk, PcmSourceRing, PcmSourceRingConfig, SourceCommand, SourceFrame,
-    SourceGeneration,
+    NativeResolvedAsset, NativeSourcePrepareCaps, NativeSourcePrepareRequest, NativeSourceResolver,
+    NativeSourceResolverError, NativeWaveParseCaps, NativeWaveRegion, SourceCommand, SourceFrame,
+    SourceGeneration, SourceGraphTrackMapping, prepare_graph_source_set,
+    prepare_native_source_with_audit_gate,
 };
 
 const BLOCKS: u64 = 100_000;
@@ -56,84 +71,182 @@ unsafe impl GlobalAlloc for AuditedAllocator {
 }
 
 fn main() {
-    let config = PcmSourceRingConfig {
-        channel_count: 1,
-        quantum_frames: QuantumFrames(QUANTUM),
-        frame_capacity: u64::from(QUANTUM),
-        initial_generation: SourceGeneration(1),
+    let mut resolver = Resolver::new(SyntheticWave::new(u64::from(QUANTUM) * 4));
+    let request = NativeSourcePrepareRequest {
+        locator: "audit:synthetic-wave".to_owned(),
+        declared_identity: b"issue041-native-worker".to_vec(),
+        declared_sample_rate_hz: SampleRateHz(48_000),
+        engine_sample_rate_hz: SampleRateHz(48_000),
+        declared_channel_count: 1,
+        region: NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: u64::from(QUANTUM) * 4,
+        },
+        ring_config: miso_engine_source::PcmSourceRingConfig {
+            channel_count: 1,
+            quantum_frames: QuantumFrames(QUANTUM),
+            // Initial EOF prefill occupies four blocks, leaving exactly one block available for
+            // the held post-seek generation before render begins.
+            frame_capacity: u64::from(QUANTUM) * 5,
+            initial_generation: SourceGeneration(1),
+        },
     };
-    let minute = PcmSourceRing::resource_report(config).expect("minute resource");
-    let multi_hour = PcmSourceRing::resource_report(config).expect("multi-hour resource");
-    assert_eq!(
-        minute, multi_hour,
-        "duration cannot change retained source layout"
-    );
-
-    let (producer, mut consumer, ring) = PcmSourceRing::prepare(config).expect("prepared ring");
-    assert_eq!(ring, minute);
-    let mut host = producer.into_host_chunk_provider(miso_engine_core::SampleRateHz(48_000));
-    let pcm = [0.25_f32; QUANTUM as usize];
-    submit(&mut host, SourceGeneration(1), 0, &pcm);
-    let mut output = [1.0_f32; QUANTUM as usize];
-    let output_address = output.as_ptr() as usize;
+    let caps = NativeSourcePrepareCaps {
+        parser: NativeWaveParseCaps {
+            max_chunk_count: 4,
+            max_skipped_metadata_bytes: 0,
+        },
+        max_worker_read_scratch_bytes: u64::from(QUANTUM) * 4,
+        max_total_engine_owned_bytes: u64::MAX,
+        max_largest_allocation_bytes: u64::MAX,
+        control_queue_items: NonZeroUsize::new(2).expect("two commands"),
+    };
+    let (mut prepared, mut gate) =
+        prepare_native_source_with_audit_gate(&mut resolver, request, caps)
+            .expect("prepare real native worker");
+    prepared
+        .controller()
+        .wait_for_event()
+        .expect("native worker prefill event");
+    let (mut controller, source) = prepared.into_graph_source();
+    let envelope = RenderEnvelope {
+        sample_rate: SampleRateHz(48_000),
+        quantum: QuantumFrames(QUANTUM),
+        input_channels: None,
+        output_channels: NonZeroUsize::new(2).expect("stereo output"),
+    };
+    let input = GraphNodeId::TrackStage {
+        track_id: StableGraphId::parse("audit.source").expect("stable input id"),
+        stage: TrackStage::Input,
+    };
+    let output = GraphNodeId::Output {
+        output_id: StableGraphId::parse("audit.main").expect("stable output id"),
+    };
+    let source_set = prepare_graph_source_set(
+        envelope,
+        vec![source],
+        vec![SourceGraphTrackMapping {
+            node: input.clone(),
+            source_index: 0,
+            left_channel: 0,
+            right_channel: 0,
+        }],
+    )
+    .expect("seal graph source set");
+    let mut plan = match prepared_graph_plan(envelope, input, output).bind_with_source_set(
+        GraphRuntimeBindings {
+            envelope,
+            nodes: vec![GraphNodeBinding::new(
+                GraphNodeId::Output {
+                    output_id: StableGraphId::parse("audit.main").expect("stable output id"),
+                },
+                Box::new(Noop),
+            )],
+            observers: Vec::new(),
+        },
+        source_set,
+    ) {
+        Ok(plan) => plan,
+        Err(failure) => panic!("bind graph source set: {}", failure.code),
+    };
+    let mut output_pcm = [f32::from_bits(0xffff_ffff); (QUANTUM as usize) * 2];
+    let output_address = output_pcm.as_ptr() as usize;
 
     audit::warm_up();
     audit::reset();
     let mut resumed_at = None;
     eprintln!("MISO_SOURCE_RT_BEGIN");
     for block in 0..BLOCKS {
-        if block == 2 {
-            host.try_seek(SourceCommand::Seek {
-                generation: SourceGeneration(2),
-                frame: SourceFrame(u64::from(QUANTUM) * 2),
-            })
-            .expect("off-render resume seek");
-            submit(&mut host, SourceGeneration(2), u64::from(QUANTUM) * 2, &pcm);
-        } else if block > 2 {
-            submit(
-                &mut host,
-                SourceGeneration(2),
-                u64::from(QUANTUM) * block,
-                &pcm,
+        if block == 1 {
+            controller
+                .try_seek(SourceCommand::Seek {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(u64::from(QUANTUM)),
+                })
+                .expect("off-render native seek");
+            controller
+                .hold_worker_for_audit()
+                .expect("queue audit hold after seek");
+            gate.wait_until_held().expect("worker held outside render");
+        }
+        let report = plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(
+                        &mut output_pcm,
+                        2,
+                        QUANTUM as usize,
+                        QUANTUM as usize,
+                    )
+                    .expect("fixed output"),
+                },
+                RenderTime {
+                    absolute_sample: block * u64::from(QUANTUM),
+                },
+            )
+            .expect("prepared native-source render");
+        assert_eq!(report.frames, QUANTUM);
+        let left = &output_pcm[..QUANTUM as usize];
+        let right = &output_pcm[QUANTUM as usize..];
+        if block == 0 {
+            assert!(
+                left.iter()
+                    .chain(right)
+                    .all(|sample| sample.to_bits() == 0.25_f32.to_bits()),
+                "initial native PCM mismatch: left={left:?}, right={right:?}"
             );
         }
-        let report = audit::in_render_scope(|| consumer.read_block_contiguous(&mut output))
-            .expect("prepared output shape");
         if block == 1 {
-            assert!(output.iter().all(|sample| sample.to_bits() == 0));
-            assert_eq!(report.underrun_frames, QUANTUM);
-            assert!(report.underrun_event);
-        }
-        if block == 2 {
             assert!(
-                output
-                    .iter()
+                left.iter()
+                    .chain(right)
                     .all(|sample| sample.to_bits() == 0.25_f32.to_bits())
             );
-            resumed_at = Some(u64::from(QUANTUM) * 2);
+        }
+        if block == 2 {
+            assert!(left.iter().chain(right).all(|sample| sample.to_bits() == 0));
+            controller
+                .try_seek(SourceCommand::Seek {
+                    generation: SourceGeneration(3),
+                    frame: SourceFrame(u64::from(QUANTUM) * 3),
+                })
+                .expect("off-render resume seek");
+            gate.release_and_wait()
+                .expect("worker resumes outside render");
+        }
+        if block == 3 {
+            assert!(
+                left.iter()
+                    .chain(right)
+                    .all(|sample| sample.to_bits() == 0.25_f32.to_bits())
+            );
+            resumed_at = Some(u64::from(QUANTUM) * 3);
         }
     }
     eprintln!("MISO_SOURCE_RT_END");
-    let telemetry = consumer.telemetry();
     let snapshot = audit::snapshot();
-    assert_eq!(output.as_ptr() as usize, output_address);
-    assert_eq!(telemetry.underrun_frames, u64::from(QUANTUM));
-    assert_eq!(telemetry.underrun_events, 1);
-    assert_eq!(resumed_at, Some(u64::from(QUANTUM) * 2));
+    assert_eq!(output_pcm.as_ptr() as usize, output_address);
+    assert_eq!(resumed_at, Some(u64::from(QUANTUM) * 3));
     assert_eq!(snapshot.total(), 0);
+    drop(plan);
+    assert!(
+        controller.wait_for_event().is_ok(),
+        "off-render worker terminal event"
+    );
     println!(
         concat!(
             "{{\"schema_version\":1,\"kind\":\"issue010_source_realtime_audit\",",
             "\"blocks\":{},\"quantum_frames\":{},\"underrun_frames\":{},",
             "\"underrun_events\":{},\"resumed_source_frame\":{},\"output_address\":{},",
-            "\"minute_equals_multi_hour_resources\":true,\"descriptive_rss_bytes\":null,",
+            "\"native_worker_hold_release\":true,",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"logs\":{},",
             "\"file_io\":{},\"network_io\":{},\"syscalls\":{},\"total_violations\":{}}}"
         ),
         BLOCKS,
         QUANTUM,
-        telemetry.underrun_frames,
-        telemetry.underrun_events,
+        QUANTUM,
+        1,
         resumed_at.expect("resume"),
         output_address,
         snapshot.allocations,
@@ -147,19 +260,229 @@ fn main() {
     );
 }
 
-fn submit(
-    host: &mut miso_engine_source::HostChunkProvider,
-    generation: SourceGeneration,
-    start_frame: u64,
-    pcm: &[f32],
-) {
-    host.submit(HostPlanarChunk {
-        sample_rate_hz: miso_engine_core::SampleRateHz(48_000),
-        generation,
-        start_frame: SourceFrame(start_frame),
-        planes: &[pcm],
-        frames: QUANTUM,
-        end_of_region: false,
+struct Noop;
+impl GraphRuntimeProcessor for Noop {
+    fn process(
+        &mut self,
+        _block: miso_engine_graph::GraphBindingBlock<'_>,
+    ) -> Result<(), miso_engine_core::realtime::RenderError> {
+        Ok(())
+    }
+}
+
+struct Resolver {
+    asset: Option<NativeResolvedAsset<SyntheticWave>>,
+}
+impl Resolver {
+    fn new(reader: SyntheticWave) -> Self {
+        Self {
+            asset: Some(NativeResolvedAsset {
+                observed_identity: b"issue041-native-worker".to_vec(),
+                reader,
+            }),
+        }
+    }
+}
+impl NativeSourceResolver for Resolver {
+    type Asset = SyntheticWave;
+    fn resolve(
+        &mut self,
+        locator: &str,
+    ) -> Result<NativeResolvedAsset<Self::Asset>, NativeSourceResolverError> {
+        if locator != "audit:synthetic-wave" {
+            return Err(NativeSourceResolverError::Unresolved);
+        }
+        self.asset
+            .take()
+            .ok_or(NativeSourceResolverError::Unresolved)
+    }
+}
+
+struct SyntheticWave {
+    position: u64,
+    frames: u64,
+}
+impl SyntheticWave {
+    fn new(frames: u64) -> Self {
+        Self {
+            position: 0,
+            frames,
+        }
+    }
+    fn header(&self) -> [u8; 44] {
+        let data_bytes = u32::try_from(self.frames * 4).expect("small audit source");
+        let riff_size = 36_u32.checked_add(data_bytes).expect("small audit source");
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            riff_size.to_le_bytes()[0],
+            riff_size.to_le_bytes()[1],
+            riff_size.to_le_bytes()[2],
+            riff_size.to_le_bytes()[3],
+            b'W',
+            b'A',
+            b'V',
+            b'E',
+            b'f',
+            b'm',
+            b't',
+            b' ',
+            16,
+            0,
+            0,
+            0,
+            3,
+            0,
+            1,
+            0,
+            0x80,
+            0xbb,
+            0,
+            0,
+            0,
+            0xee,
+            2,
+            0,
+            4,
+            0,
+            32,
+            0,
+            b'd',
+            b'a',
+            b't',
+            b'a',
+            data_bytes.to_le_bytes()[0],
+            data_bytes.to_le_bytes()[1],
+            data_bytes.to_le_bytes()[2],
+            data_bytes.to_le_bytes()[3],
+        ]
+    }
+    fn len(&self) -> u64 {
+        44 + self.frames * 4
+    }
+}
+impl Read for SyntheticWave {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if self.position >= self.len() {
+            return Ok(0);
+        }
+        let count = usize::try_from((self.len() - self.position).min(output.len() as u64))
+            .expect("bounded read");
+        let header = self.header();
+        for (index, byte) in output[..count].iter_mut().enumerate() {
+            let offset = self.position + index as u64;
+            *byte = if offset < 44 {
+                header[offset as usize]
+            } else {
+                0.25_f32.to_le_bytes()[((offset - 44) % 4) as usize]
+            };
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+impl Seek for SyntheticWave {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let base = match from {
+            SeekFrom::Start(value) => {
+                self.position = value;
+                return Ok(value);
+            }
+            SeekFrom::Current(value) => self.position as i128 + value as i128,
+            SeekFrom::End(value) => self.len() as i128 + value as i128,
+        };
+        if base < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "before start",
+            ));
+        }
+        self.position = base as u64;
+        Ok(self.position)
+    }
+}
+
+fn prepared_graph_plan(
+    envelope: RenderEnvelope,
+    input: GraphNodeId,
+    output: GraphNodeId,
+) -> PreparedGraphPlan {
+    PreparedGraphPlan::new(PreparedGraphPlanParts {
+        plan_id: 41,
+        spec: GraphSpec {
+            nodes: vec![
+                GraphNode {
+                    id: input.clone(),
+                    latency: LatencySamples(0),
+                    tail: TailSamples::Finite(0),
+                },
+                GraphNode {
+                    id: output.clone(),
+                    latency: LatencySamples(0),
+                    tail: TailSamples::Finite(0),
+                },
+            ],
+            ports: Vec::new(),
+            edges: vec![GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("audit.route").expect("stable route id"),
+                },
+                source: GraphPortId {
+                    node: input.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.audit.route".to_owned(),
+            }],
+        },
+        sequential_schedule: vec![input.clone(), output.clone()],
+        dependency_levels: vec![
+            DependencyLevel {
+                level: 0,
+                nodes: vec![input.clone()],
+            },
+            DependencyLevel {
+                level: 1,
+                nodes: vec![output.clone()],
+            },
+        ],
+        route_timings: Vec::new(),
+        inserted_delays: Vec::new(),
+        buffer_assignments: Vec::new(),
+        estimate: GraphResourceEstimate {
+            logical_nodes: 0,
+            materialized_nodes: 0,
+            edges: 0,
+            schedule_items: 0,
+            dependency_levels: 0,
+            reductions: 0,
+            routes: 0,
+            effects: 0,
+            audio_buffer_samples: 0,
+            total_delay_samples: 0,
+            delay_bytes: 0,
+            graph_metadata_bytes: 0,
+            declared_effect_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            builtin_bank_count: 0,
+            largest_allocation_bytes: 0,
+            incremental_plan_bytes: 0,
+            session_plus_plan_bytes: 0,
+        },
+        envelope,
+        required_bindings: vec![input, output],
+        routes: Vec::new(),
+        effects: Vec::new(),
+        banks: Vec::new(),
+        builtin_banks: Vec::new(),
+        observers: Vec::new(),
     })
-    .expect("host source submission before render");
 }

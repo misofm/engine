@@ -331,6 +331,85 @@ enum WorkerCommand {
     },
     Wake,
     SnapshotSanitation,
+    #[cfg(feature = "test-support")]
+    AuditHold,
+}
+
+/// Deterministic off-render hold/release gate for native-worker qualification only.
+///
+/// The worker acknowledges that it is held before the caller enters render, and acknowledges its
+/// release before the caller renders resumed PCM. This is compiled only with `test-support`.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct NativeWorkerAuditGate {
+    held: Consumer<()>,
+    release: Producer<()>,
+    resumed: Consumer<()>,
+    released: bool,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+#[cfg(feature = "test-support")]
+struct WorkerAuditGate {
+    held: Producer<()>,
+    release: Consumer<()>,
+    resumed: Producer<()>,
+}
+
+#[cfg(not(feature = "test-support"))]
+struct WorkerAuditGate;
+
+#[cfg(feature = "test-support")]
+impl NativeWorkerAuditGate {
+    /// Wait outside render until the worker has consumed a hold command.
+    #[doc(hidden)]
+    pub fn wait_until_held(&mut self) -> Result<(), NativeSourceWorkerControlError> {
+        loop {
+            match self.held.try_pop() {
+                Ok(()) => return Ok(()),
+                Err(QueueEmpty { .. }) => thread::yield_now(),
+            }
+        }
+    }
+
+    /// Release one held worker outside render.
+    #[doc(hidden)]
+    pub fn release_and_wait(&mut self) -> Result<(), NativeSourceWorkerControlError> {
+        if self.released {
+            return Err(NativeSourceWorkerControlError::Stopped);
+        }
+        self.release
+            .try_push(())
+            .map_err(|_| NativeSourceWorkerControlError::Backpressure)?;
+        self.released = true;
+        loop {
+            match self.resumed.try_pop() {
+                Ok(()) => return Ok(()),
+                Err(QueueEmpty { .. }) => thread::yield_now(),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl WorkerAuditGate {
+    fn hold(&mut self) {
+        self.held
+            .try_push(())
+            .expect("audit controller consumes bounded hold acknowledgement");
+        loop {
+            match self.release.try_pop() {
+                Ok(()) => break,
+                Err(QueueEmpty { .. }) => thread::yield_now(),
+            }
+        }
+    }
+
+    fn acknowledge_resumed(&mut self) {
+        self.resumed
+            .try_push(())
+            .expect("audit controller consumes bounded release acknowledgement");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -402,6 +481,13 @@ impl NativeSourceController {
     /// Wake a worker waiting for ring capacity after an off-render consumer-drain notification.
     pub fn try_wake(&mut self) -> Result<(), NativeSourceWorkerControlError> {
         self.try_send(WorkerCommand::Wake)
+    }
+
+    /// Ask the test-support worker gate to hold after its next submitted block.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn hold_worker_for_audit(&mut self) -> Result<(), NativeSourceWorkerControlError> {
+        self.try_send(WorkerCommand::AuditHold)
     }
 
     /// Wait outside render for the initial prepared source data event.
@@ -509,10 +595,77 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
     })
 }
 
+/// Prepare a native source with a deterministic audit-only worker hold/release gate.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn prepare_native_source_with_audit_gate<S: NativeSourceResolver>(
+    resolver: &mut S,
+    request: NativeSourcePrepareRequest,
+    caps: NativeSourcePrepareCaps,
+) -> Result<(PreparedNativeSource, NativeWorkerAuditGate), NativeSourcePrepareError> {
+    let (held_sender, held_receiver) = bounded_spsc(
+        NonZeroUsize::new(1).expect("one hold acknowledgement"),
+        QueueGeneration(14),
+    )
+    .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let (release_sender, release_receiver) = bounded_spsc(
+        NonZeroUsize::new(1).expect("one hold release"),
+        QueueGeneration(15),
+    )
+    .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let (resumed_sender, resumed_receiver) = bounded_spsc(
+        NonZeroUsize::new(1).expect("one release acknowledgement"),
+        QueueGeneration(16),
+    )
+    .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let (controller, worker, consumer, resources) = prepare_native_source_parts_with_audit_gate(
+        resolver,
+        request,
+        caps,
+        Some(WorkerAuditGate {
+            held: held_sender,
+            release: release_receiver,
+            resumed: resumed_sender,
+        }),
+    )?;
+    Ok((
+        PreparedNativeSource {
+            controller,
+            consumer,
+            resources,
+            worker,
+        },
+        NativeWorkerAuditGate {
+            held: held_receiver,
+            release: release_sender,
+            resumed: resumed_receiver,
+            released: false,
+            _not_sync: PhantomData,
+        },
+    ))
+}
+
 fn prepare_native_source_parts<S: NativeSourceResolver>(
     resolver: &mut S,
     request: NativeSourcePrepareRequest,
     caps: NativeSourcePrepareCaps,
+) -> Result<
+    (
+        NativeSourceController,
+        NativeSourceWorker,
+        PcmSourceConsumer,
+        NativeSourceResourceReport,
+    ),
+    NativeSourcePrepareError,
+> {
+    prepare_native_source_parts_with_audit_gate(resolver, request, caps, None)
+}
+
+fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
+    resolver: &mut S,
+    request: NativeSourcePrepareRequest,
+    caps: NativeSourcePrepareCaps,
+    audit_gate: Option<WorkerAuditGate>,
 ) -> Result<
     (
         NativeSourceController,
@@ -583,6 +736,7 @@ fn prepare_native_source_parts<S: NativeSourceResolver>(
                 planar_staging.into_boxed_slice(),
                 initial_generation,
                 stop_receiver,
+                audit_gate,
             )
         })
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
@@ -888,6 +1042,7 @@ fn validate_seek_frame(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_worker<R: Read + Seek>(
     mut commands: Consumer<WorkerCommand>,
     mut events: Producer<NativeSourceWorkerEvent>,
@@ -896,16 +1051,26 @@ fn run_worker<R: Read + Seek>(
     mut planar_staging: Box<[f32]>,
     mut generation: SourceGeneration,
     mut stop: Consumer<()>,
+    #[allow(unused_mut, unused_variables)] mut audit_gate: Option<WorkerAuditGate>,
 ) -> NativeSourceWorkerExit {
     let mut pending: Option<PendingBlock> = None;
     let mut end_submitted = false;
     let mut source_ready_sent = false;
     let mut sanitation = 0_u64;
+    #[cfg(feature = "test-support")]
+    let mut audit_resume_after_submit = false;
+    #[cfg(feature = "test-support")]
+    let mut audit_hold_after_submit = false;
     let exit = loop {
         if stop.try_pop().is_ok() {
             break NativeSourceWorkerExit::Stopped;
         }
         if let Ok(command) = commands.try_pop() {
+            #[cfg(feature = "test-support")]
+            if matches!(command, WorkerCommand::AuditHold) {
+                audit_hold_after_submit = true;
+                continue;
+            }
             match apply_command(command, &mut provider, &mut decoder, &mut generation) {
                 Ok(CommandResult::Seek) => {
                     pending = None;
@@ -934,6 +1099,22 @@ fn run_worker<R: Read + Seek>(
                 block.native_decoder_sanitized_samples,
             ) {
                 Ok(_) => {
+                    #[cfg(feature = "test-support")]
+                    if audit_resume_after_submit {
+                        if let Some(gate) = audit_gate.as_mut() {
+                            gate.acknowledge_resumed();
+                        }
+                        audit_resume_after_submit = false;
+                    }
+                    #[cfg(feature = "test-support")]
+                    if audit_hold_after_submit {
+                        let Some(gate) = audit_gate.as_mut() else {
+                            break NativeSourceWorkerExit::Stopped;
+                        };
+                        gate.hold();
+                        audit_hold_after_submit = false;
+                        audit_resume_after_submit = true;
+                    }
                     end_submitted = block.end_of_region;
                     if !source_ready_sent {
                         publish_worker_event(
@@ -1030,6 +1211,8 @@ fn apply_command<R: Read + Seek>(
             *generation = requested;
             Ok(CommandResult::Seek)
         }
+        #[cfg(feature = "test-support")]
+        WorkerCommand::AuditHold => Err(NativeSourceWorkerExit::Stopped),
     }
 }
 

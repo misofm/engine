@@ -52,6 +52,9 @@ pub use native_source::{
     PreparedNativeSource, prepare_native_session_sources, prepare_native_source,
 };
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]
+pub use native_source::{NativeWorkerAuditGate, prepare_native_source_with_audit_gate};
+
 /// A nonzero source-stream generation selected by an off-render controller.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

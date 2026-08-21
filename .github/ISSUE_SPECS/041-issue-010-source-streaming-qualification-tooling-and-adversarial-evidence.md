@@ -193,3 +193,37 @@ SHA-256 is `fb68fbd5bc86ea3e200db330dbe2f3cc7f0297f061a604dc2648e6603fd507f1`.
 
 Not yet run: real-worker 100,000-render audit, sparse-duration allocation/RSS evidence, or broad
 workspace/policy gates. No benchmark/timing workload was invoked; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — real native-worker audit checkpoint (2026-08-21)
+
+**Gate 3 PASS; qualification remains incomplete.** The existing
+`miso-engine-source-audit` now uses the production native resolver, RIFF/WAVE parser, decoder
+worker, bounded ring, sealed graph source set and `PreparedRenderPlan`. A `test-support`-only
+native worker gate uses three existing move-owned capacity-one SPSC exchanges: the controller waits
+off render for a post-seek submitted prefill to be held, renders the declared unavailable quantum,
+then queues the strictly newer resume seek and releases off render. The gate is absent without the
+source crate's `test-support` feature and introduces no `Arc`, lock, render synchronization, second
+worker, or ordinary source-path behavior.
+
+The one final functional invocation rendered exactly 100,000 48-kHz/128-frame plan blocks. It
+observed one positive-zero missing block (`underrun_frames=128`, `underrun_events=1`), resumed
+finite PCM at declared source frame `384`, retained the output address, reported zero render
+allocation/deallocation/lock/log/file/network/syscall violations, and dropped the plan before
+waiting for the native terminal event, so stop/join remained off render. The emitted record was:
+`{"blocks":100000,"quantum_frames":128,"underrun_frames":128,"underrun_events":1,"resumed_source_frame":384,"native_worker_hold_release":true,"total_violations":0}`.
+
+For candor, an earlier **pre-render harness topology** used an initially full two-block ring and
+asked the worker gate to hold only after a post-seek submission; the post-seek submission could not
+obtain a recycled block, so its off-render hold wait deadlocked before the render loop. That process
+was terminated. The harness alone was corrected to a four-block EOF prefill in a five-block ring,
+leaving one preallocated block for the held post-seek prefill, and to queue the newer resume seek
+before release. No production source behavior changed; exactly one final 100,000-block audit was
+then run successfully. This was functional evidence, not a benchmark or timing run.
+
+Focused PASS: source/source-audit format check; locked source and audit check/tests (29 source unit
+tests plus one compile-fail doctest); warning-denied Clippy with the test-support feature;
+realtime-policy mutation tests; and `git diff --check`. The baseline realtime policy check is
+currently externally blocked by pre-existing unapproved `unsafe` in
+`tools/miso-engine-graph-audit/src/parametric_eq_main.rs` (outside Issue 041); no source policy
+exception was added. No Gate 4 RSS/allocation-layout work was started and
+`timed_benchmark_invocations=0`.

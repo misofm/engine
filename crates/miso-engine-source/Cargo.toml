@@ -8,6 +8,11 @@ publish.workspace = true
 [lib]
 name = "miso_engine_source"
 
+[features]
+# Qualification-only deterministic native worker hold/release support. It is not enabled by
+# ordinary source consumers or target builds.
+test-support = []
+
 [dependencies]
 miso-engine-core.workspace = true
 miso-engine-graph.workspace = true
