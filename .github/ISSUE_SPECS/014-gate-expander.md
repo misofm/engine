@@ -187,3 +187,41 @@ Terra and final Sol verdicts; exact successor link; and `timed_benchmark_invocat
 pending Sol adversarial review.** Issue 047 remains the sole owner of expanded corpus/sequences,
 realtime audit, target/instruction evidence, benchmark and listening handoff. No such work ran;
 `timed_benchmark_invocations=0`.
+
+### Sol attempt 2 — bounded correction and final review (2026-08-21)
+
+- Adversarial review of candidate `c4dbc00` found no production equation, state-layout, resource,
+  scalar/bank ownership, sidechain-fallback or graph/PDC defect. The correction therefore changes
+  no production DSP or public API. It closes two product-evidence defects: the effect-runtime
+  dependency policy now admits exactly the launch EQ, compressor and gate/expander factories and
+  mutation-proves gate/expander removal/substitution; representative gate tests no longer rely on
+  one 48 kHz bypass impulse and a one-sample sidechain state observation.
+- Exact-cap preparation and one-byte-below state/scratch rejection now run at every launch rate.
+  Enabled and bypass impulses at 0/2/10 ms lookahead produce only pre-latency zero and retain the
+  input bits at exact `N`; detector offsets are checked against the frozen rounding rule. Direct
+  link equations, the three-sample hold order, ratio-one identity, attack/release one-time-constant
+  residuals, exact 64-update retargeting with malformed-span coexistence, and an active connected-
+  zero-sidechain versus unconnected-main output distinction after latency all pass.
+- Focused PASS: format/check, 7 gate tests, 2 core gate-kernel tests, 4 registry/native-session
+  tests, the ten-track bank/tail/connected-scalar graph differential, and warning-denied all-target
+  Clippy for the touched product boundary. Shell syntax, effect-runtime baseline/mutations,
+  workspace/realtime/rack baseline+mutations and graph policy all pass; `git diff --check` passes.
+- Candidate-wide PASS: locked workspace all-target/all-feature check and tests, warning-denied
+  workspace all-target/all-feature Clippy, and warning-denied no-dependency rustdoc. The first
+  workspace test observed one unrelated source-worker watermark scheduling miss (`2` versus `3`);
+  its exact focused rerun and the single uncontended full workspace rerun both passed. No source
+  edit or third Issue-014 attempt was made.
+
+The bounded correction and every executed command are green, but frozen product Gate 4 is not
+closed: no effect-local test invokes both reset kinds, compares legal active restore continuation
+against an uninterrupted scalar instance, preserves signed-zero through gain identity, or injects
+a nonfinite computed lane state to prove lane-local recovery/reporting. Static review found the
+corresponding production paths plausible and no production defect, but that is not the required
+objective proof. These launch-product checks cannot be moved into Issue 047's broad qualification
+scope merely to declare this issue complete.
+
+**Final Sol verdict: FAIL / STOPPED / RESCOPED.** Both allowed attempts are exhausted; Issue 014
+has no overall PASS. Preserve this green correction and open the smallest stateless successor that
+owns only those four effect-local state/reset/recovery proofs and any directly exposed repair. It
+must not absorb corpus expansion, target/audit work, benchmark or listening from Issue 047.
+`timed_benchmark_invocations=0`.

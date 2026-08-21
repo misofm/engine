@@ -1289,8 +1289,19 @@ mod tests {
     }
 
     fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
+        request_at_rate(values, 48_000)
+    }
+
+    fn request_at_rate<'a>(
+        values: &'a [InitialParameterValue],
+        sample_rate: u32,
+    ) -> PrepareEffectRequest<'a> {
+        let quality = QUALITIES
+            .iter()
+            .find(|quality| quality.sample_rate == sample_rate)
+            .expect("launch rate");
         PrepareEffectRequest {
-            sample_rate: 48_000,
+            sample_rate,
             quantum: 128,
             quality: EffectQuality::Normal,
             bypass: false,
@@ -1303,7 +1314,7 @@ mod tests {
             },
             initial_values: values,
             limits: PrepareEffectLimits {
-                maximum_total_state_bytes: 7_856,
+                maximum_total_state_bytes: quality.maximum_state.total().expect("state total"),
                 maximum_scratch_bytes: 64,
                 maximum_automation_spans_per_block: 16,
             },
@@ -1367,38 +1378,78 @@ mod tests {
             assert_eq!(quality.sample_rate, rate);
             assert_eq!(quality.latency, LatencySamples(latency));
             assert_eq!(quality.tail, TailSamples::Finite(0));
+            assert_eq!(quality.maximum_state.common_bytes, 0);
             assert_eq!(quality.maximum_state.left_bytes, lane_bytes);
+            assert_eq!(quality.maximum_state.right_bytes, lane_bytes);
             assert_eq!(quality.maximum_state.total(), Some(total));
             assert_eq!(quality.scratch_fixed_bytes, 64);
+            assert_eq!(quality.scratch_bytes_per_frame, 0);
         }
     }
 
     #[test]
-    fn preparation_caps_and_lookahead_rows_are_transactional() {
-        let values = initial_values();
+    fn all_rate_caps_lookahead_and_fixed_latency_are_exact() {
         let factory = GateExpanderFactory;
-        let effect = factory.prepare(request(&values)).expect("prepare");
-        assert_eq!(effect.metadata().latency, LatencySamples(480));
-        let mut below = request(&values);
-        below.limits.maximum_total_state_bytes -= 1;
-        let error = match factory.prepare(below) {
-            Ok(_) => panic!("one byte below state must reject"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "effect.resource.limit");
-        let mut below_scratch = request(&values);
-        below_scratch.limits.maximum_scratch_bytes -= 1;
-        let error = match factory.prepare(below_scratch) {
-            Ok(_) => panic!("one byte below scratch must reject"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "effect.resource.limit");
-        for (lookahead, expected_delay) in [(0.0, 480), (5.0, 240), (10.0, 0)] {
-            let mut defaults =
-                core::array::from_fn(|index| GATE_EXPANDER_PARAMETERS_V1[index].default_value);
-            defaults[7] = lookahead;
-            let lane = Lane::new(&defaults, 481, 48_000).expect("lane");
-            assert_eq!(lane.detector_delay, expected_delay);
+        for quality in QUALITIES {
+            let rate = quality.sample_rate;
+            let latency = quality.latency.0 as usize;
+            for lookahead in [0.0, 2.0, 10.0] {
+                let mut values = initial_values();
+                values[14].value = lookahead;
+                values[15].value = lookahead;
+                for bypass in [false, true] {
+                    let mut preparation = request_at_rate(&values, rate);
+                    preparation.bypass = bypass;
+                    let mut effect = factory.prepare(preparation).expect("exact cap prepares");
+                    assert_eq!(effect.metadata().latency, quality.latency);
+                    let mut left = vec![0.0; latency + 1];
+                    let mut right = vec![0.0; latency + 1];
+                    left[0] = -0.5;
+                    right[0] = 0.25;
+                    for offset in (0..left.len()).step_by(128) {
+                        let end = (offset + 128).min(left.len());
+                        effect.process(
+                            EffectProcessBlock::new(
+                                &mut left[offset..end],
+                                &mut right[offset..end],
+                                None,
+                                offset as u64,
+                                &[],
+                                128,
+                            )
+                            .expect("block"),
+                        );
+                    }
+                    assert!(left[..latency].iter().all(|sample| sample.to_bits() == 0));
+                    assert!(right[..latency].iter().all(|sample| sample.to_bits() == 0));
+                    assert_eq!(left[latency].to_bits(), (-0.5_f32).to_bits());
+                    assert_eq!(right[latency].to_bits(), 0.25_f32.to_bits());
+                }
+                let defaults: [f32; PARAMETER_COUNT] =
+                    core::array::from_fn(|index| values[index * 2].value);
+                let lane = Lane::new(&defaults, latency + 1, rate).expect("lane");
+                assert_eq!(
+                    lane.detector_delay,
+                    latency - rounded_samples(lookahead, rate).expect("lookahead")
+                );
+            }
+            let values = initial_values();
+            let mut below = request_at_rate(&values, rate);
+            below.limits.maximum_total_state_bytes -= 1;
+            assert_eq!(
+                factory.prepare(below).err().expect("state cap").code,
+                "effect.resource.limit"
+            );
+            let mut below_scratch = request_at_rate(&values, rate);
+            below_scratch.limits.maximum_scratch_bytes -= 1;
+            assert_eq!(
+                factory
+                    .prepare(below_scratch)
+                    .err()
+                    .expect("scratch cap")
+                    .code,
+                "effect.resource.limit"
+            );
         }
     }
 
@@ -1429,93 +1480,148 @@ mod tests {
             reference_gate_expander_gain_reduction_db(-80.0, parameters, ReferenceGatePhase::Open),
             Ok(0.0)
         );
+        assert_eq!(
+            reference_gate_expander_gain_reduction_db(
+                -80.0,
+                ReferenceGateExpanderParameters {
+                    ratio: 1.0,
+                    ..parameters
+                },
+                ReferenceGatePhase::Closed
+            ),
+            Ok(0.0)
+        );
         let mut defaults =
             core::array::from_fn(|index| GATE_EXPANDER_PARAMETERS_V1[index].default_value);
-        defaults[5] = 0.0;
+        defaults[5] = 3.0 * 1000.0 / 48_000.0;
         let mut lane = Lane::new(&defaults, 481, 48_000).expect("lane");
-        transition(&mut lane, -80.0);
-        assert_eq!(lane.phase, Phase::Closed);
-        transition(&mut lane, -40.0);
-        assert_eq!(lane.phase, Phase::Open);
-        transition(&mut lane, -46.0);
-        assert_eq!(lane.phase, Phase::Open);
+        assert_eq!(lane.hold_samples, 3);
+        for expected in [2, 1, 0] {
+            transition(&mut lane, -46.1);
+            assert_eq!(lane.phase, Phase::Open);
+            assert_eq!(lane.hold_remaining, expected);
+        }
         transition(&mut lane, -46.1);
         assert_eq!(lane.phase, Phase::Closed);
+        transition(&mut lane, -40.0);
+        assert_eq!((lane.phase, lane.hold_remaining), (Phase::Open, 3));
+        transition(&mut lane, -46.0);
+        assert_eq!((lane.phase, lane.hold_remaining), (Phase::Open, 3));
+        transition(&mut lane, -46.1);
+        assert_eq!((lane.phase, lane.hold_remaining), (Phase::Open, 2));
+        let attack_residual = lane.attack_coefficient.powi(48);
+        let release_residual = lane.release_coefficient.powi(4_800);
+        let one_over_e = (-1.0_f64).exp() as f32;
+        assert!((attack_residual - one_over_e).abs() <= 0.02 * one_over_e);
+        assert!((release_residual - one_over_e).abs() <= 0.02 * one_over_e);
+        assert_eq!(linked_levels(LinkMode::DualMono, -0.25, 0.75), (0.25, 0.75));
+        assert_eq!(linked_levels(LinkMode::Maximum, -0.25, 0.75), (0.75, 0.75));
+        assert_eq!(linked_levels(LinkMode::Average, -0.25, 0.75), (0.5, 0.5));
     }
 
     #[test]
-    fn fixed_latency_bypass_sidechain_and_automation_state_are_observable() {
-        let mut values = initial_values();
-        values[10].value = 0.0;
-        values[11].value = 0.0;
-        values[15].value = 10.0;
+    fn active_sidechain_and_exact_automation_state_are_observable() {
+        let values = initial_values();
         let factory = GateExpanderFactory;
-        let mut bypass_request = request(&values);
-        bypass_request.bypass = true;
-        let mut effect = factory.prepare(bypass_request).expect("prepare");
-        let mut left = vec![0.0; 481];
-        let mut right = vec![0.0; 481];
-        left[0] = 1.0;
-        for offset in (0..481).step_by(128) {
-            let end = (offset + 128).min(481);
-            effect.process(
-                EffectProcessBlock::new(
-                    &mut left[offset..end],
-                    &mut right[offset..end],
-                    None,
-                    offset as u64,
-                    &[],
-                    128,
-                )
-                .expect("block"),
-            );
-        }
-        assert_eq!(left[480].to_bits(), 1.0_f32.to_bits());
+        let mut effect = factory.prepare(request(&values)).expect("prepare");
         let span = PreparedAutomationSpan {
             kind: AutomationSpanKind::Point,
             channel: ParameterChannel::Left,
             parameter_index: 0,
-            start_sample: 481,
-            end_sample: 481,
+            start_sample: 0,
+            end_sample: 0,
             start_value: -20.0,
             end_value: -20.0,
         };
-        let mut one_left = [0.0];
-        let mut one_right = [0.0];
-        effect.process(
-            EffectProcessBlock::new(&mut one_left, &mut one_right, None, 481, &[span], 128)
-                .expect("block"),
+        let mut left = [0.0; 32];
+        let mut right = [0.0; 32];
+        assert_eq!(
+            effect.process(
+                EffectProcessBlock::new(&mut left, &mut right, None, 0, &[span], 128)
+                    .expect("block")
+            ),
+            ProcessReport::default()
         );
         let (left_payload, _) = snapshot(effect.as_ref());
-        assert_eq!(read_f32(&left_payload, 8), -39.6875);
-        assert_eq!(read_u32(&left_payload, 10), 63);
+        assert_eq!(read_f32(&left_payload, 8), -30.0);
+        assert_eq!(read_u32(&left_payload, 10), 32);
+        let malformed = PreparedAutomationSpan {
+            channel: ParameterChannel::Both,
+            start_sample: 32,
+            end_sample: 32,
+            start_value: -60.0,
+            end_value: -60.0,
+            ..span
+        };
+        let retarget = PreparedAutomationSpan {
+            start_sample: 32,
+            end_sample: 32,
+            start_value: -60.0,
+            end_value: -60.0,
+            ..span
+        };
+        let mut left = [0.0; 64];
+        let mut right = [0.0; 64];
+        let report = effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 32, &[malformed, retarget], 128)
+                .expect("block"),
+        );
+        assert_eq!(report.invalid_spans, 1);
+        let (left_payload, _) = snapshot(effect.as_ref());
+        assert_eq!(read_f32(&left_payload, 8).to_bits(), (-60.0_f32).to_bits());
+        assert_eq!(read_u32(&left_payload, 10), 0);
 
         let mut connected_values = initial_values();
         connected_values[10].value = 0.0;
         connected_values[11].value = 0.0;
+        connected_values[12].value = 5.0;
+        connected_values[13].value = 5.0;
+        connected_values[14].value = 10.0;
+        connected_values[15].value = 10.0;
+        let mut unconnected = factory
+            .prepare(request(&connected_values))
+            .expect("unconnected");
         let mut connected = request(&connected_values);
         connected.ports.sidechain = PreparedSidechainPort::Connected {
             id: port_id("sidechain-in"),
             required: false,
         };
         let mut connected_effect = factory.prepare(connected).expect("connected");
-        let mut high_left = [1.0];
-        let mut high_right = [1.0];
-        let side_left = [0.0];
-        let side_right = [0.0];
-        connected_effect.process(
-            EffectProcessBlock::new(
-                &mut high_left,
-                &mut high_right,
-                Some((&side_left, &side_right)),
-                0,
-                &[],
-                128,
-            )
-            .expect("block"),
-        );
-        let (connected_payload, _) = snapshot(connected_effect.as_ref());
-        assert_eq!(read_u32(&connected_payload, 3), PHASE_CLOSED);
+        let mut unconnected_left = vec![0.25; 481];
+        let mut unconnected_right = vec![0.25; 481];
+        let mut connected_left = unconnected_left.clone();
+        let mut connected_right = unconnected_right.clone();
+        let side_left = vec![0.0; 481];
+        let side_right = vec![0.0; 481];
+        for offset in (0..481).step_by(128) {
+            let end = (offset + 128).min(481);
+            unconnected.process(
+                EffectProcessBlock::new(
+                    &mut unconnected_left[offset..end],
+                    &mut unconnected_right[offset..end],
+                    None,
+                    offset as u64,
+                    &[],
+                    128,
+                )
+                .expect("unconnected block"),
+            );
+            connected_effect.process(
+                EffectProcessBlock::new(
+                    &mut connected_left[offset..end],
+                    &mut connected_right[offset..end],
+                    Some((&side_left[offset..end], &side_right[offset..end])),
+                    offset as u64,
+                    &[],
+                    128,
+                )
+                .expect("connected block"),
+            );
+        }
+        assert_eq!(unconnected_left[480].to_bits(), 0.25_f32.to_bits());
+        assert_eq!(unconnected_right[480].to_bits(), 0.25_f32.to_bits());
+        assert!(connected_left[480] < unconnected_left[480]);
+        assert!(connected_right[480] < unconnected_right[480]);
     }
 
     #[test]
