@@ -18,6 +18,12 @@ descriptor/package/state bytes into issue 029 without renumbering existing specs
 **Canonical effect interchange, state migration, and CID package identity**. Therefore the
 extensibility sequence is 029 -> 027 -> 028.
 
+The issue-006 three-attempt workflow remains recorded as failed at runner artifact promotion. A
+fresh Sol rescope accepted its launch-critical graph compiler/runtime/PDC outcome from complete
+functional evidence and the already measured validator-valid raw descriptive benchmark. Issue 030
+owns only benchmark-wrapper operational hardening and promotion of those exact bytes. It is not a
+dependency of issues 007–010 and does not authorize another issue-006 benchmark run.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

@@ -186,3 +186,39 @@ valid, but the frozen exactly-once gate required the runner to succeed and write
 It did neither. This was correction attempt 3, so the issue must now stop and be rebriefed rather
 than patched or rerun in place. Final benchmark invocation count: **1**. Accepted benchmark result
 count: **0**. No V1/legacy source was inspected.
+
+## Sol rescope and workflow reset — 2026-08-21
+
+**Rescoped status: ACCEPTED for the launch-critical graph compiler/runtime/PDC outcome. The frozen
+attempt-3 exactly-once workflow remains FAIL; it is not relabeled or resumed. Issue 007 may start.**
+
+The required graph behavior and every nonbenchmark acceptance gate passed before the sole
+authorized benchmark invocation. That invocation then completed the entire fixed workload: six
+LF-terminated records, two rounds for each of the three frozen workloads, stable fixture and output
+identities/counts, ordered descriptive statistics, explicit environment disclosures, and zero
+errors. The frozen validator accepts those exact raw bytes. Therefore the issue body's required
+**compile benchmark measurement** exists and is suitable as descriptive launch evidence; it has no
+timing threshold and authorizes no performance superlative.
+
+The failed attempt is preserved exactly as recorded above. In particular, this rescope does not
+claim that `scripts/run-graph-compiler-benchmark.sh` succeeded, does not call the raw file the
+accepted runner artifact, and does not create or rename an accepted artifact inside the exhausted
+workflow. The missing accepted path resulted solely from shell bookkeeping after the successful
+workload: a newline detached `if !` from the command, so the success path never reached validation
+and promotion. That operational concern does not change graph compilation, scalar execution,
+routing, deterministic reduction, PDC, tail/resource accounting, prepared-plan ownership, or the
+measured records.
+
+The fresh rescope narrows issue 006 to its product contract and accepts it using the recorded
+functional evidence plus the validator-valid raw descriptive measurement. It transfers runner
+control-flow hardening, failure-path tests, and promotion of the exact preserved raw bytes to
+**Benchmark runner operational hardening and accepted-artifact promotion** (issue 030). Issue 030
+is a nonblocking tooling follow-up: issue 006 does not depend on it, and issues 007/008/009/010 do
+not inherit it. No further issue-006 benchmark invocation is authorized or required.
+
+This is a workflow reset after the required three-attempt stop, not a fourth correction attempt and
+not a weakened attempt-3 gate. The evidence history, raw artifact identity
+`c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5` (10,364 bytes), final
+invocation count of one, and accepted-runner-artifact count of zero remain authoritative. No
+implementation changed during the rescope, no benchmark was run, and no V1/legacy source was
+inspected.

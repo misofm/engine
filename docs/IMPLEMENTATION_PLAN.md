@@ -7,10 +7,11 @@ This is the concise index for the stateless implementation payloads in [`.github
 ## Delivery sequence
 
 1. **Foundation and proof:** 001–005 establish the workspace, research corpus, realtime memory model, TOML compiler, and control protocol.
-2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming.
+2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming. Issue 006 is accepted under its recorded post-stop Sol rescope; issue 007 may proceed and issue 008 follows issue 007.
 3. **Effects:** 011 defines only the launch native runtime contract; 012–021 implement the launch processors using it. Graph issue 006 and launch effects do not wait for external package or persisted-state formats.
 4. **Deployment:** 022–025 provide the C runner, mobile/native examples, browser AudioWorklet, and optional remote sidecar.
 5. **Qualification and extensibility:** 026 qualifies a release; 029 freezes canonical descriptor/package/CID/state interchange; 027 layers the third-party Wasm ABI on that identity contract; 028 is explicitly post-launch execution. Dependency order, not numeric order, controls 029 -> 027 -> 028.
+6. **Nonblocking tooling follow-up:** 030 hardens the graph benchmark shell wrapper and promotes the exact preserved validator-valid issue-006 raw artifact. It does not gate 007–010, does not change graph acceptance, and requires no further issue-006 benchmark run.
 
 ## Non-negotiable release shape
 
@@ -34,3 +35,4 @@ The checked-in control-plane documentation for issue 005 is indexed in [the docu
 | 022–025 | native, mobile, browser, and optional cloud control deployment |
 | 026–028 | release proof, third-party ABI kit, then post-launch sandbox |
 | 029 | canonical descriptor/package/CID/state interchange prerequisite for 027 and future repository work |
+| 030 | nonblocking graph benchmark runner hardening and accepted-artifact promotion |
