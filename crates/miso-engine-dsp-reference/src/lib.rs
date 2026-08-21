@@ -14,6 +14,7 @@ mod signals;
 mod soft_clip;
 mod spectrum;
 mod tpt;
+mod transient_shaper;
 
 #[cfg(test)]
 mod parametric_eq_candidates;
@@ -43,6 +44,9 @@ pub use soft_clip::{
 };
 pub use spectrum::{Complex64, SpectrumError, direct_dft_bin, direct_dft_frequency, magnitude_db};
 pub use tpt::{ReferenceTptOutput, ReferenceTptStateSpace, rbj_butterworth_magnitude_db};
+pub use transient_shaper::{
+    ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,
+};
 
 #[cfg(test)]
 mod tests {

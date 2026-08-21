@@ -135,3 +135,22 @@ Candidate identity; descriptor/coefficient/state/resource tables; independent re
 maxima; identity/link/automation/reset/restore/recovery/bank/graph rows; exact commands and policies;
 attempt count; strict Terra/final Sol verdict; successor link; and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — scalar checkpoint (partial PASS)
+
+- Added `miso-engine-transient-shaper`: Normal-only `miso.transient-shaper` scalar factory with
+  frozen four-rate coefficient-bit rows, three dual-mono 64-update ramps, fixed 11-word/44-byte
+  lane state, 88-byte scalar state and 24-byte reset-default envelope. The scalar path implements
+  the frozen peak/link/follower/contrast graph, zero-latency/tail identity behavior, atomic restore,
+  sanitation and lane-local recovery.
+- Added an independent test-only `f64` transient-shaper oracle in `miso-engine-dsp-reference`.
+  Focused tests cover descriptor/coefficient/resource caps, oracle comparison, signed-zero/default
+  identity, exact detector-link magnitudes, ramp/state continuation, both resets, sanitation and
+  injected lane recovery.
+- PASS: `cargo fmt --check --package miso-engine-transient-shaper --package miso-engine-dsp-reference`;
+  `cargo test --locked -p miso-engine-transient-shaper --lib` (3 passed);
+  `cargo test --locked -p miso-engine-dsp-reference --lib` (6 passed, 1 documented ignored);
+  `cargo clippy --locked -p miso-engine-transient-shaper --all-targets -- -D warnings`.
+- This is a scalar-only partial checkpoint: W4/W8 banking, registry/effect-compiler/graph, Issue-054
+  qualification, audits, targets and benchmark work remain unstarted. `timed_benchmark_invocations=0`.
+  Terra checkpoint verdict: partial PASS; pause for root commit and Sol review.

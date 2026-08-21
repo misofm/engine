@@ -1,0 +1,19 @@
+[package]
+name = "miso-engine-transient-shaper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_transient_shaper"
+
+[dependencies]
+miso-engine-effect-contract.workspace = true
+
+[dev-dependencies]
+# The f64 oracle is test-only and never reachable from production rendering.
+miso-engine-dsp-reference.workspace = true
+
+[lints]
+workspace = true
