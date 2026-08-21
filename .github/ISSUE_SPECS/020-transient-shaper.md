@@ -240,3 +240,27 @@ attempt count; strict Terra/final Sol verdict; successor link; and
 - This is the final focused product checkpoint before the separately authorized clean workspace
   seal, not an overall Issue-020 verdict. Issue 054, audit mains, target/instruction inspection,
   benchmarks and listening remain untouched; `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — final nonbenchmark product seal
+
+- Final candidate `4f2c1c4` preserves the accepted scalar, homogeneous-bank, registry and graph
+  checkpoints above. No production, fixture, policy or qualification file changed during this
+  seal.
+- `cargo fmt --all -- --check`: PASS. `cargo check --locked --workspace --all-targets
+  --all-features` and `cargo test --locked --workspace --all-targets --all-features`: PASS,
+  including all 11 transient-shaper product tests and the ten-track graph closure fixture.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: PASS.
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps`: PASS.
+- Workspace, realtime, effect-runtime and rack baseline plus mutation suites PASS when invoked
+  through `bash`; graph baseline policy PASS. The graph policy has no separate mutation script.
+- The Git-free static seal found no conflict markers or trailing whitespace in the Issue-020
+  product paths, no `.orig`, `.rej`, `.tmp` or `.profraw` artifacts outside excluded build/VCS
+  directories, and valid shell syntax for every invoked policy script.
+- No Issue-054 qualification, functional audit main, cross-target build, instruction/object
+  inspection, benchmark, timing or listening command ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: PASS.** Issue 020 closes the fixed Normal dual-envelope transient-shaper
+scalar, W4/W8 bank, launch registry/effect compiler and ten-track graph/PDC/resource product
+vertical in the second and final authorized attempt. Issue 054 remains the sole owner of deferred
+corpus expansion, large deterministic rows, realtime audit, target/instruction evidence,
+descriptive benchmark and listening handoff.
