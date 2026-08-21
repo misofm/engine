@@ -1,0 +1,1 @@
+{"schema":1,"fixture":"direct-route","logical_nodes":9,"materialized_nodes":9,"edges":8,"schedule_items":9,"dependency_levels":9,"colored_output_buffers":2,"audio_buffer_samples":2561,"delay_bytes":0,"graph_metadata_bytes":5336,"declared_effect_bytes":0,"largest_allocation_bytes":5336,"incremental_plan_bytes":15580,"session_plus_plan_bytes":27868}

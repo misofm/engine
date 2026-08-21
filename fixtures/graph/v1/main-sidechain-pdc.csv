@@ -1,0 +1,9 @@
+fixture,sample_rate_hz,quantum_frames,delayed_port,frame,left,right
+faster-main,48000,4,main,0,0,0
+faster-main,48000,4,main,1,0,0
+faster-main,48000,4,main,2,2,20
+faster-main,48000,4,main,3,0,0
+faster-sidechain,48000,4,sidechain,0,0,0
+faster-sidechain,48000,4,sidechain,1,0,0
+faster-sidechain,48000,4,sidechain,2,2,20
+faster-sidechain,48000,4,sidechain,3,0,0

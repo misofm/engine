@@ -8,7 +8,7 @@ use std::{
 };
 
 use miso_engine_effect_compiler::EffectPreparedSession;
-use miso_engine_graph::GraphCompileCaps;
+use miso_engine_graph::{GraphCompileCaps, balanced_pairwise_sum};
 use miso_engine_graph_compiler::{GraphCompileReport, GraphCompileRequest, GraphCompiler};
 use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 use sha2::{Digest, Sha256};
@@ -107,14 +107,152 @@ fn compile_fixture() -> GraphCompileReport {
 fn generated() -> Vec<(String, Vec<u8>)> {
     let report = compile_fixture();
     let fingerprint = format!("{}\n", fingerprint(&report)).into_bytes();
-    vec![
+    let colored_buffers = report
+        .buffer_assignments
+        .iter()
+        .map(|assignment| assignment.buffer_index)
+        .max()
+        .map_or(0, |maximum| maximum + 1);
+    let resource_report = format!(
+        concat!(
+            "{{\"schema\":1,\"fixture\":\"direct-route\",\"logical_nodes\":{},",
+            "\"materialized_nodes\":{},\"edges\":{},\"schedule_items\":{},",
+            "\"dependency_levels\":{},\"colored_output_buffers\":{},",
+            "\"audio_buffer_samples\":{},\"delay_bytes\":{},",
+            "\"graph_metadata_bytes\":{},\"declared_effect_bytes\":{},",
+            "\"largest_allocation_bytes\":{},\"incremental_plan_bytes\":{},",
+            "\"session_plus_plan_bytes\":{}}}\n"
+        ),
+        report.estimate.logical_nodes,
+        report.estimate.materialized_nodes,
+        report.estimate.edges,
+        report.estimate.schedule_items,
+        report.estimate.dependency_levels,
+        colored_buffers,
+        report.estimate.audio_buffer_samples,
+        report.estimate.delay_bytes,
+        report.estimate.graph_metadata_bytes,
+        report.estimate.declared_effect_bytes,
+        report.estimate.largest_allocation_bytes,
+        report.estimate.incremental_plan_bytes,
+        report.estimate.session_plus_plan_bytes,
+    )
+    .into_bytes();
+    let mut files = vec![
         (
             "v1/direct-route.canonical.txt".to_owned(),
             report.canonical_debug_bytes,
         ),
         ("v1/direct-route.dot".to_owned(), report.dot.into_bytes()),
+        (
+            "v1/invalid-scc-diagnostics.json".to_owned(),
+            concat!(
+                "{\"schema\":1,\"diagnostics\":[",
+                "{\"code\":\"graph.cycle\",\"path\":\"$.routes[id=ab]\",",
+                "\"cycle\":[\"submix:a\",\"submix:b\",\"submix:a\"],",
+                "\"cycle_edge_paths\":[\"$.routes[id=ab]\",\"$.routes[id=ba]\"]},",
+                "{\"code\":\"graph.cycle\",\"path\":\"$.routes[id=cc]\",",
+                "\"cycle\":[\"submix:c\",\"submix:c\"],",
+                "\"cycle_edge_paths\":[\"$.routes[id=cc]\"]}]}\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "v1/main-sidechain-pdc.csv".to_owned(),
+            concat!(
+                "fixture,sample_rate_hz,quantum_frames,delayed_port,frame,left,right\n",
+                "faster-main,48000,4,main,0,0,0\n",
+                "faster-main,48000,4,main,1,0,0\n",
+                "faster-main,48000,4,main,2,2,20\n",
+                "faster-main,48000,4,main,3,0,0\n",
+                "faster-sidechain,48000,4,sidechain,0,0,0\n",
+                "faster-sidechain,48000,4,sidechain,1,0,0\n",
+                "faster-sidechain,48000,4,sidechain,2,2,20\n",
+                "faster-sidechain,48000,4,sidechain,3,0,0\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
         ("v1/direct-route.report.json".to_owned(), fingerprint),
-    ]
+        ("v1/direct-route.resources.json".to_owned(), resource_report),
+        (
+            "v1/summation-residuals.json".to_owned(),
+            summation_report().into_bytes(),
+        ),
+    ];
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn summation_report() -> String {
+    let fixtures = [
+        ("positive", vec![1.0_f32; 257]),
+        (
+            "alternating",
+            (0..257)
+                .map(|index| if index % 2 == 0 { 1.0 } else { -1.0 })
+                .collect(),
+        ),
+        (
+            "descending",
+            (0..257)
+                .map(|index| 2.0_f32.powi(-index.min(120)))
+                .collect(),
+        ),
+        (
+            "adversarial-cancellation",
+            vec![1.0e20, 1.0, -1.0e20, 3.0, -2.0, 0.5, -0.5],
+        ),
+    ];
+    let mut records = Vec::new();
+    let mut maximum_absolute = 0.0_f64;
+    let mut maximum_bound = 0.0_f64;
+    let mut squared_residual = 0.0_f64;
+    for (name, mut values) in fixtures {
+        let reference = values.iter().map(|value| f64::from(*value)).sum::<f64>();
+        let sum_abs = values
+            .iter()
+            .map(|value| f64::from(value.abs()))
+            .sum::<f64>();
+        let levels = values.len().next_power_of_two().ilog2();
+        let unit_roundoff = 2.0_f64.powi(-24);
+        let gamma = f64::from(levels) * unit_roundoff / (1.0 - f64::from(levels) * unit_roundoff);
+        let bound = gamma * sum_abs + values.len() as f64 * f64::from(f32::MIN_POSITIVE);
+        let mut sanitized = 0;
+        let actual = f64::from(balanced_pairwise_sum(&mut values, &mut sanitized));
+        let absolute = (actual - reference).abs();
+        maximum_absolute = maximum_absolute.max(absolute);
+        maximum_bound = maximum_bound.max(bound);
+        squared_residual += absolute * absolute;
+        records.push(format!(
+            concat!(
+                "{{\"name\":\"{}\",\"contributions\":{},\"actual\":{:e},",
+                "\"reference_f64\":{:e},\"absolute_residual\":{:e},",
+                "\"analytic_bound\":{:e},\"sanitized_samples\":{}}}"
+            ),
+            name,
+            values.len(),
+            actual,
+            reference,
+            absolute,
+            bound,
+            sanitized,
+        ));
+    }
+    let rms = (squared_residual / records.len() as f64).sqrt();
+    format!(
+        concat!(
+            "{{\"schema\":1,\"strategy\":\"fixed-balanced-pairwise-f32\",",
+            "\"reference\":\"independent-linear-f64\",\"fixtures\":[{}],",
+            "\"maximum_absolute_residual\":{:e},",
+            "\"rms_residual\":{:e},\"maximum_analytic_bound\":{:e}}}\n"
+        ),
+        records.join(","),
+        maximum_absolute,
+        rms,
+        maximum_bound,
+    )
 }
 
 fn fingerprint(report: &GraphCompileReport) -> String {

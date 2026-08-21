@@ -1,0 +1,1 @@
+{"schema":1,"diagnostics":[{"code":"graph.cycle","path":"$.routes[id=ab]","cycle":["submix:a","submix:b","submix:a"],"cycle_edge_paths":["$.routes[id=ab]","$.routes[id=ba]"]},{"code":"graph.cycle","path":"$.routes[id=cc]","cycle":["submix:c","submix:c"],"cycle_edge_paths":["$.routes[id=cc]"]}]}

@@ -73,3 +73,67 @@ therefore **fails**.
 
 `scripts/run-graph-compiler-benchmark.sh` was **not invoked** because the prerequisite
 nonbenchmark gates do not pass. Benchmark invocation count: **0**.
+
+## Sol adversarial review and correction attempt 2 — 2026-08-21
+
+**Status: FAIL / incomplete; a final bounded correction was required.**
+
+Sol found that attempt 1's compiling seam did not execute a graph: bindings were reduced to an ID
+set, the executor emitted silence, the requested plan ID was discarded, and reported PDC was not
+materialized or processed. Tail propagation, route transforms, sidechain audio, complete binding
+ownership, resource accounting, canonical debug semantics, and cycle handling also had ownership
+or correctness gaps. Attempt 2 replaced that seam with a scalar graph executor and added exact
+per-edge delay processing, fixed pairwise reductions, typed source/builtin/fader/matrix/effect/
+output bindings, ownership-returning bind failures, plan-ID/time propagation, deterministic
+canonical bytes/SHA/DOT, iterative per-SCC witnesses, indexed lowering, and checked estimates.
+
+Attempt-2 evidence passed direct accepted-session PCM rendering; all eight rates at quanta 1, 127,
+128, 255, and 1,024 for enabled/latency-preserving bypass PDC; 10,000 deterministic mutations; 100
+fresh-process fingerprints; a 65,537-track release scale compile; summation analytic-bound and 100
+completion-order checks; native/Android/iOS/Wasm target builds; and a one-million-block graph render
+audit. It remained incomplete because checked fixture regeneration/corruption, typed faster/slower
+sidechain audio evidence, liveness coloring, graph-backed swap/destruction evidence, numeric report
+files, and the benchmark driver/validator were still missing. The benchmark remained forbidden.
+Benchmark invocation count after attempt 2: **0**.
+
+## Sol correction attempt 3 prebenchmark evidence — 2026-08-21
+
+**Status: PASS for every frozen nonbenchmark gate; exactly one benchmark invocation is now
+authorized after this evidence is committed. Overall issue acceptance remains pending that result.**
+
+The final bounded correction added deterministic smallest-index liveness coloring used by the
+executor and estimates, including identity-boundary aliasing and fan-out lifetime tests; typed
+faster-main and faster-sidechain impulse fixtures; exact checked-in canonical/DOT/report/resource/
+diagnostic/PDC/summation files with a sorted length/SHA-256 manifest, non-mutating `--check`, and
+changed/missing/unlisted corruption tests; and graph-backed plan exchange evidence with two accepted
+swaps, one forced retirement-full deferral, and two displaced executor-owning plans destroyed on the
+dedicated retirement thread.
+
+The benchmark harness is ready but has not run. `miso-engine-graph-bench` freezes three workloads:
+256 tracks/1,024 routes/32 submixes with 64 mixed-latency effects and 32 sidechains; 65,537-track
+sparse validation/estimation; and canonical debug/SHA/DOT. Its strict validator requires six JSONL
+records, two rounds per workload, stable hashes/counts, ordered nearest-rank percentiles, phase and
+memory measurements, environment/optimization metadata with explicit missing disclosure, zero
+errors, and descriptive-only/no-threshold status. The exact runner refuses overwrite/retry and
+preserves and hashes rejected raw output. Runner/validator mutation tests launched **0** workloads.
+
+Final local nonbenchmark evidence passed:
+
+- formatting plus locked workspace all-target/all-feature check, tests, warning-denied Clippy, and
+  warning-denied rustdoc;
+- naming/dependency, realtime, effect-runtime, and graph policies plus policy mutation tests;
+- exact seven-file graph fixture `--check`, all-file/manifest corruption, 100/100 fresh-process
+  determinism, 10,000 graph mutations, SCC witnesses, all-rate/all-quantum PDC, numeric summation,
+  and direct bound PCM tests;
+- debug and release 65,537-track gates (release test 6.94 seconds on this machine), and the traced
+  one-million-block lifecycle/render audit with zero allocation/free/lock/log/I/O/network/syscall
+  violations;
+- Android ARM64 and iOS ARM64 checks; Wasm scalar and separate `+simd128` release builds with cfg
+  assertions; native x86-64 scalar, AVX2-without-FMA, and AVX2-plus-FMA checks.
+
+No V1/legacy source was inspected. No benchmark was run while a nonbenchmark gate was missing.
+Benchmark invocation count remains **0**. The single authorized command is exactly:
+
+```text
+scripts/run-graph-compiler-benchmark.sh
+```
