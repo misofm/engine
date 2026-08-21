@@ -169,3 +169,23 @@ results; attempt number; strict verdict; Issue-055 link; and `timed_benchmark_in
   qualification, audit, target and benchmark work remain unstarted; homogeneous bank execution is
   deliberately unavailable after validation. `timed_benchmark_invocations=0`. Terra checkpoint
   verdict: partial PASS; pause for root commit and Sol review.
+
+## Sol attempt 2 — bounded scalar correction (PASS, integration ready)
+
+- Adversarial review found that a nonfinite tap returned before consuming its active crossfade
+  update. `read_transition` now advances or commits the frozen 128-update state machine before
+  propagating a fallible tap result, so recovery still emits dry, invalidates only that lane and
+  reports once while the host sample consumes its transition update.
+- Executed scalar tests now prove a true latest-wins retarget delivered during an active transition;
+  ordinary updates 1/63/64, retarget and block partition equivalence; default activity; exact
+  dual-mono and ping-pong cases; intermediate cross-feedback, active damping and negative feedback
+  against the independent `f64` oracle; nonfinite/subnormal sanitation; active-transition recovery;
+  atomic invalid restore; word-exact full/discontinuity resets; signed-zero mix-zero/bypass identity
+  with history warming; and validation of every member before legal homogeneous-bank fallback.
+- PASS: `cargo fmt --check --package miso-engine-delay --package miso-engine-dsp-reference`;
+  `cargo test --locked -p miso-engine-delay -p miso-engine-dsp-reference --lib` (delay 7 passed;
+  reference 6 passed, 1 pre-existing documented ignore); and
+  `cargo clippy --locked -p miso-engine-delay --all-targets -- -D warnings`.
+- Scalar correction verdict: PASS and ready for the separately checkpointed registry/compiler/graph
+  integration. This is not an overall Issue-021 verdict; the frozen integration and final product
+  seal remain. Issue-055 qualification remains untouched. `timed_benchmark_invocations=0`.

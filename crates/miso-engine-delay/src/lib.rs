@@ -347,14 +347,16 @@ impl DelayLane {
         if remaining == 0 {
             return self.tap(cursor);
         }
-        let new = self.tap_at(cursor, self.transition_delay)?;
+        let new = self.tap_at(cursor, self.transition_delay);
         if remaining == 1 {
             self.active_delay = self.transition_delay;
             self.transition_remaining = 0;
-            return Ok(new);
+            return new;
         }
-        let old = self.tap_at(cursor, self.active_delay)?;
+        let old = self.tap_at(cursor, self.active_delay);
         self.transition_remaining -= 1;
+        let new = new?;
+        let old = old?;
         let update = 129_u32 - remaining;
         let alpha = update as f32 * (1.0_f32 / 128.0_f32);
         let delta = new - old;
@@ -1117,10 +1119,11 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::{ReferenceDelayPair, ReferenceDelayParameters};
     use miso_engine_effect_contract::{
-        EffectProcessBlock, InitialParameterValue, LinkMode, PreparedNativeEffect,
-        StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
+        BankWidth, EffectProcessBlock, InitialParameterValue, LinkMode, PrepareEffectBankRequest,
+        PreparedNativeEffect, StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
     };
 
     fn initial_values() -> [InitialParameterValue; 9] {
@@ -1182,6 +1185,61 @@ mod tests {
         (common, left, right)
     }
 
+    fn point(
+        parameter_index: u32,
+        channel: ParameterChannel,
+        first_sample: u64,
+        value: f32,
+    ) -> PreparedAutomationSpan {
+        PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel,
+            parameter_index,
+            start_sample: first_sample,
+            end_sample: first_sample,
+            start_value: value,
+            end_value: value,
+        }
+    }
+
+    fn process_zeros(
+        effect: &mut PreparedDelay,
+        frames: usize,
+        first_sample: u64,
+        automation: &[PreparedAutomationSpan],
+    ) -> ProcessReport {
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        effect.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                first_sample,
+                automation,
+                effect.metadata.quantum,
+            )
+            .expect("zero block"),
+        )
+    }
+
+    fn process_chunked(effect: &mut PreparedDelay, left: &mut [f32], right: &mut [f32]) {
+        for offset in (0..left.len()).step_by(effect.metadata.quantum as usize) {
+            let end = (offset + effect.metadata.quantum as usize).min(left.len());
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left[offset..end],
+                    &mut right[offset..end],
+                    None,
+                    offset as u64,
+                    &[],
+                    effect.metadata.quantum,
+                )
+                .expect("chunk"),
+            );
+        }
+    }
+
     #[test]
     fn descriptor_exact_resources_caps_and_integer_mapping_are_frozen() {
         validate_descriptor_v1(&DELAY_DESCRIPTOR_V1).expect("descriptor");
@@ -1234,43 +1292,86 @@ mod tests {
         for index in [0, 1] {
             values[index].value = 1.0;
         }
-        values[2].value = 0.5;
-        values[3].value = 0.5;
-        values[4].value = 0.0;
-        values[5].value = 0.0;
+        values[2].value = -0.5;
+        values[3].value = 0.25;
+        values[4].value = 0.375;
+        values[5].value = 0.375;
         values[6].value = 1.0;
         values[7].value = 1.0;
-        values[8].value = 1.0;
+        values[8].value = 0.5;
         let mut effect = prepare(&values);
         let mut reference = ReferenceDelayPair::new(
             48_000.0,
             ReferenceDelayParameters {
                 left_delay_ms: 1.0,
                 right_delay_ms: 1.0,
-                left_feedback: 0.5,
-                right_feedback: 0.5,
-                left_damping: 0.0,
-                right_damping: 0.0,
+                left_feedback: -0.5,
+                right_feedback: 0.25,
+                left_damping: 0.375,
+                right_damping: 0.375,
                 left_mix: 1.0,
                 right_mix: 1.0,
-                cross_feedback: 1.0,
+                cross_feedback: 0.5,
             },
         )
         .expect("oracle");
-        let mut left = vec![0.0_f32; 100];
-        let mut right = vec![0.0_f32; 100];
+        let mut left = vec![0.0_f32; 160];
+        let mut right = vec![0.0_f32; 160];
         left[0] = 1.0;
+        right[0] = -0.25;
         effect.process(
-            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"),
+            EffectProcessBlock::new(&mut left[..128], &mut right[..128], None, 0, &[], 128)
+                .expect("first block"),
         );
-        for index in 0..100 {
-            let (expected_left, expected_right) =
-                reference.process_sample(if index == 0 { 1.0 } else { 0.0 }, 0.0);
+        effect.process(
+            EffectProcessBlock::new(&mut left[128..], &mut right[128..], None, 128, &[], 128)
+                .expect("second block"),
+        );
+        for index in 0..160 {
+            let (expected_left, expected_right) = reference.process_sample(
+                if index == 0 { 1.0 } else { 0.0 },
+                if index == 0 { -0.25 } else { 0.0 },
+            );
             assert!((left[index] - expected_left as f32).abs() < 1.0e-6);
             assert!((right[index] - expected_right as f32).abs() < 1.0e-6);
         }
         assert_eq!(left[48].to_bits(), 1.0_f32.to_bits());
-        assert_eq!(right[96].to_bits(), 0.5_f32.to_bits());
+
+        let mut isolated_values = values;
+        isolated_values[2].value = 0.5;
+        isolated_values[3].value = 0.5;
+        isolated_values[4].value = 0.0;
+        isolated_values[5].value = 0.0;
+        isolated_values[8].value = 0.0;
+        let mut isolated = prepare(&isolated_values);
+        let mut isolated_left = vec![0.0_f32; 100];
+        let mut isolated_right = vec![0.0_f32; 100];
+        isolated_left[0] = 1.0;
+        isolated.process(
+            EffectProcessBlock::new(&mut isolated_left, &mut isolated_right, None, 0, &[], 128)
+                .expect("isolated block"),
+        );
+        assert!(isolated_right.iter().all(|sample| sample.to_bits() == 0));
+
+        let default_values = initial_values();
+        let mut default = prepare(&default_values);
+        let mut default_left = vec![0.0_f32; 12_001];
+        let mut default_right = vec![0.0_f32; 12_001];
+        default_left[0] = 1.0;
+        process_chunked(&mut default, &mut default_left, &mut default_right);
+        assert_eq!(default_left[12_000].to_bits(), 0.35_f32.to_bits());
+
+        let mut ping_pong_values = isolated_values;
+        ping_pong_values[8].value = 1.0;
+        let mut ping_pong = prepare(&ping_pong_values);
+        let mut ping_left = vec![0.0_f32; 100];
+        let mut ping_right = vec![0.0_f32; 100];
+        ping_left[0] = 1.0;
+        ping_pong.process(
+            EffectProcessBlock::new(&mut ping_left, &mut ping_right, None, 0, &[], 128)
+                .expect("ping-pong block"),
+        );
+        assert_eq!(ping_right[96].to_bits(), 0.5_f32.to_bits());
     }
 
     #[test]
@@ -1289,6 +1390,9 @@ mod tests {
         effect.left.ring[effect.left.ring.len() - 2] = 1.0;
         effect.left.begin_transition();
         let first = effect.left.read_transition(0).expect("first");
+        effect.left.pending_delay = 4;
+        effect.left.pending_delay = 3;
+        effect.left.ring[effect.left.ring.len() - 3] = 0.25;
         for _ in 2..64 {
             let _ = effect.left.read_transition(0).expect("transition");
         }
@@ -1299,9 +1403,8 @@ mod tests {
         assert_eq!(first.to_bits(), (1.0_f32 / 128.0).to_bits());
         assert_eq!(sixty_fourth.to_bits(), 0.5_f32.to_bits());
         assert_eq!(effect.left.active_delay, 2);
+        assert_eq!(effect.left.pending_delay, 3);
         assert_eq!(effect.left.transition_remaining, 0);
-        effect.left.pending_delay = 3;
-        effect.left.ring[effect.left.ring.len() - 3] = 0.25;
         effect.left.begin_transition();
         let alpha = 1.0_f32 * (1.0_f32 / 128.0_f32);
         let queued_expected = 1.0_f32 + alpha * (0.25_f32 - 1.0_f32);
@@ -1379,5 +1482,218 @@ mod tests {
         effect.reset(ResetKind::FullToDefaults);
         assert_eq!(effect.cursor, 0);
         assert_eq!(effect.left.valid_history, 0);
+    }
+
+    #[test]
+    fn ordinary_ramp_updates_retarget_and_partition_are_exact() {
+        let mut values = initial_values();
+        values[6].value = 0.0;
+        let span = point(3, ParameterChannel::Left, 0, 1.0);
+        let mut effect = prepare(&values);
+        process_zeros(&mut effect, 1, 0, &[span]);
+        assert_eq!(
+            effect.left.ramps[2].current.to_bits(),
+            (1.0_f32 / 64.0).to_bits()
+        );
+        assert_eq!(effect.left.ramps[2].remaining, 63);
+        assert_eq!(effect.right.ramps[2].current.to_bits(), 0.35_f32.to_bits());
+        process_zeros(&mut effect, 62, 1, &[]);
+        assert_eq!(
+            effect.left.ramps[2].current.to_bits(),
+            (63.0_f32 / 64.0).to_bits()
+        );
+        assert_eq!(effect.left.ramps[2].remaining, 1);
+        process_zeros(&mut effect, 1, 63, &[]);
+        assert_eq!(effect.left.ramps[2].current.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(effect.left.ramps[2].remaining, 0);
+        let retarget = point(3, ParameterChannel::Left, 64, 0.0);
+        process_zeros(&mut effect, 1, 64, &[retarget]);
+        assert_eq!(
+            effect.left.ramps[2].current.to_bits(),
+            (63.0_f32 / 64.0).to_bits()
+        );
+        assert_eq!(effect.left.ramps[2].remaining, 63);
+
+        let mut whole = prepare(&values);
+        let mut partitioned = prepare(&values);
+        process_zeros(&mut whole, 64, 0, &[span]);
+        process_zeros(&mut partitioned, 1, 0, &[span]);
+        process_zeros(&mut partitioned, 63, 1, &[]);
+        assert_eq!(snapshot(&whole), snapshot(&partitioned));
+    }
+
+    #[test]
+    fn sanitation_and_active_transition_recovery_are_lane_local() {
+        let values = initial_values();
+        let mut sanitized = prepare(&values);
+        let mut left = [f32::NAN, f32::from_bits(1)];
+        let mut right = [0.0_f32; 2];
+        let report = sanitized.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                .expect("sanitation block"),
+        );
+        assert_eq!(report.sanitized_main_samples, 2);
+        assert_eq!(left.map(f32::to_bits), [0, 0]);
+        assert_eq!(report.recovered_left_samples, 0);
+
+        let mut recovery_values = values;
+        recovery_values[0].value = 1.0;
+        recovery_values[1].value = 1.0;
+        recovery_values[6].value = 1.0;
+        recovery_values[7].value = 1.0;
+        let mut recovery = prepare(&recovery_values);
+        recovery.left.valid_history = u32::try_from(recovery.left.ring.len()).expect("ring words");
+        recovery.left.active_delay = 1;
+        recovery.left.transition_delay = 1;
+        recovery.left.pending_delay = 2;
+        let corrupt = (recovery.cursor + recovery.left.ring.len() - 2) % recovery.left.ring.len();
+        recovery.left.ring[corrupt] = f32::INFINITY;
+        let mut bad_left = [-0.25_f32];
+        let mut good_right = [0.125_f32];
+        let report = recovery.process(
+            EffectProcessBlock::new(&mut bad_left, &mut good_right, None, 0, &[], 128)
+                .expect("active recovery block"),
+        );
+        assert_eq!(report.recovered_left_samples, 1);
+        assert_eq!(report.recovered_right_samples, 0);
+        assert_eq!(bad_left[0].to_bits(), (-0.25_f32).to_bits());
+        assert_eq!(recovery.left.transition_remaining, 127);
+        assert_eq!(recovery.left.valid_history, 0);
+        assert_eq!(recovery.right.valid_history, 1);
+
+        recovery.left.valid_history = u32::try_from(recovery.left.ring.len()).expect("ring words");
+        recovery.left.active_delay = 1;
+        recovery.left.transition_delay = 2;
+        recovery.left.pending_delay = 2;
+        recovery.left.transition_remaining = 1;
+        let corrupt = (recovery.cursor + recovery.left.ring.len() - 2) % recovery.left.ring.len();
+        recovery.left.ring[corrupt] = f32::INFINITY;
+        let mut bad_left = [-0.5_f32];
+        let mut good_right = [0.25_f32];
+        let report = recovery.process(
+            EffectProcessBlock::new(&mut bad_left, &mut good_right, None, 1, &[], 128)
+                .expect("faulted final transition update"),
+        );
+        assert_eq!(report.recovered_left_samples, 1);
+        assert_eq!(bad_left[0].to_bits(), (-0.5_f32).to_bits());
+        assert_eq!(recovery.left.active_delay, 2);
+        assert_eq!(recovery.left.transition_remaining, 0);
+    }
+
+    #[test]
+    fn invalid_restore_is_atomic_and_both_resets_are_word_exact() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let spans = [
+            point(0, ParameterChannel::Left, 0, 2.0),
+            point(1, ParameterChannel::Left, 0, -0.5),
+            point(4, ParameterChannel::Both, 0, 1.0),
+        ];
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.125_f32; 8];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128)
+                .expect("dirty block"),
+        );
+        let before = snapshot(&effect);
+        let mut invalid = before.clone();
+        write_f32(&mut invalid.2, 0, f32::NAN);
+        assert!(
+            effect
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(
+                        &invalid.0,
+                        &invalid.1,
+                        &invalid.2,
+                        effect.metadata().state_sizes,
+                    )
+                    .expect("invalid payload shape"),
+                )
+                .is_err()
+        );
+        assert_eq!(snapshot(&effect), before);
+
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        let mut retained_values = values;
+        retained_values[0].value = 2.0;
+        retained_values[2].value = -0.5;
+        retained_values[8].value = 1.0;
+        let retained = prepare(&retained_values);
+        assert_eq!(snapshot(&effect), snapshot(&retained));
+
+        effect.reset(ResetKind::FullToDefaults);
+        let fresh = prepare(&values);
+        assert_eq!(snapshot(&effect), snapshot(&fresh));
+    }
+
+    #[test]
+    fn dry_identities_warm_and_bank_fallback_validates_every_member() {
+        let mut mix_values = initial_values();
+        mix_values[6].value = 0.0;
+        mix_values[7].value = 0.0;
+        let mut mix_zero = prepare(&mix_values);
+        let mut left = [-0.0_f32];
+        let mut right = [0.0_f32];
+        mix_zero.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                .expect("mix-zero block"),
+        );
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(mix_zero.left.valid_history, 1);
+        assert_eq!(mix_zero.left.ring[0].to_bits(), (-0.0_f32).to_bits());
+
+        let values = initial_values();
+        let mut bypass_request = request(&values, 48_000);
+        bypass_request.bypass = true;
+        let mut bypass = prepare_delay(bypass_request).expect("bypass prepare");
+        let mut left = [-0.0_f32];
+        let mut right = [0.0_f32];
+        bypass.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                .expect("bypass block"),
+        );
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(bypass.left.valid_history, 1);
+
+        let factory = DelayFactory;
+        let bank_values = [initial_values(); 4];
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|index| request(&bank_values[index], 48_000));
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::Aarch64Neon,
+                    width: BankWidth::Four,
+                    requests: &requests,
+                })
+                .expect("legal scalar fallback")
+                .is_none()
+        );
+
+        let mut malformed_values = bank_values;
+        malformed_values[3][0].value = f32::NAN;
+        let malformed_requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|index| request(&malformed_values[index], 48_000));
+        let malformed = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Aarch64Neon,
+            width: BankWidth::Four,
+            requests: &malformed_requests,
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed member must precede fallback"),
+        };
+        assert_eq!(malformed.code, "effect.parameter.initial");
+        let mut below_cap = requests;
+        below_cap[3].limits.maximum_total_state_bytes -= 1;
+        let under_cap = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Aarch64Neon,
+            width: BankWidth::Four,
+            requests: &below_cap,
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("under-cap member must precede fallback"),
+        };
+        assert_eq!(under_cap.code, "effect.resource.limit");
     }
 }

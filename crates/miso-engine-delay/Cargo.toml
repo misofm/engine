@@ -14,6 +14,7 @@ miso-engine-effect-contract.workspace = true
 [dev-dependencies]
 # The independent f64 delay oracle is test-only and unreachable from production rendering.
 miso-engine-dsp-reference.workspace = true
+miso-engine-core.workspace = true
 
 [lints]
 workspace = true
