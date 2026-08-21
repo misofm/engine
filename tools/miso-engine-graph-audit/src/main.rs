@@ -318,6 +318,9 @@ fn prepared_graph(
             delay_bytes: 0,
             graph_metadata_bytes: 0,
             declared_effect_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            builtin_bank_count: 0,
             largest_allocation_bytes: 4,
             incremental_plan_bytes: 24,
             session_plus_plan_bytes: 24,
@@ -327,6 +330,7 @@ fn prepared_graph(
         routes: Vec::new(),
         effects: Vec::new(),
         banks: Vec::new(),
+        builtin_banks: Vec::new(),
         observers: Vec::new(),
     });
     match graph.bind(GraphRuntimeBindings {

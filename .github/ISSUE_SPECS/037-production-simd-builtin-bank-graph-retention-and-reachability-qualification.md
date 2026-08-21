@@ -163,3 +163,53 @@ same-target scalar differential/state comparison, cross-track/left-right isolati
 incompatible-wave/cap-overflow cases within the 100-layout corpus, or post-attachment resource
 cap rejection. Target/policy/full-workspace evidence is also not attached. No timed benchmark was
 launched: `timed_benchmark_invocations=0`.
+
+## Final Sol correction/review attempt 2 evidence (2026-08-21)
+
+**PASS — the two-attempt Issue-037 budget is closed.** Candidate input was clean `main` at
+`b5ac078`; the root orchestrator owns the final checkpoint commit, upstream synchronization and
+GitHub close.
+
+Bounded corrections and adversarial proof:
+
+- `miso-engine-builtins` now keeps disabled/inactive vector operands out of the TPT recurrence
+  while restoring the original dry bits. The frozen operation graph for enabled lanes is
+  unchanged. Base non-FMA output **and carried HPF/LPF state** are bit-identical to independent
+  scalar processing across consecutive blocks. Arbitrary signed-zero, NaN-payload, infinity and
+  subnormal identity-lane bits preserve exactly without state/counter mutation. A left-only lane-2
+  mutation leaves all right outputs/state and every other track output/state/counter bit-identical.
+- Builtin-bank preparation groups stable track IDs within each dependency wave before taking
+  exact-width chunks. Four/eight-lane incompatible-wave cases regroup eligible members; scalar
+  dispatch retains every scalar binding. The existing connected-sidechain effect-bank mutation
+  remains scalar fallback. No padding or track ceiling was introduced.
+- The graph retains address-free backend, width, exact member IDs and active masks. Resource
+  accounting now includes fixed bank state, active masks, member arrays and ID payloads, all four
+  owned AoSoA planes, and bank-vector metadata. Checked addition is transactional on overflow.
+  The corrected post-bank audio/sample cap is validated before ownership is consumed; the
+  adversarial one-below cap test proves both the complete `EffectPreparedSession` and sealed valid
+  `PreparedBuiltinsSession` are returned.
+- Qualification counters assert that the render audit is disarmed before reads. The final release
+  invocation again completed exactly 100,000 callbacks with one retained eight-lane host bank and
+  four scalar tails, `process_calls=100000`, `architecture_tpt_kernel_calls=51200000`, and PCM hash
+  `9f30db0220656d79`. Backend/width/member/active metadata is asserted before binding; output
+  storage remains stable and destruction occurs after disarm.
+- The exact seeded suite still completes 100 layouts from `0x000000008a050a08` over counts
+  `1,2,3,4,5,7,8,9,17`; transcript hash remains `c85b220980077824`. Cap, overflow, corruption,
+  dependency-wave, scalar fallback, sidechain fallback, state and isolation mutations all pass.
+  Observer ordering, exact main/sidechain PDC, bypass PDC and stable reductions remain green.
+
+Final gates passed on the same working candidate:
+
+- focused locked core/builtin/builtin-compiler/rack/rack-compiler/graph/graph-compiler tests,
+  builtin allocation tracking, 65,537-track scale cases, graph/rack fixture corruption tests and
+  graph-compiler compile-fail docs;
+- `cargo check --workspace --locked`, `cargo test --workspace --locked`, warning-denied workspace
+  all-target Clippy, warning-denied workspace rustdoc, and `cargo fmt --all -- --check`;
+- builtin, graph, rack, realtime and workspace policy checks plus their available mutation suites;
+- native scalar baseline, Android ARM64, iOS ARM64, Wasm scalar and Wasm simd128 target checks; and
+- named instruction inspection: clean scalar, AVX2 eight-lane non-FMA, exactly three AVX2+FMA
+  contractions, NEON four-lane non-FMA, Wasm `f32x4.mul/add/sub`, and no relaxed SIMD.
+
+The corrected release command was a fixed functional audit, not a benchmark. No Issue-037
+benchmark command or artifact was created: `timed_benchmark_invocations=0`. Issue 038 remains the
+sole owner of real-audio timing.

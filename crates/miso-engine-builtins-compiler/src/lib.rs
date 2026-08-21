@@ -1,7 +1,7 @@
 //! Off-render preparation adapter for issue-007 builtins.
 #![allow(missing_docs)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(feature = "test-support")]
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +26,8 @@ use miso_engine_core::realtime::{
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
     GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
-    GraphPreparedBuiltinBankProcessor, GraphRuntimeBindings, GraphRuntimeObserver,
-    GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphRuntimeBindings,
+    GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
 };
 use miso_engine_rack::{AoSoaScratch, KernelDispatch};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
@@ -96,13 +96,13 @@ pub struct PreparedBuiltinInputBankV1 {
     backend: miso_engine_core::KernelBackendV1,
     width: miso_engine_effect_contract::BankWidth,
     members: Box<[GraphNodeId]>,
+    active: Box<[bool]>,
     processor: BuiltinBankProcessor,
     scratch: AoSoaScratch,
 }
 
 struct BuiltinBankProcessor {
     bank: BuiltinInputBankV1,
-    active_mask: Box<[bool]>,
     process_calls: u64,
     tpt_kernel_calls: u64,
 }
@@ -132,47 +132,121 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
 
 impl PreparedBuiltinInputBankV1 {
     fn into_graph_bank(self) -> (GraphPreparedBuiltinBank, GraphBuiltinBankResourceEstimate) {
-        let _ = (self.backend, self.width);
-        let lanes = u64::try_from(self.members.len()).expect("bank lane count");
-        let member_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>())
-            .expect("type size")
-            .checked_mul(lanes)
-            .expect("preflighted bank member layout");
-        let processor_bytes =
-            u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).expect("type size");
-        let active_bytes = u64::try_from(self.processor.active_mask.len()).expect("lane count");
-        let scratch_samples = u64::from(self.scratch.quantum())
-            .checked_mul(u64::from(self.scratch.width().lanes()))
-            .and_then(|samples| samples.checked_mul(4))
-            .expect("preflighted scratch layout");
-        let scratch_plane_bytes = scratch_samples
-            .checked_div(4)
-            .and_then(|samples| samples.checked_mul(4))
-            .expect("preflighted scratch plane layout");
+        let resource = builtin_bank_resource(
+            core::slice::from_ref(&self.members),
+            self.width,
+            self.scratch.quantum(),
+        )
+        .expect("preflighted builtin-bank resource");
         (
             GraphPreparedBuiltinBank {
+                backend: self.backend,
                 members: self.members,
+                active_mask: self.active,
                 processor: Box::new(self.processor),
                 scratch: self.scratch,
             },
-            GraphBuiltinBankResourceEstimate {
-                bank_count: 1,
-                payload_bytes: member_bytes
-                    .checked_add(processor_bytes)
-                    .and_then(|bytes| bytes.checked_add(active_bytes))
-                    .expect("preflighted builtin payload layout"),
-                scratch_bytes: scratch_samples
-                    .checked_mul(4)
-                    .expect("preflighted scratch bytes"),
-                scratch_samples,
-                metadata_bytes: 0,
-                largest_allocation_bytes: member_bytes
-                    .max(processor_bytes)
-                    .max(active_bytes)
-                    .max(scratch_plane_bytes),
-            },
+            resource,
         )
     }
+}
+
+fn planned_builtin_bank_members(
+    inputs: &[(Box<str>, InputBuiltins)],
+    dispatch: KernelDispatch,
+    levels: &[DependencyLevel],
+) -> Vec<Box<[GraphNodeId]>> {
+    let Some(width) = dispatch.bank_width() else {
+        return Vec::new();
+    };
+    let level_by_node: BTreeMap<_, _> = levels
+        .iter()
+        .flat_map(|level| {
+            level
+                .nodes
+                .iter()
+                .cloned()
+                .map(move |node| (node, level.level))
+        })
+        .collect();
+    let mut by_level = BTreeMap::<u64, Vec<GraphNodeId>>::new();
+    for (track, _) in inputs {
+        let node = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(track).expect("prepared stable ID"),
+            stage: TrackStage::PostInputBuiltins,
+        };
+        if let Some(level) = level_by_node.get(&node).copied() {
+            by_level.entry(level).or_default().push(node);
+        }
+    }
+    let mut groups = Vec::new();
+    for members in by_level.values_mut() {
+        members.sort();
+        for group in members.chunks(width.lanes() as usize) {
+            if group.len() == width.lanes() as usize {
+                groups.push(group.to_vec().into_boxed_slice());
+            }
+        }
+    }
+    groups
+}
+
+fn builtin_bank_resource(
+    groups: &[Box<[GraphNodeId]>],
+    width: miso_engine_effect_contract::BankWidth,
+    quantum: u32,
+) -> Option<GraphBuiltinBankResourceEstimate> {
+    let bank_count = u64::try_from(groups.len()).ok()?;
+    let lanes = u64::from(width.lanes());
+    if groups
+        .iter()
+        .any(|members| u64::try_from(members.len()).ok() != Some(lanes))
+    {
+        return None;
+    }
+    let member_array_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>())
+        .ok()?
+        .checked_mul(lanes)?;
+    let processor_bytes = u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).ok()?;
+    let active_bytes = lanes;
+    let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
+    let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
+    let scratch_samples_per_bank = scratch_plane_samples.checked_mul(4)?;
+    let scratch_bytes_per_bank = scratch_samples_per_bank.checked_mul(4)?;
+    let mut member_string_bytes = 0_u64;
+    let mut largest_member_string = 0_u64;
+    for member in groups.iter().flat_map(|members| members.iter()) {
+        let GraphNodeId::TrackStage { track_id, .. } = member else {
+            return None;
+        };
+        let bytes = u64::try_from(track_id.as_str().len()).ok()?;
+        member_string_bytes = member_string_bytes.checked_add(bytes)?;
+        largest_member_string = largest_member_string.max(bytes);
+    }
+    let fixed_payload_per_bank = member_array_bytes
+        .checked_add(processor_bytes)?
+        .checked_add(active_bytes)?;
+    let payload_bytes = fixed_payload_per_bank
+        .checked_mul(bank_count)?
+        .checked_add(member_string_bytes)?;
+    let scratch_samples = scratch_samples_per_bank.checked_mul(bank_count)?;
+    let scratch_bytes = scratch_bytes_per_bank.checked_mul(bank_count)?;
+    let metadata_bytes = u64::try_from(core::mem::size_of::<GraphPreparedBuiltinBank>())
+        .ok()?
+        .checked_mul(bank_count)?;
+    Some(GraphBuiltinBankResourceEstimate {
+        bank_count,
+        payload_bytes,
+        scratch_bytes,
+        scratch_samples,
+        metadata_bytes,
+        largest_allocation_bytes: member_array_bytes
+            .max(processor_bytes)
+            .max(active_bytes)
+            .max(largest_member_string)
+            .max(scratch_plane_bytes)
+            .max(metadata_bytes),
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -742,6 +816,22 @@ impl PreparedBuiltinsSession {
         }
     }
 
+    /// Exact retained resource addition for the selected production bank layout.
+    ///
+    /// This is a read-only transactional preflight: graph/session caps can reject the final
+    /// artifact while both prepared inputs are still owned by their caller.
+    pub fn graph_builtin_bank_resource(
+        &self,
+        dispatch: KernelDispatch,
+        levels: &[DependencyLevel],
+    ) -> Option<GraphBuiltinBankResourceEstimate> {
+        let Some(width) = dispatch.bank_width() else {
+            return Some(GraphBuiltinBankResourceEstimate::default());
+        };
+        let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
+        builtin_bank_resource(&groups, width, self.seal.quantum)
+    }
+
     /// Materialize full post-input builtin banks using the already-selected host dispatch.
     /// Incomplete groups deliberately retain their original scalar bindings.
     pub fn into_graph_artifact_with_banks<R>(
@@ -754,62 +844,39 @@ impl PreparedBuiltinsSession {
         let Some(width) = dispatch.bank_width() else {
             return self.into_graph_artifact(graph, report);
         };
-        let level_by_node: std::collections::BTreeMap<_, _> = levels
-            .iter()
-            .flat_map(|level| {
-                level
-                    .nodes
-                    .iter()
-                    .cloned()
-                    .map(move |node| (node, level.level))
-            })
-            .collect();
-        self.bank_inputs.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut selected = std::collections::BTreeSet::new();
-        let mut banks = Vec::new();
-        for inputs in self.bank_inputs.chunks_mut(width.lanes() as usize) {
-            if inputs.len() != width.lanes() as usize {
-                continue;
-            }
-            let members: Vec<_> = inputs
+        let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
+        if groups.is_empty() {
+            return self.into_graph_artifact(graph, report);
+        }
+        let resource = builtin_bank_resource(&groups, width, self.seal.quantum)
+            .expect("preflighted builtin-bank resource");
+        let mut bank_inputs: BTreeMap<Box<str>, InputBuiltins> =
+            core::mem::take(&mut self.bank_inputs).into_iter().collect();
+        let mut selected = BTreeSet::new();
+        let mut banks = Vec::with_capacity(groups.len());
+        for members in groups {
+            let active = vec![true; members.len()].into_boxed_slice();
+            let inputs = members
                 .iter()
-                .map(|(track, _)| GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(track).expect("prepared stable ID"),
-                    stage: TrackStage::PostInputBuiltins,
+                .map(|member| {
+                    let GraphNodeId::TrackStage { track_id, .. } = member else {
+                        unreachable!("prepared builtin member shape")
+                    };
+                    bank_inputs
+                        .remove(track_id.as_str())
+                        .expect("prepared builtin member ownership")
                 })
                 .collect();
-            let Some(first_level) = level_by_node.get(&members[0]).copied() else {
-                continue;
-            };
-            if members
-                .iter()
-                .any(|member| level_by_node.get(member).copied() != Some(first_level))
-            {
-                continue;
-            }
-            let active = vec![true; inputs.len()];
-            let sample_rate = self.seal.sample_rate;
-            let bank_inputs = inputs
-                .iter_mut()
-                .map(|(_, input)| {
-                    core::mem::replace(
-                        input,
-                        BuiltinChain::new(sample_rate, BuiltinParameters::default())
-                            .expect("default builtin parameters")
-                            .into_input_builtins(),
-                    )
-                })
-                .collect();
-            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, bank_inputs, &active)
+            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, inputs, &active)
                 .expect("selected backend and exact bank width are preparation-validated");
             selected.extend(members.iter().cloned());
             banks.push(PreparedBuiltinInputBankV1 {
                 backend: dispatch.backend(),
                 width,
-                members: members.into_boxed_slice(),
+                members,
+                active,
                 processor: BuiltinBankProcessor {
                     bank,
-                    active_mask: active.into_boxed_slice(),
                     process_calls: 0,
                     tpt_kernel_calls: 0,
                 },
@@ -817,43 +884,13 @@ impl PreparedBuiltinsSession {
                     .expect("prepared nonzero graph quantum"),
             });
         }
-        if selected.is_empty() {
-            return self.into_graph_artifact(graph, report);
-        }
         self.processors
             .retain(|binding| !selected.contains(&binding.node));
         let mut graph_banks = Vec::with_capacity(banks.len());
-        let mut resource = GraphBuiltinBankResourceEstimate::default();
         for bank in banks {
-            let (bank, addition) = bank.into_graph_bank();
-            resource.bank_count = resource
-                .bank_count
-                .checked_add(addition.bank_count)
-                .expect("preflighted bank count");
-            resource.payload_bytes = resource
-                .payload_bytes
-                .checked_add(addition.payload_bytes)
-                .expect("preflighted bank payload");
-            resource.scratch_bytes = resource
-                .scratch_bytes
-                .checked_add(addition.scratch_bytes)
-                .expect("preflighted scratch payload");
-            resource.scratch_samples = resource
-                .scratch_samples
-                .checked_add(addition.scratch_samples)
-                .expect("preflighted scratch samples");
-            resource.largest_allocation_bytes = resource
-                .largest_allocation_bytes
-                .max(addition.largest_allocation_bytes);
+            let (bank, _per_bank_resource) = bank.into_graph_bank();
             graph_banks.push(bank);
         }
-        resource.metadata_bytes = u64::try_from(core::mem::size_of::<GraphPreparedBuiltinBank>())
-            .expect("type size")
-            .checked_mul(u64::try_from(graph_banks.capacity()).expect("bank capacity"))
-            .expect("preflighted graph bank vector layout");
-        resource.largest_allocation_bytes = resource
-            .largest_allocation_bytes
-            .max(resource.metadata_bytes);
         let graph = graph
             .with_builtin_banks(graph_banks, resource)
             .expect("validated fixed builtin member shape");
@@ -1003,6 +1040,11 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     #[must_use]
     pub const fn prepared_builtin_bank_count(&self) -> usize {
         self.graph.prepared_builtin_bank_count()
+    }
+
+    /// Address-free backend, width, member and active-mask metadata for qualification.
+    pub fn prepared_builtin_banks(&self) -> impl Iterator<Item = GraphPreparedBuiltinBankInfo<'_>> {
+        self.graph.builtin_bank_info()
     }
 
     /// Exact graph-owned storage after retained builtin-bank attachment.
@@ -1738,6 +1780,7 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 mod tests {
     use super::*;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+    use miso_engine_core::TargetCapabilities;
     use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 
     fn session() -> CompiledSession {
@@ -1767,6 +1810,72 @@ mod tests {
             maximum_peak_hold_frames: u32::MAX,
             maximum_smoothing_samples: u32::MAX,
         }
+    }
+
+    #[test]
+    fn builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back() {
+        let inputs: Vec<_> = (0..17)
+            .map(|index| {
+                (
+                    Box::<str>::from(format!("bank{index}")),
+                    BuiltinChain::new(48_000, BuiltinParameters::default())
+                        .expect("input")
+                        .into_input_builtins(),
+                )
+            })
+            .collect();
+        let node = |index| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&format!("bank{index}")).expect("id"),
+            stage: TrackStage::PostInputBuiltins,
+        };
+        let levels = vec![
+            DependencyLevel {
+                level: 0,
+                nodes: vec![node(0)],
+            },
+            DependencyLevel {
+                level: 1,
+                nodes: (1..10).map(node).collect(),
+            },
+            DependencyLevel {
+                level: 2,
+                nodes: (10..17).map(node).collect(),
+            },
+        ];
+        for (dispatch, expected_groups) in [
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(
+                    true, false, false, false,
+                )),
+                3,
+            ),
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(
+                    false, false, true, false,
+                )),
+                1,
+            ),
+        ] {
+            let groups = planned_builtin_bank_members(&inputs, dispatch, &levels);
+            assert_eq!(groups.len(), expected_groups);
+            assert!(groups.iter().all(|members| {
+                let member_levels: BTreeSet<_> = members
+                    .iter()
+                    .map(|member| {
+                        levels
+                            .iter()
+                            .find(|level| level.nodes.contains(member))
+                            .expect("member level")
+                            .level
+                    })
+                    .collect();
+                member_levels.len() == 1 && members.windows(2).all(|pair| pair[0] < pair[1])
+            }));
+        }
+        let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        ));
+        assert!(planned_builtin_bank_members(&inputs, scalar, &levels).is_empty());
     }
     fn handle(value: u64) -> MeterHandle {
         MeterHandle(NonZeroU64::new(value).expect("nonzero test meter handle"))

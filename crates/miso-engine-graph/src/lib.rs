@@ -8,7 +8,7 @@ use core::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use miso_engine_core::{
-    QuantumFrames,
+    KernelBackendV1, QuantumFrames,
     realtime::{
         BufferArena, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan, PreparedPlanExecutor,
         PreparedRenderPlan, RenderEnvelope, RenderError,
@@ -190,6 +190,8 @@ pub struct GraphBuiltinBankResourceEstimate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphBuiltinBankAttachError {
     InvalidMembers,
+    IncompatibleMembers,
+    ResourceMismatch,
     ResourceOverflow,
 }
 
@@ -199,31 +201,33 @@ impl GraphResourceEstimate {
         &mut self,
         resource: GraphBuiltinBankResourceEstimate,
     ) -> Option<()> {
-        self.builtin_bank_count = self.builtin_bank_count.checked_add(resource.bank_count)?;
-        self.builtin_bank_bytes = self
+        let mut next = self.clone();
+        next.builtin_bank_count = next.builtin_bank_count.checked_add(resource.bank_count)?;
+        next.builtin_bank_bytes = next
             .builtin_bank_bytes
             .checked_add(resource.payload_bytes)?;
-        self.builtin_bank_scratch_bytes = self
+        next.builtin_bank_scratch_bytes = next
             .builtin_bank_scratch_bytes
             .checked_add(resource.scratch_bytes)?;
-        self.audio_buffer_samples = self
+        next.audio_buffer_samples = next
             .audio_buffer_samples
             .checked_add(resource.scratch_samples)?;
-        self.graph_metadata_bytes = self
+        next.graph_metadata_bytes = next
             .graph_metadata_bytes
             .checked_add(resource.metadata_bytes)?;
         let retained = resource.payload_bytes.checked_add(resource.scratch_bytes)?;
-        self.incremental_plan_bytes = self.incremental_plan_bytes.checked_add(retained)?;
-        self.incremental_plan_bytes = self
+        next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(retained)?;
+        next.incremental_plan_bytes = next
             .incremental_plan_bytes
             .checked_add(resource.metadata_bytes)?;
-        self.session_plus_plan_bytes = self
+        next.session_plus_plan_bytes = next
             .session_plus_plan_bytes
             .checked_add(retained)?
             .checked_add(resource.metadata_bytes)?;
-        self.largest_allocation_bytes = self
+        next.largest_allocation_bytes = next
             .largest_allocation_bytes
             .max(resource.largest_allocation_bytes);
+        *self = next;
         Some(())
     }
 }
@@ -403,9 +407,19 @@ pub struct GraphPreparedEffectBank {
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
 pub struct GraphPreparedBuiltinBank {
+    pub backend: KernelBackendV1,
     pub members: Box<[GraphNodeId]>,
+    pub active_mask: Box<[bool]>,
     pub processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
     pub scratch: miso_engine_rack::AoSoaScratch,
+}
+
+/// Address-free prepared builtin-bank metadata available before render binding.
+pub struct GraphPreparedBuiltinBankInfo<'a> {
+    pub backend: KernelBackendV1,
+    pub width: miso_engine_effect_contract::BankWidth,
+    pub members: &'a [GraphNodeId],
+    pub active_mask: &'a [bool],
 }
 /// Render contract for an already-prepared builtin bank.
 pub trait GraphPreparedBuiltinBankProcessor: Send {
@@ -438,6 +452,17 @@ impl PreparedGraphPlan {
             .iter()
             .flat_map(|bank| bank.members.iter())
     }
+    /// Address-free semantic membership retained by production builtin banks.
+    pub fn builtin_bank_info(&self) -> impl Iterator<Item = GraphPreparedBuiltinBankInfo<'_>> {
+        self.builtin_banks
+            .iter()
+            .map(|bank| GraphPreparedBuiltinBankInfo {
+                backend: bank.backend,
+                width: bank.scratch.width(),
+                members: &bank.members,
+                active_mask: &bank.active_mask,
+            })
+    }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
     /// for deciding eligibility; this validates only the immutable graph shape.
     pub fn with_builtin_banks(
@@ -446,8 +471,21 @@ impl PreparedGraphPlan {
         resource: GraphBuiltinBankResourceEstimate,
     ) -> Result<Self, GraphBuiltinBankAttachError> {
         let mut seen = BTreeSet::new();
+        let level_by_node: BTreeMap<_, _> = self
+            .dependency_levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .nodes
+                    .iter()
+                    .cloned()
+                    .map(move |node| (node, level.level))
+            })
+            .collect();
         for bank in &banks {
             if bank.members.len() != bank.scratch.width().lanes() as usize
+                || bank.active_mask.len() != bank.members.len()
+                || !bank.scratch.width().matches_backend(bank.backend)
                 || bank.members.iter().any(|node| {
                     !matches!(
                         node,
@@ -460,6 +498,23 @@ impl PreparedGraphPlan {
             {
                 return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }
+            let Some(level) = bank
+                .members
+                .first()
+                .and_then(|member| level_by_node.get(member))
+                .copied()
+            else {
+                return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
+            };
+            if bank.members.iter().any(|member| {
+                level_by_node.get(member).copied() != Some(level)
+                    || !self.required_bindings.contains(member)
+            }) {
+                return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
+            }
+        }
+        if resource.bank_count != u64::try_from(banks.len()).unwrap_or(u64::MAX) {
+            return Err(GraphBuiltinBankAttachError::ResourceMismatch);
         }
         self.estimate
             .checked_add_builtin_banks(resource)
@@ -1306,6 +1361,31 @@ mod tests {
             incremental_plan_bytes: 0,
             session_plus_plan_bytes: 0,
         }
+    }
+
+    #[test]
+    fn builtin_bank_resource_overflow_leaves_the_graph_estimate_unchanged() {
+        let mut estimate = empty_estimate();
+        estimate.builtin_bank_bytes = 1;
+        estimate.audio_buffer_samples = 7;
+        estimate.incremental_plan_bytes = 11;
+        estimate.session_plus_plan_bytes = 13;
+        let before = estimate.clone();
+        assert_eq!(
+            estimate.checked_add_builtin_banks(GraphBuiltinBankResourceEstimate {
+                bank_count: 1,
+                payload_bytes: u64::MAX,
+                scratch_bytes: 16,
+                scratch_samples: 4,
+                metadata_bytes: 8,
+                largest_allocation_bytes: 16,
+            }),
+            None
+        );
+        assert_eq!(
+            estimate, before,
+            "overflow cannot partially mutate the report"
+        );
     }
 
     fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {

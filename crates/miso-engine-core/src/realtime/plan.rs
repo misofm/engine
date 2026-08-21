@@ -216,6 +216,10 @@ impl PreparedRenderPlan {
     #[doc(hidden)]
     #[must_use]
     pub fn qualification_counters(&self) -> [u64; 2] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "qualification counters are sealed until the render audit is disarmed"
+        );
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::qualification_counters)

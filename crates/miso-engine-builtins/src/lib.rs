@@ -942,9 +942,13 @@ impl BuiltinFilterBank {
     ) -> Result<(), BuiltinParameterError> {
         let dry = *samples;
         for (lane, recovered) in recovered.iter_mut().enumerate().take(lanes) {
-            if self.enabled[lane]
-                && (!normal_or_zero(self.s1[lane]) || !normal_or_zero(self.s2[lane]))
-            {
+            if !self.enabled[lane] {
+                // Disabled/identity lanes must not feed arbitrary payload bits into the vector
+                // recurrence.  The dry bit pattern is restored below; zeroing only the internal
+                // operand keeps their retained state exactly unchanged, including for NaN,
+                // infinity, subnormal and signed-zero input payloads.
+                samples[lane] = 0.0;
+            } else if !normal_or_zero(self.s1[lane]) || !normal_or_zero(self.s2[lane]) {
                 self.s1[lane] = 0.0;
                 self.s2[lane] = 0.0;
                 *recovered = recovered.saturating_add(1);
@@ -1978,6 +1982,36 @@ mod tests {
         None
     }
 
+    fn assert_bank_state_matches_scalar(bank: &BuiltinInputBankV1, scalar: &[InputBuiltins]) {
+        for (lane, scalar) in scalar.iter().enumerate() {
+            for (actual, expected, label) in [
+                (bank.left.hpf.s1[lane], scalar.left.hpf.s1, "left HPF s1"),
+                (bank.left.hpf.s2[lane], scalar.left.hpf.s2, "left HPF s2"),
+                (bank.left.lpf.s1[lane], scalar.left.lpf.s1, "left LPF s1"),
+                (bank.left.lpf.s2[lane], scalar.left.lpf.s2, "left LPF s2"),
+                (bank.right.hpf.s1[lane], scalar.right.hpf.s1, "right HPF s1"),
+                (bank.right.hpf.s2[lane], scalar.right.hpf.s2, "right HPF s2"),
+                (bank.right.lpf.s1[lane], scalar.right.lpf.s1, "right LPF s1"),
+                (bank.right.lpf.s2[lane], scalar.right.lpf.s2, "right LPF s2"),
+            ] {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "lane={lane} {label}");
+            }
+        }
+    }
+
+    fn bank_lane_state_bits(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
+        [
+            bank.left.hpf.s1[lane].to_bits(),
+            bank.left.hpf.s2[lane].to_bits(),
+            bank.left.lpf.s1[lane].to_bits(),
+            bank.left.lpf.s2[lane].to_bits(),
+            bank.right.hpf.s1[lane].to_bits(),
+            bank.right.hpf.s2[lane].to_bits(),
+            bank.right.lpf.s1[lane].to_bits(),
+            bank.right.lpf.s2[lane].to_bits(),
+        ]
+    }
+
     #[test]
     fn available_nonfused_bank_is_bit_identical_to_independent_scalar_tpt() {
         let Some((backend, width)) = available_nonfused_bank() else {
@@ -2016,8 +2050,10 @@ mod tests {
                 )
                 .expect("scalar input");
         }
-        bank.process(&mut left, &mut right, frames as u32, 99)
+        let bank_report = bank
+            .process(&mut left, &mut right, frames as u32, 99)
             .expect("bank input");
+        assert_eq!(bank_report, BuiltinProcessReport::default());
         for frame in 0..frames {
             for lane in 0..lanes {
                 let index = frame * lanes + lane;
@@ -2028,6 +2064,43 @@ mod tests {
                 );
             }
         }
+        assert_bank_state_matches_scalar(&bank, &scalar);
+
+        // Compare a second block as well so bit identity covers carried state, not just the
+        // all-zero initial condition.
+        for lane in 0..lanes {
+            expected_left[lane].fill(0.173 + lane as f32 * 0.003);
+            expected_right[lane].fill(-0.219 + lane as f32 * 0.002);
+            scalar[lane]
+                .process(
+                    DualMonoBlock::new(
+                        &mut expected_left[lane],
+                        &mut expected_right[lane],
+                        99 + frames as u64,
+                    )
+                    .expect("second scalar block"),
+                )
+                .expect("second scalar input");
+            for frame in 0..frames {
+                left[frame * lanes + lane] = 0.173 + lane as f32 * 0.003;
+                right[frame * lanes + lane] = -0.219 + lane as f32 * 0.002;
+            }
+        }
+        let bank_report = bank
+            .process(&mut left, &mut right, frames as u32, 99 + frames as u64)
+            .expect("second bank input");
+        assert_eq!(bank_report, BuiltinProcessReport::default());
+        for frame in 0..frames {
+            for lane in 0..lanes {
+                let index = frame * lanes + lane;
+                assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
+                assert_eq!(
+                    right[index].to_bits(),
+                    expected_right[lane][frame].to_bits()
+                );
+            }
+        }
+        assert_bank_state_matches_scalar(&bank, &scalar);
     }
 
     #[test]
@@ -2135,17 +2208,118 @@ mod tests {
             &active,
         )
         .expect("bank");
-        let mut left = vec![0.0; lanes * 3];
-        let mut right = vec![0.0; lanes * 3];
-        for index in (1..left.len()).step_by(lanes) {
-            left[index] = -0.0;
-            right[index] = 0.25;
+        let arbitrary_left = [
+            (-0.0_f32).to_bits(),
+            0x7fc0_1234,
+            f32::INFINITY.to_bits(),
+            1,
+        ];
+        let arbitrary_right = [
+            0.0_f32.to_bits(),
+            0xffc0_5678,
+            f32::NEG_INFINITY.to_bits(),
+            0x8000_0001,
+        ];
+        let mut left = vec![0.0; lanes * arbitrary_left.len()];
+        let mut right = vec![0.0; lanes * arbitrary_right.len()];
+        for (frame, bits) in arbitrary_left.into_iter().enumerate() {
+            left[frame * lanes + 1] = f32::from_bits(bits);
+            right[frame * lanes + 1] = f32::from_bits(arbitrary_right[frame]);
         }
-        bank.process(&mut left, &mut right, 3, 0)
+        let state_before = bank_lane_state_bits(&bank, 1);
+        let report = bank
+            .process(&mut left, &mut right, arbitrary_left.len() as u32, 0)
             .expect("bank render");
-        for index in (1..left.len()).step_by(lanes) {
-            assert_eq!(left[index].to_bits(), (-0.0_f32).to_bits());
-            assert_eq!(right[index].to_bits(), 0.25_f32.to_bits());
+        assert_eq!(report, BuiltinProcessReport::default());
+        assert_eq!(bank_lane_state_bits(&bank, 1), state_before);
+        for frame in 0..arbitrary_left.len() {
+            assert_eq!(left[frame * lanes + 1].to_bits(), arbitrary_left[frame]);
+            assert_eq!(right[frame * lanes + 1].to_bits(), arbitrary_right[frame]);
+        }
+    }
+
+    #[test]
+    fn left_only_one_track_mutation_is_isolated_in_output_state_and_counters() {
+        let Some((backend, width)) = available_nonfused_bank() else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let params: Vec<_> = (0..lanes).map(bank_parameters).collect();
+        let active = vec![true; lanes];
+        let mut control = BuiltinInputBankV1::new(
+            backend,
+            width,
+            params.iter().copied().map(prepared_input).collect(),
+            &active,
+        )
+        .expect("control bank");
+        let mut perturbed = BuiltinInputBankV1::new(
+            backend,
+            width,
+            params.into_iter().map(prepared_input).collect(),
+            &active,
+        )
+        .expect("perturbed bank");
+        let frames = 23usize;
+        let mut control_left = vec![0.0; frames * lanes];
+        let mut control_right = vec![0.0; frames * lanes];
+        for frame in 0..frames {
+            for lane in 0..lanes {
+                control_left[frame * lanes + lane] =
+                    ((frame * 13 + lane * 7) as f32 * 0.019).sin() * 0.5;
+                control_right[frame * lanes + lane] =
+                    ((frame * 5 + lane * 17) as f32 * 0.023).cos() * 0.4;
+            }
+        }
+        let mut perturbed_left = control_left.clone();
+        let mut perturbed_right = control_right.clone();
+        for frame in 0..frames {
+            perturbed_left[frame * lanes + 2] = ((frame * 29 + 3) as f32 * 0.031).cos() * -0.71;
+        }
+        let control_report = control
+            .process(&mut control_left, &mut control_right, frames as u32, 4_096)
+            .expect("control process");
+        let perturbed_report = perturbed
+            .process(
+                &mut perturbed_left,
+                &mut perturbed_right,
+                frames as u32,
+                4_096,
+            )
+            .expect("perturbed process");
+        assert_eq!(control_report, perturbed_report, "per-call counters");
+        for frame in 0..frames {
+            for lane in 0..lanes {
+                let index = frame * lanes + lane;
+                if lane != 2 {
+                    assert_eq!(
+                        control_left[index].to_bits(),
+                        perturbed_left[index].to_bits(),
+                        "unrelated left lane={lane} frame={frame}"
+                    );
+                }
+                assert_eq!(
+                    control_right[index].to_bits(),
+                    perturbed_right[index].to_bits(),
+                    "right lane={lane} frame={frame}"
+                );
+            }
+        }
+        for lane in 0..lanes {
+            let control_state = bank_lane_state_bits(&control, lane);
+            let perturbed_state = bank_lane_state_bits(&perturbed, lane);
+            if lane == 2 {
+                assert_eq!(
+                    &control_state[4..],
+                    &perturbed_state[4..],
+                    "same-track right state"
+                );
+            } else {
+                assert_eq!(
+                    control_state, perturbed_state,
+                    "unrelated lane={lane} state"
+                );
+            }
         }
     }
 

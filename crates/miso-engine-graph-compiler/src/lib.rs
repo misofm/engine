@@ -168,6 +168,7 @@ impl GraphCompiler {
                 caps,
             },
             &builtin_tails,
+            Some(&builtins),
         ) {
             Ok(value) => value,
             Err(failure) => {
@@ -193,12 +194,13 @@ impl GraphCompiler {
     pub fn compile(
         request: GraphCompileRequest,
     ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
-        Self::compile_with_builtin_tails(request, &BTreeMap::new())
+        Self::compile_with_builtin_tails(request, &BTreeMap::new(), None)
     }
     #[allow(clippy::result_large_err)]
     fn compile_with_builtin_tails(
         request: GraphCompileRequest,
         builtin_tails: &BTreeMap<String, TailSamples>,
+        prepared_builtins: Option<&PreparedBuiltinsSession>,
     ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
         let GraphCompileRequest {
             plan_id,
@@ -508,6 +510,7 @@ impl GraphCompiler {
         let buffers = buffer_assignments(&schedule, &edges);
         let ports = ports_for(&nodes, &edges);
         let reductions = reduction_records(&nodes, &edges);
+        let rack_cohorts = rack_cohort_report(&effects);
         let Some(estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
@@ -524,27 +527,53 @@ impl GraphCompiler {
                 vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
             ));
         };
-        if !estimate_fits_platform(&estimate) {
+        let mut capped_estimate = estimate.clone();
+        if let Some(builtins) = prepared_builtins {
+            let Some(resource) =
+                builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels)
+            else {
+                return Err(failure(
+                    effects,
+                    vec![diag(
+                        "graph.resource.arithmetic_overflow",
+                        "$.graph.builtin_banks",
+                    )],
+                ));
+            };
+            if capped_estimate
+                .checked_add_builtin_banks(resource)
+                .is_none()
+            {
+                return Err(failure(
+                    effects,
+                    vec![diag(
+                        "graph.resource.arithmetic_overflow",
+                        "$.graph.builtin_banks",
+                    )],
+                ));
+            }
+        }
+        if !estimate_fits_platform(&capped_estimate) {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
             ));
         }
-        if estimate.materialized_nodes > caps.maximum_nodes
-            || estimate.edges > caps.maximum_edges
-            || estimate.schedule_items > caps.maximum_schedule_items
-            || estimate.dependency_levels > caps.maximum_dependency_levels
-            || estimate.audio_buffer_samples > caps.maximum_audio_buffer_samples
-            || estimate.graph_metadata_bytes > caps.maximum_graph_bytes
-            || estimate.incremental_plan_bytes > caps.maximum_plan_bytes
-            || estimate.largest_allocation_bytes > caps.maximum_single_allocation_bytes
+        if capped_estimate.materialized_nodes > caps.maximum_nodes
+            || capped_estimate.edges > caps.maximum_edges
+            || capped_estimate.schedule_items > caps.maximum_schedule_items
+            || capped_estimate.dependency_levels > caps.maximum_dependency_levels
+            || capped_estimate.audio_buffer_samples > caps.maximum_audio_buffer_samples
+            || capped_estimate.graph_metadata_bytes > caps.maximum_graph_bytes
+            || capped_estimate.incremental_plan_bytes > caps.maximum_plan_bytes
+            || capped_estimate.largest_allocation_bytes > caps.maximum_single_allocation_bytes
         {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.limit", "$.graph_compile_caps")],
             ));
         }
-        if estimate.session_plus_plan_bytes > model.limits.memory_bytes {
+        if capped_estimate.session_plus_plan_bytes > model.limits.memory_bytes {
             return Err(failure(
                 effects,
                 vec![diag("graph.resource.limit", "$.limits.memory_bytes")],
@@ -567,7 +596,6 @@ impl GraphCompiler {
         });
         let sha256 = hex_sha256(&debug);
         let dot = dot(&nodes, &edges, &timing.delays);
-        let rack_cohorts = rack_cohort_report(&effects);
         let banks = match bind_rack_banks(&effects, &effect_ids, &levels, rack_cohorts.dispatch) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
@@ -2552,6 +2580,32 @@ mod tests {
                 expected_builtin_banks != 0,
                 "audit host needs a selected SIMD backend"
             );
+            let actual_members: Vec<_> = audit_artifact
+                .prepared_builtin_banks()
+                .flat_map(|bank| {
+                    assert_eq!(bank.backend, audit_backend.backend());
+                    assert_eq!(Some(bank.width), audit_backend.bank_width());
+                    assert!(bank.active_mask.iter().all(|active| *active));
+                    bank.members.iter().map(|member| match member {
+                        GraphNodeId::TrackStage { track_id, stage } => {
+                            assert_eq!(*stage, TrackStage::PostInputBuiltins);
+                            track_id.as_str().to_owned()
+                        }
+                        _ => panic!("audit builtin member kind"),
+                    })
+                })
+                .collect();
+            let mut expected_members: Vec<_> =
+                (0..12).map(|index| format!("bank{index}")).collect();
+            expected_members.sort();
+            expected_members.truncate(
+                expected_builtin_banks
+                    * audit_backend
+                        .bank_width()
+                        .expect("audit bank width")
+                        .lanes() as usize,
+            );
+            assert_eq!(actual_members, expected_members);
             let audit_envelope = audit_artifact.envelope();
             let audit_nodes = audit_artifact
                 .external_binding_nodes()
@@ -2589,6 +2643,10 @@ mod tests {
                     output_hash = output_hash.wrapping_mul(0x0000_0100_0000_01b3);
                 }
             }
+            assert!(
+                !audit::is_render_scope_active(),
+                "audit is disarmed before snapshots and qualification counters"
+            );
             let audit_snapshot = audit::snapshot();
             assert_eq!(audit_snapshot.total(), 0);
             let counters = audit_plan.qualification_counters();
@@ -2733,15 +2791,43 @@ mod tests {
             Ok(artifact) => artifact,
             Err(_) => panic!("graph"),
         };
-        let expected_banks = KernelDispatch::select(target_capabilities())
+        let dispatch = KernelDispatch::select(target_capabilities());
+        let expected_banks = dispatch
             .bank_width()
             .map_or(0, |width| 8 / width.lanes() as usize);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+        let member_ids: Vec<_> = artifact
+            .prepared_builtin_banks()
+            .flat_map(|bank| {
+                assert_eq!(bank.backend, dispatch.backend());
+                assert_eq!(Some(bank.width), dispatch.bank_width());
+                assert!(bank.active_mask.iter().all(|active| *active));
+                bank.members.iter().map(|member| match member {
+                    GraphNodeId::TrackStage { track_id, stage } => {
+                        assert_eq!(*stage, TrackStage::PostInputBuiltins);
+                        track_id.as_str().to_owned()
+                    }
+                    _ => panic!("builtin bank member kind"),
+                })
+            })
+            .collect();
+        let mut expected_member_ids: Vec<_> = (0..expected_banks
+            * dispatch
+                .bank_width()
+                .map_or(0, |width| width.lanes() as usize))
+            .map(|index| format!("bank{index}"))
+            .collect();
+        expected_member_ids.sort();
+        assert_eq!(member_ids, expected_member_ids);
         let resource = artifact.graph_resource_estimate();
         assert_eq!(resource.builtin_bank_count, expected_banks as u64);
         if expected_banks != 0 {
             assert!(resource.builtin_bank_bytes != 0);
-            assert!(resource.builtin_bank_scratch_bytes != 0);
+            let width = u64::from(dispatch.bank_width().expect("bank width").lanes());
+            assert_eq!(
+                resource.builtin_bank_scratch_bytes,
+                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 4 * 4
+            );
         }
         let envelope = artifact.envelope();
         let nodes = artifact
@@ -2778,6 +2864,134 @@ mod tests {
         )
         .expect("production builtin-bank render");
         assert!(pcm.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn post_bank_graph_cap_rejects_transactionally_with_both_prepared_inputs() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..8)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index}")).expect("id");
+                track.simd1.effects.clear();
+                track.dynamic.effects.clear();
+                track.simd2.effects.clear();
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("cap-route-{index}")).expect("route id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled cap session");
+        let base = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 79,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("base graph: {:?}", failure.diagnostics));
+        let baseline_builtins = prepare_session_builtins(
+            &session,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("baseline builtins");
+        let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 80,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            builtins: baseline_builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("baseline bank graph: {:?}", failure.diagnostics));
+        let final_samples = baseline.graph_resource_estimate().audio_buffer_samples;
+        assert!(final_samples > base.report.estimate.audio_buffer_samples);
+        let mut constrained = integration_caps();
+        constrained.maximum_audio_buffer_samples = final_samples - 1;
+        assert!(
+            base.report.estimate.audio_buffer_samples <= constrained.maximum_audio_buffer_samples
+        );
+        let builtins = prepare_session_builtins(
+            &session,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("returned builtins");
+        let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 81,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            builtins,
+            caps: constrained,
+        }) {
+            Ok(_) => panic!("post-bank cap must reject"),
+            Err(failure) => failure,
+        };
+        assert!(failure.diagnostics.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "graph.resource.limit" && diagnostic.path == "$.graph_compile_caps"
+        }));
+        assert_eq!(failure.effects.session.normalized_model().tracks.len(), 8);
+        assert!(failure.effects.entries.is_empty());
+        assert_eq!(failure.builtins.tails().count(), 8);
+        assert!(
+            failure
+                .builtins
+                .validate_for_session(&failure.effects.session)
+                .0
+                .is_empty(),
+            "returned builtin ownership remains sealed and valid"
+        );
     }
 
     #[test]
