@@ -2,7 +2,7 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1 only after Issue-040 has a recorded PASS.** Qualify that exact product
+**READY FOR TERRA ATTEMPT 1 only after Issue-043 has a recorded PASS.** Qualify that exact product
 candidate; do not repair production semantics here. This issue permits one Terra
 qualification/review attempt and at most one bounded Sol correction to test-only tooling. A second
 failure stops. A production defect immediately FAILs and requires a new stateless product issue.

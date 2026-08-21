@@ -31,7 +31,7 @@ Wasm filesystem streaming, hardcoding 128 frames, relying on Rust std threads, t
 - Bootstrap Rust workspace and target matrix
 - Real-time memory, buffers, queues, and plan lifetime
 - Transport-neutral binary control protocol
-- Issue-010 launch-critical source ownership and accounting closure
+- Exact lock-free native source sanitation telemetry handoff
 - Production SIMD builtin bank graph retention and reachability qualification
 - Issue-007 builtin qualification tooling, audits, and benchmark
 

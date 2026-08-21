@@ -189,3 +189,20 @@ reported byte layout. This is an Issue 040 accounting blocker for the bounded So
   audit matrix; no benchmark command or timing command was run.
 
 `timed_benchmark_invocations=0`.
+
+## Sol correction attempt 2 final verdict (2026-08-21)
+
+**Status: FAIL / STOPPED / RESCOPED — no overall PASS.** The sole remaining product blocker is
+structural: `NativeDecoderSanitationTelemetry` uses `std::sync::Arc`, while the exact report charges
+only `size_of` its payload and cannot state the opaque allocation/control-block bytes. Replacing it
+inside this exhausted correction with an intrusive raw-pointer `Box` would require new custom
+unsafe `Send`/`Sync`, refcount and final-drop architecture. Sol stopped before compiling or retaining
+that prototype; the source checkpoint is unchanged.
+
+The green attempt-1 checkpoint remains accepted technical input: plan/source-set-owned stop/join,
+transactional ownership return, separate controllers, equal endpoint shapes, representative
+sanitation/rate/seek/fan-out/claim tests, and exact accounting/caps for every enumerated allocation
+other than the opaque `Arc` control block. The independent Issue-042 parametric-EQ oracle failure
+continues to block a full workspace test but did not cause or excuse this Issue-040 accounting FAIL.
+Issue **Exact lock-free native source sanitation telemetry handoff** owns the single remaining
+product correction. No benchmark or timing command was run; `timed_benchmark_invocations=0`.

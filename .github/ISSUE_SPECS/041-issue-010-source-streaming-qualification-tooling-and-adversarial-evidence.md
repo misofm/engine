@@ -15,9 +15,10 @@ off render. Source PCM uses bounded planar rings; unavailable in-region samples 
 EOF is not an underrun, generations switch only at block boundaries, and source duration cannot
 determine retained engine memory.
 
-Issue **JIT PCM streaming and host-supplied source rings** remains FAIL. Issue
-**Issue-010 launch-critical source ownership and accounting closure** owns and must first accept the
-production lifetime/API/accounting contract. This issue adds no product feature. It owns only the
+Issues **JIT PCM streaming and host-supplied source rings** and **Issue-010 launch-critical source
+ownership and accounting closure** remain FAIL. Issue **Exact lock-free native source sanitation
+telemetry handoff** must first accept the preserved lifetime/API/accounting checkpoint plus its
+remaining telemetry correction. This issue adds no product feature. It owns only the
 larger qualification evidence omitted from Issue 010: exact invalid-diagnostic corpus coverage,
 frozen randomized seek races, a real delayed native worker in the 100,000-render audit, and actual
 one-minute/sparse-multi-hour allocation-layout and RSS records.
@@ -78,13 +79,13 @@ repeating the already accepted full target matrix without a touched production b
 
 ## Dependencies by exact issue title
 
-- Issue-010 launch-critical source ownership and accounting closure
+- Exact lock-free native source sanitation telemetry handoff
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 
 ## Sol implementation brief (2026-08-21)
 
-**READY FOR TERRA ATTEMPT 1 only after the product-closure dependency passes.** The tracked brief is
+**READY FOR TERRA ATTEMPT 1 only after the replacement product-closure dependency passes.** The tracked brief is
 `.github/ISSUE_SPECS/BRIEFS/041-issue-010-source-streaming-qualification-tooling-and-adversarial-evidence.md`.
 It freezes the seed/count, real-worker audit, allocation/RSS comparison, two-attempt maximum and
 zero-timing rule.
