@@ -73,3 +73,15 @@ engine qualification belongs to the next successor.
 Candidate and manifest hashes; independent-oracle dependency/provenance check; exact row/path and
 24/24 mutation counts; tolerance maxima; read-only/no-production-reachability proof; commands and
 strict Terra/Sol verdicts; `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — benchmark-input checkpoint
+
+The first bounded checkpoint adds the ten frozen input bundles for five workload kinds at 48 and
+96 kHz, updates the V1 manifest, and extends the typed checker with exact kind/rate/ID/field and
+referenced-PCM manifest-hash validation plus mutation coverage. These files are deterministic
+inputs only; no benchmark process or timing path ran.
+
+Focused PASS: package format and locked check; four focused V1 checker tests; warning-denied
+all-target Clippy; `scripts/check-builtins-fixtures.sh` over 50 manifest-listed files; and
+`git diff --check`. Response/oracle, remaining PCM/meter/diagnostic/resource completeness and the
+final corpus seal remain pending. `workload_invocations=0`; `timed_benchmark_invocations=0`.

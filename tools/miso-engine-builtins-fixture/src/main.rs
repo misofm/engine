@@ -31,6 +31,14 @@ const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
 const CASE_COUNT_V1: usize = 1_762;
 const RESPONSE_CASE_COUNT_V1: usize = 1_740;
 const PCM_PAYLOAD_COUNT_V1: usize = 33;
+const BENCHMARK_RATES_V1: [u32; 2] = [48_000, 96_000];
+const BENCHMARK_KINDS_V1: [&str; 5] = [
+    "full_chain_filters",
+    "identity_chain",
+    "matrix_ramp",
+    "meter_success_full",
+    "prepare_256_tracks",
+];
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -56,6 +64,8 @@ enum FixturePathClassV1 {
     Cases,
     /// Headerless planar PCM expected bytes.
     Pcm,
+    /// A frozen benchmark input bundle.
+    Benchmark,
     /// Independent response data.
     Reference,
     /// Expected meter records.
@@ -81,6 +91,29 @@ struct FixtureManifestEntryV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FixtureManifestV1 {
     entries: Vec<FixtureManifestEntryV1>,
+}
+
+/// One strict, complete benchmark input declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BenchmarkInputV1 {
+    kind: BenchmarkKindV1,
+    rate_hz: u32,
+    fields: Vec<(String, String)>,
+}
+
+/// The frozen benchmark input kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkKindV1 {
+    /// One asymmetric filter/matrix render track.
+    FullChainFilters,
+    /// One exact-identity render track.
+    IdentityChain,
+    /// One matrix-ramp render track.
+    MatrixRamp,
+    /// One drain/full seven-tap meter render track.
+    MeterSuccessFull,
+    /// One off-render 256-track preparation workload.
+    Prepare256Tracks,
 }
 
 fn generated() -> Vec<(String, Vec<u8>)> {
@@ -1359,6 +1392,7 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     let response_ids = verify_cases_v1(root)?;
     verify_reference_coverage_v1(root, &response_ids)?;
     verify_jsonl_payloads_v1(root)?;
+    verify_benchmark_inputs_v1(root, &manifest)?;
     Ok(())
 }
 
@@ -1424,6 +1458,7 @@ fn classify_fixture_path_v1(path: &str) -> Result<FixturePathClassV1, String> {
         "resources.jsonl" => Ok(FixturePathClassV1::Resources),
         "metadata.toml" => Ok(FixturePathClassV1::Metadata),
         "meters/graph-taps.jsonl" | "meters/window-and-drop.jsonl" => Ok(FixturePathClassV1::Meter),
+        _ if benchmark_path_v1(path).is_some() => Ok(FixturePathClassV1::Benchmark),
         _ if path.starts_with("pcm/")
             && path.ends_with(".f32le")
             && is_fixture_case_id(&path[4..path.len() - 6]) =>
@@ -1499,6 +1534,7 @@ fn verify_path_class_coverage_v1(manifest: &FixtureManifestV1) -> Result<(), Str
         (FixturePathClassV1::Metadata, 1),
         (FixturePathClassV1::Meter, 2),
         (FixturePathClassV1::Pcm, PCM_PAYLOAD_COUNT_V1),
+        (FixturePathClassV1::Benchmark, 10),
     ] {
         if counts.get(&class) != Some(&expected) {
             return Err(format!(
@@ -1621,6 +1657,291 @@ fn verify_jsonl_payloads_v1(root: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn benchmark_path_v1(path: &str) -> Option<(BenchmarkKindV1, u32)> {
+    let name = path.strip_prefix("benchmark/")?.strip_suffix(".toml")?;
+    let (kind, rate_hz) = name.rsplit_once('-')?;
+    let rate_hz = rate_hz.parse().ok()?;
+    let kind = BenchmarkKindV1::parse(kind)?;
+    BENCHMARK_RATES_V1
+        .contains(&rate_hz)
+        .then_some((kind, rate_hz))
+}
+
+impl BenchmarkKindV1 {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "full_chain_filters" => Some(Self::FullChainFilters),
+            "identity_chain" => Some(Self::IdentityChain),
+            "matrix_ramp" => Some(Self::MatrixRamp),
+            "meter_success_full" => Some(Self::MeterSuccessFull),
+            "prepare_256_tracks" => Some(Self::Prepare256Tracks),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullChainFilters => "full_chain_filters",
+            Self::IdentityChain => "identity_chain",
+            Self::MatrixRamp => "matrix_ramp",
+            Self::MeterSuccessFull => "meter_success_full",
+            Self::Prepare256Tracks => "prepare_256_tracks",
+        }
+    }
+
+    const fn references_pcm(self) -> bool {
+        !matches!(self, Self::Prepare256Tracks)
+    }
+}
+
+fn verify_benchmark_inputs_v1(root: &Path, manifest: &FixtureManifestV1) -> Result<(), String> {
+    let manifest_entries: BTreeMap<_, _> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    let actual: BTreeSet<_> = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| match entry.class {
+            FixturePathClassV1::Benchmark => Some(entry.path.as_str()),
+            _ => None,
+        })
+        .collect();
+    let expected: BTreeSet<_> = BENCHMARK_KINDS_V1
+        .into_iter()
+        .flat_map(|kind| {
+            BENCHMARK_RATES_V1
+                .into_iter()
+                .map(move |rate_hz| format!("benchmark/{kind}-{rate_hz}.toml"))
+        })
+        .collect();
+    let expected: BTreeSet<_> = expected.iter().map(String::as_str).collect();
+    if actual != expected {
+        return Err("benchmark input paths differ from the frozen V1 grid".to_owned());
+    }
+    for kind in BENCHMARK_KINDS_V1 {
+        for rate_hz in BENCHMARK_RATES_V1 {
+            let path = format!("benchmark/{kind}-{rate_hz}.toml");
+            let input = parse_benchmark_input_v1(root, &path)?;
+            if input.kind.as_str() != kind || input.rate_hz != rate_hz {
+                return Err(format!("benchmark input identity mismatch: {path}"));
+            }
+            if input.kind.references_pcm() {
+                let pcm_path = benchmark_field_v1(&input, "input_pcm_path")
+                    .ok_or_else(|| format!("benchmark input has no PCM path: {path}"))?;
+                let pcm_sha256 = benchmark_field_v1(&input, "input_pcm_sha256")
+                    .ok_or_else(|| format!("benchmark input has no PCM hash: {path}"))?;
+                let pcm_path = quoted_toml_string_v1(pcm_path)
+                    .ok_or_else(|| format!("benchmark input PCM path is not quoted: {path}"))?;
+                let pcm_sha256 = quoted_toml_string_v1(pcm_sha256)
+                    .ok_or_else(|| format!("benchmark input PCM hash is not quoted: {path}"))?;
+                let manifest_entry = manifest_entries.get(pcm_path).ok_or_else(|| {
+                    format!("benchmark input references unlisted PCM: {path} -> {pcm_path}")
+                })?;
+                if manifest_entry.class != FixturePathClassV1::Pcm
+                    || manifest_entry.sha256 != pcm_sha256
+                {
+                    return Err(format!(
+                        "benchmark input PCM hash does not match manifest: {path} -> {pcm_path}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_benchmark_input_v1(root: &Path, path: &str) -> Result<BenchmarkInputV1, String> {
+    let (_, path_rate_hz) = benchmark_path_v1(path)
+        .ok_or_else(|| format!("benchmark input path is invalid: {path}"))?;
+    let bytes = read_regular_file(&root.join(path), path)?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| format!("benchmark input is not UTF-8: {path}"))?;
+    let mut fields = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (line_number, line) in text.split_inclusive('\n').enumerate() {
+        let line = line.strip_suffix('\n').ok_or_else(|| {
+            format!(
+                "benchmark input line is not LF terminated: {path}:{}",
+                line_number + 1
+            )
+        })?;
+        let (key, value) = line.split_once(" = ").ok_or_else(|| {
+            format!(
+                "benchmark input line is not canonical: {path}:{}",
+                line_number + 1
+            )
+        })?;
+        if !key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || !seen.insert(key)
+        {
+            return Err(format!(
+                "benchmark input key is invalid or duplicate: {path}:{key}"
+            ));
+        }
+        if value.is_empty() {
+            return Err(format!("benchmark input value is empty: {path}:{key}"));
+        }
+        fields.push((key.to_owned(), value.to_owned()));
+    }
+    let kind = benchmark_field_from_pairs_v1(&fields, "workload_kind")
+        .and_then(quoted_toml_string_v1)
+        .and_then(BenchmarkKindV1::parse)
+        .ok_or_else(|| format!("benchmark input workload_kind is invalid: {path}"))?;
+    let rate_hz = benchmark_field_from_pairs_v1(&fields, "sample_rate_hz")
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| format!("benchmark input sample_rate_hz is invalid: {path}"))?;
+    if rate_hz != path_rate_hz {
+        return Err(format!("benchmark input rate does not match path: {path}"));
+    }
+    let expected = expected_benchmark_fields_v1(kind, rate_hz);
+    if fields != expected {
+        return Err(format!(
+            "benchmark input fields are incomplete or noncanonical: {path}"
+        ));
+    }
+    Ok(BenchmarkInputV1 {
+        kind,
+        rate_hz,
+        fields,
+    })
+}
+
+fn benchmark_field_v1<'a>(input: &'a BenchmarkInputV1, key: &str) -> Option<&'a str> {
+    benchmark_field_from_pairs_v1(&input.fields, key)
+}
+
+fn benchmark_field_from_pairs_v1<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find_map(|(field, value)| (field == key).then_some(value.as_str()))
+}
+
+fn quoted_toml_string_v1(value: &str) -> Option<&str> {
+    value.strip_prefix('"')?.strip_suffix('"')
+}
+
+fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(String, String)> {
+    let mut fields = vec![
+        benchmark_field_pair_v1("fixture_schema", "1"),
+        benchmark_field_pair_v1("issue", "35"),
+        benchmark_field_pair_v1("workload_kind", &format!("\"{}\"", kind.as_str())),
+        benchmark_field_pair_v1(
+            "workload_id",
+            &format!("\"issue035.{}.{}hz.q128\"", kind.as_str(), rate_hz),
+        ),
+        benchmark_field_pair_v1("sample_rate_hz", &rate_hz.to_string()),
+        benchmark_field_pair_v1("quantum_frames", "128"),
+    ];
+    match kind {
+        BenchmarkKindV1::FullChainFilters => fields.extend([
+            benchmark_field_pair_v1("tracks", "1"),
+            benchmark_field_pair_v1("meter_observers", "0"),
+            benchmark_field_pair_v1("meter_queue_capacity", "0"),
+            benchmark_field_pair_v1("state_mode", "\"continuous\""),
+            benchmark_field_pair_v1("input_pcm_path", "\"pcm/filters-asymmetric.f32le\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"7b78746567c4c36d221643d359840968e832925661354009cb0b31e45d914fa3\""),
+            benchmark_field_pair_v1("left_hpf_hz", "100.0"),
+            benchmark_field_pair_v1("right_hpf_hz", "200.0"),
+            benchmark_field_pair_v1("left_lpf_hz", "1000.0"),
+            benchmark_field_pair_v1("right_lpf_hz", "2000.0"),
+            benchmark_field_pair_v1("left_trim_db", "-3.0"),
+            benchmark_field_pair_v1("right_trim_db", "2.0"),
+            benchmark_field_pair_v1("left_fader_db", "-1.0"),
+            benchmark_field_pair_v1("right_fader_db", "-4.0"),
+            benchmark_field_pair_v1("matrix_ll", "0.8"),
+            benchmark_field_pair_v1("matrix_lr", "0.2"),
+            benchmark_field_pair_v1("matrix_rl", "-0.3"),
+            benchmark_field_pair_v1("matrix_rr", "0.7"),
+        ]),
+        BenchmarkKindV1::IdentityChain => fields.extend([
+            benchmark_field_pair_v1("tracks", "1"),
+            benchmark_field_pair_v1("meter_observers", "0"),
+            benchmark_field_pair_v1("meter_queue_capacity", "0"),
+            benchmark_field_pair_v1("state_mode", "\"continuous\""),
+            benchmark_field_pair_v1("input_pcm_path", "\"pcm/identity-signed-zero.f32le\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"602eb824699c16d5c423a0196bc71b02d207783d0007fcfd7ed9566784709e99\""),
+            benchmark_field_pair_v1("left_hpf_hz", "0.0"),
+            benchmark_field_pair_v1("right_hpf_hz", "0.0"),
+            benchmark_field_pair_v1("left_lpf_hz", "0.0"),
+            benchmark_field_pair_v1("right_lpf_hz", "0.0"),
+            benchmark_field_pair_v1("left_trim_db", "0.0"),
+            benchmark_field_pair_v1("right_trim_db", "0.0"),
+            benchmark_field_pair_v1("left_fader_db", "0.0"),
+            benchmark_field_pair_v1("right_fader_db", "0.0"),
+            benchmark_field_pair_v1("matrix_ll", "1.0"),
+            benchmark_field_pair_v1("matrix_lr", "0.0"),
+            benchmark_field_pair_v1("matrix_rl", "0.0"),
+            benchmark_field_pair_v1("matrix_rr", "1.0"),
+        ]),
+        BenchmarkKindV1::MatrixRamp => fields.extend([
+            benchmark_field_pair_v1("tracks", "1"),
+            benchmark_field_pair_v1("meter_observers", "0"),
+            benchmark_field_pair_v1("meter_queue_capacity", "0"),
+            benchmark_field_pair_v1("state_mode", "\"continuous\""),
+            benchmark_field_pair_v1("input_pcm_path", "\"pcm/matrix-ramp-128.f32le\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"4b302238e21a45301a1faca72b292d92feacde0dd17df7ddc8f9c271bc693fb8\""),
+            benchmark_field_pair_v1("smoothing_updates", "128"),
+            benchmark_field_pair_v1("target_selection", "\"alternating_by_operation\""),
+            benchmark_field_pair_v1("initial_matrix_ll", "0.7"),
+            benchmark_field_pair_v1("initial_matrix_lr", "0.3"),
+            benchmark_field_pair_v1("initial_matrix_rl", "-0.2"),
+            benchmark_field_pair_v1("initial_matrix_rr", "0.8"),
+            benchmark_field_pair_v1("even_target_ll", "0.6"),
+            benchmark_field_pair_v1("even_target_lr", "0.4"),
+            benchmark_field_pair_v1("even_target_rl", "-0.4"),
+            benchmark_field_pair_v1("even_target_rr", "0.6"),
+            benchmark_field_pair_v1("odd_target_ll", "0.9"),
+            benchmark_field_pair_v1("odd_target_lr", "-0.1"),
+            benchmark_field_pair_v1("odd_target_rl", "0.2"),
+            benchmark_field_pair_v1("odd_target_rr", "0.8"),
+        ]),
+        BenchmarkKindV1::MeterSuccessFull => fields.extend([
+            benchmark_field_pair_v1("tracks", "1"),
+            benchmark_field_pair_v1("meter_observers", "14"),
+            benchmark_field_pair_v1("meter_queue_capacity", "1"),
+            benchmark_field_pair_v1("state_mode", "\"continuous\""),
+            benchmark_field_pair_v1("input_pcm_path", "\"pcm/graph-taps.f32le\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"e07cfb2696b6eb2d8114ab84653186395694ba9c16904b70d8b0238903cad46f\""),
+            benchmark_field_pair_v1("meter_period_frames", "128"),
+            benchmark_field_pair_v1("meter_peak_hold_frames", "0"),
+            benchmark_field_pair_v1("meter_peak_decay_db_per_second", "0.0"),
+            benchmark_field_pair_v1("meter_reset_generation", "7"),
+            benchmark_field_pair_v1("success_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair_v1("full_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair_v1("success_drain_per_operation", "true"),
+            benchmark_field_pair_v1("full_prefill", "true"),
+        ]),
+        BenchmarkKindV1::Prepare256Tracks => fields.extend([
+            benchmark_field_pair_v1("tracks", "256"),
+            benchmark_field_pair_v1("meter_observers", "56"),
+            benchmark_field_pair_v1("meter_queue_capacity", "4"),
+            benchmark_field_pair_v1("state_mode", "\"new_per_prepare\""),
+            benchmark_field_pair_v1("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
+            benchmark_field_pair_v1("session_template_sha256", "\"1ff2db241f84b1a641b50c69c4fd09eda0a1baa0a5735d3769c056212927f31a\""),
+            benchmark_field_pair_v1("track_id_prefix", "\"benchmark-track-\""),
+            benchmark_field_pair_v1("track_id_count", "256"),
+            benchmark_field_pair_v1("empty_effect_racks", "true"),
+            benchmark_field_pair_v1("route_source_track_id", "\"benchmark-track-0\""),
+            benchmark_field_pair_v1("route_source_tap", "\"post_matrix\""),
+            benchmark_field_pair_v1("meter_track_ids", "\"benchmark-track-0,benchmark-track-1,benchmark-track-2,benchmark-track-3,benchmark-track-4,benchmark-track-5,benchmark-track-6,benchmark-track-7\""),
+            benchmark_field_pair_v1("meter_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair_v1("meter_period_frames", "128"),
+            benchmark_field_pair_v1("meter_peak_hold_frames", "0"),
+            benchmark_field_pair_v1("meter_peak_decay_db_per_second", "0.0"),
+            benchmark_field_pair_v1("meter_reset_generation", "7"),
+        ]),
+    }
+    fields
+}
+
+fn benchmark_field_pair_v1(key: &str, value: &str) -> (String, String) {
+    (key.to_owned(), value.to_owned())
 }
 
 fn list_files(root: &Path) -> Result<Vec<String>, String> {
@@ -1778,6 +2099,54 @@ mod tests {
         remove_temporary_root(root);
     }
 
+    #[test]
+    fn v1_check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations() {
+        let files = complete_files();
+        for (name, mutate) in [
+            (
+                "workload_id",
+                benchmark_text_mutation_v1(
+                    "workload_id = \"issue035.full_chain_filters.48000hz.q128\"",
+                    "workload_id = \"issue035.full_chain_filters.96000hz.q128\"",
+                ),
+            ),
+            (
+                "missing_parameter",
+                benchmark_text_mutation_v1("matrix_rr = 0.7\n", ""),
+            ),
+            (
+                "declared_pcm_hash",
+                benchmark_text_mutation_v1(
+                    "input_pcm_sha256 = \"7b78746567c4c36d221643d359840968e832925661354009cb0b31e45d914fa3\"",
+                    "input_pcm_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
+                ),
+            ),
+        ] {
+            let root = temporary_root(&format!("benchmark-{name}"));
+            let mut mutated = files.clone();
+            mutate(&mut mutated);
+            write_fixture(&root, &mutated);
+            assert!(
+                check_fixture_root_v1(&root).is_err(),
+                "accepted benchmark {name} mutation"
+            );
+            remove_temporary_root(root);
+        }
+
+        let root = temporary_root("benchmark-pcm-content");
+        let mut mutated = files;
+        mutated
+            .get_mut("pcm/filters-asymmetric.f32le")
+            .expect("fixture PCM")
+            .push(0);
+        write_fixture(&root, &mutated);
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted benchmark PCM manifest-hash mismatch"
+        );
+        remove_temporary_root(root);
+    }
+
     fn reject_payload_mutation(
         files: &BTreeMap<String, Vec<u8>>,
         class: &str,
@@ -1811,7 +2180,38 @@ mod tests {
     }
 
     fn complete_files() -> BTreeMap<String, Vec<u8>> {
-        generated().into_iter().collect()
+        let mut files: BTreeMap<_, _> = generated().into_iter().collect();
+        for kind in BENCHMARK_KINDS_V1 {
+            let kind = BenchmarkKindV1::parse(kind).expect("frozen benchmark kind");
+            for rate_hz in BENCHMARK_RATES_V1 {
+                files.insert(
+                    format!("benchmark/{}-{rate_hz}.toml", kind.as_str()),
+                    canonical_benchmark_input_v1(kind, rate_hz).into_bytes(),
+                );
+            }
+        }
+        files
+    }
+
+    fn canonical_benchmark_input_v1(kind: BenchmarkKindV1, rate_hz: u32) -> String {
+        let mut output = String::new();
+        for (key, value) in expected_benchmark_fields_v1(kind, rate_hz) {
+            writeln!(output, "{key} = {value}").expect("string");
+        }
+        output
+    }
+
+    fn benchmark_text_mutation_v1(
+        from: &'static str,
+        to: &'static str,
+    ) -> impl FnOnce(&mut BTreeMap<String, Vec<u8>>) {
+        move |files| {
+            let path = "benchmark/full_chain_filters-48000.toml";
+            let input = String::from_utf8(files.get(path).expect("benchmark input").clone())
+                .expect("benchmark input UTF-8");
+            assert!(input.contains(from), "frozen benchmark field");
+            files.insert(path.to_owned(), input.replacen(from, to, 1).into_bytes());
+        }
     }
 
     fn write_fixture(root: &Path, files: &BTreeMap<String, Vec<u8>>) {
