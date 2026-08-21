@@ -373,6 +373,7 @@ name = "miso-engine-parametric-eq"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
 ]
 

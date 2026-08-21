@@ -12,5 +12,9 @@ name = "miso_engine_parametric_eq"
 miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 
+[dev-dependencies]
+# Test-only independent f64 oracle; production code has no dependency on this crate.
+miso-engine-dsp-reference.workspace = true
+
 [lints]
 workspace = true

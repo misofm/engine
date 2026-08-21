@@ -209,3 +209,35 @@ Issue-042 PASS; every post-selection production gate remains required.
 Command: `cargo test -p miso-engine-dsp-reference
 issue_042_complete_retained_f32_candidate_comparison_requires_sol_freeze -- --nocapture` — PASS
 (one complete-grid invocation). `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — scalar endpoint-conditioned delta checkpoint (2026-08-21)
+
+**CHECKPOINT PASS; scalar only.** `miso-engine-parametric-eq` now designs normalized RBJ words in
+`f64` and retains only the selected seven `f32` delta words in frozen field order
+`(a,n0,d0,n1,d1,n2,d2)`. It selects `a=+1` through one-quarter rate and `a=-1` above it,
+validates retained-word finiteness, nonzero scale and reconstructed strict Jury stability, and
+uses the exact noncontracting scalar recurrence from the amended brief. Scalar automation redesign
+rolls all four ramps back and clears only the failed section; identity/disabled and whole-bypass
+paths warm direct histories. The 16-word/section, 256-byte/lane V1 payload remains histories then
+the four numeric ramps; coefficients and anchors are rebuilt during all-or-none restore.
+
+The test-only independent `miso-engine-dsp-reference` dev dependency is present only for the
+scalar conformance tests; production has no reference-crate dependency. The complete production
+design equivalence test covers all 1,488 frozen rows, every 2,048-point log probe plus exact
+`f0`/DC/Nyquist, retained stability/scale invariants and the `-100 dB` notch-null check. It passed
+the unchanged `0.005 dB` response limit. A focused scalar sequence also tracks the independent
+`f64` oracle, and focused tests cover bypass warming, active-ramp restore continuity and lane-local
+recovery.
+
+The former DF-I homogeneous-bank implementation is deliberately unavailable at this checkpoint:
+`bind_homogeneous_bank` returns `Ok(None)` and its three semantic bank tests are marked deferred
+until the separate endpoint-conditioned delta-bank checkpoint. Core bank-token code was not
+changed. No graph, fixture, audit, target, benchmark or production SIMD work was performed.
+
+Commands — all PASS:
+
+- `cargo fmt --check`
+- `cargo test -p miso-engine-parametric-eq` — 13 passed, 3 deferred bank tests ignored
+- `cargo clippy -p miso-engine-parametric-eq --all-targets -- -D warnings`
+
+`timed_benchmark_invocations=0`.
