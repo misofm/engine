@@ -225,3 +225,7 @@ has no overall PASS. Preserve this green correction and open the smallest statel
 owns only those four effect-local state/reset/recovery proofs and any directly exposed repair. It
 must not absorb corpus expansion, target/audit work, benchmark or listening from Issue 047.
 `timed_benchmark_invocations=0`.
+
+Issue 048, **Launch gate reset, restore, and recovery proof**, is that bounded successor. It
+consumes this issue's preserved green checkpoint as technical input only; Issue 047 and release
+qualification must wait for its PASS.

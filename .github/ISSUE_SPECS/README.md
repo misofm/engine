@@ -114,12 +114,16 @@ benchmark and audition/listening handoff. It permits one Terra attempt plus one 
 its timed invocation count starts at zero. Issue 046 gates only release qualification Issue 026
 and does not block other effect implementations.
 
-Issue 014, **Launch hysteretic peak gate/expander**, is likewise a bounded product vertical using
-the accepted dynamics/runtime/bank/graph seams. Issue 047, **Launch gate/expander qualification,
-realtime audit, and benchmark**, owns its expanded corpus/sequences, cohort/determinism evidence,
-100,000-render audit, target/instruction proof, sole eventual descriptive benchmark and audition/
-listening handoff. It permits one Terra attempt plus one Sol correction, starts with zero timed
-invocations, gates only Issue 026 and does not block other effect implementations.
+Issue 014, **Launch hysteretic peak gate/expander**, stopped after its two attempts with the
+descriptor/scalar/W4/W8/registry/graph product and bounded correction preserved as technical input,
+but without effect-local reset, uninterrupted restore, signed-zero identity and injected recovery
+proofs. Issue 048, **Launch gate reset, restore, and recovery proof**, owns only that launch-product
+closure and any directly exposed bounded repair. Issue 047, **Launch gate/expander qualification,
+realtime audit, and benchmark**, follows 048 and owns expanded corpus/sequences, cohort/determinism,
+100,000-render audit, targets/instructions, the sole eventual descriptive benchmark and audition/
+listening handoff. Issues 048 and 047 each permit one Terra attempt plus one Sol correction; their
+timed invocation counts start at zero. Issue 047 gates only Issue 026 and does not block unrelated
+effect implementations.
 
 ## Shared definition
 

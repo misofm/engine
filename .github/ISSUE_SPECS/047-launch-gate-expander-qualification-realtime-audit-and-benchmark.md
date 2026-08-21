@@ -8,10 +8,12 @@ descriptive benchmark and an honest audition/listening handoff.
 
 ## Context
 
-Issue **Launch hysteretic peak gate/expander** owns and closes the product semantics. This issue is
-qualification-only: it cannot change parameters, equations, state, timing, latency/tail,
-automation, banking, graph behavior or public APIs. A production defect fails and returns to a new
-stateless product issue.
+Issue **Launch hysteretic peak gate/expander** stopped without overall PASS and remains historical
+technical input. Issue **Launch gate reset, restore, and recovery proof** owns the remaining
+launch-product closure. This issue starts only after that successor passes and is qualification-
+only: it cannot change parameters, equations, state, timing, latency/tail, automation, banking,
+graph behavior or public APIs. A production defect fails and returns to a new stateless product
+issue.
 
 There are exactly two total attempts: one Terra qualification/review attempt and one bounded Sol
 test/tool correction. A second failure stops. No benchmark is authorized at creation;
@@ -47,13 +49,13 @@ without execution; benchmark retries; or fabricated human listening.
 
 ## Dependencies by exact issue title
 
-- Launch hysteretic peak gate/expander
+- Launch gate reset, restore, and recovery proof
 
 ## Sol implementation brief
 
-**REQUIRES A TRACKED SOL BRIEF AFTER ISSUE 014 PASSES.** That brief must freeze the corpus rows,
-seed/count, audit fixture/counters, target/object commands, benchmark schema/workloads and listening
-handoff before implementation. This issue has no current timing authorization.
+**REQUIRES A TRACKED SOL BRIEF AFTER ISSUE 048 PASSES.** That brief must freeze the corpus rows,
+seed/count, audit fixture/counters, target/object commands, benchmark schema/workloads and
+listening handoff before implementation. This issue has no current timing authorization.
 
 ## Acceptance gates with objective measurements
 
@@ -83,7 +85,8 @@ Native scalar and runtime-gated x86 AVX2/AVX2+FMA; AArch64 NEON W4; wasm32 scala
 
 ## Required evidence
 
-Issue-014 candidate identity; reference/corpus/transcript hashes and maxima; exact cohort/graph/
-audit counters; target/instruction outputs; preflight zero-launch proof; benchmark authorization
-and, only afterward, raw/accepted hashes and record count; audition/preregistration hashes; attempt
-count; `timed_benchmark_invocations`; and Terra/final Sol PASS/FAIL verdicts.
+Preserved Issue-014 checkpoint and accepted Issue-048 candidate identity; reference/corpus/
+transcript hashes and maxima; exact cohort/graph/audit counters; target/instruction outputs;
+preflight zero-launch proof; benchmark authorization and, only afterward, raw/accepted hashes and
+record count; audition/preregistration hashes; attempt count; `timed_benchmark_invocations`; and
+Terra/final Sol PASS/FAIL verdicts.
