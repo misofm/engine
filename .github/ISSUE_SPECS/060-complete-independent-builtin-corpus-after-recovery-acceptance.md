@@ -64,3 +64,20 @@ target/instruction qualification, benchmark schema/runner/workload/timing, or li
 Candidate and manifest hashes; exact row/path/tuple and mutation counts; response tolerance maxima
 and recovery totals; provenance/read-only proof; strict Terra/Sol verdicts;
 `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — response reconciliation checkpoint
+
+Checkpoint 1 PASS: the corpus now contains exactly 1,630 response rows (735 HPF, 735 LPF, 160
+fixed cascade) and 1,652 cases (the same 1,630 response IDs plus 22 functional declarations).
+Every legal response row has `recovery_count=0` under Issue 059, and the CSV/case response-ID sets
+match exactly. SHA-256 identities are response
+`c2173a06aa9c2f37c7966d576f7d34dde349e05633941d9e8e4eb6d888fbf53d`, cases
+`3f097580addf28280cf0c2aa3709610974e0a92d4ad00ea7267e5359a9ac7091`, and manifest
+`33e3d1cb185060449b2bdb25bdb7525c4f11a78f0e531c1fbf5f85f3a088a27d`.
+
+Disposable scratch `--write` followed by read-only `--check`, checked-corpus `--check`, format,
+dsp-reference tests (10 pass, two unrelated ignored), warning-denied fixture/reference Clippy and
+`git diff --check` pass. The writer includes the unchanged ten accepted benchmark inputs solely so
+the required scratch author/check flow is complete; no benchmark process ran. Checkpoint 2
+functional PCM/meter/diagnostic/resource semantics and final mutation seal remain pending.
+`workload_invocations=0`; `timed_benchmark_invocations=0`.

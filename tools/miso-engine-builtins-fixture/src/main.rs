@@ -28,8 +28,9 @@ use sha2::{Digest, Sha256};
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
-const CASE_COUNT_V1: usize = 1_762;
-const RESPONSE_CASE_COUNT_V1: usize = 1_740;
+const CASE_COUNT_V1: usize = 1_652;
+const RESPONSE_CASE_COUNT_V1: usize = 1_630;
+const RESPONSE_ROW_COUNT_V1: usize = 1_630;
 const PCM_PAYLOAD_COUNT_V1: usize = 33;
 const BENCHMARK_RATES_V1: [u32; 2] = [48_000, 96_000];
 const BENCHMARK_KINDS_V1: [&str; 5] = [
@@ -185,6 +186,15 @@ fn generated() -> Vec<(String, Vec<u8>)> {
     ];
     for (id, pcm) in pcm_cases() {
         files.push((format!("pcm/{id}.f32le"), pcm));
+    }
+    for kind in BENCHMARK_KINDS_V1 {
+        let kind = BenchmarkKindV1::parse(kind).expect("frozen benchmark kind");
+        for rate_hz in BENCHMARK_RATES_V1 {
+            files.push((
+                format!("benchmark/{}-{rate_hz}.toml", kind.as_str()),
+                canonical_benchmark_input_v1(kind, rate_hz).into_bytes(),
+            ));
+        }
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     files
@@ -369,9 +379,12 @@ fn cases() -> String {
     let mut entries = Vec::new();
     for rate in RATES {
         for quantum in QUANTA {
-            for (section, _) in response_sections() {
+            for section in ["high_pass", "low_pass"] {
                 for (cutoff_index, cutoff) in response_cutoffs(rate).into_iter().enumerate() {
-                    for (probe_index, probe) in probes(rate, cutoff).into_iter().enumerate() {
+                    for (probe_index, probe) in frozen_single_section_probes_v1(rate, cutoff)
+                        .into_iter()
+                        .enumerate()
+                    {
                         entries.push((
                             format!("response-{section}-{rate}-{quantum}-{cutoff_index}-{probe_index}"),
                             format!(
@@ -380,6 +393,14 @@ fn cases() -> String {
                         ));
                     }
                 }
+            }
+            for (probe_index, probe) in frozen_cascade_probes_v1(rate).into_iter().enumerate() {
+                entries.push((
+                    format!("response-cascade-{rate}-{quantum}-fixed-{probe_index}"),
+                    format!(
+                        "category = \"filter_response\"\nrate_hz = {rate}\nquantum_frames = {quantum}\nsection = \"cascade\"\ncutoff_hz = 100.00000000000000000\nprobe_hz = {probe:.17}\noracle = \"rbj_f64_and_cast_state\"\n"
+                    ),
+                ));
             }
         }
     }
@@ -430,14 +451,6 @@ fn cases() -> String {
         write!(output, "[[case]]\nid = \"{id}\"\n{body}").expect("string");
     }
     output
-}
-
-fn response_sections() -> [(&'static str, ReferenceFilterKind); 3] {
-    [
-        ("high_pass", ReferenceFilterKind::HighPass),
-        ("low_pass", ReferenceFilterKind::LowPass),
-        ("cascade", ReferenceFilterKind::LowPass),
-    ]
 }
 
 fn response_cutoffs(rate: u32) -> [f64; 6] {
@@ -1436,8 +1449,21 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     let manifest = parse_manifest_v1(root)?;
     verify_manifest_bytes_v1(root, &manifest)?;
     verify_path_class_coverage_v1(&manifest)?;
-    let _response_ids = verify_cases_v1(root)?;
-    verify_reference_oracle_v1(root)?;
+    let case_response_ids = verify_cases_v1(root)?;
+    let csv_response_ids = verify_reference_oracle_v1(root)?;
+    if case_response_ids != csv_response_ids {
+        let missing: Vec<_> = csv_response_ids
+            .difference(&case_response_ids)
+            .take(1)
+            .collect();
+        let unexpected: Vec<_> = case_response_ids
+            .difference(&csv_response_ids)
+            .take(1)
+            .collect();
+        return Err(format!(
+            "cases.toml and reference/filter-response.csv response IDs differ; missing={missing:?} unexpected={unexpected:?}"
+        ));
+    }
     verify_jsonl_payloads_v1(root)?;
     verify_benchmark_inputs_v1(root, &manifest)?;
     Ok(())
@@ -1636,7 +1662,7 @@ fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn verify_reference_oracle_v1(root: &Path) -> Result<(), String> {
+fn verify_reference_oracle_v1(root: &Path) -> Result<BTreeSet<String>, String> {
     let bytes = read_regular_file(
         &root.join("reference/filter-response.csv"),
         "reference/filter-response.csv",
@@ -1673,9 +1699,23 @@ fn verify_reference_oracle_v1(root: &Path) -> Result<(), String> {
         }
         rows.push(row);
     }
+    if rows.len() != RESPONSE_ROW_COUNT_V1 {
+        return Err(format!(
+            "reference/filter-response.csv coverage count differs: rows={} expected={RESPONSE_ROW_COUNT_V1}",
+            rows.len()
+        ));
+    }
+    if ids != expected_response_ids_v1() {
+        let expected = expected_response_ids_v1();
+        let missing: Vec<_> = expected.difference(&ids).take(1).collect();
+        let unexpected: Vec<_> = ids.difference(&expected).take(1).collect();
+        return Err(format!(
+            "reference/filter-response.csv IDs differ from the frozen grid; missing={missing:?} unexpected={unexpected:?}"
+        ));
+    }
     verify_response_grid_v1(&rows)?;
     verify_response_oracle_tolerances_v1(&rows)?;
-    Ok(())
+    Ok(ids)
 }
 
 fn parse_response_csv_row_v1(
@@ -1808,6 +1848,32 @@ fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
     expected
 }
 
+fn expected_response_ids_v1() -> BTreeSet<String> {
+    let mut expected = BTreeSet::new();
+    for rate_hz in RATES {
+        for quantum_frames in QUANTA {
+            for (cutoff_index, cutoff_hz) in response_cutoffs(rate_hz).into_iter().enumerate() {
+                for (probe_index, _) in frozen_single_section_probes_v1(rate_hz, cutoff_hz)
+                    .into_iter()
+                    .enumerate()
+                {
+                    for section in ["high_pass", "low_pass"] {
+                        expected.insert(format!(
+                            "response-{section}-{rate_hz}-{quantum_frames}-{cutoff_index}-{probe_index}"
+                        ));
+                    }
+                }
+            }
+            for (probe_index, _) in frozen_cascade_probes_v1(rate_hz).into_iter().enumerate() {
+                expected.insert(format!(
+                    "response-cascade-{rate_hz}-{quantum_frames}-fixed-{probe_index}"
+                ));
+            }
+        }
+    }
+    expected
+}
+
 fn frozen_single_section_probes_v1(rate_hz: u32, cutoff_hz: f64) -> Vec<f64> {
     let mut probes = probes(rate_hz, cutoff_hz);
     probes.push(cutoff_hz);
@@ -1829,25 +1895,11 @@ fn sort_and_deduplicate_f64_v1(values: &mut Vec<f64>) {
 }
 
 fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
-    let mut recovery_counts = BTreeMap::new();
     for row in rows {
-        let recovery_limit = match row.section {
-            ResponseSectionV1::HighPass | ResponseSectionV1::LowPass => 2,
-            ResponseSectionV1::Cascade => 4,
-        };
-        if row.recovery_count > recovery_limit {
+        if row.recovery_count != 0 {
             return Err(format!(
-                "reference/filter-response.csv recovery count exceeds one per section/lane: {} has {}, limit {}",
-                row.id, row.recovery_count, recovery_limit
-            ));
-        }
-        let recovery_coordinate = (row.rate_hz, row.section, row.cutoff_hz.to_bits());
-        if let Some(expected) = recovery_counts.insert(recovery_coordinate, row.recovery_count)
-            && expected != row.recovery_count
-        {
-            return Err(format!(
-                "reference/filter-response.csv recovery count differs across probe/quantum rows: {} has {}, expected {}",
-                row.id, row.recovery_count, expected
+                "reference/filter-response.csv legal recovery count is nonzero: {} has {}",
+                row.id, row.recovery_count
             ));
         }
         let rbj = independent_rbj_magnitude_db_v1(row)?;
@@ -2278,6 +2330,14 @@ fn benchmark_field_pair_v1(key: &str, value: &str) -> (String, String) {
     (key.to_owned(), value.to_owned())
 }
 
+fn canonical_benchmark_input_v1(kind: BenchmarkKindV1, rate_hz: u32) -> String {
+    let mut output = String::new();
+    for (key, value) in expected_benchmark_fields_v1(kind, rate_hz) {
+        writeln!(output, "{key} = {value}").expect("string");
+    }
+    output
+}
+
 fn list_files(root: &Path) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     fn visit(root: &Path, path: &Path, files: &mut Vec<String>) -> Result<(), String> {
@@ -2525,14 +2585,6 @@ mod tests {
             }
         }
         files
-    }
-
-    fn canonical_benchmark_input_v1(kind: BenchmarkKindV1, rate_hz: u32) -> String {
-        let mut output = String::new();
-        for (key, value) in expected_benchmark_fields_v1(kind, rate_hz) {
-            writeln!(output, "{key} = {value}").expect("string");
-        }
-        output
     }
 
     fn benchmark_text_mutation_v1(
