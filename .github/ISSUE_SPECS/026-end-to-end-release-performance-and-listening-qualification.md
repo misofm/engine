@@ -56,7 +56,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Dynamic EQ
 - Launch two-band LR4 multiband compressor
 - Launch multiband compressor qualification, realtime audit, and benchmark
-- Launch fixed-2x cubic soft-clip saturator
+- Launch soft-clip bank and graph closure
 - Launch saturator/clipper qualification, realtime audit, and benchmark
 - Transient shaper
 - Dual-mono/stereo delay

@@ -1,5 +1,13 @@
 # Sol brief — 019 Launch fixed-2x cubic soft-clip saturator
 
+## Final status — STOPPED/RESCOPED
+
+Issue 019 exhausted Terra attempt 1 and Sol attempt 2 without overall PASS. Scalar checkpoint
+`e674d5e` is accepted technical input only. Issue 053, **Launch soft-clip bank and graph closure**,
+owns the unimplemented bank/registry/graph product gates and the single representative alias claim;
+Issue 052 follows it for broad qualification. This historical scalar brief authorizes no further
+Issue-019 implementation or benchmark.
+
 ## Decision and boundary
 
 Freeze one useful mode: `miso.soft-clip`, `CubicSoftClip`, Normal quality, fixed 2x, DualMono only.

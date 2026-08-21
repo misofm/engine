@@ -1,5 +1,12 @@
 # 019 Launch fixed-2x cubic soft-clip saturator
 
+## Status — STOPPED/RESCOPED
+
+Terra attempt 1 and Sol attempt 2 are exhausted without an overall PASS. Accepted scalar
+checkpoint `e674d5e` is preserved as technical input only. Issue 053, **Launch soft-clip bank and
+graph closure**, owns the missing launch-product work; Issue 052 remains its downstream broad
+qualification. No Issue-019 benchmark was invoked.
+
 ## Outcome
 
 Ship one honest launch nonlinear processor: a Normal-only, fixed-2x, linear-phase FIR oversampled
@@ -153,3 +160,16 @@ link and `timed_benchmark_invocations=0`.
 - The bank remains deliberately unimplemented and returns legal `Ok(None)`. Registry, graph,
   Issue 052 qualification, audit, targets, benchmark, and listening were not run or changed. This
   checkpoint is not an overall Issue 019 PASS; `timed_benchmark_invocations=0`.
+
+## Final disposition — strict STOPPED/RESCOPED
+
+Both authorized attempts are consumed. The descriptor/scalar implementation and bounded evidence
+at `e674d5e` are accepted technical input, including the corrected coefficient bits, automation
+zero normalization, 31-sample latency, finite tail 29/support 60, state/reset/restore and isolated
+recovery proofs. They do not constitute overall Issue-019 PASS.
+
+W4/W8 banks, scalar tails, the single representative alias-claim row, registry/effect-compiler,
+ten-track graph/PDC/cap closure and final workspace/policy seal were not completed. They move
+without redesign to Issue 053, **Launch soft-clip bank and graph closure**. Broad corpus, audit,
+targets/instructions, benchmark and listening remain Issue 052 after Issue 053. No gate is relaxed
+and `timed_benchmark_invocations=0`.

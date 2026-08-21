@@ -2,13 +2,16 @@
 
 ## Outcome
 
-Qualify the fixed-2x cubic launch saturator after Issue 019 without changing its product contract.
+Qualify the fixed-2x cubic launch saturator after Issue 053 closes its product contract.
 
 ## Context
 
-This stateless qualification issue follows the accepted launch effect/runtime/rack/graph contracts,
-never V1, and permits exactly two attempts: Terra plus one Sol correction. Timed benchmark count is
-zero and no benchmark is authorized before every functional/preflight gate is green.
+Issue 019 stopped after two attempts and contributes accepted scalar checkpoint `e674d5e` only as
+technical input. Issue 053 owns the missing bank/registry/graph product closure. This stateless
+qualification issue starts only after Issue 053 passes, follows the accepted launch effect/runtime/
+rack/graph contracts, never V1, and permits exactly two attempts: Terra plus one Sol correction.
+Timed benchmark count is zero and no benchmark is authorized before every functional/preflight gate
+is green.
 
 ## Scope
 
@@ -16,12 +19,13 @@ Add the checked independent transfer/alias corpus across launch rates, expanded 
 asymmetric-lane matrices, 10,000 seeded transitions and million-sample finite rows, cohort/tail/
 determinism evidence, a 100,000-render realtime audit, native/AArch64/Wasm build and instruction
 gates, and audition/listening handoff. Research additional modes, ADAA and quality/factor choices as
-nonlaunch comparisons only; they cannot silently alter Issue 019.
+nonlaunch comparisons only; they cannot silently alter the accepted Issue-019 scalar or Issue-053
+product contract.
 
 ## Required public interfaces/contracts
 
-Consume the exact Issue-019 descriptor, table, state, scalar/W4/W8 and graph artifact. Qualification
-reports are deterministic, checksummed and separate from production DSP.
+Consume the exact accepted Issue-019 scalar and completed Issue-053 bank/registry/graph artifact.
+Qualification reports are deterministic, checksummed and separate from production DSP.
 
 ## Deliverables
 
@@ -35,7 +39,7 @@ claims, or blocking unrelated effect implementation.
 
 ## Dependencies by exact issue title
 
-- Launch fixed-2x cubic soft-clip saturator
+- Launch soft-clip bank and graph closure
 
 ## Hazards/decisions
 

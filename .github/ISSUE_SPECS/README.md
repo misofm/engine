@@ -68,7 +68,7 @@ without retry; its evidence remains descriptive rather than an optimization clai
 Issues 009, 022, 024, 031 and 026 wait for 037 because their completed product contracts require
 the retained production builtin-SIMD graph. Issue 038 is a dependency only of release
 qualification issue 026; it does not block scheduler issue 009, streaming issue 010, effects or
-deployment feature work. Issue 042 and Issues 013, 014, 019 and 021 continue to consume Issue 008's
+deployment feature work. Issue 042 and Issues 013, 014, 021 and 053 continue to consume Issue 008's
 preserved generic architecture/effect-bank slice without treating its stopped issue as PASS.
 
 Issue 009 stopped after its two-attempt budget without overall PASS. Upstream checkpoint `3236b9c`
@@ -145,12 +145,14 @@ audit, targets/instructions, the sole eventual one-warmup/two-round descriptive 
 audition/listening handoff. Both permit one Terra attempt plus one Sol correction. Their timed
 invocation counts start at zero; Issue 051 gates only release qualification Issue 026.
 
-Issue 019, **Launch fixed-2x cubic soft-clip saturator**, owns one Normal-quality effect-local 2x
-linear-phase FIR and cubic soft clip with scalar/W4/W8 plus representative registry/graph/PDC
-closure. Issue 052, **Launch saturator/clipper qualification, realtime audit, and benchmark**,
-follows 019 and owns expanded mode/quality research, corpus/long rows, realtime audit, complete
-targets/instructions, the sole eventual one-warmup/two-round descriptive benchmark and listening
-handoff. Both permit one Terra attempt plus one Sol correction and start with zero timed
+Issue 019, **Launch fixed-2x cubic soft-clip saturator**, stopped after its Terra and Sol attempts
+without overall PASS; accepted scalar checkpoint `e674d5e` remains technical input. Issue 053,
+**Launch soft-clip bank and graph closure**, owns only the missing W4/W8 banks, scalar tails, single
+representative alias claim, registry/effect-compiler and ten-track graph/PDC/cap product closure.
+Issue 052, **Launch saturator/clipper qualification, realtime audit, and benchmark**, follows 053
+and owns expanded mode/quality research, corpus/long rows, realtime audit, complete targets/
+instructions, the sole eventual one-warmup/two-round descriptive benchmark and listening handoff.
+Issues 053 and 052 each permit one Terra attempt plus one Sol correction and start with zero timed
 invocations; Issue 052 gates only release qualification Issue 026.
 
 ## Shared definition
