@@ -71,9 +71,10 @@ impl ReferencePeakCompressor {
             return Err(ReferenceCompressorError::InvalidInput);
         }
         let latency = (sample_rate_hz / 50.0) as usize;
-        let ring_length = latency.checked_add(1).ok_or(ReferenceCompressorError::InvalidInput)?;
-        let lookahead = (parameters.lookahead_ms * sample_rate_hz / 1000.0 + 0.5).floor()
-            as usize;
+        let ring_length = latency
+            .checked_add(1)
+            .ok_or(ReferenceCompressorError::InvalidInput)?;
+        let lookahead = (parameters.lookahead_ms * sample_rate_hz / 1000.0 + 0.5).floor() as usize;
         Ok(Self {
             sample_rate_hz,
             parameters,
@@ -112,9 +113,13 @@ impl ReferencePeakCompressor {
         let target = (output_db - input_db).clamp(-100.0, 0.0);
         let attack = (-1.0 / (0.001 * self.parameters.attack_ms * self.sample_rate_hz)).exp();
         let release = (-1.0 / (0.001 * self.parameters.release_ms * self.sample_rate_hz)).exp();
-        let coefficient = if target < self.gain_reduction_db { attack } else { release };
-        self.gain_reduction_db = coefficient * self.gain_reduction_db
-            + (1.0 - coefficient) * target;
+        let coefficient = if target < self.gain_reduction_db {
+            attack
+        } else {
+            release
+        };
+        self.gain_reduction_db =
+            coefficient * self.gain_reduction_db + (1.0 - coefficient) * target;
         let gain = 10.0_f64.powf((self.gain_reduction_db + self.parameters.makeup_db) * 0.05);
         let wet = delayed * gain;
         delayed + self.parameters.mix * (wet - delayed)

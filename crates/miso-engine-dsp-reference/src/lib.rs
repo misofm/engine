@@ -19,7 +19,9 @@ mod parametric_eq_time_domain_candidates;
 
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
-pub use compressor::{ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor};
+pub use compressor::{
+    ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor,
+};
 pub use parametric_eq::{
     ReferenceParametricEqCoefficients, ReferenceParametricEqError, ReferenceParametricEqKind,
     ReferenceParametricEqSection,
