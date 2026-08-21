@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use miso_engine_builtins_compiler::{MeterConsumer, PreparedBuiltinsSession};
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSamples};
@@ -32,6 +33,23 @@ pub struct GraphCompileFailure {
     pub effects: EffectPreparedSession,
     pub diagnostics: GraphDiagnosticSet,
 }
+/// Compile a graph with internally prepared issue-007 processors and observers.
+pub struct GraphBuiltinsCompileRequest {
+    pub plan_id: u64,
+    pub effects: EffectPreparedSession,
+    pub builtins: PreparedBuiltinsSession,
+    pub caps: GraphCompileCaps,
+}
+pub struct PreparedGraphBuiltinsArtifact {
+    pub graph: PreparedGraphPlan,
+    pub report: GraphCompileReport,
+    pub meter_consumers: Vec<MeterConsumer>,
+}
+pub struct GraphBuiltinsCompileFailure {
+    pub effects: EffectPreparedSession,
+    pub builtins: PreparedBuiltinsSession,
+    pub diagnostics: GraphDiagnosticSet,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphCompileReport {
     pub nodes: Vec<GraphNode>,
@@ -51,6 +69,57 @@ pub struct GraphCompileReport {
 }
 
 impl GraphCompiler {
+    #[allow(clippy::result_large_err)]
+    pub fn compile_with_builtins(
+        request: GraphBuiltinsCompileRequest,
+    ) -> Result<PreparedGraphBuiltinsArtifact, GraphBuiltinsCompileFailure> {
+        let GraphBuiltinsCompileRequest {
+            plan_id,
+            effects,
+            builtins,
+            caps,
+        } = request;
+        if effects.session.canonical_toml() != builtins.session.canonical_toml()
+            || effects.session.sample_rate() != builtins.session.sample_rate()
+            || effects.session.quantum() != builtins.session.quantum()
+        {
+            return Err(GraphBuiltinsCompileFailure {
+                effects,
+                builtins,
+                diagnostics: GraphDiagnosticSet::sorted(vec![diag(
+                    "builtin.session.mismatch",
+                    "$.session",
+                )]),
+            });
+        }
+        let compiled = match Self::compile(GraphCompileRequest {
+            plan_id,
+            effects,
+            caps,
+        }) {
+            Ok(value) => value,
+            Err(failure) => {
+                return Err(GraphBuiltinsCompileFailure {
+                    effects: failure.effects,
+                    builtins,
+                    diagnostics: failure.diagnostics,
+                });
+            }
+        };
+        let PreparedBuiltinsSession {
+            processors,
+            observers,
+            meter_consumers,
+            ..
+        } = builtins;
+        Ok(PreparedGraphBuiltinsArtifact {
+            graph: compiled
+                .graph
+                .attach_internal_bindings(processors, observers),
+            report: compiled.report,
+            meter_consumers,
+        })
+    }
     // The frozen transactional API returns the complete prepared-effect input by value on
     // failure. Boxing it would change that ownership contract solely to optimize a cold path.
     #[allow(clippy::result_large_err)]
@@ -1559,6 +1628,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
     use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
     use miso_engine_effect_compiler::EffectPreparedSession;
     use miso_engine_graph::{
@@ -1674,6 +1744,51 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    #[test]
+    fn builtins_replace_only_the_three_internal_track_bindings() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let builtins = prepare_session_builtins(
+            &compiled,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("builtins");
+        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 77,
+            effects: EffectPreparedSession {
+                session: compiled,
+                entries: Vec::new(),
+            },
+            builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("graph"));
+        assert_eq!(artifact.graph.required_bindings.len(), 2);
     }
 
     #[test]

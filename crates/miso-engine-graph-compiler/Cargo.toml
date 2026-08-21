@@ -14,6 +14,7 @@ miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-graph.workspace = true
+miso-engine-builtins-compiler.workspace = true
 sha2.workspace = true
 
 [lints]
