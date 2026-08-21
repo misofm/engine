@@ -126,3 +126,28 @@ No engine, mobile, browser, Wasm, render-thread, or DSP target changes.
 Shell syntax/policy report; hermetic exit/status and artifact matrix; mutation-test report; exact
 pre/post byte counts and SHA-256; frozen-validator transcript; explicit timed-workload invocation
 count; and confirmation that issue 006's failed attempt record was not edited or relabeled.
+
+## Terra attempt 1 — shell-only no-promotion checkpoint (2026-08-21)
+
+Candidate input was `b742c08`. The runner now retains the environment-prefixed workload command
+inside one `if ! (...)` condition while a scratch status file preserves the wrapped nonzero status.
+It validates raw JSONL before a same-directory temporary copy/no-clobber publication and keeps raw
+bytes on every rejection. New `scripts/promote-issue006-graph-benchmark.sh` is no-argument,
+contains no Cargo or benchmark-launch token, verifies the frozen source identity plus aggregate
+validator before a temporary copy/no-clobber publication, and never moves or edits raw bytes.
+
+`bash -n` passed for runner, promotion helper and hermetic test. The hermetic scratch suite passed:
+stub success (one counted stub launch and byte-identical raw/accepted), exact workload status `73`,
+interrupted partial status `130`, validator failure with raw hash reporting, existing raw/accepted
+symlink refusal, missing validator/jq refusal before launch, promotion success from a scratch copy,
+truncated/appended/validator-rejected/symlink/existing-destination promotion rejection, and both
+detached-`if !` and inverted-status mutations. It launched zero real Cargo/Rust graph workloads.
+
+Read-only real-source identity remains `10364` bytes, six LF records and SHA-256
+`c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5`; the unchanged aggregate
+validator returned zero. The real accepted path remains absent. GNU Bash was
+`5.2.21(1)-release`; jq was `1.7`; `git diff --check` passed.
+`issue_030_workload_invocations=0`; `issue_030_timed_invocations=0`. No real promotion was made,
+and Issue 006's failed historical runner record was not edited or relabeled. Terra verdict:
+**PARTIAL / GREEN SHELL CHECKPOINT** — ready for root commit/push and Sol review before the sole
+promotion-only action.
