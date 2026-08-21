@@ -2,17 +2,26 @@
 //!
 //! The binary has no command-line control surface. The fixed shell runner supplies only the
 //! warmup/round environment, while this program owns fixed 48 kHz, 128-frame production DSP.
+#![allow(unsafe_code)]
 
 use core::fmt::Write as _;
-use std::time::Instant;
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    time::Instant,
+};
 
 use miso_engine_builtins::{
     BuiltinChain, BuiltinInputBankV1, BuiltinParameters, ChannelParameters, DualMonoBlock,
 };
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
+use miso_engine_conformance::DualAccumulatorDelayFactory;
+use miso_engine_core::realtime::{
+    PlanarBufferMut, RenderIo, RenderTime,
+    audit::{self, ForbiddenOperation, record_allocator_violation},
+};
 use miso_engine_core::{KernelBackendV1, target_capabilities};
-use miso_engine_effect_compiler::EffectPreparedSession;
+use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     TrackStage,
@@ -20,9 +29,47 @@ use miso_engine_graph::{
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_rack::KernelDispatch;
 use miso_engine_session::{
-    CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml,
+    CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
+    SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
 };
 use sha2::{Digest, Sha256};
+
+struct AuditedAllocator;
+#[global_allocator]
+static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
+
+// SAFETY: every method forwards the allocator's original pointer/layout contract unchanged. An
+// allocation while the render audit is armed aborts instead of unwinding through `GlobalAlloc`.
+unsafe impl GlobalAlloc for AuditedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if record_allocator_violation(ForbiddenOperation::Allocation) {
+            std::process::abort();
+        }
+        // SAFETY: the allocator-provided layout is forwarded unchanged.
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if record_allocator_violation(ForbiddenOperation::Allocation) {
+            std::process::abort();
+        }
+        // SAFETY: the allocator-provided layout is forwarded unchanged.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        if record_allocator_violation(ForbiddenOperation::Deallocation) {
+            std::process::abort();
+        }
+        // SAFETY: the original pointer/layout pair is forwarded unchanged.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        if record_allocator_violation(ForbiddenOperation::Allocation) {
+            std::process::abort();
+        }
+        // SAFETY: the original allocation contract and requested size are forwarded unchanged.
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
 
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM: usize = 128;
@@ -67,6 +114,7 @@ struct Shape {
 }
 struct Measurement {
     ns_per_frame: Vec<u64>,
+    input_sha256: String,
     output_sha256: String,
     audit: audit::AuditSnapshot,
     render_errors: u64,
@@ -122,15 +170,25 @@ fn host_backend() -> KernelBackendV1 {
 fn measure(workload: Workload, backend: KernelBackendV1) -> (Measurement, Shape) {
     let mut runtime = Runtime::prepare(workload, backend);
     let mut durations = Vec::with_capacity(OBSERVATIONS);
+    let mut input_hash = Sha256::new();
+    let mut output_hash = Sha256::new();
     audit::warm_up();
     audit::reset();
     let mut render_errors = 0_u64;
     let mut panic_unwinds = 0_u64;
     for observation in 0..OBSERVATIONS {
-        // Frozen asymmetric dual-mono input is filled outside the timer; filter state is never reset.
+        // Frozen asymmetric dual-mono input is filled and identified outside the timer. Runtime
+        // state is continuous across all one thousand observations and is never reset.
         runtime.fill_input(observation as u64);
+        hash_semantic_input(
+            workload.tracks() as usize,
+            observation as u64,
+            &mut input_hash,
+        );
         let started = Instant::now();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.render()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.render(observation as u64)
+        }));
         let ns = u64::try_from(started.elapsed().as_nanos()).expect("duration fits u64")
             / QUANTUM as u64;
         match result {
@@ -138,11 +196,13 @@ fn measure(workload: Workload, backend: KernelBackendV1) -> (Measurement, Shape)
             Ok(Err(())) => render_errors += 1,
             Err(_) => panic_unwinds += 1,
         }
+        runtime.hash_output(&mut output_hash);
         durations.push(ns);
     }
     let measurement = Measurement {
         ns_per_frame: durations,
-        output_sha256: runtime.output_sha256(),
+        input_sha256: hex_digest(input_hash.finalize()),
+        output_sha256: hex_digest(output_hash.finalize()),
         audit: audit::snapshot(),
         render_errors,
         panic_unwinds,
@@ -170,18 +230,18 @@ impl Runtime {
             Self::Mixed(value) => value.fill_input(observation),
         }
     }
-    fn render(&mut self) -> Result<(), ()> {
+    fn render(&mut self, observation: u64) -> Result<(), ()> {
         match self {
-            Self::Scalar(value) => value.render(),
-            Self::Bank(value) => value.render(),
-            Self::Mixed(value) => value.render(),
+            Self::Scalar(value) => audit::in_render_scope(|| value.render(observation)),
+            Self::Bank(value) => audit::in_render_scope(|| value.render(observation)),
+            Self::Mixed(value) => value.render(observation),
         }
     }
-    fn output_sha256(&self) -> String {
+    fn hash_output(&self, hash: &mut Sha256) {
         match self {
-            Self::Scalar(value) => value.output_sha256(),
-            Self::Bank(value) => value.output_sha256(),
-            Self::Mixed(value) => value.output_sha256(),
+            Self::Scalar(value) => value.hash_output(hash),
+            Self::Bank(value) => value.hash_output(hash),
+            Self::Mixed(value) => value.hash_output(hash),
         }
     }
     const fn shape(&self) -> Shape {
@@ -233,24 +293,26 @@ impl ScalarRuntime {
     fn fill_input(&mut self, observation: u64) {
         fill_track_inputs(&mut self.left, &mut self.right, observation);
     }
-    fn render(&mut self) -> Result<(), ()> {
+    fn render(&mut self, observation: u64) -> Result<(), ()> {
         for (index, chain) in self.chains.iter_mut().enumerate() {
             chain
-                .process_dual_mono(
-                    DualMonoBlock::new(&mut self.left[index], &mut self.right[index], 0)
-                        .map_err(|_| ())?,
+                .process_input(
+                    DualMonoBlock::new(
+                        &mut self.left[index],
+                        &mut self.right[index],
+                        observation * QUANTUM as u64,
+                    )
+                    .map_err(|_| ())?,
                 )
                 .map_err(|_| ())?;
         }
         Ok(())
     }
-    fn output_sha256(&self) -> String {
-        hash_f32(
-            self.left
-                .iter()
-                .flatten()
-                .chain(self.right.iter().flatten()),
-        )
+    fn hash_output(&self, hash: &mut Sha256) {
+        for track in 0..self.left.len() {
+            hash_f32_into(hash, self.left[track].iter());
+            hash_f32_into(hash, self.right[track].iter());
+        }
     }
 }
 
@@ -282,14 +344,28 @@ impl BankRuntime {
     fn fill_input(&mut self, observation: u64) {
         fill_aosoa_inputs(&mut self.left, &mut self.right, 8, observation);
     }
-    fn render(&mut self) -> Result<(), ()> {
+    fn render(&mut self, observation: u64) -> Result<(), ()> {
         self.bank
-            .process(&mut self.left, &mut self.right, QUANTUM as u32, 0)
+            .process(
+                &mut self.left,
+                &mut self.right,
+                QUANTUM as u32,
+                observation * QUANTUM as u64,
+            )
             .map(|_| ())
             .map_err(|_| ())
     }
-    fn output_sha256(&self) -> String {
-        hash_f32(self.left.iter().chain(self.right.iter()))
+    fn hash_output(&self, hash: &mut Sha256) {
+        for track in 0..8 {
+            hash_f32_into(
+                hash,
+                (0..QUANTUM).map(|frame| &self.left[frame * 8 + track]),
+            );
+            hash_f32_into(
+                hash,
+                (0..QUANTUM).map(|frame| &self.right[frame * 8 + track]),
+            );
+        }
     }
 }
 
@@ -312,10 +388,55 @@ impl MixedRuntime {
         model.tracks = (0..12)
             .map(|index| {
                 let mut track = template.clone();
-                track.id = StableId::parse(&format!("bank{index}")).expect("frozen track id");
-                track.simd1.effects.clear();
+                let track_id = if index < 10 {
+                    format!("rack{index:02}")
+                } else {
+                    format!("fallback{index}")
+                };
+                track.id = StableId::parse(&track_id).expect("frozen track id");
+                let lane = index as f32;
+                track.builtins.left.trim_db = -3.0 + lane * 0.25;
+                track.builtins.left.hpf_hz = 40.0 + lane * 3.0;
+                track.builtins.left.lpf_hz = 15_000.0 - lane * 100.0;
+                track.builtins.right.trim_db = 2.0 - lane * 0.2;
+                track.builtins.right.hpf_hz = 60.0 + lane * 2.0;
+                track.builtins.right.lpf_hz = 14_000.0 - lane * 80.0;
                 track.dynamic.effects.clear();
                 track.simd2.effects.clear();
+                let mut effect = template.dynamic.effects[0].clone();
+                effect.id = StableId::parse("delay-main").expect("frozen effect id");
+                effect.identity = EffectIdentity::Native {
+                    effect_id: StableId::parse("conformance.delay")
+                        .expect("frozen native effect id"),
+                };
+                effect.params = vec![EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Both,
+                    unit: ParameterUnit::Linear,
+                    value: 0.75 + index as f32 * 0.031_25,
+                }];
+                effect.bypass = false;
+                effect.sidechain = if index < 10 {
+                    SidechainDeclaration::None
+                } else {
+                    SidechainDeclaration::Routed(Sidechain {
+                        source: RouteSource::Track {
+                            track_id: track.id.clone(),
+                            tap: SendTap::Input,
+                        },
+                        port_id: StableId::parse("sidechain-in").expect("frozen sidechain port"),
+                    })
+                };
+                // rack02/rack05 deliberately omit this leading slot. Their two missing positions
+                // are explicit identity lanes in the retained eight-track cohort report.
+                track.simd1.effects = if matches!(index, 2 | 5) || index >= 10 {
+                    vec![effect]
+                } else {
+                    let mut leading = effect.clone();
+                    leading.id = StableId::parse("delay-leading").expect("frozen effect id");
+                    leading.bypass = true;
+                    vec![leading, effect]
+                };
                 track
             })
             .collect();
@@ -361,12 +482,23 @@ impl MixedRuntime {
             },
         )
         .expect("mixed builtin preparation");
+        let registry = NativeEffectRegistry::new([
+            Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>,
+        ])
+        .expect("frozen conformance registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 24,
+                maximum_scratch_bytes: 1 << 24,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("mixed effect preparation");
         let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             plan_id: 38,
-            effects: EffectPreparedSession {
-                session,
-                entries: Vec::new(),
-            },
+            effects,
             builtins,
             caps: graph_caps(),
         }) {
@@ -378,6 +510,40 @@ impl MixedRuntime {
             1,
             "host-selected full production builtin bank"
         );
+        let builtin_banks: Vec<_> = artifact.prepared_builtin_banks().collect();
+        assert_eq!(builtin_banks.len(), 1);
+        assert_eq!(builtin_banks[0].backend, backend);
+        assert_eq!(builtin_banks[0].width.lanes(), 8);
+        assert_eq!(builtin_banks[0].members.len(), 8);
+        assert!(builtin_banks[0].active_mask.iter().all(|active| *active));
+        let cohorts = &artifact.report().rack_cohorts;
+        assert_eq!(cohorts.dispatch.backend(), backend);
+        assert_eq!(cohorts.simd1.banks.len(), 1, "one full track cohort");
+        assert_eq!(cohorts.simd1.banks[0].members.len(), 8);
+        assert_eq!(
+            cohorts.simd1.banks[0]
+                .members
+                .iter()
+                .flat_map(|member| member.active_slots.iter())
+                .filter(|active| !**active)
+                .count(),
+            2,
+            "two explicit identity/missing positions"
+        );
+        let compatible_tails = cohorts
+            .simd1
+            .scalar_tails
+            .iter()
+            .filter(|member| member.track_id.starts_with("rack"))
+            .count();
+        let incompatible_fallbacks = cohorts
+            .simd1
+            .scalar_tails
+            .iter()
+            .filter(|member| member.track_id.starts_with("fallback"))
+            .count();
+        assert_eq!(compatible_tails, 2, "stable compatible scalar tail");
+        assert_eq!(incompatible_fallbacks, 2, "connected-sidechain fallback");
         let envelope = artifact.envelope();
         let nodes = artifact
             .external_binding_nodes()
@@ -397,8 +563,11 @@ impl MixedRuntime {
             backend_name: backend_name(backend),
         }
     }
-    fn fill_input(&mut self, _observation: u64) {}
-    fn render(&mut self) -> Result<(), ()> {
+    fn fill_input(&mut self, _observation: u64) {
+        // Per-track input blocks were fully prepared before measurement. Production graph source
+        // bindings copy those immutable blocks when their graph nodes execute.
+    }
+    fn render(&mut self, observation: u64) -> Result<(), ()> {
         self.plan
             .render(
                 RenderIo {
@@ -406,32 +575,57 @@ impl MixedRuntime {
                     output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
                         .map_err(|_| ())?,
                 },
-                RenderTime { absolute_sample: 0 },
+                RenderTime {
+                    absolute_sample: observation * QUANTUM as u64,
+                },
             )
             .map(|_| ())
             .map_err(|_| ())
     }
-    fn output_sha256(&self) -> String {
-        hash_f32(self.output.iter())
+    fn hash_output(&self, hash: &mut Sha256) {
+        hash_f32_into(hash, self.output.iter());
     }
 }
 
 struct FrozenGraphSource {
-    track: usize,
+    blocks: Box<[FrozenDualMonoBlock]>,
+    observation: usize,
+}
+struct FrozenDualMonoBlock {
+    left: [f32; QUANTUM],
+    right: [f32; QUANTUM],
+}
+impl FrozenGraphSource {
+    fn new(track: usize) -> Self {
+        let blocks = (0..OBSERVATIONS)
+            .map(|observation| {
+                let mut left = [0.0; QUANTUM];
+                let mut right = [0.0; QUANTUM];
+                for frame in 0..QUANTUM {
+                    (left[frame], right[frame]) =
+                        asymmetric_input(track, frame, observation as u64);
+                }
+                FrozenDualMonoBlock { left, right }
+            })
+            .collect();
+        Self {
+            blocks,
+            observation: 0,
+        }
+    }
 }
 impl GraphRuntimeProcessor for FrozenGraphSource {
     fn process(
         &mut self,
         block: GraphBindingBlock<'_>,
     ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        for (frame, (left, right)) in block
-            .left
-            .iter_mut()
-            .zip(block.right.iter_mut())
-            .enumerate()
-        {
-            (*left, *right) = asymmetric_input(self.track, frame, 0);
-        }
+        let source = self
+            .blocks
+            .get(self.observation)
+            .expect("exactly one thousand prepared graph observations");
+        block.left.copy_from_slice(&source.left);
+        block.right.copy_from_slice(&source.right);
+        self.observation += 1;
         Ok(())
     }
 }
@@ -450,12 +644,13 @@ fn source_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
         stage: TrackStage::Input,
     } = node
     {
-        let track = track_id
-            .as_str()
-            .strip_prefix("bank")
+        let id = track_id.as_str();
+        let track = id
+            .strip_prefix("rack")
+            .or_else(|| id.strip_prefix("fallback"))
             .and_then(|value| value.parse().ok())
             .expect("frozen graph input");
-        Box::new(FrozenGraphSource { track })
+        Box::new(FrozenGraphSource::new(track))
     } else {
         Box::new(GraphIdentity)
     }
@@ -525,6 +720,20 @@ fn asymmetric_input(track: usize, frame: usize, observation: u64) -> (f32, f32) 
         -(ramp * (0.5 + lane * 0.125) - phase * 0.75),
     )
 }
+fn hash_semantic_input(tracks: usize, observation: u64, hash: &mut Sha256) {
+    for track in 0..tracks {
+        for channel in 0..2 {
+            for frame in 0..QUANTUM {
+                let sample = asymmetric_input(track, frame, observation);
+                hash.update(if channel == 0 {
+                    sample.0.to_bits().to_le_bytes()
+                } else {
+                    sample.1.to_bits().to_le_bytes()
+                });
+            }
+        }
+    }
+}
 fn backend_name(backend: KernelBackendV1) -> &'static str {
     match backend {
         KernelBackendV1::X86Avx2 => "X86Avx2",
@@ -532,12 +741,10 @@ fn backend_name(backend: KernelBackendV1) -> &'static str {
         _ => panic!("frozen host workload requires x86 AVX2"),
     }
 }
-fn hash_f32<'a>(values: impl Iterator<Item = &'a f32>) -> String {
-    let mut hash = Sha256::new();
+fn hash_f32_into<'a>(hash: &mut Sha256, values: impl Iterator<Item = &'a f32>) {
     for value in values {
         hash.update(value.to_bits().to_le_bytes());
     }
-    hex_digest(hash.finalize())
 }
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
     let mut result = String::with_capacity(64);
@@ -551,7 +758,6 @@ struct Identities {
     candidate_commit_sha256: String,
     binary_sha256: String,
     fixture_sha256: String,
-    input_sha256: String,
 }
 impl Identities {
     fn collect() -> Self {
@@ -559,9 +765,6 @@ impl Identities {
             candidate_commit_sha256: required_sha256("MISO_ENGINE_RACK_BENCH_CANDIDATE_SHA256"),
             binary_sha256: required_sha256("MISO_ENGINE_RACK_BENCH_BINARY_SHA256"),
             fixture_sha256: hex_digest(Sha256::digest(FIXTURE_BYTES)),
-            input_sha256: hex_digest(Sha256::digest(
-                b"issue038/asymmetric-dual-mono/v1/48000/128/continuous-state",
-            )),
         }
     }
 }
@@ -669,7 +872,7 @@ fn record_json(
         identities.binary_sha256,
         FIXTURE_ID,
         identities.fixture_sha256,
-        identities.input_sha256,
+        measurement.input_sha256,
         measurement.output_sha256,
         measurement.render_errors,
         measurement.audit.allocations,
@@ -707,5 +910,63 @@ impl Percentiles {
             p999: rank(999),
             max: values[OBSERVATIONS - 1],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_launch_preflight_prepares_each_exact_production_workload() {
+        let backend = host_backend();
+        for (workload, expected) in [
+            (Workload::ScalarEightTracks, ("Scalar", 1, 0, 8, 0, 0)),
+            (
+                Workload::HostSelectedEightTrackBank,
+                (backend_name(backend), 8, 1, 0, 0, 0),
+            ),
+            (
+                Workload::MixedTwelveTrackGraph,
+                (backend_name(backend), 8, 1, 2, 2, 2),
+            ),
+        ] {
+            let runtime = Runtime::prepare(workload, backend);
+            let shape = runtime.shape();
+            assert_eq!(
+                (
+                    shape.backend,
+                    shape.bank_width,
+                    shape.bank_count,
+                    shape.scalar_tail_count,
+                    shape.scalar_fallback_count,
+                    shape.identity_lane_count,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_input_identity_is_layout_independent_and_workload_specific() {
+        let identify = |tracks| {
+            let mut hash = Sha256::new();
+            for observation in 0..OBSERVATIONS as u64 {
+                hash_semantic_input(tracks, observation, &mut hash);
+            }
+            hex_digest(hash.finalize())
+        };
+        assert_eq!(identify(8), identify(8));
+        assert_ne!(identify(8), identify(12));
+    }
+
+    #[test]
+    fn nearest_rank_uses_the_frozen_one_thousand_observation_indices() {
+        let samples: Vec<_> = (1..=1_000).collect();
+        let p = Percentiles::from(&samples);
+        assert_eq!(
+            (p.min, p.p50, p.p95, p.p99, p.p999, p.max),
+            (1, 500, 950, 990, 999, 1_000)
+        );
     }
 }

@@ -156,3 +156,60 @@ errors. The preflight passed fixture hashing, all bounded per-key deletion/type 
 argument/source checks, release build and `workload_launches=0`. No benchmark binary or timing
 runner invocation was performed by Terra; the timed invocation count remains **0** pending root
 Sol authorization and review.
+
+## Sol attempt 1 adversarial verdict (2026-08-21)
+
+**FAIL; bounded correction required.** Review found that the runner supplied a 40-character Git
+object ID where the record schema required SHA-256, so the first warmup could never have produced
+an accepted record. The nominal mixed workload did not construct the frozen missing/identity,
+scalar-tail and incompatible-fallback shape, performed input work inside the graph render call and
+hashed only the last output block. The scalar workload timed the full builtin chain instead of the
+specified post-input TPT operation, direct scalar/bank calls lacked an armed allocation audit, and
+input identity was neither workload-specific nor a hash of the full measurement input. Validators
+also accepted matched nonzero forbidden-operation counters, while preflight did not exercise the
+required partial-output, interruption, pipe-failure and exactly-once artifact lifecycle. No timed
+workload was launched while discovering these defects; invocation count remained **0**.
+
+## Sol bounded correction / attempt 2 nonbenchmark verdict (2026-08-21)
+
+**NONBENCHMARK PASS; one timed invocation remains pending.** The correction now uses eight real
+scalar post-input TPT processors, one host-selected production eight-lane bank, and a sealed
+12-track production graph whose preparation asserts one eight-track cohort, two compatible scalar
+tails, two incompatible scalar fallbacks and two missing/identity slot positions. Per-track left
+and right parameters are asymmetric and nonidentity. All 1,000 deterministic source observations
+are prepared before graph timing; every observation times only the production operation, divides
+integer nanoseconds by 128, and hashes the complete semantic input and output streams outside the
+timer. Scalar and bank render regions arm the realtime audit allocator. The record validators now
+require every forbidden counter and the exact sum to be zero, exact six-record/two-round
+cardinality, stable per-workload identities and honest metadata/null accounting.
+
+The runner now derives the 64-character candidate SHA-256, rejects arguments, unsupported hosts,
+dirty trees and all pre-existing artifact paths before launch, uses append-only raw persistence,
+propagates pipeline failures and records checksummed PASS/FAIL disposition state. Hermetic
+zero-audio lifecycle tests cover warmup failure, partial round-one and round-two output, invalid
+aggregate output, metadata-pipeline failure, interruption, overwrite refusal, successful
+byte-identical promotion and rerun refusal. Fixture content and manifest mutations are checked
+independently.
+
+The final shared pre-commit checkpoint passed:
+
+- `cargo test --workspace --locked`, including all doctests;
+- warning-denied workspace Clippy and rustdoc, full locked workspace check and format;
+- rack-benchmark unit, schema/mutation, fixture and runner lifecycle tests;
+- workspace/realtime/builtin/graph/rack policies and their applicable mutations; and
+- fresh-process graph determinism at 100/100.
+
+The rack lifecycle suite reports `audio workload launches: 0`; no `artifacts/issue038` timing
+artifact exists and the timed invocation count is still **0**. Root owns the coherent checkpoint
+commit and upstream synchronization. After that exact commit passes
+`bash scripts/preflight-rack-benchmark.sh` on a clean AVX2 host with `workload_launches=0`, this Sol
+review authorizes root to invoke **exactly once**:
+
+```sh
+bash scripts/run-rack-benchmark.sh
+```
+
+That single invocation owns one warmup and two measured rounds. Any workload or runner failure
+consumes the authorization; preserve raw/disposition bytes and do not retry. Final Issue-038 PASS
+still requires the six accepted records, byte-identical raw/accepted hashes, PASS disposition and
+remote evidence synchronization.
