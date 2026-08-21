@@ -1926,7 +1926,7 @@ mod tests {
     };
     use miso_engine_session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
-        StableId, compile_session, parse_session_toml,
+        Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
     };
     use std::sync::{
         Arc,
@@ -2014,6 +2014,39 @@ mod tests {
             left: 0.03125 * (index + 1) as f32,
             right: -0.015625 * 9_u32.saturating_sub(index) as f32,
         })
+    }
+
+    fn accepted_compressor_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model =
+            parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
+        let mut tail = model.tracks[7].clone();
+        tail.id = StableId::parse("eq9").expect("stable tail id");
+        model.tracks.push(tail);
+        let mut tail_route = model.routes[7].clone();
+        tail_route.id = StableId::parse("eq9-main").expect("stable route id");
+        tail_route.source = RouteSource::Track {
+            track_id: StableId::parse("eq9").expect("stable tail id"),
+            tap: SendTap::PostMatrix,
+        };
+        model.routes.push(tail_route);
+        for track in &mut model.tracks {
+            let effect = &mut track.simd1.effects[0];
+            effect.id = StableId::parse("compressor").expect("stable effect id");
+            effect.identity = EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor id"),
+            };
+            effect.params.clear();
+            effect.sidechain = SidechainDeclaration::None;
+        }
+        // `eq8` remains in the accepted graph but must never enter the homogeneous bank.
+        model.tracks[8].simd1.effects[0].sidechain = SidechainDeclaration::Routed(Sidechain {
+            source: RouteSource::Track {
+                track_id: StableId::parse("eq0").expect("stable source id"),
+                tap: SendTap::PostMatrix,
+            },
+            port_id: StableId::parse("sidechain-in").expect("stable sidechain port"),
+        });
+        model
     }
 
     /// A deterministic factory failure used to prove the bank binder leaves its already prepared
@@ -3014,6 +3047,220 @@ mod tests {
                 .all(|(index, sample)| index == 0 || index == frames || *sample == 0.0),
             "bypass retains the dry impulse without changing the rack graph"
         );
+    }
+
+    #[test]
+    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change() {
+        let model = accepted_compressor_graph_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted compressor fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let compressor = registry
+            .get_shared_ascii("miso.compressor")
+            .expect("registered compressor");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: compressor,
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar compressor registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared compressor effects");
+        assert_eq!(effects.entries.len(), 10);
+        assert!(
+            effects
+                .entries
+                .iter()
+                .all(|entry| entry.metadata.latency == LatencySamples(960))
+        );
+        let scalar_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared scalar compressor effects");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_013,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("compressor graph: {:?}", failure.diagnostics));
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_014,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar compressor graph: {:?}", failure.diagnostics));
+        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        if width.is_some() {
+            assert_eq!(artifact.graph.prepared_bank_count(), 1);
+            assert_eq!(artifact.report.rack_cohorts.simd1.banks.len(), 1);
+            assert_eq!(artifact.report.rack_cohorts.simd1.scalar_tails.len(), 2);
+            assert!(
+                artifact
+                    .report
+                    .rack_cohorts
+                    .simd1
+                    .scalar_tails
+                    .iter()
+                    .any(|tail| tail.track_id.as_ref() == "eq8")
+            );
+            assert!(
+                artifact
+                    .report
+                    .rack_cohorts
+                    .simd1
+                    .scalar_tails
+                    .iter()
+                    .any(|tail| tail.track_id.as_ref() == "eq9")
+            );
+        } else {
+            assert_eq!(artifact.graph.prepared_bank_count(), 0);
+            assert_eq!(artifact.report.rack_cohorts.simd1.scalar_tails.len(), 10);
+        }
+        assert_eq!(
+            artifact.report.sequential_schedule,
+            scalar_artifact.report.sequential_schedule
+        );
+        assert_eq!(
+            artifact.report.route_timings,
+            scalar_artifact.report.route_timings
+        );
+        assert_eq!(
+            artifact.report.inserted_delays,
+            scalar_artifact.report.inserted_delays
+        );
+        let expected_schedule = artifact.report.sequential_schedule.clone();
+        let expected_route_timings = artifact.report.route_timings.clone();
+
+        let PreparedGraphArtifact {
+            graph: bank_graph,
+            report: _,
+        } = artifact;
+        let PreparedGraphArtifact {
+            graph: scalar_graph,
+            report: _,
+        } = scalar_artifact;
+        let envelope = bank_graph.envelope;
+        let bank_nodes = bank_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
+            .collect();
+        let scalar_nodes = scalar_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
+            .collect();
+        let mut bank_plan = bank_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bank_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("compressor bank bind: {}", failure.code));
+        let mut scalar_plan = scalar_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("compressor scalar bind: {}", failure.code));
+        let frames = envelope.quantum.0 as usize;
+        let mut rendered_nonzero = false;
+        for block in 0..16_u64 {
+            let mut bank_pcm = vec![0.0_f32; frames * 2];
+            let mut scalar_pcm = vec![0.0_f32; frames * 2];
+            bank_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
+                            .expect("bank output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("bank render");
+            scalar_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                            .expect("scalar output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("scalar render");
+            assert_eq!(
+                bank_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                scalar_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "retained compressor bank and scalar fallback render the same PCM"
+            );
+            rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
+        }
+        assert!(
+            rendered_nonzero,
+            "the fixed-delay compressor path rendered after its latency"
+        );
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.simd1.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("bypass compressor fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass compressor effects");
+        assert!(
+            bypass_effects
+                .entries
+                .iter()
+                .all(|entry| entry.metadata.latency == LatencySamples(960))
+        );
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_015,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass compressor graph: {:?}", failure.diagnostics));
+        assert_eq!(
+            bypass_artifact.report.sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
     }
 
     #[test]

@@ -174,3 +174,26 @@ Focused evidence run by Terra (no benchmark invocation):
 This is not a final Issue-013 verdict. W4 runtime evidence, cross-target instruction inspection,
 connected-sidechain scalar fallback in a production graph, corpus/seeded/million-sample evidence,
 fixtures, realtime audit, target matrix and benchmark remain unrun and unclaimed.
+
+## Terra attempt 1 checkpoint evidence — registry and graph vertical
+
+The caller-injected V1 launch registry now contains `miso.parametric-eq` and
+`miso.compressor`; no render-reachable global catalog was introduced. The focused graph test builds
+an accepted ten-track compressor session from the existing accepted nine-track session shape: nine
+unconnected compressor tracks form an exact-width bank plus scalar tail on bank-capable dispatch,
+and one routed `sidechain-in` compressor is retained as a scalar fallback. It renders sixteen
+consecutive 48-kHz/128-frame blocks through both the retained-bank graph and a test-only
+scalar-delegate registry, requiring bit-exact PCM. The test also verifies fixed 960-sample effect
+metadata, unchanged schedule/route-PDC records relative to scalar dispatch, and unchanged metadata
+and PDC records with all compressor instances bypassed.
+
+Focused evidence run by Terra (no benchmark invocation):
+
+- `cargo fmt --check --package miso-engine-effect-compiler --package miso-engine-graph-compiler` — PASS.
+- `cargo test --locked -p miso-engine-effect-compiler --test native_session` — PASS, 4 tests.
+- `cargo test --locked -p miso-engine-graph-compiler --lib` — PASS, 16 tests.
+- `cargo clippy --locked -p miso-engine-effect-compiler -p miso-engine-graph-compiler --all-targets -- -D warnings` — PASS.
+
+This remains a bounded graph integration checkpoint only. It does not claim a checked corpus,
+full target/runtime qualification, the realtime audit, seeded or million-sample matrices, or any
+benchmark/listening result.

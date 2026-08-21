@@ -75,7 +75,8 @@ pub struct EffectPreparedSession {
 /// into [`prepare_native_session_effects`]; there is no render-reachable global catalog.
 pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
-        Box::new(miso_engine_parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>
+        Box::new(miso_engine_parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
+        Box::new(miso_engine_compressor::CompressorFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
 

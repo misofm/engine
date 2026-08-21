@@ -180,8 +180,9 @@ fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
     )
     .expect("compiled fixture");
     let registry = launch_native_effect_registry_v1().expect("launch registry");
-    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.len(), 2);
     assert!(registry.get_ascii("miso.parametric-eq").is_some());
+    assert!(registry.get_ascii("miso.compressor").is_some());
     let prepared = prepare_native_session_effects(&session, &registry, caps()).expect("prepared");
     assert_eq!(prepared.entries.len(), 9);
 }

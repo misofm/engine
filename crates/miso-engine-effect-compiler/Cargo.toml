@@ -13,6 +13,7 @@ miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-parametric-eq.workspace = true
+miso-engine-compressor.workspace = true
 
 [lints]
 workspace = true
