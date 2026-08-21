@@ -20,12 +20,13 @@ fi
 
 CARGO_TARGET_DIR="$target_directory" RUSTFLAGS='-C target-feature=-simd128' \
     cargo build --locked --release --target wasm32-unknown-unknown \
-    -p miso-engine-core -p miso-engine-target-smoke
+    -p miso-engine-core -p miso-engine-source -p miso-engine-target-smoke
 
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 for archive in \
     "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_core-*.rlib \
+    "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_source-*.rlib \
     "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_target_smoke-*.rlib; do
     [[ -f "$archive" ]] || continue
     archive="$(realpath "$archive")"

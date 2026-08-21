@@ -174,3 +174,29 @@ The bounded contract above is approved for Terra attempt 1. Use the companion st
 `BRIEFS/010-jit-pcm-streaming-and-host-supplied-source-rings.md`. Keep one source crate, one fixture
 framework and one render audit. Do not add a benchmark, PCM protocol message, host adapter, codec,
 SRC, broad parser catalog or generic qualification tool. Split any such need into a later issue.
+
+## Terra attempt 1 evidence (2026-08-21)
+
+**Status: PASS — ready for Sol adversarial review. Benchmark invocation count: 0.**
+
+- The single sorted `fixtures/sources/v1` manifest/checker passed, including RIFF/RF64,
+  classic/extensible, all six scalar encodings, odd padding, independent `f32`-bit oracles, and
+  malformed header/format/cap/duplicate-data mutations.
+- Native source preparation tests cover identity/rate/channel/region rejection, fixed caps,
+  one-source/three-track repeated-and-crossed 4-channel fan-out, transactional source-set binding,
+  and rollback after a later resolver failure. Ring tests cover capacity-one-quantum, wraparound,
+  full/empty, EOF, and generation-tagged stale discard behavior.
+- `miso-engine-source-audit` ran once as functional evidence (not a benchmark): exactly 100,000
+  48-kHz/128-frame reads; one injected unavailable block produced 128 positive-zero underrun
+  frames and one maximal event; a generation-tagged source resumed at frame 256; output storage
+  address stayed fixed; allocation, free, lock, log, file-I/O, network-I/O, and syscall counters
+  were all zero. The one-minute and sparse-multi-hour labels use the identical fixed source
+  settings and produced equal exact retained resource reports; retained engine layout has no
+  duration input. `descriptive_rss_bytes` is deliberately `null` in this headless runner and is
+  not substituted for the exact engine-owned report.
+- Locked quality gates passed: workspace check/test, `-D warnings` Clippy, warning-denied rustdoc,
+  and workspace formatting. Realtime policy and its mutation tests passed. The Wasm local-source
+  opcode inspection now includes `miso-engine-source` and found no atomic opcode.
+- Source+graph compile logs passed for Android ARM64, iOS ARM64, Wasm scalar, and Wasm `simd128`.
+  The native parser/worker modules are cfg-excluded on Wasm; no device/browser runtime claim is
+  made. No timed benchmark, timing threshold, codec, SRC, protocol PCM, or host runtime was added.
