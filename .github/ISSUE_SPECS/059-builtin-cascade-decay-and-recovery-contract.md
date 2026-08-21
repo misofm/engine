@@ -80,3 +80,26 @@ object inspection, benchmarks, timing, or listening.
 Exact candidate identity; four-rate per-section/per-lane timeline and totals; partition/probe
 invariance hashes; decision and any changed public semantics; focused commands/results; strict
 Terra/Sol verdicts; `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence
+
+The repeated cascade reports were ordinary finite-subnormal retained-state decay incorrectly
+classified as invalid recovery. The bounded correction canonicalizes finite subnormal state to
+positive zero without a recovery increment in scalar and bank paths; only nonfinite retained state
+resets and increments `BuiltinProcessReport`. Coefficients, recurrence order, response, latency,
+tail and retained layout are unchanged.
+
+Independent retained-`f32` recurrence and production agree bit-for-bit per section/lane across all
+five partitions and duplicated probe metadata. Canonicalization event samples `[HPF L/R, LPF L/R]`
+and transcript hashes are: 44,100 `[[36229,36229],[36225,36225]]` / `41e00de8a16c7fbb`;
+48,000 `[[39435,39435],[39433,39433]]` / `a0ff07932e1b7a8d`; 88,200
+`[[385,385],[960,960]]` / `cdda7646b0504e2a`; and 96,000
+`[[414,414],[1133,1133]]` / `2023c64000bb1500`. Every lane reports zero recovery.
+
+Focused PASS: format; builtins 26/26; dsp-reference 10 pass with two unrelated ignored;
+warning-denied all-target Clippy for builtins/reference/fixture; and `git diff --check`. The checked
+fixture validator remains red only because the intentionally unchanged stopped-#56 CSV still
+serializes the old count (`34` at the first cascade); Issue 060 owns that corpus update. No audit,
+target, benchmark or timing command ran. `workload_invocations=0`;
+`timed_benchmark_invocations=0`. Terra verdict: **PASS READY FOR SOL REVIEW**, with corpus seal
+explicitly pending Issue 060.

@@ -47,7 +47,10 @@ pub use soft_clip::{
     ReferenceSoftClip, ReferenceSoftClipError, reference_cubic_soft_clip, reference_halfband_63,
 };
 pub use spectrum::{Complex64, SpectrumError, direct_dft_bin, direct_dft_frequency, magnitude_db};
-pub use tpt::{ReferenceTptOutput, ReferenceTptStateSpace, rbj_butterworth_magnitude_db};
+pub use tpt::{
+    ReferenceRetainedTptF32, ReferenceTptOutput, ReferenceTptRetainedAction,
+    ReferenceTptRetainedStep, ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
+};
 pub use transient_shaper::{
     ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,
     reference_transient_shaper_coefficient,

@@ -71,7 +71,15 @@ pub enum BuiltinParameterError {
 pub struct BuiltinProcessReport {
     pub sanitized_input: u64,
     pub sanitized_output: u64,
+    /// Invalid retained-state recoveries for the left lane only.
+    ///
+    /// Finite subnormal retained values are canonicalized to positive zero before they can be
+    /// committed; they do not increment this counter.
     pub recovered_left_state: u64,
+    /// Invalid retained-state recoveries for the right lane only.
+    ///
+    /// Finite subnormal retained values are canonicalized to positive zero before they can be
+    /// committed; they do not increment this counter.
     pub recovered_right_state: u64,
 }
 
@@ -543,9 +551,12 @@ impl TptSvf {
         if !self.enabled {
             return input;
         }
-        if !normal_or_zero(self.s1) || !normal_or_zero(self.s2) {
+        if !self.s1.is_finite() || !self.s2.is_finite() {
             self.reset();
             *recovered = recovered.saturating_add(1);
+        } else {
+            self.s1 = canonicalize_retained_state(self.s1);
+            self.s2 = canonicalize_retained_state(self.s2);
         }
         let v3 = input - self.s2;
         let p1 = self.a2 * v3;
@@ -564,13 +575,13 @@ impl TptSvf {
         let kh = self.k * v1;
         let th = input - kh;
         let high = th - v2;
-        if !normal_or_zero(n1) || !normal_or_zero(n2) {
+        if !n1.is_finite() || !n2.is_finite() {
             self.reset();
             *recovered = recovered.saturating_add(1);
             return 0.0;
         }
-        self.s1 = n1;
-        self.s2 = n2;
+        self.s1 = canonicalize_retained_state(n1);
+        self.s2 = canonicalize_retained_state(n2);
         sanitize(
             if self.high_pass { high } else { low },
             &mut report.sanitized_output,
@@ -948,10 +959,13 @@ impl BuiltinFilterBank {
                 // operand keeps their retained state exactly unchanged, including for NaN,
                 // infinity, subnormal and signed-zero input payloads.
                 samples[lane] = 0.0;
-            } else if !normal_or_zero(self.s1[lane]) || !normal_or_zero(self.s2[lane]) {
+            } else if !self.s1[lane].is_finite() || !self.s2[lane].is_finite() {
                 self.s1[lane] = 0.0;
                 self.s2[lane] = 0.0;
                 *recovered = recovered.saturating_add(1);
+            } else {
+                self.s1[lane] = canonicalize_retained_state(self.s1[lane]);
+                self.s2[lane] = canonicalize_retained_state(self.s2[lane]);
             }
         }
         kernel
@@ -971,12 +985,14 @@ impl BuiltinFilterBank {
                 samples[lane] = dry[lane];
                 continue;
             }
-            if !normal_or_zero(self.s1[lane]) || !normal_or_zero(self.s2[lane]) {
+            if !self.s1[lane].is_finite() || !self.s2[lane].is_finite() {
                 self.s1[lane] = 0.0;
                 self.s2[lane] = 0.0;
                 *recovered = recovered.saturating_add(1);
                 samples[lane] = 0.0;
             } else {
+                self.s1[lane] = canonicalize_retained_state(self.s1[lane]);
+                self.s2[lane] = canonicalize_retained_state(self.s2[lane]);
                 samples[lane] = sanitize(samples[lane], &mut report.sanitized_output);
             }
         }
@@ -1575,6 +1591,10 @@ fn db_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 fn normal_or_zero(value: f32) -> bool {
     value.is_finite() && !value.is_subnormal()
 }
+/// Canonicalize legal finite filter-state underflow without reporting invalid-state recovery.
+fn canonicalize_retained_state(value: f32) -> f32 {
+    if value.is_subnormal() { 0.0 } else { value }
+}
 fn zero(value: f32) -> f32 {
     if value == 0.0 { 0.0 } else { value }
 }
@@ -1595,8 +1615,8 @@ mod tests {
     use super::*;
     use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
     use miso_engine_dsp_reference::{
-        ReferenceBiquad, ReferenceFilterKind, ReferenceTptOutput, ReferenceTptStateSpace,
-        rbj_butterworth_magnitude_db,
+        ReferenceBiquad, ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput,
+        ReferenceTptRetainedAction, ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
     };
 
     // Issue 032: the first tier is launch-gated; the second remains informational compatibility
@@ -3034,6 +3054,450 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct CascadeRecoveryEvent {
+        sample: u32,
+        section: u8,
+        lane: u8,
+        pre_state_bits: [u32; 2],
+        next_state_bits: [u32; 2],
+        output_bits: u32,
+        action: ReferenceTptRetainedAction,
+        recovery_delta: u64,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct CascadeTimeline {
+        pcm_bits: Vec<[u32; 2]>,
+        final_state_bits: [u32; 8],
+        report: BuiltinProcessReport,
+        events: Vec<CascadeRecoveryEvent>,
+    }
+
+    fn fixed_cascade_parameters() -> BuiltinParameters {
+        BuiltinParameters {
+            left: ChannelParameters {
+                hpf_hz: 100.0,
+                lpf_hz: 1_000.0,
+                ..ChannelParameters::default()
+            },
+            right: ChannelParameters {
+                hpf_hz: 100.0,
+                lpf_hz: 1_000.0,
+                ..ChannelParameters::default()
+            },
+            ..BuiltinParameters::default()
+        }
+    }
+
+    fn filter_state_bits(filter: &TptSvf) -> [u32; 2] {
+        [filter.s1.to_bits(), filter.s2.to_bits()]
+    }
+
+    fn input_state_bits(input: &InputBuiltins) -> [u32; 8] {
+        [
+            input.left.hpf.s1.to_bits(),
+            input.left.hpf.s2.to_bits(),
+            input.left.lpf.s1.to_bits(),
+            input.left.lpf.s2.to_bits(),
+            input.right.hpf.s1.to_bits(),
+            input.right.hpf.s2.to_bits(),
+            input.right.lpf.s1.to_bits(),
+            input.right.lpf.s2.to_bits(),
+        ]
+    }
+
+    fn assert_reference_coefficients(production: &TptSvf, reference: ReferenceRetainedTptF32) {
+        assert_eq!(
+            [
+                production.c1.to_bits(),
+                production.a2.to_bits(),
+                production.a3.to_bits(),
+                production.k.to_bits(),
+            ],
+            reference.coefficient_bits(),
+            "independent retained coefficient words"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_cascade_section(
+        production: &mut TptSvf,
+        reference: &mut ReferenceRetainedTptF32,
+        input: f32,
+        sample: u32,
+        section: u8,
+        lane: u8,
+        recovered: &mut u64,
+        report: &mut BuiltinProcessReport,
+        events: &mut Vec<CascadeRecoveryEvent>,
+    ) -> f32 {
+        let production_pre = filter_state_bits(production);
+        let recovered_before = *recovered;
+        let output = production.process(input, recovered, report);
+        let reference_step = reference.process(input);
+        assert_eq!(
+            production_pre, reference_step.pre_state_bits,
+            "rate-independent pre-state section={section} lane={lane} sample={sample}"
+        );
+        assert_eq!(
+            filter_state_bits(production),
+            reference_step.next_state_bits,
+            "rate-independent next-state section={section} lane={lane} sample={sample}"
+        );
+        assert_eq!(
+            output.to_bits(),
+            reference_step.output_bits,
+            "rate-independent output section={section} lane={lane} sample={sample}"
+        );
+        let recovery_delta = recovered.saturating_sub(recovered_before);
+        assert_eq!(
+            recovery_delta, reference_step.recovery_delta,
+            "rate-independent recovery section={section} lane={lane} sample={sample}"
+        );
+        if reference_step.action != ReferenceTptRetainedAction::FiniteNormal {
+            events.push(CascadeRecoveryEvent {
+                sample,
+                section,
+                lane,
+                pre_state_bits: production_pre,
+                next_state_bits: filter_state_bits(production),
+                output_bits: output.to_bits(),
+                action: reference_step.action,
+                recovery_delta,
+            });
+        }
+        output
+    }
+
+    fn trace_fixed_cascade(rate: u32, quantum: usize) -> CascadeTimeline {
+        let mut input = BuiltinChain::new(rate, fixed_cascade_parameters())
+            .expect("prepared cascade")
+            .into_input_builtins();
+        let mut reference_left_high = ReferenceRetainedTptF32::conditioned_butterworth(
+            rate,
+            100.0,
+            ReferenceTptOutput::HighPass,
+        )
+        .expect("reference high");
+        let mut reference_left_low = ReferenceRetainedTptF32::conditioned_butterworth(
+            rate,
+            1_000.0,
+            ReferenceTptOutput::LowPass,
+        )
+        .expect("reference low");
+        let mut reference_right_high = reference_left_high;
+        let mut reference_right_low = reference_left_low;
+        assert_reference_coefficients(&input.left.hpf, reference_left_high);
+        assert_reference_coefficients(&input.left.lpf, reference_left_low);
+        assert_reference_coefficients(&input.right.hpf, reference_right_high);
+        assert_reference_coefficients(&input.right.lpf, reference_right_low);
+
+        let mut report = BuiltinProcessReport::default();
+        let mut recovered_left = 0;
+        let mut recovered_right = 0;
+        let mut pcm_bits = Vec::with_capacity(rate as usize);
+        let mut events = Vec::new();
+        for block_start in (0..rate as usize).step_by(quantum) {
+            let block_end = (block_start + quantum).min(rate as usize);
+            for index in block_start..block_end {
+                let sample = u32::try_from(index).expect("one second fits u32");
+                let dry = if index == 0 { 1.0 } else { 0.0 };
+                let left_high = trace_cascade_section(
+                    &mut input.left.hpf,
+                    &mut reference_left_high,
+                    dry,
+                    sample,
+                    0,
+                    0,
+                    &mut recovered_left,
+                    &mut report,
+                    &mut events,
+                );
+                let left = trace_cascade_section(
+                    &mut input.left.lpf,
+                    &mut reference_left_low,
+                    left_high,
+                    sample,
+                    1,
+                    0,
+                    &mut recovered_left,
+                    &mut report,
+                    &mut events,
+                );
+                let right_high = trace_cascade_section(
+                    &mut input.right.hpf,
+                    &mut reference_right_high,
+                    dry,
+                    sample,
+                    0,
+                    1,
+                    &mut recovered_right,
+                    &mut report,
+                    &mut events,
+                );
+                let right = trace_cascade_section(
+                    &mut input.right.lpf,
+                    &mut reference_right_low,
+                    right_high,
+                    sample,
+                    1,
+                    1,
+                    &mut recovered_right,
+                    &mut report,
+                    &mut events,
+                );
+                pcm_bits.push([left.to_bits(), right.to_bits()]);
+            }
+        }
+        report.recovered_left_state = recovered_left;
+        report.recovered_right_state = recovered_right;
+        CascadeTimeline {
+            pcm_bits,
+            final_state_bits: input_state_bits(&input),
+            report,
+            events,
+        }
+    }
+
+    fn render_fixed_cascade_public(rate: u32, quantum: usize) -> CascadeTimeline {
+        let mut input = BuiltinChain::new(rate, fixed_cascade_parameters())
+            .expect("prepared cascade")
+            .into_input_builtins();
+        let mut report = BuiltinProcessReport::default();
+        let mut pcm_bits = Vec::with_capacity(rate as usize);
+        for block_start in (0..rate as usize).step_by(quantum) {
+            let frames = (rate as usize - block_start).min(quantum);
+            let mut left = vec![0.0; frames];
+            let mut right = vec![0.0; frames];
+            if block_start == 0 {
+                left[0] = 1.0;
+                right[0] = 1.0;
+            }
+            report.add(
+                input
+                    .process(
+                        DualMonoBlock::new(&mut left, &mut right, block_start as u64)
+                            .expect("block"),
+                    )
+                    .expect("input render"),
+            );
+            pcm_bits.extend(
+                left.into_iter()
+                    .zip(right)
+                    .map(|(left, right)| [left.to_bits(), right.to_bits()]),
+            );
+        }
+        CascadeTimeline {
+            pcm_bits,
+            final_state_bits: input_state_bits(&input),
+            report,
+            events: Vec::new(),
+        }
+    }
+
+    fn timeline_hash(timeline: &CascadeTimeline) -> u64 {
+        fn mix(hash: &mut u64, word: u64) {
+            *hash ^= word;
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        for [left, right] in &timeline.pcm_bits {
+            mix(&mut hash, u64::from(*left));
+            mix(&mut hash, u64::from(*right));
+        }
+        for word in timeline.final_state_bits {
+            mix(&mut hash, u64::from(word));
+        }
+        for word in [
+            timeline.report.sanitized_input,
+            timeline.report.sanitized_output,
+            timeline.report.recovered_left_state,
+            timeline.report.recovered_right_state,
+        ] {
+            mix(&mut hash, word);
+        }
+        for event in &timeline.events {
+            mix(&mut hash, u64::from(event.sample));
+            mix(&mut hash, u64::from(event.section));
+            mix(&mut hash, u64::from(event.lane));
+            for word in event
+                .pre_state_bits
+                .into_iter()
+                .chain(event.next_state_bits)
+            {
+                mix(&mut hash, u64::from(word));
+            }
+            mix(&mut hash, u64::from(event.output_bits));
+            mix(
+                &mut hash,
+                match event.action {
+                    ReferenceTptRetainedAction::FiniteNormal => 0,
+                    ReferenceTptRetainedAction::SubnormalCanonicalization => 1,
+                    ReferenceTptRetainedAction::InvalidRecovery => 2,
+                },
+            );
+            mix(&mut hash, event.recovery_delta);
+        }
+        hash
+    }
+
+    fn probe_metadata_hash(timeline: &CascadeTimeline, rate: u32, probe: f64) -> u64 {
+        let mut hash = probe.to_bits() ^ u64::from(rate);
+        for [left, right] in &timeline.pcm_bits {
+            hash ^= u64::from(*left);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            hash ^= u64::from(*right);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    fn event_counts(timeline: &CascadeTimeline) -> [[usize; 2]; 2] {
+        let mut counts = [[0; 2]; 2];
+        for event in &timeline.events {
+            counts[event.section as usize][event.lane as usize] += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn fixed_cascade_recovery_timeline_is_independent_partition_and_probe_invariant() {
+        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+            let baseline = trace_fixed_cascade(rate, 1);
+            let public_baseline = render_fixed_cascade_public(rate, 1);
+            assert_eq!(
+                baseline.pcm_bits, public_baseline.pcm_bits,
+                "public PCM rate={rate}"
+            );
+            assert_eq!(
+                baseline.final_state_bits, public_baseline.final_state_bits,
+                "public state rate={rate}"
+            );
+            assert_eq!(
+                baseline.report, public_baseline.report,
+                "public report rate={rate}"
+            );
+            assert_eq!(
+                baseline.report.recovered_left_state, 0,
+                "left recovery rate={rate}"
+            );
+            assert_eq!(
+                baseline.report.recovered_right_state, 0,
+                "right recovery rate={rate}"
+            );
+            assert!(
+                baseline
+                    .events
+                    .iter()
+                    .all(|event| event.action
+                        == ReferenceTptRetainedAction::SubnormalCanonicalization),
+                "only finite underflow may occur rate={rate}"
+            );
+            assert!(
+                !baseline.events.is_empty(),
+                "must observe underflow rate={rate}"
+            );
+            let baseline_hash = timeline_hash(&baseline);
+            let (expected_events, expected_hash) = match rate {
+                44_100 => ([[36_229, 36_229], [36_225, 36_225]], 0x41e0_0de8_a16c_7fbb),
+                48_000 => ([[39_435, 39_435], [39_433, 39_433]], 0xa0ff_0793_2e1b_7a8d),
+                88_200 => ([[385, 385], [960, 960]], 0xcdda_7646_b050_4e2a),
+                96_000 => ([[414, 414], [1_133, 1_133]], 0x2023_c640_00bb_1500),
+                _ => unreachable!("launch-rate iteration"),
+            };
+            assert_eq!(
+                event_counts(&baseline),
+                expected_events,
+                "event totals rate={rate}"
+            );
+            assert_eq!(baseline_hash, expected_hash, "timeline hash rate={rate}");
+            for quantum in [127, 128, 255, 1_024] {
+                let candidate = trace_fixed_cascade(rate, quantum);
+                let public = render_fixed_cascade_public(rate, quantum);
+                assert_eq!(
+                    candidate, baseline,
+                    "trace partition rate={rate} quantum={quantum}"
+                );
+                assert_eq!(
+                    public.pcm_bits, baseline.pcm_bits,
+                    "public PCM rate={rate} quantum={quantum}"
+                );
+                assert_eq!(
+                    public.final_state_bits, baseline.final_state_bits,
+                    "public state rate={rate} quantum={quantum}"
+                );
+                assert_eq!(
+                    public.report, baseline.report,
+                    "public report rate={rate} quantum={quantum}"
+                );
+            }
+            for probe in cascade_probes(rate) {
+                let first = probe_metadata_hash(&baseline, rate, probe);
+                let duplicate = probe_metadata_hash(&baseline, rate, probe);
+                assert_eq!(
+                    first, duplicate,
+                    "duplicated probe rate={rate} probe={probe}"
+                );
+                assert_eq!(
+                    timeline_hash(&baseline),
+                    baseline_hash,
+                    "probe mutated render rate={rate}"
+                );
+            }
+            println!(
+                "issue-059 rate={rate} events={:?} recovered_left={} recovered_right={} hash={baseline_hash:016x}",
+                event_counts(&baseline),
+                baseline.report.recovered_left_state,
+                baseline.report.recovered_right_state,
+            );
+        }
+    }
+
+    #[test]
+    fn finite_subnormal_tpt_state_is_canonicalized_without_scalar_or_bank_recovery() {
+        let mut scalar = TptSvf::design(48_000, 100.0, true).expect("scalar");
+        scalar.s1 = f32::from_bits(1);
+        scalar.s2 = -f32::from_bits(1);
+        let mut recovered = 0;
+        let mut scalar_report = BuiltinProcessReport::default();
+        assert_eq!(scalar.process(0.0, &mut recovered, &mut scalar_report), 0.0);
+        assert_eq!(recovered, 0);
+        assert_eq!(
+            filter_state_bits(&scalar),
+            [0.0_f32.to_bits(), 0.0_f32.to_bits()]
+        );
+
+        let Some((backend, width)) = available_nonfused_bank() else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let parameters = vec![fixed_cascade_parameters(); lanes];
+        let active = vec![true; lanes];
+        let scalar_inputs = parameters
+            .iter()
+            .copied()
+            .map(|parameters| {
+                BuiltinChain::new(48_000, parameters)
+                    .expect("scalar input")
+                    .into_input_builtins()
+            })
+            .collect::<Vec<_>>();
+        let mut bank =
+            BuiltinInputBankV1::new(backend, width, scalar_inputs, &active).expect("bank");
+        bank.left.hpf.s1[0] = f32::from_bits(1);
+        bank.left.hpf.s2[0] = -f32::from_bits(1);
+        let mut left = vec![0.0; lanes];
+        let mut right = vec![0.0; lanes];
+        let report = bank
+            .process(&mut left, &mut right, 1, 0)
+            .expect("bank process");
+        assert_eq!(report.recovered_left_state, 0);
+        assert_eq!(report.recovered_right_state, 0);
+        assert_eq!(bank.left.hpf.s1[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(bank.left.hpf.s2[0].to_bits(), 0.0_f32.to_bits());
     }
 
     #[test]
