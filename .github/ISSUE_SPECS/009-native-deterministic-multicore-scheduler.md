@@ -234,3 +234,15 @@ shared tree is split into a clean commit. Consequently the benchmark remains una
 not run. Under the issue's two-attempt stop rule, do not add another correction round or weaken
 these gates; preserve this useful checkpoint and open a stateless, smaller qualification issue for
 the missing evidence before closing Issue 9.
+
+### Post-stop rescope (2026-08-21)
+
+Checkpoint `3236b9c` is upstream and preserves the real parallel scheduler implementation and the
+passing focused/audit/target evidence above. Issue 9 remains **stopped without overall PASS**;
+closing its GitHub record is delivery synchronization, not acceptance of its incomplete frozen
+matrix. Successor **Native graph scheduler qualification and benchmark** owns only the missing
+q128 production differential, exact perturbation/preparation/protocol matrices, all-thread syscall
+trace, macOS/rustdoc/clean-seal evidence and the sole possible exactly-once scheduler benchmark.
+Its timed invocation count starts at `0`. Unrelated sequential/browser/mobile/streaming/effect work
+does not wait for that qualification; only consumers claiming the production native parallel path
+and end-to-end release qualification do.

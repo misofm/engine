@@ -61,13 +61,25 @@ bank graph retention and reachability qualification**, owns the missing producti
 builtin graph retention, exact 100 seeded layouts and corrected real-TPT 100,000-render audit;
 timing is forbidden there. Issue 038, **Issue-008 real audio benchmark workloads and exactly-once
 qualification**, follows 037, replaces the placeholder byte-fold workload and alone may later
-authorize one warmup plus two measured rounds. Current timed invocation count is zero.
+authorize one warmup plus two measured rounds. Issue 038 completed its one authorized invocation
+without retry; its evidence remains descriptive rather than an optimization claim.
 
 Issues 009, 022, 024, 031 and 026 wait for 037 because their completed product contracts require
 the retained production builtin-SIMD graph. Issue 038 is a dependency only of release
 qualification issue 026; it does not block scheduler issue 009, streaming issue 010, effects or
 deployment feature work. Issues 012, 013, 014, 019 and 021 continue to consume Issue 008's
 preserved generic architecture/effect-bank slice without treating its stopped issue as PASS.
+
+Issue 009 stopped after its two-attempt budget without overall PASS. Upstream checkpoint `3236b9c`
+preserves the real Linux x86-64 parallel graph scheduler, transactional fallbacks, audit/target
+evidence and a zero-launch benchmark runner as technical input. Issue 039, **Native graph scheduler
+qualification and benchmark**, owns only the missing q128 full production differential, exact 32
+completion perturbations, exact 100 preparations/count matrix, injected ownership failures,
+all-thread syscall trace, macOS/rustdoc/clean-candidate proof and sole one-warmup/two-round scheduler
+benchmark. Issue 039 permits one Terra attempt plus one bounded Sol correction; its timed invocation
+count starts at zero. It gates only consumers that claim qualified native parallel graph execution
+and release issue 026. Sequential streaming, effects, control work and browser/mobile adapters
+remain nonblocked.
 
 ## Shared definition
 
