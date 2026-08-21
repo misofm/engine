@@ -2,8 +2,9 @@
 
 ## Decision and attempt budget
 
-**READY FOR PREIMPLEMENTATION COMPARISON ONLY.** One Terra attempt and at most one bounded Sol
-correction are available. Issue 042 is stopped without overall PASS. Preserve its public EQ
+**STOPPED AFTER TWO FAILED ATTEMPTS; NO RECURRENCE IS SELECTED.** The Terra comparison and sole
+bounded Sol oracle correction both failed to select a candidate. Issue 042 is stopped without
+overall PASS. Preserve its public EQ
 surface, complete analytic/search evidence and reusable scalar/bank/graph/audit infrastructure,
 but treat its direct-history delta recurrence and state bytes as rejected. No benchmark or timing
 command is authorized; `timed_benchmark_invocations=0`.

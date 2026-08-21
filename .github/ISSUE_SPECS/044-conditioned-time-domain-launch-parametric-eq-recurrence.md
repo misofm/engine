@@ -134,3 +134,27 @@ The explicit flush candidate removes recovery but still has eight impulse/DFT fa
 unchanged 0.05 dB limit. The comparison's final exactly-one-selectable assertion therefore fails
 as intended. It is retained and ignored pending the one bounded Sol correction. No production,
 graph, audit, target or benchmark work was performed; `timed_benchmark_invocations=0`.
+
+## Sol correction attempt 2 — final verdict (2026-08-21)
+
+**FAIL / STOPPED; no recurrence selected and no production change is permitted.** Adversarial
+review found that attempt 1 compared each candidate's finite one-second impulse DFT with the
+infinite-duration analytic magnitude. The shared `0.536679696321 dB` result therefore included
+window-truncation error and was not a valid recurrence differential. The sole bounded correction
+now generates an independent `f64` one-second impulse with `ReferenceParametricEqSection` and
+applies the identical finite window, sample count and DFT probe used for the `f32` candidate.
+
+The one authorized complete rerun still selected no candidate:
+
+| Candidate | Selectable | Underflow / recovery events | Invalid values | DFT failures / worst error | Transcript |
+| --- | --- | ---: | ---: | ---: | --- |
+| 2^24-scaled direct histories | no | 24 / 24 | 0 | 11 / `38.341681759850 dB` | `6fd9c4f9898458e2` |
+| transposed two-state | no | 24 / 24 | 0 | 10 / `42.832790236097 dB` | `b3501a5d71222b30` |
+| direct histories with finite-subnormal -> positive zero | no | 738 / 0 | 0 | 11 / `38.341681759850 dB` | `52a2c5651dd9d4c4` |
+
+All candidates completed all 48 impulse cases and all 48 million-sample cases. The flush candidate
+alone retained zero recovery and zero invalid values, but it materially misses the unchanged
+`0.05 dB` finite-window reference gate. The comparison remains ignored with its exactly-one
+assertion intact as stopped failure evidence. The two-attempt budget is exhausted: do not add a
+candidate, weaken the tolerance/domain/recovery rules, or begin production. No benchmark or
+timing command was run; `timed_benchmark_invocations=0`.

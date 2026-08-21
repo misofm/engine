@@ -4,7 +4,9 @@
 //! retains the Issue-042 endpoint-conditioned transfer words but never imports a production EQ
 //! processor. The comparison is evidence for Sol's recurrence freeze, not a runtime design.
 
-use crate::{ReferenceParametricEqCoefficients, ReferenceParametricEqKind};
+use crate::{
+    ReferenceParametricEqCoefficients, ReferenceParametricEqKind, ReferenceParametricEqSection,
+};
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const IMPULSE_FRAMES_PER_SECOND: usize = 1;
@@ -646,6 +648,34 @@ fn impulse_dft_db(samples: &[f32], rate: u32, frequency: f64) -> f64 {
     }
 }
 
+/// Independent `f64` one-second impulse DFT with the same finite window and probe as a candidate.
+///
+/// Comparing a truncated candidate impulse with the infinite-duration analytic transfer would
+/// charge the candidate for the reference tail omitted by the frozen one-second window.
+fn reference_impulse_dft_db(row: Row, frequency: f64) -> f64 {
+    let mut reference = ReferenceParametricEqSection::new(row.reference());
+    let phase = -core::f64::consts::TAU * frequency / f64::from(row.rate);
+    let (step_re, step_im) = (phase.cos(), phase.sin());
+    let (mut unit_re, mut unit_im) = (1.0_f64, 0.0_f64);
+    let (mut re, mut im) = (0.0_f64, 0.0_f64);
+    let frames = row.rate as usize * IMPULSE_FRAMES_PER_SECOND;
+    for sample in 0..frames {
+        let output = reference.process(if sample == 0 { 1.0 } else { 0.0 });
+        re += output * unit_re;
+        im += output * unit_im;
+        (unit_re, unit_im) = (
+            unit_re * step_re - unit_im * step_im,
+            unit_re * step_im + unit_im * step_re,
+        );
+    }
+    let magnitude = re.hypot(im);
+    if magnitude == 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        20.0 * magnitude.log10()
+    }
+}
+
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut value = *state;
@@ -676,12 +706,7 @@ fn run_impulse_case(candidate_kind: CandidateKind, row: Row, summary: &mut Summa
         impulse.push(output);
     }
     let (frequency, _, _, _) = row.values();
-    let expected = 20.0
-        * row
-            .reference()
-            .magnitude_at_hz(f64::from(frequency))
-            .expect("reference f0 magnitude")
-            .log10();
+    let expected = reference_impulse_dft_db(row, f64::from(frequency));
     let actual = impulse_dft_db(&impulse, row.rate, f64::from(frequency));
     summary.mix(actual.to_bits());
     summary.mix(expected.to_bits());
@@ -736,7 +761,7 @@ fn compare_candidate(kind: CandidateKind) -> Summary {
 }
 
 #[test]
-#[ignore = "Issue #44 Terra comparison found no selectable recurrence; Sol attempt 2 owns one bounded correction"]
+#[ignore = "Issue #44 exhausted both attempts without a selectable time-domain recurrence"]
 fn issue_044_complete_time_domain_recurrence_comparison_requires_sol_freeze() {
     let summaries: Vec<_> = CandidateKind::ALL
         .into_iter()
