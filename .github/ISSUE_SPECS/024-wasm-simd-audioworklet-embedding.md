@@ -33,6 +33,7 @@ Wasm filesystem streaming, hardcoding 128 frames, relying on Rust std threads, t
 - Transport-neutral binary control protocol
 - JIT PCM streaming and host-supplied source rings
 - AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Issue-007 builtin qualification tooling, audits, and benchmark
 
 ## Hazards/decisions
 

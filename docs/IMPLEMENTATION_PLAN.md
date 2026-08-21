@@ -7,12 +7,13 @@ This is the concise index for the stateless implementation payloads in [`.github
 ## Delivery sequence
 
 1. **Foundation and proof:** 001–005 establish the workspace, research corpus, realtime memory model, TOML compiler, and control protocol.
-2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming. Issue 006 is accepted under its recorded post-stop Sol rescope. After issue 007, issue 032 centralizes the four-rate launch policy and must complete before issues 008 and 010; issue 009 follows issue 008.
+2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming. Issue 006 is accepted under its recorded post-stop Sol rescope. Issue 007 stopped after three attempts and retains only its proven scalar DSP/runtime slice; issue 032 centralizes the four-rate launch policy, then issue 034 closes the builtin preparation/metadata/sealed-graph/resource contract before issue 008. Issue 008 does not wait for issue 035's scalar qualification tooling. Issue 010 also follows issue 032; issue 009 follows issue 008.
 3. **Effects:** 011 defines only the launch native runtime contract; 012–021 implement the launch processors using it. Graph issue 006 and launch effects do not wait for external package or persisted-state formats.
-4. **Deployment:** 022–025 provide the C runner, mobile/native examples, browser AudioWorklet, and optional remote sidecar.
-5. **Qualification and extensibility:** 026 qualifies a release; 029 freezes canonical descriptor/package/CID/state interchange; 027 layers the third-party Wasm ABI on that identity contract; 028 is explicitly post-launch execution. Dependency order, not numeric order, controls 029 -> 027 -> 028.
+4. **Deployment:** 022–025 provide the C runner, mobile/native examples, browser AudioWorklet, and optional remote sidecar. Issues 022–024 wait for issue 035's corrected builtin machine candidate.
+5. **Qualification and extensibility:** 026 qualifies a release only after issue 035 machine qualification and issue 033 real human listening; 029 freezes canonical descriptor/package/CID/state interchange; 027 layers the third-party Wasm ABI on that identity contract; 028 is explicitly post-launch execution. Dependency order, not numeric order, controls 029 -> 027 -> 028.
 6. **Nonblocking tooling follow-up:** 030 hardens the graph benchmark shell wrapper and promotes the exact preserved validator-valid issue-006 raw artifact. It does not gate 007–010, does not change graph acceptance, and requires no further issue-006 benchmark run.
-7. **Rate-policy correction:** 032 makes 44.1/48/88.2/96 kHz the exact launch session/render tier and preserves 176.4/192/352.8/384 kHz only as an informational compatibility corpus. Dependency order, not numeric order, controls 007 -> 032 -> 008/010 and downstream effects, hosts, and release qualification.
+7. **Rate-policy correction:** 032 makes 44.1/48/88.2/96 kHz the exact launch session/render tier and preserves 176.4/192/352.8/384 kHz only as an informational compatibility corpus. Dependency order, not numeric order, controls 007 accepted slice -> 032 -> 034 -> 008, while 010 follows 032; downstream effects, hosts and release qualification follow their exact dependencies.
+8. **Builtin post-stop correction:** 034 closes launch-critical metadata, sealed-only graph integration, exact checked resource accounting and compiler mutations. Then 008 and 035 may proceed independently. Issue 035 alone owns complete builtin fixtures, direct/graph audits, target evidence and one eventual externally invoked benchmark containing exactly two internal rounds. Its invocation count starts at zero and it gates 022–024, 033 and 026.
 
 ## Non-negotiable release shape
 
@@ -22,7 +23,7 @@ The launch-supported session/render rate set is exactly 44.1/48/88.2/96 kHz. The
 
 ## Review cadence
 
-For every issue: Sol approves brief/gates; Terra produces attempt 1 with evidence; Sol adversarially reviews; Sol may revise up to two times; after three total failed attempts, rescope/rebrief rather than relaxing gates.  A gate that cannot be evaluated before coding fails briefing.  Weekly optimization work must become an issue with a baseline and a measured result.
+For every issue: Sol approves brief/gates; Terra produces attempt 1 with evidence; Sol adversarially reviews; Sol may revise up to two times unless the issue brief freezes a smaller budget; after that budget fails, rescope/rebrief rather than relaxing gates. Issues 034 and 035 each permit only two total attempts. A gate that cannot be evaluated before coding fails briefing. Weekly optimization work must become an issue with a baseline and a measured result.
 
 ## Index
 
@@ -39,3 +40,6 @@ The checked-in control-plane documentation for issue 005 is indexed in [the docu
 | 030 | nonblocking graph benchmark runner hardening and accepted-artifact promotion |
 | 031 | optional post-foundation higher-precision builtin-filter investigation |
 | 032 | four-rate launch authority and extended-rate compatibility deferral; ordered after 007 and before 008/010 |
+| 033 | real issue-007 builtin filter/matrix human listening after issue 035 seals the machine candidate and benchmark |
+| 034 | launch-critical issue-007 builtin contract closure; prerequisite for 008 and 035; no timed benchmark |
+| 035 | complete builtin qualification fixtures/audits/targets and sole one-invocation/two-round benchmark owner; gates 022–024, 033 and 026 |

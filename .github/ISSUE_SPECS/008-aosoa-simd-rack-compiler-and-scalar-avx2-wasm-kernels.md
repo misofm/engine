@@ -31,7 +31,7 @@ Placing arbitrary third-party Wasm in a SIMD bank, fixed global eight-track assu
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- Dual-mono builtins and metering
+- Issue-007 launch-critical builtin contract closure
 - Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
@@ -48,6 +48,12 @@ TDF-II, `f64`, double-single, compensated, or shared L/R state. Given identical 
 finite-normal input, and no sanitation, base non-FMA scalar and SIMD are bit-identical on the same
 target; cross-target and FMA paths also pass issue 007's response gates and the declared samplewise
 tolerance. A future precision mode belongs to issue 031 and would require a new cohort/ABI decision.
+
+The issue-007 post-stop rescope accepts that DSP operation graph only as technical input. This
+issue waits for **Issue-007 launch-critical builtin contract closure** because bank adapters
+consume its stable per-lane preparation/metadata and sealed graph/resource contract. It does not
+wait for **Issue-007 builtin qualification tooling, audits, and benchmark**: that successor owns
+scalar expected-output/audit/benchmark evidence and does not define SIMD semantics.
 
 ## Acceptance gates with objective measurements
 

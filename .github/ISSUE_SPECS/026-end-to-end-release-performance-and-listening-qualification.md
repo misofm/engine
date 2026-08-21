@@ -37,7 +37,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Versioned TOML schema and transactional session compiler
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- Dual-mono builtins and metering
+- Issue-007 builtin qualification tooling, audits, and benchmark
 - Issue-007 builtin filter and matrix human listening qualification
 - AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
 - Native deterministic multicore scheduler
@@ -54,7 +54,6 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Transient shaper
 - Dual-mono/stereo delay
 - Optional binary WebSocket sidecar
-- Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
 

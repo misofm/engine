@@ -670,3 +670,42 @@ provisional technical input but cannot cite issue-007 machine qualification. Iss
 and 026 remain blocked on the corrected machine candidate; Issue 033 human listening runs only
 after that candidate and its sole accepted benchmark are sealed. No audible-quality, machine-
 qualified, launch-readiness or issue-026 claim is permitted from this attempt.
+
+## Post-three-attempt Sol rescope and accepted slice (2026-08-21)
+
+**ISSUE 007 IS STOPPED; ITS ORIGINAL BROAD OUTCOME DID NOT PASS.** Preserve the complete failure
+record above. The rescope accepts only this proven implementation slice as reusable technical
+foundation:
+
+- the conditioned incremental non-fused all-`f32` TPT HPF/LPF operation graph, independent L/R
+  coefficient/state ownership, preparation cutoff rejection and the recorded analytic, impulse,
+  sustained and fixed 100-Hz-HPF/1-kHz-LPF cascade thresholds at the four launch rates;
+- the scalar polarity/trim/filter and fader/mute/matrix sections, exact N-update matrix behavior,
+  reset/sanitization/recovery semantics and stable seven-tap enum/meter math that passed their
+  focused tests; and
+- the existing graph/runtime, cross-target and zero-forbidden-count audit code as provisional
+  implementation to be corrected and requalified, not as complete fixture, lifecycle or
+  machine-qualification evidence.
+
+This acceptance does **not** accept the parameter descriptor contract, generic internal-binding
+bypass, resource exactness, compiler mutation coverage, fixture corpus, direct/graph audit scope,
+target qualification, schema-v2 benchmark or any machine/audible/launch claim. Those defects and
+all attempt-3 evidence remain open rather than being reclassified as passing.
+
+Two stateless successor workflows replace further issue-007 implementation:
+
+- **Issue-007 launch-critical builtin contract closure** owns parameter metadata, sealed-only
+  graph integration, exact checked resource accounting and the 10,000-case compiler mutation
+  gate. It may use at most two attempts and may not run or authorize a timed benchmark.
+- **Issue-007 builtin qualification tooling, audits, and benchmark** depends on that contract
+  closure and owns the complete independent fixture corpus, exact million-call direct/graph
+  audits, target/repository qualification and the only eventual single two-round benchmark
+  authorization. Its current timed invocation count is **0**.
+
+Issue **AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels** must wait for the first successor
+because its builtin bank adapters consume the corrected preparation/metadata and sealed graph/
+resource contract. It does not wait for the scalar qualification tooling or descriptive
+benchmark. Issues 022, 023 and 024 wait for the second successor's corrected machine candidate.
+Issue 033 runs real listening only after that candidate and sole benchmark are sealed; issue 026
+waits for both machine qualification and issue 033. No timed benchmark was authorized by this
+rescope, and `timed_benchmark_invocations=0` remains authoritative.

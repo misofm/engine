@@ -12,10 +12,13 @@ benchmark, or inherit V1/legacy work. Sound quality and DSP correctness are rele
 Objective fixtures and machine conformance do not replace documented listening, and a coding
 agent cannot fabricate human listeners, playback conditions or trial responses.
 
-Issue 007 deliberately ends at a sealed *machine-qualified, human-listening pending* candidate.
-This issue owns the two preregistered real listening executions against that exact candidate. It is
-a hard dependency of **End-to-end release, performance, and listening qualification**. Closing
-issue 007 does not imply this issue passed and does not authorize a launch claim.
+Issue 007 stopped after three attempts and accepted only a reusable DSP/runtime slice. The sealed
+*machine-qualified, human-listening pending* candidate and sole accepted builtin benchmark must
+instead come from **Issue-007 builtin qualification tooling, audits, and benchmark** after
+**Issue-007 launch-critical builtin contract closure**. This issue owns the two preregistered real
+listening executions against that exact corrected candidate. It is a hard dependency of
+**End-to-end release, performance, and listening qualification**. Neither the issue-007 rescope nor
+machine qualification implies this issue passed or authorizes a launch claim.
 
 This issue follows the Sol-approved brief → human/facilitator execution with raw evidence → Sol
 adversarial review workflow. Any candidate code, coefficient, fixture or render-input change
@@ -53,14 +56,15 @@ agent/facilitator as a human listener.
 
 ## Dependencies by exact issue title
 
-- Dual-mono builtins and metering
+- Issue-007 builtin qualification tooling, audits, and benchmark
 - DSP research corpus and conformance harness
 
 ## Frozen procedure requirements
 
 Before the first answer is collected, the facilitator records:
 
-- exact clean candidate commit, target/features, issue-007 benchmark SHA-256 and fixture manifest;
+- exact clean candidate commit, target/features, issue-035 accepted builtin benchmark SHA-256 and
+  fixture manifest;
 - comparator identity and complete filter/matrix/session parameters;
 - both candidate render hashes, RMS match within 0.1 dB and peaks below 0 dBFS;
 - SplitMix64-v1 seed, assignment owner, concealment location and stopping rule;
@@ -99,9 +103,9 @@ FAIL and blocks issue 026.
 
 ## Target matrix
 
-One pinned native issue-007 candidate at 48 kHz/128 frames for both preregistered procedures. The
-playback chain is recorded exactly; results are not generalized to untested rooms, transducers,
-listeners, rates or targets.
+One pinned native issue-035 machine-qualified builtin candidate at 48 kHz/128 frames for both
+preregistered procedures. The playback chain is recorded exactly; results are not generalized to
+untested rooms, transducers, listeners, rates or targets.
 
 ## Required evidence
 
