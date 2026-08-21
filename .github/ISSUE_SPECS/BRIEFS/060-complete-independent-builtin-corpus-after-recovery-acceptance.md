@@ -2,11 +2,12 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1.** Start from clean Issue-059 PASS candidate `2dba426` and retain
-Issue-056 benchmark-input checkpoint `3aeb39c` as technical input. This issue permits one Terra
-implementation/review and one bounded Sol correction/review. A second failure stops. Production
-DSP, audits, target work and benchmarks are forbidden; `workload_invocations=0` and
-`timed_benchmark_invocations=0` throughout.
+**STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the single bounded Sol
+correction/review are consumed. Clean checkpoint `10f0235` and the interrupted typed-checker
+candidate are technical input only. Remaining response/scalar PCM, graph/PDC,
+meter/diagnostic/resource and final corruption/read-only work moves to Issues 061–064 as recorded
+in the Issue-060 decision record. Production DSP, audits, targets and benchmarks remain forbidden;
+`workload_invocations=0` and `timed_benchmark_invocations=0`.
 
 Own only `tools/miso-engine-builtins-fixture`, `fixtures/builtins/v1`, focused DSP-reference fixture
 support if strictly needed, and Issue-060 evidence. Do not create another corpus, parser framework

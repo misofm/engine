@@ -166,6 +166,125 @@ struct VerifiedCasesV1 {
     functional_cases: BTreeMap<String, FunctionalCaseV1>,
 }
 
+/// One canonical meter snapshot, represented by its serialized IEEE-754 words.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MeterSnapshotV1 {
+    case: String,
+    tap: Option<String>,
+    handle: u64,
+    reset_generation: u64,
+    sequence: u64,
+    start: u64,
+    end: u64,
+    frames: u64,
+    left_peak: u32,
+    right_peak: u32,
+    left_held_peak: u32,
+    right_held_peak: u32,
+    left_energy: u64,
+    right_energy: u64,
+    left_rms: u64,
+    right_rms: u64,
+    clipped: u64,
+    sanitized: u64,
+    dropped: u64,
+    discontinuities: u64,
+}
+
+/// The three canonical meter record forms in the V1 fixture corpus.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MeterRecordV1 {
+    Snapshot(MeterSnapshotV1),
+    Partial {
+        case: String,
+        observed_frames: u64,
+        period_frames: u64,
+        start: u64,
+    },
+    Overflow {
+        case: String,
+        error: String,
+        path: String,
+    },
+}
+
+/// One sorted stable diagnostic tuple.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiagnosticRecordV1 {
+    case: String,
+    code: String,
+    path: String,
+    error: Option<String>,
+}
+
+/// One checked resource-accounting record from the fixed V1 grid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResourceRecordV1 {
+    tracks: u64,
+    meters: u64,
+    queue_capacity: u64,
+    meter_items: u64,
+    processor_bytes: u64,
+    meter_bytes: u64,
+    retained_bytes: u64,
+    maximum_single_allocation_bytes: u64,
+    allocation_count: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReferenceMeterConfigV1 {
+    period_frames: u32,
+    queue_capacity: usize,
+    reset_generation: u64,
+    peak_hold_frames: u32,
+    peak_decay_db_per_second: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReferenceMeterLaneV1 {
+    peak: f32,
+    energy: f64,
+    clipped: u64,
+    sanitized: u64,
+    held: f32,
+    hold_remaining: u32,
+}
+
+/// Independent scalar meter recurrence used only to validate checked fixture tuples.
+#[derive(Clone, Debug)]
+struct ReferenceMeterV1 {
+    config: ReferenceMeterConfigV1,
+    decay: f32,
+    start: Option<u64>,
+    frames: u32,
+    sequence: u64,
+    left: ReferenceMeterLaneV1,
+    right: ReferenceMeterLaneV1,
+    clipped: u64,
+    sanitized: u64,
+    discontinuities: u64,
+    dropped: u64,
+    queued: Vec<MeterSnapshotV1>,
+}
+
+const RESOURCE_ROWS_V1: [[u64; 9]; 9] = [
+    [1, 0, 1, 0, 597, 0, 597, 216, 17],
+    [1, 1, 1, 2, 597, 966, 1_563, 320, 32],
+    [1, 7, 4, 35, 597, 10_122, 10_719, 800, 86],
+    [4, 0, 1, 0, 2_460, 0, 2_460, 864, 53],
+    [4, 1, 1, 2, 2_460, 978, 3_438, 864, 68],
+    [4, 7, 4, 35, 2_460, 10_206, 12_666, 864, 122],
+    [
+        65_537, 0, 1, 0, 42_564_597, 0, 42_564_597, 14_155_992, 786_449,
+    ],
+    [
+        65_537, 1, 1, 2, 42_564_597, 978, 42_565_575, 14_155_992, 786_464,
+    ],
+    [
+        65_537, 7, 4, 35, 42_564_597, 10_206, 42_574_803, 14_155_992, 786_518,
+    ],
+];
+
 /// One parsed independent response row from the checked V1 CSV.
 #[derive(Clone, Debug)]
 struct ResponseCsvRowV1 {
@@ -1490,6 +1609,9 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     verify_metadata_v1(root)?;
     verify_functional_fixture_completeness_v1(root, &manifest, &cases.functional_cases)?;
     verify_jsonl_payloads_v1(root)?;
+    verify_meter_corpus_v1(root)?;
+    verify_diagnostics_v1(root)?;
+    verify_resources_v1(root)?;
     verify_benchmark_inputs_v1(root, &manifest)?;
     Ok(())
 }
@@ -2249,6 +2371,760 @@ fn json_u32_hex_field_v1(record: &str, key: &str) -> Result<u32, String> {
 fn json_u64_hex_field_v1(record: &str, key: &str) -> Result<u64, String> {
     u64::from_str_radix(json_string_field_v1(record, key)?, 16)
         .map_err(|_| format!("JSONL field is not a u64 hex word: {key}"))
+}
+
+fn verify_meter_corpus_v1(root: &Path) -> Result<(), String> {
+    let graph = parse_canonical_meter_records_v1(root, "meters/graph-taps.jsonl")?;
+    let expected_graph = expected_graph_meter_records_v1(root)?;
+    if graph != expected_graph {
+        return Err(
+            "meters/graph-taps.jsonl differs from the independent seven-tap tuple set".to_owned(),
+        );
+    }
+    let window = parse_canonical_meter_records_v1(root, "meters/window-and-drop.jsonl")?;
+    let expected_window = expected_window_meter_records_v1()?;
+    if window != expected_window {
+        return Err(
+            "meters/window-and-drop.jsonl differs from the independent 15-record tuple set"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_canonical_meter_records_v1(root: &Path, path: &str) -> Result<Vec<MeterRecordV1>, String> {
+    let bytes = read_regular_file(&root.join(path), path)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| format!("JSONL is not UTF-8: {path}"))?;
+    let mut records = Vec::new();
+    let mut previous = None::<String>;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let line = line
+            .strip_suffix('\n')
+            .ok_or_else(|| format!("meter record is not LF terminated: {path}:{}", index + 1))?;
+        let parsed = parse_meter_record_v1(line)?;
+        let canonical = canonical_meter_record_v1(&parsed);
+        if line != canonical {
+            return Err(format!(
+                "meter record is not canonical: {path}:{}",
+                index + 1
+            ));
+        }
+        if previous.as_deref().is_some_and(|previous| previous >= line) {
+            return Err(format!(
+                "meter records are not strictly sorted: {path}:{}",
+                index + 1
+            ));
+        }
+        previous = Some(line.to_owned());
+        records.push(parsed);
+    }
+    if records.is_empty() {
+        return Err(format!("meter payload has no records: {path}"));
+    }
+    Ok(records)
+}
+
+fn parse_meter_record_v1(record: &str) -> Result<MeterRecordV1, String> {
+    if record.contains("\"snapshot\":null") {
+        return Ok(MeterRecordV1::Partial {
+            case: json_string_field_v1(record, "case")?.to_owned(),
+            observed_frames: json_u64_field_v1(record, "observed_frames")?,
+            period_frames: json_u64_field_v1(record, "period_frames")?,
+            start: json_u64_hex_field_v1(record, "start")?,
+        });
+    }
+    if record.contains("\"error\":") {
+        return Ok(MeterRecordV1::Overflow {
+            case: json_string_field_v1(record, "case")?.to_owned(),
+            error: json_string_field_v1(record, "error")?.to_owned(),
+            path: json_string_field_v1(record, "path")?.to_owned(),
+        });
+    }
+    let tap = record
+        .strip_prefix("{\"tap\":\"")
+        .and_then(|record| record.split_once('"').map(|(tap, _)| tap.to_owned()));
+    Ok(MeterRecordV1::Snapshot(MeterSnapshotV1 {
+        case: json_string_field_v1(record, "case")?.to_owned(),
+        tap,
+        handle: json_u64_hex_field_v1(record, "handle")?,
+        reset_generation: json_u64_hex_field_v1(record, "reset_generation")?,
+        sequence: json_u64_hex_field_v1(record, "sequence")?,
+        start: json_u64_hex_field_v1(record, "start")?,
+        end: json_u64_hex_field_v1(record, "end")?,
+        frames: json_u64_field_v1(record, "frames")?,
+        left_peak: json_u32_hex_field_v1(record, "left_peak")?,
+        right_peak: json_u32_hex_field_v1(record, "right_peak")?,
+        left_held_peak: json_u32_hex_field_v1(record, "left_held_peak")?,
+        right_held_peak: json_u32_hex_field_v1(record, "right_held_peak")?,
+        left_energy: json_u64_hex_field_v1(record, "left_energy")?,
+        right_energy: json_u64_hex_field_v1(record, "right_energy")?,
+        left_rms: json_u64_hex_field_v1(record, "left_rms")?,
+        right_rms: json_u64_hex_field_v1(record, "right_rms")?,
+        clipped: json_u64_hex_field_v1(record, "clipped")?,
+        sanitized: json_u64_hex_field_v1(record, "sanitized")?,
+        dropped: json_u64_hex_field_v1(record, "dropped")?,
+        discontinuities: json_u64_hex_field_v1(record, "discontinuities")?,
+    }))
+}
+
+fn canonical_meter_record_v1(record: &MeterRecordV1) -> String {
+    match record {
+        MeterRecordV1::Snapshot(snapshot) => {
+            let canonical_snapshot = canonical_meter_snapshot_v1(snapshot);
+            snapshot
+                .tap
+                .as_ref()
+                .map_or(canonical_snapshot.clone(), |tap| {
+                    format!("{{\"tap\":\"{tap}\",\"snapshot\":{canonical_snapshot}}}")
+                })
+        }
+        MeterRecordV1::Partial {
+            case,
+            observed_frames,
+            period_frames,
+            start,
+        } => format!(
+            "{{\"case\":\"{case}\",\"snapshot\":null,\"observed_frames\":{observed_frames},\"period_frames\":{period_frames},\"start\":\"{start:016x}\"}}"
+        ),
+        MeterRecordV1::Overflow { case, error, path } => {
+            format!("{{\"case\":\"{case}\",\"error\":\"{error}\",\"path\":\"{path}\"}}")
+        }
+    }
+}
+
+fn canonical_meter_snapshot_v1(snapshot: &MeterSnapshotV1) -> String {
+    format!(
+        "{{\"case\":\"{}\",\"handle\":\"{:016x}\",\"reset_generation\":\"{:016x}\",\"sequence\":\"{:016x}\",\"start\":\"{:016x}\",\"end\":\"{:016x}\",\"frames\":{},\"left_peak\":\"{:08x}\",\"right_peak\":\"{:08x}\",\"left_held_peak\":\"{:08x}\",\"right_held_peak\":\"{:08x}\",\"left_energy\":\"{:016x}\",\"right_energy\":\"{:016x}\",\"left_rms\":\"{:016x}\",\"right_rms\":\"{:016x}\",\"clipped\":\"{:016x}\",\"sanitized\":\"{:016x}\",\"dropped\":\"{:016x}\",\"discontinuities\":\"{:016x}\"}}",
+        snapshot.case,
+        snapshot.handle,
+        snapshot.reset_generation,
+        snapshot.sequence,
+        snapshot.start,
+        snapshot.end,
+        snapshot.frames,
+        snapshot.left_peak,
+        snapshot.right_peak,
+        snapshot.left_held_peak,
+        snapshot.right_held_peak,
+        snapshot.left_energy,
+        snapshot.right_energy,
+        snapshot.left_rms,
+        snapshot.right_rms,
+        snapshot.clipped,
+        snapshot.sanitized,
+        snapshot.dropped,
+        snapshot.discontinuities,
+    )
+}
+
+fn verify_diagnostics_v1(root: &Path) -> Result<(), String> {
+    let bytes = read_regular_file(&root.join("diagnostics.jsonl"), "diagnostics.jsonl")?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| "diagnostics.jsonl is not UTF-8".to_owned())?;
+    let actual = parse_canonical_diagnostics_v1(text)?;
+    let expected = expected_diagnostics_v1();
+    if actual != expected {
+        return Err(
+            "diagnostics.jsonl differs from the exact 13 stable code/path tuples".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_canonical_diagnostics_v1(text: &str) -> Result<Vec<DiagnosticRecordV1>, String> {
+    let mut records = Vec::new();
+    let mut previous = None::<String>;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let line = line
+            .strip_suffix('\n')
+            .ok_or_else(|| format!("diagnostic record is not LF terminated: {}", index + 1))?;
+        let parsed = DiagnosticRecordV1 {
+            case: json_string_field_v1(line, "case")?.to_owned(),
+            code: json_string_field_v1(line, "code")?.to_owned(),
+            path: json_string_field_v1(line, "path")?.to_owned(),
+            error: line
+                .contains("\"error\":")
+                .then(|| json_string_field_v1(line, "error"))
+                .transpose()?
+                .map(str::to_owned),
+        };
+        let canonical = canonical_diagnostic_v1(&parsed);
+        if line != canonical {
+            return Err(format!("diagnostic record is not canonical: {}", index + 1));
+        }
+        if previous.as_deref().is_some_and(|previous| previous >= line) {
+            return Err(format!(
+                "diagnostic records are not strictly sorted: {}",
+                index + 1
+            ));
+        }
+        previous = Some(line.to_owned());
+        records.push(parsed);
+    }
+    Ok(records)
+}
+
+fn canonical_diagnostic_v1(record: &DiagnosticRecordV1) -> String {
+    let mut output = format!(
+        "{{\"case\":\"{}\",\"code\":\"{}\",\"path\":\"{}\"",
+        record.case, record.code, record.path
+    );
+    if let Some(error) = &record.error {
+        write!(output, ",\"error\":\"{error}\"").expect("string");
+    }
+    output.push('}');
+    output
+}
+
+fn expected_diagnostics_v1() -> Vec<DiagnosticRecordV1> {
+    [
+        (
+            "block-length",
+            "builtin.block.length",
+            "$.render.block",
+            Some("LaneLength"),
+        ),
+        (
+            "block-overflow",
+            "builtin.block.sample_time_overflow",
+            "$.render.first_sample",
+            Some("SampleTimeOverflow"),
+        ),
+        (
+            "filter-cutoff",
+            "builtin.filter.cutoff",
+            "$.tracks[id=vocal].builtins.left.hpf_hz",
+            None,
+        ),
+        (
+            "filter-order",
+            "builtin.filter.cutoff",
+            "$.tracks[id=vocal].builtins.left",
+            None,
+        ),
+        (
+            "gain-domain",
+            "builtin.gain.domain",
+            "$.tracks[id=vocal].fader.left_db",
+            None,
+        ),
+        (
+            "matrix-coefficient",
+            "builtin.matrix.coefficient",
+            "$.tracks[id=vocal].matrix_or_pan.ll",
+            None,
+        ),
+        (
+            "meter-request",
+            "builtin.meter.duplicate",
+            "$.meters[track_id=vocal,tap=Input]",
+            None,
+        ),
+        (
+            "meter-request",
+            "builtin.meter.unknown_track",
+            "$.meters[track_id=missing,tap=PostFader]",
+            None,
+        ),
+        (
+            "resource-cap",
+            "builtin.resource.limit",
+            "$.builtin_compile_caps",
+            None,
+        ),
+        (
+            "seal-session-mismatch",
+            "builtin.prepared.processor_set",
+            "$.builtins.processors",
+            None,
+        ),
+        (
+            "seal-session-mismatch",
+            "builtin.prepared.tail_set",
+            "$.builtins.tails",
+            None,
+        ),
+        (
+            "seal-session-mismatch",
+            "builtin.prepared.track_set",
+            "$.builtins.tracks",
+            None,
+        ),
+        (
+            "seal-session-mismatch",
+            "builtin.session.mismatch",
+            "$.session",
+            None,
+        ),
+    ]
+    .into_iter()
+    .map(|(case, code, path, error)| DiagnosticRecordV1 {
+        case: case.to_owned(),
+        code: code.to_owned(),
+        path: path.to_owned(),
+        error: error.map(str::to_owned),
+    })
+    .collect()
+}
+
+fn verify_resources_v1(root: &Path) -> Result<(), String> {
+    let bytes = read_regular_file(&root.join("resources.jsonl"), "resources.jsonl")?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| "resources.jsonl is not UTF-8".to_owned())?;
+    let mut actual = Vec::new();
+    let mut previous = None::<String>;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let line = line
+            .strip_suffix('\n')
+            .ok_or_else(|| format!("resource record is not LF terminated: {}", index + 1))?;
+        let parsed = ResourceRecordV1 {
+            tracks: json_u64_field_v1(line, "tracks")?,
+            meters: json_u64_field_v1(line, "meters")?,
+            queue_capacity: json_u64_field_v1(line, "queue_capacity")?,
+            meter_items: json_u64_field_v1(line, "meter_items")?,
+            processor_bytes: json_u64_field_v1(line, "engine_owned_processor_payload_bytes")?,
+            meter_bytes: json_u64_field_v1(line, "engine_owned_meter_payload_bytes")?,
+            retained_bytes: json_u64_field_v1(line, "engine_owned_retained_payload_bytes")?,
+            maximum_single_allocation_bytes: json_u64_field_v1(
+                line,
+                "maximum_single_allocation_bytes",
+            )?,
+            allocation_count: json_u64_field_v1(line, "retained_allocation_count")?,
+        };
+        if line != canonical_resource_v1(&parsed) {
+            return Err(format!("resource record is not canonical: {}", index + 1));
+        }
+        if previous.as_deref().is_some_and(|previous| previous >= line) {
+            return Err(format!(
+                "resource records are not strictly sorted: {}",
+                index + 1
+            ));
+        }
+        previous = Some(line.to_owned());
+        validate_resource_record_v1(&parsed)?;
+        actual.push(parsed);
+    }
+    let expected: Vec<_> = RESOURCE_ROWS_V1
+        .into_iter()
+        .map(resource_record_from_words_v1)
+        .collect();
+    if actual != expected {
+        return Err("resources.jsonl differs from the exact 3-by-3 V1 resource grid".to_owned());
+    }
+    Ok(())
+}
+
+fn resource_record_from_words_v1(words: [u64; 9]) -> ResourceRecordV1 {
+    ResourceRecordV1 {
+        tracks: words[0],
+        meters: words[1],
+        queue_capacity: words[2],
+        meter_items: words[3],
+        processor_bytes: words[4],
+        meter_bytes: words[5],
+        retained_bytes: words[6],
+        maximum_single_allocation_bytes: words[7],
+        allocation_count: words[8],
+    }
+}
+
+fn canonical_resource_v1(record: &ResourceRecordV1) -> String {
+    format!(
+        "{{\"tracks\":{},\"meters\":{},\"queue_capacity\":{},\"meter_items\":{},\"engine_owned_processor_payload_bytes\":{},\"engine_owned_meter_payload_bytes\":{},\"engine_owned_retained_payload_bytes\":{},\"maximum_single_allocation_bytes\":{},\"retained_allocation_count\":{}}}",
+        record.tracks,
+        record.meters,
+        record.queue_capacity,
+        record.meter_items,
+        record.processor_bytes,
+        record.meter_bytes,
+        record.retained_bytes,
+        record.maximum_single_allocation_bytes,
+        record.allocation_count,
+    )
+}
+
+fn validate_resource_record_v1(record: &ResourceRecordV1) -> Result<(), String> {
+    let expected_capacity = if record.meters == 7 { 4 } else { 1 };
+    let expected_items = match record.meters {
+        0 => 0,
+        1 => 2,
+        7 => 35,
+        _ => return Err("resource record has an unsupported meter-set cardinality".to_owned()),
+    };
+    if ![1, 4, 65_537].contains(&record.tracks)
+        || record.queue_capacity != expected_capacity
+        || record.meter_items != expected_items
+    {
+        return Err("resource record has an invalid fixed-grid coordinate".to_owned());
+    }
+    if record.processor_bytes.checked_add(record.meter_bytes) != Some(record.retained_bytes)
+        || record.maximum_single_allocation_bytes > record.retained_bytes
+        || record.allocation_count == 0
+    {
+        return Err(
+            "resource record has invalid checked totals or allocation accounting".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+impl ReferenceMeterV1 {
+    fn new(config: ReferenceMeterConfigV1) -> Self {
+        let decay =
+            10.0_f64.powf(-f64::from(config.peak_decay_db_per_second) / (20.0 * 48_000.0)) as f32;
+        Self {
+            config,
+            decay,
+            start: None,
+            frames: 0,
+            sequence: 0,
+            left: reference_meter_lane_v1(),
+            right: reference_meter_lane_v1(),
+            clipped: 0,
+            sanitized: 0,
+            discontinuities: 0,
+            dropped: 0,
+            queued: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, left: &[f32], right: &[f32], first_sample: u64) -> Result<(), String> {
+        if left.len() != right.len()
+            || first_sample
+                .checked_add(u64::try_from(left.len()).map_err(|_| "meter length")?)
+                .is_none()
+        {
+            return Err("reference meter rejected observation".to_owned());
+        }
+        if self
+            .start
+            .is_some_and(|start| first_sample != start.saturating_add(u64::from(self.frames)))
+        {
+            self.discontinuity(first_sample);
+        }
+        if self.start.is_none() {
+            self.start = Some(first_sample);
+        }
+        for (&left, &right) in left.iter().zip(right) {
+            reference_meter_observe_lane_v1(
+                &mut self.left,
+                left,
+                self.config,
+                self.decay,
+                &mut self.clipped,
+                &mut self.sanitized,
+            );
+            reference_meter_observe_lane_v1(
+                &mut self.right,
+                right,
+                self.config,
+                self.decay,
+                &mut self.clipped,
+                &mut self.sanitized,
+            );
+            self.frames = self.frames.saturating_add(1);
+            if self.frames == self.config.period_frames {
+                self.emit();
+            }
+        }
+        Ok(())
+    }
+
+    fn emit(&mut self) {
+        let start = self.start.expect("reference meter start");
+        let end = start + u64::from(self.frames);
+        let snapshot = MeterSnapshotV1 {
+            case: String::new(),
+            tap: None,
+            handle: 1,
+            reset_generation: self.config.reset_generation,
+            sequence: self.sequence,
+            start,
+            end,
+            frames: u64::from(self.frames),
+            left_peak: self.left.peak.to_bits(),
+            right_peak: self.right.peak.to_bits(),
+            left_held_peak: self.left.held.to_bits(),
+            right_held_peak: self.right.held.to_bits(),
+            left_energy: self.left.energy.to_bits(),
+            right_energy: self.right.energy.to_bits(),
+            left_rms: (self.left.energy / f64::from(self.frames)).sqrt().to_bits(),
+            right_rms: (self.right.energy / f64::from(self.frames))
+                .sqrt()
+                .to_bits(),
+            clipped: self.clipped,
+            sanitized: self.sanitized,
+            dropped: self.dropped,
+            discontinuities: self.discontinuities,
+        };
+        if self.queued.len() == self.config.queue_capacity {
+            self.dropped = self.dropped.saturating_add(1);
+        } else {
+            self.queued.push(snapshot);
+        }
+        self.sequence = self.sequence.saturating_add(1);
+        self.start = Some(end);
+        self.frames = 0;
+        clear_reference_meter_interval_v1(&mut self.left);
+        clear_reference_meter_interval_v1(&mut self.right);
+    }
+
+    fn pop(&mut self, case: &str) -> Option<MeterRecordV1> {
+        (!self.queued.is_empty()).then(|| {
+            let mut snapshot = self.queued.remove(0);
+            snapshot.case = case.to_owned();
+            MeterRecordV1::Snapshot(snapshot)
+        })
+    }
+
+    fn drain(&mut self, case: &str, output: &mut Vec<MeterRecordV1>) {
+        while let Some(snapshot) = self.pop(case) {
+            output.push(snapshot);
+        }
+    }
+
+    fn reset(&mut self, full: bool) {
+        self.start = None;
+        self.frames = 0;
+        self.left = reference_meter_lane_v1();
+        self.right = reference_meter_lane_v1();
+        if full {
+            self.sequence = 0;
+            self.clipped = 0;
+            self.sanitized = 0;
+            self.discontinuities = 0;
+            self.dropped = 0;
+        }
+    }
+
+    fn discontinuity(&mut self, first_sample: u64) {
+        self.start = Some(first_sample);
+        self.frames = 0;
+        self.left = reference_meter_lane_v1();
+        self.right = reference_meter_lane_v1();
+        self.discontinuities = self.discontinuities.saturating_add(1);
+    }
+}
+
+fn reference_meter_lane_v1() -> ReferenceMeterLaneV1 {
+    ReferenceMeterLaneV1 {
+        peak: 0.0,
+        energy: 0.0,
+        clipped: 0,
+        sanitized: 0,
+        held: 0.0,
+        hold_remaining: 0,
+    }
+}
+
+fn clear_reference_meter_interval_v1(lane: &mut ReferenceMeterLaneV1) {
+    lane.peak = 0.0;
+    lane.energy = 0.0;
+    lane.clipped = 0;
+    lane.sanitized = 0;
+}
+
+fn reference_meter_observe_lane_v1(
+    lane: &mut ReferenceMeterLaneV1,
+    sample: f32,
+    config: ReferenceMeterConfigV1,
+    decay: f32,
+    clipped: &mut u64,
+    sanitized: &mut u64,
+) {
+    let invalid = !sample.is_finite() || sample.is_subnormal();
+    let sample = if invalid { 0.0 } else { sample };
+    if invalid {
+        lane.sanitized = lane.sanitized.saturating_add(1);
+        *sanitized = sanitized.saturating_add(1);
+    }
+    let absolute = sample.abs();
+    lane.peak = lane.peak.max(absolute);
+    lane.energy += f64::from(sample) * f64::from(sample);
+    if absolute >= 1.0 {
+        lane.clipped = lane.clipped.saturating_add(1);
+        *clipped = clipped.saturating_add(1);
+    }
+    if absolute >= lane.held {
+        lane.held = absolute;
+        lane.hold_remaining = config.peak_hold_frames;
+    } else if lane.hold_remaining > 0 {
+        lane.hold_remaining -= 1;
+    } else if config.peak_decay_db_per_second != 0.0 {
+        lane.held *= decay;
+    }
+}
+
+fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
+    let config = |period_frames, queue_capacity| ReferenceMeterConfigV1 {
+        period_frames,
+        queue_capacity,
+        reset_generation: 3,
+        peak_hold_frames: 1,
+        peak_decay_db_per_second: 12.0,
+    };
+    let mut records = vec![MeterRecordV1::Partial {
+        case: "partial".to_owned(),
+        observed_frames: 2,
+        period_frames: 4,
+        start: 3,
+    }];
+
+    let mut multiple = ReferenceMeterV1::new(config(2, 8));
+    multiple.observe(&[1.0, 0.5, 0.25, 0.0], &[0.0, -1.0, 0.5, -0.25], 3)?;
+    multiple.drain("multiple", &mut records);
+
+    let mut wrap = ReferenceMeterV1::new(config(2, 2));
+    wrap.observe(&[1.0, 0.5, 0.25, 0.0], &[0.0, -1.0, 0.5, -0.25], 3)?;
+    records.push(
+        wrap.pop("wrap")
+            .ok_or_else(|| "reference wrap first snapshot".to_owned())?,
+    );
+    wrap.observe(&[0.75, 0.25, 0.5, 0.0], &[-0.5, 0.0, 0.25, -0.25], 7)?;
+    wrap.drain("wrap", &mut records);
+
+    let mut full = ReferenceMeterV1::new(config(2, 1));
+    full.observe(&[1.0, 0.0, 0.5, 0.0], &[0.0, 1.0, 0.0, 0.5], 3)?;
+    records.push(
+        full.pop("full")
+            .ok_or_else(|| "reference full first snapshot".to_owned())?,
+    );
+    full.observe(&[0.25, 0.0], &[0.0, -0.25], 7)?;
+    full.drain("drop", &mut records);
+
+    let mut discontinuity = ReferenceMeterV1::new(config(2, 4));
+    discontinuity.observe(&[1.0, 0.0], &[0.0, 1.0], 3)?;
+    discontinuity.observe(&[0.5, 0.0], &[0.0, 0.5], 9)?;
+    discontinuity.drain("discontinuity", &mut records);
+
+    let mut reset = ReferenceMeterV1::new(config(2, 4));
+    reset.observe(&[1.0, 0.0], &[0.0, 1.0], 3)?;
+    records.push(
+        reset
+            .pop("drain")
+            .ok_or_else(|| "reference drain snapshot".to_owned())?,
+    );
+    reset.reset(false);
+    reset.observe(&[0.5, 0.0], &[0.0, 0.5], 9)?;
+    records.push(
+        reset
+            .pop("reset-discontinuity")
+            .ok_or_else(|| "reference reset discontinuity snapshot".to_owned())?,
+    );
+    reset.reset(true);
+    reset.observe(&[0.25, 0.0], &[0.0, 0.25], 11)?;
+    records.push(
+        reset
+            .pop("reset-full")
+            .ok_or_else(|| "reference reset full snapshot".to_owned())?,
+    );
+
+    let mut sanitized = ReferenceMeterV1::new(config(2, 4));
+    sanitized.observe(&[f32::NAN, 0.5], &[f32::INFINITY, -0.5], 3)?;
+    records.push(
+        sanitized
+            .pop("sanitization")
+            .ok_or_else(|| "reference sanitization snapshot".to_owned())?,
+    );
+    records.push(MeterRecordV1::Overflow {
+        case: "overflow".to_owned(),
+        error: "SampleTimeOverflow".to_owned(),
+        path: "$.meter.first_sample".to_owned(),
+    });
+    records.sort_by_key(canonical_meter_record_v1);
+    Ok(records)
+}
+
+fn expected_graph_meter_records_v1(root: &Path) -> Result<Vec<MeterRecordV1>, String> {
+    let source_left: Vec<_> = (0..128).map(|index| 0.125 + index as f32 * 0.001).collect();
+    let source_right: Vec<_> = (0..128).map(|index| -0.25 - index as f32 * 0.002).collect();
+    let post_input_left = retained_tpt_filter_chain_v1(&source_left)?;
+    let post_input_right = retained_tpt_filter_chain_v1(&source_right)?;
+    let post_matrix = read_pcm_words_v1(root, "pcm/graph-taps.f32le")?;
+    let (post_matrix_left, post_matrix_right) = post_matrix.split_at(128);
+    if post_matrix_left.len() != 128 || post_matrix_right.len() != 128 {
+        return Err("graph-taps PCM has an invalid frame count".to_owned());
+    }
+    let post_matrix_left: Vec<_> = post_matrix_left
+        .iter()
+        .copied()
+        .map(f32::from_bits)
+        .collect();
+    let post_matrix_right: Vec<_> = post_matrix_right
+        .iter()
+        .copied()
+        .map(f32::from_bits)
+        .collect();
+    let mut records = vec![
+        graph_meter_snapshot_v1("Input", 1, &source_left, &source_right),
+        graph_meter_snapshot_v1("PostInputBuiltins", 2, &post_input_left, &post_input_right),
+        graph_meter_snapshot_v1("PostSimd1", 3, &post_input_left, &post_input_right),
+        graph_meter_snapshot_v1("PostDynamic", 4, &post_input_left, &post_input_right),
+        graph_meter_snapshot_v1("PostSimd2PreFader", 5, &post_input_left, &post_input_right),
+        graph_meter_snapshot_v1("PostFader", 6, &post_input_left, &post_input_right),
+        graph_meter_snapshot_v1("PostMatrix", 7, &post_matrix_left, &post_matrix_right),
+    ];
+    records.sort_by_key(canonical_meter_record_v1);
+    Ok(records)
+}
+
+fn retained_tpt_filter_chain_v1(input: &[f32]) -> Result<Vec<f32>, String> {
+    let mut high_pass = ReferenceRetainedTptF32::conditioned_butterworth(
+        48_000,
+        20.0,
+        ReferenceTptOutput::HighPass,
+    )
+    .ok_or_else(|| "independent graph HPF design rejected".to_owned())?;
+    let mut low_pass = ReferenceRetainedTptF32::conditioned_butterworth(
+        48_000,
+        20_000.0,
+        ReferenceTptOutput::LowPass,
+    )
+    .ok_or_else(|| "independent graph LPF design rejected".to_owned())?;
+    Ok(input
+        .iter()
+        .copied()
+        .map(|sample| {
+            let high = f32::from_bits(high_pass.process(sample).output_bits);
+            f32::from_bits(low_pass.process(high).output_bits)
+        })
+        .collect())
+}
+
+fn graph_meter_snapshot_v1(tap: &str, handle: u64, left: &[f32], right: &[f32]) -> MeterRecordV1 {
+    let summary = |samples: &[f32]| {
+        let peak = samples
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        let energy = samples.iter().fold(0.0_f64, |energy, sample| {
+            energy + f64::from(*sample) * f64::from(*sample)
+        });
+        (peak, energy)
+    };
+    let (left_peak, left_energy) = summary(left);
+    let (right_peak, right_energy) = summary(right);
+    MeterRecordV1::Snapshot(MeterSnapshotV1 {
+        case: "graph-taps".to_owned(),
+        tap: Some(tap.to_owned()),
+        handle,
+        reset_generation: 0,
+        sequence: 0,
+        start: 0,
+        end: 128,
+        frames: 128,
+        left_peak: left_peak.to_bits(),
+        right_peak: right_peak.to_bits(),
+        left_held_peak: left_peak.to_bits(),
+        right_held_peak: right_peak.to_bits(),
+        left_energy: left_energy.to_bits(),
+        right_energy: right_energy.to_bits(),
+        left_rms: (left_energy / 128.0).sqrt().to_bits(),
+        right_rms: (right_energy / 128.0).sqrt().to_bits(),
+        clipped: 0,
+        sanitized: 0,
+        dropped: 0,
+        discontinuities: 0,
+    })
 }
 
 fn verify_reference_oracle_v1(root: &Path) -> Result<BTreeSet<String>, String> {

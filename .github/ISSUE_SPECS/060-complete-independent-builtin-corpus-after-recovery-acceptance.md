@@ -1,5 +1,12 @@
 # 060 Complete independent builtin corpus after recovery acceptance
 
+## Final status
+
+**FAIL / STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the single bounded Sol
+correction/review budget are consumed. Checkpoint 1's zero-recovery response candidate remains
+useful technical input, but Issue 060 did not seal the corpus and authorizes no downstream audit,
+target or benchmark work.
+
 ## Outcome
 
 Complete and seal the one independent builtin V1 corpus after Issue 059 freezes the cascade
@@ -63,6 +70,35 @@ target/instruction qualification, benchmark schema/runner/workload/timing, or li
 
 Candidate and manifest hashes; exact row/path/tuple and mutation counts; response tolerance maxima
 and recovery totals; provenance/read-only proof; strict Terra/Sol verdicts;
+`workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Final Terra/Sol evidence and successor disposition
+
+Clean checkpoint `10f0235` was a partial Checkpoint-2A checker foundation, not acceptance. Sol's
+read-only adversarial review found that response-case tuples were not parsed beyond ID/category;
+some frozen response rows bypassed finite-window/tail checks and no exact partition equality or
+canonical decimal rule was enforced; `pcm/matrix-ramp.f32le` had no semantic check; the reset PCM
+proved only discontinuity reset despite declaring both reset modes; and the graph fixture cleared
+its racks, had repeated intermediate tap values, no positive-latency PDC route and checked only the
+PostMatrix summary against candidate PCM.
+
+The interrupted Checkpoint-2B checker-only candidate compiled, passed package warning-denied
+Clippy and `git diff --check`, then its focused valid-corpus test stopped with the exact checker
+diagnostic `diagnostics.jsonl differs from the exact 13 stable code/path tuples`. It did not repair
+the Checkpoint-2A gaps and did not implement the required 24 meaningful semantic corruptions.
+Closing response/scalar PCM, graph/PDC, typed meter/diagnostic/resource semantics and the final
+corruption/read-only seal is not one bounded correction, so no further Issue-060 implementation is
+permitted.
+
+The stateless successor chain is:
+
+1. **Complete builtin response cases and scalar PCM semantics**;
+2. **Complete builtin graph-tap and PDC fixture semantics**;
+3. **Complete builtin meter, diagnostic, and resource corpus semantics**; then
+4. **Seal independent builtin corpus corruption and read-only qualification**, which joins the
+   three independent completion slices and alone hands a sealed corpus to Issue 057.
+
+No benchmark process, workload or timing path ran:
 `workload_invocations=0`; `timed_benchmark_invocations=0`.
 
 ## Terra attempt 1 — response reconciliation checkpoint
