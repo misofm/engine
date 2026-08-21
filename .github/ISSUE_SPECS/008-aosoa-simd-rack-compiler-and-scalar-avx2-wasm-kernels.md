@@ -142,3 +142,70 @@ failure.
 relax the instruction gate, classify auto-vectorizer output as the intended kernel, run the timed
 benchmark, or make a disguised large SIMD correction in this attempt. Sol review/rescope is
 required before further implementation.
+
+## Sol bounded correction/review attempt 2 — 2026-08-21
+
+Candidate base: clean `main` at `4d20b5f`. Root owns the checkpoint commit/GitHub synchronization;
+the reviewed pre-commit architecture source hashes were:
+
+- `arch/mod.rs` `3a3763a9a48b6ac048aaa19eba99798f7453509e52b28dbd44ab5d1836c6dafd`
+- `arch/scalar.rs` `2587141e8bd200949daff59d0609dad0a4f5ad65edded90c7a81defbe2616e73`
+- `arch/x86.rs` `7438035f5781ab97d0be435de01fe80e3d83bab3b752af58ff143b5795806394`
+- `arch/aarch64.rs` `22098ae6a03c7ce43245b3895f1974bd01bff961eb2cbd72a546c8f246a0b93b`
+- `arch/wasm32.rs` `fecc0f11c57091b4f7e4bea80001f03ae10aed0cb44d03ab7d8b1ffa92a1f199`
+
+### Architecture-owned correction — PASS
+
+- Core now prepares an opaque safe dispatch token off render. Runtime AVX2/FMA detection occurs
+  only while that token is constructed; render calls a retained safe function pointer. Native
+  registers, raw pointers, target-feature functions and unsafe constructors are not public.
+- The builtin adapter now stores transposed per-lane/per-channel `c1/a2/a3/k`, `s1/s2`, masks,
+  polarity and trim. Disabled/inactive lanes restore exact dry bits and do not update state.
+  Recovery is lane-local and reported per call; a second clean call reports zero recovery.
+- Base Wasm uses explicit `f32x4.mul/add/sub` and no relaxed SIMD. AArch64 uses explicit four-lane
+  NEON `fmul/fadd/fsub`. AVX2 uses packed eight-lane `vmulps/vaddps/vsubps` without fusion.
+  AVX2+FMA has exactly the three frozen contractions (`vfmsub`, `vfmadd`, `vfnmadd`).
+- Available native non-FMA output is bit-identical to the accepted scalar TPT graph for the
+  finite-normal differential; FMA passes `1e-6 + 2e-5 * abs(scalar)`. L/R, cross-track,
+  inactive-lane and recovery isolation tests pass. Public masks reject values other than exact
+  zero/all-one, avoiding backend-dependent selection semantics.
+- `bash scripts/check-rack-instructions.sh` passed named-symbol inspection for baseline scalar,
+  AVX2/no-FMA, AVX2+FMA (exactly three sites), AArch64 NEON, Wasm scalar and Wasm simd128. The
+  inspection script hash was
+  `626a8aed9205f7706f843641fd9942a6dc43ee797d0acd7912b23bf30a60c485`.
+
+The focused locked package suite; fixture checker and its corruption tests; `cargo fmt`; full
+workspace check, test, warning-denied Clippy and rustdoc; workspace/realtime/effect/graph/rack
+policies and applicable mutation probes; native baseline, Android ARM64, iOS ARM64, Wasm scalar
+and Wasm simd128 builds all passed. The unrelated `field_reassign_with_default` lint was corrected.
+The existing release 100,000-render graph audit also passed with output hash
+`08b0fa64586c2325` and zero forbidden-operation counters.
+
+### Adversarial production/readiness findings — FAIL
+
+1. The architecture kernel is not retained by a production prepared graph. Repository-wide use
+   inspection finds `BuiltinInputBankV1` only in its definition and builtin unit tests. The
+   production post-input-builtin binding remains scalar, and the passing 100,000-render graph
+   audit executes the fixture's scalar `DualAccumulatorDelayBank`, not the new TPT SIMD token.
+   Therefore instruction emission and direct conformance are proved, but the required working
+   post-input-builtin SIMD render vertical and its realtime audit are not.
+2. The frozen exactly-100 generated layout suite from seed `0x000000008a050a08` is absent. Existing
+   tests cover the exact track-count set and deterministic cohort/fixture behavior, but search and
+   test inspection found no implementation of that seed or 100 generated randomized layouts.
+3. Benchmark readiness is a false positive. `scripts/preflight-rack-benchmark.sh` reports
+   `workload_launches=0`, one warmup, two measured rounds and six future records without creating
+   `target/issue8/rack-benchmark.jsonl`; however `miso-engine-rack-bench` times only a byte fold of
+   the three workload labels. It constructs no scalar TPT tracks, SIMD bank or mixed graph, reports
+   raw nanoseconds rather than ns/frame, and omits the frozen backend/fixture/audit/build metadata.
+   The preflight tests also do not prove schema mutations, output persistence, shell-failure
+   propagation or real overwrite refusal. A timed invocation is therefore forbidden.
+
+### Final verdict
+
+**SOL ATTEMPT 2: FAIL (architecture correction PASS; production vertical FAIL; benchmark readiness
+FAIL).** No timed benchmark was invoked and no benchmark artifact exists. The two-attempt budget is
+exhausted: do not weaken the gates or perform a disguised third attempt. Preserve this coherent
+SIMD checkpoint, then create a stateless bounded feature rescope for production post-input-builtin
+bank retention plus the missing seeded/realtime gates. Move the false benchmark/preflight repair
+to the existing benchmark-tooling scope (Issue 030 or a narrower successor) before authorizing the
+single one-warmup/two-round invocation.

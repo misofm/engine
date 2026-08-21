@@ -10,6 +10,7 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 create_fixture() {
     local root="$1"
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
+        "$root/crates/miso-engine-core/src/arch" \
         "$root/tools/miso-engine-realtime-audit/src" \
         "$root/tools/miso-engine-protocol-audit/src"
     printf '%s\n' \
@@ -31,6 +32,10 @@ create_fixture() {
         'unsafe impl Send for Allowed {}' \
         'struct Allowed;' \
         >"$root/crates/miso-engine-core/src/realtime/spsc.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe fn architecture_kernel() {}' \
+        >"$root/crates/miso-engine-core/src/arch/x86.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for Audit {}' \
@@ -69,5 +74,7 @@ expect_failure unsafe-scope \
     'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure unsafe-outside-exact-allowlist \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-protocol-audit/src/other.rs"'
+expect_failure unsafe-outside-architecture-allowlist \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/other.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

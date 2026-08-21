@@ -3,6 +3,10 @@
 //! Detection in this crate is control-plane work. It is never required from a realtime render
 //! callback.
 
+mod arch;
+
+pub use arch::{PreparedTptBankKernelV1, TptBankKernelError};
+
 /// The version of the engine API represented by this build.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
