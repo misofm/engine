@@ -145,6 +145,14 @@ audit, targets/instructions, the sole eventual one-warmup/two-round descriptive 
 audition/listening handoff. Both permit one Terra attempt plus one Sol correction. Their timed
 invocation counts start at zero; Issue 051 gates only release qualification Issue 026.
 
+Issue 019, **Launch fixed-2x cubic soft-clip saturator**, owns one Normal-quality effect-local 2x
+linear-phase FIR and cubic soft clip with scalar/W4/W8 plus representative registry/graph/PDC
+closure. Issue 052, **Launch saturator/clipper qualification, realtime audit, and benchmark**,
+follows 019 and owns expanded mode/quality research, corpus/long rows, realtime audit, complete
+targets/instructions, the sole eventual one-warmup/two-round descriptive benchmark and listening
+handoff. Both permit one Terra attempt plus one Sol correction and start with zero timed
+invocations; Issue 052 gates only release qualification Issue 026.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
