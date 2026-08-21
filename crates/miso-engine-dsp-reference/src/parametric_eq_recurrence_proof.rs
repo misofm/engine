@@ -4,7 +4,9 @@
 //! single ignored full-matrix invocation must extend this derivation; it must not execute this
 //! phase separately and combine transcripts later.
 
-use core::f64::consts::FRAC_1_SQRT_2;
+use core::cmp::Ordering;
+use core::f64::consts::{FRAC_1_SQRT_2, PI};
+use core::mem::size_of;
 
 use crate::{
     ReferenceParametricEqCoefficients, ReferenceParametricEqKind, ReferenceParametricEqSection,
@@ -611,11 +613,1048 @@ fn phase_one(candidate_id: CandidateId, rows: &[Row]) -> Summary {
 }
 
 #[test]
-#[ignore = "Issue-045's one permitted execution must include the later retained-f32 phases"]
-fn issue_045_phase_one_f64_reconstruction_and_impulse_gate() {
-    let rows = rows();
-    let summaries = CandidateId::ALL.map(|candidate| phase_one(candidate, &rows));
-    for summary in summaries {
+#[ignore = "Issue-045's one permitted execution is the complete four-phase matrix"]
+fn issue_045_complete_recurrence_comparison_requires_sol_freeze() {
+    complete_comparison();
+}
+
+#[repr(C)]
+struct LaneWords<const WIDTH: usize, const WORDS: usize> {
+    /// Field-major, direct `field[lane]` storage: no lane communication or hidden scalar state.
+    fields: [[f32; WIDTH]; WORDS],
+}
+
+const L1_COEFFICIENT_WORDS: usize = 6;
+const L1_STATE_WORDS: usize = 4;
+const D2_COEFFICIENT_WORDS: usize = 7;
+const D2_STATE_WORDS: usize = 8;
+const B3_COEFFICIENT_WORDS: usize = 9;
+const B3_STATE_WORDS: usize = 2;
+
+#[derive(Clone, Copy, Default)]
+struct StepEvents {
+    canonicalizations: u64,
+    recoveries: u64,
+    first_bad_bits: Option<u32>,
+}
+
+impl StepEvents {
+    fn canonicalized(&mut self, value: f32) {
+        self.canonicalizations += 1;
+        self.first_bad_bits.get_or_insert(value.to_bits());
+    }
+
+    fn recovered(&mut self, value: f32) {
+        self.recoveries += 1;
+        self.first_bad_bits.get_or_insert(value.to_bits());
+    }
+}
+
+/// Every committed retained value is a normal `f32` or canonical positive zero.
+fn canonical_boundary(value: f32, events: &mut StepEvents) -> Result<f32, ()> {
+    if !value.is_finite() {
+        events.recovered(value);
+        return Err(());
+    }
+    if value.to_bits() == 0 {
+        return Ok(value);
+    }
+    if value == 0.0 || !value.is_normal() {
+        events.canonicalized(value);
+        return Ok(0.0);
+    }
+    Ok(value)
+}
+
+fn normal_or_positive_zero(value: f32) -> bool {
+    value.is_normal() || value.to_bits() == 0
+}
+
+#[derive(Clone, Copy)]
+struct RetainedL1 {
+    a: f32,
+    n0: f32,
+    n1: f32,
+    n2: f32,
+    k1: f32,
+    k2: f32,
+    x1: f32,
+    x2: f32,
+    s0: f32,
+    s1: f32,
+}
+
+#[derive(Clone, Copy)]
+struct RetainedD2 {
+    a: f32,
+    n0: f32,
+    d0: f32,
+    n1: f32,
+    d1: f32,
+    n2: f32,
+    d2: f32,
+    x1: Expansion,
+    x2: Expansion,
+    y1: Expansion,
+    y2: Expansion,
+}
+
+#[derive(Clone, Copy)]
+struct RetainedB3 {
+    a00: f32,
+    a01: f32,
+    a10: f32,
+    a11: f32,
+    b0: f32,
+    b1: f32,
+    c0: f32,
+    c1: f32,
+    d: f32,
+    s0: f32,
+    s1: f32,
+}
+
+#[derive(Clone, Copy)]
+enum RetainedCandidate {
+    Identity,
+    L1(RetainedL1),
+    D2(RetainedD2),
+    B3(RetainedB3),
+}
+
+impl RetainedCandidate {
+    fn design(
+        id: CandidateId,
+        row: Row,
+        reference: ReferenceParametricEqCoefficients,
+    ) -> Result<Self, &'static str> {
+        let source = Candidate::design(id, row, reference)?;
+        match source {
+            Candidate::Identity => Ok(Self::Identity),
+            Candidate::L1(value) => {
+                let words = [value.a, value.n0, value.n1, value.n2, value.k1, value.k2];
+                if !words.into_iter().all(|word| (word as f32).is_finite()) {
+                    return Err("l1_nonfinite_retained_word");
+                }
+                Ok(Self::L1(RetainedL1 {
+                    a: value.a as f32,
+                    n0: value.n0 as f32,
+                    n1: value.n1 as f32,
+                    n2: value.n2 as f32,
+                    k1: value.k1 as f32,
+                    k2: value.k2 as f32,
+                    x1: 0.0,
+                    x2: 0.0,
+                    s0: 0.0,
+                    s1: 0.0,
+                }))
+            }
+            Candidate::D2(value) => {
+                let words = [
+                    value.a, value.n0, value.d0, value.n1, value.d1, value.n2, value.d2,
+                ];
+                if !words.into_iter().all(|word| (word as f32).is_finite()) {
+                    return Err("d2_nonfinite_retained_word");
+                }
+                Ok(Self::D2(RetainedD2 {
+                    a: value.a as f32,
+                    n0: value.n0 as f32,
+                    d0: value.d0 as f32,
+                    n1: value.n1 as f32,
+                    d1: value.d1 as f32,
+                    n2: value.n2 as f32,
+                    d2: value.d2 as f32,
+                    x1: Expansion::zero(),
+                    x2: Expansion::zero(),
+                    y1: Expansion::zero(),
+                    y2: Expansion::zero(),
+                }))
+            }
+            Candidate::B3(value) => {
+                let words = [
+                    value.a00, value.a01, value.a10, value.a11, value.b0, value.b1, value.c0,
+                    value.c1, value.d,
+                ];
+                if !words.into_iter().all(|word| (word as f32).is_finite()) {
+                    return Err("b3_nonfinite_retained_word");
+                }
+                Ok(Self::B3(RetainedB3 {
+                    a00: value.a00 as f32,
+                    a01: value.a01 as f32,
+                    a10: value.a10 as f32,
+                    a11: value.a11 as f32,
+                    b0: value.b0 as f32,
+                    b1: value.b1 as f32,
+                    c0: value.c0 as f32,
+                    c1: value.c1 as f32,
+                    d: value.d as f32,
+                    s0: 0.0,
+                    s1: 0.0,
+                }))
+            }
+        }
+    }
+
+    fn words(self) -> ([u32; 9], usize) {
+        match self {
+            Self::Identity => ([1.0_f32.to_bits(), 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            Self::L1(value) => (
+                [
+                    value.a.to_bits(),
+                    value.n0.to_bits(),
+                    value.n1.to_bits(),
+                    value.n2.to_bits(),
+                    value.k1.to_bits(),
+                    value.k2.to_bits(),
+                    0,
+                    0,
+                    0,
+                ],
+                L1_COEFFICIENT_WORDS,
+            ),
+            Self::D2(value) => (
+                [
+                    value.a.to_bits(),
+                    value.n0.to_bits(),
+                    value.d0.to_bits(),
+                    value.n1.to_bits(),
+                    value.d1.to_bits(),
+                    value.n2.to_bits(),
+                    value.d2.to_bits(),
+                    0,
+                    0,
+                ],
+                D2_COEFFICIENT_WORDS,
+            ),
+            Self::B3(value) => (
+                [
+                    value.a00.to_bits(),
+                    value.a01.to_bits(),
+                    value.a10.to_bits(),
+                    value.a11.to_bits(),
+                    value.b0.to_bits(),
+                    value.b1.to_bits(),
+                    value.c0.to_bits(),
+                    value.c1.to_bits(),
+                    value.d.to_bits(),
+                ],
+                B3_COEFFICIENT_WORDS,
+            ),
+        }
+    }
+
+    fn direct_form(self) -> [f64; 5] {
+        match self {
+            Self::Identity => [1.0, 0.0, 0.0, 0.0, 0.0],
+            Self::L1(value) => {
+                let a = f64::from(value.a);
+                let b2 = f64::from(value.n2);
+                let b1 = f64::from(value.n1) - 2.0 * a * b2;
+                [
+                    f64::from(value.n0) - a * b1 - b2,
+                    b1,
+                    b2,
+                    f64::from(value.k1) * (1.0 + f64::from(value.k2)),
+                    f64::from(value.k2),
+                ]
+            }
+            Self::D2(value) => {
+                let a = f64::from(value.a);
+                let d2 = f64::from(value.d2);
+                let scale = (f64::from(value.d0) - a * f64::from(value.d1)) + d2;
+                [
+                    (f64::from(value.n0) - a * f64::from(value.n1) + f64::from(value.n2)) / scale,
+                    (f64::from(value.n1) - 2.0 * a * f64::from(value.n2)) / scale,
+                    f64::from(value.n2) / scale,
+                    (f64::from(value.d1) - 2.0 * a * d2) / scale,
+                    d2 / scale,
+                ]
+            }
+            Self::B3(value) => RetainedB3::direct_form(value),
+        }
+    }
+
+    fn step(&mut self, input: f32) -> (f32, StepEvents) {
+        match self {
+            Self::Identity => (input, StepEvents::default()),
+            Self::L1(value) => value.step(input),
+            Self::D2(value) => value.step(input),
+            Self::B3(value) => value.step(input),
+        }
+    }
+
+    fn state(self) -> ([f32; D2_STATE_WORDS], usize) {
+        match self {
+            Self::Identity => ([0.0; D2_STATE_WORDS], 0),
+            Self::L1(value) => (
+                [value.x1, value.x2, value.s0, value.s1, 0.0, 0.0, 0.0, 0.0],
+                L1_STATE_WORDS,
+            ),
+            Self::D2(value) => (
+                [
+                    value.x1.hi,
+                    value.x1.lo,
+                    value.x2.hi,
+                    value.x2.lo,
+                    value.y1.hi,
+                    value.y1.lo,
+                    value.y2.hi,
+                    value.y2.lo,
+                ],
+                D2_STATE_WORDS,
+            ),
+            Self::B3(value) => (
+                [value.s0, value.s1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                B3_STATE_WORDS,
+            ),
+        }
+    }
+
+    fn strict_stability_margin(self) -> Option<f64> {
+        let [_, _, _, a1, a2] = self.direct_form();
+        let margin = (1.0 - a2.abs()).min(1.0 + a1 + a2).min(1.0 - a1 + a2);
+        margin.is_finite().then_some(margin)
+    }
+}
+
+impl RetainedL1 {
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.s0 = 0.0;
+        self.s1 = 0.0;
+    }
+
+    fn step(&mut self, x: f32) -> (f32, StepEvents) {
+        let mut events = StepEvents::default();
+        let dx = self.x1 - self.a * x;
+        let ddx = (self.x2 - self.a * self.x1) - self.a * dx;
+        let e = (self.n0 * x + self.n1 * dx) + self.n2 * ddx;
+        let f1 = e - self.k2 * self.s1;
+        let y = f1 - self.k1 * self.s0;
+        let values = [x, self.x1, y, self.k1 * y + self.s0];
+        let mut next = [0.0; L1_STATE_WORDS];
+        for (destination, value) in next.iter_mut().zip(values) {
+            let Ok(value) = canonical_boundary(value, &mut events) else {
+                self.reset();
+                return (0.0, events);
+            };
+            *destination = value;
+        }
+        self.x1 = next[0];
+        self.x2 = next[1];
+        self.s0 = next[2];
+        self.s1 = next[3];
+        (next[2], events)
+    }
+}
+
+impl RetainedB3 {
+    fn direct_form(self) -> [f64; 5] {
+        let a1 = -(f64::from(self.a00) + f64::from(self.a11));
+        let a2 =
+            f64::from(self.a00) * f64::from(self.a11) - f64::from(self.a01) * f64::from(self.a10);
+        [
+            f64::from(self.d),
+            f64::from(self.d) * a1
+                + f64::from(self.c0) * f64::from(self.b0)
+                + f64::from(self.c1) * f64::from(self.b1),
+            f64::from(self.d) * a2
+                + f64::from(self.c0)
+                    * (-f64::from(self.a11) * f64::from(self.b0)
+                        + f64::from(self.a01) * f64::from(self.b1))
+                + f64::from(self.c1)
+                    * (f64::from(self.a10) * f64::from(self.b0)
+                        - f64::from(self.a00) * f64::from(self.b1)),
+            a1,
+            a2,
+        ]
+    }
+
+    fn reset(&mut self) {
+        self.s0 = 0.0;
+        self.s1 = 0.0;
+    }
+
+    fn step(&mut self, x: f32) -> (f32, StepEvents) {
+        let mut events = StepEvents::default();
+        let y = (self.d * x + self.c0 * self.s0) + self.c1 * self.s1;
+        let s0 = (self.a00 * self.s0 + self.a01 * self.s1) + self.b0 * x;
+        let s1 = (self.a10 * self.s0 + self.a11 * self.s1) + self.b1 * x;
+        let Ok(y) = canonical_boundary(y, &mut events) else {
+            self.reset();
+            return (0.0, events);
+        };
+        let Ok(s0) = canonical_boundary(s0, &mut events) else {
+            self.reset();
+            return (0.0, events);
+        };
+        let Ok(s1) = canonical_boundary(s1, &mut events) else {
+            self.reset();
+            return (0.0, events);
+        };
+        self.s0 = s0;
+        self.s1 = s1;
+        (y, events)
+    }
+}
+
+/// Canonical two-word `f32` expansion. Every primitive is separate-multiply/add only.
+#[derive(Clone, Copy)]
+struct Expansion {
+    hi: f32,
+    lo: f32,
+}
+
+impl Expansion {
+    const fn zero() -> Self {
+        Self { hi: 0.0, lo: 0.0 }
+    }
+
+    const fn word(value: f32) -> Self {
+        Self { hi: value, lo: 0.0 }
+    }
+
+    fn add(self, other: Self) -> Result<Self, f32> {
+        let (sum, error) = two_sum(self.hi, other.hi)?;
+        let (middle, middle_error) = two_sum(error, self.lo + other.lo)?;
+        let (high, high_error) = two_sum(sum, middle)?;
+        Self::renormalize(high, middle_error + high_error)
+    }
+
+    fn sub(self, other: Self) -> Result<Self, f32> {
+        self.add(Self {
+            hi: -other.hi,
+            lo: -other.lo,
+        })
+    }
+
+    fn times_word(self, word: f32) -> Result<Self, f32> {
+        let (product, error) = two_prod(self.hi, word)?;
+        Self::renormalize(product, error + self.lo * word)
+    }
+
+    fn divided_by_word(self, word: f32) -> Result<Self, f32> {
+        if !word.is_finite() || word == 0.0 {
+            return Err(word);
+        }
+        let q1 = self.hi / word;
+        let (product_hi, product_lo) = two_prod(q1, word)?;
+        let q2 = (((self.hi - product_hi) - product_lo) + self.lo) / word;
+        Self::renormalize(q1, q2)
+    }
+
+    fn renormalize(hi: f32, lo: f32) -> Result<Self, f32> {
+        let (sum, error) = two_sum(hi, lo)?;
+        let (hi, lo) = quick_two_sum(sum, error)?;
+        if !hi.is_finite() || !lo.is_finite() || (hi == 0.0 && lo != 0.0) {
+            return Err(if !hi.is_finite() { hi } else { lo });
+        }
+        if hi != 0.0 && lo.abs() > ulp(hi) * 0.5 {
+            return Err(lo);
+        }
+        Ok(Self { hi, lo })
+    }
+
+    fn canonicalize(&mut self, events: &mut StepEvents) -> Result<(), ()> {
+        self.hi = canonical_boundary(self.hi, events)?;
+        self.lo = canonical_boundary(self.lo, events)?;
+        if self.hi == 0.0 {
+            self.lo = 0.0;
+        }
+        if self.hi != 0.0 && self.lo.abs() > ulp(self.hi) * 0.5 {
+            events.recovered(self.lo);
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+fn two_sum(left: f32, right: f32) -> Result<(f32, f32), f32> {
+    let sum = left + right;
+    let virtual_right = sum - left;
+    let error = (left - (sum - virtual_right)) + (right - virtual_right);
+    (sum.is_finite() && error.is_finite())
+        .then_some((sum, error))
+        .ok_or(if !sum.is_finite() { sum } else { error })
+}
+
+fn quick_two_sum(left: f32, right: f32) -> Result<(f32, f32), f32> {
+    let sum = left + right;
+    let error = right - (sum - left);
+    (sum.is_finite() && error.is_finite())
+        .then_some((sum, error))
+        .ok_or(if !sum.is_finite() { sum } else { error })
+}
+
+fn two_prod(left: f32, right: f32) -> Result<(f32, f32), f32> {
+    const SPLIT: f32 = 4_097.0;
+    const MAX_SPLIT_OPERAND: f32 = f32::MAX / SPLIT;
+    if !left.is_finite()
+        || !right.is_finite()
+        || left.abs() > MAX_SPLIT_OPERAND
+        || right.abs() > MAX_SPLIT_OPERAND
+    {
+        return Err(if !left.is_finite() || left.abs() > MAX_SPLIT_OPERAND {
+            left
+        } else {
+            right
+        });
+    }
+    let product = left * right;
+    let left_split = SPLIT * left;
+    let left_high = left_split - (left_split - left);
+    let left_low = left - left_high;
+    let right_split = SPLIT * right;
+    let right_high = right_split - (right_split - right);
+    let right_low = right - right_high;
+    let error =
+        ((left_high * right_high - product) + left_high * right_low + left_low * right_high)
+            + left_low * right_low;
+    (product.is_finite() && error.is_finite())
+        .then_some((product, error))
+        .ok_or(if !product.is_finite() { product } else { error })
+}
+
+fn ulp(value: f32) -> f32 {
+    if value == 0.0 {
+        f32::from_bits(1)
+    } else {
+        let bits = value.abs().to_bits();
+        (f32::from_bits(bits.saturating_add(1)) - f32::from_bits(bits)).abs()
+    }
+}
+
+impl RetainedD2 {
+    fn reset(&mut self) {
+        self.x1 = Expansion::zero();
+        self.x2 = Expansion::zero();
+        self.y1 = Expansion::zero();
+        self.y2 = Expansion::zero();
+    }
+
+    fn step(&mut self, input: f32) -> (f32, StepEvents) {
+        let mut events = StepEvents::default();
+        let input = Expansion::word(input);
+        let result = (|| -> Result<Expansion, f32> {
+            let dx = self.x1.sub(input.times_word(self.a)?)?;
+            let ddx = self
+                .x2
+                .sub(self.x1.times_word(self.a)?)?
+                .sub(dx.times_word(self.a)?)?;
+            let numerator = input
+                .times_word(self.n0)?
+                .add(dx.times_word(self.n1)?)?
+                .add(ddx.times_word(self.n2)?)?;
+            let scale = Expansion::word(self.d0)
+                .sub(Expansion::word(self.a).times_word(self.d1)?)?
+                .add(Expansion::word(self.d2))?;
+            if scale.hi == 0.0 || scale.lo != 0.0 {
+                return Err(scale.hi);
+            }
+            let q1 = self.a * self.d2;
+            let q2 = (self.d1 - q1) - q1;
+            let history = self.y1.times_word(q2)?.add(self.y2.times_word(self.d2)?)?;
+            numerator.sub(history)?.divided_by_word(scale.hi)
+        })();
+        let mut output = match result {
+            Ok(value) => value,
+            Err(value) => {
+                events.recovered(value);
+                self.reset();
+                return (0.0, events);
+            }
+        };
+        let mut x1 = input;
+        let mut x2 = self.x1;
+        let mut y1 = output;
+        let mut y2 = self.y1;
+        for value in [&mut x1, &mut x2, &mut y1, &mut y2] {
+            if value.canonicalize(&mut events).is_err() {
+                self.reset();
+                return (0.0, events);
+            }
+        }
+        output = y1;
+        let output_word = match canonical_boundary(output.hi + output.lo, &mut events) {
+            Ok(value) => value,
+            Err(()) => {
+                self.reset();
+                return (0.0, events);
+            }
+        };
+        self.x1 = x1;
+        self.x2 = x2;
+        self.y1 = y1;
+        self.y2 = y2;
+        (output_word, events)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetainedSummary {
+    candidate: CandidateId,
+    analytic_rows: u32,
+    analytic_failures: u32,
+    searches: u32,
+    search_failures: u32,
+    impulse_cases: u32,
+    impulse_failures: u32,
+    million_cases: u32,
+    recoveries: u64,
+    canonicalizations: u64,
+    invalid_values: u64,
+    minimum_stability_margin: f64,
+    worst_analytic_db: f64,
+    worst_dft_db: f64,
+    max_output: f64,
+    max_state: f64,
+    minimum_nonzero: f64,
+    first_failure: Option<(&'static str, usize, usize, u32)>,
+    analytic_hash: u64,
+    impulse_hash: u64,
+    million_hash: u64,
+}
+
+impl RetainedSummary {
+    const fn new(candidate: CandidateId) -> Self {
+        Self {
+            candidate,
+            analytic_rows: 0,
+            analytic_failures: 0,
+            searches: 0,
+            search_failures: 0,
+            impulse_cases: 0,
+            impulse_failures: 0,
+            million_cases: 0,
+            recoveries: 0,
+            canonicalizations: 0,
+            invalid_values: 0,
+            minimum_stability_margin: f64::INFINITY,
+            worst_analytic_db: 0.0,
+            worst_dft_db: 0.0,
+            max_output: 0.0,
+            max_state: 0.0,
+            minimum_nonzero: f64::INFINITY,
+            first_failure: None,
+            analytic_hash: FNV_OFFSET,
+            impulse_hash: FNV_OFFSET,
+            million_hash: FNV_OFFSET,
+        }
+    }
+
+    fn fail(&mut self, category: &'static str, row: usize, sample: usize, bits: u32) {
+        self.first_failure
+            .get_or_insert((category, row, sample, bits));
+    }
+
+    fn observe(
+        &mut self,
+        candidate: RetainedCandidate,
+        output: f32,
+        events: StepEvents,
+        row: usize,
+        sample: usize,
+        phase_hash: &mut u64,
+    ) {
+        mix_hash(phase_hash, u64::from(output.to_bits()));
+        self.recoveries += events.recoveries;
+        self.canonicalizations += events.canonicalizations;
+        if events.recoveries != 0 {
+            self.fail(
+                "recovery",
+                row,
+                sample,
+                events.first_bad_bits.unwrap_or(output.to_bits()),
+            );
+        }
+        self.observe_value(output, false, row, sample);
+        let (state, count) = candidate.state();
+        for value in state.into_iter().take(count) {
+            mix_hash(phase_hash, u64::from(value.to_bits()));
+            self.observe_value(value, true, row, sample);
+        }
+    }
+
+    fn observe_value(&mut self, value: f32, state: bool, row: usize, sample: usize) {
+        if !normal_or_positive_zero(value) {
+            self.invalid_values += 1;
+            self.fail("invalid_committed_value", row, sample, value.to_bits());
+            return;
+        }
+        let magnitude = f64::from(value).abs();
+        if state {
+            self.max_state = self.max_state.max(magnitude);
+        } else {
+            self.max_output = self.max_output.max(magnitude);
+        }
+        if magnitude != 0.0 {
+            self.minimum_nonzero = self.minimum_nonzero.min(magnitude);
+        }
+    }
+
+    fn passes(self) -> bool {
+        self.analytic_rows == 1_488
+            && self.analytic_failures == 0
+            && self.searches == 1_104
+            && self.search_failures == 0
+            && self.impulse_cases == 48
+            && self.impulse_failures == 0
+            && self.million_cases == 48
+            && self.recoveries == 0
+            && self.invalid_values == 0
+    }
+}
+
+fn mix_hash(hash: &mut u64, word: u64) {
+    *hash ^= word;
+    *hash = hash.wrapping_mul(FNV_PRIME);
+}
+
+fn f32_direct_magnitude(coefficients: [f64; 5], frequency: f64, rate: f64) -> f64 {
+    let [b0, b1, b2, a1, a2] = coefficients;
+    let omega = 2.0 * PI * frequency / rate;
+    let numerator_re = b0 + b1 * omega.cos() + b2 * (2.0 * omega).cos();
+    let numerator_im = -b1 * omega.sin() - b2 * (2.0 * omega).sin();
+    let denominator_re = 1.0 + a1 * omega.cos() + a2 * (2.0 * omega).cos();
+    let denominator_im = -a1 * omega.sin() - a2 * (2.0 * omega).sin();
+    numerator_re.hypot(numerator_im) / denominator_re.hypot(denominator_im)
+}
+
+fn db(value: f64) -> f64 {
+    if value == 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        20.0 * value.log10()
+    }
+}
+
+fn probes(row: Row) -> Vec<f64> {
+    let mut output = Vec::with_capacity(2_051);
+    for index in 0..2_048 {
+        output.push(10.0 * 2_000.0_f64.powf(index as f64 / 2_047.0));
+    }
+    output.push(row.frequency);
+    output.push(0.0);
+    output.push(f64::from(row.rate) * 0.5);
+    output
+}
+
+#[derive(Clone, Copy)]
+enum SearchTarget {
+    Db(f64),
+    NotchMinimum,
+}
+
+fn retained_analytic(candidate_id: CandidateId, all_rows: &[Row]) -> RetainedSummary {
+    let mut summary = RetainedSummary::new(candidate_id);
+    mix_hash(&mut summary.analytic_hash, EQUATION_VERSION);
+    mix_hash(&mut summary.analytic_hash, candidate_id as u64);
+    for (row_index, row) in all_rows.iter().copied().enumerate() {
+        summary.analytic_rows += 1;
+        let reference = row.reference();
+        let candidate = match RetainedCandidate::design(candidate_id, row, reference) {
+            Ok(value) => value,
+            Err(_) => {
+                summary.analytic_failures += 1;
+                summary.fail("retained_design", row_index, 0, 0);
+                continue;
+            }
+        };
+        let (words, count) = candidate.words();
+        for word in words.into_iter().take(count) {
+            mix_hash(&mut summary.analytic_hash, u64::from(word));
+        }
+        let Some(margin) = candidate.strict_stability_margin() else {
+            summary.analytic_failures += 1;
+            summary.fail("retained_nonfinite_transition", row_index, 0, 0);
+            continue;
+        };
+        summary.minimum_stability_margin = summary.minimum_stability_margin.min(margin);
+        if margin.partial_cmp(&0.0) != Some(Ordering::Greater) {
+            summary.analytic_failures += 1;
+            summary.fail("retained_unstable_transition", row_index, 0, 0);
+        }
+        let coefficients = candidate.direct_form();
+        if !coefficients.into_iter().all(f64::is_finite) {
+            summary.analytic_failures += 1;
+            summary.fail("retained_nonfinite_words", row_index, 0, 0);
+            continue;
+        }
+        for probe in probes(row) {
+            let expected = reference.magnitude_at_hz(probe).expect("frozen probe");
+            let actual = f32_direct_magnitude(coefficients, probe, f64::from(row.rate));
+            let expected_db = db(expected);
+            let actual_db = db(actual);
+            mix_hash(&mut summary.analytic_hash, actual.to_bits());
+            if !actual.is_finite()
+                || (expected_db >= -120.0 && (actual_db - expected_db).abs() > 0.005)
+            {
+                summary.analytic_failures += 1;
+                summary.fail("analytic_response", row_index, 0, actual as f32 as u32);
+            }
+            if expected_db >= -120.0 {
+                summary.worst_analytic_db = summary
+                    .worst_analytic_db
+                    .max((actual_db - expected_db).abs());
+            }
+        }
+        run_characteristic_search(&mut summary, row_index, row, coefficients);
+    }
+    summary
+}
+
+fn run_characteristic_search(
+    summary: &mut RetainedSummary,
+    row_index: usize,
+    row: Row,
+    coefficients: [f64; 5],
+) {
+    let target = match row.kind {
+        ReferenceParametricEqKind::LowPass | ReferenceParametricEqKind::HighPass
+            if (row.q - FRAC_1_SQRT_2).abs() < f64::EPSILON =>
+        {
+            Some(SearchTarget::Db(-3.010_299_956_6))
+        }
+        ReferenceParametricEqKind::Bell if row.gain != 0.0 => Some(SearchTarget::Db(row.gain)),
+        ReferenceParametricEqKind::LowShelf | ReferenceParametricEqKind::HighShelf
+            if row.gain != 0.0 =>
+        {
+            Some(SearchTarget::Db(row.gain * 0.5))
+        }
+        ReferenceParametricEqKind::Notch => Some(SearchTarget::NotchMinimum),
+        _ => None,
+    };
+    let Some(target) = target else {
+        return;
+    };
+    summary.searches += 1;
+    let nyquist = row.rate as f64 * 0.5;
+    let low = (row.frequency * 0.25).max(0.0);
+    let high = (row.frequency * 4.0).min(nyquist);
+    let mut best_frequency = row.frequency;
+    let mut best_magnitude = f32_direct_magnitude(coefficients, row.frequency, row.rate as f64);
+    let mut best_score = search_score(best_magnitude, target);
+    for index in 0..2_049 {
+        let frequency = low + (high - low) * index as f64 / 2_048.0;
+        let magnitude = f32_direct_magnitude(coefficients, frequency, row.rate as f64);
+        let score = search_score(magnitude, target);
+        if score < best_score {
+            best_score = score;
+            best_frequency = frequency;
+            best_magnitude = magnitude;
+        }
+    }
+    mix_hash(&mut summary.analytic_hash, best_frequency.to_bits());
+    mix_hash(&mut summary.analytic_hash, best_magnitude.to_bits());
+    let relative = ((best_frequency - row.frequency) / row.frequency).abs();
+    let null_ok = !matches!(target, SearchTarget::NotchMinimum) || best_magnitude <= 1e-5;
+    if !relative.is_finite() || relative > 0.001 || !null_ok {
+        summary.search_failures += 1;
+        summary.fail(
+            "characteristic_search",
+            row_index,
+            0,
+            best_frequency as f32 as u32,
+        );
+    }
+}
+
+fn search_score(magnitude: f64, target: SearchTarget) -> f64 {
+    match target {
+        SearchTarget::Db(target) => (db(magnitude) - target).abs(),
+        SearchTarget::NotchMinimum => magnitude,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Edge {
+    Low,
+    High,
+}
+
+impl Edge {
+    const ALL: [Self; 2] = [Self::Low, Self::High];
+
+    const fn values(self) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Low => (10.0, -24.0, 0.1, 0.1),
+            Self::High => (20_000.0, 24.0, 18.0, 1.0),
+        }
+    }
+}
+
+fn edge_rows() -> Vec<Row> {
+    let mut output = Vec::with_capacity(48);
+    for rate in RATES {
+        for kind in [
+            ReferenceParametricEqKind::Bell,
+            ReferenceParametricEqKind::LowShelf,
+            ReferenceParametricEqKind::HighShelf,
+            ReferenceParametricEqKind::LowPass,
+            ReferenceParametricEqKind::HighPass,
+            ReferenceParametricEqKind::Notch,
+        ] {
+            for edge in Edge::ALL {
+                let (frequency, gain, q, slope) = edge.values();
+                output.push(Row {
+                    rate,
+                    kind,
+                    frequency,
+                    gain,
+                    q,
+                    slope,
+                });
+            }
+        }
+    }
+    assert_eq!(output.len(), 48);
+    output
+}
+
+fn impulse_dft_step(
+    sample: f64,
+    unit_re: &mut f64,
+    unit_im: &mut f64,
+    step_re: f64,
+    step_im: f64,
+    re: &mut f64,
+    im: &mut f64,
+) {
+    *re += sample * *unit_re;
+    *im += sample * *unit_im;
+    (*unit_re, *unit_im) = (
+        *unit_re * step_re - *unit_im * step_im,
+        *unit_re * step_im + *unit_im * step_re,
+    );
+}
+
+fn impulse_phase(summary: &mut RetainedSummary) {
+    let mut impulse_hash = summary.impulse_hash;
+    for (row_index, row) in edge_rows().into_iter().enumerate() {
+        let reference = row.reference();
+        let mut candidate = match RetainedCandidate::design(summary.candidate, row, reference) {
+            Ok(value) => value,
+            Err(_) => {
+                summary.impulse_failures += 1;
+                summary.fail("impulse_design", row_index, 0, 0);
+                continue;
+            }
+        };
+        let mut oracle = ReferenceParametricEqSection::new(reference);
+        let phase = -core::f64::consts::TAU * row.frequency / f64::from(row.rate);
+        let (step_re, step_im) = (phase.cos(), phase.sin());
+        let (mut actual_re, mut actual_im) = (0.0, 0.0);
+        let (mut expected_re, mut expected_im) = (0.0, 0.0);
+        let (mut actual_unit_re, mut actual_unit_im) = (1.0, 0.0);
+        let (mut expected_unit_re, mut expected_unit_im) = (1.0, 0.0);
+        for sample in 0..row.rate as usize {
+            let input = if sample == 0 { 1.0 } else { 0.0 };
+            let (actual, events) = candidate.step(input as f32);
+            summary.observe(
+                candidate,
+                actual,
+                events,
+                row_index,
+                sample,
+                &mut impulse_hash,
+            );
+            impulse_dft_step(
+                f64::from(actual),
+                &mut actual_unit_re,
+                &mut actual_unit_im,
+                step_re,
+                step_im,
+                &mut actual_re,
+                &mut actual_im,
+            );
+            impulse_dft_step(
+                oracle.process(input),
+                &mut expected_unit_re,
+                &mut expected_unit_im,
+                step_re,
+                step_im,
+                &mut expected_re,
+                &mut expected_im,
+            );
+        }
+        let actual_db = db(actual_re.hypot(actual_im));
+        let expected_db = db(expected_re.hypot(expected_im));
+        mix_hash(&mut impulse_hash, actual_db.to_bits());
+        mix_hash(&mut impulse_hash, expected_db.to_bits());
+        if expected_db >= -120.0 {
+            let error = (actual_db - expected_db).abs();
+            summary.worst_dft_db = summary.worst_dft_db.max(error);
+            if !error.is_finite() || error > 0.05 {
+                summary.impulse_failures += 1;
+                summary.fail("finite_window_dft", row_index, 0, actual_db as f32 as u32);
+            }
+        }
+        summary.impulse_cases += 1;
+    }
+    summary.impulse_hash = impulse_hash;
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn deterministic_noise(state: &mut u64) -> f32 {
+    let word = splitmix64(state);
+    let sign = if word & 1 == 0 { -1.0 } else { 1.0 };
+    let magnitude = 0.01 + ((word >> 40) as u32 as f32 / ((1_u32 << 24) - 1) as f32) * 0.98;
+    sign * magnitude
+}
+
+fn million_phase(summary: &mut RetainedSummary) {
+    let mut million_hash = summary.million_hash;
+    for (row_index, row) in edge_rows().into_iter().enumerate() {
+        let reference = row.reference();
+        let mut candidate = match RetainedCandidate::design(summary.candidate, row, reference) {
+            Ok(value) => value,
+            Err(_) => {
+                summary.fail("million_design", row_index, 0, 0);
+                continue;
+            }
+        };
+        let mut state = 0x0000_0000_0012_e911_u64
+            ^ u64::from(row.rate)
+            ^ (u64::from(row.kind as u8) << 32)
+            ^ (edge_discriminator(row) << 40);
+        for sample in 0..1_000_000 {
+            let input = if sample == 0 {
+                0.99
+            } else {
+                deterministic_noise(&mut state)
+            };
+            let (output, events) = candidate.step(input);
+            summary.observe(
+                candidate,
+                output,
+                events,
+                row_index,
+                sample,
+                &mut million_hash,
+            );
+        }
+        summary.million_cases += 1;
+    }
+    summary.million_hash = million_hash;
+}
+
+fn edge_discriminator(row: Row) -> u64 {
+    if row.frequency == 10.0 { 0 } else { 1 }
+}
+
+fn complete_comparison() {
+    let all_rows = rows();
+    let phase_one_summaries = CandidateId::ALL.map(|candidate| phase_one(candidate, &all_rows));
+    let mut retained = Vec::new();
+    for summary in phase_one_summaries {
         eprintln!(
             "issue-045 phase=1 candidate={} rows={} map_failures={} impulse_failures={} row_rejections={} worst_map={:.17e} worst_impulse={:.17e} hash={:016x} first_rejection={:?} survives={}",
             summary.candidate.name(),
@@ -630,5 +1669,80 @@ fn issue_045_phase_one_f64_reconstruction_and_impulse_gate() {
             summary.survives(),
         );
         assert_eq!(summary.rows, 1_488);
+        if summary.survives() {
+            retained.push(retained_analytic(summary.candidate, &all_rows));
+        }
     }
+    if retained.is_empty() {
+        eprintln!("issue-045 phase=1 no candidates survived; later phases not invoked");
+        return;
+    }
+    for summary in &mut retained {
+        impulse_phase(summary);
+        million_phase(summary);
+        eprintln!(
+            "issue-045 candidate={} analytic_rows={} analytic_failures={} searches={} search_failures={} impulse_cases={} impulse_failures={} million_cases={} recoveries={} canonicalizations={} invalid={} margin={:.17e} worst_analytic_db={:.17e} worst_dft_db={:.17e} max_output={:.17e} max_state={:.17e} min_nonzero={:.17e} analytic_hash={:016x} impulse_hash={:016x} million_hash={:016x} first_failure={:?} pass={}",
+            summary.candidate.name(),
+            summary.analytic_rows,
+            summary.analytic_failures,
+            summary.searches,
+            summary.search_failures,
+            summary.impulse_cases,
+            summary.impulse_failures,
+            summary.million_cases,
+            summary.recoveries,
+            summary.canonicalizations,
+            summary.invalid_values,
+            summary.minimum_stability_margin,
+            summary.worst_analytic_db,
+            summary.worst_dft_db,
+            summary.max_output,
+            summary.max_state,
+            summary.minimum_nonzero,
+            summary.analytic_hash,
+            summary.impulse_hash,
+            summary.million_hash,
+            summary.first_failure,
+            summary.passes(),
+        );
+    }
+}
+
+#[test]
+fn issue_045_retained_layout_and_dekker_primitives_are_static() {
+    assert_eq!(
+        size_of::<LaneWords<4, { L1_COEFFICIENT_WORDS + L1_STATE_WORDS }>>(),
+        160
+    );
+    assert_eq!(
+        size_of::<LaneWords<8, { L1_COEFFICIENT_WORDS + L1_STATE_WORDS }>>(),
+        320
+    );
+    assert_eq!(
+        size_of::<LaneWords<4, { D2_COEFFICIENT_WORDS + D2_STATE_WORDS }>>(),
+        240
+    );
+    assert_eq!(
+        size_of::<LaneWords<8, { D2_COEFFICIENT_WORDS + D2_STATE_WORDS }>>(),
+        480
+    );
+    assert_eq!(
+        size_of::<LaneWords<4, { B3_COEFFICIENT_WORDS + B3_STATE_WORDS }>>(),
+        176
+    );
+    assert_eq!(
+        size_of::<LaneWords<8, { B3_COEFFICIENT_WORDS + B3_STATE_WORDS }>>(),
+        352
+    );
+    assert_eq!(
+        two_sum(1.0, f32::EPSILON).expect("finite").0,
+        1.0 + f32::EPSILON
+    );
+    assert_eq!(
+        quick_two_sum(1.0, f32::EPSILON).expect("finite").0,
+        1.0 + f32::EPSILON
+    );
+    let (product, error) = two_prod(4_097.0, 0.25).expect("finite split");
+    assert_eq!(product + error, 1_024.25);
+    assert!(two_prod(f32::MAX, 1.0).is_err());
 }

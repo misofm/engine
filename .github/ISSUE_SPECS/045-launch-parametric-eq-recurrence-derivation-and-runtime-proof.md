@@ -112,3 +112,20 @@ Checkpoint gates: `cargo fmt --check -p miso-engine-dsp-reference` PASS;
 `cargo clippy --locked -p miso-engine-dsp-reference --all-targets -- -D warnings` PASS.
 Matrix invocations: 0. Timed benchmark invocations: 0. No production or Cargo-manifest change.
 Terra verdict: PARTIAL — compile-green phase-one harness only; no numerical selection result.
+
+## Terra attempt 1 — retained-operation checkpoint (partial)
+
+Extended the same ignored reference-only test with the fixed retained L1 (6+4 words), D2 (7+8
+double-single words), and B3 (9+2 words) operation/state graphs; D2 defines the prescribed
+`TwoSum`, `QuickTwoSum`, split-4097 Dekker product, expansion arithmetic/division, split guards,
+non-overlap recovery, and committed-boundary canonicalization. The frozen phase-2 2,048-probe and
+1,104-characteristic-search loop plus the phase-3 48 finite-window impulse/DFT and phase-4 48
+million-sample orchestration are now present behind the one ignored test. Static W4/W8 field-major
+storage assertions are 160/320 bytes L1, 240/480 bytes D2, and 176/352 bytes B3 respectively.
+
+No phase was executed: `matrix_invocations=0`; `timed_benchmark_invocations=0`. Checkpoint gates:
+`cargo fmt --check -p miso-engine-dsp-reference` PASS;
+`cargo test --locked -p miso-engine-dsp-reference --no-run` PASS;
+`cargo clippy --locked -p miso-engine-dsp-reference --all-targets -- -D warnings` PASS;
+`git diff --check` PASS. No production or Cargo-manifest change. Terra verdict: PARTIAL —
+compile-green orchestration only, with no candidate result or selection.
