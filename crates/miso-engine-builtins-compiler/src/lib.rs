@@ -445,10 +445,26 @@ pub struct PreparedBuiltinsGraphBound {
     pub meter_consumers: Vec<MeterConsumer>,
 }
 
+/// Native dependency-wave result of consuming and binding a sealed builtin graph artifact.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct PreparedBuiltinsNativeGraphBound {
+    pub prepared: miso_engine_graph::PreparedNativeGraphPlanV1,
+    pub meter_consumers: Vec<MeterConsumer>,
+}
+
 /// A rejected external binding preserves the opaque artifact and caller-owned bindings.
 pub struct PreparedBuiltinsGraphBindFailure<R> {
     pub artifact: PreparedBuiltinsGraphArtifact<R>,
     pub bindings: GraphRuntimeBindings,
+    pub code: &'static str,
+}
+
+/// A rejected native binding preserves the opaque artifact and every caller-owned input.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct PreparedBuiltinsNativeGraphBindFailure<R> {
+    pub artifact: PreparedBuiltinsGraphArtifact<R>,
+    pub bindings: GraphRuntimeBindings,
+    pub config: miso_engine_graph::NativeGraphBindConfigV1,
     pub code: &'static str,
 }
 
@@ -1131,6 +1147,114 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             plan,
             meter_consumers: self.meter_consumers,
         })
+    }
+
+    /// Consume the sealed wrapper into the ownership-split native dependency-wave executor.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound_native(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+        config: miso_engine_graph::NativeGraphBindConfigV1,
+    ) -> Result<PreparedBuiltinsNativeGraphBound, PreparedBuiltinsNativeGraphBindFailure<R>> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().cloned().collect();
+        let expected: BTreeSet<_> = self
+            .graph
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_nodes.contains(*node) && !bank_nodes.contains(*node))
+            .cloned()
+            .collect();
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let duplicate_nodes = supplied.len() != bindings.nodes.len();
+        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
+        let builtin_observer_pairs: BTreeSet<_> = self
+            .builtin_observers
+            .iter()
+            .map(|observer| (observer.node.clone(), observer.handle))
+            .collect();
+        let mut observer_pairs = BTreeSet::new();
+        let valid_observers = bindings
+            .observers
+            .iter()
+            .chain(self.builtin_observers.iter())
+            .all(|observer| {
+                matches!(observer.node, GraphNodeId::TrackStage { .. })
+                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+            });
+        if bindings.envelope != self.graph.envelope
+            || duplicate_nodes
+            || overlaps_builtin
+            || supplied != expected
+            || !valid_observers
+        {
+            let code = if !valid_observers {
+                "graph.plan.observer"
+            } else if bindings.envelope != self.graph.envelope {
+                "graph.plan.envelope_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err(PreparedBuiltinsNativeGraphBindFailure {
+                artifact: self,
+                bindings,
+                config,
+                code,
+            });
+        }
+        bindings.nodes.append(&mut self.builtin_processors);
+        bindings.observers.append(&mut self.builtin_observers);
+        match self.graph.bind_native(bindings, config) {
+            Ok(prepared) => Ok(PreparedBuiltinsNativeGraphBound {
+                prepared,
+                meter_consumers: self.meter_consumers,
+            }),
+            Err(failure) => {
+                let mut builtin_processors = Vec::new();
+                let mut external_processors = Vec::new();
+                for binding in failure.bindings.nodes {
+                    if builtin_nodes.contains(&binding.node) {
+                        builtin_processors.push(binding);
+                    } else {
+                        external_processors.push(binding);
+                    }
+                }
+                let mut builtin_observers = Vec::new();
+                let mut external_observers = Vec::new();
+                for observer in failure.bindings.observers {
+                    if builtin_observer_pairs.contains(&(observer.node.clone(), observer.handle)) {
+                        builtin_observers.push(observer);
+                    } else {
+                        external_observers.push(observer);
+                    }
+                }
+                Err(PreparedBuiltinsNativeGraphBindFailure {
+                    artifact: PreparedBuiltinsGraphArtifact {
+                        graph: *failure.plan,
+                        builtin_processors,
+                        builtin_observers,
+                        report: self.report,
+                        meter_consumers: self.meter_consumers,
+                    },
+                    bindings: GraphRuntimeBindings {
+                        envelope: failure.bindings.envelope,
+                        nodes: external_processors,
+                        observers: external_observers,
+                    },
+                    config: failure.config,
+                    code: failure.code,
+                })
+            }
+        }
     }
 }
 

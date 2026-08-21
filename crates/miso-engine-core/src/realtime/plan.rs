@@ -93,6 +93,11 @@ pub trait PreparedPlanExecutor: Send {
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// Copy cumulative auxiliary-worker audit snapshots after render is disarmed.
+    #[doc(hidden)]
+    fn copy_worker_audit_snapshots(&self, _output: &mut [super::audit::AuditSnapshot]) -> usize {
+        0
+    }
 }
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +228,17 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::qualification_counters)
+    }
+    /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
+    #[doc(hidden)]
+    pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "worker audit snapshots are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, |executor| executor.copy_worker_audit_snapshots(output))
     }
     #[cfg(test)]
     pub(crate) fn set_drop_observer(

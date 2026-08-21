@@ -188,6 +188,12 @@ impl RealtimePlanOwner {
     }
 }
 // REALTIME_POLICY_END
+impl RealtimePlanOwner {
+    /// Copy cumulative auxiliary-worker audit snapshots after callback rendering is disarmed.
+    pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
+        self.active.1.copy_worker_audit_snapshots(output)
+    }
+}
 impl PlanRetirer {
     /// Reclaim one displaced plan on the control/retirement owner.
     pub fn try_reclaim(&mut self) -> Result<(PlanEpoch, PreparedRenderPlan), QueueEmpty> {

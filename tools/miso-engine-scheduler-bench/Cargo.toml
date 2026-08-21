@@ -1,0 +1,21 @@
+[package]
+name = "miso-engine-scheduler-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_scheduler_bench"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-builtins-compiler.workspace = true
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-effect-compiler.workspace = true
+miso-engine-graph.workspace = true
+miso-engine-graph-compiler.workspace = true
+miso-engine-session.workspace = true
+
+[lints]
+workspace = true

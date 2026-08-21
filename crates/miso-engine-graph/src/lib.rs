@@ -17,6 +17,16 @@ use miso_engine_core::{
 use miso_engine_effect_contract::{
     EffectProcessBlock, LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use miso_engine_native_scheduler::{
+    FallbackReasonV1, NativeSchedulerConfigV1, NativeSchedulerResourceReportV1,
+    SchedulerSelectionV1,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use miso_engine_native_scheduler::{
+    NativeSchedulerJobV1, NativeSchedulerV1, RenderPartitionV1, RenderWaveV1,
+    SchedulerDispatchErrorV1, SchedulerPrepareErrorV1, partition_stable_units_v1,
+};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StableGraphId(String);
@@ -619,6 +629,204 @@ impl PreparedGraphPlan {
         )
         .expect("prevalidated graph plan"))
     }
+
+    /// Transactionally bind the ownership-split native dependency-wave executor.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    pub fn bind_native(
+        self,
+        mut bindings: GraphRuntimeBindings,
+        config: NativeGraphBindConfigV1,
+    ) -> Result<PreparedNativeGraphPlanV1, GraphNativeBindFailure> {
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let builtin_bank_members: BTreeSet<_> = self.builtin_bank_members().cloned().collect();
+        let required: BTreeSet<_> = self
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_bank_members.contains(*node))
+            .cloned()
+            .collect();
+        let duplicate_binding = supplied.len() != bindings.nodes.len();
+        let valid_observers = self
+            .observers
+            .iter()
+            .chain(bindings.observers.iter())
+            .all(|binding| matches!(binding.node, GraphNodeId::TrackStage { .. }))
+            && {
+                let mut pairs: BTreeSet<_> = BTreeSet::new();
+                self.observers
+                    .iter()
+                    .chain(bindings.observers.iter())
+                    .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
+            };
+        if bindings.envelope != self.envelope
+            || supplied != required
+            || duplicate_binding
+            || !valid_observers
+        {
+            let envelope_mismatch = bindings.envelope != self.envelope;
+            return Err(GraphNativeBindFailure {
+                plan: Box::new(self),
+                bindings,
+                config,
+                code: if !valid_observers {
+                    "graph.plan.observer"
+                } else if envelope_mismatch {
+                    "graph.plan.envelope_mismatch"
+                } else {
+                    "graph.plan.binding"
+                },
+            });
+        }
+        let blueprint = match NativeGraphBlueprint::prepare(&self, config, bindings.observers.len())
+        {
+            Ok(blueprint) => blueprint,
+            Err(code) => {
+                return Err(GraphNativeBindFailure {
+                    plan: Box::new(self),
+                    bindings,
+                    config,
+                    code,
+                });
+            }
+        };
+        let explicit_fallback = (config.render_mode == NativeGraphRenderModeV1::SingleThread)
+            .then_some(FallbackReasonV1::SingleThread);
+        let scheduler = match NativeSchedulerV1::prepare_with_fallback(
+            config.scheduler,
+            blueprint.largest_wave_width,
+            self.plan_id,
+            explicit_fallback,
+        ) {
+            Ok(scheduler) => scheduler,
+            Err(error) => {
+                let code = match error {
+                    SchedulerPrepareErrorV1::WorkerStart => "graph.scheduler.worker_start",
+                    SchedulerPrepareErrorV1::ResourceOverflow => "graph.scheduler.resource",
+                    SchedulerPrepareErrorV1::EmptyWave
+                    | SchedulerPrepareErrorV1::InvalidPartition => "graph.scheduler.layout",
+                };
+                return Err(GraphNativeBindFailure {
+                    plan: Box::new(self),
+                    bindings,
+                    config,
+                    code,
+                });
+            }
+        };
+        let scheduler_resources = scheduler.resource_report(
+            blueprint.waves.len(),
+            blueprint.unit_count,
+            blueprint.partition_count,
+        );
+        let Some(total_retained_bytes) = blueprint
+            .graph_job_bytes
+            .checked_add(scheduler_resources.retained_queue_bytes)
+        else {
+            return Err(GraphNativeBindFailure {
+                plan: Box::new(self),
+                bindings,
+                config,
+                code: "graph.scheduler.resource",
+            });
+        };
+        if total_retained_bytes > config.maximum_retained_bytes {
+            return Err(GraphNativeBindFailure {
+                plan: Box::new(self),
+                bindings,
+                config,
+                code: "graph.scheduler.cap",
+            });
+        }
+        let envelope = self.envelope;
+        let plan_id = self.plan_id;
+        let mut graph = self;
+        graph.observers.append(&mut bindings.observers);
+        let resources = NativeGraphResourceReportV1 {
+            scheduler: scheduler_resources,
+            graph_job_bytes: blueprint.graph_job_bytes,
+            total_retained_bytes,
+        };
+        let (executor, metadata) =
+            NativeGraphExecutor::new(graph, bindings.nodes, blueprint, scheduler, resources);
+        let plan = PreparedRenderPlan::prepare_with_executor(
+            PrepareRenderPlan {
+                plan_id,
+                envelope,
+                scratch: &[],
+                parameter_defaults: &[],
+                event_capacity: 0,
+            },
+            Box::new(executor),
+        )
+        .expect("prevalidated native graph plan");
+        Ok(PreparedNativeGraphPlanV1 { plan, metadata })
+    }
+}
+
+/// Frozen session execution choice supplied to native graph binding.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeGraphRenderModeV1 {
+    /// Compatibility execution on the callback coordinator.
+    SingleThread,
+    /// Execute independent dependency-wave partitions on armed native workers when supported.
+    DependencyWaves,
+}
+
+/// Explicit, checked native graph binding inputs.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeGraphBindConfigV1 {
+    pub render_mode: NativeGraphRenderModeV1,
+    pub scheduler: NativeSchedulerConfigV1,
+    /// Maximum graph-job plus scheduler-queue payload bytes retained by this execution layout.
+    pub maximum_retained_bytes: usize,
+}
+
+/// Exact address-free native execution storage report.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeGraphResourceReportV1 {
+    pub scheduler: NativeSchedulerResourceReportV1,
+    pub graph_job_bytes: usize,
+    pub total_retained_bytes: usize,
+}
+
+/// Frozen metadata returned alongside the publishable prepared render plan.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeGraphPreparedMetadataV1 {
+    pub selection: SchedulerSelectionV1,
+    pub resources: NativeGraphResourceReportV1,
+}
+
+/// A native graph preparation result; the contained plan remains the ordinary publication unit.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct PreparedNativeGraphPlanV1 {
+    pub plan: PreparedRenderPlan,
+    pub metadata: NativeGraphPreparedMetadataV1,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedNativeGraphPlanV1 {
+    #[must_use]
+    pub fn into_plan(self) -> PreparedRenderPlan {
+        self.plan
+    }
+}
+
+/// Transactional native binding failure returning every caller-owned input.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct GraphNativeBindFailure {
+    pub plan: Box<PreparedGraphPlan>,
+    pub bindings: GraphRuntimeBindings,
+    pub config: NativeGraphBindConfigV1,
+    pub code: &'static str,
 }
 pub struct PreparedGraphPlanParts {
     pub plan_id: u64,
@@ -1206,6 +1414,1006 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeNodeLocation {
+    wave: usize,
+    partition: usize,
+    unit: usize,
+    member: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum NativeUnitBlueprintKind {
+    Node,
+    EffectBank(usize),
+    BuiltinBank(usize),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeUnitBlueprint {
+    key: GraphNodeId,
+    members: Box<[GraphNodeId]>,
+    kind: NativeUnitBlueprintKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeWaveBlueprint {
+    level: u64,
+    units: Box<[NativeUnitBlueprint]>,
+    partitions: Box<[miso_engine_native_scheduler::RenderPartitionRangeV1]>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct NativeStageOperation {
+    source: NativeNodeLocation,
+    destination: NativeNodeLocation,
+    destination_edge: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeGraphBlueprint {
+    waves: Box<[NativeWaveBlueprint]>,
+    stage_operations: Box<[Box<[NativeStageOperation]>]>,
+    observation_order: Box<[Box<[NativeNodeLocation]>]>,
+    output: NativeNodeLocation,
+    largest_wave_width: usize,
+    unit_count: usize,
+    partition_count: usize,
+    graph_job_bytes: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct NativeBankMembership {
+    key: GraphNodeId,
+    members: Box<[GraphNodeId]>,
+    kind: NativeUnitBlueprintKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphBlueprint {
+    fn prepare(
+        plan: &PreparedGraphPlan,
+        config: NativeGraphBindConfigV1,
+        runtime_observer_count: usize,
+    ) -> Result<Self, &'static str> {
+        if config.maximum_retained_bytes == 0 {
+            return Err("graph.scheduler.cap");
+        }
+        let schedule_nodes: BTreeSet<_> = plan.sequential_schedule.iter().cloned().collect();
+        if schedule_nodes.len() != plan.sequential_schedule.len() {
+            return Err("graph.scheduler.layout");
+        }
+        let mut level_by_node = BTreeMap::new();
+        for (wave_index, level) in plan.dependency_levels.iter().enumerate() {
+            if level.nodes.is_empty()
+                || level.nodes.windows(2).any(|pair| pair[0] >= pair[1])
+                || level
+                    .nodes
+                    .iter()
+                    .any(|node| level_by_node.insert(node.clone(), wave_index).is_some())
+            {
+                return Err("graph.scheduler.layout");
+            }
+        }
+        if level_by_node.keys().cloned().collect::<BTreeSet<_>>() != schedule_nodes {
+            return Err("graph.scheduler.layout");
+        }
+
+        let mut membership = BTreeMap::new();
+        for (bank_index, bank) in plan.banks.iter().enumerate() {
+            let members: Box<[_]> = bank
+                .members
+                .iter()
+                .cloned()
+                .map(GraphNodeId::Effect)
+                .collect();
+            add_native_bank_membership(
+                &mut membership,
+                &level_by_node,
+                members,
+                NativeUnitBlueprintKind::EffectBank(bank_index),
+            )?;
+        }
+        for (bank_index, bank) in plan.builtin_banks.iter().enumerate() {
+            add_native_bank_membership(
+                &mut membership,
+                &level_by_node,
+                bank.members.clone(),
+                NativeUnitBlueprintKind::BuiltinBank(bank_index),
+            )?;
+        }
+
+        let mut locations = BTreeMap::new();
+        let mut waves = Vec::with_capacity(plan.dependency_levels.len());
+        let mut largest_wave_width = 0_usize;
+        let mut unit_count = 0_usize;
+        let mut partition_count = 0_usize;
+        let mut bank_member_count = 0_usize;
+        for (wave_index, level) in plan.dependency_levels.iter().enumerate() {
+            let mut units = Vec::new();
+            for node in &level.nodes {
+                if let Some(bank) = membership.get(node) {
+                    if *node == bank.key {
+                        bank_member_count = bank_member_count
+                            .checked_add(bank.members.len())
+                            .ok_or("graph.scheduler.resource")?;
+                        units.push(NativeUnitBlueprint {
+                            key: bank.key.clone(),
+                            members: bank.members.clone(),
+                            kind: bank.kind,
+                        });
+                    }
+                } else {
+                    units.push(NativeUnitBlueprint {
+                        key: node.clone(),
+                        members: vec![node.clone()].into_boxed_slice(),
+                        kind: NativeUnitBlueprintKind::Node,
+                    });
+                }
+            }
+            units.sort_by(|left, right| left.key.cmp(&right.key));
+            if units.is_empty() || units.windows(2).any(|pair| pair[0].key >= pair[1].key) {
+                return Err("graph.scheduler.layout");
+            }
+            let ranges = partition_stable_units_v1(
+                core::num::NonZeroUsize::new(units.len()).ok_or("graph.scheduler.layout")?,
+                config.scheduler.render_lanes,
+            );
+            for range in &ranges {
+                for (local_unit, unit) in units[range.first_unit..range.end_unit].iter().enumerate()
+                {
+                    for (member, node) in unit.members.iter().enumerate() {
+                        if locations
+                            .insert(
+                                node.clone(),
+                                NativeNodeLocation {
+                                    wave: wave_index,
+                                    partition: range.partition_id,
+                                    unit: local_unit,
+                                    member,
+                                },
+                            )
+                            .is_some()
+                        {
+                            return Err("graph.scheduler.layout");
+                        }
+                    }
+                }
+            }
+            largest_wave_width = largest_wave_width.max(units.len());
+            unit_count = unit_count
+                .checked_add(units.len())
+                .ok_or("graph.scheduler.resource")?;
+            partition_count = partition_count
+                .checked_add(ranges.len())
+                .ok_or("graph.scheduler.resource")?;
+            waves.push(NativeWaveBlueprint {
+                level: level.level,
+                units: units.into_boxed_slice(),
+                partitions: ranges,
+            });
+        }
+
+        let mut edge_index_by_node: BTreeMap<GraphNodeId, usize> = BTreeMap::new();
+        let mut stage_operations = vec![Vec::new(); waves.len()];
+        for edge in &plan.spec.edges {
+            let source = *locations
+                .get(&edge.source.node)
+                .ok_or("graph.scheduler.layout")?;
+            let destination = *locations
+                .get(&edge.destination.node)
+                .ok_or("graph.scheduler.layout")?;
+            if source.wave >= destination.wave {
+                return Err("graph.scheduler.layout");
+            }
+            let destination_edge = edge_index_by_node
+                .entry(edge.destination.node.clone())
+                .or_default();
+            stage_operations[destination.wave].push(NativeStageOperation {
+                source,
+                destination,
+                destination_edge: *destination_edge,
+            });
+            *destination_edge = destination_edge
+                .checked_add(1)
+                .ok_or("graph.scheduler.resource")?;
+        }
+        let observation_order: Box<[Box<[NativeNodeLocation]>]> = plan
+            .dependency_levels
+            .iter()
+            .map(|level| level.nodes.iter().map(|node| locations[node]).collect())
+            .collect();
+        let output_node = plan
+            .sequential_schedule
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::Output { .. }))
+            .ok_or("graph.scheduler.layout")?;
+        let output = locations[output_node];
+        let graph_job_bytes = native_graph_job_bytes(
+            plan,
+            unit_count,
+            partition_count,
+            bank_member_count,
+            &stage_operations,
+            runtime_observer_count,
+        )?;
+        if graph_job_bytes > config.maximum_retained_bytes {
+            return Err("graph.scheduler.cap");
+        }
+        Ok(Self {
+            waves: waves.into_boxed_slice(),
+            stage_operations: stage_operations
+                .into_iter()
+                .map(Vec::into_boxed_slice)
+                .collect(),
+            observation_order,
+            output,
+            largest_wave_width,
+            unit_count,
+            partition_count,
+            graph_job_bytes,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn add_native_bank_membership(
+    membership: &mut BTreeMap<GraphNodeId, NativeBankMembership>,
+    level_by_node: &BTreeMap<GraphNodeId, usize>,
+    members: Box<[GraphNodeId]>,
+    kind: NativeUnitBlueprintKind,
+) -> Result<(), &'static str> {
+    let key = members
+        .iter()
+        .min()
+        .cloned()
+        .ok_or("graph.scheduler.layout")?;
+    let level = level_by_node
+        .get(&key)
+        .copied()
+        .ok_or("graph.scheduler.layout")?;
+    if members.iter().any(|member| {
+        level_by_node.get(member).copied() != Some(level) || membership.contains_key(member)
+    }) {
+        return Err("graph.scheduler.layout");
+    }
+    let record = NativeBankMembership {
+        key,
+        members: members.clone(),
+        kind,
+    };
+    for member in members {
+        membership.insert(member, record.clone());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_graph_job_bytes(
+    plan: &PreparedGraphPlan,
+    unit_count: usize,
+    partition_count: usize,
+    bank_member_count: usize,
+    stage_operations: &[Vec<NativeStageOperation>],
+    runtime_observer_count: usize,
+) -> Result<usize, &'static str> {
+    fn add(total: &mut usize, count: usize, size: usize) -> Result<(), &'static str> {
+        *total = total
+            .checked_add(count.checked_mul(size).ok_or("graph.scheduler.resource")?)
+            .ok_or("graph.scheduler.resource")?;
+        Ok(())
+    }
+    let frames = plan.envelope.quantum.0 as usize;
+    let mut total = 0_usize;
+    add(
+        &mut total,
+        plan.sequential_schedule.len(),
+        2_usize
+            .checked_mul(frames)
+            .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
+            .ok_or("graph.scheduler.resource")?,
+    )?;
+    add(
+        &mut total,
+        plan.spec.edges.len(),
+        2_usize
+            .checked_mul(frames)
+            .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
+            .ok_or("graph.scheduler.resource")?,
+    )?;
+    let delay_samples = plan
+        .inserted_delays
+        .iter()
+        .try_fold(0_usize, |sum, delay| {
+            sum.checked_add(delay.samples.0 as usize)
+                .ok_or("graph.scheduler.resource")
+        })?;
+    add(&mut total, delay_samples, 2 * core::mem::size_of::<f32>())?;
+    let reduction_slots = plan.spec.nodes.iter().try_fold(0_usize, |sum, node| {
+        let inputs = plan
+            .spec
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.destination.node == node.id
+                    && edge.destination.kind != GraphPortKind::SidechainInput
+            })
+            .count();
+        sum.checked_add(inputs).ok_or("graph.scheduler.resource")
+    })?;
+    add(&mut total, reduction_slots, core::mem::size_of::<f32>())?;
+    add(
+        &mut total,
+        plan.spec.edges.len(),
+        core::mem::size_of::<NativeRuntimeEdge>(),
+    )?;
+    add(
+        &mut total,
+        unit_count,
+        core::mem::size_of::<NativeGraphUnit>(),
+    )?;
+    add(
+        &mut total,
+        bank_member_count,
+        core::mem::size_of::<NativeRuntimeNode>(),
+    )?;
+    add(
+        &mut total,
+        partition_count,
+        core::mem::size_of::<RenderPartitionV1<NativeGraphPartitionJob>>()
+            + core::mem::size_of::<miso_engine_native_scheduler::RenderPartitionRangeV1>(),
+    )?;
+    add(
+        &mut total,
+        plan.dependency_levels.len(),
+        core::mem::size_of::<RenderWaveV1<NativeGraphPartitionJob>>(),
+    )?;
+    add(
+        &mut total,
+        stage_operations.iter().map(Vec::len).sum(),
+        core::mem::size_of::<NativeStageOperation>(),
+    )?;
+    add(
+        &mut total,
+        plan.sequential_schedule.len(),
+        core::mem::size_of::<NativeNodeLocation>(),
+    )?;
+    add(
+        &mut total,
+        plan.observers
+            .len()
+            .checked_add(runtime_observer_count)
+            .ok_or("graph.scheduler.resource")?,
+        core::mem::size_of::<GraphNodeObserverBinding>(),
+    )?;
+    Ok(total)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeRuntimeEdge {
+    sidechain: bool,
+    delay: Option<CompensationDelay>,
+    contribution: StereoBuffer,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeRuntimeNodeKind {
+    Identity,
+    Bound(Box<dyn GraphRuntimeProcessor>),
+    Effect(GraphPreparedEffect),
+    Route(RouteTransform),
+    Reduction,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeRuntimeNode {
+    incoming: Box<[NativeRuntimeEdge]>,
+    output: StereoBuffer,
+    reduction_scratch: Box<[f32]>,
+    kind: NativeRuntimeNodeKind,
+    observers: Box<[GraphNodeObserverBinding]>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeRuntimeNode {
+    fn reduce(&mut self, sanitized_samples: &mut u64) {
+        let main_inputs = self.incoming.iter().filter(|edge| !edge.sidechain).count();
+        for frame in 0..self.output.left.len() {
+            for (slot, edge) in self
+                .incoming
+                .iter()
+                .filter(|edge| !edge.sidechain)
+                .enumerate()
+            {
+                self.reduction_scratch[slot] = edge.contribution.left[frame];
+            }
+            self.output.left[frame] = balanced_pairwise_sum(
+                &mut self.reduction_scratch[..main_inputs],
+                sanitized_samples,
+            );
+            for (slot, edge) in self
+                .incoming
+                .iter()
+                .filter(|edge| !edge.sidechain)
+                .enumerate()
+            {
+                self.reduction_scratch[slot] = edge.contribution.right[frame];
+            }
+            self.output.right[frame] = balanced_pairwise_sum(
+                &mut self.reduction_scratch[..main_inputs],
+                sanitized_samples,
+            );
+        }
+    }
+
+    fn execute(
+        &mut self,
+        first_sample: u64,
+        sanitized_samples: &mut u64,
+    ) -> Result<(), RenderError> {
+        self.reduce(sanitized_samples);
+        match &mut self.kind {
+            NativeRuntimeNodeKind::Identity | NativeRuntimeNodeKind::Reduction => {}
+            NativeRuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
+                left: &mut self.output.left,
+                right: &mut self.output.right,
+                first_sample,
+            })?,
+            NativeRuntimeNodeKind::Route(transform) => {
+                for frame in 0..self.output.left.len() {
+                    (self.output.left[frame], self.output.right[frame]) = transform.transform(
+                        self.output.left[frame],
+                        self.output.right[frame],
+                        sanitized_samples,
+                    );
+                }
+            }
+            NativeRuntimeNodeKind::Effect(effect) => {
+                let sidechain = self
+                    .incoming
+                    .iter()
+                    .find(|edge| edge.sidechain)
+                    .map(|edge| (&*edge.contribution.left, &*edge.contribution.right));
+                let block = EffectProcessBlock::new(
+                    &mut self.output.left,
+                    &mut self.output.right,
+                    sidechain,
+                    first_sample,
+                    &[],
+                    effect.metadata.quantum,
+                )
+                .map_err(|_| RenderError::InvalidEnvelope)?;
+                let _ = effect.processor.process(block);
+            }
+        }
+        Ok(())
+    }
+
+    fn observe(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        for observer in &mut self.observers {
+            observer.observer.observe(GraphObservationBlock {
+                left: &self.output.left,
+                right: &self.output.right,
+                first_sample,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeGraphUnit {
+    Node(NativeRuntimeNode),
+    EffectBank {
+        members: Box<[NativeRuntimeNode]>,
+        processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
+        scratch: miso_engine_rack::AoSoaScratch,
+    },
+    BuiltinBank {
+        members: Box<[NativeRuntimeNode]>,
+        processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
+        scratch: miso_engine_rack::AoSoaScratch,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphUnit {
+    fn member(&self, member: usize) -> Option<&NativeRuntimeNode> {
+        match self {
+            Self::Node(node) => (member == 0).then_some(node),
+            Self::EffectBank { members, .. } | Self::BuiltinBank { members, .. } => {
+                members.get(member)
+            }
+        }
+    }
+
+    fn member_mut(&mut self, member: usize) -> Option<&mut NativeRuntimeNode> {
+        match self {
+            Self::Node(node) => (member == 0).then_some(node),
+            Self::EffectBank { members, .. } | Self::BuiltinBank { members, .. } => {
+                members.get_mut(member)
+            }
+        }
+    }
+
+    fn execute(
+        &mut self,
+        first_sample: u64,
+        sanitized_samples: &mut u64,
+    ) -> Result<(), RenderError> {
+        match self {
+            Self::Node(node) => node.execute(first_sample, sanitized_samples),
+            Self::EffectBank {
+                members,
+                processor,
+                scratch,
+            } => {
+                let frames = members
+                    .first()
+                    .ok_or(RenderError::InvalidEnvelope)?
+                    .output
+                    .left
+                    .len() as u32;
+                for (lane, member) in members.iter_mut().enumerate() {
+                    member.reduce(sanitized_samples);
+                    scratch
+                        .gather_lane(lane, &member.output.left, &member.output.right, frames)
+                        .map_err(|_| RenderError::InvalidEnvelope)?;
+                }
+                let offsets_four = [0_u32; 5];
+                let offsets_eight = [0_u32; 9];
+                let offsets = if members.len() == 4 {
+                    &offsets_four[..]
+                } else {
+                    &offsets_eight[..]
+                };
+                scratch
+                    .process(
+                        processor.as_mut(),
+                        frames,
+                        first_sample,
+                        &[],
+                        offsets,
+                        false,
+                    )
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+                for (lane, member) in members.iter_mut().enumerate() {
+                    scratch
+                        .scatter_lane(
+                            lane,
+                            &mut member.output.left,
+                            &mut member.output.right,
+                            frames,
+                        )
+                        .map_err(|_| RenderError::InvalidEnvelope)?;
+                }
+                Ok(())
+            }
+            Self::BuiltinBank {
+                members,
+                processor,
+                scratch,
+            } => {
+                let frames = members
+                    .first()
+                    .ok_or(RenderError::InvalidEnvelope)?
+                    .output
+                    .left
+                    .len() as u32;
+                for (lane, member) in members.iter_mut().enumerate() {
+                    member.reduce(sanitized_samples);
+                    scratch
+                        .gather_lane(lane, &member.output.left, &member.output.right, frames)
+                        .map_err(|_| RenderError::InvalidEnvelope)?;
+                }
+                let (left, right) = scratch
+                    .builtin_planes_mut(frames)
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+                processor.process(left, right, frames, first_sample)?;
+                for (lane, member) in members.iter_mut().enumerate() {
+                    scratch
+                        .scatter_lane(
+                            lane,
+                            &mut member.output.left,
+                            &mut member.output.right,
+                            frames,
+                        )
+                        .map_err(|_| RenderError::InvalidEnvelope)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        match self {
+            Self::BuiltinBank { processor, .. } => processor.qualification_counters(),
+            Self::Node(_) | Self::EffectBank { .. } => [0, 0],
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeGraphPartitionJob {
+    units: Box<[NativeGraphUnit]>,
+    first_sample: u64,
+    sanitized_samples: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphPartitionJob {
+    fn node(&self, location: NativeNodeLocation) -> Option<&NativeRuntimeNode> {
+        self.units.get(location.unit)?.member(location.member)
+    }
+
+    fn node_mut(&mut self, location: NativeNodeLocation) -> Option<&mut NativeRuntimeNode> {
+        self.units
+            .get_mut(location.unit)?
+            .member_mut(location.member)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeSchedulerJobV1 for NativeGraphPartitionJob {
+    type Error = RenderError;
+
+    fn execute(&mut self) -> Result<(), Self::Error> {
+        for unit in &mut self.units {
+            unit.execute(self.first_sample, &mut self.sanitized_samples)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeGraphExecutor {
+    waves: Box<[RenderWaveV1<NativeGraphPartitionJob>]>,
+    stage_operations: Box<[Box<[NativeStageOperation]>]>,
+    observation_order: Box<[Box<[NativeNodeLocation]>]>,
+    output: NativeNodeLocation,
+    scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphExecutor {
+    fn new(
+        graph: PreparedGraphPlan,
+        bindings: Vec<GraphNodeBinding>,
+        blueprint: NativeGraphBlueprint,
+        scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
+        resources: NativeGraphResourceReportV1,
+    ) -> (Self, NativeGraphPreparedMetadataV1) {
+        let PreparedGraphPlan {
+            spec,
+            inserted_delays,
+            routes,
+            effects,
+            banks,
+            builtin_banks,
+            observers,
+            envelope,
+            ..
+        } = graph;
+        let frames = envelope.quantum.0 as usize;
+        let delays: BTreeMap<_, _> = inserted_delays
+            .into_iter()
+            .map(|delay| (delay.edge_id, delay.samples.0))
+            .collect();
+        let mut routes: BTreeMap<_, _> = routes
+            .into_iter()
+            .map(|route| (route.node, route.transform))
+            .collect();
+        let mut effects: BTreeMap<_, _> = effects
+            .into_iter()
+            .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
+            .collect();
+        let mut bindings: BTreeMap<_, _> = bindings
+            .into_iter()
+            .map(|binding| (binding.node, binding.processor))
+            .collect();
+        let mut observers_by_node: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for observer in observers {
+            observers_by_node
+                .entry(observer.node.clone())
+                .or_default()
+                .push(observer);
+        }
+        for values in observers_by_node.values_mut() {
+            values.sort_by_key(|observer| observer.handle);
+        }
+        let mut incoming_by_node: BTreeMap<_, Vec<_>> = spec
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), Vec::new()))
+            .collect();
+        for edge in spec.edges {
+            incoming_by_node
+                .get_mut(&edge.destination.node)
+                .expect("validated native destination")
+                .push(edge);
+        }
+        let mut banks: Vec<_> = banks.into_iter().map(Some).collect();
+        let mut builtin_banks: Vec<_> = builtin_banks.into_iter().map(Some).collect();
+        let mut rendered_waves = Vec::with_capacity(blueprint.waves.len());
+        for wave in blueprint.waves {
+            let mut units: Vec<Option<NativeGraphUnit>> = wave
+                .units
+                .into_vec()
+                .into_iter()
+                .map(|unit| {
+                    let prepared = match unit.kind {
+                        NativeUnitBlueprintKind::Node => NativeGraphUnit::Node(build_native_node(
+                            &unit.members[0],
+                            false,
+                            frames,
+                            &mut incoming_by_node,
+                            &delays,
+                            &mut routes,
+                            &mut effects,
+                            &mut bindings,
+                            &mut observers_by_node,
+                        )),
+                        NativeUnitBlueprintKind::EffectBank(index) => {
+                            let bank = banks[index]
+                                .take()
+                                .expect("validated effect bank ownership");
+                            let members = unit
+                                .members
+                                .iter()
+                                .map(|member| {
+                                    build_native_node(
+                                        member,
+                                        true,
+                                        frames,
+                                        &mut incoming_by_node,
+                                        &delays,
+                                        &mut routes,
+                                        &mut effects,
+                                        &mut bindings,
+                                        &mut observers_by_node,
+                                    )
+                                })
+                                .collect();
+                            NativeGraphUnit::EffectBank {
+                                members,
+                                processor: bank.processor,
+                                scratch: bank.scratch,
+                            }
+                        }
+                        NativeUnitBlueprintKind::BuiltinBank(index) => {
+                            let bank = builtin_banks[index]
+                                .take()
+                                .expect("validated builtin bank ownership");
+                            let members = unit
+                                .members
+                                .iter()
+                                .map(|member| {
+                                    build_native_node(
+                                        member,
+                                        true,
+                                        frames,
+                                        &mut incoming_by_node,
+                                        &delays,
+                                        &mut routes,
+                                        &mut effects,
+                                        &mut bindings,
+                                        &mut observers_by_node,
+                                    )
+                                })
+                                .collect();
+                            NativeGraphUnit::BuiltinBank {
+                                members,
+                                processor: bank.processor,
+                                scratch: bank.scratch,
+                            }
+                        }
+                    };
+                    Some(prepared)
+                })
+                .collect();
+            let partitions = wave
+                .partitions
+                .iter()
+                .map(|range| {
+                    let partition_units = (range.first_unit..range.end_unit)
+                        .map(|index| units[index].take().expect("one stable unit owner"))
+                        .collect();
+                    RenderPartitionV1::new(
+                        *range,
+                        NativeGraphPartitionJob {
+                            units: partition_units,
+                            first_sample: 0,
+                            sanitized_samples: 0,
+                        },
+                    )
+                })
+                .collect();
+            rendered_waves.push(
+                RenderWaveV1::new(wave.level, partitions).expect("validated native wave layout"),
+            );
+        }
+        debug_assert!(incoming_by_node.values().all(Vec::is_empty));
+        debug_assert!(bindings.is_empty());
+        debug_assert!(observers_by_node.values().all(Vec::is_empty));
+        let metadata = NativeGraphPreparedMetadataV1 {
+            selection: scheduler.selection(),
+            resources,
+        };
+        (
+            Self {
+                waves: rendered_waves.into_boxed_slice(),
+                stage_operations: blueprint.stage_operations,
+                observation_order: blueprint.observation_order,
+                output: blueprint.output,
+                scheduler,
+            },
+            metadata,
+        )
+    }
+
+    fn stage_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
+        let (previous, current_and_later) = self.waves.split_at_mut(wave_index);
+        let current = current_and_later
+            .first_mut()
+            .ok_or(RenderError::InvalidEnvelope)?;
+        for parcel in current.recovered_parcels_mut() {
+            parcel.first_sample = first_sample;
+        }
+        for operation in self.stage_operations[wave_index].iter().copied() {
+            let source = previous
+                .get(operation.source.wave)
+                .and_then(|wave| wave.recovered_parcel(operation.source.partition))
+                .and_then(|parcel| parcel.node(operation.source))
+                .ok_or(RenderError::InvalidEnvelope)?;
+            let destination = current
+                .recovered_parcel_mut(operation.destination.partition)
+                .and_then(|parcel| parcel.node_mut(operation.destination))
+                .ok_or(RenderError::InvalidEnvelope)?;
+            let edge = destination
+                .incoming
+                .get_mut(operation.destination_edge)
+                .ok_or(RenderError::InvalidEnvelope)?;
+            edge.contribution.left.copy_from_slice(&source.output.left);
+            edge.contribution
+                .right
+                .copy_from_slice(&source.output.right);
+            if let Some(delay) = &mut edge.delay {
+                delay.process(&mut edge.contribution.left, &mut edge.contribution.right);
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
+        for location in self.observation_order[wave_index].iter().copied() {
+            self.waves[wave_index]
+                .recovered_parcel_mut(location.partition)
+                .and_then(|parcel| parcel.node_mut(location))
+                .ok_or(RenderError::InvalidEnvelope)?
+                .observe(first_sample)?;
+        }
+        Ok(())
+    }
+
+    fn node(&self, location: NativeNodeLocation) -> Option<&NativeRuntimeNode> {
+        self.waves
+            .get(location.wave)?
+            .recovered_parcel(location.partition)?
+            .node(location)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedPlanExecutor for NativeGraphExecutor {
+    // REALTIME_POLICY_BEGIN
+    fn render(
+        &mut self,
+        _arena: &mut BufferArena,
+        _input: Option<PlanarBufferRef<'_>>,
+        mut output: PlanarBufferMut<'_>,
+        time: miso_engine_core::realtime::RenderTime,
+    ) -> Result<(), RenderError> {
+        for wave_index in 0..self.waves.len() {
+            self.stage_wave(wave_index, time.absolute_sample)?;
+            match self.scheduler.render_wave(&mut self.waves[wave_index]) {
+                Ok(_) => {}
+                Err(SchedulerDispatchErrorV1::Job(error)) => return Err(error.error),
+                Err(
+                    SchedulerDispatchErrorV1::MissingParcel { .. }
+                    | SchedulerDispatchErrorV1::CommandQueueFull { .. }
+                    | SchedulerDispatchErrorV1::CompletionMismatch { .. },
+                ) => return Err(RenderError::InvalidEnvelope),
+            }
+            self.observe_wave(wave_index, time.absolute_sample)?;
+        }
+        let rendered = self.node(self.output).ok_or(RenderError::InvalidEnvelope)?;
+        output.plane_mut(0)?.copy_from_slice(&rendered.output.left);
+        output.plane_mut(1)?.copy_from_slice(&rendered.output.right);
+        Ok(())
+    }
+    // REALTIME_POLICY_END
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        self.waves.iter().fold([0_u64, 0_u64], |mut total, wave| {
+            for parcel in wave.recovered_parcels() {
+                for unit in &parcel.units {
+                    let counters = unit.qualification_counters();
+                    total[0] = total[0].saturating_add(counters[0]);
+                    total[1] = total[1].saturating_add(counters[1]);
+                }
+            }
+            total
+        })
+    }
+
+    fn copy_worker_audit_snapshots(
+        &self,
+        output: &mut [miso_engine_core::realtime::audit::AuditSnapshot],
+    ) -> usize {
+        self.scheduler.copy_worker_audit_snapshots(output)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn build_native_node(
+    node_id: &GraphNodeId,
+    bank_member: bool,
+    frames: usize,
+    incoming_by_node: &mut BTreeMap<GraphNodeId, Vec<GraphEdge>>,
+    delays: &BTreeMap<GraphEdgeId, u64>,
+    routes: &mut BTreeMap<GraphNodeId, RouteTransform>,
+    effects: &mut BTreeMap<GraphNodeId, GraphPreparedEffect>,
+    bindings: &mut BTreeMap<GraphNodeId, Box<dyn GraphRuntimeProcessor>>,
+    observers: &mut BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
+) -> NativeRuntimeNode {
+    let incoming: Vec<_> = incoming_by_node
+        .remove(node_id)
+        .expect("validated native node")
+        .into_iter()
+        .map(|edge| NativeRuntimeEdge {
+            sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
+            delay: delays
+                .get(&edge.id)
+                .copied()
+                .filter(|samples| *samples != 0)
+                .map(|samples| CompensationDelay::new(samples as usize)),
+            contribution: StereoBuffer::new(frames),
+        })
+        .collect();
+    let main_inputs = incoming.iter().filter(|edge| !edge.sidechain).count();
+    let kind = if bank_member {
+        NativeRuntimeNodeKind::Identity
+    } else if let Some(processor) = bindings.remove(node_id) {
+        NativeRuntimeNodeKind::Bound(processor)
+    } else if let Some(effect) = effects.remove(node_id) {
+        NativeRuntimeNodeKind::Effect(effect)
+    } else if let Some(transform) = routes.remove(node_id) {
+        NativeRuntimeNodeKind::Route(transform)
+    } else if matches!(
+        node_id,
+        GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
+    ) {
+        NativeRuntimeNodeKind::Reduction
+    } else {
+        NativeRuntimeNodeKind::Identity
+    };
+    NativeRuntimeNode {
+        incoming: incoming.into_boxed_slice(),
+        output: StereoBuffer::new(frames),
+        reduction_scratch: vec![0.0; main_inputs].into_boxed_slice(),
+        kind,
+        observers: observers
+            .remove(node_id)
+            .unwrap_or_default()
+            .into_boxed_slice(),
+    }
+}
+
 pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
     u64::from(quantum.0).checked_mul(count)
 }
@@ -1570,6 +2778,225 @@ mod tests {
             .expect("render");
         assert_eq!(report.plan_id, 42);
         assert_eq!(report.next_absolute_sample, 10);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_parallel_sum_plan(rate: u32) -> (PreparedGraphPlan, GraphRuntimeBindings) {
+        let input_a = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("a").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let input_b = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("b").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let delayed_edge_id = GraphEdgeId::RouteSource {
+            route_id: StableGraphId::parse("a").expect("route ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(rate),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let edge = |source: GraphNodeId, route: &str| GraphEdge {
+            id: GraphEdgeId::RouteSource {
+                route_id: StableGraphId::parse(route).expect("route ID"),
+            },
+            source: GraphPortId {
+                node: source,
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: format!("$.{route}"),
+        };
+        let schedule = vec![input_a.clone(), input_b.clone(), output.clone()];
+        let nodes = schedule
+            .iter()
+            .cloned()
+            .map(|id| GraphNode {
+                id,
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            })
+            .collect();
+        let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: u64::from(rate),
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges: vec![edge(input_a.clone(), "a"), edge(input_b.clone(), "b")],
+            },
+            sequential_schedule: schedule,
+            dependency_levels: vec![
+                DependencyLevel {
+                    level: 0,
+                    nodes: vec![input_a.clone(), input_b.clone()],
+                },
+                DependencyLevel {
+                    level: 1,
+                    nodes: vec![output.clone()],
+                },
+            ],
+            route_timings: Vec::new(),
+            inserted_delays: vec![InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(delayed_edge_id.clone()),
+                },
+                edge_id: delayed_edge_id,
+                samples: LatencySamples(2),
+            }],
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: vec![input_a.clone(), input_b.clone(), output.clone()],
+            routes: Vec::new(),
+            effects: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes: vec![
+                GraphNodeBinding::new(
+                    input_a,
+                    Box::new(OneShotSource {
+                        emitted: false,
+                        left: 1.0,
+                        right: 2.0,
+                    }),
+                ),
+                GraphNodeBinding::new(
+                    input_b,
+                    Box::new(OneShotSource {
+                        emitted: false,
+                        left: 3.0,
+                        right: 5.0,
+                    }),
+                ),
+                GraphNodeBinding::new(output, Box::new(Noop)),
+            ],
+            observers: Vec::new(),
+        };
+        (plan, bindings)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_dependency_waves_match_sequential_state_and_pcm_at_launch_rates() {
+        for rate in [44_100_u32, 48_000, 88_200, 96_000] {
+            let (sequential_graph, sequential_bindings) = native_parallel_sum_plan(rate);
+            let (native_graph, native_bindings) = native_parallel_sum_plan(rate);
+            let mut sequential = match sequential_graph.bind(sequential_bindings) {
+                Ok(plan) => plan,
+                Err(_) => panic!("sequential binding failed"),
+            };
+            let prepared = match native_graph.bind_native(
+                native_bindings,
+                NativeGraphBindConfigV1 {
+                    render_mode: NativeGraphRenderModeV1::DependencyWaves,
+                    scheduler: NativeSchedulerConfigV1 {
+                        render_lanes: core::num::NonZeroUsize::new(2).expect("two lanes"),
+                        enabled: true,
+                    },
+                    maximum_retained_bytes: 1 << 20,
+                },
+            ) {
+                Ok(prepared) => prepared,
+                Err(failure) => panic!("native binding failed: {}", failure.code),
+            };
+            assert_eq!(prepared.metadata.selection, SchedulerSelectionV1::Parallel);
+            assert_eq!(prepared.metadata.resources.scheduler.worker_count, 1);
+            assert_eq!(prepared.metadata.resources.scheduler.wave_count, 2);
+            assert_eq!(prepared.metadata.resources.scheduler.unit_count, 3);
+            let mut native = prepared.into_plan();
+            for block in 0..3_u64 {
+                let mut sequential_pcm = [0.0_f32; 8];
+                let mut native_pcm = [0.0_f32; 8];
+                sequential
+                    .render(
+                        miso_engine_core::realtime::RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut sequential_pcm, 2, 4, 4)
+                                .expect("sequential output"),
+                        },
+                        miso_engine_core::realtime::RenderTime {
+                            absolute_sample: block * 4,
+                        },
+                    )
+                    .expect("sequential render");
+                native
+                    .render(
+                        miso_engine_core::realtime::RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut native_pcm, 2, 4, 4)
+                                .expect("native output"),
+                        },
+                        miso_engine_core::realtime::RenderTime {
+                            absolute_sample: block * 4,
+                        },
+                    )
+                    .expect("native render");
+                assert_eq!(
+                    native_pcm.map(f32::to_bits),
+                    sequential_pcm.map(f32::to_bits)
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_binding_reports_fallback_and_returns_ownership_on_cap_failure() {
+        let (graph, bindings) = native_parallel_sum_plan(48_000);
+        let prepared = match graph.bind_native(
+            bindings,
+            NativeGraphBindConfigV1 {
+                render_mode: NativeGraphRenderModeV1::SingleThread,
+                scheduler: NativeSchedulerConfigV1 {
+                    render_lanes: core::num::NonZeroUsize::new(4).expect("four lanes"),
+                    enabled: true,
+                },
+                maximum_retained_bytes: 1 << 20,
+            },
+        ) {
+            Ok(prepared) => prepared,
+            Err(failure) => panic!("single-thread native binding failed: {}", failure.code),
+        };
+        assert_eq!(
+            prepared.metadata.selection,
+            SchedulerSelectionV1::Sequential(FallbackReasonV1::SingleThread)
+        );
+        assert_eq!(prepared.metadata.resources.scheduler.worker_count, 0);
+        drop(prepared);
+
+        let (graph, bindings) = native_parallel_sum_plan(48_000);
+        let failure = match graph.bind_native(
+            bindings,
+            NativeGraphBindConfigV1 {
+                render_mode: NativeGraphRenderModeV1::DependencyWaves,
+                scheduler: NativeSchedulerConfigV1 {
+                    render_lanes: core::num::NonZeroUsize::new(2).expect("two lanes"),
+                    enabled: true,
+                },
+                maximum_retained_bytes: 1,
+            },
+        ) {
+            Ok(_) => panic!("undersized cap unexpectedly accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.scheduler.cap");
+        assert_eq!(failure.plan.plan_id, 48_000);
+        assert_eq!(failure.bindings.nodes.len(), 3);
     }
 
     #[test]

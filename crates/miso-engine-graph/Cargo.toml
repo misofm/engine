@@ -13,6 +13,9 @@ miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-rack.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+miso-engine-native-scheduler.workspace = true
+
 [dev-dependencies]
 miso-engine-conformance.workspace = true
 

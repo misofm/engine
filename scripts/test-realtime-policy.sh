@@ -12,7 +12,8 @@ create_fixture() {
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
         "$root/crates/miso-engine-core/src/arch" \
         "$root/tools/miso-engine-realtime-audit/src" \
-        "$root/tools/miso-engine-protocol-audit/src"
+        "$root/tools/miso-engine-protocol-audit/src" \
+        "$root/tools/miso-engine-rack-bench/src"
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn render() {}' \
@@ -46,6 +47,11 @@ create_fixture() {
         'unsafe impl Send for ProtocolAudit {}' \
         'struct ProtocolAudit;' \
         >"$root/tools/miso-engine-protocol-audit/src/main.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe impl Send for RackBenchmarkAudit {}' \
+        'struct RackBenchmarkAudit;' \
+        >"$root/tools/miso-engine-rack-bench/src/main.rs"
 }
 
 expect_failure() {
@@ -76,5 +82,7 @@ expect_failure unsafe-outside-exact-allowlist \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-protocol-audit/src/other.rs"'
 expect_failure unsafe-outside-architecture-allowlist \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/other.rs"'
+expect_failure unsafe-outside-rack-benchmark-main \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-rack-bench/src/other.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

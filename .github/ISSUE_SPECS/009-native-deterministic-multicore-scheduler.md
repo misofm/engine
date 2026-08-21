@@ -186,3 +186,51 @@ thread evidence; target/dependency/object and policy reports; benchmark prefligh
 `workload_launches=0`; and, only after authorization, raw/accepted benchmark hashes plus exact
 invocation/warmup/round counts and rough descriptive ratios. Record Terra and final Sol PASS/FAIL
 verdicts. Never run a second benchmark to improve or repair a result.
+
+## Attempt record (2026-08-21)
+
+### Terra attempt 1 — FAIL
+
+The first attempt supplied the deterministic move-owned worker substrate, but it did not connect
+the accepted graph executor to the workers. The production graph therefore still rendered on one
+thread. A generic scheduler without a graph ownership split is not this issue's product vertical.
+
+### Sol bounded correction / attempt 2
+
+The correction split the private graph executor into immutable dependency-wave descriptions and
+move-owned partition jobs. Every ordinary node owns its mutable processor, output, contribution,
+delay, reduction and observer storage; every prepared effect/builtin bank is kept indivisible.
+The coordinator stages completed prior-wave outputs and PDC contributions, dispatches jobs, then
+recovers and observes them in stable partition/node order. The sequential graph binder remains
+unchanged. Native binding is transactional and reports selected/fallback mode plus exact checked
+job/queue retention. Linux x86-64 is the only parallel selection; other native targets and Wasm
+retain typed sequential behavior.
+
+Evidence obtained on the shared candidate before timing:
+
+- focused scheduler/graph tests, the production retained-builtin-bank compiler test, and
+  warning-denied focused Clippy passed;
+- the 10,000-callback 48-kHz/128-frame four-lane release audit passed with one plan swap,
+  coordinator forbidden total `0`, worker forbidden totals `[0,0,0]`, output hash
+  `2352102765731977870`, and destruction on retirement thread `ThreadId(8)`;
+- scheduler, graph, realtime and workspace policies and the scheduler/realtime mutation suites
+  passed;
+- Android AArch64, iOS AArch64, Wasm scalar and Wasm `simd128` graph checks passed; the extracted
+  Wasm graph objects contained no scheduler/thread/atomic opcode;
+- the benchmark validator/runner mutation suite passed with `workload_launches=0`; it proves the
+  fixed one-warmup/two-measured-round lifecycle, strict six-record schema, overwrite refusal,
+  status propagation and no retry. No timed benchmark was run.
+
+### Final Sol verdict — FAIL (stop and rescope)
+
+The ownership refactor is bounded and the implemented vertical is coherent, but this final attempt
+does not satisfy the frozen evidence matrix. The native differential fixture uses quantum `4`, not
+`128`, and does not cover both requested lane counts with the full asymmetric
+sidechain/send/submix/builtin-bank/observer graph or the 32 frozen completion perturbations. The
+100-preparation/generated-track partition matrix, injected handshake/stale/duplicate-completion
+matrix, external per-thread syscall trace, macOS native compile evidence, and warning-denied
+all-target rustdoc evidence are also absent. Gate 6 cannot seal candidate hashes until the mixed
+shared tree is split into a clean commit. Consequently the benchmark remains unauthorized and was
+not run. Under the issue's two-attempt stop rule, do not add another correction round or weaken
+these gates; preserve this useful checkpoint and open a stateless, smaller qualification issue for
+the missing evidence before closing Issue 9.

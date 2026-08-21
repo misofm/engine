@@ -28,6 +28,8 @@ members = [
     "tools/miso-engine-session-bench",
     "tools/miso-engine-effect-contract-bench",
     "tools/miso-engine-graph-audit",
+    "tools/miso-engine-scheduler-audit",
+    "tools/miso-engine-scheduler-bench",
     "tools/miso-engine-graph-bench",
     "tools/miso-engine-builtins-audit",
     "tools/miso-engine-builtins-bench",

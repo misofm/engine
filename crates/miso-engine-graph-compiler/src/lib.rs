@@ -1920,7 +1920,8 @@ mod tests {
     };
     use miso_engine_graph::{
         GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
-        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
+        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, NativeGraphBindConfigV1,
+        NativeGraphRenderModeV1, NativeSchedulerConfigV1, SchedulerSelectionV1,
     };
     use miso_engine_session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
@@ -2844,15 +2845,30 @@ mod tests {
                 GraphNodeBinding::new(node, processor)
             })
             .collect();
-        let bound = match artifact.into_bound(GraphRuntimeBindings {
-            envelope,
-            nodes,
-            observers: Vec::new(),
-        }) {
+        let bound = match artifact.into_bound_native(
+            GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            },
+            NativeGraphBindConfigV1 {
+                render_mode: NativeGraphRenderModeV1::DependencyWaves,
+                scheduler: NativeSchedulerConfigV1 {
+                    render_lanes: NonZeroUsize::new(4).expect("four lanes"),
+                    enabled: true,
+                },
+                maximum_retained_bytes: 1 << 28,
+            },
+        ) {
             Ok(bound) => bound,
             Err(_) => panic!("sealed builtin bank bind"),
         };
-        let mut plan = bound.plan;
+        assert_eq!(
+            bound.prepared.metadata.selection,
+            SchedulerSelectionV1::Parallel
+        );
+        assert_eq!(bound.prepared.metadata.resources.scheduler.worker_count, 3);
+        let mut plan = bound.prepared.into_plan();
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0; frames * 2];
         plan.render(

@@ -20,6 +20,8 @@ pub struct NativeSchedulerConfigV1 {
 /// Immutable reason a prepared scheduler uses the sequential parcel driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FallbackReasonV1 {
+    /// The session explicitly requested the compatibility single-thread render mode.
+    SingleThread,
     /// The host explicitly disabled worker execution.
     DisabledByHost,
     /// One configured lane leaves no auxiliary worker.
@@ -160,6 +162,32 @@ impl<J> RenderWaveV1<J> {
     pub fn all_recovered(&self) -> bool {
         self.partitions.iter().all(RenderPartitionV1::is_recovered)
     }
+
+    /// Borrow one recovered parcel by its stable partition identifier.
+    #[must_use]
+    pub fn recovered_parcel(&self, partition_id: usize) -> Option<&J> {
+        self.partitions.get(partition_id)?.parcel.as_ref()
+    }
+
+    /// Mutably borrow one recovered parcel by its stable partition identifier.
+    #[must_use]
+    pub fn recovered_parcel_mut(&mut self, partition_id: usize) -> Option<&mut J> {
+        self.partitions.get_mut(partition_id)?.parcel.as_mut()
+    }
+
+    /// Visit every coordinator-owned parcel in stable partition order.
+    pub fn recovered_parcels(&self) -> impl Iterator<Item = &J> {
+        self.partitions
+            .iter()
+            .filter_map(|partition| partition.parcel.as_ref())
+    }
+
+    /// Visit every coordinator-owned parcel mutably in stable partition order.
+    pub fn recovered_parcels_mut(&mut self) -> impl Iterator<Item = &mut J> {
+        self.partitions
+            .iter_mut()
+            .filter_map(|partition| partition.parcel.as_mut())
+    }
 }
 
 /// Divide `unit_count` stable units into contiguous near-even partitions without padding.
@@ -263,7 +291,23 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
         largest_wave_width: usize,
         generation: u64,
     ) -> Result<Self, SchedulerPrepareErrorV1> {
-        let selection = select_scheduler(config, largest_wave_width);
+        Self::prepare_with_fallback(config, largest_wave_width, generation, None)
+    }
+
+    /// Prepare with an explicit control-plane sequential selection.
+    ///
+    /// Graph binding uses this for a session whose frozen render mode is single-threaded.  Host
+    /// and target fallbacks continue to be selected by [`Self::prepare`].
+    pub fn prepare_with_fallback(
+        config: NativeSchedulerConfigV1,
+        largest_wave_width: usize,
+        generation: u64,
+        fallback: Option<FallbackReasonV1>,
+    ) -> Result<Self, SchedulerPrepareErrorV1> {
+        let selection = fallback.map_or_else(
+            || select_scheduler(config, largest_wave_width),
+            SchedulerSelectionV1::Sequential,
+        );
         let platform = platform::PlatformScheduler::prepare(selection, config, generation)?;
         Ok(Self {
             selection,
@@ -313,6 +357,17 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
     pub fn stop_and_join(&mut self) {
         self.platform.stop_and_join();
     }
+
+    /// Copy cumulative per-worker realtime audit snapshots in stable worker order.
+    ///
+    /// Callers read this only after rendering is disarmed. The returned count is bounded by the
+    /// supplied slice and never allocates.
+    pub fn copy_worker_audit_snapshots(
+        &self,
+        output: &mut [miso_engine_core::realtime::audit::AuditSnapshot],
+    ) -> usize {
+        self.platform.copy_worker_audit_snapshots(output)
+    }
 }
 
 impl<J: NativeSchedulerJobV1> Drop for NativeSchedulerV1<J> {
@@ -325,7 +380,7 @@ fn select_scheduler(
     config: NativeSchedulerConfigV1,
     largest_wave_width: usize,
 ) -> SchedulerSelectionV1 {
-    if cfg!(target_arch = "wasm32") {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         SchedulerSelectionV1::Sequential(FallbackReasonV1::UnsupportedTarget)
     } else if !config.enabled {
         SchedulerSelectionV1::Sequential(FallbackReasonV1::DisabledByHost)
@@ -347,7 +402,10 @@ mod platform {
     };
     use core::num::NonZeroUsize;
     use miso_engine_core::realtime::{Consumer, Producer, QueueGeneration, bounded_spsc_move};
-    use std::thread::{self, JoinHandle};
+    use std::{
+        sync::mpsc,
+        thread::{self, JoinHandle},
+    };
 
     struct WorkerCommand<J> {
         generation: u64,
@@ -361,6 +419,7 @@ mod platform {
         wave_id: u64,
         partition_id: usize,
         result: Result<(), J::Error>,
+        audit: miso_engine_core::realtime::audit::AuditSnapshot,
         parcel: J,
     }
 
@@ -373,6 +432,7 @@ mod platform {
         commands: Producer<WorkerMessage<J>>,
         completions: Consumer<WorkerCompletion<J>>,
         handle: Option<JoinHandle<()>>,
+        audit: miso_engine_core::realtime::audit::AuditSnapshot,
     }
 
     /// Target-native worker implementation.  Its threads are created only by `prepare`.
@@ -445,20 +505,32 @@ mod platform {
                     completion_generation,
                 )
                 .map_err(|_| SchedulerPrepareErrorV1::ResourceOverflow)?;
+                let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
                 let handle = match thread::Builder::new()
                     .name(format!("miso-scheduler-{worker_id}"))
-                    .spawn(move || worker_loop(worker_commands, worker_completions))
-                {
+                    .spawn(move || {
+                        miso_engine_core::realtime::audit::warm_up();
+                        miso_engine_core::realtime::audit::reset();
+                        if ready_sender.send(()).is_ok() {
+                            worker_loop(worker_commands, worker_completions);
+                        }
+                    }) {
                     Ok(handle) => handle,
                     Err(_) => {
                         stop_workers(&mut workers);
                         return Err(SchedulerPrepareErrorV1::WorkerStart);
                     }
                 };
+                if ready_receiver.recv().is_err() {
+                    let _ = handle.join();
+                    stop_workers(&mut workers);
+                    return Err(SchedulerPrepareErrorV1::WorkerStart);
+                }
                 workers.push(Worker {
                     commands,
                     completions,
                     handle: Some(handle),
+                    audit: miso_engine_core::realtime::audit::AuditSnapshot::default(),
                 });
             }
             Ok(Self {
@@ -488,14 +560,17 @@ mod platform {
             let mut issued = 0_usize;
             for partition_index in 1..wave.partition_count() {
                 let Some(parcel) = wave.partitions[partition_index].parcel.take() else {
-                    recover_issued(
+                    let recovered = recover_issued(
                         &mut self.workers,
                         wave,
                         issued,
                         generation,
                         wave_id,
                         &mut report,
-                    )?;
+                    );
+                    if let Some(worker_id) = recovered.mismatch {
+                        return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                    }
                     return Err(SchedulerDispatchErrorV1::MissingParcel {
                         partition_id: partition_index,
                     });
@@ -508,17 +583,33 @@ mod platform {
                 });
                 if let Err(full) = self.workers[partition_index - 1].commands.try_push(command) {
                     let WorkerMessage::Run(command) = full.value else {
-                        unreachable!("only runnable messages are published during render");
+                        let recovered = recover_issued(
+                            &mut self.workers,
+                            wave,
+                            issued,
+                            generation,
+                            wave_id,
+                            &mut report,
+                        );
+                        if let Some(worker_id) = recovered.mismatch {
+                            return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                        }
+                        return Err(SchedulerDispatchErrorV1::CommandQueueFull {
+                            worker_id: partition_index - 1,
+                        });
                     };
                     wave.partitions[partition_index].parcel = Some(command.parcel);
-                    recover_issued(
+                    let recovered = recover_issued(
                         &mut self.workers,
                         wave,
                         issued,
                         generation,
                         wave_id,
                         &mut report,
-                    )?;
+                    );
+                    if let Some(worker_id) = recovered.mismatch {
+                        return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                    }
                     return Err(SchedulerDispatchErrorV1::CommandQueueFull {
                         worker_id: partition_index - 1,
                     });
@@ -527,34 +618,40 @@ mod platform {
                 report.worker_commands = report.worker_commands.saturating_add(1);
             }
             let Some(mut coordinator) = wave.partitions[0].parcel.take() else {
-                recover_issued(
+                let recovered = recover_issued(
                     &mut self.workers,
                     wave,
                     issued,
                     generation,
                     wave_id,
                     &mut report,
-                )?;
+                );
+                if let Some(worker_id) = recovered.mismatch {
+                    return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                }
                 return Err(SchedulerDispatchErrorV1::MissingParcel { partition_id: 0 });
             };
             let coordinator_result = coordinator.execute();
             wave.partitions[0].parcel = Some(coordinator);
             report.coordinator_jobs = 1;
-            let worker_error = recover_issued(
+            let recovered = recover_issued(
                 &mut self.workers,
                 wave,
                 issued,
                 generation,
                 wave_id,
                 &mut report,
-            )?;
+            );
+            if let Some(worker_id) = recovered.mismatch {
+                return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+            }
             if let Err(error) = coordinator_result {
                 return Err(SchedulerDispatchErrorV1::Job(SchedulerJobFailureV1 {
                     partition_id: 0,
                     error,
                 }));
             }
-            if let Some(error) = worker_error {
+            if let Some(error) = recovered.first_error {
                 return Err(SchedulerDispatchErrorV1::Job(error));
             }
             Ok(report)
@@ -595,6 +692,17 @@ mod platform {
         pub(super) const fn retained_queue_bytes(&self) -> usize {
             self.retained_queue_bytes
         }
+
+        pub(super) fn copy_worker_audit_snapshots(
+            &self,
+            output: &mut [miso_engine_core::realtime::audit::AuditSnapshot],
+        ) -> usize {
+            let count = output.len().min(self.workers.len());
+            for (target, worker) in output[..count].iter_mut().zip(&self.workers) {
+                *target = worker.audit;
+            }
+            count
+        }
     }
 
     fn execute_sequential<J: NativeSchedulerJobV1>(
@@ -631,6 +739,11 @@ mod platform {
         }
     }
 
+    struct Recovery<E> {
+        mismatch: Option<usize>,
+        first_error: Option<SchedulerJobFailureV1<E>>,
+    }
+
     fn recover_issued<J: NativeSchedulerJobV1>(
         workers: &mut [Worker<J>],
         wave: &mut RenderWaveV1<J>,
@@ -638,8 +751,9 @@ mod platform {
         generation: u64,
         wave_id: u64,
         report: &mut SchedulerDispatchReportV1,
-    ) -> Result<Option<SchedulerJobFailureV1<J::Error>>, SchedulerDispatchErrorV1<J::Error>> {
+    ) -> Recovery<J::Error> {
         let mut first_error = None;
+        let mut mismatch = None;
         for (worker_id, worker) in workers.iter_mut().enumerate().take(issued) {
             let completion = loop {
                 if let Ok(completion) = worker.completions.try_pop() {
@@ -653,9 +767,12 @@ mod platform {
                 || completion.partition_id != expected_partition
                 || wave.partitions[expected_partition].parcel.is_some()
             {
-                return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                mismatch.get_or_insert(worker_id);
             }
-            wave.partitions[expected_partition].parcel = Some(completion.parcel);
+            if wave.partitions[expected_partition].parcel.is_none() {
+                wave.partitions[expected_partition].parcel = Some(completion.parcel);
+            }
+            worker.audit = completion.audit;
             report.worker_completions = report.worker_completions.saturating_add(1);
             if first_error.is_none()
                 && let Err(error) = completion.result
@@ -666,7 +783,10 @@ mod platform {
                 });
             }
         }
-        Ok(first_error)
+        Recovery {
+            mismatch,
+            first_error,
+        }
     }
 
     fn worker_loop<J: NativeSchedulerJobV1>(
@@ -683,12 +803,15 @@ mod platform {
             match message {
                 WorkerMessage::Stop => return,
                 WorkerMessage::Run(mut command) => {
-                    let result = command.parcel.execute();
+                    let result = miso_engine_core::realtime::audit::in_render_scope(|| {
+                        command.parcel.execute()
+                    });
                     let completion = WorkerCompletion {
                         generation: command.generation,
                         wave_id: command.wave_id,
                         partition_id: command.partition_id,
                         result,
+                        audit: miso_engine_core::realtime::audit::snapshot(),
                         parcel: command.parcel,
                     };
                     let mut completion = Some(completion);
@@ -765,6 +888,13 @@ mod platform {
         }
 
         pub(super) const fn retained_queue_bytes(&self) -> usize {
+            0
+        }
+
+        pub(super) fn copy_worker_audit_snapshots(
+            &self,
+            _output: &mut [miso_engine_core::realtime::audit::AuditSnapshot],
+        ) -> usize {
             0
         }
     }
@@ -894,6 +1024,9 @@ mod tests {
             _ => panic!("stable worker failure was not returned"),
         }
         assert!(rendered.all_recovered());
+        let mut audits = [miso_engine_core::realtime::audit::AuditSnapshot::default(); 3];
+        assert_eq!(scheduler.copy_worker_audit_snapshots(&mut audits), 3);
+        assert!(audits.into_iter().all(|snapshot| snapshot.total() == 0));
         scheduler.stop_and_join();
     }
 }
