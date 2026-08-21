@@ -586,3 +586,87 @@ PASS: `cargo run -p miso-engine-builtins-audit --bin miso_engine_builtins_graph_
 `scripts/test-realtime-policy.sh`; focused warning-denied Clippy, formatting, and diff checks
 also pass. Benchmark invocation count remains **0**. This evidence does not authorize or invoke
 the timed benchmark.
+
+## Final Sol adversarial verification / attempt-3 verdict (2026-08-21)
+
+**ATTEMPT 3: FAIL; ISSUE 007 STOPS. DO NOT AUTHORIZE THE TIMED BENCHMARK.** The timed
+workload invocation count remains **0**. No raw or accepted issue-007 benchmark artifact exists.
+Human listening remains honestly pending in Issue 033 and was not fabricated.
+
+The retained conditioned incremental TPT implementation passed its analytic cast-state cutoff,
+DC/Nyquist, dense monotonicity, one-second impulse/partition/tail, sustained three-column fit and
+fixed 100-Hz-HPF/1-kHz-LPF cascade tests at the four launch rates. Focused debug and pinned scalar
+release tests passed, as did the 65,537-track tests, all eight existing sealed-artifact corruption
+tests, the current allocation tracker, the native/mobile/Wasm target script, locked workspace
+tests, warning-denied all-target Clippy and rustdoc, formatting, and all current
+workspace/realtime/research/graph/builtin policy and mutation scripts. The direct and graph audit
+executables each completed 1,000,000 iterations with zero operations counted by their current
+seven audit hooks, their syscall traces passed, and all current detector probes fired. The
+zero-launch preflight reported `workload_launches=0`, binary SHA-256
+`d1505fa38322eeb87ce651115a96a9c9e75d4a5da89a2edc56125abe89a35638`, and input-manifest
+SHA-256 `e824fa664933cd2a1a2ea62285dcbb7e7164c114922ca274f1246c4b8ecf1337`.
+
+Those successful commands do not satisfy the frozen final brief. Adversarial inspection found
+the following unresolved launch-critical contract defects:
+
+1. Parameter metadata still exposes `per_lane: bool`, uses undifferentiated `Decibels`, and gives
+   HPF/LPF an infinite maximum. It does not expose the required `PerLane`/`MatrixShared` scope,
+   explicit decibel-amplitude mapping, or the rate-dependent `0`-disabled/otherwise
+   `10 <= f < Fs/2` domain.
+2. `PreparedGraphPlan::attach_internal_bindings` remains a public generic method accepting
+   arbitrary processor and observer vectors. An ordinary caller can therefore bypass the sealed
+   `PreparedBuiltinsSession` path and masquerade arbitrary internal bindings, contrary to the
+   frozen provenance contract. The eight corruption tests exercise the sealed validation path but
+   do not close this public bypass or prove compile-time opacity.
+3. Resource preflight still converts `requests.len()` with unchecked `as u64`, contrary to the
+   all-conversions-checked rule. The test allocator proves total/largest only for one-track/seven-
+   meter capacity-four preparation; it does not record/compare every requested layout or the
+   allocation-count breakdown across the pinned 1/4/65,537-track and 0/1/7-meter resource grid.
+4. There is no frozen 10,000-case builtin *compiler* mutation test spanning valid and invalid
+   parameters, meter requests, matrix targets, block shapes/times and every cap. The current two
+   builtin loops generate valid scalar/meter inputs, while the graph compiler's 10,000 loop mutates
+   generic graph topology.
+
+The remaining failures are qualification/tooling gaps rather than observed TPT response failures:
+
+5. The fixture corpus is not the complete frozen expected-output matrix. Its cascade generator
+   derives variable `0.5*cutoff`/`2*cutoff` filters instead of the fixed 100-Hz HPF followed by
+   1-kHz LPF and does not use the sorted union of those two probe sets. `cases.toml` contains
+   declarations instead of fully expanded functional tuples; pan/balance endpoints and centers,
+   complete block splits/retargets, builtin sanitization/recovery PCM, PDC coexistence, and all
+   seal diagnostics are absent. Decimal response fields are fixed decimal places rather than 17
+   significant digits. The graph fixture clears every rack, so post-input/SIMD1/dynamic/SIMD2
+   observations are bit-identical rather than distinguishable. Current corruption tests alter
+   every generated file's bytes, but do not exercise delete/alter/add/coverage-hole mutations for
+   every frozen format.
+6. The direct million-call audit starts one ramp but never exercises retarget, sanitization,
+   pairwise recovery or reset. The graph audit verifies frame/drop counts only, not the exact
+   seven tap values or checked PCM fixtures; it clears every rack and has no PDC coexistence. It
+   records two applied swaps where the brief freezes one applied swap plus a deferred replacement,
+   reports counts only by epoch rather than plan/epoch, and has no feature-detection or
+   panic/unwind hook/counter/probe.
+7. The schema-v2 benchmark implementation is not the frozen workload. Render timings retain the
+   whole eight-operation batch duration instead of dividing nanoseconds by operations. The meter
+   workload observes the same post-chain buffers with fourteen standalone meters rather than two
+   sets across all seven taps, and render operations reuse one batch sample time. All workloads use
+   the manifest as their input-fixture ID rather than workload-specific fixture IDs. Records omit
+   CPU architecture, physical core count, render-error, feature-detection, panic/unwind and total
+   forbidden-operation fields. The runner substitutes `unknown`/`default` without adding those
+   keys to `missing_metadata`, and a validation failure does not preserve a validator reason/hash
+   record. The validator does not bind workload ID to kind/rate, enforce workload-specific shapes,
+   or require stable output hashes across rounds; its mutation suite covers only a small subset of
+   required fields and no exhaustive workload/rate/cardinality/output-fixture mismatch matrix.
+   An adversarial synthetic 20-record set with a cross-round output-hash mismatch and without the
+   omitted metadata/audit fields was accepted by the current validator.
+
+Do not perform a fourth issue-007 implementation attempt. Create two new stateless corrective
+issues with the accepted TPT recurrence and thresholds explicitly out of scope: first, a
+launch-critical builtin-contract closure for metadata, sealed-only graph attachment, checked
+resource accounting and the complete compiler mutation gate; second, dependent qualification
+tooling for the complete independent fixture corpus, exact direct/graph audits and schema-v2
+benchmark runner/validators. The latter owns a newly briefed single benchmark authorization only
+after every nonbenchmark gate passes. Issue 008 may rely on the retained TPT operation graph as
+provisional technical input but cannot cite issue-007 machine qualification. Issues 022, 023, 024
+and 026 remain blocked on the corrected machine candidate; Issue 033 human listening runs only
+after that candidate and its sole accepted benchmark are sealed. No audible-quality, machine-
+qualified, launch-readiness or issue-026 claim is permitted from this attempt.
