@@ -190,3 +190,68 @@ It therefore did not run its zero-launch benchmark validation/build steps and em
 or binary seal. No scheduler benchmark binary, runner, timed workload, warmup or measured round
 was invoked; the timed invocation count remains `0`. Per the frozen stop rule, Terra attempt 1
 stops here for Sol review rather than treating an unsealed candidate as ready for timing.
+
+## Sol bounded correction and adversarial review — nonbenchmark PASS (2026-08-21)
+
+Sol found two qualification-harness defects rather than a production scheduler defect. The first
+completion hook dequeued workers in fixed partition order and only spun afterward, so the claimed
+32 cases did not perturb acceptance. The scheduler runner test also inspected lifecycle text but
+did not execute scratch-only failure, interruption and persistence cases. The one permitted bounded
+correction replaced the hook with a test-support-only real SPSC dequeue order and expanded the
+existing runner/preflight; normal builds retain no completion-order control surface.
+
+The corrected completion suite generated exactly 32 noncanonical orders from seed
+`0x000000000009d37a`, with frozen order hash `0x59b00a341747bb7d`. A scheduler-level transcript
+proved that all five possible noncanonical three-worker orders actually dequeued and accepted the
+real move-owned completion parcels in their selected order. The shared q128 production graph then
+matched sequential PCM, continuation, PDC, counters and observer records for every generated case.
+The exact-100 fresh-preparation matrix passed with q128 immutable transcript
+`0x6bc642d33017a164` and aggregate resource transcript `0xccbc40a515d04b5e`; the generated counts
+retain near-even nonempty partitions, indivisible banks, scalar tails, no padding, exact cap
+rejection and checked overflow rejection.
+
+The protocol matrix passed through the real ownership seam. Command-full injection now occurs at
+worker 2 after two parcels have executed and proves their recovery without coordinator/third-worker
+execution. Stale-generation and duplicate-completion injections return all four parcels after one
+execution each; reversed completion acceptance still selects the lowest failing partition; both
+endpoint destruction orders drop every parcel exactly once. Graph-level startup-handshake failure
+returns the original prepared graph, all three runtime node bindings, envelope, observer set and
+exact config, and those returned inputs bind successfully once the injection is removed.
+
+Candidate `310830802a5bd3bc531cfe33956f64b915d84e64` passed the complete locked workspace
+all-target/all-feature check and test, format, warning-denied Clippy and warning-denied rustdoc.
+Workspace, realtime, graph, rack, builtins and scheduler policies passed with every available
+mutation suite. `cargo check --offline --locked -p miso-engine-graph --target
+x86_64-apple-darwin` passed; this remains a compile-only macOS claim. The corrected candidate-bound
+10,000-callback audit retained output hash `4883946621149312822`, observer hash
+`6336442738503922099`, preparation hash `7765968082259386724`, one swap, 20,000 observer records,
+coordinator forbidden total `0`, worker forbidden totals `[0,0,0]` and retirement on
+`ThreadId(8)`. Its eight-file `strace -ff` evidence has trace-manifest SHA-256
+`20928cb9b05e08ab04a22275eb2d559e06414aeabce2dc422686e2b02d4122d5`, audit SHA-256
+`371e888cc3e26844e8c79366460c2476f4af610fed8da9ab4cb482466ce3a15f` and validator SHA-256
+`cb7a66cfd9f6d114146d458f2c5cc245642e7e226909f7c3149b0a15ab2da76f`; the coordinator and all
+six prepared worker TIDs made zero syscalls in the armed interval, with the three replacement-plan
+workers identified separately as active.
+
+Exact command `bash scripts/preflight-scheduler-benchmark.sh` passed on that clean candidate. Its
+schema-version-2 seal reports `workload_launches=0`, one warmup, measured rounds 1 and 2, six
+required records, candidate SHA-256
+`e77578952f889d809801b5ac20f4ce16e8f300b64a04bfd6e4cb6eb8b1254f7b`, binary SHA-256
+`4bb7f9fc4c101c568f563223d150ef90fdc98b2aadc8590ab5d0964c9971d4a5`, source SHA-256
+`85e57eb12e7d85f4cdd2fee1985d6367b0c285ed915ffbec18fe1bc06b13d93a`, fixture SHA-256
+`1ff2db241f84b1a641b50c69c4fd09eda0a1baa0a5735d3769c056212927f31a`, runner SHA-256
+`e649a3c72da0656c5cd011bbf9ae07178b879d7ded712a2a6af8901b869b9a29`, validator-library SHA-256
+`5826a9d2e5bbe3e46e35e4e258d8e69c2efcb331c3f53cbe4207fc663f81dcb0`, record-validator SHA-256
+`14149c0af2ac487aad3ee1d7577d47348be1176ade4a0a7540aeff020546e158` and aggregate-validator
+SHA-256 `e30a21a9f500770b03a7ad0732711f5a0c59075eba522c87743290144822f41a`.
+The scratch lifecycle suite proved argument/overwrite refusal, warmup and both measured-round
+failure propagation, partial raw-byte persistence, invalid-output refusal, pipeline failure,
+interruption disposition, byte-identical accepted promotion and refusal to resume. It launched no
+engine audio workload.
+
+**Strict Sol verdict:** acceptance Gates 1–7 PASS on the sealed source candidate. Gate 8 is pending;
+the scheduler benchmark binary, timing runner, warmup and measured rounds have not been invoked,
+and timed invocation count remains exactly `0`. Once this evidence record is committed and pushed
+with a clean tree, root is authorized to invoke exactly `bash scripts/run-scheduler-benchmark.sh`
+once. That invocation owns one untimed warmup and measured rounds 1 and 2; any failure consumes the
+authorization, must preserve its raw/stderr/disposition bytes, and forbids retry or tuning.
