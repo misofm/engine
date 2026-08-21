@@ -62,7 +62,7 @@ Stopped dependencies contribute evidence only, not PASS.
 
 ## Sol implementation brief
 
-**READY FOR TERRA ATTEMPT 1, RESEARCH ONLY.** The tracked brief is
+**READY FOR THE ONE AUTHORIZED SOL-ATTEMPT-2 COMPLETE RUN, RESEARCH ONLY.** The tracked brief is
 `.github/ISSUE_SPECS/BRIEFS/045-launch-parametric-eq-recurrence-derivation-and-runtime-proof.md`.
 
 ## Hazards/decisions
@@ -155,3 +155,43 @@ maxima, hashes, and selection result are unavailable and are **not fabricated he
 frozen proof requires one canonical complete transcript and permits no Terra rerun,
 `matrix_invocations=1`, `timed_benchmark_invocations=0`, and Terra verdict is **FAIL**: evidence
 capture/harness invocation defect requiring Sol review before any correction or second matrix run.
+
+## Sol attempt 2 — bounded harness correction and final-run authorization
+
+**REVIEW PASS / EXACTLY ONE COMPLETE MATRIX INVOCATION AUTHORIZED; no numerical result yet.** The
+missing Terra transcript is an invocation/output-lifecycle defect eligible for the single bounded
+Sol correction. The preserved phase-1 values are coherent with the frozen gate: L1 and B3 fail
+before retained evaluation, while D2 legitimately survives all 1,488 mappings with zero mapping,
+impulse or rejection failures and worst f64 impulse error `1.67157965315372124e-13`.
+
+Static review corrected only proof-harness defects. The 1,104 characteristic checks now use the
+unchanged 96-step crossing/log-extremum procedures rather than a coarse scan seeded at the requested
+frequency. D2's coefficient-only `scale/q1/q2` use the frozen noncontracting f32 graph consistently
+in both its retained analytic transfer and double-single recurrence; audio/state operations remain
+double-single, with no candidate/word/domain/tolerance change. Low-word addition now preserves both
+component sums. First-failure values record actual f32 bits. The harness now records and `sync_all`s
+a create-new deterministic transcript after its header/layout and each completed phase, validates
+the persisted bytes at completion, hashes the frozen configuration, and applies the frozen
+non-timing final selection rank.
+
+Static gates PASS without executing the ignored matrix:
+
+- `cargo fmt --check -p miso-engine-dsp-reference`
+- `cargo test --locked -p miso-engine-dsp-reference --no-run`
+- `cargo clippy --locked -p miso-engine-dsp-reference --all-targets -- -D warnings`
+
+The final operator must first prove both output paths absent, enable `pipefail`, and invoke exactly:
+
+```text
+test ! -e /tmp/engine-v2-issue-045-sol2-transcript.txt
+test ! -e /tmp/engine-v2-issue-045-sol2-stdout.txt
+set -o pipefail
+MISO_ISSUE_045_TRANSCRIPT=/tmp/engine-v2-issue-045-sol2-transcript.txt cargo test --locked -p miso-engine-dsp-reference parametric_eq_recurrence_proof::issue_045_complete_recurrence_comparison_requires_sol_freeze -- --ignored --exact --nocapture 2>&1 | tee /tmp/engine-v2-issue-045-sol2-stdout.txt
+rg -n '^issue-045 complete=true$' /tmp/engine-v2-issue-045-sol2-transcript.txt
+sha256sum /tmp/engine-v2-issue-045-sol2-transcript.txt /tmp/engine-v2-issue-045-sol2-stdout.txt
+```
+
+Only the `cargo test` line is the one complete matrix invocation. Do not retry it for a candidate
+failure, interrupted process, missing completion marker or post-run evidence problem: any such
+outcome is final Issue-045 STOP. Current counts remain `matrix_invocations=1` and
+`timed_benchmark_invocations=0`.

@@ -1,12 +1,14 @@
-//! Issue-045 phase-one-only f64 recurrence derivations.
+//! Issue-045 four-phase recurrence derivation and retained-f32 comparison.
 //!
-//! This test-boundary module intentionally stops before retained `f32` evaluation. The eventual
-//! single ignored full-matrix invocation must extend this derivation; it must not execute this
-//! phase separately and combine transcripts later.
+//! This test-boundary module executes only through one ignored full-matrix test. It persists each
+//! completed phase to a create-new transcript; phases cannot be run separately and recombined.
 
 use core::cmp::Ordering;
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
 use core::mem::size_of;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 
 use crate::{
     ReferenceParametricEqCoefficients, ReferenceParametricEqKind, ReferenceParametricEqSection,
@@ -21,7 +23,49 @@ const IMPULSE_SAMPLES: usize = 4_096;
 const F64_TOLERANCE: f64 = 1e-12;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-const EQUATION_VERSION: u64 = 0x4930_3435_5048_4153; // I045_PHAS
+const EQUATION_VERSION: u64 = 0x4930_3435_534f_4c32; // I045_SOL2
+const TRANSCRIPT_ENV: &str = "MISO_ISSUE_045_TRANSCRIPT";
+
+struct Transcript {
+    path: PathBuf,
+    file: File,
+    expected: String,
+}
+
+impl Transcript {
+    fn create() -> Self {
+        let path = std::env::var_os(TRANSCRIPT_ENV)
+            .map(PathBuf::from)
+            .expect("the final Issue-045 run requires MISO_ISSUE_045_TRANSCRIPT");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("the Issue-045 transcript path must not already exist");
+        Self {
+            path,
+            file,
+            expected: String::new(),
+        }
+    }
+
+    fn record(&mut self, line: String) {
+        eprintln!("{line}");
+        writeln!(self.file, "{line}").expect("write Issue-045 transcript record");
+        self.file
+            .sync_all()
+            .expect("persist Issue-045 transcript record");
+        self.expected.push_str(&line);
+        self.expected.push('\n');
+    }
+
+    fn finish(mut self) {
+        self.record("issue-045 complete=true".to_owned());
+        drop(self.file);
+        let actual = fs::read_to_string(&self.path).expect("read persisted Issue-045 transcript");
+        assert_eq!(actual, self.expected, "persisted transcript changed");
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateId {
@@ -38,6 +82,22 @@ impl CandidateId {
             Self::L1 => "L1",
             Self::D2 => "D2",
             Self::B3 => "B3",
+        }
+    }
+
+    const fn coefficient_words(self) -> usize {
+        match self {
+            Self::L1 => L1_COEFFICIENT_WORDS,
+            Self::D2 => D2_COEFFICIENT_WORDS,
+            Self::B3 => B3_COEFFICIENT_WORDS,
+        }
+    }
+
+    const fn state_words(self) -> usize {
+        match self {
+            Self::L1 => L1_STATE_WORDS,
+            Self::D2 => D2_STATE_WORDS,
+            Self::B3 => B3_STATE_WORDS,
         }
     }
 }
@@ -635,18 +695,19 @@ const B3_STATE_WORDS: usize = 2;
 struct StepEvents {
     canonicalizations: u64,
     recoveries: u64,
-    first_bad_bits: Option<u32>,
+    first_canonicalized_bits: Option<u32>,
+    first_recovery_bits: Option<u32>,
 }
 
 impl StepEvents {
     fn canonicalized(&mut self, value: f32) {
         self.canonicalizations += 1;
-        self.first_bad_bits.get_or_insert(value.to_bits());
+        self.first_canonicalized_bits.get_or_insert(value.to_bits());
     }
 
     fn recovered(&mut self, value: f32) {
         self.recoveries += 1;
-        self.first_bad_bits.get_or_insert(value.to_bits());
+        self.first_recovery_bits.get_or_insert(value.to_bits());
     }
 }
 
@@ -861,12 +922,15 @@ impl RetainedCandidate {
             Self::D2(value) => {
                 let a = f64::from(value.a);
                 let d2 = f64::from(value.d2);
-                let scale = (f64::from(value.d0) - a * f64::from(value.d1)) + d2;
+                let scale_word = (value.d0 - value.a * value.d1) + value.d2;
+                let q1 = value.a * value.d2;
+                let q2 = (value.d1 - q1) - q1;
+                let scale = f64::from(scale_word);
                 [
                     (f64::from(value.n0) - a * f64::from(value.n1) + f64::from(value.n2)) / scale,
                     (f64::from(value.n1) - 2.0 * a * f64::from(value.n2)) / scale,
                     f64::from(value.n2) / scale,
-                    (f64::from(value.d1) - 2.0 * a * d2) / scale,
+                    f64::from(q2) / scale,
                     d2 / scale,
                 ]
             }
@@ -1016,10 +1080,13 @@ impl Expansion {
     }
 
     fn add(self, other: Self) -> Result<Self, f32> {
-        let (sum, error) = two_sum(self.hi, other.hi)?;
-        let (middle, middle_error) = two_sum(error, self.lo + other.lo)?;
-        let (high, high_error) = two_sum(sum, middle)?;
-        Self::renormalize(high, middle_error + high_error)
+        let (high_sum, high_error) = two_sum(self.hi, other.hi)?;
+        let (low_sum, low_error) = two_sum(self.lo, other.lo)?;
+        let (middle, middle_error) = two_sum(high_error, low_sum)?;
+        let (high, high_tail) = two_sum(high_sum, middle)?;
+        let (low, low_tail) = two_sum(low_error, middle_error)?;
+        let (tail, tail_error) = two_sum(high_tail, low)?;
+        Self::renormalize(high, (tail + tail_error) + low_tail)
     }
 
     fn sub(self, other: Self) -> Result<Self, f32> {
@@ -1146,16 +1213,16 @@ impl RetainedD2 {
                 .times_word(self.n0)?
                 .add(dx.times_word(self.n1)?)?
                 .add(ddx.times_word(self.n2)?)?;
-            let scale = Expansion::word(self.d0)
-                .sub(Expansion::word(self.a).times_word(self.d1)?)?
-                .add(Expansion::word(self.d2))?;
-            if scale.hi == 0.0 || scale.lo != 0.0 {
-                return Err(scale.hi);
+            // These coefficient-only derived words retain the exact Issue-042 noncontracting f32
+            // graph. Audio/state arithmetic remains the frozen double-single graph.
+            let scale = (self.d0 - self.a * self.d1) + self.d2;
+            if !scale.is_finite() || scale == 0.0 {
+                return Err(scale);
             }
             let q1 = self.a * self.d2;
             let q2 = (self.d1 - q1) - q1;
             let history = self.y1.times_word(q2)?.add(self.y2.times_word(self.d2)?)?;
-            numerator.sub(history)?.divided_by_word(scale.hi)
+            numerator.sub(history)?.divided_by_word(scale)
         })();
         let mut output = match result {
             Ok(value) => value,
@@ -1265,7 +1332,7 @@ impl RetainedSummary {
                 "recovery",
                 row,
                 sample,
-                events.first_bad_bits.unwrap_or(output.to_bits()),
+                events.first_recovery_bits.unwrap_or(output.to_bits()),
             );
         }
         self.observe_value(output, false, row, sample);
@@ -1340,12 +1407,6 @@ fn probes(row: Row) -> Vec<f64> {
     output
 }
 
-#[derive(Clone, Copy)]
-enum SearchTarget {
-    Db(f64),
-    NotchMinimum,
-}
-
 fn retained_analytic(candidate_id: CandidateId, all_rows: &[Row]) -> RetainedSummary {
     let mut summary = RetainedSummary::new(candidate_id);
     mix_hash(&mut summary.analytic_hash, EQUATION_VERSION);
@@ -1391,7 +1452,7 @@ fn retained_analytic(candidate_id: CandidateId, all_rows: &[Row]) -> RetainedSum
                 || (expected_db >= -120.0 && (actual_db - expected_db).abs() > 0.005)
             {
                 summary.analytic_failures += 1;
-                summary.fail("analytic_response", row_index, 0, actual as f32 as u32);
+                summary.fail("analytic_response", row_index, 0, (actual as f32).to_bits());
             }
             if expected_db >= -120.0 {
                 summary.worst_analytic_db = summary
@@ -1410,61 +1471,100 @@ fn run_characteristic_search(
     row: Row,
     coefficients: [f64; 5],
 ) {
-    let target = match row.kind {
+    let result = match row.kind {
         ReferenceParametricEqKind::LowPass | ReferenceParametricEqKind::HighPass
             if (row.q - FRAC_1_SQRT_2).abs() < f64::EPSILON =>
         {
-            Some(SearchTarget::Db(-3.010_299_956_6))
+            Some((
+                find_crossing(coefficients, row.rate, -3.010_299_956_6),
+                None,
+            ))
         }
-        ReferenceParametricEqKind::Bell if row.gain != 0.0 => Some(SearchTarget::Db(row.gain)),
+        ReferenceParametricEqKind::Bell if row.gain != 0.0 => {
+            let found = find_log_extremum(coefficients, row.rate, row.gain > 0.0);
+            Some((found, Some((row.gain, false))))
+        }
         ReferenceParametricEqKind::LowShelf | ReferenceParametricEqKind::HighShelf
             if row.gain != 0.0 =>
         {
-            Some(SearchTarget::Db(row.gain * 0.5))
+            Some((find_crossing(coefficients, row.rate, row.gain * 0.5), None))
         }
-        ReferenceParametricEqKind::Notch => Some(SearchTarget::NotchMinimum),
+        ReferenceParametricEqKind::Notch => {
+            let found = find_log_extremum(coefficients, row.rate, false);
+            Some((found, Some((0.0, true))))
+        }
         _ => None,
     };
-    let Some(target) = target else {
+    let Some((found, magnitude_gate)) = result else {
         return;
     };
     summary.searches += 1;
-    let nyquist = row.rate as f64 * 0.5;
-    let low = (row.frequency * 0.25).max(0.0);
-    let high = (row.frequency * 4.0).min(nyquist);
-    let mut best_frequency = row.frequency;
-    let mut best_magnitude = f32_direct_magnitude(coefficients, row.frequency, row.rate as f64);
-    let mut best_score = search_score(best_magnitude, target);
-    for index in 0..2_049 {
-        let frequency = low + (high - low) * index as f64 / 2_048.0;
-        let magnitude = f32_direct_magnitude(coefficients, frequency, row.rate as f64);
-        let score = search_score(magnitude, target);
-        if score < best_score {
-            best_score = score;
-            best_frequency = frequency;
-            best_magnitude = magnitude;
+    let magnitude = f32_direct_magnitude(coefficients, found, row.rate as f64);
+    mix_hash(&mut summary.analytic_hash, found.to_bits());
+    mix_hash(&mut summary.analytic_hash, magnitude.to_bits());
+    let relative = ((found - row.frequency) / row.frequency).abs();
+    let magnitude_ok = magnitude_gate.is_none_or(|(target_db, notch)| {
+        if notch {
+            magnitude <= 1e-5
+        } else {
+            (db(magnitude) - target_db).abs() <= 0.005
         }
-    }
-    mix_hash(&mut summary.analytic_hash, best_frequency.to_bits());
-    mix_hash(&mut summary.analytic_hash, best_magnitude.to_bits());
-    let relative = ((best_frequency - row.frequency) / row.frequency).abs();
-    let null_ok = !matches!(target, SearchTarget::NotchMinimum) || best_magnitude <= 1e-5;
-    if !relative.is_finite() || relative > 0.001 || !null_ok {
+    });
+    if !relative.is_finite() || relative > 0.001 || !magnitude_ok {
         summary.search_failures += 1;
         summary.fail(
             "characteristic_search",
             row_index,
             0,
-            best_frequency as f32 as u32,
+            (found as f32).to_bits(),
         );
     }
 }
 
-fn search_score(magnitude: f64, target: SearchTarget) -> f64 {
-    match target {
-        SearchTarget::Db(target) => (db(magnitude) - target).abs(),
-        SearchTarget::NotchMinimum => magnitude,
+fn find_crossing(coefficients: [f64; 5], rate: u32, target_db: f64) -> f64 {
+    let mut low = 0.0;
+    let mut high = f64::from(rate) * 0.5;
+    let mut low_side = db(f32_direct_magnitude(coefficients, low, f64::from(rate))) >= target_db;
+    let high_side = db(f32_direct_magnitude(coefficients, high, f64::from(rate))) >= target_db;
+    if low_side == high_side {
+        return f64::NAN;
     }
+    for _ in 0..96 {
+        let middle = (low + high) * 0.5;
+        let middle_side =
+            db(f32_direct_magnitude(coefficients, middle, f64::from(rate))) >= target_db;
+        if middle_side == low_side {
+            low = middle;
+            low_side = middle_side;
+        } else {
+            high = middle;
+        }
+    }
+    (low + high) * 0.5
+}
+
+fn find_log_extremum(coefficients: [f64; 5], rate: u32, maximum: bool) -> f64 {
+    let mut low = f64::from(rate) * 1.0e-12;
+    let mut high = f64::from(rate) * 0.5;
+    for _ in 0..96 {
+        let log_low = low.ln();
+        let span = high.ln() - log_low;
+        let first = (log_low + span / 3.0).exp();
+        let second = (log_low + span * (2.0 / 3.0)).exp();
+        let first_value = f32_direct_magnitude(coefficients, first, f64::from(rate));
+        let second_value = f32_direct_magnitude(coefficients, second, f64::from(rate));
+        let keep_left = if maximum {
+            first_value >= second_value
+        } else {
+            first_value <= second_value
+        };
+        if keep_left {
+            high = second;
+        } else {
+            low = first;
+        }
+    }
+    (low.ln() + (high.ln() - low.ln()) * 0.5).exp()
 }
 
 #[derive(Clone, Copy)]
@@ -1587,7 +1687,12 @@ fn impulse_phase(summary: &mut RetainedSummary) {
             summary.worst_dft_db = summary.worst_dft_db.max(error);
             if !error.is_finite() || error > 0.05 {
                 summary.impulse_failures += 1;
-                summary.fail("finite_window_dft", row_index, 0, actual_db as f32 as u32);
+                summary.fail(
+                    "finite_window_dft",
+                    row_index,
+                    0,
+                    (actual_db as f32).to_bits(),
+                );
             }
         }
         summary.impulse_cases += 1;
@@ -1650,12 +1755,127 @@ fn edge_discriminator(row: Row) -> u64 {
     if row.frequency == 10.0 { 0 } else { 1 }
 }
 
+fn configuration_hash(all_rows: &[Row]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for word in [
+        EQUATION_VERSION,
+        IMPULSE_SAMPLES as u64,
+        F64_TOLERANCE.to_bits(),
+        2_048,
+        1_104,
+        48,
+        1_000_000,
+        0x0000_0000_0012_e911,
+        0.005_f64.to_bits(),
+        0.05_f64.to_bits(),
+        0.001_f64.to_bits(),
+    ] {
+        mix_hash(&mut hash, word);
+    }
+    for candidate in CandidateId::ALL {
+        mix_hash(&mut hash, candidate as u64);
+        mix_hash(&mut hash, candidate.coefficient_words() as u64);
+        mix_hash(&mut hash, candidate.state_words() as u64);
+    }
+    for row in all_rows.iter().copied() {
+        for word in [
+            u64::from(row.rate),
+            row.kind as u64,
+            row.frequency.to_bits(),
+            row.gain.to_bits(),
+            row.q.to_bits(),
+            row.slope.to_bits(),
+        ] {
+            mix_hash(&mut hash, word);
+        }
+        for probe in probes(row) {
+            mix_hash(&mut hash, probe.to_bits());
+        }
+    }
+    for row in edge_rows() {
+        for word in [
+            u64::from(row.rate),
+            row.kind as u64,
+            row.frequency.to_bits(),
+            row.gain.to_bits(),
+            row.q.to_bits(),
+            row.slope.to_bits(),
+        ] {
+            mix_hash(&mut hash, word);
+        }
+    }
+    hash
+}
+
+fn retained_record(stage: u8, summary: &RetainedSummary) -> String {
+    format!(
+        "issue-045 phase={stage} candidate={} analytic_rows={} analytic_failures={} searches={} search_failures={} impulse_cases={} impulse_failures={} million_cases={} recoveries={} canonicalizations={} invalid={} margin={:.17e} worst_analytic_db={:.17e} worst_dft_db={:.17e} max_output={:.17e} max_state={:.17e} min_nonzero={:.17e} analytic_hash={:016x} impulse_hash={:016x} million_hash={:016x} first_failure={:?} pass={}",
+        summary.candidate.name(),
+        summary.analytic_rows,
+        summary.analytic_failures,
+        summary.searches,
+        summary.search_failures,
+        summary.impulse_cases,
+        summary.impulse_failures,
+        summary.million_cases,
+        summary.recoveries,
+        summary.canonicalizations,
+        summary.invalid_values,
+        summary.minimum_stability_margin,
+        summary.worst_analytic_db,
+        summary.worst_dft_db,
+        summary.max_output,
+        summary.max_state,
+        summary.minimum_nonzero,
+        summary.analytic_hash,
+        summary.impulse_hash,
+        summary.million_hash,
+        summary.first_failure,
+        summary.passes(),
+    )
+}
+
+fn select_candidate(summaries: &[RetainedSummary]) -> Option<CandidateId> {
+    summaries
+        .iter()
+        .filter(|summary| summary.passes())
+        .min_by(|left, right| {
+            right
+                .minimum_stability_margin
+                .total_cmp(&left.minimum_stability_margin)
+                .then_with(|| left.worst_dft_db.total_cmp(&right.worst_dft_db))
+                .then_with(|| {
+                    left.candidate
+                        .state_words()
+                        .cmp(&right.candidate.state_words())
+                })
+                .then_with(|| (left.candidate as u8).cmp(&(right.candidate as u8)))
+        })
+        .map(|summary| summary.candidate)
+}
+
 fn complete_comparison() {
     let all_rows = rows();
+    let mut transcript = Transcript::create();
+    transcript.record(format!(
+        "issue-045 begin attempt=2 equation_version={EQUATION_VERSION:016x} rows={} configuration_hash={:016x}",
+        all_rows.len(),
+        configuration_hash(&all_rows),
+    ));
+    for candidate in CandidateId::ALL {
+        transcript.record(format!(
+            "issue-045 layout candidate={} coefficient_words={} state_words={} w4_bytes={} w8_bytes={}",
+            candidate.name(),
+            candidate.coefficient_words(),
+            candidate.state_words(),
+            (candidate.coefficient_words() + candidate.state_words()) * 4 * size_of::<f32>(),
+            (candidate.coefficient_words() + candidate.state_words()) * 8 * size_of::<f32>(),
+        ));
+    }
     let phase_one_summaries = CandidateId::ALL.map(|candidate| phase_one(candidate, &all_rows));
     let mut retained = Vec::new();
     for summary in phase_one_summaries {
-        eprintln!(
+        transcript.record(format!(
             "issue-045 phase=1 candidate={} rows={} map_failures={} impulse_failures={} row_rejections={} worst_map={:.17e} worst_impulse={:.17e} hash={:016x} first_rejection={:?} survives={}",
             summary.candidate.name(),
             summary.rows,
@@ -1667,45 +1887,35 @@ fn complete_comparison() {
             summary.hash,
             summary.first_rejection,
             summary.survives(),
-        );
+        ));
         assert_eq!(summary.rows, 1_488);
         if summary.survives() {
-            retained.push(retained_analytic(summary.candidate, &all_rows));
+            let retained_summary = retained_analytic(summary.candidate, &all_rows);
+            transcript.record(retained_record(2, &retained_summary));
+            retained.push(retained_summary);
         }
     }
     if retained.is_empty() {
-        eprintln!("issue-045 phase=1 no candidates survived; later phases not invoked");
+        transcript.record(
+            "issue-045 selection passing_candidates=0 selected=none reason=no_phase_one_survivor"
+                .to_owned(),
+        );
+        transcript.finish();
         return;
     }
     for summary in &mut retained {
         impulse_phase(summary);
+        transcript.record(retained_record(3, summary));
         million_phase(summary);
-        eprintln!(
-            "issue-045 candidate={} analytic_rows={} analytic_failures={} searches={} search_failures={} impulse_cases={} impulse_failures={} million_cases={} recoveries={} canonicalizations={} invalid={} margin={:.17e} worst_analytic_db={:.17e} worst_dft_db={:.17e} max_output={:.17e} max_state={:.17e} min_nonzero={:.17e} analytic_hash={:016x} impulse_hash={:016x} million_hash={:016x} first_failure={:?} pass={}",
-            summary.candidate.name(),
-            summary.analytic_rows,
-            summary.analytic_failures,
-            summary.searches,
-            summary.search_failures,
-            summary.impulse_cases,
-            summary.impulse_failures,
-            summary.million_cases,
-            summary.recoveries,
-            summary.canonicalizations,
-            summary.invalid_values,
-            summary.minimum_stability_margin,
-            summary.worst_analytic_db,
-            summary.worst_dft_db,
-            summary.max_output,
-            summary.max_state,
-            summary.minimum_nonzero,
-            summary.analytic_hash,
-            summary.impulse_hash,
-            summary.million_hash,
-            summary.first_failure,
-            summary.passes(),
-        );
+        transcript.record(retained_record(4, summary));
     }
+    let passing = retained.iter().filter(|summary| summary.passes()).count();
+    let selected = select_candidate(&retained);
+    transcript.record(format!(
+        "issue-045 selection passing_candidates={passing} selected={}",
+        selected.map_or("none", CandidateId::name),
+    ));
+    transcript.finish();
 }
 
 #[test]

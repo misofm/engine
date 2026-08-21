@@ -2,7 +2,8 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1, RESEARCH ONLY.** There are exactly two total attempts: one Terra
+**READY FOR THE ONE AUTHORIZED SOL-ATTEMPT-2 COMPLETE RUN, RESEARCH ONLY.** There are exactly two
+total attempts: one Terra
 implementation/review of this proof and, only if needed, one bounded Sol correction to a derivation
 or harness defect. Each attempt may invoke the complete matrix exactly once. A second failure
 stops; a Sol correction may not add a candidate family, change a row/probe/domain/tolerance or
@@ -41,9 +42,9 @@ output-history variant may be substituted.
 
 Retain Issue-042's seven words `(a,n0,d0,n1,d1,n2,d2)` and eight state words
 `(x1_hi,x1_lo,x2_hi,x2_lo,y1_hi,y1_lo,y2_hi,y2_lo)`. Evaluate the exact Issue-042 delta temporary
-order, but every add/subtract/multiply and the final division operates on a canonical `(hi,lo)`
-f32 expansion; input and coefficients enter as `(word,+0)`, and output is the one f32 rounding
-`hi+lo`. There is no f64 lane and no FMA.
+order. Every audio/state add, subtract and product and the final division operates on a canonical
+`(hi,lo)` f32 expansion; input and coefficient words enter those operations as `(word,+0)`, and
+output is the one f32 rounding `hi+lo`. There is no f64 lane and no FMA.
 
 ```text
 dx=x1-a*x; ddx=(x2-a*x1)-a*dx
@@ -54,6 +55,12 @@ history=q2*y1+d2*y2
 y=(num-history)/scale
 x2'=x1; x1'=x; y2'=y1; y1'=y
 ```
+
+The coefficient-only derived `scale`, `q1` and `q2` lines use the displayed noncontracting scalar
+f32 operation order and produce one f32 word each; expansion arithmetic begins where those words
+multiply or divide audio/state expansions. The retained analytic transfer must use those same
+derived f32 words. This avoids inventing an unfrozen expansion-by-expansion coefficient graph and
+keeps scalar/W4/W8 lowering identical.
 
 The proof implementation must define and unit-check these fixed error-free primitives before the
 matrix [DEKKER-EXTENDED]: `TwoSum`, `QuickTwoSum`, and Dekker `TwoProd` with split constant
