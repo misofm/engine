@@ -152,3 +152,25 @@ static/envelope/latency/link/sidechain, seeded, million-sample, automation/reset
 isolation maxima; scalar/bank/target instruction reports; exact graph/audit counters and PCM hash;
 benchmark preflight launch count and, only after the sole authorized invocation, six-record JSONL
 hash/count; audition/preregistration hashes; and explicit Terra plus final Sol PASS/FAIL verdicts.
+
+## Terra attempt 1 checkpoint evidence — scalar and homogeneous-bank foundation
+
+The scalar foundation and its approved gain/mix-token prerequisite are checkpointed. The current
+homogeneous-bank slice prepares only exact-width, same-program, unconnected-sidechain requests and
+returns the existing legal scalar fallback for unavailable architecture or connected sidechain.
+Prepared bank state retains width-specific independent `Lane` storage and uses the core prepared
+gain/mix token for the frozen dry/wet/mixed selection graph. Dry identity takes precedence over
+wet identity, preserving the scalar `G == 0`/positive-zero-makeup rule without overlapping masks.
+
+Focused evidence run by Terra (no benchmark invocation):
+
+- `cargo check --locked -p miso-engine-compressor` — PASS.
+- `cargo test --locked -p miso-engine-compressor --lib` — PASS, 7 tests.
+- `cargo clippy --locked -p miso-engine-compressor --all-targets -- -D warnings` — PASS.
+- The native available W8 test compares eight unconnected scalar instances with one AVX2 bank for
+  eight 128-frame blocks, asserting bit-exact planar PCM and byte-exact per-track state payload
+  for track 3. It also exercises independent per-track input/state evolution.
+
+This is not a final Issue-013 verdict. W4 runtime evidence, cross-target instruction inspection,
+connected-sidechain scalar fallback in a production graph, corpus/seeded/million-sample evidence,
+fixtures, realtime audit, target matrix and benchmark remain unrun and unclaimed.
