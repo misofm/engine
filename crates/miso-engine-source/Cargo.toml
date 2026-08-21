@@ -11,6 +11,7 @@ name = "miso_engine_source"
 [dependencies]
 miso-engine-core.workspace = true
 miso-engine-graph.workspace = true
+miso-engine-session.workspace = true
 
 [dev-dependencies]
 miso-engine-effect-contract.workspace = true

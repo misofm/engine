@@ -36,10 +36,12 @@ pub use native_wave::{
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_source::{
-    NativeResolvedAsset, NativeSourcePrepareCaps, NativeSourcePrepareError,
-    NativeSourcePrepareRequest, NativeSourceResolver, NativeSourceResolverError,
-    NativeSourceResourceReport, NativeSourceWorker, NativeSourceWorkerControlError,
-    NativeSourceWorkerEvent, NativeSourceWorkerExit, prepare_native_source,
+    NativeResolvedAsset, NativeSessionPreparedSources, NativeSessionSourcePrepareCaps,
+    NativeSessionSourcePrepareFailure, NativeSessionSourceResourceReport, NativeSourcePrepareCaps,
+    NativeSourcePrepareError, NativeSourcePrepareRequest, NativeSourceResolver,
+    NativeSourceResolverError, NativeSourceResourceReport, NativeSourceWorker,
+    NativeSourceWorkerControlError, NativeSourceWorkerEvent, NativeSourceWorkerExit,
+    prepare_native_session_sources, prepare_native_source,
 };
 
 /// A nonzero source-stream generation selected by an off-render controller.
@@ -1254,6 +1256,10 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 pub struct SourceGraphSource {
     pub consumer: PcmSourceConsumer,
     pub resources: SourceResourceReport,
+    /// Fixed native worker/decoder bytes not represented by the ring report.
+    pub additional_overhead_bytes: u64,
+    /// Largest fixed worker/decoder allocation, if larger than the ring allocation.
+    pub additional_largest_allocation_bytes: u64,
 }
 
 /// One immutable source-channel mapping to a graph track-input node.
@@ -1402,10 +1408,12 @@ pub fn prepare_graph_source_set(
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         overhead = overhead
             .checked_add(source.resources.overhead_bytes)
+            .and_then(|value| value.checked_add(source.additional_overhead_bytes))
             .and_then(|value| value.checked_add(plane_bytes))
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         largest = largest
             .max(source.resources.largest_allocation_bytes)
+            .max(source.additional_largest_allocation_bytes)
             .max(plane_bytes);
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
@@ -1832,6 +1840,8 @@ mod tests {
                 vec![SourceGraphSource {
                     consumer,
                     resources,
+                    additional_overhead_bytes: 0,
+                    additional_largest_allocation_bytes: 0,
                 }],
                 vec![
                     SourceGraphTrackMapping {

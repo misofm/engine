@@ -492,6 +492,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-graph",
+ "miso-engine-session",
 ]
 
 [[package]]

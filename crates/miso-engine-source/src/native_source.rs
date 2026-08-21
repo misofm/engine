@@ -12,12 +12,16 @@ use std::{
 };
 
 use miso_engine_core::SampleRateHz;
+use miso_engine_graph::{GraphNodeId, StableGraphId, TrackStage};
+use miso_engine_session::CompiledSession;
 
 use crate::{
     HostChunkError, HostChunkProvider, NativeWaveDecoder, NativeWaveError, NativeWaveMetadata,
     NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig,
-    PcmSourceRingError, SourceCommand, SourceDiagnosticCode, SourceFrame, SourceGeneration,
-    SourceResourceReport, SourceSeekError, parse_native_wave,
+    PcmSourceRingError, SourceCommand, SourceDiagnostic, SourceDiagnosticCode,
+    SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
+    SourceGraphTrackMapping, SourceResourceReport, SourceSeekError, parse_native_wave,
+    prepare_graph_source_set,
 };
 
 /// Opaque native resolver failure before a source asset can be parsed.
@@ -96,6 +100,55 @@ pub struct NativeSourceResourceReport {
     pub total_engine_owned_bytes: u64,
     /// Largest exact allocation among ring, decoder scratch, and planar staging.
     pub largest_allocation_bytes: u64,
+}
+
+/// Fixed caps for preparing every declared native session source as one transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeSessionSourcePrepareCaps {
+    /// Per-source parser, ring, worker, and decoder caps.
+    pub source: NativeSourcePrepareCaps,
+    /// Maximum checked session-runtime plus source-overhead bytes after deduplicating ring PCM.
+    pub max_combined_runtime_bytes: u64,
+    /// Maximum checked allocation request across session, source, and graph source-set storage.
+    pub max_largest_allocation_bytes: u64,
+}
+
+/// Exact one-time accounting for a prepared session source transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeSessionSourceResourceReport {
+    pub source_count: u64,
+    pub session_runtime_bytes: u64,
+    pub source_pcm_already_charged_bytes: u64,
+    pub source_overhead_bytes: u64,
+    pub combined_runtime_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+/// A failed all-or-nothing session source preparation with sorted stable diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeSessionSourcePrepareFailure {
+    pub diagnostics: Vec<SourceDiagnostic>,
+}
+
+/// Prepared graph source set plus the native workers that keep its rings filled.
+pub struct NativeSessionPreparedSources {
+    pub source_set: miso_engine_graph::GraphPreparedSourceSet,
+    pub workers: Vec<NativeSourceWorker>,
+    pub resources: NativeSessionSourceResourceReport,
+}
+
+impl NativeSessionPreparedSources {
+    /// Move the graph source set and its worker ownership together to plan publication/retirement.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        miso_engine_graph::GraphPreparedSourceSet,
+        Vec<NativeSourceWorker>,
+        NativeSessionSourceResourceReport,
+    ) {
+        (self.source_set, self.workers, self.resources)
+    }
 }
 
 /// Resolution or source preparation rejection before any consumer is published.
@@ -359,6 +412,168 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
     ))
 }
 
+/// Resolve every normalized session source once and publish no source set unless all preparation
+/// and combined resource checks succeed. Started workers are stopped/joined on every failure.
+pub fn prepare_native_session_sources<S: NativeSourceResolver>(
+    session: &CompiledSession,
+    resolver: &mut S,
+    caps: NativeSessionSourcePrepareCaps,
+) -> Result<NativeSessionPreparedSources, NativeSessionSourcePrepareFailure> {
+    let model = session.normalized_model();
+    let mut diagnostics = Vec::new();
+    let mut workers = Vec::with_capacity(model.sources.len());
+    let mut graph_sources = Vec::with_capacity(model.sources.len());
+    let mut reports = Vec::with_capacity(model.sources.len());
+
+    for source in &model.sources {
+        let request = NativeSourcePrepareRequest {
+            locator: source.content.locator.clone(),
+            declared_identity: source.content.identity.as_bytes().to_vec(),
+            declared_sample_rate_hz: SampleRateHz(source.sample_rate_hz),
+            engine_sample_rate_hz: session.sample_rate(),
+            declared_channel_count: u16::from(source.mapping.channel_count),
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(source.mapping.region.start_sample),
+                length_frames: source.mapping.region.length_samples,
+            },
+            ring_config: PcmSourceRingConfig {
+                channel_count: u32::from(source.mapping.channel_count),
+                quantum_frames: session.quantum(),
+                frame_capacity: model.limits.pcm_ring_frames,
+                initial_generation: SourceGeneration(1),
+            },
+        };
+        match prepare_native_source(resolver, request, caps.source) {
+            Ok((worker, consumer, report)) => {
+                let additional_overhead_bytes = report
+                    .total_engine_owned_bytes
+                    .checked_sub(report.ring.total_engine_owned_bytes)
+                    .expect("native report includes ring");
+                graph_sources.push(SourceGraphSource {
+                    consumer,
+                    resources: report.ring,
+                    additional_overhead_bytes,
+                    additional_largest_allocation_bytes: report.largest_allocation_bytes,
+                });
+                reports.push(report);
+                workers.push(worker);
+            }
+            Err(error) => diagnostics.push(native_prepare_diagnostic(source.id.as_str(), error)),
+        }
+    }
+    if !diagnostics.is_empty() {
+        stop_workers(&mut workers);
+        sort_diagnostics(&mut diagnostics);
+        return Err(NativeSessionSourcePrepareFailure { diagnostics });
+    }
+
+    let source_indexes: std::collections::BTreeMap<_, _> = model
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| (source.id.clone(), index))
+        .collect();
+    let mappings: Vec<_> = model
+        .tracks
+        .iter()
+        .map(|track| SourceGraphTrackMapping {
+            node: GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(track.id.as_str()).expect("compiled stable ID"),
+                stage: TrackStage::Input,
+            },
+            source_index: source_indexes[&track.source_id],
+            left_channel: u32::from(track.left_source_channel),
+            right_channel: u32::from(track.right_source_channel),
+        })
+        .collect();
+    let source_set = match prepare_graph_source_set(
+        miso_engine_core::realtime::RenderEnvelope {
+            sample_rate: session.sample_rate(),
+            quantum: session.quantum(),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("dual mono output"),
+        },
+        graph_sources,
+        mappings,
+    ) {
+        Ok(source_set) => source_set,
+        Err(_) => {
+            stop_workers(&mut workers);
+            return Err(NativeSessionSourcePrepareFailure {
+                diagnostics: vec![SourceDiagnostic::new(
+                    SourceDiagnosticCode::GraphBindingMismatch,
+                    SourceDiagnosticPath::for_source(model.sources[0].id.as_str()),
+                    "compiled track/source mappings could not be sealed for graph binding",
+                )],
+            });
+        }
+    };
+    let graph_resources = source_set.resource_report();
+    let session_runtime_bytes = session.resource_estimate().requested_runtime_bytes;
+    let combined_runtime_bytes =
+        match session_runtime_bytes.checked_add(graph_resources.overhead_bytes) {
+            Some(total) => total,
+            None => {
+                stop_workers(&mut workers);
+                return Err(resource_failure(model.sources[0].id.as_str()));
+            }
+        };
+    let largest_allocation_bytes = session
+        .resource_estimate()
+        .single_allocation_bytes
+        .max(graph_resources.largest_allocation_bytes);
+    if graph_resources.pcm_payload_already_charged_bytes
+        != session.resource_estimate().source_ring_bytes
+        || combined_runtime_bytes > model.limits.memory_bytes
+        || combined_runtime_bytes > caps.max_combined_runtime_bytes
+        || largest_allocation_bytes > caps.max_largest_allocation_bytes
+    {
+        stop_workers(&mut workers);
+        return Err(resource_failure(model.sources[0].id.as_str()));
+    }
+    let source_count = u64::try_from(reports.len()).expect("source vector length fits u64");
+    Ok(NativeSessionPreparedSources {
+        source_set,
+        workers,
+        resources: NativeSessionSourceResourceReport {
+            source_count,
+            session_runtime_bytes,
+            source_pcm_already_charged_bytes: graph_resources.pcm_payload_already_charged_bytes,
+            source_overhead_bytes: graph_resources.overhead_bytes,
+            combined_runtime_bytes,
+            largest_allocation_bytes,
+        },
+    })
+}
+
+fn native_prepare_diagnostic(source_id: &str, error: NativeSourcePrepareError) -> SourceDiagnostic {
+    SourceDiagnostic::new(
+        error.diagnostic_code(),
+        SourceDiagnosticPath::for_source(source_id),
+        "native source resolution or preparation rejected the declared source",
+    )
+}
+
+fn resource_failure(source_id: &str) -> NativeSessionSourcePrepareFailure {
+    NativeSessionSourcePrepareFailure {
+        diagnostics: vec![SourceDiagnostic::new(
+            SourceDiagnosticCode::ResourceLimit,
+            SourceDiagnosticPath::for_source(source_id),
+            "session plus graph source overhead exceeds a declared preparation resource limit",
+        )],
+    }
+}
+
+fn sort_diagnostics(diagnostics: &mut [SourceDiagnostic]) {
+    diagnostics.sort_by(|left, right| left.path.cmp(&right.path).then(left.code.cmp(&right.code)));
+}
+
+fn stop_workers(workers: &mut [NativeSourceWorker]) {
+    for worker in workers {
+        let _ = worker.stop_and_join();
+    }
+}
+
 fn source_resource_report(
     metadata: NativeWaveMetadata,
     ring_config: PcmSourceRingConfig,
@@ -568,6 +783,7 @@ mod tests {
     use std::io::Cursor;
 
     use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
+    use miso_engine_session::{CompileCaps, StableId, compile_session, parse_session_toml};
 
     struct Resolver {
         asset: Option<NativeResolvedAsset<Cursor<Vec<u8>>>>,
@@ -625,6 +841,73 @@ mod tests {
             max_total_engine_owned_bytes: u64::MAX,
             max_largest_allocation_bytes: u64::MAX,
             control_queue_items: NonZeroUsize::new(2).expect("two"),
+        }
+    }
+
+    fn session_caps() -> NativeSessionSourcePrepareCaps {
+        NativeSessionSourcePrepareCaps {
+            source: NativeSourcePrepareCaps {
+                parser: NativeWaveParseCaps {
+                    max_chunk_count: 8,
+                    max_skipped_metadata_bytes: 32,
+                },
+                max_worker_read_scratch_bytes: 2_048,
+                max_total_engine_owned_bytes: u64::MAX,
+                max_largest_allocation_bytes: u64::MAX,
+                control_queue_items: NonZeroUsize::new(2).expect("two"),
+            },
+            max_combined_runtime_bytes: u64::MAX,
+            max_largest_allocation_bytes: u64::MAX,
+        }
+    }
+
+    fn compiled_source_session() -> CompiledSession {
+        let mut session =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("session");
+        session.sources[0].mapping.region.length_samples = 4;
+        compile_session(
+            &session,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled")
+    }
+
+    struct SessionResolver {
+        assets: Vec<NativeResolvedAsset<Cursor<Vec<u8>>>>,
+        calls: usize,
+    }
+
+    impl NativeSourceResolver for SessionResolver {
+        type Asset = Cursor<Vec<u8>>;
+
+        fn resolve(
+            &mut self,
+            _opaque_locator: &str,
+        ) -> Result<NativeResolvedAsset<Self::Asset>, NativeSourceResolverError> {
+            self.calls = self.calls.saturating_add(1);
+            if self.assets.is_empty() {
+                Err(NativeSourceResolverError::Unresolved)
+            } else {
+                Ok(self.assets.remove(0))
+            }
+        }
+    }
+
+    fn session_resolver(identity: &[u8]) -> SessionResolver {
+        SessionResolver {
+            assets: vec![NativeResolvedAsset {
+                observed_identity: identity.to_vec(),
+                reader: Cursor::new(stereo_float32_wave(&[0.0; 8])),
+            }],
+            calls: 0,
         }
     }
 
@@ -777,6 +1060,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiled_session_sources_prepare_once_and_publish_one_graph_source_set() {
+        let session = compiled_source_session();
+        let mut resolver = session_resolver(b"sha256:demo");
+        let prepared = prepare_native_session_sources(&session, &mut resolver, session_caps())
+            .expect("session source preparation");
+        assert_eq!(resolver.calls, 1);
+        assert_eq!(prepared.resources.source_count, 1);
+        assert_eq!(prepared.source_set.claims().len(), 1);
+        assert_eq!(
+            prepared.resources.source_pcm_already_charged_bytes,
+            session.resource_estimate().source_ring_bytes
+        );
+        let (_source_set, mut workers, _resources) = prepared.into_parts();
+        stop_workers(&mut workers);
+    }
+
+    #[test]
+    fn compiled_session_source_mismatch_and_cap_fail_without_publication() {
+        let session = compiled_source_session();
+        let mut identity_resolver = session_resolver(b"wrong");
+        let identity = match prepare_native_session_sources(
+            &session,
+            &mut identity_resolver,
+            session_caps(),
+        ) {
+            Ok(_) => panic!("identity mismatch unexpectedly prepared"),
+            Err(failure) => failure,
+        };
+        assert_eq!(identity.diagnostics.len(), 1);
+        assert_eq!(
+            identity.diagnostics[0].code,
+            SourceDiagnosticCode::ContentIdentityMismatch
+        );
+
+        let mut capped_resolver = session_resolver(b"sha256:demo");
+        let mut caps = session_caps();
+        caps.max_combined_runtime_bytes = 0;
+        let capped = match prepare_native_session_sources(&session, &mut capped_resolver, caps) {
+            Ok(_) => panic!("combined cap unexpectedly prepared"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            capped.diagnostics[0].code,
+            SourceDiagnosticCode::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn compiled_session_source_rollback_stops_earlier_worker() {
+        let mut session_toml =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("session");
+        session_toml.sources[0].mapping.region.length_samples = 4;
+        let mut second = session_toml.sources[0].clone();
+        second.id = StableId::parse("voice2").expect("ID");
+        second.content.locator = "host:voice2".to_owned();
+        session_toml.sources.push(second);
+        let session = compile_session(
+            &session_toml,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let mut resolver = session_resolver(b"sha256:demo");
+        let failure = match prepare_native_session_sources(&session, &mut resolver, session_caps())
+        {
+            Ok(_) => panic!("second resolver call unexpectedly prepared"),
+            Err(failure) => failure,
+        };
+        assert_eq!(resolver.calls, 2);
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(
+            failure.diagnostics[0].code,
+            SourceDiagnosticCode::AssetUnresolved
+        );
+        assert_eq!(failure.diagnostics[0].path.as_str(), "$.sources[id=voice2]");
+    }
+
     fn read_one(consumer: &mut PcmSourceConsumer) -> ([f32; 4], SourceReadReport) {
         let mut output = [0.0; 4];
         let report = {
@@ -793,6 +1161,29 @@ mod tests {
         format.extend_from_slice(&48_000_u32.to_le_bytes());
         format.extend_from_slice(&192_000_u32.to_le_bytes());
         format.extend_from_slice(&4_u16.to_le_bytes());
+        format.extend_from_slice(&32_u16.to_le_bytes());
+        let mut data = Vec::new();
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        let mut wave = Vec::new();
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&0_u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVE");
+        append_chunk(&mut wave, b"fmt ", &format);
+        append_chunk(&mut wave, b"data", &data);
+        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        wave
+    }
+
+    fn stereo_float32_wave(samples: &[f32]) -> Vec<u8> {
+        let mut format = Vec::new();
+        format.extend_from_slice(&3_u16.to_le_bytes());
+        format.extend_from_slice(&2_u16.to_le_bytes());
+        format.extend_from_slice(&48_000_u32.to_le_bytes());
+        format.extend_from_slice(&384_000_u32.to_le_bytes());
+        format.extend_from_slice(&8_u16.to_le_bytes());
         format.extend_from_slice(&32_u16.to_le_bytes());
         let mut data = Vec::new();
         for sample in samples {
