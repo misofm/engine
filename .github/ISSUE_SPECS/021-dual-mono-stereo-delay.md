@@ -210,3 +210,26 @@ results; attempt number; strict verdict; Issue-055 link; and `timed_benchmark_in
   mutation policies; and graph policy.
 - Integration checkpoint verdict: partial PASS. The final clean nonbenchmark product seal remains
   separate; Issue-055 qualification remains untouched. `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — final nonbenchmark product seal
+
+- Final candidate `6781c88` preserves the accepted scalar correction and registry/compiler/graph
+  checkpoints above. No production, fixture, policy or qualification file changed during this seal.
+- `cargo fmt --all -- --check`: PASS. `cargo check --locked --workspace --all-targets
+  --all-features` and `cargo test --locked --workspace --all-targets --all-features`: PASS,
+  including all seven delay product tests and the ten-track scalar graph closure fixture.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: PASS.
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps`: PASS.
+- Workspace, realtime, effect-runtime and rack baseline plus mutation suites PASS when invoked
+  through `bash`; graph baseline policy PASS. The graph policy has no separate mutation script.
+- The Git-free static seal found no conflict markers or trailing whitespace in the Issue-021
+  product paths, no `.orig`, `.rej`, `.tmp` or `.profraw` artifacts outside excluded build/VCS
+  directories, and valid shell syntax for every invoked policy script.
+- No Issue-055 qualification, functional audit main, cross-target build, instruction/object
+  inspection, benchmark, timing or listening command ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: PASS.** Issue 021 closes the fixed two-second integer-time dual-mono/ping-pong
+delay scalar effect, launch registry/effect compiler and ten-track dynamic-rack graph/PDC/resource
+vertical in the second and final authorized attempt. Issue 055 remains the sole owner of deferred
+corpus and long-stress expansion, realtime audit, target/instruction evidence, descriptive benchmark
+and listening handoff.
