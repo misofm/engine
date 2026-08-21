@@ -8,6 +8,7 @@ mod block;
 mod processor;
 mod signals;
 mod spectrum;
+mod tpt;
 
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
@@ -16,6 +17,7 @@ pub use signals::{
     ReferenceSignalError, deterministic_bipolar_noise, deterministic_impulse, deterministic_sine,
 };
 pub use spectrum::{Complex64, SpectrumError, direct_dft_bin, direct_dft_frequency, magnitude_db};
+pub use tpt::{ReferenceTptOutput, ReferenceTptStateSpace, rbj_butterworth_magnitude_db};
 
 #[cfg(test)]
 mod tests {

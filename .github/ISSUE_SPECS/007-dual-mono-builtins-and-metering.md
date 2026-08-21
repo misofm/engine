@@ -190,3 +190,18 @@ sanitization; signed-zero identity; pairwise state recovery with per-call and li
 render-reachable panics; full resource/largest-allocation accounting; exact lane/field diagnostics;
 and exact prepared track/tail/observer-node set validation. All prior missing fixture, target,
 mutation, realtime, allocation, listening, and benchmark evidence remains required.
+
+## Restarted Terra attempt 1 evidence (2026-08-21; partial)
+
+Production HPF/LPF now uses the rescope's `f32` non-fused TPT/SVF operation graph, with `f64`
+off-render design, cast-coefficient transition/Jury validation, 10-Hz enabled-cutoff floor, and
+pairwise state recovery. The former TDF-II sustained-sine failure is not retained as a production
+gate. A separate f64 state-space oracle built from the exact cast TPT coefficient bits compares
+against its independently derived RBJ transfer response across every required rate, section,
+cutoff, and prescribed analytic probes; the current `0.005 dB` analytic gate passes. The existing
+all-rate impulse/sweep and bounded mutation tests also pass under the new realization.
+
+This is not issue completion: the full one-second impulse DFT, coherent sustained-signal,
+manifest fixtures, public API/resource/meter corrections, allocation/realtime audits, listening,
+cross-target workspace evidence, and authorized benchmark remain outstanding. Benchmark count is
+still **0**.

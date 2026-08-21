@@ -949,7 +949,10 @@ fn sanitize(value: f32, count: &mut u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_dsp_reference::{ReferenceBiquad, ReferenceFilterKind};
+    use miso_engine_dsp_reference::{
+        ReferenceBiquad, ReferenceFilterKind, ReferenceTptOutput, ReferenceTptStateSpace,
+        rbj_butterworth_magnitude_db,
+    };
     #[test]
     fn polarity_trim_fader_and_matrix_are_exact() {
         let mut chain = BuiltinChain::new(
@@ -1189,6 +1192,74 @@ mod tests {
                     assert!(
                         (actual_db - reference_db).abs() <= 0.05,
                         "rate={rate}, frequency={frequency}, actual={actual_db}, reference={reference_db}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn cast_tpt_state_space_matches_independent_rbj_transfer() {
+        for rate in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+        ] {
+            let mut cutoffs = vec![
+                10.0,
+                20.0,
+                100.0,
+                1_000.0,
+                (20_000.0_f64).min(0.1 * f64::from(rate)),
+                0.45 * f64::from(rate),
+            ];
+            cutoffs.sort_by(f64::total_cmp);
+            cutoffs.dedup_by(|left, right| *left == *right);
+            for (high_pass, kind, output) in [
+                (
+                    true,
+                    ReferenceFilterKind::HighPass,
+                    ReferenceTptOutput::HighPass,
+                ),
+                (
+                    false,
+                    ReferenceFilterKind::LowPass,
+                    ReferenceTptOutput::LowPass,
+                ),
+            ] {
+                for cutoff in &cutoffs {
+                    let filter = TptSvf::design(rate, *cutoff as f32, high_pass).expect("valid");
+                    let state = ReferenceTptStateSpace::from_cast_coefficients(
+                        filter.a1, filter.a2, filter.a3, filter.k, output,
+                    );
+                    let mut probes = vec![
+                        0.25 * cutoff,
+                        *cutoff,
+                        4.0 * cutoff,
+                        0.2 * f64::from(rate),
+                        0.45 * f64::from(rate),
+                        0.49 * f64::from(rate),
+                    ];
+                    probes.retain(|probe| *probe > 0.0 && *probe < 0.5 * f64::from(rate));
+                    probes.sort_by(f64::total_cmp);
+                    probes.dedup_by(|left, right| *left == *right);
+                    for frequency in probes {
+                        let reference =
+                            rbj_butterworth_magnitude_db(f64::from(rate), *cutoff, kind, frequency)
+                                .expect("reference");
+                        let actual = state
+                            .magnitude_db(f64::from(rate), frequency)
+                            .expect("state");
+                        if reference >= -120.0 {
+                            assert!(
+                                (actual - reference).abs() <= 0.005,
+                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, actual={actual}, reference={reference}"
+                            );
+                        }
+                    }
+                    let cutoff_db = state
+                        .magnitude_db(f64::from(rate), *cutoff)
+                        .expect("cutoff state");
+                    assert!(
+                        (cutoff_db + 3.010_299_956_6).abs() <= 0.005,
+                        "rate={rate}, cutoff={cutoff}, db={cutoff_db}"
                     );
                 }
             }
