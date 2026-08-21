@@ -116,3 +116,21 @@ Issue-042 failure reproducer; candidate equations and complete 96-sequence compa
 selection; exact state/layout/accounting tables; analytic/search/seeded/time-domain maxima;
 automation/reset/restore/isolation results; graph/audit/target regressions; Terra and final Sol
 verdicts; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — complete time-domain comparison (2026-08-21)
+
+**FAIL; no recurrence selected and no production file changed.** The test-only reference boundary
+ran each of three candidates over all 48 one-second impulse/DFT rows and all 48 million-sample
+valid sequences. Every candidate completed with normal-or-positive-zero retained output/state
+after its declared boundary policy, but none satisfied the complete frozen selection gate.
+
+| Candidate | Selectable | Underflow / recovery events | Worst DFT error | Transcript |
+| --- | --- | ---: | ---: | --- |
+| 2^24-scaled direct histories | no | 24 / 24 | 0.536679696321 dB | `93b9b4aeac0fea29` |
+| transposed two-state | no | 24 / 24 | 1.094058507582 dB | `80c0b5f4ab2bda57` |
+| direct histories with finite-subnormal -> positive zero | no | 738 / 0 | 0.536679696321 dB | `0a6a7cb49811030b` |
+
+The explicit flush candidate removes recovery but still has eight impulse/DFT failures above the
+unchanged 0.05 dB limit. The comparison's final exactly-one-selectable assertion therefore fails
+as intended. It is retained and ignored pending the one bounded Sol correction. No production,
+graph, audit, target or benchmark work was performed; `timed_benchmark_invocations=0`.

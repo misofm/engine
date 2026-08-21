@@ -13,6 +13,8 @@ mod tpt;
 
 #[cfg(test)]
 mod parametric_eq_candidates;
+#[cfg(test)]
+mod parametric_eq_time_domain_candidates;
 
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
