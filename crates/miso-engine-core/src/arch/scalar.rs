@@ -1,6 +1,6 @@
 //! Portable scalar reference for the architecture-owned TPT operation graph.
 
-use super::TptKernelBlock;
+use super::{BiquadKernelBlock, TptKernelBlock};
 
 #[inline(never)]
 pub(super) fn process_tpt_scalar(block: TptKernelBlock<'_>) {
@@ -27,4 +27,36 @@ pub(super) fn process_tpt_scalar(block: TptKernelBlock<'_>) {
     } else {
         low
     };
+}
+
+/// Frozen non-FMA direct-form-I operation graph for one scalar lane.
+#[inline(never)]
+pub(super) fn process_biquad_scalar(block: BiquadKernelBlock<'_>) {
+    let x = block.samples[0];
+    let old_x1 = block.x1[0];
+    let old_x2 = block.x2[0];
+    let old_y1 = block.y1[0];
+    let old_y2 = block.y2[0];
+    let p0 = block.b0[0] * x;
+    let p1 = block.b1[0] * old_x1;
+    let s0 = p0 + p1;
+    let p2 = block.b2[0] * old_x2;
+    let s1 = s0 + p2;
+    let p3 = block.a1[0] * old_y1;
+    let s2 = s1 - p3;
+    let p4 = block.a2[0] * old_y2;
+    let y = s2 - p4;
+    if block.identity_mask[0] == u32::MAX {
+        block.x2[0] = old_x1;
+        block.x1[0] = x;
+        block.y2[0] = old_x1;
+        block.y1[0] = x;
+        block.samples[0] = x;
+    } else {
+        block.x2[0] = old_x1;
+        block.x1[0] = x;
+        block.y2[0] = old_y1;
+        block.y1[0] = y;
+        block.samples[0] = y;
+    }
 }

@@ -2,7 +2,7 @@
 
 use core::arch::aarch64::*;
 
-use super::TptKernelBlock;
+use super::{BiquadKernelBlock, TptKernelBlock};
 
 #[inline(never)]
 #[target_feature(enable = "neon")]
@@ -42,4 +42,46 @@ unsafe fn process_tpt_aarch64_neon_inner(block: TptKernelBlock<'_>) {
 pub(super) fn process_tpt_aarch64_neon(block: TptKernelBlock<'_>) {
     // SAFETY: AArch64 NEON is a target property proved when this safe token is constructed.
     unsafe { process_tpt_aarch64_neon_inner(block) }
+}
+
+#[inline(never)]
+#[target_feature(enable = "neon")]
+unsafe fn process_biquad_aarch64_neon_inner(block: BiquadKernelBlock<'_>) {
+    // SAFETY: AArch64 NEON is prepared before render and validation proves four-lane slices.
+    unsafe {
+        let x = vld1q_f32(block.samples.as_ptr());
+        let b0 = vld1q_f32(block.b0.as_ptr());
+        let b1 = vld1q_f32(block.b1.as_ptr());
+        let b2 = vld1q_f32(block.b2.as_ptr());
+        let a1 = vld1q_f32(block.a1.as_ptr());
+        let a2 = vld1q_f32(block.a2.as_ptr());
+        let old_x1 = vld1q_f32(block.x1.as_ptr());
+        let old_x2 = vld1q_f32(block.x2.as_ptr());
+        let old_y1 = vld1q_f32(block.y1.as_ptr());
+        let old_y2 = vld1q_f32(block.y2.as_ptr());
+        let p0 = vmulq_f32(b0, x);
+        let p1 = vmulq_f32(b1, old_x1);
+        let s0 = vaddq_f32(p0, p1);
+        let p2 = vmulq_f32(b2, old_x2);
+        let s1 = vaddq_f32(s0, p2);
+        let p3 = vmulq_f32(a1, old_y1);
+        let s2 = vsubq_f32(s1, p3);
+        let p4 = vmulq_f32(a2, old_y2);
+        let y = vsubq_f32(s2, p4);
+        let mask = vld1q_u32(block.identity_mask.as_ptr());
+        let new_y2 = vbslq_f32(mask, old_x1, old_y1);
+        let new_y1 = vbslq_f32(mask, x, y);
+        let output = vbslq_f32(mask, x, y);
+        vst1q_f32(block.x1.as_mut_ptr(), x);
+        vst1q_f32(block.x2.as_mut_ptr(), old_x1);
+        vst1q_f32(block.y1.as_mut_ptr(), new_y1);
+        vst1q_f32(block.y2.as_mut_ptr(), new_y2);
+        vst1q_f32(block.samples.as_mut_ptr(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_biquad_aarch64_neon(block: BiquadKernelBlock<'_>) {
+    // SAFETY: the prepared token proves the AArch64 NEON target capability.
+    unsafe { process_biquad_aarch64_neon_inner(block) }
 }
