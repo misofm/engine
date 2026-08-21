@@ -94,3 +94,59 @@ currently fails at 192,000 Hz and 38,400 Hz: the scalar HPF/LPF cascade measures
 `-35.64407 dB` versus the independent f64 reference `-35.79218 dB` (about `0.14811 dB`, exceeding
 the frozen `0.05 dB` tolerance). The test remains enabled; the tolerance was not changed and no
 benchmark was run. This is a failed Terra attempt-1 gate pending Sol review/revision.
+
+## Sol adversarial review / correction attempt 2 (2026-08-21)
+
+**ATTEMPT 2: BLOCKED BEFORE IMPLEMENTATION; ISSUE REMAINS FAIL. REBRIEF REQUIRED.**
+
+The short 4,096-frame sine fixture is defective at high rates: at 192 kHz it observes only 21.3
+ms and its second half remains dominated by the 100 Hz section's startup tail. Extending the
+experiment to a 250 ms settling interval followed by a 125 ms measurement interval does not,
+however, make the frozen gate pass. At 192 kHz and 38.4 kHz the production scalar result remains
+about `0.147205 dB` above the independent `f64` result. Thus the short window exposed the failure
+poorly, but it did not create the underlying finite-precision error.
+
+Independent calculations isolate that error:
+
+- the analytic response of the production coefficients after their required `f32` cast differs
+  from the separately derived `f64` response by about `0.0000008 dB` at the failing point;
+- a 16,384-sample DFT of the production `f32` impulse response differs by about `0.0000703 dB`;
+- sustained-sine simulation reproduces the production `f32` transposed-DF-II result at about
+  `+0.147205 dB`, while changing only the state/arithmetic to `f64` reduces the difference to
+  about `-0.00000066 dB`.
+
+The independent oracle and coefficient design are therefore not the cause. The sustained-tone
+gate is measuring real `f32` transposed-DF-II state/arithmetic quantization for a low-cutoff
+section at a high sample rate. The brief requires coefficients cast to `f32` and freezes the
+transposed-DF-II equations, but does not explicitly freeze state or intermediate precision. A
+unilateral change to `f64` or compensated state would change the scalar DSP/resource contract and
+conflict with issue 008's four/eight-lane `f32` SIMD consumption; changing the test to coefficient
+or impulse-only response would stop measuring the observed sustained-signal behavior. Neither is
+a bounded correction, and the tolerance was not relaxed.
+
+The replacement brief must choose and freeze all of the following together:
+
+1. state and intermediate precision/rounding for every multiply and add, including whether
+   compensated state is allowed and how it is represented in four/eight-lane issue-008 kernels;
+2. the magnitude conformance method: runtime swept/sustained signal versus impulse DFT versus
+   coefficient transfer response, with exact amplitudes, settling/window length, leakage control,
+   sampled frequencies and normalization;
+3. one achievable all-eight-rate error gate for that chosen runtime realization, plus the scalar
+   versus SIMD differential gate and revised state/resource estimates.
+
+Adversarial review also found independent defects that a rebrief/restart must not hide: parameter
+descriptors omit the frozen units/domains/defaults/update/smoothing metadata; the public block has
+no rejecting safe constructor and processing silently returns an empty report for invalid shapes;
+fader/mute does not sanitize at its DSP entry; an identity matrix can lose signed zero; computed
+bad biquad state words are sanitized independently rather than clearing the pair and recording
+recovery; recovery reports mix retained and per-call semantics; meter emission contains a render-
+reachable `expect`; resource estimates omit substantial processor/observer/endpoint/allocation
+overhead and do not compute the actual largest allocation; parameter diagnostics do not provide
+the frozen lane/field paths; and the public prepared artifact plus graph attachment do not fully
+prove exact prepared track/tail/observer-node sets against forged input.
+
+No production correction was retained. Fixture-manifest, complete all-rate/all-quantum runtime
+conformance, full mutation/allocation audits, the one-million-call/render/swap audit, real blinded
+listening records, and final target evidence remain missing. The exactly-once benchmark was not
+invoked; benchmark invocation count remains **0**. Stop this workflow and restart from a revised
+Sol brief rather than attempting `f64`/double-single state or weakening/relabeling the failed gate.
