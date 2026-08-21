@@ -10,7 +10,7 @@ name = "miso_engine_graph_audit"
 path = "src/main.rs"
 
 [[bin]]
-name = "miso_engine_parametric_eq_audit"
+name = "miso_engine_graph_audit_parametric_eq"
 path = "src/parametric_eq_main.rs"
 
 [dependencies]

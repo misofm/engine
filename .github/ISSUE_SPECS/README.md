@@ -96,13 +96,13 @@ proof. Issue 041 is nonblocking for hosts/features and gates only release qualif
 Issues 040, 041 and 043 forbid benchmarks; the timed invocation count remains zero.
 
 Issue 012 stopped without overall PASS when its first independent-oracle gate disproved the frozen
-five-`f32`-coefficient direct-form-I numerical contract at low normalized frequencies. Checkpoints
-`46b4a37`, `7b9c01b` and `cf739ef` preserve descriptor/scalar, automation and safe architecture-
-kernel work only as technical input. Issue 042, **Numerically conditioned launch parametric EQ
-realization**, retains the 10–20,000 Hz domain and response tolerances. It must compare
-TPT/state-variable, coupled-form and delta-operator candidates across the complete grid before Sol
-freezes any replacement representation/state/recurrence. Issue 042 has two total attempts and
-forbids benchmarks; Issues 015, 017 and 026 depend on it instead of stopped Issue 012.
+five-`f32`-coefficient direct-form-I numerical contract. Issue 042 then selected an endpoint-
+conditioned transfer and proved the complete analytic/search, scalar/bank/graph/audit and target
+surfaces, but stopped after its first legal one-second impulse triggered runtime recovery in the
+frozen direct-history delta recurrence. Those checkpoints remain technical input only. Issue 044,
+**Conditioned time-domain launch parametric EQ recurrence**, owns the complete 96-sequence runtime-
+state comparison, Sol freeze, selected scalar/bank correction and final regression gates. It has
+two total attempts and forbids benchmarks; Issues 015, 017 and 026 depend on Issue 044.
 
 ## Shared definition
 

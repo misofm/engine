@@ -150,7 +150,7 @@ instruction/target reports; Terra and final Sol PASS/FAIL; and explicit
 ## Terra attempt 1 — non-numerical audit and target checkpoint (2026-08-21)
 
 **CHECKPOINT PASS, with an external formatting blocker.**
-`miso_engine_parametric_eq_audit` prepares one active endpoint-conditioned dual-mono EQ and
+`miso_engine_graph_audit_parametric_eq` prepares one active endpoint-conditioned dual-mono EQ and
 executes exactly 100,000 prepared 128-frame blocks while the realtime audit is armed. It freezes
 the output addresses, requires finite/recovery-free reports, proves zero allocation/deallocation,
 lock, log, I/O and syscall counters, then drops the prepared effect only after leaving the render
@@ -163,7 +163,7 @@ fused contractions; the AVX2 path is eight-lane and the NEON/Wasm paths are four
 
 PASS:
 
-- `cargo run --locked -p miso-engine-graph-audit --bin miso_engine_parametric_eq_audit -- --blocks 100000`
+- `cargo run --locked -p miso-engine-graph-audit --bin miso_engine_graph_audit_parametric_eq -- --blocks 100000`
 - `cargo test --locked -p miso-engine-graph-audit`
 - `cargo clippy --locked -p miso-engine-graph-audit --all-targets -- -D warnings`
 - `bash scripts/check-parametric-eq-targets.sh`
@@ -194,9 +194,9 @@ two-attempt budget is exhausted because Sol attempt 2 selected and froze the cur
 delta recurrence. No tolerance, domain or recovery waiver and no third Issue-042 attempt is
 permitted.
 
-The accepted scalar/bank/graph/audit/target checkpoints remain technical input only. A stateless
-successor owns conditioned time-domain recurrence/state selection and implementation before any
-further graph or qualification work. `timed_benchmark_invocations=0`.
+The accepted scalar/bank/graph/audit/target checkpoints remain technical input only. Issue 044,
+**Conditioned time-domain launch parametric EQ recurrence**, owns recurrence/state selection and
+implementation before any further graph or qualification work. `timed_benchmark_invocations=0`.
 
 ## Terra attempt 1 — endpoint-conditioned homogeneous-bank checkpoint (2026-08-21)
 
