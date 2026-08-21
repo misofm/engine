@@ -125,6 +125,14 @@ listening handoff. Issues 048 and 047 each permit one Terra attempt plus one Sol
 timed invocation counts start at zero. Issue 047 gates only Issue 026 and does not block unrelated
 effect implementations.
 
+Issue 016, **Launch fixed-4x true-peak safety limiter**, owns one bounded product: the fixed
+four-times BS.1770 Annex-2 detector, conservative ceiling guard, scalar/W4/W8 state and the public
+graph/PDC vertical. Issue 049, **Launch true-peak limiter qualification, realtime audit, and
+benchmark**, owns expanded standard/corpus matrices, long sequences, the 100,000-render audit,
+targets/instructions, the sole eventual one-warmup/two-round descriptive benchmark and audition/
+listening handoff. Both issues allow one Terra attempt plus one Sol correction. Their timed
+invocation counts start at zero; Issue 049 gates only release qualification Issue 026.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
