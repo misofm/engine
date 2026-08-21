@@ -146,3 +146,43 @@ selected decision amendment; descriptor/state/kernel tables; response/frequency/
 design maxima; fixture and graph hashes; automation/reset/restore/isolation results; realtime and
 instruction/target reports; Terra and final Sol PASS/FAIL; and explicit
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — preimplementation comparison evidence (2026-08-21)
+
+This attempt added the mandatory candidate probe only at the independent
+`miso-engine-dsp-reference` test boundary. Production EQ, graph, registry, fixtures, targets and
+benchmarks were not changed. The probe evaluates each candidate from its retained `f32` words and
+state transition, against the existing independent `f64` RBJ reference; production does not import
+or call this test-only code.
+
+The complete legal comparison matrix contained 1,488 designs: four rates times the applicable
+family/domain Cartesian products over the frozen values. Every design used 2,048 logarithmic
+10–20,000 Hz probes plus exact `f0`, DC and Nyquist (2,051 probe entries before any coincident
+frequency duplication). The scalar bounded recurrence probe ran 2,048 samples per legal
+candidate/design. Summary hashes include the input rows and retained candidate words.
+
+| Candidate | Designs | Design failures | Response failures | Null failures | Center/midpoint failures | State failures | Worst error (dB) | Hash |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| TPT/state-variable | 1,488 | 0 | 25,753 | 27 | 0 | 0 | 11.460910844044 | `ca96986d381e3fe4` |
+| Coupled form | 1,488 | 240 | 1,755,276 | 96 | 717 | 0 | 75.653733885702 | `d5004e7dc41dbb27` |
+| Delta operator | 1,488 | 0 | 0 | 1 | 0 | 0 | 0.000552061269 | `1bfffc2d86280ce8` |
+
+The first deterministic failure for each candidate is:
+
+- TPT/state-variable: 44.1 kHz bell, `f0=10`, gain `-24 dB`, `Q=0.1`, DC probe: observed
+  `-0.009410503674 dB`, reference `0 dB` (exceeds `0.005 dB`).
+- Coupled form: 44.1 kHz bell, `f0=10`, gain `-24 dB`, `Q=0.1`, `10.1873937511 Hz` probe:
+  observed `-23.9939045788 dB`, reference `-23.9990547448 dB` (error
+  `0.005150165928 dB`, exceeding `0.005 dB`).
+- Delta operator: 44.1 kHz notch, `f0=20,000`, `Q=18`, `f0` probe: magnitude
+  `1.873111739e-5` (about `-94.55 dB`) rather than the required maximum `1e-5` (`-100 dB`).
+
+All candidate recurrence-state probes remained finite and bounded, but that does not repair their
+separate frozen response/null/design failures. Therefore **no representation is selected** and
+production implementation is stopped pending a Sol brief amendment. No candidate reached
+selectability, so no one-second/DFT gate or post-selection production, target, graph, fixture,
+audit or benchmark gate was run. `timed_benchmark_invocations=0`.
+
+The prior Issue-012 retained-`f32` DF-I evidence remains intact: a 44.1 kHz low shelf at `10 Hz`
+was observed at `-23.4572457785 dB` where the independent reference was
+`-23.9999999963 dB`, exceeding the original `0.005 dB` analytic tolerance.

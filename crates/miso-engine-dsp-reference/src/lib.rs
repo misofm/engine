@@ -5,13 +5,21 @@
 
 mod biquad;
 mod block;
+mod parametric_eq;
 mod processor;
 mod signals;
 mod spectrum;
 mod tpt;
 
+#[cfg(test)]
+mod parametric_eq_candidates;
+
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
+pub use parametric_eq::{
+    ReferenceParametricEqCoefficients, ReferenceParametricEqError, ReferenceParametricEqKind,
+    ReferenceParametricEqSection,
+};
 pub use processor::{IdentityProcessor, OfflineF64Processor, render_planar_f64};
 pub use signals::{
     ReferenceSignalError, deterministic_bipolar_noise, deterministic_impulse, deterministic_sine,
