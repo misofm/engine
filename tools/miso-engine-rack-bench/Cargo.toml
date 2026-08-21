@@ -1,0 +1,17 @@
+[package]
+name = "miso-engine-rack-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_rack_bench"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-core.workspace = true
+miso-engine-rack.workspace = true
+
+[lints]
+workspace = true

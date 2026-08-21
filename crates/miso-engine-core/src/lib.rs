@@ -98,6 +98,72 @@ pub struct TargetCapabilities {
     pub x86_fma: bool,
 }
 
+impl TargetCapabilities {
+    /// Assemble a previously detected capability set for plan preparation or deterministic tests.
+    #[must_use]
+    pub const fn from_detected(
+        wasm_simd128: bool,
+        aarch64_neon: bool,
+        x86_avx2: bool,
+        x86_fma: bool,
+    ) -> Self {
+        Self {
+            scalar: true,
+            wasm_simd128,
+            aarch64_neon,
+            x86_avx2,
+            x86_fma,
+        }
+    }
+}
+
+/// The kernel family selected while a render plan is prepared.
+///
+/// This is a semantic value rather than a native register type, so it can be retained in
+/// immutable plan data without exposing architecture intrinsics on the render API.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum KernelBackendV1 {
+    /// Portable one-lane fallback.
+    Scalar,
+    /// A wasm32 artifact built with `simd128`.
+    WasmSimd128,
+    /// The mandatory four-lane AArch64 NEON target facility.
+    Aarch64Neon,
+    /// Eight-lane AVX2 arithmetic without FMA contraction.
+    X86Avx2,
+    /// Eight-lane AVX2 arithmetic with the separately selected FMA graph.
+    X86Avx2Fma,
+}
+
+impl KernelBackendV1 {
+    /// Number of logical audio lanes handled by this backend.
+    #[must_use]
+    pub const fn lanes(self) -> u32 {
+        match self {
+            Self::Scalar => 1,
+            Self::WasmSimd128 | Self::Aarch64Neon => 4,
+            Self::X86Avx2 | Self::X86Avx2Fma => 8,
+        }
+    }
+
+    /// Select the best legal backend from capabilities detected off the render thread.
+    #[must_use]
+    pub const fn select(capabilities: TargetCapabilities) -> Self {
+        if capabilities.x86_avx2 && capabilities.x86_fma {
+            Self::X86Avx2Fma
+        } else if capabilities.x86_avx2 {
+            Self::X86Avx2
+        } else if capabilities.aarch64_neon {
+            Self::Aarch64Neon
+        } else if capabilities.wasm_simd128 {
+            Self::WasmSimd128
+        } else {
+            Self::Scalar
+        }
+    }
+}
+
 /// Detect the target capabilities for control-plane plan selection.
 ///
 /// The result may be queried while a plan is compiled. It must be stored with the prepared plan
@@ -119,13 +185,7 @@ fn assemble_capabilities(
     x86_avx2: bool,
     x86_fma: bool,
 ) -> TargetCapabilities {
-    TargetCapabilities {
-        scalar: true,
-        wasm_simd128,
-        aarch64_neon,
-        x86_avx2,
-        x86_fma,
-    }
+    TargetCapabilities::from_detected(wasm_simd128, aarch64_neon, x86_avx2, x86_fma)
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

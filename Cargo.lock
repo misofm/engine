@@ -379,6 +379,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-rack"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
+name = "miso-engine-rack-bench"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-rack",
+]
+
+[[package]]
+name = "miso-engine-rack-compiler"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-effect-contract",
+ "miso-engine-rack",
+]
+
+[[package]]
 name = "miso-engine-realtime-audit"
 version = "0.1.0"
 dependencies = [

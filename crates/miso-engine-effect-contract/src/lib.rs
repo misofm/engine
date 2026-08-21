@@ -6,7 +6,8 @@
 
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
-    LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+    KernelBackendV1, LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate,
+    is_launch_sample_rate,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -140,6 +141,20 @@ impl BankWidth {
             Self::Four => 4,
             Self::Eight => 8,
         }
+    }
+    /// Whether this non-scalar bank width is legal for a selected backend.
+    #[must_use]
+    pub const fn matches_backend(self, backend: KernelBackendV1) -> bool {
+        matches!(
+            (self, backend),
+            (
+                Self::Four,
+                KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon
+            ) | (
+                Self::Eight,
+                KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma
+            )
+        )
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -604,8 +619,18 @@ pub struct PrepareEffectRequest<'a> {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareEffectBankRequest<'a> {
+    /// Backend selected before plan preparation. Factories validate it against `width`.
+    pub backend: KernelBackendV1,
     pub width: BankWidth,
     pub requests: &'a [PrepareEffectRequest<'a>],
+}
+
+impl PrepareEffectBankRequest<'_> {
+    /// Reject a bank request whose stored backend and width do not describe the same lane count.
+    #[must_use]
+    pub const fn has_matching_backend_width(self) -> bool {
+        self.width.matches_backend(self.backend)
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectPrepareError {

@@ -4,6 +4,8 @@ members = [
     "crates/miso-engine-session",
     "crates/miso-engine-effect-contract",
     "crates/miso-engine-effect-compiler",
+    "crates/miso-engine-rack",
+    "crates/miso-engine-rack-compiler",
     "crates/miso-engine-effect-package",
     "crates/miso-engine-builtins",
     "crates/miso-engine-builtins-compiler",
@@ -29,6 +31,7 @@ members = [
     "tools/miso-engine-builtins-audit",
     "tools/miso-engine-builtins-bench",
     "tools/miso-engine-builtins-fixture",
+    "tools/miso-engine-rack-bench",
 ]
 resolver = "3"
 
@@ -47,6 +50,8 @@ miso-engine-session = { path = "crates/miso-engine-session", version = "0.1.0" }
 miso-engine-protocol = { path = "crates/miso-engine-protocol", version = "0.1.0" }
 miso-engine-effect-contract = { path = "crates/miso-engine-effect-contract", version = "0.1.0" }
 miso-engine-effect-compiler = { path = "crates/miso-engine-effect-compiler", version = "0.1.0" }
+miso-engine-rack = { path = "crates/miso-engine-rack", version = "0.1.0" }
+miso-engine-rack-compiler = { path = "crates/miso-engine-rack-compiler", version = "0.1.0" }
 miso-engine-effect-package = { path = "crates/miso-engine-effect-package", version = "0.1.0" }
 miso-engine-builtins = { path = "crates/miso-engine-builtins", version = "0.1.0" }
 miso-engine-builtins-compiler = { path = "crates/miso-engine-builtins-compiler", version = "0.1.0" }
