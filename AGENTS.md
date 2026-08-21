@@ -63,7 +63,7 @@ Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar to
 
 Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  Do not make cross-cutting architecture changes without a new or amended issue.
 
-Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable, and push those checkpoints to the configured upstream promptly when the user has authorized pushes.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
+Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  Push those checkpoints promptly when the current delivery mode calls for checkpoint pushes.  When the user requests CI-conscious batching, checkpoint locally on one dedicated feature branch and defer upstream pushes until the coherent batch boundary; batching changes push frequency, never local commit frequency.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
 
 1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
 2. **Terra implements attempt 1** and attaches required evidence.
@@ -93,14 +93,16 @@ GitHub issue must stay synchronized:
 Recovery and throughput are also hard delivery requirements:
 
 - Keep at most one uncommitted implementation tranche in the shared worktree.  As soon as a tranche
-  compiles and its focused tests pass, its owner must pause; the root agent commits and pushes that
-  exact-path checkpoint before more implementation is layered onto it.
+  compiles and its focused tests pass, its owner must pause; the root agent commits that exact-path
+  checkpoint before more implementation is layered onto it.  Push immediately in checkpoint-push
+  mode, or retain the commit locally on the active batch branch in CI-conscious batch mode.
 - Do not carry a coherent checkpoint across three agent handoffs or more than 30 minutes of active
   work without committing it.  If the slice is not green, commit only when the failure is candidly
   documented and the tree remains useful and buildable; otherwise reduce the slice until it is.
 - The root agent performs a status/commit/upstream audit at every checkpoint notification.  A new
-  implementation tranche must not start while an earlier coherent tranche is merely waiting to be
-  committed or pushed.
+  implementation tranche must not start while an earlier coherent tranche is waiting to be
+  committed.  In checkpoint-push mode it must not wait for a required push either; in CI-conscious
+  batch mode a local checkpoint commit is sufficient until the declared batch boundary.
 - Limit active implementation WIP to one launch-critical feature issue.  Other agents may brief,
   review, or work on genuinely independent bounded issues, but must not create overlapping edits or
   make broad workspace gates unreliable.
@@ -112,6 +114,23 @@ Recovery and throughput are also hard delivery requirements:
 - Report throughput as pushed, remotely synchronized capabilities.  After two consecutive
   checkpoints without closing or materially advancing an issue, root must stop the current shape,
   reduce scope, or create a bounded successor before authorizing more implementation.
+
+### CI-conscious batch delivery
+
+When the user requests fewer CI/CD invocations, use this delivery mode until they change it:
+
+- Create one local `codex/batch-*` feature branch from the synchronized default branch.  Keep
+  frequent exact-path local checkpoint commits, but do not push each checkpoint.
+- Do not open or refresh a pull request while the batch is still accumulating.  A pull-request
+  update is a CI event even when ordinary feature-branch pushes are ignored.
+- At a coherent batch boundary, run the proportional local gates once, push the batch branch at
+  most once if remote review is needed, then merge or fast-forward and push `main` once.  Do not
+  manufacture empty commits or force-push merely to obtain another CI run.
+- GitHub issue evidence may be prepared locally during the batch, but do not claim remote
+  synchronization or close an issue until its evidence commit is actually upstream.  Synchronize
+  all completed issue bodies/states immediately after the single batch push.
+- `.github/workflows/ci.yml` should ignore ordinary feature-branch pushes, run for `main` pushes
+  and pull requests targeting `main`, and cancel superseded runs for the same ref.
 
 Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
 evidence needed to prove its product contract; generic harness hardening, artifact promotion,
