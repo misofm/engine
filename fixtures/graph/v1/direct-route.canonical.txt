@@ -1,0 +1,76 @@
+MISO-GRAPH-V1
+envelope	48000	128
+node	track:vocal:input	track-stage	0	finite:0
+node	track:vocal:post-input-builtins	track-stage	0	finite:0
+node	track:vocal:post-simd1	track-stage	0	finite:0
+node	track:vocal:post-dynamic	track-stage	0	finite:0
+node	track:vocal:post-simd2-pre-fader	track-stage	0	finite:0
+node	track:vocal:post-fader	track-stage	0	finite:0
+node	track:vocal:post-matrix	track-stage	0	finite:0
+node	route:to-main	route	0	finite:0
+node	output:main-out	output	0	finite:0
+port	track:vocal:input:main-input:-
+port	track:vocal:input:main-output:-
+port	track:vocal:post-input-builtins:main-input:-
+port	track:vocal:post-input-builtins:main-output:-
+port	track:vocal:post-simd1:main-input:-
+port	track:vocal:post-simd1:main-output:-
+port	track:vocal:post-dynamic:main-input:-
+port	track:vocal:post-dynamic:main-output:-
+port	track:vocal:post-simd2-pre-fader:main-input:-
+port	track:vocal:post-simd2-pre-fader:main-output:-
+port	track:vocal:post-fader:main-input:-
+port	track:vocal:post-fader:main-output:-
+port	track:vocal:post-matrix:main-input:-
+port	track:vocal:post-matrix:main-output:-
+port	route:to-main:main-input:-
+port	route:to-main:main-output:-
+port	output:main-out:main-input:-
+port	output:main-out:main-output:-
+edge	track-main:track:vocal:post-input-builtins	track:vocal:input:main-output:-	track:vocal:post-input-builtins:main-input:-	$.tracks
+edge	track-main:track:vocal:post-simd1	track:vocal:post-input-builtins:main-output:-	track:vocal:post-simd1:main-input:-	$.tracks
+edge	track-main:track:vocal:post-dynamic	track:vocal:post-simd1:main-output:-	track:vocal:post-dynamic:main-input:-	$.tracks
+edge	track-main:track:vocal:post-simd2-pre-fader	track:vocal:post-dynamic:main-output:-	track:vocal:post-simd2-pre-fader:main-input:-	$.tracks
+edge	track-main:track:vocal:post-fader	track:vocal:post-simd2-pre-fader:main-output:-	track:vocal:post-fader:main-input:-	$.tracks
+edge	track-main:track:vocal:post-matrix	track:vocal:post-fader:main-output:-	track:vocal:post-matrix:main-input:-	$.tracks
+edge	route-source:to-main	track:vocal:post-matrix:main-output:-	route:to-main:main-input:-	$.routes[id=to-main].source
+edge	route-destination:to-main	route:to-main:main-output:-	output:main-out:main-input:-	$.routes[id=to-main].destination
+order	0	track:vocal:input
+order	1	track:vocal:post-input-builtins
+order	2	track:vocal:post-simd1
+order	3	track:vocal:post-dynamic
+order	4	track:vocal:post-simd2-pre-fader
+order	5	track:vocal:post-fader
+order	6	track:vocal:post-matrix
+order	7	route:to-main
+order	8	output:main-out
+level	0	track:vocal:input
+level	1	track:vocal:post-input-builtins
+level	2	track:vocal:post-simd1
+level	3	track:vocal:post-dynamic
+level	4	track:vocal:post-simd2-pre-fader
+level	5	track:vocal:post-fader
+level	6	track:vocal:post-matrix
+level	7	route:to-main
+level	8	output:main-out
+route-transform	route:to-main	3f800000	3f800000	00000000	00000000	3f800000
+route-timing	to-main	0	0	0
+tail	track:vocal:input	finite:0
+tail	track:vocal:post-input-builtins	finite:0
+tail	track:vocal:post-simd1	finite:0
+tail	track:vocal:post-dynamic	finite:0
+tail	track:vocal:post-simd2-pre-fader	finite:0
+tail	track:vocal:post-fader	finite:0
+tail	track:vocal:post-matrix	finite:0
+tail	route:to-main	finite:0
+tail	output:main-out	finite:0
+buffer	track:vocal:input:main-output:-	0
+buffer	track:vocal:post-input-builtins:main-output:-	1
+buffer	track:vocal:post-simd1:main-output:-	1
+buffer	track:vocal:post-dynamic:main-output:-	1
+buffer	track:vocal:post-simd2-pre-fader:main-output:-	1
+buffer	track:vocal:post-fader:main-output:-	0
+buffer	track:vocal:post-matrix:main-output:-	1
+buffer	route:to-main:main-output:-	0
+buffer	output:main-out:main-output:-	1
+estimate	9	9	8	9	9	0	1	0	2561	0	0	5336	0	5336	15580	27868

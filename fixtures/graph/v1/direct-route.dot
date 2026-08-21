@@ -1,0 +1,19 @@
+digraph miso_engine_graph_v1 {
+  "track:vocal:input" [label="track:vocal:input|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-input-builtins" [label="track:vocal:post-input-builtins|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-simd1" [label="track:vocal:post-simd1|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-dynamic" [label="track:vocal:post-dynamic|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-simd2-pre-fader" [label="track:vocal:post-simd2-pre-fader|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-fader" [label="track:vocal:post-fader|track-stage|latency=0|tail=finite:0"];
+  "track:vocal:post-matrix" [label="track:vocal:post-matrix|track-stage|latency=0|tail=finite:0"];
+  "route:to-main" [label="route:to-main|route|latency=0|tail=finite:0"];
+  "output:main-out" [label="output:main-out|output|latency=0|tail=finite:0"];
+  "track:vocal:input" -> "track:vocal:post-input-builtins";
+  "track:vocal:post-input-builtins" -> "track:vocal:post-simd1";
+  "track:vocal:post-simd1" -> "track:vocal:post-dynamic";
+  "track:vocal:post-dynamic" -> "track:vocal:post-simd2-pre-fader";
+  "track:vocal:post-simd2-pre-fader" -> "track:vocal:post-fader";
+  "track:vocal:post-fader" -> "track:vocal:post-matrix";
+  "track:vocal:post-matrix" -> "route:to-main";
+  "route:to-main" -> "output:main-out";
+}
