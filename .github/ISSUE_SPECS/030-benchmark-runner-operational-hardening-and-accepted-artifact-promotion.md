@@ -1,5 +1,13 @@
 # 030 Benchmark runner operational hardening and accepted-artifact promotion
 
+## Sol briefing status — 2026-08-21
+
+**READY for Terra attempt 1.** The authoritative tracked brief is
+`BRIEFS/030-benchmark-runner-operational-hardening-and-accepted-artifact-promotion.md`. This small
+tooling closure permits exactly two total attempts: one Terra implementation/review and, only if
+needed, one bounded Sol correction/review. A second failure stops and preserves all artifacts.
+Issue 030 authorizes **zero** graph benchmark workload or timed invocations in either attempt.
+
 ## Outcome
 
 Make the graph benchmark shell wrapper report workload success and failure correctly, validate
@@ -25,9 +33,8 @@ and SHA-256 `c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5`.
 `scripts/graph-benchmark-validator.jq` accepts it with exit 0. This identity is carry-forward
 evidence, not permission to synthesize, edit, or silently replace the file.
 
-This issue follows a new Sol-approved brief -> Terra attempt 1 with evidence -> Sol adversarial
-review workflow, with at most two further revisions. It does not continue issue 006's exhausted
-attempt count.
+This issue follows a new Sol-approved brief -> Terra attempt 1 with evidence -> at most one bounded
+Sol correction/review workflow. It does not continue issue 006's exhausted attempt count.
 
 ## Scope
 
@@ -46,8 +53,9 @@ complete raw file before an atomic same-filesystem promotion to
 `target/issue6/graph-compiler-benchmark.jsonl`; its failure paths preserve raw output, never publish
 an accepted path, and return nonzero.
 
-A separate explicit promotion-only command or an unambiguous runner mode may consume the exact
-preserved raw artifact without launching `cargo run`. It must refuse an unexpected size/hash,
+A separate no-argument command,
+`scripts/promote-issue006-graph-benchmark.sh`, consumes the exact preserved raw artifact without
+containing or launching `cargo run`. It must refuse an unexpected size/hash,
 missing or malformed input, validator rejection, an existing destination, or source/destination
 aliasing. It must not normalize line endings, reserialize JSON, or modify record values. Successful
 promotion copies through a same-filesystem temporary and atomic rename while leaving the historical
