@@ -25,11 +25,13 @@ mod native {
         NativeGraphBindConfigV1, NativeGraphPreparedMetadataV1, NativeGraphRenderModeV1,
         NativeSchedulerConfigV1, TrackStage,
     };
-    use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler};
+    use miso_engine_graph_compiler::{
+        GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler,
+    };
     use miso_engine_session::{
         ChannelMatrix, CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
-        RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId,
-        Submix, compile_session, parse_session_toml,
+        RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId, Submix,
+        compile_session, parse_session_toml,
     };
 
     pub const Q128_QUANTUM_FRAMES: usize = 128;
@@ -243,7 +245,10 @@ mod native {
                     };
                 }
                 if index != 0 && index != Q128_TRACK_COUNT - 1 {
-                    track.simd1.effects.push(delay_effect(index, SidechainDeclaration::None));
+                    track
+                        .simd1
+                        .effects
+                        .push(delay_effect(index, SidechainDeclaration::None));
                 }
                 if index == Q128_TRACK_COUNT - 1 {
                     track.dynamic.effects.push(delay_effect(
@@ -308,9 +313,10 @@ mod native {
 
         let session = compile_session(&model, unbounded_session_caps())
             .map_err(|_| "q128.session".to_owned())?;
-        let registry = NativeEffectRegistry::new([Box::new(DualAccumulatorDelayFactory::correct())
-            as Box<dyn miso_engine_effect_contract::NativeEffectFactory>])
-        .map_err(|_| "q128.registry".to_owned())?;
+        let registry =
+            NativeEffectRegistry::new([Box::new(DualAccumulatorDelayFactory::correct())
+                as Box<dyn miso_engine_effect_contract::NativeEffectFactory>])
+            .map_err(|_| "q128.registry".to_owned())?;
         let effects = prepare_native_session_effects(&session, &registry, effect_caps())
             .map_err(|_| "q128.effects".to_owned())?;
         let builtins = prepare_session_builtins(&session, &[], builtin_caps())
@@ -515,3 +521,90 @@ mod native {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::*;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+    const BLOCKS: u64 = 3;
+    const OBSERVERS_PER_BLOCK: usize = 2;
+
+    #[test]
+    fn q128_is_byte_identical_at_every_launch_rate_and_lane_count() {
+        for rate in RATES {
+            let mut sequential = fixture(rate, 1, Q128RenderMode::Sequential, 39_001);
+            let mut two_lane = fixture(rate, 2, Q128RenderMode::DependencyWaves, 39_002);
+            let mut four_lane = fixture(rate, 4, Q128RenderMode::DependencyWaves, 39_003);
+            assert_eq!(sequential.report.sha256, two_lane.report.sha256);
+            assert_eq!(sequential.report.sha256, four_lane.report.sha256);
+            assert_eq!(sequential.pdc_samples, two_lane.pdc_samples);
+            assert_eq!(sequential.pdc_samples, four_lane.pdc_samples);
+            assert!(sequential.pdc_samples > 0);
+
+            for block in 0..BLOCKS {
+                let absolute_sample = block * Q128_QUANTUM_FRAMES as u64;
+                let sequential_pcm = render(&mut sequential, absolute_sample);
+                let two_lane_pcm = render(&mut two_lane, absolute_sample);
+                let four_lane_pcm = render(&mut four_lane, absolute_sample);
+                assert_pcm_eq(&sequential_pcm, &two_lane_pcm, rate, block, "two_lane");
+                assert_pcm_eq(&sequential_pcm, &four_lane_pcm, rate, block, "four_lane");
+            }
+
+            assert_eq!(
+                sequential.plan.qualification_counters(),
+                two_lane.plan.qualification_counters(),
+                "builtin qualification counters at {rate} Hz two lane"
+            );
+            assert_eq!(
+                sequential.plan.qualification_counters(),
+                four_lane.plan.qualification_counters(),
+                "builtin qualification counters at {rate} Hz four lane"
+            );
+            assert_eq!(
+                sequential.observer_records(),
+                two_lane.observer_records(),
+                "observer transcript at {rate} Hz two lane"
+            );
+            assert_eq!(
+                sequential.observer_records(),
+                four_lane.observer_records(),
+                "observer transcript at {rate} Hz four lane"
+            );
+            assert_eq!(
+                sequential.observer_record_count(),
+                BLOCKS as usize * OBSERVERS_PER_BLOCK,
+                "complete observer transcript at {rate} Hz"
+            );
+        }
+    }
+
+    fn fixture(rate: u32, lanes: usize, mode: Q128RenderMode, plan_id: u64) -> PreparedQ128Fixture {
+        prepare_q128_fixture(
+            rate,
+            lanes,
+            mode,
+            plan_id,
+            BLOCKS as usize * OBSERVERS_PER_BLOCK,
+        )
+        .unwrap_or_else(|error| panic!("q128 fixture preparation failed at {rate} Hz: {error}"))
+    }
+
+    fn render(plan: &mut PreparedQ128Fixture, absolute_sample: u64) -> Vec<f32> {
+        let mut pcm = vec![0.0_f32; Q128_QUANTUM_FRAMES * 2];
+        plan.render(&mut pcm, absolute_sample)
+            .unwrap_or_else(|error| panic!("q128 render failed: {error:?}"));
+        pcm
+    }
+
+    fn assert_pcm_eq(left: &[f32], right: &[f32], rate: u32, block: u64, mode: &str) {
+        assert_eq!(left.len(), right.len());
+        for (index, (left, right)) in left.iter().zip(right).enumerate() {
+            assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "PCM differs at {rate} Hz, block {block}, {mode}, sample {index}"
+            );
+        }
+    }
+}
