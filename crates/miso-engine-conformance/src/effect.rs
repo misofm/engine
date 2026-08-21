@@ -11,16 +11,16 @@ use miso_engine_core::{
     is_extended_compatibility_sample_rate, is_launch_sample_rate, realtime::audit,
 };
 use miso_engine_effect_contract::{
-    AutomationSpanKind, EffectDescriptorV1, EffectId, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, ProcessReport, QualityDescriptorV1, ResetKind,
-    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    TailSamples, expected_prepared_metadata, sanitize_sample, valid_runtime_span,
-    validate_descriptor_v1,
+    AutomationSpanKind, BankProcessReport, EffectDescriptorV1, EffectId, EffectPrepareError,
+    EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples, LinkMode,
+    LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    ProcessReport, QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata, sanitize_sample, valid_runtime_span, validate_descriptor_v1,
 };
 
 const MOCK_ID: EffectId = match EffectId::new("conformance.delay") {
@@ -193,9 +193,139 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
     }
     fn bind_homogeneous_bank(
         &self,
-        _request: PrepareEffectBankRequest<'_>,
+        request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        Ok(None)
+        if self.fault != FaultKind::None
+            || !request.has_matching_backend_width()
+            || request.requests.len() != request.width.lanes() as usize
+        {
+            return Ok(None);
+        }
+        let metadata = expected_prepared_metadata(self.descriptor(), request.requests[0])?;
+        if request.requests.iter().any(|item| {
+            expected_prepared_metadata(self.descriptor(), *item).map_or(true, |candidate| {
+                candidate.program_key() != metadata.program_key()
+            })
+        }) {
+            return Ok(None);
+        }
+        let mut lanes = core::array::from_fn(|_| DualAccumulatorDelay {
+            metadata,
+            initial_gain: [1.0; 2],
+            gain: [1.0; 2],
+            delay: [[0.0; 3]; 2],
+            accumulator: [0.0; 2],
+            active: [None; 2],
+            delay_index: 0,
+            metadata_calls: 0,
+            snapshot_calls: Cell::new(0),
+            fault: FaultKind::None,
+        });
+        for (index, item) in request.requests.iter().enumerate() {
+            let left = item
+                .initial_values
+                .iter()
+                .find(|value| value.channel == ParameterChannel::Left)
+                .map_or(1.0, |value| value.value);
+            let right = item
+                .initial_values
+                .iter()
+                .find(|value| value.channel == ParameterChannel::Right)
+                .map_or(1.0, |value| value.value);
+            lanes[index].initial_gain = [left, right];
+            lanes[index].gain = [left, right];
+        }
+        Ok(Some(Box::new(DualAccumulatorDelayBank {
+            metadata: PreparedBankMetadata {
+                width: request.width,
+                program_key: metadata.program_key(),
+            },
+            lanes,
+        })))
+    }
+}
+
+struct DualAccumulatorDelayBank {
+    metadata: PreparedBankMetadata,
+    lanes: [DualAccumulatorDelay; 8],
+}
+impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
+    fn metadata(&self) -> PreparedBankMetadata {
+        self.metadata.clone()
+    }
+    fn reset(&mut self, kind: ResetKind) {
+        for lane in &mut self.lanes[..self.metadata.width.lanes() as usize] {
+            lane.reset(kind);
+        }
+    }
+    fn process_bank(
+        &mut self,
+        block: miso_engine_effect_contract::EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
+        let width = self.metadata.width;
+        let mut report = BankProcessReport::empty(width);
+        let lanes = width.lanes() as usize;
+        for frame in 0..block.frames as usize {
+            for lane in 0..lanes {
+                let index = frame * lanes + lane;
+                let sample = block.first_sample + frame as u64;
+                let mut left = block.left[index];
+                let mut right = block.right[index];
+                if sanitize_sample(left).is_none() {
+                    left = 0.0;
+                    report.reports[lane].sanitized_main_samples = report.reports[lane]
+                        .sanitized_main_samples
+                        .saturating_add(1);
+                }
+                if sanitize_sample(right).is_none() {
+                    right = 0.0;
+                    report.reports[lane].sanitized_main_samples = report.reports[lane]
+                        .sanitized_main_samples
+                        .saturating_add(1);
+                }
+                let (left, recover_left) = self.lanes[lane].process_lane(0, left, sample);
+                let (right, recover_right) = self.lanes[lane].process_lane(1, right, sample);
+                if recover_left {
+                    report.reports[lane].recovered_left_samples = report.reports[lane]
+                        .recovered_left_samples
+                        .saturating_add(1);
+                }
+                if recover_right {
+                    report.reports[lane].recovered_right_samples = report.reports[lane]
+                        .recovered_right_samples
+                        .saturating_add(1);
+                }
+                block.left[index] = left;
+                block.right[index] = right;
+                self.lanes[lane].delay_index = (self.lanes[lane].delay_index + 1) % 3;
+            }
+        }
+        report
+    }
+    fn snapshot_track_state_payload(
+        &self,
+        track: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.lanes
+            .get(track as usize)
+            .ok_or(StatePayloadError {
+                code: "effect.bank.track",
+            })?
+            .snapshot_state_payload(output)
+    }
+    fn restore_track_state_payload(
+        &mut self,
+        track: u32,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.lanes
+            .get_mut(track as usize)
+            .ok_or(StatePayloadError {
+                code: "effect.bank.track",
+            })?
+            .restore_state_payload(version, input)
     }
 }
 

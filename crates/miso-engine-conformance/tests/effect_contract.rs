@@ -4,14 +4,97 @@ use miso_engine_conformance::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory, FaultKind,
     run_effect_conformance,
 };
+use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
-    AutomationSpanKind, EffectDescriptorV1, EffectQuality, InitialParameterValue, LinkMode,
-    ParameterChannel, ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedPortsV1, PreparedSidechainPort,
-    QualityDescriptorV1, SmoothingRule, automation_segment_value, expected_prepared_metadata,
-    inverse_map_normalized, inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
+    AutomationSpanKind, BankWidth, EffectDescriptorV1, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, ParameterChannel, ParameterId, ParameterMapping,
+    ParameterSmoother, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedPortsV1, PreparedSidechainPort, QualityDescriptorV1,
+    SmoothingRule, automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
+    inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
     validate_automation_block, validate_descriptor_v1,
 };
+
+#[test]
+fn correct_factory_binds_distinguishable_four_lane_bank() {
+    let values: Vec<_> = (0..4)
+        .map(|lane| {
+            [
+                InitialParameterValue {
+                    parameter_index: 0,
+                    channel: ParameterChannel::Left,
+                    value: 0.5 + lane as f32 * 0.1,
+                },
+                InitialParameterValue {
+                    parameter_index: 0,
+                    channel: ParameterChannel::Right,
+                    value: 1.0 + lane as f32 * 0.1,
+                },
+            ]
+        })
+        .collect();
+    let requests: Vec<_> = values
+        .iter()
+        .map(|initial_values| PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 8,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: miso_engine_conformance::DUAL_ACCUMULATOR_DELAY_DESCRIPTOR.ports[1].id,
+                    required: false,
+                },
+            },
+            initial_values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 8,
+            },
+        })
+        .collect();
+    let mut bank = DualAccumulatorDelayFactory::correct()
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Aarch64Neon,
+            width: BankWidth::Four,
+            requests: &requests,
+        })
+        .unwrap()
+        .expect("positive bank");
+    let mut left = vec![0.0; 4 * 4];
+    let mut right = vec![0.0; 4 * 4];
+    for lane in 0..4 {
+        left[lane] = 1.0;
+        right[lane] = 2.0;
+    }
+    let report = bank.process_bank(
+        miso_engine_effect_contract::EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            4,
+            BankWidth::Four,
+            0,
+            &[],
+            &[0; 5],
+            8,
+        )
+        .unwrap(),
+    );
+    assert_eq!(report.width, BankWidth::Four);
+    for lane in 0..4 {
+        assert_eq!(
+            left[3 * 4 + lane].to_bits(),
+            (0.5 + lane as f32 * 0.1).to_bits()
+        );
+        assert_eq!(
+            right[3 * 4 + lane].to_bits(),
+            (2.0 + lane as f32 * 0.2).to_bits()
+        );
+    }
+}
 
 #[test]
 fn normalized_mapping_endpoints_ties_and_round_trips_are_stable() {

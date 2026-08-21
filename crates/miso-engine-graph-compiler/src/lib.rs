@@ -713,7 +713,10 @@ fn bind_rack_banks(
     for entry in &effects.entries {
         let rack = rack_id(entry.rack);
         if !matches!(rack, RackId::Simd1 | RackId::Simd2)
-            || !matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
+            || matches!(
+                entry.metadata.ports.sidechain,
+                PreparedSidechainPort::Connected { .. }
+            )
         {
             continue;
         }
