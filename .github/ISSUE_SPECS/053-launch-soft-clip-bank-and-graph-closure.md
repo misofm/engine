@@ -225,3 +225,26 @@ count; strict Terra/final Sol verdict; and `timed_benchmark_invocations=0`.
   authorized clean workspace check/test/Clippy/rustdoc seal has not run. No Issue-052, audit,
   cross-target, instruction, benchmark, timing or listening work ran;
   `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — final nonbenchmark product seal
+
+- Final candidate `9a382c1` preserves the accepted Issue-019 scalar checkpoint and all three
+  committed Issue-053 correction checkpoints above. No production, fixture, policy or
+  qualification file changed during this seal.
+- `cargo fmt --all -- --check`: PASS. `cargo check --locked --workspace --all-targets
+  --all-features` and `cargo test --locked --workspace --all-targets --all-features`: PASS,
+  including the eight soft-clip product tests and the ten-track graph closure fixture.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: PASS.
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps`: PASS.
+- Workspace, realtime, effect-runtime and rack baseline plus mutation suites PASS when invoked
+  through `bash`; graph baseline policy PASS. The graph policy has no separate mutation script.
+- The Git-free static seal found no conflict markers or trailing whitespace in the Issue-053
+  product paths, no `.orig`, `.rej`, `.tmp` or `.profraw` artifacts outside excluded build/VCS
+  directories, and valid shell syntax for every invoked policy script.
+- No Issue-052 qualification, functional audit main, cross-target, object inspection, benchmark,
+  timing or listening command ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: PASS.** Issue 053 closes the fixed-2x soft-clip bank, measured alias claim,
+launch registry/effect compiler and ten-track graph/PDC/resource product vertical in the second and
+final authorized attempt. Issue 052 remains the sole owner of deferred broad qualification,
+realtime audit, target/instruction, benchmark and listening work.
