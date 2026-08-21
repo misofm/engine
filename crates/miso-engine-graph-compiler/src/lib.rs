@@ -456,6 +456,7 @@ impl GraphCompiler {
             required_bindings,
             routes: route_transforms.clone(),
             effects: effect_nodes,
+            observers: Vec::new(),
         });
         Ok(PreparedGraphArtifact {
             graph,

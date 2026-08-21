@@ -326,6 +326,7 @@ pub struct PreparedGraphPlan {
     pub required_bindings: Vec<GraphNodeId>,
     routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
+    observers: Vec<GraphNodeObserverBinding>,
     _not_sync: Cell<()>,
 }
 pub struct GraphPreparedEffect {
@@ -348,6 +349,7 @@ impl PreparedGraphPlan {
             required_bindings: parts.required_bindings,
             routes: parts.routes,
             effects: parts.effects,
+            observers: parts.observers,
             _not_sync: Cell::new(()),
         }
     }
@@ -362,12 +364,20 @@ impl PreparedGraphPlan {
             .collect();
         let required: BTreeSet<_> = self.required_bindings.iter().cloned().collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
-        if bindings.envelope != self.envelope || supplied != required || duplicate_binding {
+        let valid_observers = self.observers.iter().all(|binding| {
+            matches!(binding.node, GraphNodeId::TrackStage { .. })
+        }) && {
+            let mut pairs: BTreeSet<_> = BTreeSet::new();
+            self.observers.iter().all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
+        };
+        if bindings.envelope != self.envelope || supplied != required || duplicate_binding || !valid_observers {
             let envelope_mismatch = bindings.envelope != self.envelope;
             return Err(GraphBindFailure {
                 plan: Box::new(self),
                 bindings,
-                code: if envelope_mismatch {
+                code: if !valid_observers {
+                    "graph.plan.observer"
+                } else if envelope_mismatch {
                     "graph.plan.envelope_mismatch"
                 } else {
                     "graph.plan.binding"
@@ -382,6 +392,7 @@ impl PreparedGraphPlan {
             self.buffer_assignments,
             self.routes,
             self.effects,
+            self.observers,
             bindings.nodes,
             envelope.quantum.0 as usize,
         );
@@ -411,6 +422,7 @@ pub struct PreparedGraphPlanParts {
     pub required_bindings: Vec<GraphNodeId>,
     pub routes: Vec<PreparedRoute>,
     pub effects: Vec<GraphPreparedEffect>,
+    pub observers: Vec<GraphNodeObserverBinding>,
 }
 pub struct GraphRuntimeBindings {
     pub envelope: RenderEnvelope,
@@ -437,6 +449,27 @@ pub struct GraphBindingBlock<'a> {
 }
 pub trait GraphRuntimeProcessor: Send {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+}
+/// Immutable post-node observation input. Observers cannot alter graph audio.
+pub struct GraphObservationBlock<'a> {
+    pub left: &'a [f32],
+    pub right: &'a [f32],
+    pub first_sample: u64,
+}
+/// A bounded observer invoked after its node has completed.
+pub trait GraphRuntimeObserver: Send {
+    fn observe(&mut self, block: GraphObservationBlock<'_>);
+}
+/// One immutable prepared observer binding, ordered by its stable meter handle.
+pub struct GraphNodeObserverBinding {
+    pub node: GraphNodeId,
+    pub handle: u64,
+    observer: Box<dyn GraphRuntimeObserver>,
+}
+impl GraphNodeObserverBinding {
+    pub fn new(node: GraphNodeId, handle: u64, observer: Box<dyn GraphRuntimeObserver>) -> Self {
+        Self { node, handle, observer }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedRoute {
@@ -473,6 +506,7 @@ struct RuntimeNode {
     incoming: Vec<RuntimeEdge>,
     output_buffer: usize,
     kind: RuntimeNodeKind,
+    observers: Vec<GraphNodeObserverBinding>,
 }
 struct GraphExecutor {
     nodes: Vec<RuntimeNode>,
@@ -490,6 +524,7 @@ impl GraphExecutor {
         buffer_assignments: Vec<BufferAssignment>,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
+        observer_bindings: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         frames: usize,
     ) -> Self {
@@ -526,6 +561,13 @@ impl GraphExecutor {
             .into_iter()
             .map(|binding| (binding.node, binding.processor))
             .collect();
+        let mut observers: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for observer in observer_bindings {
+            observers.entry(observer.node.clone()).or_default().push(observer);
+        }
+        for values in observers.values_mut() {
+            values.sort_by_key(|value| value.handle);
+        }
         let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
             .iter()
             .cloned()
@@ -578,6 +620,7 @@ impl GraphExecutor {
                 incoming,
                 output_buffer: usize::try_from(output_buffer).expect("validated buffer index"),
                 kind,
+                observers: observers.remove(node_id).unwrap_or_default(),
             });
         }
         let buffer_count = if nodes.is_empty() {
@@ -662,10 +705,11 @@ impl PreparedPlanExecutor for GraphExecutor {
         for node_index in 0..self.nodes.len() {
             self.prepare_inputs(node_index);
             self.reduce_main_inputs(node_index);
-            let current = &mut self.nodes[node_index];
-            let output_buffer = current.output_buffer;
-            let rendered = &mut self.buffers[output_buffer];
-            match &mut current.kind {
+            {
+                let current = &mut self.nodes[node_index];
+                let output_buffer = current.output_buffer;
+                let rendered = &mut self.buffers[output_buffer];
+                match &mut current.kind {
                 RuntimeNodeKind::Identity | RuntimeNodeKind::Reduction => {}
                 RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
                     left: &mut rendered.left,
@@ -681,7 +725,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                         );
                     }
                 }
-                RuntimeNodeKind::Effect(effect) => {
+                    RuntimeNodeKind::Effect(effect) => {
                     let sidechain = current
                         .incoming
                         .iter()
@@ -697,7 +741,17 @@ impl PreparedPlanExecutor for GraphExecutor {
                     )
                     .map_err(|_| RenderError::InvalidEnvelope)?;
                     let _ = effect.processor.process(block);
+                    }
                 }
+            }
+            let current = &mut self.nodes[node_index];
+            let rendered = &self.buffers[current.output_buffer];
+            for observer in &mut current.observers {
+                observer.observer.observe(GraphObservationBlock {
+                    left: &rendered.left,
+                    right: &rendered.right,
+                    first_sample: time.absolute_sample,
+                });
             }
         }
         let rendered = &self.buffers[self.nodes[self.output_node].output_buffer];
@@ -921,6 +975,7 @@ mod tests {
                 required_bindings: required.clone(),
                 routes: Vec::new(),
                 effects: Vec::new(),
+                observers: Vec::new(),
             }),
             GraphRuntimeBindings {
                 envelope,
@@ -1161,6 +1216,7 @@ mod tests {
                 },
             ],
             effects: Vec::new(),
+            observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
             envelope,
@@ -1377,6 +1433,7 @@ mod tests {
                 metadata,
                 processor: Box::new(SidechainSum { metadata }),
             }],
+            observers: Vec::new(),
         });
         let (main_left, main_right, side_left, side_right) = if delay_main {
             (
@@ -1627,6 +1684,7 @@ mod tests {
                 metadata,
                 processor,
             }],
+            observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
             envelope,
