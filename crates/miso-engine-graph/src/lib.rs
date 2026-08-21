@@ -342,6 +342,11 @@ pub struct GraphPreparedEffectBank {
     pub scratch: miso_engine_rack::AoSoaScratch,
 }
 impl PreparedGraphPlan {
+    /// Number of prepared homogeneous banks retained for off-render-selected execution.
+    #[must_use]
+    pub const fn prepared_bank_count(&self) -> usize {
+        self.banks.len()
+    }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
         Self {
             plan_id: parts.plan_id,

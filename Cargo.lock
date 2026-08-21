@@ -326,6 +326,7 @@ version = "0.1.0"
 dependencies = [
  "miso-engine-builtins",
  "miso-engine-builtins-compiler",
+ "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",

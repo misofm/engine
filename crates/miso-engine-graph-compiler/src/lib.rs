@@ -1866,12 +1866,22 @@ mod tests {
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, prepare_session_builtins,
     };
-    use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
-    use miso_engine_effect_compiler::EffectPreparedSession;
+    use miso_engine_conformance::DualAccumulatorDelayFactory;
+    use miso_engine_core::{
+        realtime::{PlanarBufferMut, RenderIo, RenderTime},
+        target_capabilities,
+    };
+    use miso_engine_effect_compiler::{
+        EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects,
+    };
+    use miso_engine_effect_contract::NativeEffectRegistry;
     use miso_engine_graph::{
         GraphBindingBlock, GraphNodeBinding, GraphRuntimeBindings, GraphRuntimeProcessor,
     };
-    use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
+    use miso_engine_session::{
+        CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
+        StableId, compile_session, parse_session_toml,
+    };
 
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
@@ -1981,6 +1991,86 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    #[test]
+    fn homogeneous_eight_track_bank_binds_and_executes_without_changing_graph_identity() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..8)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index}")).expect("id");
+                track.dynamic.effects.clear();
+                track.simd1.effects = base_track.dynamic.effects.clone();
+                let effect = &mut track.simd1.effects[0];
+                effect.id = StableId::parse("bank-delay").expect("id");
+                effect.identity = EffectIdentity::Native {
+                    effect_id: StableId::parse("conformance.delay").expect("id"),
+                };
+                effect.params = vec![EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Both,
+                    unit: ParameterUnit::Linear,
+                    value: 1.0 + index as f32 * 0.01,
+                }];
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("bank-route{index}")).expect("id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let registry =
+            NativeEffectRegistry::new([Box::new(DualAccumulatorDelayFactory::correct())
+                as Box<dyn miso_engine_effect_contract::NativeEffectFactory>])
+            .expect("registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("effects");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 998,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("graph"));
+        let expected = KernelDispatch::select(target_capabilities())
+            .bank_width()
+            .map_or(0, |width| 8 / width.lanes() as usize);
+        assert_eq!(artifact.graph.prepared_bank_count(), expected);
+        let canonical = artifact.report.canonical_debug_bytes.clone();
+        assert_eq!(canonical, artifact.report.canonical_debug_bytes);
     }
 
     #[test]
