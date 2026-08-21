@@ -73,6 +73,56 @@ Create local Git checkpoint commits frequently at coherent, compiling or otherwi
 
 Research delegation should use Terra agents where possible to preserve Sol review capacity.  The workflow records who supplied evidence but never substitutes authority for testable gates.
 
+### Delivery-control rules
+
+GitHub state is part of the deliverable, not optional bookkeeping.  The local spec and its matching
+GitHub issue must stay synchronized:
+
+- When a local numbered issue spec is created, create the matching GitHub issue in the same
+  checkpoint.  Confirm that its GitHub number and title match the local filename/index before
+  starting implementation.
+- After every pushed implementation checkpoint, add or refresh concise GitHub evidence when it
+  materially changes the issue's status.  Never let a completed issue exist only as a local
+  decision record.
+- As soon as Sol records PASS and the evidence commit is upstream, close the GitHub issue in that
+  same workflow.  Verify the remote state after closing it.  A task does not count as complete in
+  progress reporting until GitHub is synchronized.
+- At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+  missing, stale, or incorrectly closed entries before starting the next issue.
+
+Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
+evidence needed to prove its product contract; generic harness hardening, artifact promotion,
+extended compatibility research, and human scheduling belong in separate stateless issues.  Split
+the work before implementation when any of these are true:
+
+- the brief combines more than one independently useful product outcome;
+- new review findings require a second benchmark framework, a second large fixture corpus, or an
+  unrelated host/tooling subsystem;
+- the correction would materially expand the issue beyond its original crates or dependency
+  boundary; or
+- a benchmark-runner defect remains after one bounded correction.
+
+The three-attempt rule is a hard delivery stop, not permission for an issue to consume unlimited
+sub-rounds.  Each attempt gets one coherent implementation pass and one adversarial verdict.
+Progress-only agent turns do not create extra attempts, but they must be consolidated or reassigned
+when they stop producing commit-ready checkpoints.  After attempt three fails, preserve evidence,
+split or rescope once, and move to the newly bounded issue; never perform a disguised fourth retry.
+
+Benchmarks are descriptive during feature development.  Freeze the workload and validator before
+timing, run exactly one invocation with one warmup and two measured rounds, and do not tune or
+retry.  Benchmark infrastructure must preflight arguments, schema, output persistence, shell exit
+semantics, and overwrite refusal without launching the timed workload.  If post-workload tooling
+fails, preserve the raw output, record the failure, and move runner repair/promotion to a tooling
+issue rather than blocking unrelated engine implementation.  Do not optimize merely to improve a
+descriptive number; open a weekly optimization issue unless a named release budget is actually
+missed.
+
+Prefer a working vertical slice over exhaustive evidence scaffolding that delays downstream
+features.  Launch-critical correctness, realtime safety, deterministic behavior, target builds,
+and academically grounded DSP remain mandatory; additional matrix expansion should be recorded as
+a follow-up once representative adversarial gates cover the frozen contract.  Report progress using
+closed GitHub issues and deployable capabilities, not local file counts or unpushed evidence.
+
 ## Scope boundaries for this sprint
 
 Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runner, host adapters, streaming, and control foundation.  Do not deliver a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party Wasm execution before its post-launch issue, or a general remote audio-streaming protocol.
