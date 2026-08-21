@@ -9,8 +9,9 @@ qualified. Two total attempts are permitted. Issue 052 owns all broad qualificat
 
 ## Exact 2x pipeline
 
-Let `gd=10^(drive_db/20)`, `go=10^(output_db/20)` and `m=mix`. For each base-rate sample, advance
-the three linear ramps once in ID order, sanitize `x`, and write `2*gd*x` followed by zero to the
+Let `gd=10.0_f32.powf(drive_db*0.05_f32)`, `go=10.0_f32.powf(output_db*0.05_f32)` and `m=mix`.
+For each base-rate sample, advance the three linear ramps once in ID order, sanitize `x`, and write
+`2*gd*x` followed by zero to the
 63-word interpolation ring. For each high-rate phase, convolve ascending nonzero tap index with
 separate f32 multiply then add, apply
 
@@ -21,8 +22,14 @@ c(u) = -2/3                 u <= -1
 ```
 
 write `c(u)` to the 63-word decimation ring, convolve in the same order, retain only the even-phase
-result, and advance both high-rate rings twice. With `d=x[n-31]`, output
-`go*((1-m)*d + m*wet)`; exact mix-zero/unity-output and prepared bypass use bit selection of `d`.
+result, and advance both high-rate rings twice. With `d=x[n-31]`, compute the noncontracting output
+in this exact order: `a=1.0_f32-m; b=a*d; c=m*wet; e=b+c; y=go*e`. Exact
+mix-zero/unity-output and prepared bypass use bit selection of `d`.
+
+For the cubic interior, use exactly `p0=u*u; p1=p0*u; p2=p1/3.0_f32; y=u-p2`. Each FIR
+accumulator starts at positive zero and, for every ascending nonzero tap, computes
+`product=h[k]*history[index]` followed by a separate `accumulator=accumulator+product`. These
+rounding points are frozen and no contraction is permitted.
 
 `h` is a 63-tap symmetric f32 Blackman-windowed halfband, center 31. Odd indices except 31 and
 indices 0/62 are exact zero; `h[62-k]=h[k]`. The unique left/center literals are:
@@ -39,15 +46,17 @@ h[26]=5.7263407856e-02   h[28]=-1.0214901716e-01
 h[30]=3.1697243452e-01   h[31]=5.0000000000e-01
 ```
 
-Interpolation uses `2h`; decimation uses `h`. Ascending tap order and noncontraction are part of the
-contract. The independent f64 oracle recreates ideal cutoff `pi/2`, the 63-point Blackman window,
+The stored interpolation input is doubled and its convolution uses `h`, so the effective
+interpolator response is `2h`; decimation uses `h`. Ascending tap order and noncontraction are part
+of the contract. The independent f64 oracle recreates ideal cutoff `pi/2`, the 63-point Blackman window,
 scales off-center taps to sum 0.5, fixes center 0.5, then compares the retained f32 literals. It
 must not import production tables/code. Per-stage f32 response gates are `+-0.002 dB` through
 `0.4Fs` and `<=-75 dB` from `0.6Fs`; expected design extrema are approximately
 `[-0.00105,+0.00150] dB` and `-75.28 dB`.
 
 The two FIR delays total 62 high-rate samples = 31 base samples. Report `LatencySamples(31)` and
-`TailSamples::Finite(62)`. Enabled impulse support may begin before its linear-phase peak; PDC aligns
+`TailSamples::Finite(31)`: graph extent is latency plus tail, and the total causal response can run
+through base sample 62. Enabled impulse support may begin before its linear-phase peak; PDC aligns
 the declared group delay. Bypass and mix-zero delay dry by 31 while warming wet state.
 
 ## Descriptor, automation and state
@@ -100,7 +109,8 @@ every scalar metadata/payload shape and total retained cap before returning lega
 
 The ten-track launch fixture uses only unconnected homogeneous `miso.soft-clip` slots. It proves
 host-width banks plus ordered scalar tails, scalar-delegate PCM across active smoothing/state/tail,
-exact 31-sample group delay and 62-sample tail, bypass/PDC/canonical stability, exact bank accounting
+exact 31-sample group delay, finite tail 31 and causal support through sample 62,
+bypass/PDC/canonical stability, exact bank accounting
 and one-byte-below ownership return.
 
 ## Representative closure

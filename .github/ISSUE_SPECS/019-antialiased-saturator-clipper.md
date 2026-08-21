@@ -26,9 +26,11 @@ AoSoA bank and graph/PDC seams and permits exactly two attempts: Terra plus one 
 
 The exact equations, coefficient bits/phase, update order, state layout, resources and gates are
 authoritative in `BRIEFS/019-antialiased-saturator-clipper.md`. In summary, sanitize `x`, apply the
-smoothed drive, interpolate by two with `2h`, apply
+smoothed drive, write `2*gd*x` followed by zero and convolve with `h` (the effective interpolation
+response is `2h`), apply
 `c(u)=u-u^3/3` for `|u|<1` and `copysign(2/3,u)` otherwise, filter with `h`, retain the even phase,
-then mix with dry delayed by 31 samples and apply output gain. Report latency 31 and finite tail 62.
+then mix with dry delayed by 31 samples and apply output gain. Report latency 31 and
+`TailSamples::Finite(31)`; the total causal response can extend through base sample 62.
 
 Stable ordered PerLane parameters are: `1 drive` dB `[-24,36]` default `0`; `2 output` dB
 `[-24,24]` default `0`; `3 mix` Linear `[0,1]` default `1`. All accept canonical ordered Block
@@ -78,7 +80,8 @@ Those qualification surfaces belong to Issue 052.
 
 The fixed FIR is intentionally modest: its product claim is the measured improvement for the frozen
 tone, not alias-free output. Enabled wet audio has linear-phase pre/post-ringing and a 31-sample group
-delay; metadata tail is the complete 62-sample causal support. ADAA is deferred because singularity
+delay; graph metadata is latency 31 plus tail 31, covering causal support through sample 62. ADAA is
+deferred because singularity
 and fractional-delay compensation are separate decisions. A changed curve/factor/table/phase,
 general framework, or failed second attempt stops and requires rebriefing.
 
