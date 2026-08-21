@@ -8,7 +8,7 @@ use miso_engine_builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
     PreparedBuiltinsSession,
 };
-use miso_engine_core::realtime::RenderEnvelope;
+use miso_engine_core::{realtime::RenderEnvelope, target_capabilities};
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSamples};
 use miso_engine_graph::{
@@ -18,6 +18,8 @@ use miso_engine_graph::{
     PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
     StableGraphId, TrackStage,
 };
+use miso_engine_rack::{KernelDispatch, RackLocationV1, RackProgramSignatureV1, RoutingClassV1};
+use miso_engine_rack_compiler::{CompiledRackCohortsV1, RackTrackInputV1, compile_rack_cohorts_v1};
 use miso_engine_session::{
     ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration,
 };
@@ -107,6 +109,17 @@ pub struct GraphCompileReport {
     pub canonical_debug_bytes: Vec<u8>,
     pub sha256: String,
     pub dot: String,
+    /// Off-render SIMD-rack cohort decision. It is deliberately absent from graph identity,
+    /// schedule, PDC and reductions: changing a host backend cannot change graph semantics.
+    pub rack_cohorts: GraphRackCohortReport,
+}
+
+/// Stable rack cohorts for the two bankable graph boundaries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphRackCohortReport {
+    pub dispatch: KernelDispatch,
+    pub simd1: CompiledRackCohortsV1,
+    pub simd2: CompiledRackCohortsV1,
 }
 
 impl GraphCompiler {
@@ -545,6 +558,7 @@ impl GraphCompiler {
         });
         let sha256 = hex_sha256(&debug);
         let dot = dot(&nodes, &edges, &timing.delays);
+        let rack_cohorts = rack_cohort_report(&effects);
         let effect_nodes = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
             ports: ports.clone(),
@@ -604,8 +618,68 @@ impl GraphCompiler {
                 canonical_debug_bytes: debug,
                 sha256,
                 dot,
+                rack_cohorts,
             },
         })
+    }
+}
+
+fn rack_cohort_report(effects: &EffectPreparedSession) -> GraphRackCohortReport {
+    let dispatch = KernelDispatch::select(target_capabilities());
+    let model = effects.session.normalized_model();
+    let compile = |location: RackLocationV1, rack: RackId| {
+        let tracks = model
+            .tracks
+            .iter()
+            .map(|track| {
+                let entries: Vec<_> = effects
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.track_id == track.id.as_str() && rack_id(entry.rack) == rack
+                    })
+                    .map(|entry| entry.metadata.program_key())
+                    .collect();
+                let routing = if effects.entries.iter().any(|entry| {
+                    entry.track_id == track.id.as_str()
+                        && rack_id(entry.rack) == rack
+                        && matches!(
+                            entry.metadata.ports.sidechain,
+                            PreparedSidechainPort::Connected { .. }
+                        )
+                }) {
+                    RoutingClassV1::SidechainConnected
+                } else if effects.entries.iter().any(|entry| {
+                    entry.track_id == track.id.as_str()
+                        && rack_id(entry.rack) == rack
+                        && matches!(
+                            entry.metadata.ports.sidechain,
+                            PreparedSidechainPort::Unconnected { .. }
+                        )
+                }) {
+                    RoutingClassV1::SidechainUnconnected
+                } else {
+                    RoutingClassV1::MainOnly
+                };
+                RackTrackInputV1 {
+                    track_id: track.id.as_str().into(),
+                    signature: RackProgramSignatureV1::new(
+                        location,
+                        effects.session.sample_rate().0,
+                        effects.session.quantum().0,
+                        entries,
+                        routing,
+                    )
+                    .expect("validated nonzero session envelope"),
+                }
+            })
+            .collect();
+        compile_rack_cohorts_v1(tracks, dispatch).expect("stable track IDs were session-validated")
+    };
+    GraphRackCohortReport {
+        dispatch,
+        simd1: compile(RackLocationV1::Simd1, RackId::Simd1),
+        simd2: compile(RackLocationV1::Simd2, RackId::Simd2),
     }
 }
 
