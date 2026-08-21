@@ -511,7 +511,11 @@ impl GraphCompiler {
         let ports = ports_for(&nodes, &edges);
         let reductions = reduction_records(&nodes, &edges);
         let rack_cohorts = rack_cohort_report(&effects);
-        let Some(estimate) = resource_estimate(
+        let banks = match bind_rack_banks(&effects, &effect_ids, &levels, rack_cohorts.dispatch) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+        };
+        let Some(mut estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
             &nodes,
@@ -527,6 +531,28 @@ impl GraphCompiler {
                 vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
             ));
         };
+        // Runtime-selected banks do not change the target-neutral semantic graph hash. Preserve
+        // the pre-bank estimate for canonical bytes while publishing and capping the exact
+        // retained candidate estimate below.
+        let semantic_estimate = estimate.clone();
+        let Some(bank_resource) = effect_bank_resource(&banks, session.quantum().0) else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.effect_banks",
+                )],
+            ));
+        };
+        if checked_add_effect_banks(&mut estimate, bank_resource).is_none() {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.effect_banks",
+                )],
+            ));
+        }
         let mut capped_estimate = estimate.clone();
         if let Some(builtins) = prepared_builtins {
             let Some(resource) =
@@ -592,14 +618,10 @@ impl GraphCompiler {
             delays: &timing.delays,
             reductions: &reductions,
             buffers: &buffers,
-            estimate: &estimate,
+            estimate: &semantic_estimate,
         });
         let sha256 = hex_sha256(&debug);
         let dot = dot(&nodes, &edges, &timing.delays);
-        let banks = match bind_rack_banks(&effects, &effect_ids, &levels, rack_cohorts.dispatch) {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
-        };
         let effect_nodes = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
             ports: ports.clone(),
@@ -817,6 +839,112 @@ fn bind_rack_banks(
     Ok(banks)
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EffectBankResourceEstimate {
+    bank_count: u64,
+    scratch_samples: u64,
+    scratch_bytes: u64,
+    runtime_buffer_samples: u64,
+    runtime_buffer_bytes: u64,
+    metadata_bytes: u64,
+    largest_allocation_bytes: u64,
+}
+
+fn effect_bank_resource(
+    banks: &[miso_engine_graph::GraphPreparedEffectBank],
+    quantum: u32,
+) -> Option<EffectBankResourceEstimate> {
+    let bank_count = u64::try_from(banks.len()).ok()?;
+    let mut resource = EffectBankResourceEstimate {
+        bank_count,
+        ..EffectBankResourceEstimate::default()
+    };
+    let bank_array_bytes = u64::try_from(core::mem::size_of::<
+        miso_engine_graph::GraphPreparedEffectBank,
+    >())
+    .ok()?
+    .checked_mul(bank_count)?;
+    resource.metadata_bytes = bank_array_bytes;
+    resource.largest_allocation_bytes = bank_array_bytes;
+    for bank in banks {
+        let lanes = u64::from(bank.scratch.width().lanes());
+        if bank.scratch.quantum() != quantum
+            || u64::try_from(bank.members.len()).ok()? != lanes
+            || bank.processor.metadata().width != bank.scratch.width()
+        {
+            return None;
+        }
+        let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
+        let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
+        let scratch_samples = scratch_plane_samples.checked_mul(4)?;
+        let scratch_bytes = scratch_samples.checked_mul(4)?;
+        let runtime_buffer_samples = scratch_plane_samples.checked_mul(2)?;
+        let runtime_buffer_bytes = runtime_buffer_samples.checked_mul(4)?;
+        resource.scratch_samples = resource.scratch_samples.checked_add(scratch_samples)?;
+        resource.scratch_bytes = resource.scratch_bytes.checked_add(scratch_bytes)?;
+        resource.runtime_buffer_samples = resource
+            .runtime_buffer_samples
+            .checked_add(runtime_buffer_samples)?;
+        resource.runtime_buffer_bytes = resource
+            .runtime_buffer_bytes
+            .checked_add(runtime_buffer_bytes)?;
+
+        let member_array_bytes = u64::try_from(core::mem::size_of::<EffectNodeId>())
+            .ok()?
+            .checked_mul(lanes)?;
+        resource.metadata_bytes = resource.metadata_bytes.checked_add(member_array_bytes)?;
+        resource.largest_allocation_bytes = resource
+            .largest_allocation_bytes
+            .max(member_array_bytes)
+            .max(scratch_plane_bytes)
+            .max(u64::from(quantum).checked_mul(4)?);
+        for member in &bank.members {
+            for id in [&member.track_id, &member.effect_id] {
+                let string_bytes = u64::try_from(id.as_str().len()).ok()?;
+                resource.metadata_bytes = resource.metadata_bytes.checked_add(string_bytes)?;
+                resource.largest_allocation_bytes =
+                    resource.largest_allocation_bytes.max(string_bytes);
+            }
+        }
+    }
+    Some(resource)
+}
+
+fn checked_add_effect_banks(
+    estimate: &mut GraphResourceEstimate,
+    resource: EffectBankResourceEstimate,
+) -> Option<()> {
+    let mut next = estimate.clone();
+    next.effect_bank_count = next.effect_bank_count.checked_add(resource.bank_count)?;
+    next.effect_bank_scratch_bytes = next
+        .effect_bank_scratch_bytes
+        .checked_add(resource.scratch_bytes)?;
+    next.effect_bank_runtime_buffer_bytes = next
+        .effect_bank_runtime_buffer_bytes
+        .checked_add(resource.runtime_buffer_bytes)?;
+    next.effect_bank_metadata_bytes = next
+        .effect_bank_metadata_bytes
+        .checked_add(resource.metadata_bytes)?;
+    next.audio_buffer_samples = next
+        .audio_buffer_samples
+        .checked_add(resource.scratch_samples)?
+        .checked_add(resource.runtime_buffer_samples)?;
+    next.graph_metadata_bytes = next
+        .graph_metadata_bytes
+        .checked_add(resource.metadata_bytes)?;
+    let retained = resource
+        .scratch_bytes
+        .checked_add(resource.runtime_buffer_bytes)?
+        .checked_add(resource.metadata_bytes)?;
+    next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(retained)?;
+    next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(retained)?;
+    next.largest_allocation_bytes = next
+        .largest_allocation_bytes
+        .max(resource.largest_allocation_bytes);
+    *estimate = next;
+    Some(())
+}
+
 struct TimingResult {
     routes: Vec<RouteTiming>,
     delays: Vec<InsertedDelay>,
@@ -919,6 +1047,10 @@ fn resource_estimate(
         delay_bytes,
         graph_metadata_bytes,
         declared_effect_bytes,
+        effect_bank_count: 0,
+        effect_bank_scratch_bytes: 0,
+        effect_bank_runtime_buffer_bytes: 0,
+        effect_bank_metadata_bytes: 0,
         builtin_bank_bytes: 0,
         builtin_bank_scratch_bytes: 0,
         builtin_bank_count: 0,
@@ -982,6 +1114,10 @@ fn estimate_fits_platform(estimate: &GraphResourceEstimate) -> bool {
         estimate.delay_bytes,
         estimate.graph_metadata_bytes,
         estimate.declared_effect_bytes,
+        estimate.effect_bank_count,
+        estimate.effect_bank_scratch_bytes,
+        estimate.effect_bank_runtime_buffer_bytes,
+        estimate.effect_bank_metadata_bytes,
         estimate.largest_allocation_bytes,
         estimate.incremental_plan_bytes,
         estimate.session_plus_plan_bytes,
@@ -1822,7 +1958,7 @@ fn canonical_bytes(parts: CanonicalParts<'_>) -> Vec<u8> {
     }
     let estimate = parts.estimate;
     text.push_str(&format!(
-        "estimate\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "estimate\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         estimate.logical_nodes,
         estimate.materialized_nodes,
         estimate.edges,
@@ -1836,6 +1972,10 @@ fn canonical_bytes(parts: CanonicalParts<'_>) -> Vec<u8> {
         estimate.delay_bytes,
         estimate.graph_metadata_bytes,
         estimate.declared_effect_bytes,
+        estimate.effect_bank_count,
+        estimate.effect_bank_scratch_bytes,
+        estimate.effect_bank_runtime_buffer_bytes,
+        estimate.effect_bank_metadata_bytes,
         estimate.largest_allocation_bytes,
         estimate.incremental_plan_bytes,
         estimate.session_plus_plan_bytes
@@ -3706,6 +3846,79 @@ mod tests {
                 .collect();
         assert_eq!(actual_tails, expected_tails, "scalar tail order is stable");
         assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
+        let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let quantum = u64::from(session.quantum().0);
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
+        let expected_bank_metadata_bytes = bank_count
+            * u64::try_from(core::mem::size_of::<
+                miso_engine_graph::GraphPreparedEffectBank,
+            >())
+            .expect("bank metadata size")
+            + artifact
+                .report
+                .rack_cohorts
+                .simd1
+                .banks
+                .iter()
+                .flat_map(|bank| bank.members.iter())
+                .map(|member| {
+                    u64::try_from(core::mem::size_of::<EffectNodeId>())
+                        .expect("member metadata size")
+                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from("true-peak-limiter".len()).expect("effect ID bytes")
+                })
+                .sum::<u64>();
+        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(
+            artifact.report.estimate.effect_bank_scratch_bytes,
+            expected_bank_scratch_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            expected_bank_runtime_buffer_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_metadata_bytes,
+            expected_bank_metadata_bytes
+        );
+        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(scalar_artifact.report.estimate.effect_bank_scratch_bytes, 0);
+        assert_eq!(
+            scalar_artifact
+                .report
+                .estimate
+                .effect_bank_runtime_buffer_bytes,
+            0
+        );
+        assert_eq!(
+            scalar_artifact.report.estimate.effect_bank_metadata_bytes,
+            0
+        );
+        assert_eq!(
+            artifact.report.estimate.audio_buffer_samples,
+            scalar_artifact.report.estimate.audio_buffer_samples
+                + (expected_bank_scratch_bytes + expected_bank_runtime_buffer_bytes) / 4
+        );
+        assert_eq!(
+            artifact.report.estimate.graph_metadata_bytes,
+            scalar_artifact.report.estimate.graph_metadata_bytes + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.incremental_plan_bytes,
+            scalar_artifact.report.estimate.incremental_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.session_plus_plan_bytes,
+            scalar_artifact.report.estimate.session_plus_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
         assert_eq!(
             artifact.report.sequential_schedule,
             scalar_artifact.report.sequential_schedule

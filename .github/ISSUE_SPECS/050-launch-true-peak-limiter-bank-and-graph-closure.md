@@ -204,3 +204,39 @@ and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS
   rack/graph policy and mutation scripts; locked workspace check, test, all-target Clippy and
   warning-denied rustdoc. No Issue-049 corpus/audit/target/object/timing/listening command ran;
   `timed_benchmark_invocations=0`.
+
+## Final Sol correction attempt 2 — PASS
+
+- Reviewed clean candidate `b512d2b` against this issue, its authoritative brief and the accepted
+  Issue-016 scalar checkpoint. Bank member validation precedes unavailable-backend fallback;
+  estimator/hold/release operation order, scalar/W8 PCM and complete state/report parity,
+  transactional restore, both resets, bypass/signed-zero warming, injected lane recovery,
+  registry membership, ten-track cohort/tails and exact `T=486` PDC are non-vacuous and unchanged.
+- Found one product blocker in the candidate evidence: graph caps and the reported plan estimate
+  were evaluated before effect-bank binding and therefore omitted the bank's four retained AoSoA
+  planes, additional simultaneous member output buffers and bank/member metadata. The claimed
+  one-byte-below post-bank cap was checking only the lower scalar graph estimate.
+- The bounded correction binds the selected banks transactionally before final resource
+  publication, derives every count/size with checked arithmetic and folds exact bank scratch,
+  member-buffer and metadata values into audio-sample, graph-byte, plan-byte, session-byte and
+  largest-single-allocation checks. Overflow or any corrected cap failure drops the unpublished
+  bank and returns the complete prepared scalar effect session. Target-neutral semantic graph
+  bytes remain unchanged.
+- On the accepted 48-kHz/q128 W8 fixture the report now records one retained bank, exactly 16,384
+  AoSoA scratch bytes and 8,192 additional runtime member-buffer bytes, plus the checked target-
+  layout bank/member metadata. The strengthened test independently derives those values, proves
+  the exact delta from the scalar report, then rejects `incremental_plan_bytes-1` with
+  `graph.resource.limit` while returning all ten prepared limiter inputs.
+- Focused formatting/check, graph (11), graph-compiler (18 plus fixture/doctests), source (29), and
+  warning-denied graph/compiler/source Clippy: PASS. The first workspace check exposed only two
+  aggregate-literal compile omissions in audit tools; adding the four new fields as zeros was a
+  mechanical compatibility repair and changed no audit behavior.
+- Final locked workspace all-target/all-feature check and tests: PASS. Warning-denied workspace
+  all-target/all-feature Clippy and rustdoc: PASS. Workspace, realtime, effect-runtime and rack
+  baseline/mutation policies plus graph policy: PASS. `git diff --check`: PASS.
+- No functional audit main, Issue-049 corpus, target/object inspection, benchmark/preflight,
+  timed workload or listening command ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: PASS.** Issue 050 closes the bank/registry/graph launch-product vertical over
+the preserved Issue-016 scalar contract. Issue 049 remains the sole owner of deferred
+qualification, realtime audit, target/instruction, benchmark and listening work.

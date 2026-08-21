@@ -175,6 +175,14 @@ pub struct GraphResourceEstimate {
     pub delay_bytes: u64,
     pub graph_metadata_bytes: u64,
     pub declared_effect_bytes: u64,
+    /// Number of full homogeneous native-effect banks retained by the graph.
+    pub effect_bank_count: u64,
+    /// Exact four-plane AoSoA scratch payload retained by native-effect banks.
+    pub effect_bank_scratch_bytes: u64,
+    /// Exact additional per-member output buffers required while a bank is gathered/scattered.
+    pub effect_bank_runtime_buffer_bytes: u64,
+    /// Checked bank/member metadata retained before render-plan binding.
+    pub effect_bank_metadata_bytes: u64,
     /// Exact prepared post-input builtin bank payload retained by the graph.
     pub builtin_bank_bytes: u64,
     /// Exact AoSoA scratch payload retained by post-input builtin banks.
@@ -3069,6 +3077,10 @@ mod tests {
             delay_bytes: 0,
             graph_metadata_bytes: 0,
             declared_effect_bytes: 0,
+            effect_bank_count: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
             builtin_bank_bytes: 0,
             builtin_bank_scratch_bytes: 0,
             builtin_bank_count: 0,
