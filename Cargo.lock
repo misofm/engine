@@ -279,6 +279,7 @@ version = "0.1.0"
 dependencies = [
  "miso-engine-compressor",
  "miso-engine-core",
+ "miso-engine-delay",
  "miso-engine-effect-contract",
  "miso-engine-gate-expander",
  "miso-engine-multiband-compressor",

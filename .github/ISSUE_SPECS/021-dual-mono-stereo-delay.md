@@ -189,3 +189,24 @@ results; attempt number; strict verdict; Issue-055 link; and `timed_benchmark_in
 - Scalar correction verdict: PASS and ready for the separately checkpointed registry/compiler/graph
   integration. This is not an overall Issue-021 verdict; the frozen integration and final product
   seal remain. Issue-055 qualification remains untouched. `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — registry and graph checkpoint (partial PASS)
+
+- Added `miso.delay` to the caller-owned launch registry and exact effect-compiler dependency
+  allowlist. Mutation coverage rejects an arbitrary extra dependency and missing or substituted
+  delay dependency.
+- One accepted 48-kHz/q128 ten-track fixture places delay only in the scalar dynamic rack, with no
+  sidechains or prepared effect bank. All ten effect nodes retain stable `eq0..eq9` order, zero
+  latency/PDC and `Infinite` tail. Exact declared effect storage is
+  `10 * (768168 state + 36 fixed) = 7682040` bytes; every bank count/buffer/metadata row is zero.
+- Two consecutive graph renders match ten independently prepared scalar processors bit-for-bit
+  after the graph's accepted balanced reduction. The second block exercises carried delay history;
+  direct state snapshots close at cursor/valid-history 256. Enabled and bypassed plans preserve
+  schedule, routing, inserted-delay and canonical bytes. A graph plan cap exactly one byte below the
+  accepted estimate rejects and returns all ten prepared effects and the complete session.
+- PASS: focused format check; `cargo test --locked -p miso-engine-effect-compiler --all-targets`
+  (4 passed); `cargo test --locked -p miso-engine-graph-compiler --lib` (22 passed);
+  warning-denied all-target Clippy for both packages; shell syntax; effect-runtime baseline and
+  mutation policies; and graph policy.
+- Integration checkpoint verdict: partial PASS. The final clean nonbenchmark product seal remains
+  separate; Issue-055 qualification remains untouched. `timed_benchmark_invocations=0`.

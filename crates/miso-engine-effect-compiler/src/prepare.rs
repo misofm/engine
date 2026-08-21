@@ -85,6 +85,7 @@ pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, Regist
         Box::new(miso_engine_soft_clip::SoftClipFactory) as Box<dyn NativeEffectFactory>,
         Box::new(miso_engine_transient_shaper::TransientShaperFactory)
             as Box<dyn NativeEffectFactory>,
+        Box::new(miso_engine_delay::DelayFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
 

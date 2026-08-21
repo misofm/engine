@@ -52,6 +52,10 @@ sed -i '/^miso-engine-transient-shaper[.]workspace = true$/d' "$compiler_manifes
 expect_dependency_failure missing-transient-shaper
 sed -i 's/^miso-engine-transient-shaper[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-transient-shaper
+sed -i '/^miso-engine-delay[.]workspace = true$/d' "$compiler_manifest"
+expect_dependency_failure missing-delay
+sed -i 's/^miso-engine-delay[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+expect_dependency_failure substituted-delay
 
 printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then

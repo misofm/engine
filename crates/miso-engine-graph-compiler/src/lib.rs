@@ -2056,8 +2056,9 @@ mod tests {
         prepare_native_session_effects,
     };
     use miso_engine_effect_contract::{
-        EffectPrepareError, NativeEffectFactory, NativeEffectRegistry, PrepareEffectBankRequest,
-        PrepareEffectRequest, PreparedNativeEffect, PreparedNativeEffectBank,
+        EffectPrepareError, EffectProcessBlock, NativeEffectFactory, NativeEffectRegistry,
+        PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
+        PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
     use miso_engine_graph::{
         GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
@@ -2177,6 +2178,26 @@ mod tests {
     struct TransientShaperBinding {
         left: f32,
         right: f32,
+    }
+
+    /// One asymmetric impulse followed by silence, exposing delay history across render blocks.
+    struct DelayImpulseBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for DelayImpulseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            if block.first_sample == 0 {
+                block.left[0] = self.left;
+                block.right[0] = self.right;
+            }
+            Ok(())
+        }
     }
     impl GraphRuntimeProcessor for TransientShaperBinding {
         fn process(
@@ -2319,6 +2340,25 @@ mod tests {
         Box::new(TransientShaperBinding {
             left: 0.2 + 0.025 * index as f32,
             right: -(0.15 + 0.02 * index as f32),
+        })
+    }
+
+    fn delay_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("delay fixture track id");
+        Box::new(DelayImpulseBinding {
+            left: 0.05 * (index + 1) as f32,
+            right: -0.025 * (10 - index) as f32,
         })
     }
 
@@ -2482,6 +2522,79 @@ mod tests {
                     value: 1.0,
                 },
             ];
+        }
+        model
+    }
+
+    fn accepted_delay_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model = accepted_compressor_graph_fixture();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let mut effect = track.simd1.effects.remove(0);
+            effect.id = StableId::parse("delay").expect("stable effect id");
+            effect.identity = EffectIdentity::Native {
+                effect_id: StableId::parse("miso.delay").expect("delay id"),
+            };
+            effect.link_mode = miso_engine_session::LinkMode::DualMono;
+            effect.sidechain = SidechainDeclaration::None;
+            let parameter_index = index as f32;
+            effect.params = vec![
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Milliseconds,
+                    value: 1.0 + (index % 3) as f32,
+                },
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Milliseconds,
+                    value: 2.0 + (index % 3) as f32,
+                },
+                EffectParam {
+                    parameter_id: 2,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Linear,
+                    value: 0.3 + 0.01 * parameter_index,
+                },
+                EffectParam {
+                    parameter_id: 2,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Linear,
+                    value: -0.2 - 0.01 * parameter_index,
+                },
+                EffectParam {
+                    parameter_id: 3,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Linear,
+                    value: 0.1 + 0.01 * parameter_index,
+                },
+                EffectParam {
+                    parameter_id: 3,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Linear,
+                    value: 0.2 + 0.01 * parameter_index,
+                },
+                EffectParam {
+                    parameter_id: 4,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Linear,
+                    value: 1.0,
+                },
+                EffectParam {
+                    parameter_id: 4,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Linear,
+                    value: 1.0,
+                },
+                EffectParam {
+                    parameter_id: 5,
+                    channel: ParameterChannel::Both,
+                    unit: ParameterUnit::Linear,
+                    value: [0.0, 0.5, 1.0][index % 3],
+                },
+            ];
+            assert!(track.dynamic.effects.is_empty());
+            track.dynamic.effects.push(effect);
         }
         model
     }
@@ -5404,6 +5517,308 @@ mod tests {
             10,
             "cap rejection returns every prepared transient-shaper input"
         );
+    }
+
+    #[test]
+    fn launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps() {
+        let model = accepted_delay_graph_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        assert!(model.tracks.iter().all(|track| {
+            track.simd1.effects.is_empty()
+                && track.dynamic.effects.len() == 1
+                && matches!(
+                    track.dynamic.effects[0].sidechain,
+                    SidechainDeclaration::None
+                )
+        }));
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted delay fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        assert_eq!(session.quantum().0, 128);
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        assert!(registry.get_ascii("miso.delay").is_some());
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 768_168,
+            maximum_scratch_bytes: 36,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared delay effects");
+        let mut direct = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared direct scalar delays");
+        assert_eq!(effects.entries.len(), 10);
+        assert!(effects.entries.iter().all(|entry| {
+            entry.rack == miso_engine_effect_compiler::EffectRack::Dynamic
+                && entry.metadata.latency == LatencySamples(0)
+                && entry.metadata.tail == TailSamples::Infinite
+                && entry.metadata.state_sizes.total() == Some(768_168)
+                && entry.metadata.scratch_bytes == 36
+                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
+        }));
+
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_130,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("delay graph: {:?}", failure.diagnostics));
+        assert_eq!(artifact.graph.prepared_bank_count(), 0);
+        for cohorts in [
+            &artifact.report.rack_cohorts.simd1,
+            &artifact.report.rack_cohorts.simd2,
+        ] {
+            assert!(cohorts.banks.iter().all(|bank| {
+                bank.members
+                    .iter()
+                    .all(|member| member.active_slots.is_empty())
+            }));
+            assert!(
+                cohorts
+                    .scalar_tails
+                    .iter()
+                    .all(|member| member.active_slots.is_empty())
+            );
+        }
+        assert_eq!(artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(artifact.report.estimate.effect_bank_scratch_bytes, 0);
+        assert_eq!(artifact.report.estimate.effect_bank_runtime_buffer_bytes, 0);
+        assert_eq!(artifact.report.estimate.effect_bank_metadata_bytes, 0);
+        assert_eq!(artifact.report.estimate.effects, 10);
+        assert_eq!(artifact.report.estimate.declared_effect_bytes, 7_682_040);
+        let effect_nodes = artifact
+            .report
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.id, GraphNodeId::Effect(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(effect_nodes.len(), 10);
+        assert!(effect_nodes.iter().all(|node| {
+            node.latency == LatencySamples(0)
+                && node.tail == TailSamples::Infinite
+                && matches!(&node.id, GraphNodeId::Effect(id) if id.rack == RackId::Dynamic)
+        }));
+        assert!(artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(0)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(0)
+        }));
+        assert!(artifact.report.inserted_delays.is_empty());
+        let dynamic_order = artifact
+            .report
+            .sequential_schedule
+            .iter()
+            .filter_map(|node| match node {
+                GraphNodeId::Effect(id) if id.rack == RackId::Dynamic => {
+                    Some(id.track_id.as_str().to_owned())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dynamic_order,
+            (0..10)
+                .map(|index| format!("eq{index}"))
+                .collect::<Vec<_>>()
+        );
+        let expected_schedule = artifact.report.sequential_schedule.clone();
+        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_delays = artifact.report.inserted_delays.clone();
+        let expected_canonical = artifact.report.canonical_debug_bytes.clone();
+        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+
+        let PreparedGraphArtifact { graph, .. } = artifact;
+        let envelope = graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let nodes = graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), delay_input_binding(node)))
+            .collect();
+        let mut plan = graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("delay bind: {}", failure.code));
+        assert_eq!(
+            direct
+                .entries
+                .iter()
+                .map(|entry| entry.track_id.clone())
+                .collect::<Vec<_>>(),
+            (0..10)
+                .map(|index| format!("eq{index}"))
+                .collect::<Vec<_>>()
+        );
+        for block in 0..2_u64 {
+            let mut graph_pcm = vec![0.0_f32; frames * 2];
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut graph_pcm, 2, frames, frames)
+                        .expect("delay graph output"),
+                },
+                RenderTime {
+                    absolute_sample: block * frames as u64,
+                },
+            )
+            .expect("delay graph render");
+
+            let mut direct_tracks_left = Vec::with_capacity(10);
+            let mut direct_tracks_right = Vec::with_capacity(10);
+            for entry in &mut direct.entries {
+                let index = entry
+                    .track_id
+                    .strip_prefix("eq")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .expect("direct delay track id");
+                let mut left = vec![0.0_f32; frames];
+                let mut right = vec![0.0_f32; frames];
+                if block == 0 {
+                    left[0] = 0.05 * (index + 1) as f32;
+                    right[0] = -0.025 * (10 - index) as f32;
+                }
+                let report = entry.processor.process(
+                    EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        None,
+                        block * frames as u64,
+                        &[],
+                        128,
+                    )
+                    .expect("direct delay block"),
+                );
+                assert_eq!(report, ProcessReport::default());
+                direct_tracks_left.push(left);
+                direct_tracks_right.push(right);
+            }
+            let mut direct_left = vec![0.0_f32; frames];
+            let mut direct_right = vec![0.0_f32; frames];
+            let mut sanitized = 0;
+            for frame in 0..frames {
+                let mut left = [0.0_f32; 10];
+                let mut right = [0.0_f32; 10];
+                for track in 0..10 {
+                    left[track] = direct_tracks_left[track][frame];
+                    right[track] = direct_tracks_right[track][frame];
+                }
+                direct_left[frame] =
+                    miso_engine_graph::balanced_pairwise_sum(&mut left, &mut sanitized);
+                direct_right[frame] =
+                    miso_engine_graph::balanced_pairwise_sum(&mut right, &mut sanitized);
+            }
+            assert_eq!(sanitized, 0);
+            assert_eq!(
+                graph_pcm[..frames]
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                direct_left
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                graph_pcm[frames..]
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                direct_right
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert!(graph_pcm.iter().any(|sample| *sample != 0.0));
+        }
+        for entry in &direct.entries {
+            let sizes = entry.metadata.state_sizes;
+            let mut common = vec![0; sizes.common_bytes as usize];
+            let mut left = vec![0; sizes.left_bytes as usize];
+            let mut right = vec![0; sizes.right_bytes as usize];
+            entry
+                .processor
+                .snapshot_state_payload(
+                    StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                        .expect("direct delay state output"),
+                )
+                .expect("direct delay snapshot");
+            assert_eq!(
+                u32::from_le_bytes(common[..4].try_into().expect("cursor")),
+                256
+            );
+            assert_eq!(
+                u32::from_le_bytes(left[24..28].try_into().expect("left valid history")),
+                256
+            );
+            assert_eq!(
+                u32::from_le_bytes(right[24..28].try_into().expect("right valid history")),
+                256
+            );
+        }
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.dynamic.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled bypass delay fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass delays");
+        let bypass = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_131,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass delay graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass.graph.prepared_bank_count(), 0);
+        assert_eq!(bypass.report.sequential_schedule, expected_schedule);
+        assert_eq!(bypass.report.route_timings, expected_route_timings);
+        assert_eq!(bypass.report.inserted_delays, expected_delays);
+        assert_eq!(bypass.report.canonical_debug_bytes, expected_canonical);
+
+        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared delay effects for transactional cap");
+        let mut constrained = integration_caps();
+        constrained.maximum_plan_bytes = minimum_plan_bytes
+            .checked_sub(1)
+            .expect("nonzero delay plan estimate");
+        let failure = match GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_132,
+            effects: cap_effects,
+            caps: constrained,
+        }) {
+            Ok(_) => panic!("one-byte-below delay graph cap must reject"),
+            Err(failure) => failure,
+        };
+        assert!(failure.diagnostics.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "graph.resource.limit" && diagnostic.path == "$.graph_compile_caps"
+        }));
+        assert_eq!(failure.effects.entries.len(), 10);
+        assert_eq!(failure.effects.session.normalized_model().tracks.len(), 10);
     }
 
     #[test]
