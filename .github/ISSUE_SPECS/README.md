@@ -100,9 +100,10 @@ five-`f32`-coefficient direct-form-I numerical contract. Issue 042 then selected
 conditioned transfer and proved the complete analytic/search, scalar/bank/graph/audit and target
 surfaces, but stopped after its first legal one-second impulse triggered runtime recovery in the
 frozen direct-history delta recurrence. Those checkpoints remain technical input only. Issue 044,
-**Conditioned time-domain launch parametric EQ recurrence**, owns the complete 96-sequence runtime-
-state comparison, Sol freeze, selected scalar/bank correction and final regression gates. It has
-two total attempts and forbids benchmarks; Issues 015, 017 and 026 depend on Issue 044.
+**Conditioned time-domain launch parametric EQ recurrence**, then stopped after its corrected full
+comparison found no passing direct/scaled/transposed/flush recurrence. Issue 045, **Launch
+parametric EQ recurrence derivation and runtime proof**, is research-only and requires f64 mapping
+equivalence before retained-f32 testing. Issues 015, 017 and 026 depend on Issue 045.
 
 ## Shared definition
 

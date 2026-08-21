@@ -30,7 +30,7 @@ Machine-learning speech classification, undocumented dynamic EQ replacement, imp
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
-- Conditioned time-domain launch parametric EQ recurrence
+- Launch parametric EQ recurrence derivation and runtime proof
 - Compressor
 
 ## Hazards/decisions

@@ -158,3 +158,6 @@ alone retained zero recovery and zero invalid values, but it materially misses t
 assertion intact as stopped failure evidence. The two-attempt budget is exhausted: do not add a
 candidate, weaken the tolerance/domain/recovery rules, or begin production. No benchmark or
 timing command was run; `timed_benchmark_invocations=0`.
+
+Issue 045, **Launch parametric EQ recurrence derivation and runtime proof**, owns any further
+research. Issue 044 authorizes no production continuation.

@@ -45,7 +45,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Exact lock-free native source sanitation telemetry handoff
 - Issue-010 source streaming qualification tooling and adversarial evidence
 - Native effect runtime contract and conformance
-- Conditioned time-domain launch parametric EQ recurrence
+- Launch parametric EQ recurrence derivation and runtime proof
 - Compressor
 - Gate/expander
 - De-esser
