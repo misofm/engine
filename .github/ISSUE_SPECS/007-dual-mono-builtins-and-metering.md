@@ -336,3 +336,36 @@ A separate stateless cross-cutting rate-tier issue must amend `AGENTS.md`, share
 session validation, conformance fixtures, host/runner contracts, and release qualification before
 the four-rate launch claim is project-wide. Issue 007 may use its explicit four-rate gate now;
 extended-rate observations are diagnostic only and cannot be cited as supported qualification.
+
+## Retained API/resource/meter Terra evidence (2026-08-21; partial)
+
+The public scalar contract now has a rejecting `DualMonoBlock::new` constructor and private block
+fields; all three section processors and the combined chain return typed block failures instead of
+silently returning an empty report. The graph adapter creates the validated block and maps a time
+overflow to `RenderError::TimeOverflow` and other malformed render shapes to
+`RenderError::InvalidEnvelope`. The ten stable parameter descriptors now include unit, numeric
+domain, default, per-lane selection, update rate, smoothing, reset, and filter-disabled (`0 Hz`)
+semantics. Compiler diagnostics identify the offending lane/field for gain, cutoff, filter order,
+matrix, and smoothing validation.
+
+Input recovery reports are per-call; separately named lifetime counters are queryable and reset
+independently. Fader/mute now sanitizes at its entry, and a settled identity matrix copies finite
+samples directly so signed zero is preserved. Meter observation rejects mismatched lanes and
+sample-time overflow with a typed error. Emission contains no `expect`: impossible internal state
+is converted to a recorded discontinuity, preserving the no-panic render contract. Focused meter
+conformance covers fixed windows, energy/RMS/peak/held peak, sanitization, discontinuities,
+sequence/reset generations, and bounded queue-drop accounting.
+
+The prepared artifact publishes checked retained-resource payload estimates. These include chain
+state, three processor box payloads and binding-vector slots per track, tail entries, observer and
+consumer endpoint/binding payloads, and each SPSC meter's exact `capacity + 1` snapshot slots;
+the largest of those allocation payloads is enforced by the existing cap. This is not a claim of
+whole-plan or allocator-header accounting, forged-artifact sealing, or the required million-call
+audit; those gates remain open.
+
+PASS: `cargo test -p miso-engine-builtins -p miso-engine-builtins-compiler` (14 builtins and 2
+compiler tests) and `cargo clippy -p miso-engine-builtins -p miso-engine-builtins-compiler
+--all-targets -- -D warnings`. The original test-only `needless_range_loop` Clippy warning was
+removed. The response and cascade tests remain in that focused suite and pass. Full workspace,
+allocation/realtime, fixture/listening, cross-target, and final prepared-artifact gates are still
+unrun or open. The exactly-once benchmark invocation count remains **0**.

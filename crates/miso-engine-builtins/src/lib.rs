@@ -84,13 +84,31 @@ impl BuiltinProcessReport {
     }
 }
 
+/// A shape-validated dual-mono render block.
+///
+/// The constructor validates the two lanes and sample-time range before any processor can mutate
+/// audio. Each public processor repeats the inexpensive validation as an internal invariant.
 pub struct DualMonoBlock<'a> {
-    pub left: &'a mut [f32],
-    pub right: &'a mut [f32],
-    pub first_sample: u64,
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+    first_sample: u64,
 }
 
-impl DualMonoBlock<'_> {
+impl<'a> DualMonoBlock<'a> {
+    pub fn new(
+        left: &'a mut [f32],
+        right: &'a mut [f32],
+        first_sample: u64,
+    ) -> Result<Self, BuiltinParameterError> {
+        let block = DualMonoBlock {
+            left,
+            right,
+            first_sample,
+        };
+        block.checked_len()?;
+        Ok(block)
+    }
+
     fn checked_len(&self) -> Result<usize, BuiltinParameterError> {
         if self.left.is_empty() {
             return Err(BuiltinParameterError::EmptyBlock);
@@ -155,11 +173,45 @@ pub enum BuiltinTail {
     Infinite,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BuiltinParameterDescriptorV1 {
     pub id: u32,
     pub name: &'static str,
     pub per_lane: bool,
+    pub unit: BuiltinParameterUnit,
+    pub minimum: f32,
+    pub maximum: f32,
+    pub default: f32,
+    pub update_rate: BuiltinParameterUpdateRate,
+    pub smoothing: BuiltinSmoothingPolicy,
+    pub reset: BuiltinParameterReset,
+    pub disabled_value: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinParameterUnit {
+    Boolean,
+    Decibels,
+    Hertz,
+    Linear,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinParameterUpdateRate {
+    PreparedOnly,
+    BlockTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinSmoothingPolicy {
+    None,
+    MatrixLinearUpdates,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinParameterReset {
+    RestorePreparedValue,
+    KeepTargetResetCurrent,
 }
 
 pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] = [
@@ -167,51 +219,131 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         id: 1,
         name: "polarity_invert",
         per_lane: true,
+        unit: BuiltinParameterUnit::Boolean,
+        minimum: 0.0,
+        maximum: 1.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 2,
         name: "trim_db",
         per_lane: true,
+        unit: BuiltinParameterUnit::Decibels,
+        minimum: -144.0,
+        maximum: 24.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 3,
         name: "hpf_hz",
         per_lane: true,
+        unit: BuiltinParameterUnit::Hertz,
+        minimum: 0.0,
+        maximum: f32::INFINITY,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: Some(0.0),
     },
     BuiltinParameterDescriptorV1 {
         id: 4,
         name: "lpf_hz",
         per_lane: true,
+        unit: BuiltinParameterUnit::Hertz,
+        minimum: 0.0,
+        maximum: f32::INFINITY,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: Some(0.0),
     },
     BuiltinParameterDescriptorV1 {
         id: 5,
         name: "fader_db",
         per_lane: true,
+        unit: BuiltinParameterUnit::Decibels,
+        minimum: -144.0,
+        maximum: 24.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 6,
         name: "mute",
         per_lane: true,
+        unit: BuiltinParameterUnit::Boolean,
+        minimum: 0.0,
+        maximum: 1.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 7,
         name: "matrix_ll",
         per_lane: false,
+        unit: BuiltinParameterUnit::Linear,
+        minimum: -1.0,
+        maximum: 1.0,
+        default: 1.0,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 8,
         name: "matrix_lr",
         per_lane: false,
+        unit: BuiltinParameterUnit::Linear,
+        minimum: -1.0,
+        maximum: 1.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 9,
         name: "matrix_rl",
         per_lane: false,
+        unit: BuiltinParameterUnit::Linear,
+        minimum: -1.0,
+        maximum: 1.0,
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 10,
         name: "matrix_rr",
         per_lane: false,
+        unit: BuiltinParameterUnit::Linear,
+        minimum: -1.0,
+        maximum: 1.0,
+        default: 1.0,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
     },
 ];
 
@@ -350,8 +482,8 @@ struct FaderLane {
 pub struct InputBuiltins {
     left: InputLane,
     right: InputLane,
-    recovered_left: u64,
-    recovered_right: u64,
+    lifetime_recovered_left: u64,
+    lifetime_recovered_right: u64,
 }
 pub struct FaderMuteBuiltins {
     left: FaderLane,
@@ -382,16 +514,29 @@ impl BuiltinChain {
             matrix,
         })
     }
-    pub fn process_input(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process_input(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         self.input.process(block)
     }
-    pub fn process_fader_mute(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process_fader_mute(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         self.fader_mute.process(block)
     }
-    pub fn process_matrix(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process_matrix(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         self.matrix.process(block)
     }
-    pub fn process_dual_mono(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process_dual_mono(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
+        block.checked_len()?;
         let DualMonoBlock {
             left,
             right,
@@ -401,18 +546,18 @@ impl BuiltinChain {
             left,
             right,
             first_sample,
-        });
+        })?;
         report.add(self.fader_mute.process(DualMonoBlock {
             left,
             right,
             first_sample,
-        }));
+        })?);
         report.add(self.matrix.process(DualMonoBlock {
             left,
             right,
             first_sample,
-        }));
-        report
+        })?);
+        Ok(report)
     }
     pub fn set_matrix_target(&mut self, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
         self.matrix.set_target(target)
@@ -473,8 +618,8 @@ fn prepare_sections(
         InputBuiltins {
             left: lane(parameters.left)?,
             right: lane(parameters.right)?,
-            recovered_left: 0,
-            recovered_right: 0,
+            lifetime_recovered_left: 0,
+            lifetime_recovered_right: 0,
         },
         FaderMuteBuiltins {
             left: fader(parameters.left)?,
@@ -490,24 +635,25 @@ fn prepare_sections(
 }
 
 impl InputBuiltins {
-    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         let mut report = BuiltinProcessReport::default();
-        if block.checked_len().is_err() {
-            return report;
-        }
+        block.checked_len()?;
+        let mut recovered_left = 0;
+        let mut recovered_right = 0;
         for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
-            *left =
-                process_input_lane(&mut self.left, *left, &mut self.recovered_left, &mut report);
-            *right = process_input_lane(
-                &mut self.right,
-                *right,
-                &mut self.recovered_right,
-                &mut report,
-            );
+            *left = process_input_lane(&mut self.left, *left, &mut recovered_left, &mut report);
+            *right = process_input_lane(&mut self.right, *right, &mut recovered_right, &mut report);
         }
-        report.recovered_left_state = self.recovered_left;
-        report.recovered_right_state = self.recovered_right;
-        report
+        self.lifetime_recovered_left = self.lifetime_recovered_left.saturating_add(recovered_left);
+        self.lifetime_recovered_right = self
+            .lifetime_recovered_right
+            .saturating_add(recovered_right);
+        report.recovered_left_state = recovered_left;
+        report.recovered_right_state = recovered_right;
+        Ok(report)
     }
     pub fn reset(&mut self) {
         self.left.hpf.reset();
@@ -526,6 +672,13 @@ impl InputBuiltins {
             BuiltinTail::FiniteZero
         }
     }
+    pub fn lifetime_recovered_state(&self) -> (u64, u64) {
+        (self.lifetime_recovered_left, self.lifetime_recovered_right)
+    }
+    pub fn reset_lifetime_recovered_state(&mut self) {
+        self.lifetime_recovered_left = 0;
+        self.lifetime_recovered_right = 0;
+    }
 }
 
 fn process_input_lane(
@@ -542,24 +695,27 @@ fn process_input_lane(
 }
 
 impl FaderMuteBuiltins {
-    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         let mut report = BuiltinProcessReport::default();
-        if block.checked_len().is_err() {
-            return report;
-        }
+        block.checked_len()?;
         for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+            let left_input = sanitize_input(*left, &mut report.sanitized_input);
+            let right_input = sanitize_input(*right, &mut report.sanitized_input);
             *left = if self.left.muted {
                 0.0
             } else {
-                sanitize(*left * self.left.gain, &mut report.sanitized_output)
+                sanitize(left_input * self.left.gain, &mut report.sanitized_output)
             };
             *right = if self.right.muted {
                 0.0
             } else {
-                sanitize(*right * self.right.gain, &mut report.sanitized_output)
+                sanitize(right_input * self.right.gain, &mut report.sanitized_output)
             };
         }
-        report
+        Ok(report)
     }
     fn reset(&mut self) {}
 }
@@ -573,25 +729,31 @@ impl MatrixBuiltins {
         }
         Ok(())
     }
-    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+    pub fn process(
+        &mut self,
+        block: DualMonoBlock<'_>,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
         let mut report = BuiltinProcessReport::default();
-        if block.checked_len().is_err() {
-            return report;
-        }
+        block.checked_len()?;
         for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
             self.advance();
             let in_left = sanitize_input(*left, &mut report.sanitized_input);
             let in_right = sanitize_input(*right, &mut report.sanitized_input);
-            *left = sanitize(
-                self.current.ll * in_left + self.current.lr * in_right,
-                &mut report.sanitized_output,
-            );
-            *right = sanitize(
-                self.current.rl * in_left + self.current.rr * in_right,
-                &mut report.sanitized_output,
-            );
+            if self.current == Matrix2x2::IDENTITY {
+                *left = in_left;
+                *right = in_right;
+            } else {
+                *left = sanitize(
+                    self.current.ll * in_left + self.current.lr * in_right,
+                    &mut report.sanitized_output,
+                );
+                *right = sanitize(
+                    self.current.rl * in_left + self.current.rr * in_right,
+                    &mut report.sanitized_output,
+                );
+            }
         }
-        report
+        Ok(report)
     }
     fn advance(&mut self) {
         if self.remaining_updates == 0 {
@@ -677,6 +839,11 @@ pub struct MeterConfig {
 pub enum MeterConfigError {
     DecayDomain,
     Queue,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeterObservationError {
+    LaneLength,
+    SampleTimeOverflow,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MeterLaneSnapshot {
@@ -771,19 +938,21 @@ impl MeterAccumulator {
             consumer,
         })
     }
-    pub fn observe(&mut self, left: &[f32], right: &[f32], first_sample: u64) {
+    pub fn observe(
+        &mut self,
+        left: &[f32],
+        right: &[f32],
+        first_sample: u64,
+    ) -> Result<(), MeterObservationError> {
         if left.len() != right.len() {
-            return;
+            return Err(MeterObservationError::LaneLength);
         }
         let len = match u64::try_from(left.len())
             .ok()
             .and_then(|len| first_sample.checked_add(len))
         {
             Some(_) => left.len(),
-            None => {
-                self.discontinuity(first_sample);
-                return;
-            }
+            None => return Err(MeterObservationError::SampleTimeOverflow),
         };
         if self
             .start
@@ -816,6 +985,7 @@ impl MeterAccumulator {
                 self.emit();
             }
         }
+        Ok(())
     }
     pub fn reset(&mut self, kind: BuiltinResetKind) {
         self.start = None;
@@ -838,7 +1008,12 @@ impl MeterAccumulator {
         self.discontinuities = self.discontinuities.saturating_add(1);
     }
     fn emit(&mut self) {
-        let start = self.start.expect("meter start initialized");
+        let Some(start) = self.start else {
+            // This can only follow internal corruption.  Preserve the render no-panic contract,
+            // discard the incomplete interval, and surface it in the next snapshot counter.
+            self.discontinuity(0);
+            return;
+        };
         let end = match start.checked_add(u64::from(self.frames)) {
             Some(value) => value,
             None => {
@@ -991,11 +1166,9 @@ mod tests {
         .expect("prepare");
         let mut left = [0.5_f32];
         let mut right = [0.0_f32];
-        chain.process_dual_mono(DualMonoBlock {
-            left: &mut left,
-            right: &mut right,
-            first_sample: 0,
-        });
+        chain
+            .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
+            .expect("valid block");
         assert!((left[0] + 1.0).abs() < 2e-5);
         assert_eq!(right, [0.0]);
     }
@@ -1019,11 +1192,9 @@ mod tests {
             .expect("target");
         let mut left = [1.0, 1.0];
         let mut right = [0.0, 0.0];
-        chain.process_matrix(DualMonoBlock {
-            left: &mut left,
-            right: &mut right,
-            first_sample: 0,
-        });
+        chain
+            .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
+            .expect("valid block");
         assert_eq!(left, [0.5, 0.0]);
     }
     #[test]
@@ -1040,12 +1211,171 @@ mod tests {
             mut accumulator,
             mut consumer,
         } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
-        accumulator.observe(&[1.0, 0.5], &[0.0, -1.0], 3);
+        accumulator
+            .observe(&[1.0, 0.5], &[0.0, -1.0], 3)
+            .expect("matched meter lanes");
         let snap = consumer.try_pop().expect("snapshot");
         assert_eq!(snap.start_sample, 3);
         assert_eq!(snap.end_sample, 5);
         assert_eq!(snap.left.clipped_samples, 1);
         assert_eq!(snap.right.clipped_samples, 1);
+    }
+    #[test]
+    fn parameter_descriptors_have_complete_stable_contracts() {
+        assert_eq!(
+            BUILTIN_PARAMETER_DESCRIPTORS_V1.map(|descriptor| descriptor.id),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+        let hpf = BUILTIN_PARAMETER_DESCRIPTORS_V1[2];
+        assert_eq!(hpf.unit, BuiltinParameterUnit::Hertz);
+        assert_eq!(hpf.disabled_value, Some(0.0));
+        assert_eq!(hpf.minimum, 0.0);
+        assert!(hpf.maximum.is_infinite());
+        let matrix = BUILTIN_PARAMETER_DESCRIPTORS_V1[6];
+        assert!(!matrix.per_lane);
+        assert_eq!(matrix.unit, BuiltinParameterUnit::Linear);
+        assert_eq!(
+            matrix.smoothing,
+            BuiltinSmoothingPolicy::MatrixLinearUpdates
+        );
+        assert_eq!(matrix.reset, BuiltinParameterReset::KeepTargetResetCurrent);
+    }
+    #[test]
+    fn blocks_reject_before_processing_and_reports_are_per_call() {
+        let mut left = [1.0_f32];
+        let mut right = [1.0_f32, 1.0];
+        assert!(matches!(
+            DualMonoBlock::new(&mut left, &mut right, 0),
+            Err(BuiltinParameterError::LaneLength)
+        ));
+        let mut empty_left = [];
+        let mut empty_right = [];
+        assert!(matches!(
+            DualMonoBlock::new(&mut empty_left, &mut empty_right, 0),
+            Err(BuiltinParameterError::EmptyBlock)
+        ));
+        let mut overflow_left = [1.0_f32];
+        let mut overflow_right = [1.0_f32];
+        assert!(matches!(
+            DualMonoBlock::new(&mut overflow_left, &mut overflow_right, u64::MAX),
+            Err(BuiltinParameterError::SampleTimeOverflow)
+        ));
+
+        let mut chain = BuiltinChain::new(
+            48_000,
+            BuiltinParameters {
+                left: ChannelParameters {
+                    hpf_hz: 100.0,
+                    ..ChannelParameters::default()
+                },
+                ..BuiltinParameters::default()
+            },
+        )
+        .expect("prepare");
+        chain.input.left.hpf.s1 = f32::NAN;
+        let mut first_left = [0.5_f32];
+        let mut first_right = [0.0_f32];
+        let first = chain
+            .process_input(DualMonoBlock::new(&mut first_left, &mut first_right, 0).expect("block"))
+            .expect("process");
+        assert_eq!(first.recovered_left_state, 1);
+        assert_eq!(chain.input.lifetime_recovered_state(), (1, 0));
+        let mut second_left = [0.5_f32];
+        let mut second_right = [0.0_f32];
+        let second = chain
+            .process_input(
+                DualMonoBlock::new(&mut second_left, &mut second_right, 1).expect("block"),
+            )
+            .expect("process");
+        assert_eq!(second.recovered_left_state, 0);
+        assert_eq!(chain.input.lifetime_recovered_state(), (1, 0));
+    }
+    #[test]
+    fn fader_and_identity_matrix_sanitize_and_preserve_signed_zero() {
+        let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).expect("prepare");
+        let mut left = [-0.0_f32, f32::NAN];
+        let mut right = [0.0_f32, f32::INFINITY];
+        let report = chain
+            .process_fader_mute(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
+            .expect("process");
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(left[1], 0.0);
+        assert_eq!(right[1], 0.0);
+        assert_eq!(report.sanitized_input, 2);
+        let report = chain
+            .process_matrix(DualMonoBlock::new(&mut left, &mut right, 2).expect("block"))
+            .expect("process");
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(report.sanitized_input, 0);
+    }
+    #[test]
+    fn meter_windows_discontinuities_resets_and_drops_are_exact() {
+        let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
+        let config = MeterConfig {
+            period_frames: NonZeroU32::new(2).expect("constant"),
+            peak_hold_frames: 1,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(1).expect("constant"),
+            reset_generation: 9,
+        };
+        let PreparedMeter {
+            mut accumulator,
+            mut consumer,
+        } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
+        assert_eq!(
+            accumulator.observe(&[0.5], &[f32::NAN, 0.0], 0),
+            Err(MeterObservationError::LaneLength)
+        );
+        accumulator
+            .observe(&[1.0, 0.0], &[0.25, -0.25], 4)
+            .expect("first window");
+        let first = consumer.try_pop().expect("first snapshot");
+        assert_eq!(
+            (first.start_sample, first.end_sample, first.frames),
+            (4, 6, 2)
+        );
+        assert_eq!(first.left.energy, 1.0);
+        assert!((first.left.rms - 1.0 / 2.0_f64.sqrt()).abs() <= f64::EPSILON);
+        assert_eq!(first.left.held_peak, 1.0);
+        accumulator
+            .observe(&[0.0], &[0.0], 9)
+            .expect("discontinuity");
+        accumulator
+            .observe(&[0.0], &[0.0], 10)
+            .expect("second window");
+        let second = consumer.try_pop().expect("second snapshot");
+        assert_eq!((second.start_sample, second.end_sample), (9, 11));
+        assert_eq!(second.cumulative_discontinuities, 1);
+        accumulator
+            .observe(&[0.0, 0.0], &[0.0, 0.0], 11)
+            .expect("queued snapshot");
+        accumulator
+            .observe(&[0.0, 0.0], &[0.0, 0.0], 13)
+            .expect("dropped snapshot");
+        let queued = consumer.try_pop().expect("queued snapshot");
+        assert_eq!(queued.cumulative_dropped_snapshots, 0);
+        accumulator
+            .observe(&[0.0, 0.0], &[0.0, 0.0], 15)
+            .expect("post-drop snapshot");
+        let post_drop = consumer.try_pop().expect("post-drop snapshot");
+        assert_eq!(post_drop.cumulative_dropped_snapshots, 1);
+        accumulator.reset(BuiltinResetKind::DiscontinuityKeepTargets);
+        accumulator
+            .observe(&[0.0, 0.0], &[0.0, 0.0], 17)
+            .expect("reset window");
+        let reset = consumer.try_pop().expect("reset snapshot");
+        assert_eq!(reset.window_sequence, 5);
+        assert_eq!(reset.cumulative_dropped_snapshots, 1);
+        accumulator.reset(BuiltinResetKind::FullToPrepared);
+        accumulator
+            .observe(&[0.0, 0.0], &[0.0, 0.0], 19)
+            .expect("full reset window");
+        let full_reset = consumer.try_pop().expect("full reset snapshot");
+        assert_eq!(full_reset.window_sequence, 0);
+        assert_eq!(full_reset.cumulative_dropped_snapshots, 0);
+        assert_eq!(full_reset.cumulative_discontinuities, 0);
     }
     #[test]
     fn launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle() {
@@ -1077,11 +1407,9 @@ mod tests {
             let expected: Vec<_> = (0..left.len())
                 .map(|index| low.process(high.process(if index == 0 { 1.0 } else { 0.0 })))
                 .collect();
-            let _ = chain.process_input(DualMonoBlock {
-                left: &mut left,
-                right: &mut right,
-                first_sample: 0,
-            });
+            let _ = chain
+                .process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
+                .expect("valid block");
             for (actual, reference) in left.iter().zip(expected) {
                 assert!(
                     (f64::from(*actual) - reference).abs() <= 2e-5,
@@ -1136,11 +1464,12 @@ mod tests {
                 .expect("identity");
             let mut left = [0.25_f32; 127];
             let mut right = [-0.5_f32; 127];
-            let _ = chain.process_dual_mono(DualMonoBlock {
-                left: &mut left,
-                right: &mut right,
-                first_sample: iteration.saturating_mul(127),
-            });
+            let _ = chain
+                .process_dual_mono(
+                    DualMonoBlock::new(&mut left, &mut right, iteration.saturating_mul(127))
+                        .expect("block"),
+                )
+                .expect("valid block");
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     }
@@ -1171,11 +1500,16 @@ mod tests {
                         break;
                     }
                     let end = (offset + quantum).min(frames);
-                    let _ = chain.process_input(DualMonoBlock {
-                        left: &mut left[offset..end],
-                        right: &mut right[offset..end],
-                        first_sample: offset as u64,
-                    });
+                    let _ = chain
+                        .process_input(
+                            DualMonoBlock::new(
+                                &mut left[offset..end],
+                                &mut right[offset..end],
+                                offset as u64,
+                            )
+                            .expect("block"),
+                        )
+                        .expect("valid block");
                     offset = end;
                 }
                 let mut high = ReferenceBiquad::rbj_butterworth(
@@ -1192,12 +1526,12 @@ mod tests {
                 .expect("reference low pass");
                 let mut actual_energy = 0.0_f64;
                 let mut reference_energy = 0.0_f64;
-                for index in 0..frames {
+                for (index, actual) in left.iter().copied().enumerate() {
                     let input =
                         (core::f64::consts::TAU * frequency * index as f64 / f64::from(rate)).sin();
                     let reference = low.process(high.process(input));
                     if index >= frames / 2 {
-                        actual_energy += f64::from(left[index]) * f64::from(left[index]);
+                        actual_energy += f64::from(actual) * f64::from(actual);
                         reference_energy += reference * reference;
                     }
                 }

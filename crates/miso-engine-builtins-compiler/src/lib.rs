@@ -11,8 +11,8 @@ use miso_engine_builtins::{
 };
 use miso_engine_core::realtime::{Consumer, RenderError};
 use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphRuntimeObserver, GraphRuntimeProcessor, StableGraphId, TrackStage,
+    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
+    GraphObservationBlock, GraphRuntimeObserver, GraphRuntimeProcessor, StableGraphId, TrackStage,
 };
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
@@ -65,6 +65,15 @@ pub struct PreparedBuiltinsSession {
     pub observers: Vec<GraphNodeObserverBinding>,
     pub meter_consumers: Vec<MeterConsumer>,
     pub tails: Vec<(String, BuiltinTail)>,
+    pub resources: BuiltinResourceEstimate,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BuiltinResourceEstimate {
+    pub retained_processor_bytes: u64,
+    pub retained_meter_bytes: u64,
+    pub meter_items: u64,
+    pub largest_allocation_bytes: u64,
 }
 
 pub fn prepare_session_builtins(
@@ -118,6 +127,7 @@ pub fn prepare_session_builtins(
     }
     let mut estimated_items = 0_u64;
     let mut estimated_meter_bytes = 0_u64;
+    let mut largest_allocation_bytes = 0_u64;
     for request in requests {
         let slots = match u64::try_from(request.config.queue_capacity.get())
             .ok()
@@ -142,16 +152,34 @@ pub fn prepare_session_builtins(
                 continue;
             }
         };
-        estimated_meter_bytes = match u64::try_from(core::mem::size_of::<MeterSnapshot>())
+        let queue_payload_bytes = match u64::try_from(core::mem::size_of::<MeterSnapshot>())
             .ok()
             .and_then(|bytes| bytes.checked_mul(slots))
-            .and_then(|bytes| estimated_meter_bytes.checked_add(bytes))
         {
             Some(value) => value,
             None => {
                 diagnostics.push(diag(
                     "builtin.resource.arithmetic_overflow",
                     "$.meter_requests",
+                ));
+                continue;
+            }
+        };
+        largest_allocation_bytes = largest_allocation_bytes.max(queue_payload_bytes);
+        let meter_endpoint_bytes = checked_type_bytes::<MeterObserver>(1)
+            .and_then(|bytes| bytes.checked_add(checked_type_bytes::<MeterConsumer>(1)?))
+            .and_then(|bytes| {
+                bytes.checked_add(checked_type_bytes::<GraphNodeObserverBinding>(1)?)
+            });
+        estimated_meter_bytes = match meter_endpoint_bytes
+            .and_then(|bytes| queue_payload_bytes.checked_add(bytes))
+            .and_then(|bytes| estimated_meter_bytes.checked_add(bytes))
+        {
+            Some(value) => value,
+            None => {
+                diagnostics.push(diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &meter_path(request),
                 ));
                 continue;
             }
@@ -164,23 +192,43 @@ pub fn prepare_session_builtins(
             0
         }
     };
-    let estimated_state = u64::try_from(core::mem::size_of::<BuiltinChain>())
-        .ok()
-        .and_then(|bytes| bytes.checked_mul(track_count))
+    let estimated_state = checked_type_bytes::<BuiltinChain>(track_count)
+        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<InputProcessor>(track_count)?))
+        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<FaderProcessor>(track_count)?))
+        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<MatrixProcessor>(track_count)?))
+        .and_then(|bytes| {
+            bytes.checked_add(checked_type_bytes::<GraphNodeBinding>(
+                track_count.checked_mul(3)?,
+            )?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(checked_type_bytes::<(String, BuiltinTail)>(track_count)?)
+        })
         .unwrap_or_else(|| {
             diagnostics.push(diag("builtin.resource.arithmetic_overflow", "$.tracks"));
             u64::MAX
         });
+    largest_allocation_bytes = largest_allocation_bytes
+        .max(
+            checked_type_bytes::<GraphNodeBinding>(track_count.saturating_mul(3))
+                .unwrap_or(u64::MAX),
+        )
+        .max(
+            checked_type_bytes::<GraphNodeObserverBinding>(requests.len() as u64)
+                .unwrap_or(u64::MAX),
+        )
+        .max(checked_type_bytes::<MeterConsumer>(requests.len() as u64).unwrap_or(u64::MAX))
+        .max(checked_type_bytes::<(String, BuiltinTail)>(track_count).unwrap_or(u64::MAX));
     if estimated_state > caps.maximum_total_state_bytes
         || estimated_items > caps.maximum_total_meter_items
         || estimated_meter_bytes > caps.maximum_total_meter_bytes
-        || estimated_state.max(estimated_meter_bytes) > caps.maximum_single_allocation_bytes
+        || largest_allocation_bytes > caps.maximum_single_allocation_bytes
     {
         diagnostics.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
     }
 
-    let mut prepared = Vec::new();
-    let mut tails = Vec::new();
+    let mut prepared = Vec::with_capacity(session.normalized_model().tracks.len());
+    let mut tails = Vec::with_capacity(session.normalized_model().tracks.len());
     for track in &session.normalized_model().tracks {
         match track_parameters(track, caps.maximum_smoothing_samples) {
             Ok(parameters) => match BuiltinChain::new(session.sample_rate().0, parameters) {
@@ -188,9 +236,13 @@ pub fn prepare_session_builtins(
                     tails.push((track.id.as_str().to_owned(), chain.tail()));
                     prepared.push((track.id.as_str().to_owned(), chain.into_sections()));
                 }
-                Err(error) => diagnostics.push(parameter_diagnostic(track, error)),
+                Err(error) => {
+                    diagnostics.push(parameter_diagnostic(track, error, session.sample_rate().0))
+                }
             },
-            Err(error) => diagnostics.push(parameter_diagnostic(track, error)),
+            Err(error) => {
+                diagnostics.push(parameter_diagnostic(track, error, session.sample_rate().0))
+            }
         }
     }
     if !diagnostics.is_empty() {
@@ -251,46 +303,68 @@ pub fn prepare_session_builtins(
         observers,
         meter_consumers,
         tails,
+        resources: BuiltinResourceEstimate {
+            retained_processor_bytes: estimated_state,
+            retained_meter_bytes: estimated_meter_bytes,
+            meter_items: estimated_items,
+            largest_allocation_bytes,
+        },
     })
+}
+
+fn checked_type_bytes<T>(items: u64) -> Option<u64> {
+    u64::try_from(core::mem::size_of::<T>())
+        .ok()?
+        .checked_mul(items)
 }
 
 struct InputProcessor(InputBuiltins);
 impl GraphRuntimeProcessor for InputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let _ = self.0.process(DualMonoBlock {
-            left: block.left,
-            right: block.right,
-            first_sample: block.first_sample,
-        });
-        Ok(())
+        self.0
+            .process(
+                DualMonoBlock::new(block.left, block.right, block.first_sample)
+                    .map_err(render_error)?,
+            )
+            .map(|_| ())
+            .map_err(render_error)
     }
 }
 struct FaderProcessor(FaderMuteBuiltins);
 impl GraphRuntimeProcessor for FaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let _ = self.0.process(DualMonoBlock {
-            left: block.left,
-            right: block.right,
-            first_sample: block.first_sample,
-        });
-        Ok(())
+        self.0
+            .process(
+                DualMonoBlock::new(block.left, block.right, block.first_sample)
+                    .map_err(render_error)?,
+            )
+            .map(|_| ())
+            .map_err(render_error)
     }
 }
 struct MatrixProcessor(MatrixBuiltins);
 impl GraphRuntimeProcessor for MatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let _ = self.0.process(DualMonoBlock {
-            left: block.left,
-            right: block.right,
-            first_sample: block.first_sample,
-        });
-        Ok(())
+        self.0
+            .process(
+                DualMonoBlock::new(block.left, block.right, block.first_sample)
+                    .map_err(render_error)?,
+            )
+            .map(|_| ())
+            .map_err(render_error)
     }
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
     fn observe(&mut self, block: GraphObservationBlock<'_>) {
-        self.0.observe(block.left, block.right, block.first_sample);
+        let _ = self.0.observe(block.left, block.right, block.first_sample);
+    }
+}
+
+fn render_error(error: BuiltinParameterError) -> RenderError {
+    match error {
+        BuiltinParameterError::SampleTimeOverflow => RenderError::TimeOverflow,
+        _ => RenderError::InvalidEnvelope,
     }
 }
 
@@ -365,7 +439,11 @@ fn meter_path(request: &MeterRequest) -> String {
         request.track_id, request.tap
     )
 }
-fn parameter_diagnostic(track: &Track, error: BuiltinParameterError) -> BuiltinDiagnostic {
+fn parameter_diagnostic(
+    track: &Track,
+    error: BuiltinParameterError,
+    sample_rate: u32,
+) -> BuiltinDiagnostic {
     let code = match error {
         BuiltinParameterError::GainDomain => "builtin.gain.domain",
         BuiltinParameterError::FilterCutoff => "builtin.filter.cutoff",
@@ -375,7 +453,82 @@ fn parameter_diagnostic(track: &Track, error: BuiltinParameterError) -> BuiltinD
         BuiltinParameterError::MatrixSmoothing => "builtin.matrix.smoothing",
         _ => "builtin.resource.arithmetic_overflow",
     };
-    diag(code, &format!("$.tracks[id={}].builtins", track.id))
+    let track_path = format!("$.tracks[id={}]", track.id);
+    let path = match error {
+        BuiltinParameterError::GainDomain => gain_path(track, &track_path),
+        BuiltinParameterError::FilterCutoff => cutoff_path(track, &track_path, sample_rate),
+        BuiltinParameterError::FilterOrder => filter_order_path(track, &track_path),
+        BuiltinParameterError::MatrixCoefficient => matrix_path(track, &track_path),
+        BuiltinParameterError::MatrixSmoothing => {
+            format!("{track_path}.matrix_or_pan.smoothing_samples")
+        }
+        _ => format!("{track_path}.builtins"),
+    };
+    diag(code, &path)
+}
+
+fn gain_path(track: &Track, track_path: &str) -> String {
+    for (lane, builtins, fader) in [
+        ("left", &track.builtins.left, track.fader.left_db),
+        ("right", &track.builtins.right, track.fader.right_db),
+    ] {
+        if !builtins.trim_db.is_finite() || !(-144.0..=24.0).contains(&builtins.trim_db) {
+            return format!("{track_path}.builtins.{lane}.trim_db");
+        }
+        if !fader.is_finite() || !(-144.0..=24.0).contains(&fader) {
+            return format!("{track_path}.fader.{lane}_db");
+        }
+    }
+    format!("{track_path}.builtins")
+}
+
+fn cutoff_path(track: &Track, track_path: &str, sample_rate: u32) -> String {
+    for (lane, builtins) in [
+        ("left", &track.builtins.left),
+        ("right", &track.builtins.right),
+    ] {
+        if invalid_cutoff(builtins.hpf_hz, sample_rate) {
+            return format!("{track_path}.builtins.{lane}.hpf_hz");
+        }
+        if invalid_cutoff(builtins.lpf_hz, sample_rate) {
+            return format!("{track_path}.builtins.{lane}.lpf_hz");
+        }
+    }
+    format!("{track_path}.builtins")
+}
+
+fn filter_order_path(track: &Track, track_path: &str) -> String {
+    if track.builtins.left.hpf_hz > 0.0
+        && track.builtins.left.lpf_hz > 0.0
+        && track.builtins.left.hpf_hz >= track.builtins.left.lpf_hz
+    {
+        format!("{track_path}.builtins.left.lpf_hz")
+    } else {
+        format!("{track_path}.builtins.right.lpf_hz")
+    }
+}
+
+fn invalid_cutoff(value: f32, sample_rate: u32) -> bool {
+    !value.is_finite()
+        || value < 0.0
+        || (value > 0.0 && (value < 10.0 || value >= sample_rate as f32 * 0.5))
+}
+
+fn matrix_path(track: &Track, track_path: &str) -> String {
+    match track.matrix_or_pan {
+        MatrixOrPan::Pan { left, .. } if !left.is_finite() || !(-1.0..=1.0).contains(&left) => {
+            format!("{track_path}.matrix_or_pan.left")
+        }
+        MatrixOrPan::Pan { .. } => format!("{track_path}.matrix_or_pan.right"),
+        MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
+            for (field, value) in [("ll", ll), ("lr", lr), ("rl", rl), ("rr", rr)] {
+                if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+                    return format!("{track_path}.matrix_or_pan.{field}");
+                }
+            }
+            format!("{track_path}.matrix_or_pan")
+        }
+    }
 }
 fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinDiagnostic {
     diag(
@@ -449,6 +602,16 @@ mod tests {
         assert_eq!(prepared.processors.len(), 3);
         assert_eq!(prepared.observers.len(), 7);
         assert_eq!(prepared.meter_consumers.len(), 7);
+        assert_eq!(prepared.resources.meter_items, 35);
+        assert!(prepared.resources.retained_processor_bytes > 0);
+        assert!(
+            prepared.resources.retained_meter_bytes
+                > 35 * core::mem::size_of::<MeterSnapshot>() as u64
+        );
+        assert!(
+            prepared.resources.largest_allocation_bytes
+                >= 5 * core::mem::size_of::<MeterSnapshot>() as u64
+        );
         assert_eq!(
             prepared.tails,
             vec![("vocal".to_owned(), BuiltinTail::Infinite)]
