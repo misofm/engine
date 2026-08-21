@@ -1378,6 +1378,67 @@ mod tests {
         assert_eq!(full_reset.cumulative_discontinuities, 0);
     }
     #[test]
+    fn ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite() {
+        let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
+        let mut state = 0x4d45_5445_525f_3031_u64;
+        for iteration in 0..10_000_u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let period = NonZeroU32::new(((state as u32) & 7) + 1).expect("nonzero");
+            let capacity = NonZeroUsize::new((((state >> 8) as usize) & 3) + 1).expect("nonzero");
+            let PreparedMeter {
+                mut accumulator,
+                mut consumer,
+            } = MeterAccumulator::prepare(
+                handle,
+                MeterConfig {
+                    period_frames: period,
+                    peak_hold_frames: ((state >> 16) as u32) & 15,
+                    peak_decay_db_per_second: ((state >> 32) as f32 / u32::MAX as f32) * 120.0,
+                    queue_capacity: capacity,
+                    reset_generation: iteration,
+                },
+                48_000,
+            )
+            .expect("generated meter config");
+            let frames = usize::try_from(period.get()).expect("small period") * 2;
+            let mut left = [0.0_f32; 16];
+            let mut right = [0.0_f32; 16];
+            for index in 0..frames {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                left[index] = if state & 31 == 0 {
+                    f32::NAN
+                } else {
+                    ((state as i32) as f32) / i32::MAX as f32
+                };
+                right[index] = if state & 63 == 0 {
+                    f32::INFINITY
+                } else {
+                    (((state >> 32) as i32) as f32) / i32::MAX as f32
+                };
+            }
+            accumulator
+                .observe(
+                    &left[..frames],
+                    &right[..frames],
+                    iteration.saturating_mul(32),
+                )
+                .expect("matching meter lanes");
+            while let Ok(snapshot) = consumer.try_pop() {
+                assert_eq!(snapshot.frames, period.get());
+                assert!(snapshot.left.energy.is_finite());
+                assert!(snapshot.right.energy.is_finite());
+                assert!(snapshot.left.rms.is_finite());
+                assert!(snapshot.right.rms.is_finite());
+                assert!(snapshot.left.sample_peak.is_finite());
+                assert!(snapshot.right.sample_peak.is_finite());
+            }
+        }
+    }
+    #[test]
     fn launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle() {
         for rate in launch_and_extended_compatibility_rates() {
             let parameters = BuiltinParameters {

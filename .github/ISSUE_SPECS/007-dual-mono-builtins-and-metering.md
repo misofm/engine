@@ -369,3 +369,29 @@ compiler tests) and `cargo clippy -p miso-engine-builtins -p miso-engine-builtin
 removed. The response and cascade tests remain in that focused suite and pass. Full workspace,
 allocation/realtime, fixture/listening, cross-target, and final prepared-artifact gates are still
 unrun or open. The exactly-once benchmark invocation count remains **0**.
+
+## Fixture/reference/policy Terra evidence (2026-08-21; partial)
+
+`fixtures/builtins/v1` now contains a sorted, exact-length, lowercase-SHA-256 manifest for stable
+filter-response, meter-window, and resource-cap case declarations. `check-builtins-fixtures.sh`
+rejects missing, changed, malformed, unsorted, and unlisted payloads; its mutation companion
+proves a changed fixture cannot escape. The case declarations point to the existing independent
+f64 TPT/RBJ section and production-order cascade tests, which continue to cover the four launch
+rates and prescribed response partitions. They do not replace the remaining broader fixture
+classes or an external reproducible f64 table.
+
+Deterministic conformance now includes 10,000 independently seeded meter configurations/blocks;
+all emitted peak/RMS/energy values stayed finite and every window retained its exact configured
+frame count. A compiler test derives the emitted retained-resource estimate and proves that a cap
+one byte below its largest payload rejects transactionally with `builtin.resource.limit`.
+`check-builtins-policy.sh` now validates the production dependency direction as well as naming,
+`unsafe`, and compiled-track-ceiling prohibitions; its mutation test proves an injected forbidden
+token is rejected. The implementation note now describes the conditioned incremental TPT
+recurrence rather than the superseded transposed-DF-II realization.
+
+PASS: `bash scripts/check-builtins-policy.sh`, `bash scripts/test-builtins-policy.sh`,
+`bash scripts/check-builtins-fixtures.sh`, `bash scripts/test-builtins-fixtures.sh`, and the
+focused builtins/compiler test suite (15 + 3 tests). Allocation/forbidden-operation auditing,
+65,537-track builtin preparation, full fixture corpus, sealed-artifact equality, workspace/target
+evidence, listening, and the final benchmark remain open. Benchmark invocation count remains
+**0**.

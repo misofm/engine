@@ -650,4 +650,33 @@ mod tests {
             vec!["builtin.meter.duplicate", "builtin.meter.unknown_track"]
         );
     }
+
+    #[test]
+    fn resource_estimate_enforces_the_actual_largest_retained_payload() {
+        let config = MeterConfig {
+            period_frames: NonZeroU32::new(16).expect("constant"),
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(1).expect("constant"),
+            reset_generation: 0,
+        };
+        let requests = [MeterRequest {
+            track_id: "vocal".to_owned(),
+            tap: MeterTap::PostMatrix,
+            config,
+        }];
+        let baseline = prepare_session_builtins(&session(), &requests, caps()).expect("prepare");
+        let mut constrained = caps();
+        constrained.maximum_single_allocation_bytes = baseline
+            .resources
+            .largest_allocation_bytes
+            .saturating_sub(1);
+        let Err(error) = prepare_session_builtins(&session(), &requests, constrained) else {
+            panic!("largest retained payload must be capped");
+        };
+        assert_eq!(
+            error.0,
+            vec![diag("builtin.resource.limit", "$.builtin_compile_caps")]
+        );
+    }
 }
