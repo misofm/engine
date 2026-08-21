@@ -7,7 +7,7 @@ required native/mobile/Wasm nonbenchmark target matrix.
 
 ## Context
 
-This issue starts only after **Complete independent builtin corpus after recovery acceptance** passes.
+This issue starts only after **Seal independent builtin corpus corruption and read-only qualification** passes.
 It consumes that exact candidate/corpus without regenerating or changing expected values. It
 permits exactly one Terra attempt and one bounded Sol correction; a second failure stops.
 Launch-rate scope is exactly 44,100, 48,000, 88,200 and 96,000 Hz. Benchmark binaries, workloads
@@ -17,7 +17,7 @@ and timing are forbidden; invocation counts start and remain zero.
 
 Complete the Issue-035 frozen direct-chain and production-graph audits, graph tap/PDC/swap/
 retirement evidence, detector probes, launch-rate correctness rows, target builds/instruction
-checks and clean nonbenchmark workspace/policy seal. Use the sealed Issue-060 corpus as expected
+checks and clean nonbenchmark workspace/policy seal. Use the sealed Issue-064 corpus as expected
 output.
 
 ## Required public interfaces/contracts
@@ -39,7 +39,7 @@ listening, deployment adapters, or V1/legacy inspection.
 
 ## Dependencies by exact issue title
 
-- Complete independent builtin corpus after recovery acceptance
+- Seal independent builtin corpus corruption and read-only qualification
 - Real-time memory, buffers, queues, and plan lifetime
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Production SIMD builtin bank graph retention and reachability qualification
