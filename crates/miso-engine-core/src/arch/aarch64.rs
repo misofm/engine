@@ -4,15 +4,17 @@ use core::arch::aarch64::*;
 
 use super::{
     CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, SOFT_CLIP_HISTORY_WORDS,
-    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock,
+    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock, check_soft_clip_lanes,
 };
 
 #[inline(never)]
 #[target_feature(enable = "neon")]
-unsafe fn process_soft_clip_aarch64_neon_inner(block: SoftClipKernelBlock<'_>) {
+unsafe fn process_soft_clip_aarch64_neon_inner(block: SoftClipKernelBlock<'_>) -> u32 {
     // SAFETY: the token validates four-lane slices and AArch64 NEON is a target property.
     unsafe {
         const LANES: usize = 4;
+        let mut failed_lanes = 0;
+        check_soft_clip_lanes(block.samples, &mut failed_lanes);
         for lane in 0..LANES {
             let cursor = block.cursors[lane] as usize;
             block.interpolation_history[cursor * LANES + lane] = block.samples[lane];
@@ -21,23 +23,31 @@ unsafe fn process_soft_clip_aarch64_neon_inner(block: SoftClipKernelBlock<'_>) {
             block.interpolation_history,
             block.coefficients,
             block.cursors,
+            &mut failed_lanes,
         );
-        let shaped = soft_clip_cubic_neon(interpolated);
+        let shaped = soft_clip_cubic_neon(interpolated, &mut failed_lanes);
         for (lane, shaped_value) in shaped.into_iter().enumerate() {
             let cursor = block.cursors[lane] as usize;
             block.decimation_history[cursor * LANES + lane] = shaped_value;
         }
-        let output =
-            soft_clip_convolve_neon(block.decimation_history, block.coefficients, block.cursors);
+        let output = soft_clip_convolve_neon(
+            block.decimation_history,
+            block.coefficients,
+            block.cursors,
+            &mut failed_lanes,
+        );
         block.samples.copy_from_slice(&output);
-        for cursor in block.cursors {
-            *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+        for (lane, cursor) in block.cursors.iter_mut().enumerate() {
+            if failed_lanes & (1_u32 << lane) == 0 {
+                *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+            }
         }
+        failed_lanes
     }
 }
 
 #[inline(never)]
-pub(super) fn process_soft_clip_aarch64_neon(block: SoftClipKernelBlock<'_>) {
+pub(super) fn process_soft_clip_aarch64_neon(block: SoftClipKernelBlock<'_>) -> u32 {
     // SAFETY: AArch64 NEON is available whenever this prepared entry point is selected.
     unsafe { process_soft_clip_aarch64_neon_inner(block) }
 }
@@ -47,6 +57,7 @@ unsafe fn soft_clip_convolve_neon(
     history: &[f32],
     coefficients: &[f32],
     cursors: &[u32],
+    failed_lanes: &mut u32,
 ) -> [f32; 4] {
     // SAFETY: caller validated exact four-lane/sample-major storage before entering this helper.
     unsafe {
@@ -59,8 +70,11 @@ unsafe fn soft_clip_convolve_neon(
                 let index = (cursor + SOFT_CLIP_HISTORY_WORDS - tap) % SOFT_CLIP_HISTORY_WORDS;
                 gathered[lane] = history[index * LANES + lane];
             }
-            let product = vmulq_f32(vdupq_n_f32(coefficients[tap]), vld1q_f32(gathered.as_ptr()));
-            accumulator = vaddq_f32(accumulator, product);
+            let product = soft_clip_checked_neon(
+                vmulq_f32(vdupq_n_f32(coefficients[tap]), vld1q_f32(gathered.as_ptr())),
+                failed_lanes,
+            );
+            accumulator = soft_clip_checked_neon(vaddq_f32(accumulator, product), failed_lanes);
         }
         let mut output = [0.0_f32; LANES];
         vst1q_f32(output.as_mut_ptr(), accumulator);
@@ -69,7 +83,7 @@ unsafe fn soft_clip_convolve_neon(
 }
 
 #[target_feature(enable = "neon")]
-unsafe fn soft_clip_cubic_neon(input: [f32; 4]) -> [f32; 4] {
+unsafe fn soft_clip_cubic_neon(input: [f32; 4], failed_lanes: &mut u32) -> [f32; 4] {
     // SAFETY: caller enters only through the target-feature-gated four-lane phase function.
     unsafe {
         let value = vld1q_f32(input.as_ptr());
@@ -78,15 +92,26 @@ unsafe fn soft_clip_cubic_neon(input: [f32; 4]) -> [f32; 4] {
         let saturated = vorrq_u32(negative_mask, positive_mask);
         let interior_mask = vmvnq_u32(saturated);
         let interior = vbslq_f32(interior_mask, value, vdupq_n_f32(0.0));
-        let p0 = vmulq_f32(interior, interior);
-        let p1 = vmulq_f32(p0, interior);
-        let p2 = vdivq_f32(p1, vdupq_n_f32(3.0));
-        let polynomial = vsubq_f32(interior, p2);
+        let p0 = soft_clip_checked_neon(vmulq_f32(interior, interior), failed_lanes);
+        let p1 = soft_clip_checked_neon(vmulq_f32(p0, interior), failed_lanes);
+        let p2 = soft_clip_checked_neon(vdivq_f32(p1, vdupq_n_f32(3.0)), failed_lanes);
+        let polynomial = soft_clip_checked_neon(vsubq_f32(interior, p2), failed_lanes);
         let negative = vbslq_f32(negative_mask, vdupq_n_f32(-2.0 / 3.0), polynomial);
         let output = vbslq_f32(positive_mask, vdupq_n_f32(2.0 / 3.0), negative);
         let mut values = [0.0_f32; 4];
         vst1q_f32(values.as_mut_ptr(), output);
         values
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn soft_clip_checked_neon(value: float32x4_t, failed_lanes: &mut u32) -> float32x4_t {
+    // SAFETY: this helper runs only from NEON code and stores/loads one local four-lane array.
+    unsafe {
+        let mut values = [0.0_f32; 4];
+        vst1q_f32(values.as_mut_ptr(), value);
+        check_soft_clip_lanes(&mut values, failed_lanes);
+        vld1q_f32(values.as_ptr())
     }
 }
 

@@ -2,44 +2,72 @@
 
 use super::{
     CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, SOFT_CLIP_HISTORY_WORDS,
-    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock,
+    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock, check_soft_clip_lanes,
 };
 
 /// Frozen scalar fixed-2x soft-clip high-rate phase.
 #[inline(never)]
-pub(super) fn process_soft_clip_scalar(block: SoftClipKernelBlock<'_>) {
+pub(super) fn process_soft_clip_scalar(block: SoftClipKernelBlock<'_>) -> u32 {
+    let mut failed_lanes = 0;
+    check_soft_clip_lanes(block.samples, &mut failed_lanes);
     let cursor = block.cursors[0] as usize;
     block.interpolation_history[cursor] = block.samples[0];
-    let interpolated =
-        soft_clip_convolve_scalar(block.interpolation_history, block.coefficients, cursor);
-    let shaped = soft_clip_cubic_scalar(interpolated);
+    let interpolated = soft_clip_convolve_scalar(
+        block.interpolation_history,
+        block.coefficients,
+        cursor,
+        &mut failed_lanes,
+    );
+    let shaped = soft_clip_cubic_scalar(interpolated, &mut failed_lanes);
     block.decimation_history[cursor] = shaped;
-    block.samples[0] =
-        soft_clip_convolve_scalar(block.decimation_history, block.coefficients, cursor);
-    block.cursors[0] = ((cursor + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+    block.samples[0] = soft_clip_convolve_scalar(
+        block.decimation_history,
+        block.coefficients,
+        cursor,
+        &mut failed_lanes,
+    );
+    if failed_lanes == 0 {
+        block.cursors[0] = ((cursor + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+    }
+    failed_lanes
 }
 
 #[allow(clippy::assign_op_pattern)]
-fn soft_clip_convolve_scalar(history: &[f32], coefficients: &[f32], cursor: usize) -> f32 {
+fn soft_clip_convolve_scalar(
+    history: &[f32],
+    coefficients: &[f32],
+    cursor: usize,
+    failed_lanes: &mut u32,
+) -> f32 {
     let mut accumulator = 0.0_f32;
     for tap in SOFT_CLIP_NONZERO_TAPS {
         let index = (cursor + SOFT_CLIP_HISTORY_WORDS - tap) % SOFT_CLIP_HISTORY_WORDS;
-        let product = coefficients[tap] * history[index];
+        let mut product = [coefficients[tap] * history[index]];
+        check_soft_clip_lanes(&mut product, failed_lanes);
+        let product = product[0];
         accumulator = accumulator + product;
+        let mut sum = [accumulator];
+        check_soft_clip_lanes(&mut sum, failed_lanes);
+        accumulator = sum[0];
     }
     accumulator
 }
 
-fn soft_clip_cubic_scalar(value: f32) -> f32 {
+fn soft_clip_cubic_scalar(value: f32, failed_lanes: &mut u32) -> f32 {
     if value <= -1.0 {
         -2.0_f32 / 3.0_f32
     } else if value >= 1.0 {
         2.0_f32 / 3.0_f32
     } else {
-        let p0 = value * value;
-        let p1 = p0 * value;
-        let p2 = p1 / 3.0_f32;
-        value - p2
+        let mut p0 = [value * value];
+        check_soft_clip_lanes(&mut p0, failed_lanes);
+        let mut p1 = [p0[0] * value];
+        check_soft_clip_lanes(&mut p1, failed_lanes);
+        let mut p2 = [p1[0] / 3.0_f32];
+        check_soft_clip_lanes(&mut p2, failed_lanes);
+        let mut output = [value - p2[0]];
+        check_soft_clip_lanes(&mut output, failed_lanes);
+        output[0]
     }
 }
 

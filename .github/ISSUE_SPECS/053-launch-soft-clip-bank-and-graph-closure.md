@@ -144,3 +144,32 @@ count; strict Terra/final Sol verdict; and `timed_benchmark_invocations=0`.
 - Remaining core/Clippy/final-policy gates were not run after the semantic failure. No alias,
   registry, graph, qualification, audit, target, or timing work was started.
 - `timed_benchmark_invocations=0`. Terra verdict: **FAIL**; stop for Sol review.
+
+## Sol attempt 2 — bounded recovery-parity correction checkpoint (partial)
+
+- Base candidate `426efc6`. The Terra failure reproduced unchanged: an injected W8 interpolation
+  `NaN` did not set lane zero's recovery result. Root cause was the core phase seam, not the frozen
+  scalar DSP or test index: `PreparedSoftClipBankKernelV1::process_phase` returned only structural
+  errors, so a nonfinite FIR accumulator/cubic intermediate was not observable by the effect when
+  the current decimator output remained finite.
+- The prepared core token now returns an allocation-free `u32` failed-lane mask. Scalar, W4
+  Wasm/NEON, W8 AVX2 and the zero-contraction AVX2+FMA alias check and normalize the input, every
+  FIR product/add, and every cubic multiply/divide/subtract rounding point. Nonfinite values set
+  only their lane bit and become positive zero; finite subnormals become positive zero without a
+  recovery bit. Only healthy lane cursors advance. Dispatch remains preparation-gated and performs
+  no render allocation, feature detection or lock.
+- The bank merges both high-rate phase masks into the existing per-track recovery flags. A failed
+  lane emits its already captured delayed dry sample, clears/snaps only that lane in the same host
+  sample and increments only its corresponding `ProcessReport`; all other channels/tracks continue.
+  The descriptor, coefficient table, scalar implementation, state layout and exact 5,504/11,008
+  retained-byte rows are unchanged.
+- Executed proof now covers a portable scalar nonfinite/subnormal phase, an AVX2 interpolation plus
+  decimation two-lane fault mask with all healthy cursors isolated, and the real W8 bank report.
+  The bank's recovered left lane matches scalar delayed-dry output and complete serialized state;
+  every other left lane and all right lanes match an uninterrupted healthy scalar lane.
+- Focused PASS: `cargo fmt --all -- --check`; `cargo test --locked -p miso-engine-core --lib`
+  (31 passed); `cargo test --locked -p miso-engine-soft-clip --lib` (7 passed); and `cargo clippy
+  --locked -p miso-engine-core -p miso-engine-soft-clip --all-targets -- -D warnings`.
+- This is the first bounded Sol correction checkpoint, not overall Issue-053 PASS. The frozen alias
+  row, registry/effect-compiler, graph/PDC/cap and final workspace/policy gates were not started.
+  Issue-052 qualification remains untouched; `timed_benchmark_invocations=0`.

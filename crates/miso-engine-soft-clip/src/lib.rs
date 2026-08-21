@@ -840,8 +840,21 @@ fn process_bank_channel<const W: usize>(
             decimation.as_flattened_mut(),
         )
     };
-    if phase_one.is_err() || phase_two.is_err() {
-        failed.fill(true);
+    match phase_one {
+        Ok(failed_lanes) => {
+            for (track, failed) in failed.iter_mut().enumerate() {
+                *failed |= failed_lanes & (1_u32 << track) != 0;
+            }
+        }
+        Err(_) => failed.fill(true),
+    }
+    match phase_two {
+        Ok(failed_lanes) => {
+            for (track, failed) in failed.iter_mut().enumerate() {
+                *failed |= failed_lanes & (1_u32 << track) != 0;
+            }
+        }
+        Err(_) => failed.fill(true),
     }
     let mut output = [0.0_f32; W];
     for track in 0..W {
@@ -1704,10 +1717,10 @@ mod tests {
         assert_eq!(bits(&bank_left), bits(&expected_left));
         assert_eq!(bits(&bank_right), bits(&expected_right));
         assert_eq!(report.reports, expected_reports);
-        for track in 0..8 {
+        for (track, scalar) in scalars.iter().enumerate() {
             assert_eq!(
                 snapshot_bank(bank.as_ref(), track as u32),
-                snapshot(scalars[track].as_ref())
+                snapshot(scalar.as_ref())
             );
         }
 
@@ -1783,35 +1796,96 @@ mod tests {
                 )
                 .expect("scalar restore");
         }
-        let mut recovered_lane = BankLane::<8>::new(&[[1.0; PARAMETER_COUNT]; 8]);
-        recovered_lane.interpolation[61][0] = f32::NAN;
-        recovered_lane.dry[1][0] = -0.25;
-        let (output, recovered) =
-            process_bank_channel(&mut recovered_lane, [0.0; 8], false, kernel);
-        assert!(recovered[0]);
-        assert!(recovered[1..].iter().all(|value| !value));
-        assert_eq!(output[0].to_bits(), (-0.25_f32).to_bits());
-        assert_eq!(recovered_lane.high_cursor[0], 0);
-        assert_ne!(recovered_lane.high_cursor[1], 0);
+        let default_values = initial_values();
+        let effect_metadata =
+            expected_prepared_metadata(&SOFT_CLIP_DESCRIPTOR_V1, request(&default_values))
+                .expect("default metadata");
+        let defaults = [[1.0; PARAMETER_COUNT]; 8];
+        let mut recovered_bank = PreparedSoftClipBank::<8> {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Eight,
+                program_key: effect_metadata.program_key(),
+            },
+            effect_metadata,
+            kernel,
+            left_defaults: defaults,
+            right_defaults: defaults,
+            left: BankLane::new(&defaults),
+            right: BankLane::new(&defaults),
+        };
+        recovered_bank.left.interpolation[61][0] = f32::NAN;
+        recovered_bank.left.dry[1][0] = -0.25;
+        let mut scalar_recovery = Lane::new([1.0; PARAMETER_COUNT]).expect("scalar lane");
+        scalar_recovery.interp[61] = f32::NAN;
+        scalar_recovery.dry[1] = -0.25;
+        let scalar_output = scalar_recovery
+            .process(0.0, false)
+            .expect_err("scalar computed fault");
+        scalar_recovery.recover();
+        let mut unaffected = Lane::new([1.0; PARAMETER_COUNT]).expect("unaffected lane");
+        assert_eq!(unaffected.process(0.0, false), Ok(0.0));
+
+        let mut recovery_left = [0.0; 8];
+        let mut recovery_right = [0.0; 8];
+        let recovery_report = recovered_bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut recovery_left,
+                &mut recovery_right,
+                None,
+                1,
+                BankWidth::Eight,
+                0,
+                &[],
+                &[0; 9],
+                128,
+            )
+            .expect("recovery block"),
+        );
+        assert_eq!(recovery_left[0].to_bits(), scalar_output.to_bits());
+        assert_eq!(recovery_report.reports[0].recovered_left_samples, 1);
+        assert_eq!(recovery_report.reports[0].recovered_right_samples, 0);
+        assert!(
+            recovery_report.reports[1..]
+                .iter()
+                .all(|report| report.recovered_left_samples == 0
+                    && report.recovered_right_samples == 0)
+        );
+        let mut scalar_state = [0; LANE_STATE_BYTES as usize];
+        let mut recovered_state = [0; LANE_STATE_BYTES as usize];
+        let mut unaffected_state = [0; LANE_STATE_BYTES as usize];
+        write_lane(&mut scalar_state, &scalar_recovery);
+        write_lane(&mut recovered_state, &recovered_bank.left.lane(0));
+        write_lane(&mut unaffected_state, &unaffected);
+        assert_eq!(recovered_state, scalar_state);
+        for track in 0..8 {
+            let mut actual = [0; LANE_STATE_BYTES as usize];
+            write_lane(&mut actual, &recovered_bank.right.lane(track));
+            assert_eq!(actual, unaffected_state);
+        }
+        for track in 1..8 {
+            let mut actual = [0; LANE_STATE_BYTES as usize];
+            write_lane(&mut actual, &recovered_bank.left.lane(track));
+            assert_eq!(actual, unaffected_state);
+        }
 
         bank.reset(ResetKind::DiscontinuityKeepParameters);
         for scalar in &mut scalars {
             scalar.reset(ResetKind::DiscontinuityKeepParameters);
         }
-        for track in 0..8 {
+        for (track, scalar) in scalars.iter().enumerate() {
             assert_eq!(
                 snapshot_bank(bank.as_ref(), track as u32),
-                snapshot(scalars[track].as_ref())
+                snapshot(scalar.as_ref())
             );
         }
         bank.reset(ResetKind::FullToDefaults);
         for scalar in &mut scalars {
             scalar.reset(ResetKind::FullToDefaults);
         }
-        for track in 0..8 {
+        for (track, scalar) in scalars.iter().enumerate() {
             assert_eq!(
                 snapshot_bank(bank.as_ref(), track as u32),
-                snapshot(scalars[track].as_ref())
+                snapshot(scalar.as_ref())
             );
         }
     }

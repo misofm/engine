@@ -7,15 +7,17 @@ use core::arch::x86_64::*;
 
 use super::{
     CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, SOFT_CLIP_HISTORY_WORDS,
-    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock,
+    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock, check_soft_clip_lanes,
 };
 
 #[inline(never)]
 #[target_feature(enable = "avx2")]
-unsafe fn process_soft_clip_x86_avx2_inner(block: SoftClipKernelBlock<'_>) {
+unsafe fn process_soft_clip_x86_avx2_inner(block: SoftClipKernelBlock<'_>) -> u32 {
     // SAFETY: the token proves AVX2 and validates all eight-lane/sample-major slices.
     unsafe {
         const LANES: usize = 8;
+        let mut failed_lanes = 0;
+        check_soft_clip_lanes(block.samples, &mut failed_lanes);
         for lane in 0..LANES {
             let cursor = block.cursors[lane] as usize;
             block.interpolation_history[cursor * LANES + lane] = block.samples[lane];
@@ -24,31 +26,39 @@ unsafe fn process_soft_clip_x86_avx2_inner(block: SoftClipKernelBlock<'_>) {
             block.interpolation_history,
             block.coefficients,
             block.cursors,
+            &mut failed_lanes,
         );
-        let shaped = soft_clip_cubic_x86(interpolated);
+        let shaped = soft_clip_cubic_x86(interpolated, &mut failed_lanes);
         for (lane, shaped_value) in shaped.into_iter().enumerate() {
             let cursor = block.cursors[lane] as usize;
             block.decimation_history[cursor * LANES + lane] = shaped_value;
         }
-        let output =
-            soft_clip_convolve_x86(block.decimation_history, block.coefficients, block.cursors);
+        let output = soft_clip_convolve_x86(
+            block.decimation_history,
+            block.coefficients,
+            block.cursors,
+            &mut failed_lanes,
+        );
         block.samples.copy_from_slice(&output);
-        for cursor in block.cursors {
-            *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+        for (lane, cursor) in block.cursors.iter_mut().enumerate() {
+            if failed_lanes & (1_u32 << lane) == 0 {
+                *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+            }
         }
+        failed_lanes
     }
 }
 
 #[inline(never)]
-pub(super) fn process_soft_clip_x86_avx2(block: SoftClipKernelBlock<'_>) {
+pub(super) fn process_soft_clip_x86_avx2(block: SoftClipKernelBlock<'_>) -> u32 {
     // SAFETY: the prepared token retains this shim only after AVX2 detection.
     unsafe { process_soft_clip_x86_avx2_inner(block) }
 }
 
 #[inline(never)]
-pub(super) fn process_soft_clip_x86_avx2_fma(block: SoftClipKernelBlock<'_>) {
+pub(super) fn process_soft_clip_x86_avx2_fma(block: SoftClipKernelBlock<'_>) -> u32 {
     // The FMA selection deliberately aliases the frozen noncontracting AVX2 graph.
-    process_soft_clip_x86_avx2(block);
+    process_soft_clip_x86_avx2(block)
 }
 
 #[target_feature(enable = "avx2")]
@@ -56,6 +66,7 @@ unsafe fn soft_clip_convolve_x86(
     history: &[f32],
     coefficients: &[f32],
     cursors: &[u32],
+    failed_lanes: &mut u32,
 ) -> [f32; 8] {
     // SAFETY: callers are the AVX2 phase implementation, where the token has validated all
     // lengths and each local gather has exactly eight f32 words.
@@ -70,8 +81,11 @@ unsafe fn soft_clip_convolve_x86(
                 gathered[lane] = history[index * LANES + lane];
             }
             let coefficient = _mm256_set1_ps(coefficients[tap]);
-            let product = _mm256_mul_ps(coefficient, _mm256_loadu_ps(gathered.as_ptr()));
-            accumulator = _mm256_add_ps(accumulator, product);
+            let product = soft_clip_checked_x86(
+                _mm256_mul_ps(coefficient, _mm256_loadu_ps(gathered.as_ptr())),
+                failed_lanes,
+            );
+            accumulator = soft_clip_checked_x86(_mm256_add_ps(accumulator, product), failed_lanes);
         }
         let mut output = [0.0_f32; LANES];
         _mm256_storeu_ps(output.as_mut_ptr(), accumulator);
@@ -80,7 +94,7 @@ unsafe fn soft_clip_convolve_x86(
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn soft_clip_cubic_x86(input: [f32; 8]) -> [f32; 8] {
+unsafe fn soft_clip_cubic_x86(input: [f32; 8], failed_lanes: &mut u32) -> [f32; 8] {
     // SAFETY: this helper runs only under the validated AVX2 phase token and accesses local
     // eight-lane arrays. It emits separate multiply, divide, and subtraction instructions.
     unsafe {
@@ -92,15 +106,26 @@ unsafe fn soft_clip_cubic_x86(input: [f32; 8]) -> [f32; 8] {
         let interior_mask = _mm256_andnot_ps(saturated, all);
         let zero = _mm256_setzero_ps();
         let interior = _mm256_blendv_ps(zero, value, interior_mask);
-        let p0 = _mm256_mul_ps(interior, interior);
-        let p1 = _mm256_mul_ps(p0, interior);
-        let p2 = _mm256_div_ps(p1, _mm256_set1_ps(3.0));
-        let polynomial = _mm256_sub_ps(interior, p2);
+        let p0 = soft_clip_checked_x86(_mm256_mul_ps(interior, interior), failed_lanes);
+        let p1 = soft_clip_checked_x86(_mm256_mul_ps(p0, interior), failed_lanes);
+        let p2 = soft_clip_checked_x86(_mm256_div_ps(p1, _mm256_set1_ps(3.0)), failed_lanes);
+        let polynomial = soft_clip_checked_x86(_mm256_sub_ps(interior, p2), failed_lanes);
         let negative = _mm256_blendv_ps(polynomial, _mm256_set1_ps(-2.0 / 3.0), negative_mask);
         let output = _mm256_blendv_ps(negative, _mm256_set1_ps(2.0 / 3.0), positive_mask);
         let mut values = [0.0_f32; 8];
         _mm256_storeu_ps(values.as_mut_ptr(), output);
         values
+    }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn soft_clip_checked_x86(value: __m256, failed_lanes: &mut u32) -> __m256 {
+    // SAFETY: this helper runs only from AVX2 code and stores/loads one local eight-lane array.
+    unsafe {
+        let mut values = [0.0_f32; 8];
+        _mm256_storeu_ps(values.as_mut_ptr(), value);
+        check_soft_clip_lanes(&mut values, failed_lanes);
+        _mm256_loadu_ps(values.as_ptr())
     }
 }
 

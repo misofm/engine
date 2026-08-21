@@ -17,7 +17,7 @@ type TptKernelFn = for<'a> fn(TptKernelBlock<'a>);
 type DeltaKernelFn = for<'a> fn(DeltaKernelBlock<'a>);
 type CompressorGainMixKernelFn = for<'a> fn(CompressorGainMixKernelBlock<'a>);
 type GateGainKernelFn = for<'a> fn(GateGainKernelBlock<'a>);
-type SoftClipKernelFn = for<'a> fn(SoftClipKernelBlock<'a>);
+type SoftClipKernelFn = for<'a> fn(SoftClipKernelBlock<'a>) -> u32;
 
 const SOFT_CLIP_HISTORY_WORDS: usize = 63;
 const SOFT_CLIP_NONZERO_TAPS: [usize; 31] = [
@@ -445,7 +445,9 @@ impl PreparedSoftClipBankKernelV1 {
     /// `samples` are written to the interpolation history and replaced with the decimator result.
     /// The two histories use sample-major AoSoA storage: word `sample * lanes + lane`. The routine
     /// traverses the frozen ascending nonzero indices, performs separate multiply/add operations,
-    /// writes the cubic result, then advances each lane cursor exactly once.
+    /// writes the cubic result, then advances each healthy lane cursor exactly once. The returned
+    /// bitmask sets bit `lane` when any frozen intermediate in that lane became nonfinite; finite
+    /// subnormals are replaced with positive zero and do not set a bit.
     pub fn process_phase(
         self,
         samples: &mut [f32],
@@ -453,7 +455,7 @@ impl PreparedSoftClipBankKernelV1 {
         cursors: &mut [u32],
         interpolation_history: &mut [f32],
         decimation_history: &mut [f32],
-    ) -> Result<(), SoftClipBankKernelError> {
+    ) -> Result<u32, SoftClipBankKernelError> {
         let lanes = self.backend.lanes() as usize;
         if samples.len() != lanes || cursors.len() != lanes {
             return Err(SoftClipBankKernelError::LaneLength);
@@ -475,14 +477,24 @@ impl PreparedSoftClipBankKernelV1 {
         {
             return Err(SoftClipBankKernelError::Cursor);
         }
-        (self.process)(SoftClipKernelBlock {
+        Ok((self.process)(SoftClipKernelBlock {
             samples,
             coefficients,
             cursors,
             interpolation_history,
             decimation_history,
-        });
-        Ok(())
+        }))
+    }
+}
+
+fn check_soft_clip_lanes(values: &mut [f32], failed_lanes: &mut u32) {
+    for (lane, value) in values.iter_mut().enumerate() {
+        if !value.is_finite() {
+            *failed_lanes |= 1_u32 << lane;
+            *value = 0.0;
+        } else if value.is_subnormal() {
+            *value = 0.0;
+        }
     }
 }
 
@@ -1391,6 +1403,42 @@ mod tests {
             .expect("zero phase");
         assert_eq!(zero[0].to_bits(), 0.0_f32.to_bits());
 
+        let mut fault = [0.0];
+        let mut fault_cursor = [0];
+        let mut fault_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
+        let mut fault_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
+        fault_interpolation[32] = f32::NAN;
+        let failed_lanes = kernel
+            .process_phase(
+                &mut fault,
+                &coefficients,
+                &mut fault_cursor,
+                &mut fault_interpolation,
+                &mut fault_decimation,
+            )
+            .expect("fault phase");
+        assert_eq!(failed_lanes, 1);
+        assert_eq!(fault_cursor, [0]);
+        assert!(fault[0].is_finite());
+
+        let mut subnormal = [0.0];
+        let mut subnormal_cursor = [0];
+        let mut subnormal_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
+        let mut subnormal_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
+        subnormal_interpolation[32] = f32::MIN_POSITIVE / 2.0;
+        let failed_lanes = kernel
+            .process_phase(
+                &mut subnormal,
+                &coefficients,
+                &mut subnormal_cursor,
+                &mut subnormal_interpolation,
+                &mut subnormal_decimation,
+            )
+            .expect("subnormal phase");
+        assert_eq!(failed_lanes, 0);
+        assert_eq!(subnormal_cursor, [1]);
+        assert_eq!(subnormal[0].to_bits(), 0.0_f32.to_bits());
+
         assert_eq!(
             kernel.process_phase(
                 &mut samples,
@@ -1510,6 +1558,37 @@ mod tests {
             fma_decimation.map(f32::to_bits),
             actual_decimation.map(f32::to_bits)
         );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn x86_soft_clip_phase_reports_exact_failed_lanes_without_cross_lane_damage() {
+        let Ok(kernel) = PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2) else {
+            return;
+        };
+        let coefficients = soft_clip_coefficients();
+        let mut samples = [0.0; 8];
+        let mut cursors = [0; 8];
+        let mut interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS * 8];
+        let mut decimation = [0.0; SOFT_CLIP_HISTORY_WORDS * 8];
+        interpolation[61 * 8 + 2] = f32::NAN;
+        decimation[61 * 8 + 5] = f32::INFINITY;
+        let failed_lanes = kernel
+            .process_phase(
+                &mut samples,
+                &coefficients,
+                &mut cursors,
+                &mut interpolation,
+                &mut decimation,
+            )
+            .expect("AVX2 fault phase");
+        assert_eq!(failed_lanes, (1 << 2) | (1 << 5));
+        assert_eq!(cursors[2], 0);
+        assert_eq!(cursors[5], 0);
+        for lane in [0, 1, 3, 4, 6, 7] {
+            assert_eq!(cursors[lane], 1);
+            assert!(samples[lane].is_finite());
+        }
     }
 
     #[test]
