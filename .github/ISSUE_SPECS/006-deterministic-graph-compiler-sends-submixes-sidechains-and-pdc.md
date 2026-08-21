@@ -137,3 +137,52 @@ Benchmark invocation count remains **0**. The single authorized command is exact
 ```text
 scripts/run-graph-compiler-benchmark.sh
 ```
+
+## Sol correction attempt 3 final benchmark result — 2026-08-21
+
+**Status: FAIL at the exactly-once runner gate. Stop this workflow and rebrief/rescope; do not
+rerun the benchmark and do not weaken the gate by treating the raw file as the accepted artifact.**
+
+The authorized command was invoked exactly once. The benchmark workload itself completed all six
+records, but the runner exited with status 1 before its validator/move stage. It left
+`target/issue6/graph-compiler-benchmark.raw.jsonl` and did not create the required accepted
+`target/issue6/graph-compiler-benchmark.jsonl`. The preserved raw artifact is exactly 6 LF-terminated
+records and 10,364 bytes with SHA-256
+`c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5`. A read-only invocation of
+the frozen `scripts/graph-benchmark-validator.jq` accepts the complete raw artifact with exit 0.
+
+The runner failure is a shell control-flow defect, not a workload or JSON validation failure. In
+`scripts/run-graph-compiler-benchmark.sh`, `if !` ends a line before the environment-assignment/
+`cargo run` command. Under the measured GNU Bash 5.2.21, that newline disconnects `!` from the
+following command, so the `if` tests the successful workload status without negation and enters the
+branch that reports `graph benchmark workload failed`. Consequently lines 50–56 (frozen validator,
+raw-to-accepted move, and accepted output) never execute. This is the same syntactic shape as the
+existing protocol runner, but no runner fix is made in this final, already-consumed attempt.
+
+Read-only artifact evidence:
+
+- `graph_compile_256t_1024r_32s`: fixture SHA-256
+  `d0173f72f16960bbc3e9b4f7c90698c91b2b8373722ac4a405d3214147e52844`, 407,444 bytes,
+  256 tracks/1,024 routes/32 submixes/64 effects/32 sidechains; output SHA-256
+  `9235042638711e754daf0c47f28377d3781d615b753345fbd2df2e2fb5164ef8`, 2,913 logical
+  nodes, 3,044 materialized nodes, 3,811 edges, and 3,044 schedule items. Round p50 values were
+  19,894,714 ns and 19,823,108 ns; graph-compile p50 values were 19,781,278 ns and 19,718,490 ns.
+- `graph_debug_sha_dot_256t_1024r_32s`: the same frozen fixture/output identities and counts,
+  1,648,442 canonical-debug bytes and 551,800 DOT bytes. Round p50 values were 19,940,362 ns and
+  19,799,102 ns; graph-compile p50 values were 19,833,989 ns and 19,678,062 ns.
+- `graph_validate_65537_tracks`: fixture SHA-256
+  `ba8038e61d19ae789d3b2a2b1ea78abb151df2e66129add412008f9e419d56ec`, 32,954,883 bytes;
+  output SHA-256 `a8a4c10d15ea255d8c6fcaf52c175dfa2bc097e10b775710663d5ad4c6cea5c3`,
+  458,761 logical/materialized nodes, 393,224 edges, and 458,761 schedule items. Its single-sample
+  rounds were 4,787,158,496 ns and 4,720,265,316 ns, with graph-compile phases of 4,776,113,881 ns
+  and 4,715,198,009 ns.
+- Estimated plan bytes were 6,926,652 for the canonical workloads and 660,605,118 for scale;
+  observed peak resident bytes ranged from 110,166,016 to 1,679,867,904. Records disclose AMD
+  Ryzen 7 9700X, Linux 6.8.0-138-generic, Rust 1.97.1/LLVM 22.1.6, release opt-level 3/LTO off,
+  and missing power, target-feature, codegen-unit, and background-load metadata.
+
+All previously recorded nonbenchmark gates remain green, and the complete raw output is internally
+valid, but the frozen exactly-once gate required the runner to succeed and write the accepted path.
+It did neither. This was correction attempt 3, so the issue must now stop and be rebriefed rather
+than patched or rerun in place. Final benchmark invocation count: **1**. Accepted benchmark result
+count: **0**. No V1/legacy source was inspected.
