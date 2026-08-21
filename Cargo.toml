@@ -23,6 +23,7 @@ members = [
     "tools/miso-engine-session-bench",
     "tools/miso-engine-effect-contract-bench",
     "tools/miso-engine-graph-audit",
+    "tools/miso-engine-graph-bench",
 ]
 resolver = "3"
 

@@ -1,0 +1,22 @@
+[package]
+name = "miso-engine-graph-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_graph_bench"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-conformance.workspace = true
+miso-engine-effect-compiler.workspace = true
+miso-engine-effect-contract.workspace = true
+miso-engine-graph.workspace = true
+miso-engine-graph-compiler.workspace = true
+miso-engine-session.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
