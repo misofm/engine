@@ -379,6 +379,7 @@ impl PreparedGraphPlan {
             self.spec,
             self.sequential_schedule,
             self.inserted_delays,
+            self.buffer_assignments,
             self.routes,
             self.effects,
             bindings.nodes,
@@ -456,7 +457,7 @@ impl StereoBuffer {
     }
 }
 struct RuntimeEdge {
-    source: usize,
+    source_buffer: usize,
     sidechain: bool,
     delay: Option<CompensationDelay>,
     contribution: StereoBuffer,
@@ -470,11 +471,12 @@ enum RuntimeNodeKind {
 }
 struct RuntimeNode {
     incoming: Vec<RuntimeEdge>,
-    output: StereoBuffer,
+    output_buffer: usize,
     kind: RuntimeNodeKind,
 }
 struct GraphExecutor {
     nodes: Vec<RuntimeNode>,
+    buffers: Vec<StereoBuffer>,
     output_node: usize,
     reduction_scratch: Box<[f32]>,
     sanitized_samples: u64,
@@ -485,17 +487,29 @@ impl GraphExecutor {
         spec: GraphSpec,
         schedule: Vec<GraphNodeId>,
         inserted_delays: Vec<InsertedDelay>,
+        buffer_assignments: Vec<BufferAssignment>,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
         bindings: Vec<GraphNodeBinding>,
         frames: usize,
     ) -> Self {
-        let indexes: BTreeMap<_, _> = schedule
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, node)| (node, index))
+        let mut assigned_buffers: BTreeMap<_, _> = buffer_assignments
+            .into_iter()
+            .map(|assignment| (assignment.port.node, assignment.buffer_index))
             .collect();
+        let mut next_buffer = assigned_buffers
+            .values()
+            .copied()
+            .max()
+            .and_then(|maximum| maximum.checked_add(1))
+            .unwrap_or(0);
+        for node in &schedule {
+            assigned_buffers.entry(node.clone()).or_insert_with(|| {
+                let buffer = next_buffer;
+                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
+                buffer
+            });
+        }
         let delays: BTreeMap<_, _> = inserted_delays
             .into_iter()
             .map(|delay| (delay.edge_id, delay.samples.0))
@@ -525,13 +539,15 @@ impl GraphExecutor {
         }
         let mut maximum_inputs = 1usize;
         let mut nodes = Vec::with_capacity(schedule.len());
+        let mut maximum_buffer = 0_u64;
         for node_id in &schedule {
             let incoming: Vec<_> = incoming_by_node
                 .remove(node_id)
                 .expect("validated schedule node")
                 .into_iter()
                 .map(|edge| RuntimeEdge {
-                    source: indexes[&edge.source.node],
+                    source_buffer: usize::try_from(assigned_buffers[&edge.source.node])
+                        .expect("validated buffer index"),
                     sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
                     delay: delays
                         .get(&edge.id)
@@ -556,18 +572,31 @@ impl GraphExecutor {
             } else {
                 RuntimeNodeKind::Identity
             };
+            let output_buffer = assigned_buffers[node_id];
+            maximum_buffer = maximum_buffer.max(output_buffer);
             nodes.push(RuntimeNode {
                 incoming,
-                output: StereoBuffer::new(frames),
+                output_buffer: usize::try_from(output_buffer).expect("validated buffer index"),
                 kind,
             });
         }
+        let buffer_count = if nodes.is_empty() {
+            0
+        } else {
+            usize::try_from(maximum_buffer)
+                .expect("validated buffer index")
+                .checked_add(1)
+                .expect("validated buffer count")
+        };
         let output_node = schedule
             .iter()
             .position(|node| matches!(node, GraphNodeId::Output { .. }))
             .expect("validated single output");
         Self {
             nodes,
+            buffers: (0..buffer_count)
+                .map(|_| StereoBuffer::new(frames))
+                .collect(),
             output_node,
             reduction_scratch: vec![0.0; maximum_inputs].into_boxed_slice(),
             sanitized_samples: 0,
@@ -575,10 +604,9 @@ impl GraphExecutor {
     }
 
     fn prepare_inputs(&mut self, node_index: usize) {
-        let (before, current_and_after) = self.nodes.split_at_mut(node_index);
-        let current = &mut current_and_after[0];
+        let current = &mut self.nodes[node_index];
         for edge in &mut current.incoming {
-            let source = &before[edge.source].output;
+            let source = &self.buffers[edge.source_buffer];
             edge.contribution.left.copy_from_slice(&source.left);
             edge.contribution.right.copy_from_slice(&source.right);
             if let Some(delay) = &mut edge.delay {
@@ -589,12 +617,13 @@ impl GraphExecutor {
 
     fn reduce_main_inputs(&mut self, node_index: usize) {
         let current = &mut self.nodes[node_index];
+        let output = &mut self.buffers[current.output_buffer];
         let main_inputs = current
             .incoming
             .iter()
             .filter(|edge| !edge.sidechain)
             .count();
-        for frame in 0..current.output.left.len() {
+        for frame in 0..output.left.len() {
             for (slot, edge) in current
                 .incoming
                 .iter()
@@ -603,7 +632,7 @@ impl GraphExecutor {
             {
                 self.reduction_scratch[slot] = edge.contribution.left[frame];
             }
-            current.output.left[frame] = balanced_pairwise_sum(
+            output.left[frame] = balanced_pairwise_sum(
                 &mut self.reduction_scratch[..main_inputs],
                 &mut self.sanitized_samples,
             );
@@ -615,7 +644,7 @@ impl GraphExecutor {
             {
                 self.reduction_scratch[slot] = edge.contribution.right[frame];
             }
-            current.output.right[frame] = balanced_pairwise_sum(
+            output.right[frame] = balanced_pairwise_sum(
                 &mut self.reduction_scratch[..main_inputs],
                 &mut self.sanitized_samples,
             );
@@ -634,21 +663,22 @@ impl PreparedPlanExecutor for GraphExecutor {
             self.prepare_inputs(node_index);
             self.reduce_main_inputs(node_index);
             let current = &mut self.nodes[node_index];
+            let output_buffer = current.output_buffer;
+            let rendered = &mut self.buffers[output_buffer];
             match &mut current.kind {
                 RuntimeNodeKind::Identity | RuntimeNodeKind::Reduction => {}
                 RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
-                    left: &mut current.output.left,
-                    right: &mut current.output.right,
+                    left: &mut rendered.left,
+                    right: &mut rendered.right,
                     first_sample: time.absolute_sample,
                 })?,
                 RuntimeNodeKind::Route(transform) => {
-                    for frame in 0..current.output.left.len() {
-                        (current.output.left[frame], current.output.right[frame]) = transform
-                            .transform(
-                                current.output.left[frame],
-                                current.output.right[frame],
-                                &mut self.sanitized_samples,
-                            );
+                    for frame in 0..rendered.left.len() {
+                        (rendered.left[frame], rendered.right[frame]) = transform.transform(
+                            rendered.left[frame],
+                            rendered.right[frame],
+                            &mut self.sanitized_samples,
+                        );
                     }
                 }
                 RuntimeNodeKind::Effect(effect) => {
@@ -658,8 +688,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                         .find(|edge| edge.sidechain)
                         .map(|edge| (&*edge.contribution.left, &*edge.contribution.right));
                     let block = EffectProcessBlock::new(
-                        &mut current.output.left,
-                        &mut current.output.right,
+                        &mut rendered.left,
+                        &mut rendered.right,
                         sidechain,
                         time.absolute_sample,
                         &[],
@@ -670,7 +700,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                 }
             }
         }
-        let rendered = &self.nodes[self.output_node].output;
+        let rendered = &self.buffers[self.nodes[self.output_node].output_buffer];
         output.plane_mut(0)?.copy_from_slice(&rendered.left);
         output.plane_mut(1)?.copy_from_slice(&rendered.right);
         Ok(())

@@ -354,7 +354,7 @@ impl GraphCompiler {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
-        let buffers = buffer_assignments(&schedule);
+        let buffers = buffer_assignments(&schedule, &edges);
         let ports = ports_for(&nodes, &edges);
         let reductions = reduction_records(&nodes, &edges);
         let Some(estimate) = resource_estimate(
@@ -531,9 +531,14 @@ fn resource_estimate(
     let effect_count = count(effects.len())?;
     let maximum_inputs = input_counts.values().copied().max().unwrap_or(0);
     let quantum = u64::from(quantum);
-    // The scalar executor owns one dual-mono output per logical node and one dual-mono
-    // contribution buffer per logical edge, plus one scalar pairwise-reduction work array.
-    let audio_buffer_samples = logical_nodes
+    // Node outputs use the deterministic liveness coloring recorded in `buffers`. Edge
+    // contributions remain distinct because they carry independent PDC state into reductions.
+    let colored_outputs = buffers
+        .iter()
+        .map(|assignment| assignment.buffer_index)
+        .max()
+        .map_or(Some(0), |maximum| maximum.checked_add(1))?;
+    let audio_buffer_samples = colored_outputs
         .checked_add(logical_edges)?
         .checked_mul(2)?
         .checked_mul(quantum)?
@@ -966,15 +971,90 @@ fn cycle_witness_in_component(
     }
     None
 }
-fn buffer_assignments(schedule: &[GraphNodeId]) -> Vec<BufferAssignment> {
-    schedule
+fn buffer_assignments(schedule: &[GraphNodeId], edges: &[GraphEdge]) -> Vec<BufferAssignment> {
+    let positions: BTreeMap<_, _> = schedule
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, node)| (node, position))
+        .collect();
+    let mut consumer_counts = vec![0_usize; schedule.len()];
+    let mut last_consumers: Vec<_> = schedule
         .iter()
         .enumerate()
-        .map(|(index, node)| BufferAssignment {
-            port: port(node.clone(), GraphPortKind::MainOutput),
-            buffer_index: index as u64,
+        .map(|(position, node)| {
+            if matches!(node, GraphNodeId::Output { .. }) {
+                schedule.len()
+            } else {
+                position
+            }
         })
-        .collect()
+        .collect();
+    let mut main_input_counts = vec![0_usize; schedule.len()];
+    let mut main_input_sources = vec![None; schedule.len()];
+    for edge in edges {
+        let source = positions[&edge.source.node];
+        let destination = positions[&edge.destination.node];
+        consumer_counts[source] += 1;
+        last_consumers[source] = last_consumers[source].max(destination);
+        if edge.destination.kind == GraphPortKind::MainInput {
+            main_input_counts[destination] += 1;
+            main_input_sources[destination] = Some(source);
+        }
+    }
+
+    let mut next_buffer = 0_u64;
+    let mut free = BTreeSet::new();
+    let mut live_until = Vec::<usize>::new();
+    let mut expirations = vec![Vec::<u64>::new(); schedule.len() + 1];
+    let mut node_buffers = vec![0_u64; schedule.len()];
+    let mut assignments = Vec::with_capacity(schedule.len());
+    for (position, node) in schedule.iter().enumerate() {
+        if position != 0 {
+            for buffer in expirations[position - 1].drain(..) {
+                if live_until[buffer as usize] == position - 1 {
+                    free.insert(buffer);
+                }
+            }
+        }
+
+        let alias = is_identity_boundary(node)
+            .then_some(position)
+            .filter(|position| main_input_counts[*position] == 1)
+            .and_then(|position| main_input_sources[position])
+            .filter(|source| consumer_counts[*source] == 1)
+            .map(|source| node_buffers[source]);
+        let buffer_index = if let Some(buffer) = alias {
+            free.remove(&buffer);
+            buffer
+        } else if let Some(buffer) = free.pop_first() {
+            buffer
+        } else {
+            let buffer = next_buffer;
+            next_buffer = next_buffer.checked_add(1).expect("node count fits u64");
+            live_until.push(position);
+            buffer
+        };
+        let last_consumer = last_consumers[position];
+        live_until[buffer_index as usize] = last_consumer;
+        expirations[last_consumer].push(buffer_index);
+        node_buffers[position] = buffer_index;
+        assignments.push(BufferAssignment {
+            port: port(node.clone(), GraphPortKind::MainOutput),
+            buffer_index,
+        });
+    }
+    assignments
+}
+
+fn is_identity_boundary(node: &GraphNodeId) -> bool {
+    matches!(
+        node,
+        GraphNodeId::TrackStage {
+            stage: TrackStage::PostSimd1 | TrackStage::PostDynamic | TrackStage::PostSimd2PreFader,
+            ..
+        }
+    )
 }
 fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     let mut ports = Vec::new();
@@ -1661,6 +1741,67 @@ mod tests {
     }
 
     #[test]
+    fn buffer_coloring_aliases_identity_and_preserves_fanout_liveness() {
+        let source = track_node("track", TrackStage::Input);
+        let identity = track_node("track", TrackStage::PostSimd1);
+        let route_a = GraphNodeId::Route { route_id: gid("a") };
+        let route_b = GraphNodeId::Route { route_id: gid("b") };
+        let output = GraphNodeId::Output {
+            output_id: gid("main"),
+        };
+        let schedule = vec![
+            source.clone(),
+            identity.clone(),
+            route_a.clone(),
+            route_b.clone(),
+            output.clone(),
+        ];
+        let make_edge = |id, source, destination| GraphEdge {
+            id,
+            source: port(source, GraphPortKind::MainOutput),
+            destination: port(destination, GraphPortKind::MainInput),
+            path: "$.coloring".to_owned(),
+        };
+        let edges = vec![
+            make_edge(
+                GraphEdgeId::TrackMain {
+                    target: identity.clone(),
+                },
+                source,
+                identity.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteSource { route_id: gid("a") },
+                identity.clone(),
+                route_a.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteSource { route_id: gid("b") },
+                identity.clone(),
+                route_b.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteDestination { route_id: gid("a") },
+                route_a.clone(),
+                output.clone(),
+            ),
+            make_edge(
+                GraphEdgeId::RouteDestination { route_id: gid("b") },
+                route_b.clone(),
+                output.clone(),
+            ),
+        ];
+        let assigned: BTreeMap<_, _> = buffer_assignments(&schedule, &edges)
+            .into_iter()
+            .map(|assignment| (assignment.port.node, assignment.buffer_index))
+            .collect();
+        assert_eq!(assigned[&identity], 0);
+        assert_eq!(assigned[&route_a], 1);
+        assert_eq!(assigned[&route_b], 2);
+        assert_eq!(assigned[&output], 0);
+    }
+
+    #[test]
     fn accepted_session_compiles_binds_and_renders_direct_route() {
         let artifact = compile_fixture(123);
         assert_eq!(artifact.report.estimate.routes, 1);
@@ -1669,6 +1810,28 @@ mod tests {
         assert!(artifact.report.estimate.audio_buffer_samples > 0);
         assert!(artifact.report.estimate.graph_metadata_bytes > 0);
         assert!(artifact.report.estimate.incremental_plan_bytes > 0);
+        let assigned: BTreeMap<_, _> = artifact
+            .report
+            .buffer_assignments
+            .iter()
+            .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
+            .collect();
+        let track = |stage| track_node("vocal", stage);
+        assert_eq!(
+            assigned[&track(TrackStage::PostInputBuiltins)],
+            assigned[&track(TrackStage::PostSimd1)]
+        );
+        assert_eq!(
+            assigned[&track(TrackStage::PostSimd1)],
+            assigned[&track(TrackStage::PostDynamic)]
+        );
+        assert_eq!(
+            assigned[&track(TrackStage::PostDynamic)],
+            assigned[&track(TrackStage::PostSimd2PreFader)]
+        );
+        let colored_buffer_count = assigned.values().copied().max().expect("buffers") + 1;
+        assert_eq!(colored_buffer_count, 2);
+        assert!(colored_buffer_count < artifact.report.estimate.logical_nodes);
         assert_eq!(artifact.graph.required_bindings.len(), 5);
         let envelope = artifact.graph.envelope;
         let nodes = artifact
