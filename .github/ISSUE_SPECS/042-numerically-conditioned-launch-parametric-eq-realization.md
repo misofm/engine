@@ -186,3 +186,26 @@ audit or benchmark gate was run. `timed_benchmark_invocations=0`.
 The prior Issue-012 retained-`f32` DF-I evidence remains intact: a 44.1 kHz low shelf at `10 Hz`
 was observed at `-23.4572457785 dB` where the independent reference was
 `-23.9999999963 dB`, exceeding the original `0.005 dB` analytic tolerance.
+
+## Sol attempt 2 — conditioned-delta correction and selection (2026-08-21)
+
+**Preimplementation decision: PASS / DELTA SELECTED / READY FOR PRODUCTION IMPLEMENTATION.** The
+single 44.1-kHz/20-kHz/Q18 notch failure was a candidate-conditioning defect, not a domain or
+tolerance defect. Attempt 1 expressed every delta section only about `z=1`; Sol generalized the
+same second-order recurrence to `delta_a = z^-1 - a`, with exact retained `a=+1` through one-quarter
+rate and `a=-1` above it. The latter conditions designs nearer Nyquist without adding a candidate
+family, filter order or state word.
+
+The one authorized complete grid rerun passed. TPT and coupled-form results/hashes were unchanged.
+Endpoint-conditioned delta reported 1,488 designs, zero design/response/null/center/state failures,
+worst retained-response error `0.000552061269 dB`, worst strict stability margin
+`7.823109626770e-8`, maximum bounded-probe state `37.05598831177`, and summary hash
+`9ae58ca1fca97d4f`. The formerly failing null is about `8.35e-7` (`-121.57 dB`), inside the unchanged
+`1e-5`/`-100 dB` gate. No production EQ/core file and no tolerance, domain, probe or fourth family
+changed. The tracked brief now freezes the exact selected words, recurrence, state/layout,
+noncontraction, identity, restore and recovery contract. This is selection readiness, not overall
+Issue-042 PASS; every post-selection production gate remains required.
+
+Command: `cargo test -p miso-engine-dsp-reference
+issue_042_complete_retained_f32_candidate_comparison_requires_sol_freeze -- --nocapture` — PASS
+(one complete-grid invocation). `timed_benchmark_invocations=0`.

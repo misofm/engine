@@ -22,7 +22,7 @@ const STATE_PROBE_SAMPLES: usize = 2_048;
 const EXPECTED_SUMMARY_HASHES: [u64; 3] = [
     0xca96_986d_381e_3fe4,
     0xd500_4e7d_c41d_bb27,
-    0x1bff_fc2d_8628_0ce8,
+    0x9ae5_8ca1_fca9_7d4f,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +85,7 @@ struct Coupled {
 
 #[derive(Clone, Copy)]
 struct Delta {
+    anchor: f32,
     n0: f32,
     n1: f32,
     n2: f32,
@@ -113,7 +114,7 @@ impl Candidate {
         match family {
             Family::TptStateVariable => Self::design_tpt(row, reference),
             Family::CoupledForm => Self::design_coupled(reference),
-            Family::DeltaOperator => Ok(Self::design_delta(reference)),
+            Family::DeltaOperator => Ok(Self::design_delta(row, reference)),
         }
     }
 
@@ -222,14 +223,24 @@ impl Candidate {
         }
     }
 
-    fn design_delta(reference: ReferenceParametricEqCoefficients) -> Self {
+    fn design_delta(row: Row, reference: ReferenceParametricEqCoefficients) -> Self {
         let (b0, b1, b2, a1, a2) = reference.values();
+        // Use the delta basis nearest the designed unit-circle point. `+1` conditions low
+        // normalized frequencies; `-1` conditions frequencies nearer Nyquist. Both use the same
+        // retained words, four histories, and recurrence with delta_a = z^-1 - anchor.
+        let anchor = if row.frequency <= f64::from(row.rate) * 0.25 {
+            1.0_f32
+        } else {
+            -1.0_f32
+        };
+        let anchor_f64 = f64::from(anchor);
         Self::Delta(Delta {
-            n0: (b0 + b1 + b2) as f32,
-            n1: (b1 + 2.0 * b2) as f32,
+            anchor,
+            n0: (b0 + anchor_f64 * b1 + b2) as f32,
+            n1: (b1 + 2.0 * anchor_f64 * b2) as f32,
             n2: b2 as f32,
-            d0: (1.0 + a1 + a2) as f32,
-            d1: (a1 + 2.0 * a2) as f32,
+            d0: (1.0 + anchor_f64 * a1 + a2) as f32,
+            d1: (a1 + 2.0 * anchor_f64 * a2) as f32,
             d2: a2 as f32,
             x1: 0.0,
             x2: 0.0,
@@ -296,6 +307,7 @@ impl Candidate {
             ),
             Self::Delta(candidate) => (
                 [
+                    candidate.anchor.to_bits(),
                     candidate.n0.to_bits(),
                     candidate.n1.to_bits(),
                     candidate.n2.to_bits(),
@@ -303,9 +315,8 @@ impl Candidate {
                     candidate.d1.to_bits(),
                     candidate.d2.to_bits(),
                     0,
-                    0,
                 ],
-                6,
+                7,
             ),
         }
     }
@@ -341,11 +352,17 @@ impl Coupled {
 
 impl Delta {
     fn process(&mut self, input: f32) -> f32 {
-        let dx = self.x1 - input;
-        let ddx = (self.x2 - self.x1) - dx;
+        let anchored_input = self.anchor * input;
+        let dx = self.x1 - anchored_input;
+        let anchored_x1 = self.anchor * self.x1;
+        let first_difference = self.x2 - anchored_x1;
+        let anchored_dx = self.anchor * dx;
+        let ddx = first_difference - anchored_dx;
         let numerator = (self.n0 * input + self.n1 * dx) + self.n2 * ddx;
-        let scale = (self.d0 - self.d1) + self.d2;
-        let history = (self.d1 - self.d2 - self.d2) * self.y1 + self.d2 * self.y2;
+        let anchored_d1 = self.anchor * self.d1;
+        let scale = (self.d0 - anchored_d1) + self.d2;
+        let anchored_d2 = self.anchor * self.d2;
+        let history = (self.d1 - anchored_d2 - anchored_d2) * self.y1 + self.d2 * self.y2;
         let output = (numerator - history) / scale;
         self.x2 = self.x1;
         self.x1 = input;
@@ -504,7 +521,7 @@ fn state_space_magnitude(state: StateSpace, frequency: f64, sample_rate: f64) ->
 
 fn delta_magnitude(candidate: Delta, frequency: f64, sample_rate: f64) -> Option<f64> {
     let phase = 2.0 * PI * frequency / sample_rate;
-    let w_r = phase.cos() - 1.0;
+    let w_r = phase.cos() - f64::from(candidate.anchor);
     let w_i = -phase.sin();
     let w2_r = w_r * w_r - w_i * w_i;
     let w2_i = 2.0 * w_r * w_i;
@@ -756,7 +773,7 @@ fn stability_margin(candidate: Candidate) -> f64 {
             )
         }
         Candidate::Delta(value) => {
-            let a1 = f64::from(value.d1) - 2.0 * f64::from(value.d2);
+            let a1 = f64::from(value.d1) - 2.0 * f64::from(value.anchor) * f64::from(value.d2);
             (a1, f64::from(value.d2))
         }
     };
@@ -848,35 +865,53 @@ fn for_each_row(mut visit: impl FnMut(Row)) {
 fn issue_042_complete_retained_f32_candidate_comparison_requires_sol_freeze() {
     let summaries = Family::ALL.map(compare);
     for (index, summary) in summaries.into_iter().enumerate() {
-        let first = summary
-            .first_failure
-            .expect("every candidate has a frozen-gate failure");
-        println!(
-            "issue-042 candidate={} rows={} design={} response={} null={} center={} state={} worst_db={:.12} margin={:.12e} max_state={:.12e} hash={:016x} first_category={} first_rate={} first_kind={:?} first_f0={} first_gain={} first_q={} first_s={} first_probe={} first_observed={:.15e} first_expected={:.15e}",
-            summary.family.name(),
-            summary.rows,
-            summary.design_failures,
-            summary.response_failures,
-            summary.null_failures,
-            summary.center_failures,
-            summary.state_failures,
-            summary.worst_db_error,
-            summary.worst_stability_margin,
-            summary.max_state,
-            summary.hash,
-            first.category,
-            first.row.rate,
-            first.row.kind,
-            first.row.frequency,
-            first.row.gain,
-            first.row.q,
-            first.row.slope,
-            first.probe,
-            first.observed,
-            first.expected,
-        );
+        if let Some(first) = summary.first_failure {
+            println!(
+                "issue-042 candidate={} rows={} design={} response={} null={} center={} state={} worst_db={:.12} margin={:.12e} max_state={:.12e} hash={:016x} first_category={} first_rate={} first_kind={:?} first_f0={} first_gain={} first_q={} first_s={} first_probe={} first_observed={:.15e} first_expected={:.15e}",
+                summary.family.name(),
+                summary.rows,
+                summary.design_failures,
+                summary.response_failures,
+                summary.null_failures,
+                summary.center_failures,
+                summary.state_failures,
+                summary.worst_db_error,
+                summary.worst_stability_margin,
+                summary.max_state,
+                summary.hash,
+                first.category,
+                first.row.rate,
+                first.row.kind,
+                first.row.frequency,
+                first.row.gain,
+                first.row.q,
+                first.row.slope,
+                first.probe,
+                first.observed,
+                first.expected,
+            );
+        } else {
+            println!(
+                "issue-042 candidate={} rows={} design={} response={} null={} center={} state={} worst_db={:.12} margin={:.12e} max_state={:.12e} hash={:016x} selectable=true",
+                summary.family.name(),
+                summary.rows,
+                summary.design_failures,
+                summary.response_failures,
+                summary.null_failures,
+                summary.center_failures,
+                summary.state_failures,
+                summary.worst_db_error,
+                summary.worst_stability_margin,
+                summary.max_state,
+                summary.hash,
+            );
+        }
         assert_eq!(summary.rows, 1_488);
         assert_eq!(summary.hash, EXPECTED_SUMMARY_HASHES[index]);
-        assert!(!summary.selectable());
+        if summary.family == Family::DeltaOperator {
+            assert!(summary.selectable());
+        } else {
+            assert!(!summary.selectable());
+        }
     }
 }
