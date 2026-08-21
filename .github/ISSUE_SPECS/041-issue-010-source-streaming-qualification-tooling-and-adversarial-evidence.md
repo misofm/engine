@@ -169,3 +169,27 @@ miso-engine-source-fixture --locked`; direct checker invocation; and warning-den
 Not yet run: the frozen 256-schedule model, real-worker 100,000-render audit, sparse-duration
 allocation/RSS evidence, or broader workspace/policy gates. No production source semantics changed
 and no benchmark/timing workload was invoked; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — frozen seek/ring checkpoint (2026-08-21)
+
+**Gate 2 PASS; qualification remains incomplete.** The same source fixture checker now generates
+exactly 256 sealed one-channel/4-frame ring schedules from seed `0x00000000010a5ee1`, cycling
+capacities `1, 2, 3, 8` quanta. The canonical action-byte transcript SHA-256 is
+`ec3b7fef8e86937d4431466d2cea8a68ec56feb2897bcdc655fa10d5bf30a41c` and is checked before the
+candidate ring is evaluated.
+
+The test-only independent bounded model owns no production endpoint and models only that frozen
+action language. It predicts accepted/full/stale submissions; strictly increasing generation-2 and
+generation-3 seek boundaries; queued old-block discard; empty/missing positive-zero output;
+wrap/recycle; full; short and zero-frame EOF; copied frames; cumulative stale discards; and exact
+underrun frame/event totals. Every production `PcmSourceRing` schedule is then compared action by
+action against those predicted output bits and reports. The model caught and corrected a fixture
+sequencing mistake before publication; no production source behavior was changed.
+
+Focused PASS: `cargo fmt --check -p miso-engine-source-fixture`; `cargo test -p
+miso-engine-source-fixture --locked`; direct checker invocation; and warning-denied `cargo clippy
+-p miso-engine-source-fixture --all-targets --locked -- -D warnings`. The current checker source
+SHA-256 is `fb68fbd5bc86ea3e200db330dbe2f3cc7f0297f061a604dc2648e6603fd507f1`.
+
+Not yet run: real-worker 100,000-render audit, sparse-duration allocation/RSS evidence, or broad
+workspace/policy gates. No benchmark/timing workload was invoked; `timed_benchmark_invocations=0`.
