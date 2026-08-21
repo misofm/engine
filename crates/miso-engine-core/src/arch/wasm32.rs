@@ -2,7 +2,27 @@
 
 use core::arch::wasm32::*;
 
-use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, TptKernelBlock};
+
+#[inline(never)]
+#[target_feature(enable = "simd128")]
+unsafe fn process_gate_gain_wasm_simd128_inner(block: GateGainKernelBlock<'_>) {
+    // SAFETY: the simd128 artifact and prepared token prove support; all slices have four lanes.
+    unsafe {
+        let sample = v128_load(block.samples.as_ptr().cast::<v128>());
+        let gain = v128_load(block.gains.as_ptr().cast::<v128>());
+        let p0 = f32x4_mul(sample, gain);
+        let identity_mask = v128_load(block.identity_mask.as_ptr().cast::<v128>());
+        let output = v128_bitselect(sample, p0, identity_mask);
+        v128_store(block.samples.as_mut_ptr().cast::<v128>(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_gate_gain_wasm_simd128(block: GateGainKernelBlock<'_>) {
+    // SAFETY: module cfg and the prepared token prove base simd128 before this safe shim runs.
+    unsafe { process_gate_gain_wasm_simd128_inner(block) }
+}
 
 #[inline(never)]
 #[target_feature(enable = "simd128")]

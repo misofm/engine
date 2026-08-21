@@ -2,7 +2,27 @@
 
 use core::arch::aarch64::*;
 
-use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, TptKernelBlock};
+
+#[inline(never)]
+#[target_feature(enable = "neon")]
+unsafe fn process_gate_gain_aarch64_neon_inner(block: GateGainKernelBlock<'_>) {
+    // SAFETY: the prepared token proves AArch64 NEON and validated slices contain four lanes.
+    unsafe {
+        let sample = vld1q_f32(block.samples.as_ptr());
+        let gain = vld1q_f32(block.gains.as_ptr());
+        let p0 = vmulq_f32(sample, gain);
+        let identity_mask = vld1q_u32(block.identity_mask.as_ptr());
+        let output = vbslq_f32(identity_mask, sample, p0);
+        vst1q_f32(block.samples.as_mut_ptr(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_gate_gain_aarch64_neon(block: GateGainKernelBlock<'_>) {
+    // SAFETY: AArch64 NEON was selected at preparation, before any render callback.
+    unsafe { process_gate_gain_aarch64_neon_inner(block) }
+}
 
 #[inline(never)]
 #[target_feature(enable = "neon")]

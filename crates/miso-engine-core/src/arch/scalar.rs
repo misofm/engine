@@ -1,6 +1,18 @@
 //! Portable scalar reference for the architecture-owned TPT operation graph.
 
-use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, TptKernelBlock};
+
+/// Frozen scalar gate gain-selection graph: one multiply plus exact dry identity selection.
+#[inline(never)]
+pub(super) fn process_gate_gain_scalar(block: GateGainKernelBlock<'_>) {
+    let sample = block.samples[0];
+    let p0 = sample * block.gains[0];
+    block.samples[0] = if block.identity_mask[0] == u32::MAX {
+        sample
+    } else {
+        p0
+    };
+}
 
 /// Frozen noncontracting compressor dry/gain/mix graph for one scalar lane.
 #[inline(never)]

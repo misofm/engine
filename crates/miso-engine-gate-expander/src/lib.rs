@@ -4,15 +4,18 @@
 //! preparation; the render method performs no allocation and does not consult runtime features.
 #![allow(missing_docs)]
 
+use miso_engine_core::{GateGainKernelError, PreparedGateGainKernelV1};
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, sanitize_sample,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    sanitize_sample,
 };
 
 const PARAMETER_COUNT: usize = 8;
@@ -396,6 +399,20 @@ pub struct PreparedGateExpander {
     right: Lane,
 }
 
+/// A fixed-width homogeneous unconnected-sidechain gate/expander cohort.
+///
+/// The `W`-specialized arrays retain exactly one independent scalar lane per track and per audio
+/// channel. The core token only performs the frozen final multiply/identity selection.
+struct PreparedGateExpanderBank<const W: usize> {
+    metadata: PreparedBankMetadata,
+    effect_metadata: PreparedEffectMetadata,
+    kernel: PreparedGateGainKernelV1,
+    left_defaults: [[f32; PARAMETER_COUNT]; W],
+    right_defaults: [[f32; PARAMETER_COUNT]; W],
+    left: [Lane; W],
+    right: [Lane; W],
+}
+
 impl NativeEffectFactory for GateExpanderFactory {
     fn descriptor(&self) -> &'static EffectDescriptorV1 {
         &GATE_EXPANDER_DESCRIPTOR_V1
@@ -435,10 +452,7 @@ impl NativeEffectFactory for GateExpanderFactory {
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<
-        Option<Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>>,
-        EffectPrepareError,
-    > {
+    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
         if !request.has_matching_backend_width()
             || request.requests.len() != request.width.lanes() as usize
         {
@@ -446,14 +460,88 @@ impl NativeEffectFactory for GateExpanderFactory {
                 code: "effect.bank.requests",
             });
         }
-        for item in request.requests.iter().copied() {
-            let _ = expected_prepared_metadata(self.descriptor(), item)?;
-            let _ = initial_defaults(item.initial_values)?;
+        match request.width {
+            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
+            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
         }
-        // W4/W8 ownership is intentionally deferred; this scalar checkpoint still validates the
-        // compiler-provided request transactionally before returning the legal fallback.
-        Ok(None)
     }
+}
+
+fn prepare_homogeneous_bank<const W: usize>(
+    factory: &GateExpanderFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    let first_request = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(factory.descriptor(), first_request)?;
+    let (first_left_defaults, first_right_defaults) =
+        initial_defaults(first_request.initial_values)?;
+    let mut left_defaults = [first_left_defaults; W];
+    let mut right_defaults = [first_right_defaults; W];
+    let mut same_program = true;
+    for (track, item) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
+        }
+        let (left, right) = initial_defaults(item.initial_values)?;
+        left_defaults[track] = left;
+        right_defaults[track] = right;
+    }
+    if !same_program
+        || !matches!(
+            metadata.ports.sidechain,
+            PreparedSidechainPort::Unconnected {
+                id,
+                required: false,
+            } if id == port_id("sidechain-in")
+        )
+    {
+        return Ok(None);
+    }
+    let kernel = match PreparedGateGainKernelV1::try_new(request.backend) {
+        Ok(kernel) => kernel,
+        Err(GateGainKernelError::BackendUnavailable) => return Ok(None),
+        Err(_) => {
+            return Err(EffectPrepareError {
+                code: "effect.bank.backend",
+            });
+        }
+    };
+    let ring_length = usize::try_from(metadata.latency.0)
+        .ok()
+        .and_then(|latency| latency.checked_add(1))
+        .ok_or(EffectPrepareError {
+            code: "effect.resource.limit",
+        })?;
+    // `initial_defaults` accepted every static parameter above, and the descriptor fixes the
+    // supported rate/ring pair. `Lane::new` can therefore not fail here; fixed-width construction
+    // avoids an allocation and preserves width-specialized retained state.
+    let left = core::array::from_fn(|track| {
+        Lane::new(&left_defaults[track], ring_length, metadata.sample_rate)
+            .expect("validated gate preparation values")
+    });
+    let right = core::array::from_fn(|track| {
+        Lane::new(&right_defaults[track], ring_length, metadata.sample_rate)
+            .expect("validated gate preparation values")
+    });
+    Ok(Some(Box::new(PreparedGateExpanderBank::<W> {
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+        effect_metadata: metadata,
+        kernel,
+        left_defaults,
+        right_defaults,
+        left,
+        right,
+    })))
 }
 
 impl PreparedNativeEffect for PreparedGateExpander {
@@ -564,6 +652,202 @@ impl PreparedNativeEffect for PreparedGateExpander {
     }
 }
 
+impl<const W: usize> PreparedNativeEffectBank for PreparedGateExpanderBank<W> {
+    fn metadata(&self) -> PreparedBankMetadata {
+        self.metadata.clone()
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        for track in 0..W {
+            match kind {
+                ResetKind::FullToDefaults => {
+                    self.left[track]
+                        .full_reset(&self.left_defaults[track], self.effect_metadata.sample_rate);
+                    self.right[track].full_reset(
+                        &self.right_defaults[track],
+                        self.effect_metadata.sample_rate,
+                    );
+                }
+                ResetKind::DiscontinuityKeepParameters => {
+                    self.left[track].discontinuity_reset();
+                    self.right[track].discontinuity_reset();
+                }
+            }
+        }
+    }
+
+    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.metadata.width);
+        if block.width != self.metadata.width
+            || block.frames > self.effect_metadata.quantum
+            || block.sidechain.is_some()
+            || W != self.metadata.width.lanes() as usize
+        {
+            return report;
+        }
+        for track in 0..W {
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.effect_metadata,
+                block.first_sample,
+                &mut self.left[track],
+                &mut self.right[track],
+                &mut report.reports[track],
+            );
+        }
+        for frame in 0..block.frames as usize {
+            let start = frame * W;
+            process_bank_frame(
+                &mut self.left,
+                &mut self.right,
+                self.kernel,
+                self.effect_metadata,
+                &mut report,
+                &mut block.left[start..start + W],
+                &mut block.right[start..start + W],
+            );
+        }
+        report
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        validate_state_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        write_lane(output.left, &self.left[track]);
+        write_lane(output.right, &self.right[track]);
+        Ok(())
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        if state_layout_version != 1 {
+            return Err(state_error("effect.state.version"));
+        }
+        validate_state_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        let ring_length = self.left[track].main_ring.len();
+        let left = read_lane(input.left, ring_length, self.effect_metadata.sample_rate)?;
+        let right = read_lane(input.right, ring_length, self.effect_metadata.sample_rate)?;
+        self.left[track] = left;
+        self.right[track] = right;
+        Ok(())
+    }
+}
+
+fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
+    let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
+    if track >= width {
+        return Err(state_error("effect.state.track"));
+    }
+    Ok(track)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_bank_frame<const W: usize>(
+    left_lanes: &mut [Lane; W],
+    right_lanes: &mut [Lane; W],
+    kernel: PreparedGateGainKernelV1,
+    metadata: PreparedEffectMetadata,
+    report: &mut BankProcessReport,
+    left_samples: &mut [f32],
+    right_samples: &mut [f32],
+) {
+    let mut left_gains = [1.0; W];
+    let mut right_gains = [1.0; W];
+    let mut left_identity = [0_u32; W];
+    let mut right_identity = [0_u32; W];
+    let mut left_delayed = [0.0; W];
+    let mut right_delayed = [0.0; W];
+    for track in 0..W {
+        left_lanes[track].ramps.iter_mut().for_each(Ramp::advance);
+        right_lanes[track].ramps.iter_mut().for_each(Ramp::advance);
+        let main_left = sanitize(
+            left_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+        let main_right = sanitize(
+            right_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+        let (detector_left, detector_right) =
+            linked_levels(metadata.link_mode, main_left, main_right);
+        let left = prepare_lane_gain(
+            main_left,
+            detector_left,
+            &mut left_lanes[track],
+            metadata.bypass,
+            &mut report.reports[track].recovered_left_samples,
+        );
+        let right = prepare_lane_gain(
+            main_right,
+            detector_right,
+            &mut right_lanes[track],
+            metadata.bypass,
+            &mut report.reports[track].recovered_right_samples,
+        );
+        left_samples[track] = left.delayed;
+        right_samples[track] = right.delayed;
+        left_gains[track] = left.gain;
+        right_gains[track] = right.gain;
+        left_identity[track] = u32::from(left.identity).wrapping_neg();
+        right_identity[track] = u32::from(right.identity).wrapping_neg();
+        left_delayed[track] = left.delayed;
+        right_delayed[track] = right.delayed;
+    }
+    if kernel
+        .process_gain(left_samples, &left_gains, &left_identity)
+        .is_err()
+        || kernel
+            .process_gain(right_samples, &right_gains, &right_identity)
+            .is_err()
+    {
+        left_samples.copy_from_slice(&left_delayed);
+        right_samples.copy_from_slice(&right_delayed);
+        return;
+    }
+    for track in 0..W {
+        left_samples[track] = finish_bank_output(
+            left_samples[track],
+            left_delayed[track],
+            &mut left_lanes[track],
+            &mut report.reports[track].recovered_left_samples,
+        );
+        right_samples[track] = finish_bank_output(
+            right_samples[track],
+            right_delayed[track],
+            &mut right_lanes[track],
+            &mut report.reports[track].recovered_right_samples,
+        );
+    }
+}
+
+fn finish_bank_output(value: f32, delayed: f32, lane: &mut Lane, recovered: &mut u64) -> f32 {
+    match finite_or_zero(value) {
+        Some(value) => value,
+        None => recover(lane, delayed, recovered),
+    }
+}
+
 fn initial_defaults(
     values: &[InitialParameterValue],
 ) -> Result<([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]), EffectPrepareError> {
@@ -596,6 +880,13 @@ fn initial_defaults(
     Ok((left, right))
 }
 
+#[derive(Clone, Copy)]
+struct GainFrame {
+    delayed: f32,
+    gain: f32,
+    identity: bool,
+}
+
 fn process_lane(
     main: f32,
     detector: f32,
@@ -603,6 +894,23 @@ fn process_lane(
     bypass: bool,
     recovered: &mut u64,
 ) -> f32 {
+    let frame = prepare_lane_gain(main, detector, lane, bypass, recovered);
+    if frame.identity {
+        return frame.delayed;
+    }
+    match finite_or_zero(frame.delayed * frame.gain) {
+        Some(output) => output,
+        None => recover(lane, frame.delayed, recovered),
+    }
+}
+
+fn prepare_lane_gain(
+    main: f32,
+    detector: f32,
+    lane: &mut Lane,
+    bypass: bool,
+    recovered: &mut u64,
+) -> GainFrame {
     let ring_length = lane.main_ring.len();
     let cursor = lane.cursor as usize;
     lane.main_ring[cursor] = main;
@@ -613,7 +921,7 @@ fn process_lane(
 
     let Some(level_db) = finite_or_zero((20.0_f32 * level.max(1.0e-8).log10()).clamp(-160.0, 24.0))
     else {
-        return recover(lane, delayed, recovered);
+        return recovered_gain_frame(lane, delayed, recovered);
     };
     transition(lane, level_db);
     let target = match lane.phase {
@@ -629,18 +937,25 @@ fn process_lane(
     let Some(gain_reduction_db) =
         finite_or_zero(coefficient * lane.gain_reduction_db + (1.0 - coefficient) * target)
     else {
-        return recover(lane, delayed, recovered);
+        return recovered_gain_frame(lane, delayed, recovered);
     };
     lane.gain_reduction_db = gain_reduction_db;
     let Some(gain) = finite_or_zero(10.0_f32.powf(0.05 * gain_reduction_db)) else {
-        return recover(lane, delayed, recovered);
+        return recovered_gain_frame(lane, delayed, recovered);
     };
-    if bypass || gain_reduction_db == 0.0 {
-        return delayed;
+    GainFrame {
+        delayed,
+        gain,
+        identity: bypass || gain_reduction_db == 0.0,
     }
-    match finite_or_zero(delayed * gain) {
-        Some(output) => output,
-        None => recover(lane, delayed, recovered),
+}
+
+fn recovered_gain_frame(lane: &mut Lane, delayed: f32, recovered: &mut u64) -> GainFrame {
+    let _ = recover(lane, delayed, recovered);
+    GainFrame {
+        delayed,
+        gain: 1.0,
+        identity: true,
     }
 }
 

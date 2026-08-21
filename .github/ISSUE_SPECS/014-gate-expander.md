@@ -142,3 +142,21 @@ Terra and final Sol verdicts; exact successor link; and `timed_benchmark_invocat
   miso-engine-dsp-reference`; `cargo check -p miso-engine-gate-expander`; `cargo test -p
   miso-engine-gate-expander` (5 passed); and `cargo clippy -p miso-engine-gate-expander
   --all-targets -- -D warnings`. `timed_benchmark_invocations=0`.
+
+### Terra attempt 1 — homogeneous-bank checkpoint (2026-08-21)
+
+- Added the prepared core `GateGainKernelV1` surface: exact `sample*gain` followed by an identity
+  mask selection, width validation, and a separately selected AVX2+FMA alias with zero FMA
+  contractions. It has scalar shape/mask and available-host AVX2/base-FMA equality coverage.
+- `GateExpanderFactory` now prepares exact W4/W8 unconnected homogeneous cohorts with
+  width-specialized lane arrays, independent per-track L/R delay/detector/phase/ramp state and
+  per-track snapshot/restore/reset. It validates all requests before a legal `Ok(None)` fallback
+  for connected sidechains, heterogeneous programs or unavailable backends.
+- Focused commands passed: `cargo fmt --check --package miso-engine-core --package
+  miso-engine-gate-expander`; `cargo test --locked -p miso-engine-core -p
+  miso-engine-gate-expander` (27 core and 5 gate tests passed); and `cargo clippy --locked -p
+  miso-engine-core -p miso-engine-gate-expander --all-targets -- -D warnings`.
+- Direct gate-bank PCM/state/report parity and isolation tests were not added after the explicit
+  coverage freeze at this checkpoint; this evidence therefore does not claim those representative
+  product gates. Registry/graph, qualification/audit/target and benchmark work remain untouched.
+  `timed_benchmark_invocations=0`.

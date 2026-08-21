@@ -6,8 +6,9 @@
 mod arch;
 
 pub use arch::{
-    CompressorGainMixKernelError, DeltaBankKernelError, PreparedCompressorGainMixKernelV1,
-    PreparedDeltaBankKernelV1, PreparedTptBankKernelV1, TptBankKernelError,
+    CompressorGainMixKernelError, DeltaBankKernelError, GateGainKernelError,
+    PreparedCompressorGainMixKernelV1, PreparedDeltaBankKernelV1, PreparedGateGainKernelV1,
+    PreparedTptBankKernelV1, TptBankKernelError,
 };
 
 /// The version of the engine API represented by this build.
