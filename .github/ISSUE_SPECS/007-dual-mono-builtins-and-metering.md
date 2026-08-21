@@ -219,6 +219,22 @@ relative to input RMS, above the required `-100 dB`. The fixture remains enabled
 no threshold was relaxed and the benchmark count remains zero. This requires Sol review before
 any implementation/tolerance change.
 
+## Incremental-recurrence Terra attempt 1 evidence (2026-08-21; partial)
+
+Production now stores the conditioned `c1=t1/d` coefficient rather than `a1`, with the frozen
+incremental all-`f32` non-FMA state graph (`d1/d2`, `q1/q2`, `ic1/ic2`). Preparation follows the
+frozen f64 dependency order and derives Jury checks from the cast stored bits. The separate f64
+state-space oracle was updated to the matching `A/B/C/D` equations without importing production
+design code. The direct-recurrence sustained test was atomically superseded by the normative
+recurrence implementation and launch/deferred-compatibility observation tests.
+
+PASS so far: analytic cast-state transfer, one-second impulse DFT across the five prescribed
+partitions, and coherent sustained-sine fundamental/residual/deep-stop checks all pass for the
+four launch rates; the preserved four deferred rates also currently pass as compatibility-only
+observations. Focused warning-denied Clippy passes. This remains partial evidence: the full
+production-order cascade, fixtures, public API/resource/meter/realtime corrections, listening,
+and final target evidence are still outstanding. Benchmark count remains **0**.
+
 ## Sol adversarial review / correction attempt 2 after rescope (2026-08-21)
 
 **ATTEMPT 2: BLOCKED BEFORE PRODUCTION CORRECTION; REBRIEF REQUIRED.**

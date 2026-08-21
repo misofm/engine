@@ -217,7 +217,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
 
 #[derive(Clone, Copy)]
 struct TptSvf {
-    a1: f32,
+    c1: f32,
     a2: f32,
     a3: f32,
     k: f32,
@@ -230,7 +230,7 @@ struct TptSvf {
 impl TptSvf {
     fn identity() -> Self {
         Self {
-            a1: 0.0,
+            c1: 0.0,
             a2: 0.0,
             a3: 0.0,
             k: 0.0,
@@ -248,15 +248,20 @@ impl TptSvf {
             return Err(BuiltinParameterError::FilterCutoff);
         }
         let g = (core::f64::consts::PI * f64::from(cutoff) / f64::from(rate)).tan();
-        let k = core::f64::consts::SQRT_2;
-        let denominator = 1.0 + g * (g + k);
-        let values =
-            [1.0 / denominator, g / denominator, g * g / denominator, k].map(|value| value as f32);
+        let k64 = core::f64::consts::SQRT_2;
+        let t0 = g + k64;
+        let t1 = g * t0;
+        let denominator = 1.0 + t1;
+        let c1 = t1 / denominator;
+        let a2 = g / denominator;
+        let t2 = g * g;
+        let a3 = t2 / denominator;
+        let values = [c1, a2, a3, k64].map(|value| value as f32);
         if !values.into_iter().all(normal_or_zero) {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
-        let [a1, a2, a3, k] = values;
-        let transition_00 = 2.0_f64 * f64::from(a1) - 1.0;
+        let [c1, a2, a3, k] = values;
+        let transition_00 = 1.0 - 2.0_f64 * f64::from(c1);
         let transition_01 = -2.0_f64 * f64::from(a2);
         let transition_10 = 2.0_f64 * f64::from(a2);
         let transition_11 = 1.0 - 2.0_f64 * f64::from(a3);
@@ -271,7 +276,7 @@ impl TptSvf {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
         Ok(Self {
-            a1,
+            c1,
             a2,
             a3,
             k,
@@ -299,15 +304,18 @@ impl TptSvf {
             *recovered = recovered.saturating_add(1);
         }
         let v3 = input - self.s2;
-        let p1 = self.a1 * self.s1;
-        let p2 = self.a2 * v3;
-        let v1 = p1 + p2;
+        let p1 = self.a2 * v3;
+        let p2 = self.c1 * self.s1;
+        let d1 = p1 - p2;
+        let v1 = self.s1 + d1;
         let p3 = self.a2 * self.s1;
         let p4 = self.a3 * v3;
-        let t2 = self.s2 + p3;
-        let v2 = t2 + p4;
-        let n1 = 2.0 * v1 - self.s1;
-        let n2 = 2.0 * v2 - self.s2;
+        let d2 = p3 + p4;
+        let v2 = self.s2 + d2;
+        let q1 = d1 + d1;
+        let n1 = self.s1 + q1;
+        let q2 = d2 + d2;
+        let n2 = self.s2 + q2;
         let low = v2;
         let kh = self.k * v1;
         let th = input - kh;
@@ -1232,7 +1240,7 @@ mod tests {
                 for cutoff in &cutoffs {
                     let filter = TptSvf::design(rate, *cutoff as f32, high_pass).expect("valid");
                     let state = ReferenceTptStateSpace::from_cast_coefficients(
-                        filter.a1, filter.a2, filter.a3, filter.k, output,
+                        filter.c1, filter.a2, filter.a3, filter.k, output,
                     );
                     let mut probes = vec![
                         0.25 * cutoff,

@@ -28,26 +28,31 @@ pub struct ReferenceTptStateSpace {
 impl ReferenceTptStateSpace {
     /// Derives the selected transfer function from exact cast `f32` TPT coefficients.
     pub fn from_cast_coefficients(
-        a1: f32,
+        c1: f32,
         a2: f32,
         a3: f32,
         k: f32,
         output: ReferenceTptOutput,
     ) -> Self {
-        let (a1, a2, a3, k) = (f64::from(a1), f64::from(a2), f64::from(a3), f64::from(k));
-        let (c0, c1, d) = match output {
+        let (c1_coefficient, a2, a3, k) =
+            (f64::from(c1), f64::from(a2), f64::from(a3), f64::from(k));
+        let (c0, output_c1, d) = match output {
             ReferenceTptOutput::LowPass => (a2, 1.0 - a3, a3),
-            ReferenceTptOutput::HighPass => (-k * a1 - a2, k * a2 - (1.0 - a3), 1.0 - k * a2 - a3),
+            ReferenceTptOutput::HighPass => (
+                -k * (1.0 - c1_coefficient) - a2,
+                k * a2 - (1.0 - a3),
+                1.0 - k * a2 - a3,
+            ),
         };
         Self {
-            a00: 2.0 * a1 - 1.0,
+            a00: 1.0 - 2.0 * c1_coefficient,
             a01: -2.0 * a2,
             a10: 2.0 * a2,
             a11: 1.0 - 2.0 * a3,
             b0: 2.0 * a2,
             b1: 2.0 * a3,
             c0,
-            c1,
+            c1: output_c1,
             d,
         }
     }
