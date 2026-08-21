@@ -255,3 +255,38 @@ and timed invocation count remains exactly `0`. Once this evidence record is com
 with a clean tree, root is authorized to invoke exactly `bash scripts/run-scheduler-benchmark.sh`
 once. That invocation owns one untimed warmup and measured rounds 1 and 2; any failure consumes the
 authorization, must preserve its raw/stderr/disposition bytes, and forbids retry or tuning.
+
+## Authorized Gate 8 run and final Sol verdict — PASS (2026-08-21)
+
+After the nonbenchmark evidence was committed and pushed as docs-only descendant
+`290037ccebc64204a743cd13f93e240a84f93040`, Sol confirmed that the benchmark source, fixture,
+runner, validators and release binary were byte-identical to the preflight seal, then authorized
+exactly one `bash scripts/run-scheduler-benchmark.sh` invocation. Root invoked that command once.
+It exited `0`; no direct binary invocation, retry, resume or tuning occurred.
+
+The disposition reports schema version 2, status `PASS`, reason `complete`,
+`runner_invocations=1`, `workload_process_launches=3`, `warmup_launches=1`, and
+`measured_rounds_completed=2`. It records candidate commit
+`290037ccebc64204a743cd13f93e240a84f93040`, candidate SHA-256
+`bfe99c91dce94722c61f3da91932c0e899c2ea5d43b36422dccd638f4714538c`, and the sealed binary
+SHA-256 `4bb7f9fc4c101c568f563223d150ef90fdc98b2aadc8590ab5d0964c9971d4a5`.
+
+Raw and accepted artifacts each contain exactly six records and 5,112 bytes. They are
+byte-identical with SHA-256
+`4e1df0d434d7d50db1b6784de0a7447c1a7b646e4ca3ad95fe545acfcc30f446`. The disposition is 705
+bytes with SHA-256 `25a20d6e92c4043da2d51ec6ab76e3d5ed05d208239f317ee653db0f0a724601`.
+The stderr artifact is empty with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. Independent aggregate
+validation passed: modes are exactly sequential/two-lane/four-lane, rounds are exactly 1 and 2,
+all six output hashes are `69527027c73a5a8e`, and render, coordinator-forbidden and
+worker-forbidden totals are all zero.
+
+Descriptive p50 observations in ns/frame were sequential/two-lane/four-lane `402/319/268` in
+round 1 and `402/315/268` in round 2. On this host that is a rough sequential-over-two-lane ratio
+of `1.26x` and `1.28x`, and sequential-over-four-lane ratio of `1.50x` in both rounds. These are
+descriptive measurements only and establish no performance threshold or portable speedup claim.
+
+**Final Sol verdict: PASS.** All eight frozen acceptance gates are satisfied within the two-attempt
+budget. The native scheduler qualification benchmark was invoked exactly once with its one warmup
+and two measured rounds, its artifact and disposition identities are preserved, and no additional
+timing authorization exists.
