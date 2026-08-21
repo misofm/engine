@@ -1,7 +1,11 @@
 //! Deterministic issue-007 expected-output fixture generator and checker.
 
 use core::fmt::Write as _;
-use std::{env, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::Path,
+};
 
 use miso_engine_builtins::{
     BuiltinChain, BuiltinParameterError, BuiltinParameters, BuiltinResetKind, ChannelParameters,
@@ -24,6 +28,9 @@ use sha2::{Digest, Sha256};
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
+const CASE_COUNT_V1: usize = 1_762;
+const RESPONSE_CASE_COUNT_V1: usize = 1_740;
+const PCM_PAYLOAD_COUNT_V1: usize = 33;
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -35,11 +42,45 @@ fn main() {
 fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.as_slice() {
         [mode, root] if mode == "--write" => write_and_verify(Path::new(root)),
-        [mode, root] if mode == "--check" => verify(Path::new(root), &generated()),
+        [mode, root] if mode == "--check" => check_fixture_root_v1(Path::new(root)),
         _ => {
             Err("usage: miso_engine_builtins_fixture --write|--check SCRATCH_DIRECTORY".to_owned())
         }
     }
+}
+
+/// The checked-in builtin fixture layout.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum FixturePathClassV1 {
+    /// The expanded fixture tuple list.
+    Cases,
+    /// Headerless planar PCM expected bytes.
+    Pcm,
+    /// Independent response data.
+    Reference,
+    /// Expected meter records.
+    Meter,
+    /// Exact invalid-input records.
+    Diagnostics,
+    /// Prepared-resource records.
+    Resources,
+    /// Fixture provenance and schema metadata.
+    Metadata,
+}
+
+/// A parsed, byte-addressable fixture-manifest row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FixtureManifestEntryV1 {
+    path: String,
+    length: u64,
+    sha256: String,
+    class: FixturePathClassV1,
+}
+
+/// The strictly sorted manifest that names every fixture payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FixtureManifestV1 {
+    entries: Vec<FixtureManifestEntryV1>,
 }
 
 fn generated() -> Vec<(String, Vec<u8>)> {
@@ -1287,10 +1328,11 @@ fn write_and_verify(root: &Path) -> Result<(), String> {
     }
     fs::write(root.join("MANIFEST.tsv"), manifest(&files))
         .map_err(|error| format!("write manifest: {error}"))?;
-    verify(root, &files)
+    verify_generated_scratch(root, &files)?;
+    check_fixture_root_v1(root)
 }
 
-fn verify(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
+fn verify_generated_scratch(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
     if fs::read(root.join("MANIFEST.tsv")).map_err(|error| format!("read manifest: {error}"))?
         != manifest(expected).as_bytes()
     {
@@ -1306,6 +1348,277 @@ fn verify(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
     let expected_paths: Vec<_> = expected.iter().map(|(path, _)| path.clone()).collect();
     if actual != expected_paths {
         return Err("builtins fixture missing or unlisted file".to_owned());
+    }
+    Ok(())
+}
+
+fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
+    let manifest = parse_manifest_v1(root)?;
+    verify_manifest_bytes_v1(root, &manifest)?;
+    verify_path_class_coverage_v1(&manifest)?;
+    let response_ids = verify_cases_v1(root)?;
+    verify_reference_coverage_v1(root, &response_ids)?;
+    verify_jsonl_payloads_v1(root)?;
+    Ok(())
+}
+
+fn parse_manifest_v1(root: &Path) -> Result<FixtureManifestV1, String> {
+    let bytes = read_regular_file(&root.join("MANIFEST.tsv"), "manifest")?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "manifest is not UTF-8".to_owned())?;
+    let mut lines = text.split_inclusive('\n');
+    if lines.next() != Some(MANIFEST_HEADER) {
+        return Err("manifest has an invalid header".to_owned());
+    }
+
+    let mut previous = None;
+    let mut entries = Vec::new();
+    for (line_number, line) in lines.enumerate() {
+        let line = line
+            .strip_suffix('\n')
+            .ok_or_else(|| format!("manifest line {} is not LF terminated", line_number + 2))?;
+        let mut fields = line.split('\t');
+        let path = fields.next().unwrap_or_default();
+        let length = fields.next().unwrap_or_default();
+        let sha256 = fields.next().unwrap_or_default();
+        if path.is_empty() || fields.next().is_some() {
+            return Err(format!("manifest line {} is malformed", line_number + 2));
+        }
+        if previous.is_some_and(|previous: &str| previous >= path) {
+            return Err(format!("manifest path is not strictly sorted: {path}"));
+        }
+        let length = length
+            .parse::<u64>()
+            .map_err(|_| format!("manifest length is not an unsigned integer: {path}"))?;
+        if !is_lower_sha256(sha256) {
+            return Err(format!("manifest sha256 is not lowercase hex: {path}"));
+        }
+        entries.push(FixtureManifestEntryV1 {
+            path: path.to_owned(),
+            length,
+            sha256: sha256.to_owned(),
+            class: classify_fixture_path_v1(path)?,
+        });
+        previous = Some(path);
+    }
+    if entries.is_empty() {
+        return Err("manifest has no payload entries".to_owned());
+    }
+    Ok(FixtureManifestV1 { entries })
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+        })
+}
+
+fn classify_fixture_path_v1(path: &str) -> Result<FixturePathClassV1, String> {
+    if !is_safe_fixture_relative_path(path) {
+        return Err(format!("manifest path is unsafe: {path}"));
+    }
+    match path {
+        "cases.toml" => Ok(FixturePathClassV1::Cases),
+        "reference/filter-response.csv" => Ok(FixturePathClassV1::Reference),
+        "diagnostics.jsonl" => Ok(FixturePathClassV1::Diagnostics),
+        "resources.jsonl" => Ok(FixturePathClassV1::Resources),
+        "metadata.toml" => Ok(FixturePathClassV1::Metadata),
+        "meters/graph-taps.jsonl" | "meters/window-and-drop.jsonl" => Ok(FixturePathClassV1::Meter),
+        _ if path.starts_with("pcm/")
+            && path.ends_with(".f32le")
+            && is_fixture_case_id(&path[4..path.len() - 6]) =>
+        {
+            Ok(FixturePathClassV1::Pcm)
+        }
+        _ => Err(format!("manifest path has no V1 fixture class: {path}")),
+    }
+}
+
+fn is_safe_fixture_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
+fn is_fixture_case_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn verify_manifest_bytes_v1(root: &Path, manifest: &FixtureManifestV1) -> Result<(), String> {
+    let expected: BTreeSet<_> = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    let actual = list_files(root)?;
+    let actual: BTreeSet<_> = actual.iter().map(String::as_str).collect();
+    if actual != expected {
+        return Err("fixture tree has missing or unlisted payload files".to_owned());
+    }
+    for entry in &manifest.entries {
+        let bytes = read_regular_file(&root.join(&entry.path), &entry.path)?;
+        if u64::try_from(bytes.len()).ok() != Some(entry.length) {
+            return Err(format!("fixture byte length mismatch: {}", entry.path));
+        }
+        if sha256(&bytes) != entry.sha256 {
+            return Err(format!("fixture sha256 mismatch: {}", entry.path));
+        }
+    }
+    Ok(())
+}
+
+fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("read {label}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("fixture is not a regular file: {label}"));
+    }
+    fs::read(path).map_err(|error| format!("read {label}: {error}"))
+}
+
+fn verify_path_class_coverage_v1(manifest: &FixtureManifestV1) -> Result<(), String> {
+    let mut counts = BTreeMap::new();
+    for entry in &manifest.entries {
+        *counts.entry(entry.class.clone()).or_insert(0_usize) += 1;
+    }
+    for (class, expected) in [
+        (FixturePathClassV1::Cases, 1),
+        (FixturePathClassV1::Reference, 1),
+        (FixturePathClassV1::Diagnostics, 1),
+        (FixturePathClassV1::Resources, 1),
+        (FixturePathClassV1::Metadata, 1),
+        (FixturePathClassV1::Meter, 2),
+        (FixturePathClassV1::Pcm, PCM_PAYLOAD_COUNT_V1),
+    ] {
+        if counts.get(&class) != Some(&expected) {
+            return Err(format!(
+                "fixture coverage requires {expected} {class:?} payloads"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_cases_v1(root: &Path) -> Result<BTreeSet<String>, String> {
+    let bytes = read_regular_file(&root.join("cases.toml"), "cases.toml")?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "cases.toml is not UTF-8".to_owned())?;
+    let mut blocks = text.split("[[case]]\n");
+    if blocks.next() != Some("fixture_schema = 1\n\n") {
+        return Err("cases.toml does not have the canonical V1 header".to_owned());
+    }
+
+    let mut case_count = 0_usize;
+    let mut previous = None::<String>;
+    let mut response_ids = BTreeSet::new();
+    for block in blocks {
+        if block.is_empty() {
+            continue;
+        }
+        case_count += 1;
+        let id = quoted_case_field(block, "id")
+            .ok_or_else(|| "cases.toml case is missing canonical id".to_owned())?;
+        if previous.as_deref().is_some_and(|previous| previous >= id) {
+            return Err(format!("cases.toml IDs are not strictly sorted: {id}"));
+        }
+        previous = Some(id.to_owned());
+        if quoted_case_field(block, "category") == Some("filter_response")
+            && !response_ids.insert(id.to_owned())
+        {
+            return Err(format!("cases.toml duplicate response ID: {id}"));
+        }
+    }
+    if case_count != CASE_COUNT_V1 || response_ids.len() != RESPONSE_CASE_COUNT_V1 {
+        return Err(format!(
+            "cases.toml coverage count differs: cases={case_count} responses={}",
+            response_ids.len()
+        ));
+    }
+    Ok(response_ids)
+}
+
+fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    block.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?.strip_prefix(" = \"")?;
+        value.strip_suffix('"')
+    })
+}
+
+fn verify_reference_coverage_v1(root: &Path, expected: &BTreeSet<String>) -> Result<(), String> {
+    let bytes = read_regular_file(
+        &root.join("reference/filter-response.csv"),
+        "reference/filter-response.csv",
+    )?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "reference/filter-response.csv is not UTF-8".to_owned())?;
+    const HEADER: &str = "case,rate_hz,section,cutoff_hz,probe_hz,quantum_frames,rbj_magnitude_db,cast_state_magnitude_db,impulse_dft_magnitude_db,sustained_fundamental_db,sustained_residual_db,sustained_total_db,tail_energy,recovery_count\n";
+    let mut lines = text.split_inclusive('\n');
+    if lines.next() != Some(HEADER) {
+        return Err("reference/filter-response.csv has an invalid V1 header".to_owned());
+    }
+    let mut actual = BTreeSet::new();
+    for (index, line) in lines.enumerate() {
+        let line = line.strip_suffix('\n').ok_or_else(|| {
+            format!(
+                "reference/filter-response.csv row {} is not LF terminated",
+                index + 2
+            )
+        })?;
+        let fields: Vec<_> = line.split(',').collect();
+        if fields.len() != 14 || fields[0].is_empty() {
+            return Err(format!(
+                "reference/filter-response.csv row {} is malformed",
+                index + 2
+            ));
+        }
+        if !actual.insert(fields[0].to_owned()) {
+            return Err(format!(
+                "reference/filter-response.csv has duplicate case: {}",
+                fields[0]
+            ));
+        }
+    }
+    if &actual != expected {
+        return Err("reference/filter-response.csv coverage differs from cases.toml".to_owned());
+    }
+    Ok(())
+}
+
+fn verify_jsonl_payloads_v1(root: &Path) -> Result<(), String> {
+    for path in [
+        "meters/graph-taps.jsonl",
+        "meters/window-and-drop.jsonl",
+        "diagnostics.jsonl",
+        "resources.jsonl",
+    ] {
+        let bytes = read_regular_file(&root.join(path), path)?;
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| format!("JSONL is not UTF-8: {path}"))?;
+        let mut records = 0_usize;
+        for (index, line) in text.split_inclusive('\n').enumerate() {
+            let record = line.strip_suffix('\n').ok_or_else(|| {
+                format!("JSONL record is not LF terminated: {path}:{}", index + 1)
+            })?;
+            if record.is_empty() || !record.starts_with('{') || !record.ends_with('}') {
+                return Err(format!(
+                    "JSONL record is not a canonical object: {path}:{}",
+                    index + 1
+                ));
+            }
+            records += 1;
+        }
+        if records == 0 {
+            return Err(format!("JSONL payload has no records: {path}"));
+        }
     }
     Ok(())
 }
@@ -1353,35 +1666,223 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     #[test]
-    fn generated_corpus_is_complete_and_deterministic() {
-        let root = env::temp_dir().join(format!(
-            "miso-engine-builtins-fixture-{}",
-            std::process::id()
-        ));
+    fn v1_check_accepts_complete_generated_corpus_without_writing() {
+        let root = temporary_root("valid");
+        let files = complete_files();
+        write_fixture(&root, &files);
+        let before = read_fixture_tree(&root);
+
+        check_fixture_root_v1(&root).expect("complete V1 fixture corpus");
+
+        assert_eq!(
+            before,
+            read_fixture_tree(&root),
+            "--check mutated the fixture root"
+        );
+        remove_temporary_root(root);
+    }
+
+    #[test]
+    fn v1_check_rejects_all_twenty_four_format_mutations() {
+        let files = complete_files();
+        let targets = [
+            ("toml", "cases.toml"),
+            ("f32le", "pcm/identity-signed-zero.f32le"),
+            ("csv", "reference/filter-response.csv"),
+            ("meter_jsonl", "meters/window-and-drop.jsonl"),
+            ("diagnostics_jsonl", "diagnostics.jsonl"),
+            ("resources_jsonl", "resources.jsonl"),
+        ];
+        for (class, path) in targets {
+            reject_payload_mutation(&files, class, "delete", |root| {
+                fs::remove_file(root.join(path)).expect("delete fixture payload");
+            });
+            reject_payload_mutation(&files, class, "alter", |root| {
+                let mut bytes = fs::read(root.join(path)).expect("read fixture payload");
+                bytes.push(0);
+                fs::write(root.join(path), bytes).expect("alter fixture payload");
+            });
+            reject_payload_mutation(&files, class, "add", |root| {
+                fs::write(root.join(format!("unlisted-{class}")), b"unexpected\n")
+                    .expect("add fixture payload");
+            });
+            reject_coverage_hole(&files, class, |mutated| match class {
+                "toml" => {
+                    let cases =
+                        String::from_utf8(mutated.get("cases.toml").expect("cases").clone())
+                            .expect("utf8 cases");
+                    mutated.insert(
+                        "cases.toml".to_owned(),
+                        remove_first_response_case(&cases).into_bytes(),
+                    );
+                }
+                "f32le" => {
+                    mutated.remove("pcm/identity-signed-zero.f32le");
+                }
+                "csv" => {
+                    let csv = String::from_utf8(
+                        mutated
+                            .get("reference/filter-response.csv")
+                            .expect("reference")
+                            .clone(),
+                    )
+                    .expect("utf8 reference");
+                    mutated.insert(
+                        "reference/filter-response.csv".to_owned(),
+                        remove_first_data_row(&csv).into_bytes(),
+                    );
+                }
+                "meter_jsonl" | "diagnostics_jsonl" | "resources_jsonl" => {
+                    mutated.insert(path.to_owned(), Vec::new());
+                }
+                _ => unreachable!("frozen format class"),
+            });
+        }
+    }
+
+    #[test]
+    fn v1_check_rejects_manifest_grammar() {
+        let root = temporary_root("manifest");
+        let files = complete_files();
+        write_fixture(&root, &files);
+
+        fs::remove_file(root.join("MANIFEST.tsv")).expect("remove manifest");
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted missing manifest"
+        );
+        write_fixture(&root, &files);
+
+        fs::write(root.join("MANIFEST.tsv"), "path\tlength\tsha256\n../unsafe\t1\t0000000000000000000000000000000000000000000000000000000000000000\n")
+            .expect("unsafe manifest");
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted unsafe manifest path"
+        );
+        write_fixture(&root, &files);
+
+        let manifest = fs::read_to_string(root.join("MANIFEST.tsv")).expect("manifest");
+        let first_entry = manifest.lines().nth(1).expect("manifest entry");
+        fs::write(
+            root.join("MANIFEST.tsv"),
+            format!("{manifest}{first_entry}\n"),
+        )
+        .expect("duplicate manifest entry");
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted duplicate manifest entry"
+        );
+        remove_temporary_root(root);
+    }
+
+    fn reject_payload_mutation(
+        files: &BTreeMap<String, Vec<u8>>,
+        class: &str,
+        mutation: &str,
+        mutate: impl FnOnce(&Path),
+    ) {
+        let root = temporary_root(&format!("{class}-{mutation}"));
+        write_fixture(&root, files);
+        mutate(&root);
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted {class} {mutation} mutation"
+        );
+        remove_temporary_root(root);
+    }
+
+    fn reject_coverage_hole(
+        files: &BTreeMap<String, Vec<u8>>,
+        class: &str,
+        mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
+    ) {
+        let root = temporary_root(&format!("{class}-coverage-hole"));
+        let mut mutated = files.clone();
+        mutate(&mut mutated);
+        write_fixture(&root, &mutated);
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted {class} manifest-valid coverage hole"
+        );
+        remove_temporary_root(root);
+    }
+
+    fn complete_files() -> BTreeMap<String, Vec<u8>> {
+        generated().into_iter().collect()
+    }
+
+    fn write_fixture(root: &Path, files: &BTreeMap<String, Vec<u8>>) {
         if root.exists() {
-            fs::remove_dir_all(&root).expect("stale fixture root");
+            fs::remove_dir_all(root).expect("replace fixture root");
         }
-        let files = generated();
-        for (path, bytes) in &files {
+        fs::create_dir_all(root).expect("fixture root");
+        for (path, bytes) in files {
             let destination = root.join(path);
-            fs::create_dir_all(destination.parent().expect("parent")).expect("directory");
-            fs::write(destination, bytes).expect("fixture");
+            fs::create_dir_all(destination.parent().expect("fixture parent"))
+                .expect("fixture directory");
+            fs::write(destination, bytes).expect("fixture bytes");
         }
-        fs::write(root.join("MANIFEST.tsv"), manifest(&files)).expect("manifest");
-        verify(&root, &files).expect("valid fixture corpus");
-        for (path, bytes) in &files {
-            let mut corrupt = bytes.clone();
-            corrupt.push(0);
-            fs::write(root.join(path), corrupt).expect("corrupt");
-            assert!(
-                verify(&root, &files).is_err(),
-                "accepted corruption: {path}"
+        let manifest_files: Vec<_> = files
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect();
+        fs::write(root.join("MANIFEST.tsv"), manifest(&manifest_files)).expect("manifest");
+    }
+
+    fn read_fixture_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        for path in list_files(root).expect("list fixtures") {
+            files.insert(
+                PathBuf::from(&path),
+                fs::read(root.join(path)).expect("fixture bytes"),
             );
-            fs::write(root.join(path), bytes).expect("restore");
         }
-        fs::write(root.join("unlisted"), []).expect("unlisted");
-        assert!(verify(&root, &files).is_err());
-        fs::remove_dir_all(root).expect("cleanup");
+        files.insert(
+            PathBuf::from("MANIFEST.tsv"),
+            fs::read(root.join("MANIFEST.tsv")).expect("manifest bytes"),
+        );
+        files
+    }
+
+    fn remove_first_response_case(cases: &str) -> String {
+        let category = cases
+            .find("category = \"filter_response\"")
+            .expect("response case");
+        let start = cases[..category].rfind("[[case]]\n").expect("case start");
+        let remainder = &cases[start..];
+        let end = remainder
+            .find("\n[[case]]\n")
+            .map(|offset| start + offset + 1)
+            .unwrap_or(cases.len());
+        format!("{}{}", &cases[..start], &cases[end..])
+    }
+
+    fn remove_first_data_row(csv: &str) -> String {
+        let first_newline = csv.find('\n').expect("csv header");
+        let remainder = &csv[first_newline + 1..];
+        let second_newline = remainder.find('\n').expect("csv data");
+        format!(
+            "{}{}",
+            &csv[..first_newline + 1],
+            &remainder[second_newline + 1..]
+        )
+    }
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let sequence = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "miso-engine-builtins-fixture-v1-{}-{sequence}-{label}",
+            std::process::id()
+        ))
+    }
+
+    fn remove_temporary_root(root: PathBuf) {
+        fs::remove_dir_all(root).expect("remove fixture root");
     }
 }

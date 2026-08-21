@@ -351,3 +351,19 @@ corruption results; exact audit records/traces/probes; target/workspace logs; ze
 with `timed_benchmark_invocations=0`; final Sol authorization; raw/accepted/disposition hashes and
 validator/tool hashes if invoked; and `human_listening_status=pending` naming issue 033. If the
 benchmark is not legitimately authorized or fails, record FAIL and do not retry.
+
+## Fixture-contract checkpoint (2026-08-21)
+
+Terra's first bounded tranche exposed a real test-contract defect: the initial manifest-valid
+meter-JSONL coverage-hole mutation was accepted. Sol's bounded correction reduced the patch to the
+read-only V1 fixture-contract boundary and made all 24 format-class delete/alter/add/coverage-hole
+mutations reject. The checker now parses a strictly sorted safe manifest, verifies exact payload
+bytes, rejects unlisted files, classifies the frozen required path set, and keeps `--write` limited
+to an explicit empty scratch root while `--check` is read-only.
+
+Focused evidence PASS: all three `miso-engine-builtins-fixture` tests, package formatting,
+warning-denied all-target Clippy, and `git diff --check`. This is a recoverable tooling checkpoint,
+not Issue-035 completion: independent expected-output provenance, the full checked corpus, direct
+and graph audits, target/workspace qualification, schema-v2 benchmark readiness, final Sol review,
+and any authorized benchmark remain unrun/incomplete. No benchmark or workload was invoked;
+`timed_benchmark_invocations=0` and `workload_invocations=0`.
