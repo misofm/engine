@@ -173,6 +173,31 @@ PASS:
 format or otherwise touch that protected file. No numerical test, benchmark, timing command or
 broad fixture framework was added. `timed_benchmark_invocations=0`.
 
+## Final post-selection disposition — FAIL / STOPPED / RESCOPED (2026-08-21)
+
+Issue 042 does not have an overall PASS. The complete retained-transfer grid and 1,104 exact
+cutoff/center/shelf-midpoint/notch-minimum searches pass, but the first frozen one-second
+time-domain row fails before its DFT comparison. At 44.1 kHz, a legal bell at `f0=10 Hz`,
+`gain=-24 dB`, `Q=0.1`, `S=0.1` reports `recovered_left_samples=1`; the gate requires zero.
+The input and parameters are legal, and the recovery is emitted by the production scalar
+recurrence's own normal-or-zero state/output predicate. It is therefore neither an oracle nor a
+frequency-search defect.
+
+The exact reproducer is:
+
+`cargo test --locked -p miso-engine-parametric-eq one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges -- --nocapture`
+
+The 10,000-design and 48 million-sample sequence gates were not run after this first frozen
+failure. Their tests and the failing impulse regression are retained but explicitly ignored after
+the stop; the successor must re-enable them after selecting a valid runtime recurrence. The
+two-attempt budget is exhausted because Sol attempt 2 selected and froze the current direct-history
+delta recurrence. No tolerance, domain or recovery waiver and no third Issue-042 attempt is
+permitted.
+
+The accepted scalar/bank/graph/audit/target checkpoints remain technical input only. A stateless
+successor owns conditioned time-domain recurrence/state selection and implementation before any
+further graph or qualification work. `timed_benchmark_invocations=0`.
+
 ## Terra attempt 1 — endpoint-conditioned homogeneous-bank checkpoint (2026-08-21)
 
 **CHECKPOINT PASS; bank/architecture only.** The obsolete core direct-form-I bank surface has been

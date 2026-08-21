@@ -2267,6 +2267,208 @@ mod tests {
             + f64::from(coefficients.d2) * difference2_im;
         numerator_re.hypot(numerator_im) / denominator_re.hypot(denominator_im)
     }
+
+    const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+    const FROZEN_FREQUENCIES: [f32; 6] = [10.0, 20.0, 100.0, 1_000.0, 10_000.0, 20_000.0];
+    const FROZEN_QS: [f32; 4] = [0.1, core::f32::consts::FRAC_1_SQRT_2, 1.0, 18.0];
+    const FROZEN_GAINS: [f32; 5] = [-24.0, -6.0, 0.0, 6.0, 24.0];
+    const FROZEN_SLOPES: [f32; 3] = [0.1, 0.5, 1.0];
+    const ONE_SECOND_DFT_TOLERANCE_DB: f64 = 0.05;
+    const FREQUENCY_TOLERANCE_RATIO: f64 = 0.001;
+    const SEEDED_DESIGN_COUNT: usize = 10_000;
+    const SEEDED_DESIGN_SEED: u64 = 0x0000_0000_0012_e911;
+    const STABILITY_SAMPLES: usize = 1_000_000;
+
+    fn request_at_rate<'a>(
+        values: &'a [InitialParameterValue],
+        bypass: bool,
+        sample_rate: u32,
+    ) -> PrepareEffectRequest<'a> {
+        PrepareEffectRequest {
+            sample_rate,
+            quantum: 128,
+            quality: Quality::Normal,
+            bypass,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::None,
+            },
+            initial_values: values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 512,
+                maximum_scratch_bytes: 1,
+                maximum_automation_spans_per_block: 48,
+            },
+        }
+    }
+
+    fn single_section_values(
+        kind: EqBandKindV1,
+        frequency: f32,
+        gain: f32,
+        q: f32,
+        slope: f32,
+    ) -> Vec<InitialParameterValue> {
+        let mut configured = values();
+        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+            set_initial(&mut configured, 0, channel, 1.0);
+            set_initial(&mut configured, 1, channel, kind as u32 as f32);
+            set_initial(&mut configured, 2, channel, frequency);
+            set_initial(&mut configured, 3, channel, gain);
+            set_initial(&mut configured, 4, channel, q);
+            set_initial(&mut configured, 5, channel, slope);
+        }
+        configured
+    }
+
+    fn retained_delta_db(
+        coefficients: EqCoefficientsV1,
+        sample_rate: SampleRateHz,
+        frequency_hz: f64,
+    ) -> f64 {
+        20.0 * retained_delta_magnitude(coefficients, sample_rate, frequency_hz).log10()
+    }
+
+    fn find_crossing(
+        coefficients: EqCoefficientsV1,
+        sample_rate: SampleRateHz,
+        target_db: f64,
+    ) -> f64 {
+        let mut low = 0.0;
+        let mut high = f64::from(sample_rate.0) * 0.5;
+        let mut low_side = retained_delta_db(coefficients, sample_rate, low) >= target_db;
+        let high_side = retained_delta_db(coefficients, sample_rate, high) >= target_db;
+        assert_ne!(
+            low_side, high_side,
+            "frequency gate must bracket its crossing"
+        );
+        for _ in 0..96 {
+            let middle = (low + high) * 0.5;
+            let middle_side = retained_delta_db(coefficients, sample_rate, middle) >= target_db;
+            if middle_side == low_side {
+                low = middle;
+                low_side = middle_side;
+            } else {
+                high = middle;
+            }
+        }
+        (low + high) * 0.5
+    }
+
+    fn find_log_extremum(
+        coefficients: EqCoefficientsV1,
+        sample_rate: SampleRateHz,
+        maximum: bool,
+    ) -> f64 {
+        let mut low = f64::from(sample_rate.0) * 1.0e-12;
+        let mut high = f64::from(sample_rate.0) * 0.5;
+        for _ in 0..96 {
+            let log_low = low.ln();
+            let span = high.ln() - log_low;
+            let first = (log_low + span / 3.0).exp();
+            let second = (log_low + span * (2.0 / 3.0)).exp();
+            let first_value = retained_delta_magnitude(coefficients, sample_rate, first);
+            let second_value = retained_delta_magnitude(coefficients, sample_rate, second);
+            let keep_left = if maximum {
+                first_value >= second_value
+            } else {
+                first_value <= second_value
+            };
+            if keep_left {
+                high = second;
+            } else {
+                low = first;
+            }
+        }
+        (low.ln() + (high.ln() - low.ln()) * 0.5).exp()
+    }
+
+    fn assert_frequency_match(found: f64, requested: f32, gate: &str) {
+        let relative_error = (found - f64::from(requested)).abs() / f64::from(requested);
+        assert!(
+            relative_error <= FREQUENCY_TOLERANCE_RATIO,
+            "{gate}: found={found} requested={requested} relative_error={relative_error}"
+        );
+    }
+
+    fn one_second_impulse_response(
+        kind: EqBandKindV1,
+        frequency: f32,
+        gain: f32,
+        q: f32,
+        slope: f32,
+        rate: u32,
+    ) -> (Vec<f32>, u64, u64) {
+        let configured = single_section_values(kind, frequency, gain, q, slope);
+        let mut effect = ParametricEqFactory
+            .prepare(request_at_rate(&configured, false, rate))
+            .expect("frozen impulse design must prepare");
+        let mut left = vec![0.0_f32; rate as usize];
+        let mut right = vec![0.0_f32; rate as usize];
+        left[0] = 1.0;
+        right[0] = 1.0;
+        let mut recovered_left = 0_u64;
+        let mut recovered_right = 0_u64;
+        for first in (0..left.len()).step_by(128) {
+            let end = (first + 128).min(left.len());
+            let report = effect.process(
+                EffectProcessBlock::new(
+                    &mut left[first..end],
+                    &mut right[first..end],
+                    None,
+                    first as u64,
+                    &[],
+                    128,
+                )
+                .expect("one-second block"),
+            );
+            recovered_left += report.recovered_left_samples;
+            recovered_right += report.recovered_right_samples;
+        }
+        (left, recovered_left, recovered_right)
+    }
+
+    fn impulse_dft_db(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+        let phase = -core::f64::consts::TAU * frequency / f64::from(rate);
+        let (step_re, step_im) = (phase.cos(), phase.sin());
+        let (mut unit_re, mut unit_im) = (1.0_f64, 0.0_f64);
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for sample in samples {
+            let sample = f64::from(*sample);
+            re += sample * unit_re;
+            im += sample * unit_im;
+            (unit_re, unit_im) = (
+                unit_re * step_re - unit_im * step_im,
+                unit_re * step_im + unit_im * step_re,
+            );
+        }
+        let magnitude = re.hypot(im);
+        if magnitude == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * magnitude.log10()
+        }
+    }
+
+    fn splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = *state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn seeded_unit_interval(state: &mut u64) -> f32 {
+        let high_24 = (splitmix64(state) >> 40) as u32;
+        high_24 as f32 / ((1_u32 << 24) - 1) as f32
+    }
+
+    fn deterministic_noise(state: &mut u64) -> f32 {
+        let word = splitmix64(state);
+        let sign = if word & 1 == 0 { -1.0 } else { 1.0 };
+        let magnitude = 0.01 + ((word >> 40) as u32 as f32 / ((1_u32 << 24) - 1) as f32) * 0.98;
+        sign * magnitude
+    }
     fn assert_complete_grid_row(
         kind: EqBandKindV1,
         frequency: f32,
@@ -2430,6 +2632,327 @@ mod tests {
             "worst retained delta error={worst_error} dB"
         );
     }
+
+    #[test]
+    fn retained_delta_frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum() {
+        let mut searches = 0_u32;
+        for rate in LAUNCH_RATES {
+            let sample_rate = SampleRateHz(rate);
+            for frequency in FROZEN_FREQUENCIES {
+                for kind in [EqBandKindV1::LowPass, EqBandKindV1::HighPass] {
+                    let coefficients = design_biquad_v1(
+                        kind,
+                        frequency,
+                        0.0,
+                        core::f32::consts::FRAC_1_SQRT_2,
+                        1.0,
+                        sample_rate,
+                    )
+                    .expect("legal Butterworth design");
+                    let found = find_crossing(coefficients, sample_rate, -3.010_299_956_6);
+                    assert_frequency_match(found, frequency, "Butterworth cutoff");
+                    searches += 1;
+                }
+                for q in FROZEN_QS {
+                    for gain in FROZEN_GAINS {
+                        if gain == 0.0 {
+                            continue;
+                        }
+                        let coefficients = design_biquad_v1(
+                            EqBandKindV1::Bell,
+                            frequency,
+                            gain,
+                            q,
+                            1.0,
+                            sample_rate,
+                        )
+                        .expect("legal bell design");
+                        let found = find_log_extremum(coefficients, sample_rate, gain > 0.0);
+                        assert_frequency_match(found, frequency, "bell center");
+                        assert!(
+                            (retained_delta_db(coefficients, sample_rate, found) - f64::from(gain))
+                                .abs()
+                                <= 0.005,
+                            "bell center gain Fs={rate} f={frequency} gain={gain} Q={q}"
+                        );
+                        searches += 1;
+                    }
+                    let coefficients =
+                        design_biquad_v1(EqBandKindV1::Notch, frequency, 0.0, q, 1.0, sample_rate)
+                            .expect("legal notch design");
+                    let found = find_log_extremum(coefficients, sample_rate, false);
+                    assert_frequency_match(found, frequency, "notch minimum");
+                    assert!(
+                        retained_delta_magnitude(coefficients, sample_rate, found) <= 1e-5,
+                        "notch null Fs={rate} f={frequency} Q={q}"
+                    );
+                    searches += 1;
+                }
+                for gain in FROZEN_GAINS {
+                    if gain == 0.0 {
+                        continue;
+                    }
+                    for slope in FROZEN_SLOPES {
+                        for kind in [EqBandKindV1::LowShelf, EqBandKindV1::HighShelf] {
+                            let coefficients =
+                                design_biquad_v1(kind, frequency, gain, 1.0, slope, sample_rate)
+                                    .expect("legal shelf design");
+                            let found =
+                                find_crossing(coefficients, sample_rate, f64::from(gain) * 0.5);
+                            assert_frequency_match(found, frequency, "shelf midpoint");
+                            searches += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(searches, 1_104);
+    }
+
+    #[test]
+    #[ignore = "Issue #42 stopped after this frozen time-domain gate failed; successor #44 owns recurrence selection"]
+    fn one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges() {
+        let mut cases = 0_u32;
+        for rate in LAUNCH_RATES {
+            for kind in [
+                EqBandKindV1::Bell,
+                EqBandKindV1::LowShelf,
+                EqBandKindV1::HighShelf,
+                EqBandKindV1::LowPass,
+                EqBandKindV1::HighPass,
+                EqBandKindV1::Notch,
+            ] {
+                for (frequency, gain, q, slope) in [
+                    (10.0_f32, -24.0_f32, 0.1_f32, 0.1_f32),
+                    (20_000.0_f32, 24.0_f32, 18.0_f32, 1.0_f32),
+                ] {
+                    let (impulse, recovered_left, recovered_right) =
+                        one_second_impulse_response(kind, frequency, gain, q, slope, rate);
+                    assert_eq!(recovered_left, 0, "left recovery Fs={rate} {kind:?}");
+                    assert_eq!(recovered_right, 0, "right recovery Fs={rate} {kind:?}");
+                    assert!(
+                        impulse.iter().copied().all(valid),
+                        "one-second output remained finite normal-or-zero Fs={rate} {kind:?}"
+                    );
+                    let reference = ReferenceParametricEqCoefficients::design(
+                        reference_kind(kind),
+                        f64::from(rate),
+                        f64::from(frequency),
+                        f64::from(gain),
+                        f64::from(q),
+                        f64::from(slope),
+                    )
+                    .expect("independent frozen edge design");
+                    let expected = 20.0
+                        * reference
+                            .magnitude_at_hz(f64::from(frequency))
+                            .expect("reference f0 probe")
+                            .log10();
+                    let actual = impulse_dft_db(&impulse, rate, f64::from(frequency));
+                    if expected >= -120.0 {
+                        assert!(
+                            (actual - expected).abs() <= ONE_SECOND_DFT_TOLERANCE_DB,
+                            "one-second DFT Fs={rate} {kind:?} f={frequency} gain={gain} Q={q} S={slope}: actual={actual} expected={expected}"
+                        );
+                    } else {
+                        assert!(actual.is_finite());
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 48);
+    }
+
+    #[test]
+    #[ignore = "Issue #42 stopped before this gate; successor #44 must re-enable it after recurrence selection"]
+    fn ten_thousand_seeded_legal_designs_are_finite_jury_valid_and_reference_bounded() {
+        let kinds = [
+            EqBandKindV1::Bell,
+            EqBandKindV1::LowShelf,
+            EqBandKindV1::HighShelf,
+            EqBandKindV1::LowPass,
+            EqBandKindV1::HighPass,
+            EqBandKindV1::Notch,
+        ];
+        let mut state = SEEDED_DESIGN_SEED;
+        let mut strata = [[0_u32; 6]; 4];
+        let mut worst_margin = f64::INFINITY;
+        let mut worst_response_error = 0.0_f64;
+        let mut transcript = 0xcbf2_9ce4_8422_2325_u64;
+        for index in 0..SEEDED_DESIGN_COUNT {
+            let (rate_index, kind_index, frequency, gain, q, slope) = if index < 48 {
+                let rate_index = index / 12;
+                let kind_index = (index / 2) % 6;
+                let high_edge = index % 2 == 1;
+                (
+                    rate_index,
+                    kind_index,
+                    if high_edge { 20_000.0 } else { 10.0 },
+                    if high_edge { 24.0 } else { -24.0 },
+                    if high_edge { 18.0 } else { 0.1 },
+                    if high_edge { 1.0 } else { 0.1 },
+                )
+            } else {
+                let rate_index = (splitmix64(&mut state) as usize) % LAUNCH_RATES.len();
+                let kind_index = (splitmix64(&mut state) as usize) % kinds.len();
+                let frequency = 10.0 * 2_000.0_f32.powf(seeded_unit_interval(&mut state));
+                let gain = -24.0 + 48.0 * seeded_unit_interval(&mut state);
+                let q = 0.1 * 180.0_f32.powf(seeded_unit_interval(&mut state));
+                let slope = 0.1 + 0.9 * seeded_unit_interval(&mut state);
+                (rate_index, kind_index, frequency, gain, q, slope)
+            };
+            let rate = LAUNCH_RATES[rate_index];
+            let kind = kinds[kind_index];
+            strata[rate_index][kind_index] += 1;
+            let coefficients =
+                design_biquad_v1(kind, frequency, gain, q, slope, SampleRateHz(rate))
+                    .expect("seeded legal design");
+            let a1 = coefficients.d1 - 2.0 * coefficients.a * coefficients.d2;
+            let margin = [
+                1.0 - coefficients.d2.abs(),
+                1.0 + a1 + coefficients.d2,
+                1.0 - a1 + coefficients.d2,
+            ]
+            .into_iter()
+            .map(f64::from)
+            .fold(f64::INFINITY, f64::min);
+            assert!(margin.is_finite() && margin > 0.0, "seeded Jury margin");
+            worst_margin = worst_margin.min(margin);
+            for word in [
+                coefficients.a,
+                coefficients.n0,
+                coefficients.d0,
+                coefficients.n1,
+                coefficients.d1,
+                coefficients.n2,
+                coefficients.d2,
+            ] {
+                assert!(word.is_finite(), "seeded retained word");
+                transcript ^= u64::from(word.to_bits());
+                transcript = transcript.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            let reference = ReferenceParametricEqCoefficients::design(
+                reference_kind(kind),
+                f64::from(rate),
+                f64::from(frequency),
+                f64::from(gain),
+                f64::from(q),
+                f64::from(slope),
+            )
+            .expect("independent seeded design");
+            let reference_magnitude = reference
+                .magnitude_at_hz(f64::from(frequency))
+                .expect("independent seeded f0");
+            let reference_db = 20.0 * reference_magnitude.log10();
+            let production_db =
+                retained_delta_db(coefficients, SampleRateHz(rate), f64::from(frequency));
+            if reference_db >= -120.0 {
+                let error = (production_db - reference_db).abs();
+                worst_response_error = worst_response_error.max(error);
+                assert!(
+                    error <= 0.005,
+                    "seeded response Fs={rate} {kind:?} f={frequency} gain={gain} Q={q} S={slope}: error={error}"
+                );
+            }
+        }
+        assert_eq!(strata.iter().flatten().copied().sum::<u32>(), 10_000);
+        assert!(strata.iter().flatten().all(|count| *count >= 2));
+        assert!(worst_margin > 0.0);
+        assert!(worst_response_error <= 0.005);
+        eprintln!(
+            "issue-042 seeded-designs count=10000 seed={SEEDED_DESIGN_SEED:#018x} worst_margin={worst_margin:.12e} worst_response_db={worst_response_error:.12} transcript={transcript:016x}"
+        );
+    }
+
+    #[test]
+    #[ignore = "Issue #42 stopped before this gate; successor #44 must re-enable it after recurrence selection"]
+    fn forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery() {
+        let kinds = [
+            EqBandKindV1::Bell,
+            EqBandKindV1::LowShelf,
+            EqBandKindV1::HighShelf,
+            EqBandKindV1::LowPass,
+            EqBandKindV1::HighPass,
+            EqBandKindV1::Notch,
+        ];
+        let mut sequences = 0_u32;
+        for rate in LAUNCH_RATES {
+            for kind in kinds {
+                for (frequency, gain, q, slope) in [
+                    (10.0_f32, -24.0_f32, 0.1_f32, 0.1_f32),
+                    (20_000.0_f32, 24.0_f32, 18.0_f32, 1.0_f32),
+                ] {
+                    let configured = single_section_values(kind, frequency, gain, q, slope);
+                    let mut effect = ParametricEqFactory
+                        .prepare(request_at_rate(&configured, false, rate))
+                        .expect("frozen stability design must prepare");
+                    let mut noise_state = SEEDED_DESIGN_SEED
+                        ^ u64::from(rate)
+                        ^ (u64::from(kind as u32) << 32)
+                        ^ u64::from(frequency.to_bits());
+                    let mut left = [0.0_f32; 128];
+                    let mut right = [0.0_f32; 128];
+                    let mut first_sample = 0_usize;
+                    let mut recovered_left = 0_u64;
+                    let mut recovered_right = 0_u64;
+                    let mut sanitized = 0_u64;
+                    while first_sample < STABILITY_SAMPLES {
+                        let frames = (STABILITY_SAMPLES - first_sample).min(left.len());
+                        for index in 0..frames {
+                            if first_sample + index == 0 {
+                                left[index] = 0.99;
+                                right[index] = -0.99;
+                            } else {
+                                left[index] = deterministic_noise(&mut noise_state);
+                                right[index] = deterministic_noise(&mut noise_state);
+                            }
+                        }
+                        let report = effect.process(
+                            EffectProcessBlock::new(
+                                &mut left[..frames],
+                                &mut right[..frames],
+                                None,
+                                first_sample as u64,
+                                &[],
+                                128,
+                            )
+                            .expect("million-sample block"),
+                        );
+                        recovered_left += report.recovered_left_samples;
+                        recovered_right += report.recovered_right_samples;
+                        sanitized += report.sanitized_main_samples;
+                        assert!(
+                            left[..frames].iter().copied().all(valid)
+                                && right[..frames].iter().copied().all(valid),
+                            "valid output Fs={rate} {kind:?} f={frequency}"
+                        );
+                        first_sample += frames;
+                    }
+                    assert_eq!(recovered_left, 0, "left recovery Fs={rate} {kind:?}");
+                    assert_eq!(recovered_right, 0, "right recovery Fs={rate} {kind:?}");
+                    assert_eq!(sanitized, 0, "input sanitation Fs={rate} {kind:?}");
+                    let (left_state, right_state) = snapshot(effect.as_ref());
+                    for payload in [&left_state[..], &right_state[..]] {
+                        for section in 0..EQ_SECTION_COUNT_V1 {
+                            for history_word in 0..4 {
+                                assert!(
+                                    valid(f32::from_bits(word(
+                                        payload,
+                                        section * STATE_WORDS_PER_BAND + history_word,
+                                    ))),
+                                    "valid retained state Fs={rate} {kind:?} f={frequency} section={section} word={history_word}"
+                                );
+                            }
+                        }
+                    }
+                    sequences += 1;
+                }
+            }
+        }
+        assert_eq!(sequences, 48);
+    }
+
     #[test]
     fn whole_bypass_warms_every_section_with_dry_history() {
         let mut values = values();
