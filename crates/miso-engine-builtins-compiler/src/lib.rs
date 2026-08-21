@@ -1687,6 +1687,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section() {
+        let document = include_str!("../../../fixtures/session/v1/canonical.toml");
+        let base_model = parse_session_toml(document).expect("parse boundary session");
+        for (rate, maximum_bits) in [
+            (44_100, 0x46ac_42f7),
+            (48_000, 0x46bb_7ede),
+            (88_200, 0x472c_42f7),
+            (96_000, 0x473b_7ede),
+        ] {
+            for (high_pass, path) in [
+                (true, "$.tracks[id=vocal].builtins.left.hpf_hz"),
+                (false, "$.tracks[id=vocal].builtins.left.lpf_hz"),
+            ] {
+                let prepare = |cutoff: f32| {
+                    let mut model = base_model.clone();
+                    model.sample_rate_hz = rate;
+                    model.sources[0].sample_rate_hz = rate;
+                    for track in &mut model.tracks {
+                        track.builtins.left.hpf_hz = 0.0;
+                        track.builtins.left.lpf_hz = 0.0;
+                        track.builtins.right.hpf_hz = 0.0;
+                        track.builtins.right.lpf_hz = 0.0;
+                    }
+                    if high_pass {
+                        model.tracks[0].builtins.left.hpf_hz = cutoff;
+                    } else {
+                        model.tracks[0].builtins.left.lpf_hz = cutoff;
+                    }
+                    let compiled = compile_session(
+                        &model,
+                        CompileCaps {
+                            max_compiled_model_bytes: u64::MAX,
+                            max_requested_runtime_bytes: u64::MAX,
+                            max_single_allocation_bytes: u64::MAX,
+                            max_queue_items: u64::MAX,
+                            max_source_ring_frames: u64::MAX,
+                            max_source_ring_bytes: u64::MAX,
+                        },
+                    )
+                    .expect("launch-rate boundary session compiles");
+                    prepare_session_builtins(&compiled, &[], caps())
+                };
+                prepare(f32::from_bits(maximum_bits)).unwrap_or_else(|error| {
+                    panic!(
+                        "maximum must prepare: rate={rate}, high_pass={high_pass}, error={error:?}"
+                    )
+                });
+                let Err(successor_error) = prepare(f32::from_bits(maximum_bits + 1)) else {
+                    panic!("the immediate successor must reject before coefficient preparation");
+                };
+                assert_eq!(
+                    successor_error,
+                    BuiltinDiagnosticSet(vec![diag("builtin.filter.cutoff", path)]),
+                    "rate={rate}, high_pass={high_pass}"
+                );
+            }
+        }
+    }
+
     /// Frozen issue-034 compiler-mutation seed. This exercises complete preparation requests and
     /// their prepared block/target contract, never a timed workload.
     const BUILTIN_COMPILER_MUTATION_SEED: u64 = 0x34_007_c10_u64;

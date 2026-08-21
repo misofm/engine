@@ -3,7 +3,10 @@
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
-use miso_engine_core::realtime::{Consumer, Producer, QueueGeneration, bounded_spsc};
+use miso_engine_core::{
+    SampleRateHz, is_extended_compatibility_sample_rate,
+    realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelLinkMode {
@@ -264,10 +267,16 @@ pub fn validate_builtin_filter_cutoff_v1(
     disabled: f32,
     minimum_hz: f32,
 ) -> Result<(), BuiltinParameterError> {
+    let launch_maximum = builtin_filter_cutoff_maximum_hz_v1(sample_rate);
+    let is_extended_compatibility =
+        is_extended_compatibility_sample_rate(SampleRateHz(sample_rate));
+    if launch_maximum.is_none() && !is_extended_compatibility {
+        return Err(BuiltinParameterError::FilterCutoff);
+    }
     if value.to_bits() == disabled.to_bits() {
         return Ok(());
     }
-    match builtin_filter_cutoff_maximum_hz_v1(sample_rate) {
+    match launch_maximum {
         Some(maximum_hz) if value.is_finite() && value >= minimum_hz && value <= maximum_hz => {
             Ok(())
         }
@@ -1605,6 +1614,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compatibility_fallback_is_limited_to_the_exact_extended_rate_tier() {
+        for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES.map(|rate| rate.0) {
+            assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
+            for descriptor in [
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            ] {
+                assert!(descriptor.domain.contains(0.0, rate));
+                assert!(descriptor.domain.contains(10.0, rate));
+                assert!(descriptor.domain.contains(0.45 * rate as f32, rate));
+            }
+            assert!(BuiltinChain::new(rate, BuiltinParameters::default()).is_ok());
+        }
+        for rate in [0, 32_000, 192_001] {
+            assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
+            for descriptor in [
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            ] {
+                assert!(!descriptor.domain.contains(0.0, rate));
+                assert!(!descriptor.domain.contains(10.0, rate));
+            }
+            assert!(matches!(
+                BuiltinChain::new(rate, BuiltinParameters::default()),
+                Err(BuiltinParameterError::FilterCutoff)
+            ));
+        }
+    }
+
     fn parameters_with_cutoff(cutoff: f32, high_pass: bool) -> BuiltinParameters {
         let mut parameters = BuiltinParameters::default();
         if high_pass {
@@ -1699,6 +1738,13 @@ mod tests {
                     "successor preparation rate={rate}, high_pass={high_pass}"
                 );
             }
+            assert!(
+                matches!(
+                    TptSvf::design(rate, f32::from_bits(maximum_bits + 1), true),
+                    Err(BuiltinParameterError::FilterCoefficients)
+                ),
+                "the published successor must be the first underlying HPF coefficient failure: rate={rate}"
+            );
         }
     }
     #[test]

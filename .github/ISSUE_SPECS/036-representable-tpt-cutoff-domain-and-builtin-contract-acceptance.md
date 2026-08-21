@@ -160,3 +160,25 @@ Source-file candidate SHA-256 values before the root checkpoint are
 `3cc6917b586eee6d6f10d40ae722a4d575bbdf60d9c1c8e22caefdf62942602c`
 (`crates/miso-engine-builtins-compiler/src/lib.rs`). `timed_benchmark_invocations=0`; no benchmark
 command or artifact was created. **Terra verdict: PASS; Sol review pending.**
+
+## Sol bounded correction and final verdict (2026-08-21) — PASS
+
+Sol reviewed candidate input `14286c8` and used the one allowed bounded correction. The fallback
+in `validate_builtin_filter_cutoff_v1` had admitted every nonlaunch rate despite being documented
+only for the four issue-032 extended compatibility rates. It now delegates that classification to
+the core extended-rate predicate: all four informational compatibility rates retain their prior
+direct TPT evidence, while `0`, `32,000` and `192,001` reject. The seam test now proves directly
+that each listed successor is the first underlying HPF `FilterCoefficients` failure after every
+preceding representable value passed for both sections. A compiler test also proves maximum
+acceptance and successor `builtin.filter.cutoff` rejection at the exact HPF/LPF path for all four
+launch rates. No coefficient, cast, Jury, response, recurrence or render operation changed.
+
+All 18 ordered nonbenchmark gates in the brief pass on Rust/Cargo 1.97.1, including the unchanged
+10,000-case seed, 49 classes and transcript hash `17626955350904343931`; the full locked workspace,
+allocation grid, seal corruption/opacity, warning-denied Clippy/rustdoc, policies, 100/100 fresh-
+process determinism and target matrix also pass. Final source SHA-256 values are
+`f93da3ca6d904d72286845704ac14259a21f9b2a7a4db47d22900453c5d02fa9`
+(`crates/miso-engine-builtins/src/lib.rs`) and
+`c0a3dd80c4ddd4e27304e5e5b83832aa98f16004211ed270fd10ddf395dc3027`
+(`crates/miso-engine-builtins-compiler/src/lib.rs`). `timed_benchmark_invocations=0`; no benchmark
+command ran and no benchmark artifact was created. **Sol verdict: PASS.**
