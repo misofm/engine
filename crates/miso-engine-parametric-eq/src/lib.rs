@@ -1,21 +1,20 @@
 //! Scalar V1 four-section dual-mono parametric EQ.
 //!
-//! The scalar checkpoint deliberately owns no bank/SIMD token, fixture corpus, graph integration,
-//! or delivered automation. Its prepared state and metadata are nevertheless complete and stable.
+//! The scalar checkpoint deliberately owns no bank/SIMD token, fixture corpus, or graph integration.
 #![allow(missing_docs)]
 
 use core::f64::consts::PI;
 
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
+    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
     EffectQuality as Quality, InitialParameterValue, LatencySamples, LinkModeSet,
     NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
     ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, sanitize_sample,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata, sanitize_sample,
 };
 
 /// Fixed cascade length in V1.
@@ -744,6 +743,7 @@ const fn identity() -> EqCoefficientsV1 {
 #[derive(Clone, Copy)]
 struct BandConfiguration {
     enabled: bool,
+    kind: EqBandKindV1,
     frequency: f32,
     gain: f32,
     q: f32,
@@ -758,13 +758,60 @@ struct BiquadState {
     y2: f32,
 }
 #[derive(Clone, Copy)]
+struct NumericRamp {
+    current: f32,
+    target: f32,
+    remaining: u32,
+}
+
+impl NumericRamp {
+    const fn fixed(value: f32) -> Self {
+        Self {
+            current: value,
+            target: value,
+            remaining: 0,
+        }
+    }
+    fn set_target(&mut self, value: f32) {
+        self.target = value;
+        self.remaining = 64;
+    }
+    fn next(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.current = if self.remaining == 1 {
+            self.target
+        } else {
+            self.current + (self.target - self.current) / self.remaining as f32
+        };
+        self.remaining -= 1;
+        true
+    }
+    fn snap(&mut self) {
+        self.current = self.target;
+        self.remaining = 0;
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Lane {
     state: [BiquadState; EQ_SECTION_COUNT_V1],
+    coefficients: [EqCoefficientsV1; EQ_SECTION_COUNT_V1],
+    frequency: [NumericRamp; EQ_SECTION_COUNT_V1],
+    gain: [NumericRamp; EQ_SECTION_COUNT_V1],
+    q: [NumericRamp; EQ_SECTION_COUNT_V1],
+    slope: [NumericRamp; EQ_SECTION_COUNT_V1],
 }
-impl Default for Lane {
-    fn default() -> Self {
+impl Lane {
+    fn from_config(configs: &[BandConfiguration; EQ_SECTION_COUNT_V1]) -> Self {
         Self {
             state: [BiquadState::default(); EQ_SECTION_COUNT_V1],
+            coefficients: configs.map(|config| config.coefficients),
+            frequency: configs.map(|config| NumericRamp::fixed(config.frequency)),
+            gain: configs.map(|config| NumericRamp::fixed(config.gain)),
+            q: configs.map(|config| NumericRamp::fixed(config.q)),
+            slope: configs.map(|config| NumericRamp::fixed(config.slope)),
         }
     }
 }
@@ -792,8 +839,8 @@ impl NativeEffectFactory for ParametricEqFactory {
             metadata,
             left_config,
             right_config,
-            left: Lane::default(),
-            right: Lane::default(),
+            left: Lane::from_config(&left_config),
+            right: Lane::from_config(&right_config),
         }))
     }
     fn bind_homogeneous_bank(
@@ -831,6 +878,7 @@ fn configurations(
             })?;
             let config = BandConfiguration {
                 enabled,
+                kind,
                 frequency: selected[2].value,
                 gain: selected[3].value,
                 q: selected[4].value,
@@ -868,6 +916,7 @@ fn default_band(
     let p = &EQ_PARAMETERS[index..index + 6];
     Ok(BandConfiguration {
         enabled: false,
+        kind: EqBandKindV1::Bell,
         frequency: p[2].default_value,
         gain: p[3].default_value,
         q: p[4].default_value,
@@ -880,28 +929,45 @@ impl PreparedNativeEffect for PreparedParametricEq {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.metadata
     }
-    fn reset(&mut self, _kind: ResetKind) {
-        self.left = Lane::default();
-        self.right = Lane::default();
+    fn reset(&mut self, kind: ResetKind) {
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.left = Lane::from_config(&self.left_config);
+                self.right = Lane::from_config(&self.right_config);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                let sample_rate = SampleRateHz(self.metadata.sample_rate);
+                discontinuity_reset(&mut self.left, &self.left_config, sample_rate);
+                discontinuity_reset(&mut self.right, &self.right_config, sample_rate);
+            }
+        }
     }
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
-        let mut report = ProcessReport {
-            invalid_spans: block.automation.len() as u64,
-            ..ProcessReport::default()
-        };
+        let mut report = ProcessReport::default();
+        apply_automation(
+            block.automation,
+            self.metadata,
+            block.first_sample,
+            block.left.len() as u32,
+            &mut self.left,
+            &mut self.right,
+            &mut report.invalid_spans,
+        );
         for index in 0..block.left.len() {
             let dry_left = sanitize(block.left[index], &mut report.sanitized_main_samples);
             let dry_right = sanitize(block.right[index], &mut report.sanitized_main_samples);
             let left = process_lane(
                 dry_left,
-                &self.left_config,
                 &mut self.left,
+                &self.left_config,
+                SampleRateHz(self.metadata.sample_rate),
                 &mut report.recovered_left_samples,
             );
             let right = process_lane(
                 dry_right,
-                &self.right_config,
                 &mut self.right,
+                &self.right_config,
+                SampleRateHz(self.metadata.sample_rate),
                 &mut report.recovered_right_samples,
             );
             block.left[index] = if self.metadata.bypass { dry_left } else { left };
@@ -917,8 +983,8 @@ impl PreparedNativeEffect for PreparedParametricEq {
         &self,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        write_lane(output.common, output.left, &self.left, &self.left_config)?;
-        write_lane(&mut [], output.right, &self.right, &self.right_config)
+        write_lane(output.common, output.left, &self.left)?;
+        write_lane(&mut [], output.right, &self.right)
     }
     fn restore_state_payload(
         &mut self,
@@ -930,8 +996,9 @@ impl PreparedNativeEffect for PreparedParametricEq {
                 code: "effect.state.version",
             });
         };
-        let left = read_lane(input.common, input.left, &self.left_config)?;
-        let right = read_lane(&[], input.right, &self.right_config)?;
+        let sample_rate = SampleRateHz(self.metadata.sample_rate);
+        let left = read_lane(input.common, input.left, &self.left_config, sample_rate)?;
+        let right = read_lane(&[], input.right, &self.right_config, sample_rate)?;
         self.left = left;
         self.right = right;
         Ok(())
@@ -946,20 +1013,192 @@ fn sanitize(value: f32, count: &mut u64) -> f32 {
         }
     }
 }
+
+/// Runtime spans address descriptor positions (0..24), never sparse public `ParameterId`s.
+/// They are validated one-by-one because a malformed span must not discard another valid point.
+fn apply_automation(
+    spans: &[PreparedAutomationSpan],
+    metadata: PreparedEffectMetadata,
+    first_sample: u64,
+    _frames: u32,
+    left: &mut Lane,
+    right: &mut Lane,
+    invalid_spans: &mut u64,
+) {
+    if spans.len() > metadata.automation_capacity as usize {
+        *invalid_spans = invalid_spans.saturating_add(spans.len() as u64);
+        return;
+    }
+
+    let mut pending = [None; EQ_SECTION_COUNT_V1 * 6 * 2];
+    let mut seen = [false; EQ_SECTION_COUNT_V1 * 6 * 2];
+    let mut prior_sort_key = None;
+    for span in spans {
+        let sort_key = (span.start_sample, span.parameter_index, span.channel);
+        let parameter_index = span.parameter_index as usize;
+        let Some((section, field)) = numeric_parameter(parameter_index) else {
+            count_invalid(invalid_spans);
+            continue;
+        };
+        let Some(channel) = lane_index(span.channel) else {
+            count_invalid(invalid_spans);
+            continue;
+        };
+        let slot = (section * 6 + field) * 2 + channel;
+        if prior_sort_key.is_some_and(|prior| sort_key < prior)
+            || seen[slot]
+            || span.kind != AutomationSpanKind::Point
+            || span.start_sample != first_sample
+            || span.end_sample != first_sample
+            || span.start_value.to_bits() != span.end_value.to_bits()
+            || !numeric_value_valid(field, span.start_value)
+        {
+            count_invalid(invalid_spans);
+            continue;
+        }
+        seen[slot] = true;
+        pending[slot] = Some(span.start_value);
+        prior_sort_key = Some(sort_key);
+    }
+
+    for (slot, target) in pending.into_iter().enumerate() {
+        if let Some(target) = target {
+            set_lane_target(left, right, slot, target);
+        }
+    }
+}
+
+fn count_invalid(invalid_spans: &mut u64) {
+    *invalid_spans = invalid_spans.saturating_add(1);
+}
+
+/// Returns the cascade section and its numeric field: frequency, gain, Q, or shelf slope.
+fn numeric_parameter(parameter_index: usize) -> Option<(usize, usize)> {
+    let section = parameter_index / 6;
+    if section >= EQ_SECTION_COUNT_V1 {
+        return None;
+    }
+    match parameter_index % 6 {
+        2 => Some((section, 2)),
+        3 => Some((section, 3)),
+        4 => Some((section, 4)),
+        5 => Some((section, 5)),
+        _ => None,
+    }
+}
+
+fn lane_index(channel: ParameterChannel) -> Option<usize> {
+    match channel {
+        ParameterChannel::Left => Some(0),
+        ParameterChannel::Right => Some(1),
+        ParameterChannel::Both => None,
+    }
+}
+
+fn numeric_value_valid(field: usize, value: f32) -> bool {
+    value.is_finite()
+        && match field {
+            2 => (10.0..=20_000.0).contains(&value),
+            3 => (-24.0..=24.0).contains(&value),
+            4 => (0.1..=18.0).contains(&value),
+            5 => (0.1..=1.0).contains(&value),
+            _ => false,
+        }
+}
+
+fn set_lane_target(left: &mut Lane, right: &mut Lane, slot: usize, target: f32) {
+    let parameter = slot / 2;
+    let channel = slot % 2;
+    let section = parameter / 6;
+    let field = parameter % 6;
+    let lane = if channel == 0 { left } else { right };
+    match field {
+        2 => lane.frequency[section].set_target(target),
+        3 => lane.gain[section].set_target(target),
+        4 => lane.q[section].set_target(target),
+        5 => lane.slope[section].set_target(target),
+        _ => unreachable!("only numeric parameter slots are pending"),
+    }
+}
+
+fn discontinuity_reset(
+    lane: &mut Lane,
+    configs: &[BandConfiguration; EQ_SECTION_COUNT_V1],
+    sample_rate: SampleRateHz,
+) {
+    lane.state = [BiquadState::default(); EQ_SECTION_COUNT_V1];
+    for (index, config) in configs.iter().copied().enumerate() {
+        lane.frequency[index].snap();
+        lane.gain[index].snap();
+        lane.q[index].snap();
+        lane.slope[index].snap();
+        lane.coefficients[index] =
+            current_coefficients(config, lane, index, sample_rate).unwrap_or(config.coefficients);
+    }
+}
+
+fn current_coefficients(
+    config: BandConfiguration,
+    lane: &Lane,
+    index: usize,
+    sample_rate: SampleRateHz,
+) -> Result<EqCoefficientsV1, EqDesignError> {
+    if !config.enabled {
+        return Ok(identity());
+    }
+    design_biquad_v1(
+        config.kind,
+        lane.frequency[index].current,
+        lane.gain[index].current,
+        lane.q[index].current,
+        lane.slope[index].current,
+        sample_rate,
+    )
+}
+
 fn process_lane(
     mut value: f32,
-    configs: &[BandConfiguration; 4],
     lane: &mut Lane,
+    configs: &[BandConfiguration; 4],
+    sample_rate: SampleRateHz,
     recovered: &mut u64,
 ) -> f32 {
     let mut did_recover = false;
     for (index, config) in configs.iter().copied().enumerate() {
+        let prior_frequency = lane.frequency[index];
+        let prior_gain = lane.gain[index];
+        let prior_q = lane.q[index];
+        let prior_slope = lane.slope[index];
+        let changed = lane.frequency[index].next()
+            | lane.gain[index].next()
+            | lane.q[index].next()
+            | lane.slope[index].next();
+        if changed {
+            match current_coefficients(config, lane, index, sample_rate) {
+                Ok(coefficients) => lane.coefficients[index] = coefficients,
+                Err(_) => {
+                    lane.frequency[index] = prior_frequency;
+                    lane.gain[index] = prior_gain;
+                    lane.q[index] = prior_q;
+                    lane.slope[index] = prior_slope;
+                    lane.state[index] = BiquadState::default();
+                    if !did_recover {
+                        *recovered = recovered.saturating_add(1);
+                    }
+                    return 0.0;
+                }
+            }
+        }
         if !config.enabled {
             warm(value, &mut lane.state[index]);
             continue;
         }
         let state = &mut lane.state[index];
-        let c = config.coefficients;
+        let c = lane.coefficients[index];
+        if c.identity {
+            warm(value, state);
+            continue;
+        }
         let p0 = c.b0 * value;
         let p1 = c.b1 * state.x1;
         let s0 = p0 + p1;
@@ -1000,95 +1239,127 @@ fn warm(input: f32, state: &mut BiquadState) {
 fn valid(value: f32) -> bool {
     sanitize_sample(value).is_some()
 }
-fn write_lane(
-    common: &mut [u8],
-    output: &mut [u8],
-    lane: &Lane,
-    configs: &[BandConfiguration; 4],
-) -> Result<(), StatePayloadError> {
+fn write_lane(common: &mut [u8], output: &mut [u8], lane: &Lane) -> Result<(), StatePayloadError> {
     if !common.is_empty() || output.len() != STATE_BYTES_PER_LANE {
         return Err(StatePayloadError {
             code: "effect.state.length",
         });
     };
-    for (band, c) in configs.iter().copied().enumerate() {
+    for band in 0..EQ_SECTION_COUNT_V1 {
         let state = lane.state[band];
-        let words = [
-            state.x1,
-            state.x2,
-            state.y1,
-            state.y2,
-            c.frequency,
-            c.frequency,
-            0.0,
-            c.gain,
-            c.gain,
-            0.0,
-            c.q,
-            c.q,
-            0.0,
-            c.slope,
-            c.slope,
-            0.0,
-        ];
-        for (word, value) in words.into_iter().enumerate() {
-            output[(band * 16 + word) * 4..(band * 16 + word + 1) * 4]
-                .copy_from_slice(&value.to_bits().to_le_bytes())
-        }
+        write_f32_word(output, band, 0, state.x1);
+        write_f32_word(output, band, 1, state.x2);
+        write_f32_word(output, band, 2, state.y1);
+        write_f32_word(output, band, 3, state.y2);
+        write_ramp(output, band, 4, lane.frequency[band]);
+        write_ramp(output, band, 7, lane.gain[band]);
+        write_ramp(output, band, 10, lane.q[band]);
+        write_ramp(output, band, 13, lane.slope[band]);
     }
     Ok(())
 }
+
+fn write_ramp(output: &mut [u8], band: usize, start_word: usize, ramp: NumericRamp) {
+    write_f32_word(output, band, start_word, ramp.current);
+    write_f32_word(output, band, start_word + 1, ramp.target);
+    write_u32_word(output, band, start_word + 2, ramp.remaining);
+}
+
+fn write_f32_word(output: &mut [u8], band: usize, word: usize, value: f32) {
+    write_u32_word(output, band, word, value.to_bits());
+}
+
+fn write_u32_word(output: &mut [u8], band: usize, word: usize, value: u32) {
+    let start = (band * STATE_WORDS_PER_BAND + word) * 4;
+    output[start..start + 4].copy_from_slice(&value.to_le_bytes());
+}
+
 fn read_lane(
     common: &[u8],
     input: &[u8],
     configs: &[BandConfiguration; 4],
+    sample_rate: SampleRateHz,
 ) -> Result<Lane, StatePayloadError> {
     if !common.is_empty() || input.len() != STATE_BYTES_PER_LANE {
         return Err(StatePayloadError {
             code: "effect.state.length",
         });
     };
-    let mut lane = Lane::default();
+    let mut lane = Lane::from_config(configs);
     for (band, c) in configs.iter().copied().enumerate() {
-        let mut words = [0_f32; 16];
-        for (word, slot) in words.iter_mut().enumerate() {
-            let start = (band * 16 + word) * 4;
-            *slot = f32::from_bits(u32::from_le_bytes(
-                input[start..start + 4]
-                    .try_into()
-                    .map_err(|_| StatePayloadError {
-                        code: "effect.state.payload",
-                    })?,
-            ))
-        }
-        if ![words[0], words[1], words[2], words[3]]
-            .into_iter()
-            .all(valid)
-            || words[6].to_bits() != 0
-            || words[9].to_bits() != 0
-            || words[12].to_bits() != 0
-            || words[15].to_bits() != 0
-            || words[4].to_bits() != c.frequency.to_bits()
-            || words[5].to_bits() != c.frequency.to_bits()
-            || words[7].to_bits() != c.gain.to_bits()
-            || words[8].to_bits() != c.gain.to_bits()
-            || words[10].to_bits() != c.q.to_bits()
-            || words[11].to_bits() != c.q.to_bits()
-            || words[13].to_bits() != c.slope.to_bits()
-            || words[14].to_bits() != c.slope.to_bits()
+        let x1 = read_f32_word(input, band, 0)?;
+        let x2 = read_f32_word(input, band, 1)?;
+        let y1 = read_f32_word(input, band, 2)?;
+        let y2 = read_f32_word(input, band, 3)?;
+        let frequency = read_ramp(input, band, 4, 2)?;
+        let gain = read_ramp(input, band, 7, 3)?;
+        let q = read_ramp(input, band, 10, 4)?;
+        let slope = read_ramp(input, band, 13, 5)?;
+        if ![x1, x2, y1, y2].into_iter().all(valid)
+            || !numeric_value_valid(2, frequency.current)
+            || !numeric_value_valid(2, frequency.target)
+            || !numeric_value_valid(3, gain.current)
+            || !numeric_value_valid(3, gain.target)
+            || !numeric_value_valid(4, q.current)
+            || !numeric_value_valid(4, q.target)
+            || !numeric_value_valid(5, slope.current)
+            || !numeric_value_valid(5, slope.target)
         {
             return Err(StatePayloadError {
                 code: "effect.state.payload",
             });
         }
-        lane.state[band] = BiquadState {
-            x1: words[0],
-            x2: words[1],
-            y1: words[2],
-            y2: words[3],
-        }
+        lane.state[band] = BiquadState { x1, x2, y1, y2 };
+        lane.frequency[band] = frequency;
+        lane.gain[band] = gain;
+        lane.q[band] = q;
+        lane.slope[band] = slope;
+        lane.coefficients[band] =
+            current_coefficients(c, &lane, band, sample_rate).map_err(|_| StatePayloadError {
+                code: "effect.state.payload",
+            })?;
     }
     Ok(lane)
+}
+
+fn read_ramp(
+    input: &[u8],
+    band: usize,
+    start_word: usize,
+    field: usize,
+) -> Result<NumericRamp, StatePayloadError> {
+    let current = read_f32_word(input, band, start_word)?;
+    let target = read_f32_word(input, band, start_word + 1)?;
+    let remaining = read_u32_word(input, band, start_word + 2)?;
+    if remaining > 64 || !numeric_value_valid(field, current) || !numeric_value_valid(field, target)
+    {
+        return Err(StatePayloadError {
+            code: "effect.state.payload",
+        });
+    }
+    Ok(NumericRamp {
+        current,
+        target,
+        remaining,
+    })
+}
+
+fn read_f32_word(input: &[u8], band: usize, word: usize) -> Result<f32, StatePayloadError> {
+    Ok(f32::from_bits(read_u32_word(input, band, word)?))
+}
+
+fn read_u32_word(input: &[u8], band: usize, word: usize) -> Result<u32, StatePayloadError> {
+    let start = (band * STATE_WORDS_PER_BAND + word) * 4;
+    let bytes: [u8; 4] = input
+        .get(start..start + 4)
+        .ok_or(StatePayloadError {
+            code: "effect.state.payload",
+        })?
+        .try_into()
+        .map_err(|_| StatePayloadError {
+            code: "effect.state.payload",
+        })?;
+    Ok(u32::from_le_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -1125,9 +1396,81 @@ mod tests {
             limits: PrepareEffectLimits {
                 maximum_total_state_bytes: 512,
                 maximum_scratch_bytes: 1,
-                maximum_automation_spans_per_block: 1,
+                maximum_automation_spans_per_block: 48,
             },
         }
+    }
+    fn set_initial(
+        values: &mut [InitialParameterValue],
+        parameter_index: usize,
+        channel: ParameterChannel,
+        value: f32,
+    ) {
+        let offset = parameter_index * 2
+            + match channel {
+                ParameterChannel::Left => 0,
+                ParameterChannel::Right => 1,
+                ParameterChannel::Both => panic!("initial values are per lane"),
+            };
+        values[offset].value = value;
+    }
+    fn point(
+        parameter_index: u32,
+        channel: ParameterChannel,
+        sample: u64,
+        value: f32,
+    ) -> PreparedAutomationSpan {
+        PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel,
+            parameter_index,
+            start_sample: sample,
+            end_sample: sample,
+            start_value: value,
+            end_value: value,
+        }
+    }
+    fn snapshot(effect: &dyn PreparedNativeEffect) -> ([u8; 256], [u8; 256]) {
+        let mut left = [0_u8; STATE_BYTES_PER_LANE];
+        let mut right = [0_u8; STATE_BYTES_PER_LANE];
+        effect
+            .snapshot_state_payload(
+                StatePayloadOutput::new(
+                    &mut [],
+                    &mut left,
+                    &mut right,
+                    effect.metadata().state_sizes,
+                )
+                .expect("state output"),
+            )
+            .expect("snapshot");
+        (left, right)
+    }
+    fn word(payload: &[u8], position: usize) -> u32 {
+        u32::from_le_bytes(
+            payload[position * 4..position * 4 + 4]
+                .try_into()
+                .expect("full state word"),
+        )
+    }
+    fn process_zeros(
+        effect: &mut dyn PreparedNativeEffect,
+        first_sample: u64,
+        frames: usize,
+        automation: &[PreparedAutomationSpan],
+    ) -> ProcessReport {
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        let block = EffectProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            first_sample,
+            automation,
+            effect.metadata().quantum,
+        )
+        .expect("block");
+        effect.process(block)
     }
     #[test]
     fn descriptor_is_frozen() {
@@ -1179,5 +1522,132 @@ mod tests {
                 StatePayloadInput::new(&[], &l, &r, effect.metadata().state_sizes).expect("input"),
             )
             .expect("restore")
+    }
+    #[test]
+    fn automation_uses_descriptor_index_and_exact_64_update_trajectory() {
+        assert_eq!(
+            EQ_PARAMETERS[3].id.0, 4,
+            "public stable ID is sparse identity"
+        );
+        let values = values();
+        let mut effect = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("prepare");
+        let automation = [point(3, ParameterChannel::Left, 0, 12.0)];
+        let report = process_zeros(effect.as_mut(), 0, 1, &automation);
+        assert_eq!(report.invalid_spans, 0);
+        let (left, _) = snapshot(effect.as_ref());
+        assert_eq!(
+            f32::from_bits(word(&left, 7)),
+            12.0 / 64.0,
+            "descriptor index 3 is band-1 gain, not ParameterId 3"
+        );
+        assert_eq!(f32::from_bits(word(&left, 8)), 12.0);
+        assert_eq!(word(&left, 9), 63);
+
+        let report = process_zeros(effect.as_mut(), 1, 63, &[]);
+        assert_eq!(report.invalid_spans, 0);
+        let (left, _) = snapshot(effect.as_ref());
+        assert_eq!(f32::from_bits(word(&left, 7)), 12.0);
+        assert_eq!(f32::from_bits(word(&left, 8)), 12.0);
+        assert_eq!(word(&left, 9), 0);
+    }
+    #[test]
+    fn malformed_automation_rejects_each_span_without_losing_valid_targets() {
+        let values = values();
+        let mut effect = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("prepare");
+        let mut wrong_time = point(5, ParameterChannel::Left, 1, 0.5);
+        wrong_time.end_sample = 1;
+        let mut mismatched_point = point(2, ParameterChannel::Right, 0, 100.0);
+        mismatched_point.end_value = 200.0;
+        let automation = [
+            point(3, ParameterChannel::Left, 0, 6.0),
+            point(3, ParameterChannel::Left, 0, 8.0),
+            point(4, ParameterChannel::Left, 0, 1.0),
+            point(3, ParameterChannel::Right, 0, 7.0),
+            point(0, ParameterChannel::Left, 0, 1.0),
+            point(5, ParameterChannel::Both, 0, 0.5),
+            wrong_time,
+            mismatched_point,
+        ];
+        let report = process_zeros(effect.as_mut(), 0, 1, &automation);
+        assert_eq!(report.invalid_spans, 6);
+        let (left, right) = snapshot(effect.as_ref());
+        assert_eq!(f32::from_bits(word(&left, 8)), 6.0);
+        assert_eq!(f32::from_bits(word(&left, 11)), 1.0);
+        assert_eq!(f32::from_bits(word(&right, 8)), 0.0);
+    }
+    #[test]
+    fn automation_is_partition_invariant_for_1_63_64_and_128_frames() {
+        let values = values();
+        let mut partitioned = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("partitioned prepare");
+        let mut whole = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("whole prepare");
+        let automation = [point(2, ParameterChannel::Left, 0, 1_000.0)];
+        process_zeros(partitioned.as_mut(), 0, 1, &automation);
+        process_zeros(partitioned.as_mut(), 1, 63, &[]);
+        process_zeros(partitioned.as_mut(), 64, 64, &[]);
+        process_zeros(whole.as_mut(), 0, 128, &automation);
+        assert_eq!(snapshot(partitioned.as_ref()), snapshot(whole.as_ref()));
+    }
+    #[test]
+    fn state_restore_continues_active_ramp_bit_exactly() {
+        let mut values = values();
+        set_initial(&mut values, 0, ParameterChannel::Left, 1.0);
+        set_initial(&mut values, 2, ParameterChannel::Left, 1_000.0);
+        set_initial(&mut values, 3, ParameterChannel::Left, 6.0);
+        let mut source = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("source prepare");
+        let automation = [point(3, ParameterChannel::Left, 0, -6.0)];
+        let mut first_left = [0.25_f32; 17];
+        let mut first_right = [0.125_f32; 17];
+        source.process(
+            EffectProcessBlock::new(&mut first_left, &mut first_right, None, 0, &automation, 128)
+                .expect("first block"),
+        );
+        let (saved_left, saved_right) = snapshot(source.as_ref());
+        let mut restored = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("restore prepare");
+        restored
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(
+                    &[],
+                    &saved_left,
+                    &saved_right,
+                    restored.metadata().state_sizes,
+                )
+                .expect("state input"),
+            )
+            .expect("restore");
+
+        let mut source_left = [0.5_f32; 64];
+        let mut source_right = [-0.25_f32; 64];
+        let mut restored_left = source_left;
+        let mut restored_right = source_right;
+        source.process(
+            EffectProcessBlock::new(&mut source_left, &mut source_right, None, 17, &[], 128)
+                .expect("source continuation"),
+        );
+        restored.process(
+            EffectProcessBlock::new(&mut restored_left, &mut restored_right, None, 17, &[], 128)
+                .expect("restored continuation"),
+        );
+        assert_eq!(
+            source_left.map(f32::to_bits),
+            restored_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            source_right.map(f32::to_bits),
+            restored_right.map(f32::to_bits)
+        );
+        assert_eq!(snapshot(source.as_ref()), snapshot(restored.as_ref()));
     }
 }
