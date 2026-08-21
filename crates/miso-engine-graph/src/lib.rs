@@ -326,6 +326,7 @@ pub struct PreparedGraphPlan {
     pub required_bindings: Vec<GraphNodeId>,
     routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
+    banks: Vec<GraphPreparedEffectBank>,
     observers: Vec<GraphNodeObserverBinding>,
     _not_sync: Cell<()>,
 }
@@ -333,6 +334,12 @@ pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
     pub processor: Box<dyn PreparedNativeEffect>,
+}
+/// A prepared homogeneous native bank and its original graph member identities.
+pub struct GraphPreparedEffectBank {
+    pub members: Box<[EffectNodeId]>,
+    pub processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
+    pub scratch: miso_engine_rack::AoSoaScratch,
 }
 impl PreparedGraphPlan {
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
@@ -349,6 +356,7 @@ impl PreparedGraphPlan {
             required_bindings: parts.required_bindings,
             routes: parts.routes,
             effects: parts.effects,
+            banks: parts.banks,
             observers: parts.observers,
             _not_sync: Cell::new(()),
         }
@@ -402,6 +410,7 @@ impl PreparedGraphPlan {
             self.buffer_assignments,
             self.routes,
             self.effects,
+            self.banks,
             {
                 let mut observers = self.observers;
                 observers.append(&mut bindings.observers);
@@ -436,6 +445,7 @@ pub struct PreparedGraphPlanParts {
     pub required_bindings: Vec<GraphNodeId>,
     pub routes: Vec<PreparedRoute>,
     pub effects: Vec<GraphPreparedEffect>,
+    pub banks: Vec<GraphPreparedEffectBank>,
     pub observers: Vec<GraphNodeObserverBinding>,
 }
 pub struct GraphRuntimeBindings {
@@ -520,6 +530,7 @@ enum RuntimeNodeKind {
     Identity,
     Bound(Box<dyn GraphRuntimeProcessor>),
     Effect(GraphPreparedEffect),
+    BankMember(usize),
     Route(RouteTransform),
     Reduction,
 }
@@ -534,7 +545,14 @@ struct GraphExecutor {
     buffers: Vec<StereoBuffer>,
     output_node: usize,
     reduction_scratch: Box<[f32]>,
+    banks: Vec<RuntimeBank>,
+    bank_rendered: Box<[bool]>,
     sanitized_samples: u64,
+}
+struct RuntimeBank {
+    members: Box<[usize]>,
+    processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
+    scratch: miso_engine_rack::AoSoaScratch,
 }
 impl GraphExecutor {
     #[allow(clippy::too_many_arguments)]
@@ -545,6 +563,7 @@ impl GraphExecutor {
         buffer_assignments: Vec<BufferAssignment>,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
+        banks: Vec<GraphPreparedEffectBank>,
         observer_bindings: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         frames: usize,
@@ -577,6 +596,16 @@ impl GraphExecutor {
         let mut effects: BTreeMap<_, _> = effects
             .into_iter()
             .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
+            .collect();
+        let bank_by_node: BTreeMap<_, _> = banks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, bank)| {
+                bank.members
+                    .iter()
+                    .cloned()
+                    .map(move |member| (GraphNodeId::Effect(member), index))
+            })
             .collect();
         let mut bindings: BTreeMap<_, _> = bindings
             .into_iter()
@@ -626,6 +655,8 @@ impl GraphExecutor {
             maximum_inputs = maximum_inputs.max(incoming.len());
             let kind = if let Some(processor) = bindings.remove(node_id) {
                 RuntimeNodeKind::Bound(processor)
+            } else if let Some(bank) = bank_by_node.get(node_id) {
+                RuntimeNodeKind::BankMember(*bank)
             } else if let Some(effect) = effects.remove(node_id) {
                 RuntimeNodeKind::Effect(effect)
             } else if let Some(transform) = routes.remove(node_id) {
@@ -659,6 +690,25 @@ impl GraphExecutor {
             .iter()
             .position(|node| matches!(node, GraphNodeId::Output { .. }))
             .expect("validated single output");
+        let node_indices: BTreeMap<_, _> = schedule
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, node)| (node, index))
+            .collect();
+        let runtime_banks = banks
+            .into_iter()
+            .map(|bank| RuntimeBank {
+                members: bank
+                    .members
+                    .iter()
+                    .cloned()
+                    .map(|member| node_indices[&GraphNodeId::Effect(member)])
+                    .collect(),
+                processor: bank.processor,
+                scratch: bank.scratch,
+            })
+            .collect::<Vec<_>>();
         Self {
             nodes,
             buffers: (0..buffer_count)
@@ -666,6 +716,8 @@ impl GraphExecutor {
                 .collect(),
             output_node,
             reduction_scratch: vec![0.0; maximum_inputs].into_boxed_slice(),
+            bank_rendered: vec![false; runtime_banks.len()].into_boxed_slice(),
+            banks: runtime_banks,
             sanitized_samples: 0,
         }
     }
@@ -717,6 +769,56 @@ impl GraphExecutor {
             );
         }
     }
+
+    fn render_bank(&mut self, bank_index: usize, first_sample: u64) -> Result<(), RenderError> {
+        let lanes = self.banks[bank_index].members.len();
+        for lane in 0..lanes {
+            let node_index = self.banks[bank_index].members[lane];
+            self.prepare_inputs(node_index);
+            self.reduce_main_inputs(node_index);
+            let output_buffer = self.nodes[node_index].output_buffer;
+            self.banks[bank_index]
+                .scratch
+                .gather_lane(
+                    lane,
+                    &self.buffers[output_buffer].left,
+                    &self.buffers[output_buffer].right,
+                    self.buffers[output_buffer].left.len() as u32,
+                )
+                .map_err(|_| RenderError::InvalidEnvelope)?;
+        }
+        let frames = self.buffers[self.nodes[self.banks[bank_index].members[0]].output_buffer]
+            .left
+            .len() as u32;
+        let offsets_four = [0_u32; 5];
+        let offsets_eight = [0_u32; 9];
+        let offsets = if lanes == 4 {
+            &offsets_four[..]
+        } else {
+            &offsets_eight[..]
+        };
+        let bank = &mut self.banks[bank_index];
+        bank.scratch
+            .process(
+                bank.processor.as_mut(),
+                frames,
+                first_sample,
+                &[],
+                offsets,
+                false,
+            )
+            .map_err(|_| RenderError::InvalidEnvelope)?;
+        for lane in 0..lanes {
+            let node_index = self.banks[bank_index].members[lane];
+            let output_buffer = self.nodes[node_index].output_buffer;
+            let buffer = &mut self.buffers[output_buffer];
+            self.banks[bank_index]
+                .scratch
+                .scatter_lane(lane, &mut buffer.left, &mut buffer.right, frames)
+                .map_err(|_| RenderError::InvalidEnvelope)?;
+        }
+        Ok(())
+    }
 }
 impl PreparedPlanExecutor for GraphExecutor {
     fn render(
@@ -726,9 +828,21 @@ impl PreparedPlanExecutor for GraphExecutor {
         mut output: PlanarBufferMut<'_>,
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
+        self.bank_rendered.fill(false);
         for node_index in 0..self.nodes.len() {
-            self.prepare_inputs(node_index);
-            self.reduce_main_inputs(node_index);
+            let bank = match self.nodes[node_index].kind {
+                RuntimeNodeKind::BankMember(index) => Some(index),
+                _ => None,
+            };
+            if let Some(bank) = bank {
+                if !self.bank_rendered[bank] {
+                    self.render_bank(bank, time.absolute_sample)?;
+                    self.bank_rendered[bank] = true;
+                }
+            } else {
+                self.prepare_inputs(node_index);
+                self.reduce_main_inputs(node_index);
+            }
             {
                 let current = &mut self.nodes[node_index];
                 let output_buffer = current.output_buffer;
@@ -766,6 +880,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                         .map_err(|_| RenderError::InvalidEnvelope)?;
                         let _ = effect.processor.process(block);
                     }
+                    RuntimeNodeKind::BankMember(_) => {}
                 }
             }
             let current = &mut self.nodes[node_index];
@@ -1000,6 +1115,7 @@ mod tests {
                 required_bindings: required.clone(),
                 routes: Vec::new(),
                 effects: Vec::new(),
+                banks: Vec::new(),
                 observers: Vec::new(),
             }),
             GraphRuntimeBindings {
@@ -1242,6 +1358,7 @@ mod tests {
                 },
             ],
             effects: Vec::new(),
+            banks: Vec::new(),
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
@@ -1460,6 +1577,7 @@ mod tests {
                 metadata,
                 processor: Box::new(SidechainSum { metadata }),
             }],
+            banks: Vec::new(),
             observers: Vec::new(),
         });
         let (main_left, main_right, side_left, side_right) = if delay_main {
@@ -1712,6 +1830,7 @@ mod tests {
                 metadata,
                 processor,
             }],
+            banks: Vec::new(),
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {

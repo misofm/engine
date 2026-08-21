@@ -295,6 +295,7 @@ dependencies = [
  "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-contract",
+ "miso-engine-rack",
 ]
 
 [[package]]

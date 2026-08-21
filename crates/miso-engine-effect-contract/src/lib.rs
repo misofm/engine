@@ -10,6 +10,7 @@ use miso_engine_core::{
     is_launch_sample_rate,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaticIdError {
@@ -1110,7 +1111,7 @@ pub trait PreparedNativeEffectBank: Send {
 }
 #[derive(Default)]
 pub struct NativeEffectRegistry {
-    factories: BTreeMap<EffectId, Box<dyn NativeEffectFactory>>,
+    factories: BTreeMap<EffectId, Arc<dyn NativeEffectFactory>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -1130,7 +1131,7 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
-            if m.insert(d.id, x).is_some() {
+            if m.insert(d.id, Arc::from(x)).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
                     id: Some(d.id),
@@ -1140,12 +1141,18 @@ impl NativeEffectRegistry {
         Ok(Self { factories: m })
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(&id).map(Box::as_ref)
+        self.factories.get(&id).map(Arc::as_ref)
     }
     pub fn get_ascii(&self, id: &str) -> Option<&dyn NativeEffectFactory> {
         self.factories
             .iter()
             .find_map(|(key, value)| (key.as_str() == id).then_some(value.as_ref()))
+    }
+    /// Clone the immutable factory handle for an off-render prepared plan.
+    pub fn get_shared_ascii(&self, id: &str) -> Option<Arc<dyn NativeEffectFactory>> {
+        self.factories
+            .iter()
+            .find_map(|(key, value)| (key.as_str() == id).then_some(Arc::clone(value)))
     }
     pub fn len(&self) -> usize {
         self.factories.len()

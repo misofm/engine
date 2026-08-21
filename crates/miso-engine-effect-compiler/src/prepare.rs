@@ -8,6 +8,7 @@ use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
     ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
 };
+use std::sync::Arc;
 
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
 
@@ -23,6 +24,39 @@ pub struct EffectPreparedEntry {
     pub effect_id: String,
     pub processor: Box<dyn PreparedNativeEffect>,
     pub metadata: PreparedEffectMetadata,
+    /// Factory retained only for transactional off-render bank binding.
+    pub factory: Arc<dyn miso_engine_effect_contract::NativeEffectFactory>,
+    /// Exact owned request inputs used to prepare the scalar processor.
+    pub bank_preparation: EffectBankPreparationV1,
+}
+
+/// Owned replayable portion of an accepted prepare request. It never crosses into render.
+#[derive(Clone, Debug)]
+pub struct EffectBankPreparationV1 {
+    pub sample_rate: u32,
+    pub quantum: u32,
+    pub quality: EffectQuality,
+    pub bypass: bool,
+    pub link_mode: LinkMode,
+    pub ports: PreparedPortsV1,
+    pub initial_values: Box<[InitialParameterValue]>,
+    pub limits: PrepareEffectLimits,
+}
+
+impl EffectBankPreparationV1 {
+    #[must_use]
+    pub fn request(&self) -> PrepareEffectRequest<'_> {
+        PrepareEffectRequest {
+            sample_rate: self.sample_rate,
+            quantum: self.quantum,
+            quality: self.quality,
+            bypass: self.bypass,
+            link_mode: self.link_mode,
+            ports: self.ports,
+            initial_values: &self.initial_values,
+            limits: self.limits,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EffectRack {
@@ -66,7 +100,7 @@ pub fn prepare_native_session_effects(
                     });
                     continue;
                 };
-                let Some(factory) = registry.get_ascii(effect_id.as_str()) else {
+                let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.native.unavailable",
                         path,
@@ -275,20 +309,21 @@ pub fn prepare_native_session_effects(
                         }
                     }
                 };
-                let request = PrepareEffectRequest {
+                let bank_preparation = EffectBankPreparationV1 {
                     sample_rate: session.sample_rate().0,
                     quantum: session.quantum().0,
                     quality,
                     bypass: effect.bypass,
                     link_mode,
                     ports,
-                    initial_values: &initial,
+                    initial_values: initial.into_boxed_slice(),
                     limits: PrepareEffectLimits {
                         maximum_total_state_bytes: caps.maximum_total_state_bytes,
                         maximum_scratch_bytes: caps.maximum_scratch_bytes,
                         maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
                     },
                 };
+                let request = bank_preparation.request();
                 let expected = match expected_prepared_metadata(descriptor, request) {
                     Ok(metadata) => metadata,
                     Err(error) => {
@@ -338,6 +373,8 @@ pub fn prepare_native_session_effects(
                     effect_id: effect.id.as_str().to_owned(),
                     processor,
                     metadata,
+                    factory,
+                    bank_preparation,
                 });
             }
         }

@@ -189,6 +189,33 @@ impl AoSoaScratch {
         Ok(())
     }
 
+    /// Copy one planar track into its stable AoSoA lane without allocating.
+    pub fn gather_lane(
+        &mut self,
+        lane: usize,
+        left: &[f32],
+        right: &[f32],
+        frames: u32,
+    ) -> Result<(), RackError> {
+        self.checked(
+            frames,
+            self.width.lanes() as usize,
+            self.width.lanes() as usize,
+        )?;
+        if lane >= self.width.lanes() as usize
+            || left.len() != frames as usize
+            || right.len() != frames as usize
+        {
+            return Err(RackError::Shape);
+        }
+        let lanes = self.width.lanes() as usize;
+        for sample in 0..frames as usize {
+            self.left[sample * lanes + lane] = left[sample];
+            self.right[sample * lanes + lane] = right[sample];
+        }
+        Ok(())
+    }
+
     /// Gather sidechain inputs into the separate owned AoSoA sidechain scratch.
     pub fn gather_sidechain(
         &mut self,
@@ -221,6 +248,33 @@ impl AoSoaScratch {
                 outputs_left[lane][sample] = self.left[index];
                 outputs_right[lane][sample] = self.right[index];
             }
+        }
+        Ok(())
+    }
+
+    /// Copy one stable AoSoA lane to an existing planar graph buffer without allocating.
+    pub fn scatter_lane(
+        &self,
+        lane: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> Result<(), RackError> {
+        self.checked(
+            frames,
+            self.width.lanes() as usize,
+            self.width.lanes() as usize,
+        )?;
+        if lane >= self.width.lanes() as usize
+            || left.len() != frames as usize
+            || right.len() != frames as usize
+        {
+            return Err(RackError::Shape);
+        }
+        let lanes = self.width.lanes() as usize;
+        for sample in 0..frames as usize {
+            left[sample] = self.left[sample * lanes + lane];
+            right[sample] = self.right[sample * lanes + lane];
         }
         Ok(())
     }

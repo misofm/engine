@@ -10,7 +10,9 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::{realtime::RenderEnvelope, target_capabilities};
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
-use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSamples};
+use miso_engine_effect_contract::{
+    LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
+};
 use miso_engine_graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
@@ -559,6 +561,10 @@ impl GraphCompiler {
         let sha256 = hex_sha256(&debug);
         let dot = dot(&nodes, &edges, &timing.delays);
         let rack_cohorts = rack_cohort_report(&effects);
+        let banks = match bind_rack_banks(&effects, &effect_ids, &levels, rack_cohorts.dispatch) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+        };
         let effect_nodes = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
             ports: ports.clone(),
@@ -599,6 +605,7 @@ impl GraphCompiler {
             required_bindings,
             routes: route_transforms.clone(),
             effects: effect_nodes,
+            banks,
             observers: Vec::new(),
         });
         Ok(PreparedGraphArtifact {
@@ -681,6 +688,94 @@ fn rack_cohort_report(effects: &EffectPreparedSession) -> GraphRackCohortReport 
         simd1: compile(RackLocationV1::Simd1, RackId::Simd1),
         simd2: compile(RackLocationV1::Simd2, RackId::Simd2),
     }
+}
+
+fn bind_rack_banks(
+    effects: &EffectPreparedSession,
+    ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
+    levels: &[DependencyLevel],
+    dispatch: KernelDispatch,
+) -> Result<Vec<miso_engine_graph::GraphPreparedEffectBank>, GraphDiagnostic> {
+    let Some(width) = dispatch.bank_width() else {
+        return Ok(Vec::new());
+    };
+    let level_by_node: BTreeMap<_, _> = levels
+        .iter()
+        .flat_map(|level| {
+            level
+                .nodes
+                .iter()
+                .cloned()
+                .map(move |node| (node, level.level))
+        })
+        .collect();
+    let mut candidates = BTreeMap::new();
+    for entry in &effects.entries {
+        let rack = rack_id(entry.rack);
+        if !matches!(rack, RackId::Simd1 | RackId::Simd2)
+            || !matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
+        {
+            continue;
+        }
+        candidates
+            .entry((rack, entry.metadata.program_key()))
+            .or_insert_with(Vec::new)
+            .push(entry);
+    }
+    let mut banks = Vec::new();
+    for ((rack, program), entries) in candidates {
+        for members in entries.chunks(width.lanes() as usize) {
+            if members.len() != width.lanes() as usize
+                || members
+                    .iter()
+                    .any(|entry| !std::sync::Arc::ptr_eq(&entry.factory, &members[0].factory))
+            {
+                continue;
+            }
+            let member_ids: Vec<_> = members
+                .iter()
+                .map(|entry| ids[&(entry.track_id.clone(), rack, entry.effect_id.clone())].clone())
+                .collect();
+            let Some(first_level) = level_by_node
+                .get(&GraphNodeId::Effect(member_ids[0].clone()))
+                .copied()
+            else {
+                continue;
+            };
+            if member_ids.iter().any(|id| {
+                level_by_node.get(&GraphNodeId::Effect(id.clone())).copied() != Some(first_level)
+            }) {
+                continue;
+            }
+            let requests: Vec<_> = members
+                .iter()
+                .map(|entry| entry.bank_preparation.request())
+                .collect();
+            let request = PrepareEffectBankRequest {
+                backend: dispatch.backend(),
+                width,
+                requests: &requests,
+            };
+            let Some(processor) = members[0]
+                .factory
+                .bind_homogeneous_bank(request)
+                .map_err(|error| diag(error.code, "$.effects"))?
+            else {
+                continue;
+            };
+            if processor.metadata().width != width || processor.metadata().program_key != program {
+                return Err(diag("graph.effect.bank_metadata", "$.effects"));
+            }
+            let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
+                .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+            banks.push(miso_engine_graph::GraphPreparedEffectBank {
+                members: member_ids.into_boxed_slice(),
+                processor,
+                scratch,
+            });
+        }
+    }
+    Ok(banks)
 }
 
 struct TimingResult {
