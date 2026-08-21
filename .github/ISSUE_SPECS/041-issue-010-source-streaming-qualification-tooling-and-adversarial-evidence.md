@@ -256,3 +256,20 @@ Focused PASS: direct duration-audit invocation; source/source-audit format check
 and audit check/tests (29 source unit tests plus one compile-fail doctest); warning-denied Clippy
 including test support; and `git diff --check`. No Gate 5 full workspace/policy gate, benchmark,
 or timing workload was invoked; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — final qualification matrix (2026-08-21)
+
+**Terra FAIL at Gate 5; no source product defect was observed.** After the concurrent compressor
+core checkpoint `592a2ee` left the shared worktree clean, the required first final-matrix command,
+`cargo fmt --check`, failed before any checker, audit, workspace, Clippy, rustdoc, policy, or
+artifact-scan gate could run. The formatter reports pre-existing formatting differences in the
+committed concurrent compressor/reference files:
+`crates/miso-engine-dsp-reference/src/compressor.rs` (the ring-length/lookahead and coefficient
+formatting at lines 71 and 112) and `crates/miso-engine-dsp-reference/src/lib.rs` (the compressor
+re-export at line 19).
+
+No formatting, source-semantic, fixture, audit, policy, or compressor change was made by this
+qualification attempt, and the matrix was not continued after its first mandatory failure. Gates
+1–4 remain recorded PASS above; Gate 5 is incomplete/FAIL pending a clean formatting checkpoint
+outside this issue. Neither functional audit binary was rerun, no benchmark runner/workload was
+invoked, no timing value was collected, and `timed_benchmark_invocations=0`.
