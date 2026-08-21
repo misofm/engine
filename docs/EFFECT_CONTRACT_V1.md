@@ -69,8 +69,12 @@ effect.third_party.unavailable_at_launch
 ## Evidence contract
 
 The correct dual-accumulator/three-sample-delay mock has separate L/R delay, accumulator,
-automation, and payload state. Its enabled and bypass impulse index is exactly three. Conformance
-checks all eight rates, every declared quality/link mode, enabled/bypass, metadata immutability,
+automation, and payload state. Its enabled and bypass impulse index is exactly three. Every
+declared quality must have 44,100, 48,000, 88,200, and 96,000 Hz rows; unique ordered rows for
+176,400, 192,000, 352,800, and 384,000 Hz are optional compatibility evidence only. Conformance
+launch gates cover the first four rates and report optional extended rows separately; neither
+descriptor rows nor probes for the latter four create engine, host, or release support. It checks
+every declared quality/link mode, enabled/bypass, metadata immutability,
 sanitization, deterministic state restore, and lane isolation. Separate faulty mocks exercise
 allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, changing
 latency/tail/resources, bypass latency, malformed automation, NaN propagation, partial or

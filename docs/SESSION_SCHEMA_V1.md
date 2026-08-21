@@ -13,6 +13,12 @@ sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack e
 automation segments preserve declared order. Canonical text uses LF, exactly one final newline,
 canonical string escapes, finite `f32` spellings, and normalized negative zero.
 
+`sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
+96000 Hz. Other values, including extended compatibility corpus rates, reject with
+`sample_rate.unsupported_at_launch` at `$.sample_rate_hz`; parsing, typed compilation, and
+canonical serialization never turn such a model into an engine session. A source's nonzero
+`sample_rate_hz` remains lossless asset metadata and does not itself claim engine support.
+
 V1 output is exactly two planar `f32` channels, matching its explicit 2x2 matrices. A track maps
 independent left and right source channels and declares independent builtins, fader/mute values,
 ordered `simd1`/`dynamic`/`simd2` racks, and either a smoothed pan pair or smoothed 2x2 matrix.

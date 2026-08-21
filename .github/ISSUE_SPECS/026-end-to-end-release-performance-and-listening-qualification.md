@@ -6,7 +6,7 @@ Qualify the launch mixer/mastering engine with repeatable functional, realtime, 
 
 ## Context
 
-Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Required engine rates are 44,100, 48,000, 88,200, 96,000, 176,400, 192,000, 352,800, and 384,000 Hz; source/engine mismatches have no implicit SRC. Output is PCM.
+Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; higher named rates are extended compatibility evidence only. Source/engine mismatches have no implicit SRC. Output is PCM.
 
 This issue is independently implementable only after its exact dependencies are complete. Its change must follow the Sol-approved brief → Terra attempt 1 with evidence → Sol adversarial review workflow; Sol may make at most two further revisions, then the work must be rescoped/rebriefed rather than weakening gates.
 
@@ -31,6 +31,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Stable C ABI and native PCM reference runner
 - iOS and Android embedding examples
 - WASM SIMD AudioWorklet embedding
+- Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 - Versioned TOML schema and transactional session compiler
@@ -60,7 +61,7 @@ Use ITU/EBU references where meters/loudness are claimed: https://www.itu.int/re
 
 ## Acceptance gates with objective measurements
 
-All referenced issue gates pass. On each named pinned realtime baseline, a ten-minute run has zero deadline misses and P99.99 callback time below 70% of the quantum; reports include dry-routing, 32 dual-mono console (builtins + EQ + compressor, four submixes and two sends), and mastering scenarios at 48/96 kHz, plus at least a complete two-track mastering path at 384 kHz. Publish maximum sustainable track count for each scenario/rate rather than claiming equal capacity. A 60-minute sparse-stem streaming soak stays within the exact prepared ring/arena ceiling and has 0 render allocations/frees. Median CPU regression above 5% or P99 above 10% fails against the pinned baseline unless a new Sol-approved issue records the correctness tradeoff. Every target has a golden PCM tolerance result; unresolved release-gate defects fail qualification rather than merely becoming links.
+All referenced issue gates pass. On each named pinned realtime baseline, a ten-minute run has zero deadline misses and P99.99 callback time below 70% of the quantum; reports include dry-routing, 32 dual-mono console (builtins + EQ + compressor, four submixes and two sends), and representative mastering scenarios at each launch rate (44.1/48/88.2/96 kHz). Publish maximum sustainable track count for each scenario/rate rather than claiming equal capacity. A 60-minute sparse-stem streaming soak stays within the exact prepared ring/arena ceiling and has 0 render allocations/frees. Median CPU regression above 5% or P99 above 10% fails against the pinned baseline unless a new Sol-approved issue records the correctness tradeoff. Every target has a golden PCM tolerance result; unresolved release-gate defects fail qualification rather than merely becoming links.
 
 ## Target matrix
 
