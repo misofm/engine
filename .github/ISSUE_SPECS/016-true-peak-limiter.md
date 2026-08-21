@@ -24,7 +24,8 @@ rebrief; no domain, guard or gate may be weakened.
 - Add `miso.true-peak-limiter`, contract 1.0, state layout 1 and Normal quality at all four launch
   rates.
 - Implement the exact order-48/four-phase Annex-2 interpolating FIR detector, instantaneous gain
-  attack, one-pole release and a fixed 1.0 dB estimator safety guard.
+  attack, an exact lookahead-plus-FIR hold, one-pole release and a fixed 1.0 dB estimator safety
+  guard.
 - Support `LinkMode::{DualMono, Maximum}` with lane-local parameters, gain, delay, history, state
   and recovery. There is no sidechain.
 - Expose ceiling and release as block-Point automation with exact 64-update ramps; lookahead is
@@ -116,8 +117,10 @@ qualification remains Issue 049.
 4. Enabled, bypass and gain-identity impulses land at the exact declared latency. Bypass and
    identity preserve delayed dry bits while warming detector, target and delay state; graph PDC is
    unchanged by bypass.
-5. Exact automation endpoints/restarts, both resets, transactional active snapshot/restore,
-   signed-zero identity, sanitation, ceiling-protecting lane recovery and L/R/track isolation pass.
+5. At lookaheads `[0,5,10]` ms, attenuation is retained through exactly the corresponding
+   lookahead plus six following samples before release may begin. Exact automation endpoints/
+   restarts, both resets, transactional active snapshot/restore, signed-zero identity, sanitation,
+   ceiling-protecting lane recovery and L/R/track isolation pass.
 6. Same-target scalar and available base W4/W8 PCM, state and reports are bit-identical for finite
    normal inputs without sanitation; the existing zero-FMA gain kernel is reused. The ten-track
    graph retains exact width-correct banks and scalar tails, preserves graph/PDC bytes and returns
@@ -158,3 +161,34 @@ PASS/FAIL; and `timed_benchmark_invocations=0`.
 
 **Terra attempt 1 verdict: FAIL.** Changing the required-gain timing to make this ceiling proof
 pass would alter the frozen gain law, so this checkpoint stops for Sol classification/rebrief.
+
+## Final Sol correction attempt 2 — scalar correction PASS; overall STOPPED/RESCOPE
+
+- Candidate base: clean `ba98ea2`. Production had implemented the frozen required-gain equation
+  exactly. The defect was normative: delaying one raw required-gain point by `D=N-L` advances its
+  attenuation by `L`, but supplies no future-window hold. At 10 ms lookahead the impulse's required
+  gain was read at sample zero and one-pole release began at sample one, while its dry sample did
+  not emerge until fixed latency `T=N+6=486`.
+- The bounded correction preserves the FIR, required-gain ring, fixed latency, 1.0 dB guard,
+  detector-only topology and unclipped base-rate audio. A lane now retains one exact
+  `hold_remaining` word. An attenuation or equal-below-unity event sets `H=L+6`; the event sample
+  is not counted, the next exactly `H` samples retain gain, and release first executes on the
+  following sample. This covers both the advanced lookahead interval and the frozen FIR alignment.
+- State layout 1 is corrected before launch to `2N+31` words per lane. Snapshot/restore validates
+  `hold_remaining<=L+6`; both resets and recovery clear it. Exact lane/total state bytes are now
+  3,652/7,304; 3,964/7,928; 7,180/14,360; and 7,804/15,608 at the four launch rates.
+- The scalar impulse proof passes at lookaheads 0/5/10 ms with exact latency and guarded ceiling.
+  A separate state/timing proof exercises raw-event delay, active-hold snapshot/restore, invalid
+  hold rejection, exact countdown, first release on `H+1`, and reset clearing at all three
+  lookaheads.
+- `cargo fmt --check --package miso-engine-true-peak-limiter`: PASS.
+- `cargo test --locked -p miso-engine-true-peak-limiter --lib`: PASS, 5/5.
+- Warning-denied all-target/all-feature focused Clippy: PASS.
+- No bank, registry, graph, PDC, Issue-049, corpus, audit, target/object, benchmark, timing or
+  listening work ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: FAIL/STOP for Issue 016 overall.** The same-architecture scalar correction is
+accepted technical input, but homogeneous banks, registry/graph/PDC and the remaining frozen
+product evidence were not implemented in either authorized attempt. They cannot be reported as
+PASS or completed in a third attempt. Preserve this scalar checkpoint and move only the unfinished
+launch-product closure to a new stateless successor before Issue 049 qualification.

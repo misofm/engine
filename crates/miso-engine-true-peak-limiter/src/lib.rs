@@ -17,7 +17,8 @@ use miso_engine_effect_contract::{
 const PARAMETER_COUNT: usize = 3;
 const RAMP_COUNT: usize = 2;
 const HISTORY_WORDS: usize = 12;
-const STATE_HEADER_WORDS: usize = 22;
+const STATE_HEADER_WORDS: usize = 23;
+const FIR_ALIGNMENT_SAMPLES: u32 = 6;
 
 const fn effect_id(value: &'static str) -> miso_engine_effect_contract::EffectId {
     match miso_engine_effect_contract::EffectId::new(value) {
@@ -134,7 +135,7 @@ const PORTS: [PortDescriptorV1; 2] = [
 
 const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
     let lookahead_maximum = rate / 100;
-    let lane_words = 2 * lookahead_maximum + 30;
+    let lane_words = 2 * lookahead_maximum + 31;
     let lane_bytes = lane_words * 4;
     miso_engine_effect_contract::QualityDescriptorV1 {
         quality: EffectQuality::Normal,
@@ -238,6 +239,7 @@ struct Lane {
     lookahead_ms: f32,
     lookahead_samples: usize,
     gain: f32,
+    hold_remaining: u32,
     ramps: [Ramp; RAMP_COUNT],
     history: [f32; HISTORY_WORDS],
     main_ring: Box<[f32]>,
@@ -254,6 +256,7 @@ impl Lane {
             lookahead_ms: defaults[2],
             lookahead_samples,
             gain: 1.0,
+            hold_remaining: 0,
             ramps: [Ramp::fixed(defaults[0]), Ramp::fixed(defaults[1])],
             history: [0.0; HISTORY_WORDS],
             main_ring: vec![0.0; main_length].into_boxed_slice(),
@@ -269,6 +272,7 @@ impl Lane {
             lookahead_samples(defaults[2], sample_rate, self.required_ring.len() - 1)
                 .expect("validated prepared lookahead");
         self.gain = 1.0;
+        self.hold_remaining = 0;
         self.ramps = [Ramp::fixed(defaults[0]), Ramp::fixed(defaults[1])];
         self.history.fill(0.0);
         self.main_ring.fill(0.0);
@@ -279,6 +283,7 @@ impl Lane {
         self.main_cursor = 0;
         self.required_cursor = 0;
         self.gain = 1.0;
+        self.hold_remaining = 0;
         for ramp in &mut self.ramps {
             ramp.current = ramp.target;
             ramp.remaining = 0;
@@ -538,6 +543,7 @@ fn finite_or_zero(value: f32) -> Option<f32> {
     }
 }
 
+#[allow(clippy::assign_op_pattern, clippy::needless_range_loop)]
 fn detector_peak(lane: &mut Lane, input: f32) -> Option<f32> {
     lane.history.copy_within(0..HISTORY_WORDS - 1, 1);
     lane.history[0] = input;
@@ -599,8 +605,17 @@ fn advance_gain(lane: &mut Lane, required: f32, sample_rate: u32) -> Option<f32>
     lane.required_cursor = ((cursor + 1) % length) as u32;
     let release =
         finite_or_zero((-1.0_f32 / (0.001 * lane.ramps[1].current * sample_rate as f32)).exp())?;
-    let gain = if delayed_required < lane.gain {
+    let hold_samples = u32::try_from(lane.lookahead_samples)
+        .ok()?
+        .checked_add(FIR_ALIGNMENT_SAMPLES)?;
+    let gain = if delayed_required < lane.gain
+        || (delayed_required == lane.gain && delayed_required < 1.0)
+    {
+        lane.hold_remaining = hold_samples;
         delayed_required
+    } else if lane.hold_remaining != 0 {
+        lane.hold_remaining -= 1;
+        lane.gain
     } else {
         release * lane.gain + (1.0 - release) * delayed_required
     };
@@ -619,6 +634,7 @@ fn delay_main(lane: &mut Lane, input: f32) -> f32 {
 
 fn recover(lane: &mut Lane, recovered: &mut u64) {
     lane.gain = 0.0;
+    lane.hold_remaining = 0;
     lane.required_ring.fill(0.0);
     *recovered = recovered.saturating_add(1);
 }
@@ -708,14 +724,15 @@ fn write_lane(bytes: &mut [u8], lane: &Lane) {
     write_u32(bytes, 1, lane.required_cursor);
     write_f32(bytes, 2, lane.lookahead_ms);
     write_f32(bytes, 3, lane.gain);
+    write_u32(bytes, 4, lane.hold_remaining);
     for (index, ramp) in lane.ramps.iter().enumerate() {
-        let word = 4 + index * 3;
+        let word = 5 + index * 3;
         write_f32(bytes, word, ramp.current);
         write_f32(bytes, word + 1, ramp.target);
         write_u32(bytes, word + 2, ramp.remaining);
     }
     for (index, value) in lane.history.iter().enumerate() {
-        write_f32(bytes, 10 + index, *value);
+        write_f32(bytes, 11 + index, *value);
     }
     for (index, value) in lane.main_ring.iter().enumerate() {
         write_f32(bytes, STATE_HEADER_WORDS + index, *value);
@@ -745,6 +762,7 @@ fn read_lane(bytes: &[u8], sample_rate: u32) -> Result<Lane, StatePayloadError> 
     }
     let lookahead_ms = read_f32(bytes, 2);
     let gain = read_f32(bytes, 3);
+    let hold_remaining = read_u32(bytes, 4);
     if !parameter_state_valid(2, lookahead_ms)
         || !normal_or_zero(gain)
         || !(0.0..=1.0).contains(&gain)
@@ -755,7 +773,7 @@ fn read_lane(bytes: &[u8], sample_rate: u32) -> Result<Lane, StatePayloadError> 
     defaults[2] = lookahead_ms;
     let mut ramps = [Ramp::fixed(0.0); RAMP_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
-        let word = 4 + index * 3;
+        let word = 5 + index * 3;
         let current = read_f32(bytes, word);
         let target = read_f32(bytes, word + 1);
         let remaining = read_u32(bytes, word + 2);
@@ -777,12 +795,20 @@ fn read_lane(bytes: &[u8], sample_rate: u32) -> Result<Lane, StatePayloadError> 
     if lane.lookahead_samples > maximum {
         return Err(state_error("effect.state.parameter"));
     }
+    let maximum_hold = u32::try_from(lane.lookahead_samples)
+        .ok()
+        .and_then(|lookahead| lookahead.checked_add(FIR_ALIGNMENT_SAMPLES))
+        .ok_or(state_error("effect.state.parameter"))?;
+    if hold_remaining > maximum_hold {
+        return Err(state_error("effect.state.parameter"));
+    }
     lane.main_cursor = main_cursor;
     lane.required_cursor = required_cursor;
     lane.gain = normalize_zero(gain);
+    lane.hold_remaining = hold_remaining;
     lane.ramps = ramps;
     for (index, value) in lane.history.iter_mut().enumerate() {
-        *value = read_f32(bytes, 10 + index);
+        *value = read_f32(bytes, 11 + index);
         if !normal_or_zero(*value) {
             return Err(state_error("effect.state.history"));
         }
@@ -934,10 +960,10 @@ mod tests {
             3
         );
         for (quality, expected) in QUALITIES.iter().zip([
-            (44_100, 447, 3_648, 7_296),
-            (48_000, 486, 3_960, 7_920),
-            (88_200, 888, 7_176, 14_352),
-            (96_000, 966, 7_800, 15_600),
+            (44_100, 447, 3_652, 7_304),
+            (48_000, 486, 3_964, 7_928),
+            (88_200, 888, 7_180, 14_360),
+            (96_000, 966, 7_804, 15_608),
         ]) {
             assert_eq!(quality.sample_rate, expected.0);
             assert_eq!(quality.latency, LatencySamples(expected.1));
@@ -954,8 +980,7 @@ mod tests {
         let peak = detector_peak(&mut lane, 1.0).expect("peak");
         assert_eq!(lane.history[0].to_bits(), 1.0_f32.to_bits());
         assert!(lane.history[1..].iter().all(|value| value.to_bits() == 0));
-        for phase in 0..4 {
-            let phase_value = ANNEX2_FIR[0][phase];
+        for phase_value in ANNEX2_FIR[0] {
             assert_eq!(finite_or_zero(phase_value), Some(phase_value));
         }
         assert_eq!(peak.to_bits(), 1.0_f32.to_bits());
@@ -966,27 +991,40 @@ mod tests {
 
     #[test]
     fn fixed_latency_guarded_ceiling_and_bypass_bits_hold() {
+        let guard_limit = 10.0_f32.powf((-6.0 - 1.0) * 0.05);
+        for lookahead in [0.0, 5.0, 10.0] {
+            let mut values = initial_values();
+            values[0].value = -6.0;
+            values[1].value = -6.0;
+            values[4].value = lookahead;
+            values[5].value = lookahead;
+            let mut effect = TruePeakLimiterFactory
+                .prepare(request(&values))
+                .expect("prepare");
+            let mut left = vec![0.0; 487];
+            let mut right = vec![0.0; 487];
+            left[0] = 1.0;
+            right[0] = 0.5;
+            assert_eq!(
+                render_blocks(effect.as_mut(), &mut left, &mut right),
+                ProcessReport::default()
+            );
+            assert!(left[..486].iter().all(|sample| sample.to_bits() == 0));
+            assert!(left[486].abs() <= guard_limit, "left lookahead {lookahead}");
+            assert!(
+                right[486].abs() <= guard_limit,
+                "right lookahead {lookahead}"
+            );
+            let state = snapshot(effect.as_ref());
+            assert_eq!(read_u32(&state.0, 4), 0, "left hold {lookahead}");
+            assert_eq!(read_u32(&state.1, 4), 0, "right hold {lookahead}");
+        }
+
         let mut values = initial_values();
         values[0].value = -6.0;
         values[1].value = -6.0;
         values[4].value = 10.0;
         values[5].value = 10.0;
-        let mut effect = TruePeakLimiterFactory
-            .prepare(request(&values))
-            .expect("prepare");
-        let mut left = vec![0.0; 487];
-        let mut right = vec![0.0; 487];
-        left[0] = 1.0;
-        right[0] = 0.5;
-        assert_eq!(
-            render_blocks(effect.as_mut(), &mut left, &mut right),
-            ProcessReport::default()
-        );
-        let guard_limit = 10.0_f32.powf((-6.0 - 1.0) * 0.05);
-        assert!(left[..486].iter().all(|sample| sample.to_bits() == 0));
-        assert!(left[486].abs() <= guard_limit);
-        assert!(right[486].abs() <= guard_limit);
-
         let mut bypass_request = request(&values);
         bypass_request.bypass = true;
         let mut bypass = TruePeakLimiterFactory
@@ -1002,6 +1040,48 @@ mod tests {
         );
         assert_eq!(left[486].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(right[486].to_bits(), 0.25_f32.to_bits());
+    }
+
+    #[test]
+    fn required_gain_hold_defers_release_for_exact_lookahead_plus_alignment() {
+        const EVENT_GAIN: f32 = 0.25;
+        let (_, main_length, required_length) = dimensions(48_000).expect("dimensions");
+        for lookahead_ms in [0.0, 5.0, 10.0] {
+            let defaults = [-6.0, 10.0, lookahead_ms];
+            let mut lane = Lane::new(&defaults, 48_000).expect("lane");
+            let delay = 480 - lane.lookahead_samples;
+            for index in 0..=delay {
+                let raw = if index == 0 { EVENT_GAIN } else { 1.0 };
+                let gain = advance_gain(&mut lane, raw, 48_000).expect("advance to event");
+                if index < delay {
+                    assert_eq!(gain.to_bits(), 1.0_f32.to_bits());
+                }
+            }
+            let hold =
+                u32::try_from(lane.lookahead_samples).expect("lookahead") + FIR_ALIGNMENT_SAMPLES;
+            assert_eq!(lane.gain.to_bits(), EVENT_GAIN.to_bits());
+            assert_eq!(lane.hold_remaining, hold);
+
+            let mut payload = vec![0; (STATE_HEADER_WORDS + main_length + required_length) * 4];
+            write_lane(&mut payload, &lane);
+            let mut restored = read_lane(&payload, 48_000).expect("active hold restore");
+            assert_eq!(restored.hold_remaining, hold);
+            let mut corrupt = payload.clone();
+            write_u32(&mut corrupt, 4, hold + 1);
+            assert!(read_lane(&corrupt, 48_000).is_err());
+
+            for expected_remaining in (0..hold).rev() {
+                let gain = advance_gain(&mut restored, 1.0, 48_000).expect("held gain");
+                assert_eq!(gain.to_bits(), EVENT_GAIN.to_bits());
+                assert_eq!(restored.hold_remaining, expected_remaining);
+            }
+            let released = advance_gain(&mut restored, 1.0, 48_000).expect("first release");
+            assert!(released > EVENT_GAIN);
+            assert_eq!(restored.hold_remaining, 0);
+
+            lane.discontinuity_reset();
+            assert_eq!(lane.hold_remaining, 0);
+        }
     }
 
     #[test]
@@ -1027,8 +1107,8 @@ mod tests {
         );
         assert_eq!(report.sanitized_main_samples, 1);
         let saved = snapshot(effect.as_ref());
-        assert_eq!(read_f32(&saved.0, 4).to_bits(), (-12.0_f32).to_bits());
-        assert_eq!(read_u32(&saved.0, 6), 0);
+        assert_eq!(read_f32(&saved.0, 5).to_bits(), (-12.0_f32).to_bits());
+        assert_eq!(read_u32(&saved.0, 7), 0);
         let mut peer = TruePeakLimiterFactory
             .prepare(request(&values))
             .expect("peer");
@@ -1053,12 +1133,13 @@ mod tests {
         assert_eq!(read_u32(&discontinuity.0, 0), 0);
         assert_eq!(read_u32(&discontinuity.0, 1), 0);
         assert_eq!(read_f32(&discontinuity.0, 3).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(read_u32(&discontinuity.0, 4), 0);
         assert_eq!(
-            read_f32(&discontinuity.0, 4).to_bits(),
+            read_f32(&discontinuity.0, 5).to_bits(),
             (-12.0_f32).to_bits()
         );
         assert_eq!(
-            read_f32(&discontinuity.0, 5).to_bits(),
+            read_f32(&discontinuity.0, 6).to_bits(),
             (-12.0_f32).to_bits()
         );
     }

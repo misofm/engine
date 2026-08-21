@@ -54,15 +54,16 @@ B = T+1                            // main-delay ring length
 R = N+1                            // required-gain ring length
 L = floor(f64(lookahead_ms)*Fs/1000 + 0.5), clamped to 0..N
 D = N-L                            // required-gain delay
-lane_words = 22+B+R = 2N+30
+H = L+F                            // samples following an attenuation event held before release
+lane_words = 23+B+R = 2N+31
 ```
 
 | Fs | N | latency T | lane bytes | total state bytes |
 |---:|---:|---:|---:|---:|
-| 44100 | 441 | 447 | 3648 | 7296 |
-| 48000 | 480 | 486 | 3960 | 7920 |
-| 88200 | 882 | 888 | 7176 | 14352 |
-| 96000 | 960 | 966 | 7800 | 15600 |
+| 44100 | 441 | 447 | 3652 | 7304 |
+| 48000 | 480 | 486 | 3964 | 7928 |
+| 88200 | 882 | 888 | 7180 | 14360 |
+| 96000 | 960 | 966 | 7804 | 15608 |
 
 Each descriptor row has `TailSamples::Infinite`, `scratch_fixed_bytes=24` for two retained
 three-`f32` prepared-default tables and `scratch_bytes_per_frame=0`. State and fixed bytes are
@@ -127,8 +128,14 @@ rd = gain_ring[(q + 1 + L) mod R]    // delay D=N-L; current entry when L=N
 q = (q+1) mod R
 
 ar = exp(-1 / (0.001*tau*Fs))
-g = rd                               when rd < g0       // instantaneous attack
-g = ar*g0 + (1-ar)*rd                otherwise         // one-pole release
+when rd < g0, or rd == g0 < 1:
+    g = rd                                             // instantaneous attack/retention
+    hold_remaining = H                                // H subsequent samples are held
+otherwise when hold_remaining > 0:
+    g = g0
+    hold_remaining -= 1
+otherwise:
+    g = ar*g0 + (1-ar)*rd                              // one-pole release
 
 main_ring[w] = x
 z = main_ring[(w+1) mod B]            // exact T-sample delayed dry
@@ -137,13 +144,17 @@ y = z                                when g == 1
 y = z*g                              otherwise
 ```
 
-Clamp finite `g` to `[0,1]` after the separately rounded release graph. Equality takes release.
-`powf` and `exp` execute once per active lane/sample with bounded standard `f32` math; no oracle
-or SIMD transcendental approximation enters production.
+Clamp finite `g` to `[0,1]` after the separately rounded release graph. An attenuation/equal
+below-unity event sample is not counted inside `H`: it sets `hold_remaining=H`; each of the next
+exactly `H` samples emits the held gain and decrements once; release can first execute on the
+following sample. Equality below unity refreshes the horizon so a sustained requirement remains
+held through its final sample. Equality at unity does not create a hold. `powf` and `exp` execute
+once per active lane/sample with bounded standard `f32` math; no oracle or SIMD transcendental
+approximation enters production.
 
 At each frame: advance ceiling then release ramps; derive limit/release; sanitize L/R; update FIR
-histories and phase estimates; link; derive/push/read required gains; update both gains; update/read
-main delay; then select output. A Point at `first_sample` performs update one on that sample and
+histories and phase estimates; link; derive/push/read required gains; update both gains/holds;
+update/read main delay; then select output. A Point at `first_sample` performs update one on that sample and
 reaches the exact target on update 64; a new Point restarts from current. The ceiling gate is
 evaluated against the current smoothed value.
 
@@ -162,35 +173,38 @@ order. Normalize accepted numeric-zero targets to positive zero.
 Use accepted sample sanitation: nonfinite or subnormal main input becomes positive zero and
 increments only its lane sample counter; signed finite zero is retained. Finite computed subnormal
 phase/gain/output becomes positive zero without recovery. A nonfinite detector, limit, coefficient,
-required gain, gain state or enabled output resets only that lane's `g` and required-gain ring to
-positive zero, emits positive zero for that enabled sample, and increments its recovery counter
-once. Its FIR/main histories and every other lane/track remain intact. Bypass still emits delayed
-dry while performing and reporting the same internal recovery. Subsequent valid samples release
-from zero, which is the ceiling-protecting state. No valid product fixture may recover.
+required gain, gain state or enabled output resets only that lane's `g`, `hold_remaining` and
+required-gain ring to positive zero, emits positive zero for that enabled sample, and increments
+its recovery counter once. Its FIR/main histories and every other lane/track remain intact. Bypass
+still emits delayed dry while performing and reporting the same internal recovery. Subsequent
+valid samples release from zero, which is the ceiling-protecting state. No valid product fixture
+may recover.
 
-`FullToDefaults` clears histories/main ring, sets required-gain ring and `g` to one, resets cursors,
-and restores the complete prepared initial table. `DiscontinuityKeepParameters` clears the same
-runtime state, retains lookahead, snaps ceiling/release ramps to targets with zero remaining and
-discards active progress. Both leave metadata unchanged.
+`FullToDefaults` clears histories/main ring, sets required-gain ring and `g` to one, clears
+`hold_remaining`, resets cursors, and restores the complete prepared initial table.
+`DiscontinuityKeepParameters` clears the same runtime state, retains lookahead, snaps ceiling/
+release ramps to targets with zero remaining and discards active progress. Both leave metadata
+unchanged.
 
-Common state is empty. Each lane is exactly `2N+30` little-endian 32-bit words:
+Common state is empty. Each lane is exactly `2N+31` little-endian 32-bit words:
 
 ```text
 word 0       main-ring cursor u32
 word 1       required-gain-ring cursor u32
 word 2       lookahead_ms f32
 word 3       current gain g f32
-words 4..9   (current f32, target f32, remaining u32) for ceiling then release
-words 10..21 detector history h[0..12], newest first
+word 4       hold_remaining u32
+words 5..10  (current f32, target f32, remaining u32) for ceiling then release
+words 11..22 detector history h[0..12], newest first
 next B       main ring f32, physical order
 final R      required-gain ring f32, physical order
 ```
 
 Prepared defaults and derived `L/D` are not serialized. Snapshot requires exact lengths. Restore
 accepts layout 1 only, parses both complete lanes into unpublished temporaries, validates cursors,
-finite nonnegative lookahead/parameters in domain, `g` and required gains in `[0,1]`, remaining
-counts `<=64`, and every history/ring word finite normal-or-zero; it rederives `L/D` and commits
-both lanes only after full success. Reject negative-zero parameter/lookahead, invalid common/trailing
+finite nonnegative lookahead/parameters in domain, `g` and required gains in `[0,1]`, ramp
+remaining counts `<=64`, `hold_remaining<=L+F`, and every history/ring word finite normal-or-zero;
+it rederives `L/D/H` and commits both lanes only after full success. Reject negative-zero parameter/lookahead, invalid common/trailing
 bytes, one corrupt lane or incompatible rate/length without mutation. Signed zero is legal in FIR
 and main rings. Scalar and bank track payloads are byte-compatible; failed bank-track restore
 changes no track.
@@ -227,7 +241,8 @@ high-rate `f64` reconstruction, record worst pre-guard under-read `<=0.75 dB`.
 At every launch rate, both links, ceilings `[-6,-1]` and lookaheads `[0,5,10]`, render compact
 asymmetric near-Nyquist bursts and impulses past T. The independent output estimate must be
 `<= current_smoothed_ceiling + 0.1 dB`, output/state finite and recovery zero. Also prove exact
-latency/bypass/identity; 64-update/restart/partition continuation; both resets; active transactional
+latency/bypass/identity and exact `H=L+F` release deferral with release beginning on the next
+sample; 64-update/restart/partition continuation; both resets; active transactional
 restore; signed-zero identity; subnormal/nonfinite sanitation; injected lane-local recovery;
 scalar/W8 output/state/report parity; and the ten-track graph/cap vertical.
 
