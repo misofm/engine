@@ -90,3 +90,55 @@ Native scalar/AVX2/FMA; ARM 4-lane equivalent; wasm32 scalar and simd128.
 ## Required evidence
 
 Capability dispatch table, randomized differential results, layout assertions, allocation audit, and cycles/frame benchmarks.
+
+## Terra attempt 1 evidence — 2026-08-21
+
+Candidate implementation checkpoint: `995b5d9` plus the bounded non-timed evidence changes in
+this attempt. No timed benchmark invocation occurred; `target/issue8/rack-benchmark.jsonl` was
+not created and the invocation count remains zero.
+
+### Passed non-timed evidence
+
+- The representative graph test constructs a 12-track, 48-kHz/128-frame mixed plan, retains
+  host-selected full banks plus the exact scalar remainder, verifies a scalar differential using
+  the frozen `1e-6 + 2e-5 * abs(scalar)` bound, and freezes output FNV-1a-64
+  `08b0fa64586c2325`. It also verifies distinct L/R inputs, cross-track state isolation,
+  same-wave admission, connected-sidechain fallback, factory-error ownership, observer handle
+  order, canonical graph bytes, PDC delays and tails.
+- With `MISO_ENGINE_ISSUE8_AUDIT=1`, the same prepared mixed plan completed exactly 100,000
+  renders of 128 frames in a release test. The output backing address remained stable and the
+  armed audit counters for allocation, free, lock, log, file I/O, network I/O and syscall were
+  all zero. The host dispatch reported the exact full-bank count and scalar-tail remainder before
+  the loop.
+- `cargo fmt --all -- --check`; focused rack/effect/graph tests; workspace check and test; the
+  workspace rustdoc gate; workspace/realtime/graph/rack policy checks; and rack-policy mutation
+  probes passed. The rack fixture check and changed/missing/unlisted/manifest corruption test
+  passed.
+- Native baseline `-avx2,-fma`, Android ARM64, iOS ARM64, wasm `-simd128`, and wasm `+simd128`
+  package compile matrix passed. Rack benchmark preflight passed with
+  `workload_launches=0`, one required warmup, two required measured rounds and six required
+  future records; runner negative/overwrite/argument readiness checks passed without launching a
+  workload.
+
+### Blocking instruction gate — FAIL
+
+The required native/Wasm instruction evidence does not pass. The current implementation contains
+semantic backend selection and scalar per-lane loops, but no architecture-owned
+`#[target_feature]` AVX2/no-FMA or AVX2+FMA entrypoints, no runtime dispatch to such entrypoints,
+no AArch64 NEON implementation, and no explicit Wasm `f32x4` multiply-plus-add kernel. Source
+inspection found no target-feature intrinsic implementation under the required core architecture
+boundary. Probe-only x86 builds can cause LLVM to emit unrelated generic AVX/FMA instructions,
+which is not proof of the required separately-dispatched kernels and must not be accepted as one.
+The wasm scalar artifact contains no SIMD opcode; the `+simd128` artifact contains compiler-
+generated `f32x4` operations but no required explicit multiply kernel, and no relaxed-SIMD opcode
+was observed. This is an implementation failure, not a skipped environment gate.
+
+The full workspace Clippy command also currently stops on the pre-existing issue-007
+`field_reassign_with_default` lint in `miso-engine-builtins/src/lib.rs:1863`; focused Issue-008
+Clippy is clean and workspace rustdoc is clean. This does not change the primary instruction-gate
+failure.
+
+**TERRA ATTEMPT 1: FAIL.** Preserve the passing audit/policy/target/preflight evidence. Do not
+relax the instruction gate, classify auto-vectorizer output as the intended kernel, run the timed
+benchmark, or make a disguised large SIMD correction in this attempt. Sol review/rescope is
+required before further implementation.

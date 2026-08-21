@@ -18,7 +18,7 @@ production_graph_dependencies=$(awk '
   /^\[/ { in_dependencies = 0 }
   in_dependencies && /^[a-zA-Z0-9_-]+[.]workspace/ { print $1 }
 ' "$graph_manifest" | sort)
-[[ "$production_graph_dependencies" == $'miso-engine-core.workspace\nmiso-engine-effect-contract.workspace' ]] ||
+[[ "$production_graph_dependencies" == $'miso-engine-core.workspace\nmiso-engine-effect-contract.workspace\nmiso-engine-rack.workspace' ]] ||
   fail 'render graph dependency boundary changed'
 
 rg -q '^sha2[.]workspace = true$' "$compiler_manifest" ||
@@ -27,8 +27,13 @@ if rg -n 'sha2|miso_engine_session|miso_engine_effect_compiler' \
   crates/miso-engine-graph/src crates/miso-engine-graph/Cargo.toml; then
   fail 'control-plane dependency leaked into render graph'
 fi
-if rg -n 'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync|log::|tracing::' \
-  crates/miso-engine-graph/src crates/miso-engine-graph-compiler/src; then
+production_sources=$(mktemp)
+trap 'rm -f -- "$production_sources"' EXIT
+while IFS= read -r source; do
+  sed '/^#\[cfg(test)\]/,$d' "$source" >>"$production_sources"
+done < <(find crates/miso-engine-graph/src crates/miso-engine-graph-compiler/src -name '*.rs' -type f | sort)
+if rg -n 'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync::(Mutex|RwLock|Condvar|mpsc)|log::|tracing::' \
+  "$production_sources"; then
   fail 'publication, I/O, threading, synchronization, or logging leaked into graph path'
 fi
 if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \

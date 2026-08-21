@@ -1869,7 +1869,7 @@ mod tests {
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::{
         TargetCapabilities,
-        realtime::{PlanarBufferMut, RenderIo, RenderTime},
+        realtime::{PlanarBufferMut, RenderIo, RenderTime, audit},
         target_capabilities,
     };
     use miso_engine_effect_compiler::{
@@ -2478,6 +2478,91 @@ mod tests {
             12,
             "factory failure retained every scalar input"
         );
+
+        // This is the Issue-008 representative realtime audit: the same mixed 12-track graph
+        // is prepared afresh, then rendered for exactly 100,000 128-frame callbacks. It is
+        // explicit-release-only so ordinary workspace tests do not accidentally consume the
+        // release qualification workload. Allocation and forbidden-operation hooks are armed
+        // only after all binding/storage is complete.
+        if std::env::var_os("MISO_ENGINE_ISSUE8_AUDIT").is_some() {
+            let audit_effects = prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 20,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("audit effects");
+            let audit_artifact = GraphCompiler::compile(GraphCompileRequest {
+                plan_id: 1_000,
+                effects: audit_effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("audit graph: {:?}", failure.diagnostics));
+            let audit_backend = KernelDispatch::select(target_capabilities());
+            let expected_banks = audit_backend
+                .bank_width()
+                .map_or(0, |width| 12 / width.lanes() as usize);
+            let expected_scalar_tails = audit_backend
+                .bank_width()
+                .map_or(12, |width| 12 % width.lanes() as usize);
+            assert_eq!(audit_artifact.graph.prepared_bank_count(), expected_banks);
+            assert_eq!(
+                expected_banks
+                    * audit_backend
+                        .bank_width()
+                        .map_or(0, |width| width.lanes() as usize)
+                    + expected_scalar_tails,
+                12
+            );
+            let audit_envelope = audit_artifact.graph.envelope;
+            let audit_nodes = audit_artifact
+                .graph
+                .required_bindings
+                .iter()
+                .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+                .collect();
+            let mut audit_plan = audit_artifact
+                .graph
+                .bind(GraphRuntimeBindings {
+                    envelope: audit_envelope,
+                    nodes: audit_nodes,
+                    observers: Vec::new(),
+                })
+                .unwrap_or_else(|failure| panic!("audit bind: {}", failure.code));
+            let mut audit_pcm = vec![0.0_f32; frames * 2];
+            let output_address = audit_pcm.as_ptr() as usize;
+            audit::warm_up();
+            audit::reset();
+            let mut output_hash = 0xcbf2_9ce4_8422_2325_u64;
+            for block in 0..100_000_u64 {
+                audit_plan
+                    .render(
+                        RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut audit_pcm, 2, frames, frames)
+                                .expect("audit output"),
+                        },
+                        RenderTime {
+                            absolute_sample: block * frames as u64,
+                        },
+                    )
+                    .expect("audit render");
+                assert_eq!(audit_pcm.as_ptr() as usize, output_address);
+                for sample in &audit_pcm {
+                    output_hash ^= u64::from(sample.to_bits());
+                    output_hash = output_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            let audit_snapshot = audit::snapshot();
+            assert_eq!(audit_snapshot.total(), 0);
+            assert_eq!(
+                output_hash, 0x08b0_fa64_586c_2325,
+                "deterministic mixed output hash"
+            );
+        }
     }
 
     #[test]

@@ -92,9 +92,8 @@ fn scalar_expected_bytes() -> Vec<u8> {
     for track in 0..TRACKS {
         let gains = [1.0 + track as f32 * 0.01, 1.0 - track as f32 * 0.0075];
         for channel in 0..2 {
-            for frame in 3..FRAMES {
-                channels[channel][frame] +=
-                    input_sample(track, channel, frame - 3) * gains[channel];
+            for (frame, output) in channels[channel].iter_mut().enumerate().skip(3) {
+                *output += input_sample(track, channel, frame - 3) * gains[channel];
             }
         }
     }
