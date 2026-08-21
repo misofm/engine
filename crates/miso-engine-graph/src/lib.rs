@@ -751,8 +751,17 @@ impl PreparedGraphPlan {
             graph_job_bytes: blueprint.graph_job_bytes,
             total_retained_bytes,
         };
-        let (executor, metadata) =
-            NativeGraphExecutor::new(graph, bindings.nodes, blueprint, scheduler, resources);
+        #[cfg(feature = "test-support")]
+        let test_preparation_transcript = blueprint.test_preparation_transcript();
+        let (executor, metadata) = NativeGraphExecutor::new(
+            graph,
+            bindings.nodes,
+            blueprint,
+            scheduler,
+            resources,
+            #[cfg(feature = "test-support")]
+            test_preparation_transcript,
+        );
         let plan = PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
                 plan_id,
@@ -803,6 +812,32 @@ pub struct NativeGraphResourceReportV1 {
 pub struct NativeGraphPreparedMetadataV1 {
     pub selection: SchedulerSelectionV1,
     pub resources: NativeGraphResourceReportV1,
+    /// Exact immutable native wave/unit/partition summary for qualification-only tests. This is
+    /// absent from normal production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub test_preparation_transcript: NativeGraphPreparationTranscriptV1,
+}
+
+/// Address-free qualification summary of the actual native preparation blueprint.
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct NativeGraphPreparationTranscriptV1 {
+    /// FNV-1a transcript over every immutable wave, unit key/kind/member sequence and partition.
+    pub hash: u64,
+    /// Largest immutable wave width before partitioning.
+    pub largest_wave_width: usize,
+    /// Number of indivisible retained bank units in the native layout.
+    pub retained_bank_units: usize,
+    /// Total nodes represented by indivisible retained bank units.
+    pub retained_bank_members: usize,
+    /// Number of indivisible retained builtin-bank units in the native layout.
+    pub retained_builtin_bank_units: usize,
+    /// Total builtin-bank members represented by those native units.
+    pub retained_builtin_bank_members: usize,
+    /// `true` only when every prepared partition is contiguous, nonempty, and unpadded.
+    pub partitions_are_canonical: bool,
 }
 
 /// A native graph preparation result; the contained plan remains the ordinary publication unit.
@@ -1658,6 +1693,141 @@ impl NativeGraphBlueprint {
             graph_job_bytes,
         })
     }
+
+    #[cfg(feature = "test-support")]
+    fn test_preparation_transcript(&self) -> NativeGraphPreparationTranscriptV1 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut retained_bank_units = 0_usize;
+        let mut retained_bank_members = 0_usize;
+        let mut retained_builtin_bank_units = 0_usize;
+        let mut retained_builtin_bank_members = 0_usize;
+        let mut partitions_are_canonical = true;
+        for wave in &self.waves {
+            hash = test_transcript_u64(hash, wave.level);
+            hash = test_transcript_usize(hash, wave.units.len());
+            for unit in &wave.units {
+                let tag = match unit.kind {
+                    NativeUnitBlueprintKind::Node => 1,
+                    NativeUnitBlueprintKind::EffectBank(_) => 2,
+                    NativeUnitBlueprintKind::BuiltinBank(_) => 3,
+                };
+                hash = test_transcript_byte(hash, tag);
+                hash = test_transcript_node(hash, &unit.key);
+                hash = test_transcript_usize(hash, unit.members.len());
+                for member in &unit.members {
+                    hash = test_transcript_node(hash, member);
+                }
+                if !matches!(unit.kind, NativeUnitBlueprintKind::Node) {
+                    retained_bank_units = retained_bank_units.saturating_add(1);
+                    retained_bank_members =
+                        retained_bank_members.saturating_add(unit.members.len());
+                }
+                if matches!(unit.kind, NativeUnitBlueprintKind::BuiltinBank(_)) {
+                    retained_builtin_bank_units = retained_builtin_bank_units.saturating_add(1);
+                    retained_builtin_bank_members =
+                        retained_builtin_bank_members.saturating_add(unit.members.len());
+                }
+            }
+            hash = test_transcript_usize(hash, wave.partitions.len());
+            let mut expected_first_unit = 0_usize;
+            for partition in &wave.partitions {
+                hash = test_transcript_usize(hash, partition.partition_id);
+                hash = test_transcript_usize(hash, partition.first_unit);
+                hash = test_transcript_usize(hash, partition.end_unit);
+                partitions_are_canonical &= partition.first_unit == expected_first_unit
+                    && partition.end_unit > partition.first_unit;
+                expected_first_unit = partition.end_unit;
+            }
+            partitions_are_canonical &= expected_first_unit == wave.units.len();
+        }
+        NativeGraphPreparationTranscriptV1 {
+            hash,
+            largest_wave_width: self.largest_wave_width,
+            retained_bank_units,
+            retained_bank_members,
+            retained_builtin_bank_units,
+            retained_builtin_bank_members,
+            partitions_are_canonical,
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_byte(hash: u64, value: u8) -> u64 {
+    (hash ^ u64::from(value)).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_u64(mut hash: u64, value: u64) -> u64 {
+    for byte in value.to_le_bytes() {
+        hash = test_transcript_byte(hash, byte);
+    }
+    hash
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_usize(hash: u64, value: usize) -> u64 {
+    test_transcript_u64(hash, value as u64)
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_bytes(mut hash: u64, value: &[u8]) -> u64 {
+    hash = test_transcript_usize(hash, value.len());
+    for byte in value {
+        hash = test_transcript_byte(hash, *byte);
+    }
+    hash
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_node(hash: u64, node: &GraphNodeId) -> u64 {
+    match node {
+        GraphNodeId::TrackStage { track_id, stage } => {
+            let hash = test_transcript_byte(hash, 1);
+            let hash = test_transcript_bytes(hash, track_id.as_str().as_bytes());
+            test_transcript_byte(hash, *stage as u8)
+        }
+        GraphNodeId::Effect(effect) => {
+            let hash = test_transcript_byte(hash, 2);
+            let hash = test_transcript_bytes(hash, effect.track_id.as_str().as_bytes());
+            let hash = test_transcript_byte(hash, effect.rack as u8);
+            test_transcript_bytes(hash, effect.effect_id.as_str().as_bytes())
+        }
+        GraphNodeId::Route { route_id } => {
+            test_transcript_bytes(test_transcript_byte(hash, 3), route_id.as_str().as_bytes())
+        }
+        GraphNodeId::Submix { submix_id } => {
+            test_transcript_bytes(test_transcript_byte(hash, 4), submix_id.as_str().as_bytes())
+        }
+        GraphNodeId::Output { output_id } => {
+            test_transcript_bytes(test_transcript_byte(hash, 5), output_id.as_str().as_bytes())
+        }
+        GraphNodeId::CompensationDelay { edge_id } => {
+            test_transcript_edge(test_transcript_byte(hash, 6), edge_id)
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn test_transcript_edge(hash: u64, edge: &GraphEdgeId) -> u64 {
+    match edge {
+        GraphEdgeId::TrackMain { target } => {
+            test_transcript_node(test_transcript_byte(hash, 1), target)
+        }
+        GraphEdgeId::RouteSource { route_id } => {
+            test_transcript_bytes(test_transcript_byte(hash, 2), route_id.as_str().as_bytes())
+        }
+        GraphEdgeId::RouteDestination { route_id } => {
+            test_transcript_bytes(test_transcript_byte(hash, 3), route_id.as_str().as_bytes())
+        }
+        GraphEdgeId::EffectSidechain { effect, port } => {
+            let hash = test_transcript_byte(hash, 4);
+            let hash = test_transcript_bytes(hash, effect.track_id.as_str().as_bytes());
+            let hash = test_transcript_byte(hash, effect.rack as u8);
+            let hash = test_transcript_bytes(hash, effect.effect_id.as_str().as_bytes());
+            test_transcript_bytes(hash, port.as_bytes())
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2086,6 +2256,8 @@ impl NativeGraphExecutor {
         blueprint: NativeGraphBlueprint,
         scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
         resources: NativeGraphResourceReportV1,
+        #[cfg(feature = "test-support")]
+        test_preparation_transcript: NativeGraphPreparationTranscriptV1,
     ) -> (Self, NativeGraphPreparedMetadataV1) {
         let PreparedGraphPlan {
             spec,
@@ -2242,6 +2414,8 @@ impl NativeGraphExecutor {
         let metadata = NativeGraphPreparedMetadataV1 {
             selection: scheduler.selection(),
             resources,
+            #[cfg(feature = "test-support")]
+            test_preparation_transcript,
         };
         (
             Self {

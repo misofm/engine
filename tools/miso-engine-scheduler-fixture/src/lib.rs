@@ -169,6 +169,9 @@ mod native {
         pub metadata: NativeGraphPreparedMetadataV1,
         pub report: GraphCompileReport,
         pub pdc_samples: u64,
+        pub prepared_builtin_bank_count: usize,
+        pub prepared_builtin_bank_member_count: usize,
+        pub scalar_builtin_tail_count: usize,
         transcript: Arc<Transcript>,
     }
 
@@ -235,6 +238,56 @@ mod native {
         transcript_capacity: usize,
         completion_acceptance_spins: [u16; 3],
     ) -> Result<PreparedQ128Fixture, String> {
+        prepare_fixture_with_track_count(
+            sample_rate_hz,
+            render_lanes,
+            render_mode,
+            plan_id,
+            transcript_capacity,
+            completion_acceptance_spins,
+            Q128_TRACK_COUNT,
+            1 << 29,
+            true,
+        )
+    }
+
+    /// Prepare the same production fixture topology at one generated track count for the
+    /// scheduler preparation matrix. This is qualification-only support, not a product graph API.
+    #[doc(hidden)]
+    pub fn prepare_q128_fixture_for_track_count(
+        track_count: usize,
+        render_lanes: usize,
+        plan_id: u64,
+        maximum_retained_bytes: usize,
+    ) -> Result<PreparedQ128Fixture, String> {
+        prepare_fixture_with_track_count(
+            48_000,
+            render_lanes,
+            Q128RenderMode::DependencyWaves,
+            plan_id,
+            0,
+            [0; 3],
+            track_count,
+            maximum_retained_bytes,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_fixture_with_track_count(
+        sample_rate_hz: u32,
+        render_lanes: usize,
+        render_mode: Q128RenderMode,
+        plan_id: u64,
+        transcript_capacity: usize,
+        completion_acceptance_spins: [u16; 3],
+        track_count: usize,
+        maximum_retained_bytes: usize,
+        require_q128_bank_and_pdc: bool,
+    ) -> Result<PreparedQ128Fixture, String> {
+        if track_count == 0 {
+            return Err("q128.track_count".to_owned());
+        }
         let mut model = parse_session_toml(SESSION_FIXTURE).map_err(|_| "q128.parse".to_owned())?;
         model.sample_rate_hz = sample_rate_hz;
         model.quantum_frames = Q128_QUANTUM_FRAMES as u32;
@@ -242,7 +295,7 @@ mod native {
         model.automation.clear();
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
-        model.tracks = (0..Q128_TRACK_COUNT)
+        model.tracks = (0..track_count)
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = stable(&format!("qtrack{index:02}"));
@@ -268,13 +321,13 @@ mod native {
                         smoothing_samples: 16,
                     };
                 }
-                if index != 0 && index != Q128_TRACK_COUNT - 1 {
+                if index != 0 && index != track_count - 1 {
                     track
                         .simd1
                         .effects
                         .push(delay_effect(index, SidechainDeclaration::None));
                 }
-                if index == Q128_TRACK_COUNT - 1 {
+                if track_count > 1 && index == track_count - 1 {
                     track.dynamic.effects.push(delay_effect(
                         index,
                         SidechainDeclaration::Routed(Sidechain {
@@ -352,7 +405,15 @@ mod native {
             caps: graph_caps(),
         })
         .map_err(|_| "q128.graph".to_owned())?;
-        if artifact.prepared_builtin_bank_count() == 0 {
+        let prepared_builtin_bank_count = artifact.prepared_builtin_bank_count();
+        let prepared_builtin_bank_member_count = artifact
+            .prepared_builtin_banks()
+            .map(|bank| bank.members.len())
+            .sum();
+        let scalar_builtin_tail_count = track_count
+            .checked_sub(prepared_builtin_bank_member_count)
+            .ok_or_else(|| "q128.builtin_bank_members".to_owned())?;
+        if require_q128_bank_and_pdc && prepared_builtin_bank_count == 0 {
             return Err("q128.builtin_bank".to_owned());
         }
         let report = artifact.report().clone();
@@ -361,7 +422,7 @@ mod native {
             .iter()
             .map(|delay| delay.samples.0)
             .sum();
-        if pdc_samples == 0 {
+        if require_q128_bank_and_pdc && pdc_samples == 0 {
             return Err("q128.pdc".to_owned());
         }
         let transcript = Arc::new(Transcript::new(transcript_capacity));
@@ -384,16 +445,22 @@ mod native {
                 GraphNodeBinding::new(node, processor)
             })
             .collect();
+        let post_simd_track = if track_count > 1 {
+            "qtrack01"
+        } else {
+            "qtrack00"
+        };
+        let post_matrix_track = format!("qtrack{:02}", track_count - 1);
         let observers = vec![
             observer_binding(
-                "qtrack01",
+                post_simd_track,
                 TrackStage::PostSimd1,
                 OBSERVER_POST_SIMD1,
                 17,
                 Arc::clone(&transcript),
             ),
             observer_binding(
-                "qtrack11",
+                &post_matrix_track,
                 TrackStage::PostMatrix,
                 OBSERVER_POST_MATRIX,
                 91,
@@ -414,7 +481,7 @@ mod native {
                         true,
                     )
                     .with_test_completion_acceptance_spins(completion_acceptance_spins),
-                    maximum_retained_bytes: 1 << 29,
+                    maximum_retained_bytes,
                 },
             )
             .map_err(|failure| failure.code.to_owned())?;
@@ -424,6 +491,9 @@ mod native {
             metadata,
             report,
             pdc_samples,
+            prepared_builtin_bank_count,
+            prepared_builtin_bank_member_count,
+            scalar_builtin_tail_count,
             transcript,
         })
     }
@@ -549,11 +619,13 @@ pub use native::*;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use miso_engine_graph::{FallbackReasonV1, SchedulerSelectionV1};
 
     const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
     const BLOCKS: u64 = 3;
     const OBSERVERS_PER_BLOCK: usize = 2;
     const PERTURBATION_SEED: u64 = 0x0000_0000_0009_d37a;
+    const PREPARATION_TRACK_COUNTS: [usize; 6] = [1, 3, 4, 5, 12, 17];
 
     #[test]
     fn q128_is_byte_identical_at_every_launch_rate_and_lane_count() {
@@ -664,6 +736,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn q128_preparation_matrix_is_exact_for_100_runs_and_generated_track_counts() {
+        let mut transcript_by_count = [None; PREPARATION_TRACK_COUNTS.len()];
+        let mut resources_by_count = [None; PREPARATION_TRACK_COUNTS.len()];
+        let mut count_observations = [0_u8; PREPARATION_TRACK_COUNTS.len()];
+        let mut reference = None;
+        let mut aggregate_hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut accepted_preparations = 0_u64;
+        for preparation in 0..100_u64 {
+            let count_index = preparation as usize % PREPARATION_TRACK_COUNTS.len();
+            let track_count = PREPARATION_TRACK_COUNTS[count_index];
+            let prepared = matrix_fixture(track_count, 4, 39_500 + preparation, usize::MAX);
+            accepted_preparations = accepted_preparations.saturating_add(1);
+            count_observations[count_index] = count_observations[count_index].saturating_add(1);
+            let transcript = prepared.metadata.test_preparation_transcript;
+            if let Some(expected) = transcript_by_count[count_index] {
+                assert_eq!(
+                    transcript, expected,
+                    "fresh preparation {preparation} changed the immutable transcript"
+                );
+            } else {
+                transcript_by_count[count_index] = Some(transcript);
+            }
+            if let Some(expected) = resources_by_count[count_index] {
+                assert_eq!(
+                    prepared.metadata.resources, expected,
+                    "fresh preparation {preparation} changed retained resource accounting"
+                );
+            } else {
+                resources_by_count[count_index] = Some(prepared.metadata.resources);
+            }
+            assert_eq!(
+                prepared.prepared_builtin_bank_member_count + prepared.scalar_builtin_tail_count,
+                track_count,
+                "retained builtin banks and scalar tails cover every track"
+            );
+            assert_eq!(
+                transcript.retained_builtin_bank_units, prepared.prepared_builtin_bank_count,
+                "builtin banks stay indivisible for track count {track_count}"
+            );
+            assert_eq!(
+                transcript.retained_builtin_bank_members,
+                prepared.prepared_builtin_bank_member_count,
+                "builtin bank membership stays intact for track count {track_count}"
+            );
+            assert!(
+                transcript.partitions_are_canonical,
+                "track count {track_count}"
+            );
+            assert_resource_accounting(&prepared);
+            if track_count == 1 {
+                assert_eq!(transcript.largest_wave_width, 1);
+                assert_eq!(
+                    prepared.metadata.selection,
+                    SchedulerSelectionV1::Sequential(FallbackReasonV1::InsufficientWaveWidth)
+                );
+            } else {
+                assert_eq!(prepared.metadata.selection, SchedulerSelectionV1::Parallel);
+            }
+            aggregate_hash = preparation_matrix_hash(aggregate_hash, track_count, &prepared);
+            if track_count == 12 && reference.is_none() {
+                reference = Some(prepared);
+            }
+        }
+
+        assert_eq!(accepted_preparations, 100);
+        assert!(count_observations.iter().all(|count| *count != 0));
+        let q128_transcript = transcript_by_count[4].expect("twelve-track transcript");
+        assert_eq!(
+            q128_transcript.hash, 0x6bc6_42d3_3017_a164,
+            "frozen q128 native wave/unit/partition transcript"
+        );
+        assert_eq!(
+            aggregate_hash, 0xb487_421b_d0a3_a204,
+            "frozen exact-100 preparation matrix transcript"
+        );
+        let reference = reference.expect("one twelve-track preparation");
+        assert!(reference.prepared_builtin_bank_count > 0);
+        assert!(reference.scalar_builtin_tail_count > 0);
+
+        let cap = reference
+            .metadata
+            .resources
+            .total_retained_bytes
+            .checked_sub(1)
+            .expect("prepared native graph retained bytes");
+        let cap_error = prepare_q128_fixture_for_track_count(12, 4, 40_101, cap)
+            .err()
+            .expect("one-byte-short native retained cap must reject");
+        assert_eq!(cap_error, "graph.scheduler.cap");
+
+        let overflow_error =
+            prepare_q128_fixture_for_track_count(12, usize::MAX, 40_102, usize::MAX)
+                .err()
+                .expect("checked scheduler resource overflow must reject");
+        assert_eq!(overflow_error, "graph.scheduler.resource");
+    }
+
     fn fixture(rate: u32, lanes: usize, mode: Q128RenderMode, plan_id: u64) -> PreparedQ128Fixture {
         prepare_q128_fixture(
             rate,
@@ -686,6 +856,67 @@ mod tests {
         (0..BLOCKS)
             .map(|block| render(plan, block * Q128_QUANTUM_FRAMES as u64))
             .collect()
+    }
+
+    fn matrix_fixture(
+        track_count: usize,
+        lanes: usize,
+        plan_id: u64,
+        maximum_retained_bytes: usize,
+    ) -> PreparedQ128Fixture {
+        prepare_q128_fixture_for_track_count(track_count, lanes, plan_id, maximum_retained_bytes)
+            .unwrap_or_else(|error| {
+                panic!("matrix fixture preparation failed for {track_count} tracks: {error}")
+            })
+    }
+
+    fn assert_resource_accounting(prepared: &PreparedQ128Fixture) {
+        let resources = prepared.metadata.resources;
+        assert_eq!(
+            resources.total_retained_bytes,
+            resources
+                .graph_job_bytes
+                .checked_add(resources.scheduler.retained_queue_bytes)
+                .expect("preflighted retained resource sum")
+        );
+        assert!(resources.graph_job_bytes > 0);
+        assert!(resources.scheduler.unit_count > 0);
+        assert!(resources.scheduler.partition_count > 0);
+    }
+
+    fn preparation_matrix_hash(
+        mut hash: u64,
+        track_count: usize,
+        prepared: &PreparedQ128Fixture,
+    ) -> u64 {
+        let transcript = prepared.metadata.test_preparation_transcript;
+        let resources = prepared.metadata.resources;
+        for value in [
+            track_count as u64,
+            transcript.hash,
+            transcript.largest_wave_width as u64,
+            transcript.retained_bank_units as u64,
+            transcript.retained_bank_members as u64,
+            transcript.retained_builtin_bank_units as u64,
+            transcript.retained_builtin_bank_members as u64,
+            u64::from(transcript.partitions_are_canonical),
+            resources.scheduler.selected_lanes as u64,
+            resources.scheduler.worker_count as u64,
+            resources.scheduler.wave_count as u64,
+            resources.scheduler.unit_count as u64,
+            resources.scheduler.partition_count as u64,
+            resources.scheduler.retained_queue_bytes as u64,
+            resources.graph_job_bytes as u64,
+            resources.total_retained_bytes as u64,
+            prepared.prepared_builtin_bank_count as u64,
+            prepared.prepared_builtin_bank_member_count as u64,
+            prepared.scalar_builtin_tail_count as u64,
+        ] {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
     }
 
     fn seeded_completion_acceptance_perturbations() -> [[u16; 3]; 32] {
