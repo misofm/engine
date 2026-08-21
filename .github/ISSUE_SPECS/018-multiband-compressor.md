@@ -134,3 +134,25 @@ selection contracts are mandatory. Expanded x86/AArch64/Wasm instruction evidenc
 Candidate identity; exact descriptor/state/resource rows; independent response/dynamics maxima;
 latency/link/state/recovery/bank/graph results; focused commands/policies; attempt count; Terra and
 final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 scalar checkpoint — incomplete
+
+- Candidate base: `b6b2a23`. Added `miso-engine-multiband-compressor` with a Normal-only
+  `miso.multiband-compressor` descriptor, 12 ordered PerLane parameters, fixed `Fs/50` latency,
+  Infinite tail, required main-in/main-out-only topology, exact four-rate lane-state rows and
+  136-byte fixed scratch declaration. The scalar factory returns `Ok(None)` for homogeneous-bank
+  binding until the dedicated W4/W8 checkpoint; no registry, compiler or graph seam changed.
+- Scalar lanes retain independent dry/low/high rings, four conditioned Butterworth-Q TPT section
+  states, ten 64-update dynamics ramps, two gain-reduction states, common 0/5/20-ms lookahead,
+  dual-mono/Maximum/Average detector linking, bypass identity warming, both resets, atomic
+  snapshot/restore and lane-local sanitation/recovery. Finite TPT subnormals flush to zero rather
+  than entering recovery, preserving the fixed latency ring progression.
+- Added a test-only, independently derived `f64` LR4 crossover in
+  `miso-engine-dsp-reference`. Representative scalar tests cover every launch-rate resource row
+  and one-byte-below preparation rejection, independent crossover/recombination at 80/1000/8000
+  Hz, isolated low/high compression, fixed bypass latency, point automation and transactional
+  restore.
+- PASS: `cargo fmt --check --package miso-engine-multiband-compressor --package
+  miso-engine-dsp-reference`; locked multiband check; locked multiband library tests (4 passed);
+  and locked all-target warning-denied multiband Clippy. No bank, registry, graph, Issue-051
+  qualification/audit/target/benchmark/listening command ran; `timed_benchmark_invocations=0`.

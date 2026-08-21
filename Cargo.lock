@@ -385,6 +385,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-multiband-compressor"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "miso-engine-native-scheduler"
 version = "0.1.0"
 dependencies = [
