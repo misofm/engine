@@ -29,7 +29,7 @@ Browser parallel rendering, spawning/joining threads from the callback, work ste
 ## Dependencies by exact issue title
 
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Production SIMD builtin bank graph retention and reachability qualification
 
 ## Hazards/decisions
 

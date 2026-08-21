@@ -209,3 +209,18 @@ SIMD checkpoint, then create a stateless bounded feature rescope for production 
 bank retention plus the missing seeded/realtime gates. Move the false benchmark/preflight repair
 to the existing benchmark-tooling scope (Issue 030 or a narrower successor) before authorizing the
 single one-warmup/two-round invocation.
+
+## Post-stop rescope record — 2026-08-21
+
+**STOPPED/RESCOPED; NOT PASS.** Checkpoint `87783c5` preserves the architecture-owned kernels,
+direct builtin-bank conformance and instruction evidence as bounded technical input only.
+**Production SIMD builtin bank graph retention and reachability qualification** now owns production
+graph retention, the exact 100 seeded layouts and corrected real-TPT 100,000-render audit, with no
+benchmark. **Issue-008 real audio benchmark workloads and exactly-once qualification** follows it
+and alone may later authorize the one-warmup/two-round workload; invocation count remains zero.
+
+The scheduler, native runner, Wasm worklet, higher-precision builtin investigation and release
+qualification now depend on the production-retention rescope where their complete product
+contracts require live prepared-graph SIMD. Individual native effects continue to consume the
+preserved generic AoSoA/effect-bank architecture slice and do not wait for builtin-specific
+retention. The benchmark rescope gates only release qualification, not Issues 009 or 010.

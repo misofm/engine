@@ -28,7 +28,7 @@ production, requiring nonexistent Wasm `f64x4` or AVX2 `f64x8`, or weakening iss
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 - Dual-mono builtins and metering
-- AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Production SIMD builtin bank graph retention and reachability qualification
 
 ## Required evidence and acceptance
 

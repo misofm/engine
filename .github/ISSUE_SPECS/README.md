@@ -54,6 +54,21 @@ issue 026 waits for both 035 and 033. This ordering forbids synthetic trials, au
 claims and release bypasses while allowing independent SIMD work after its true contract
 dependency is complete.
 
+Issue 008 stopped after its two-attempt budget. Checkpoint `87783c5` preserves safe explicit
+scalar/Wasm/NEON/AVX2/FMA kernels, the generic AoSoA/effect-bank substrate and direct builtin-bank
+conformance as technical input, but Issue 008 is **not PASS**. Issue 037, **Production SIMD builtin
+bank graph retention and reachability qualification**, owns the missing production post-input-
+builtin graph retention, exact 100 seeded layouts and corrected real-TPT 100,000-render audit;
+timing is forbidden there. Issue 038, **Issue-008 real audio benchmark workloads and exactly-once
+qualification**, follows 037, replaces the placeholder byte-fold workload and alone may later
+authorize one warmup plus two measured rounds. Current timed invocation count is zero.
+
+Issues 009, 022, 024, 031 and 026 wait for 037 because their completed product contracts require
+the retained production builtin-SIMD graph. Issue 038 is a dependency only of release
+qualification issue 026; it does not block scheduler issue 009, streaming issue 010, effects or
+deployment feature work. Issues 012, 013, 014, 019 and 021 continue to consume Issue 008's
+preserved generic architecture/effect-bank slice without treating its stopped issue as PASS.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

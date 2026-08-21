@@ -39,7 +39,8 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Issue-007 builtin qualification tooling, audits, and benchmark
 - Issue-007 builtin filter and matrix human listening qualification
-- AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Production SIMD builtin bank graph retention and reachability qualification
+- Issue-008 real audio benchmark workloads and exactly-once qualification
 - Native deterministic multicore scheduler
 - JIT PCM streaming and host-supplied source rings
 - Native effect runtime contract and conformance

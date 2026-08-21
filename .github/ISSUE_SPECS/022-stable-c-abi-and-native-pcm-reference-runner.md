@@ -33,7 +33,7 @@ Network server, delivery codecs, a broad unstable C++ API, host UI, or freeing c
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Issue-007 builtin qualification tooling, audits, and benchmark
-- AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Production SIMD builtin bank graph retention and reachability qualification
 - JIT PCM streaming and host-supplied source rings
 - Native effect runtime contract and conformance
 
