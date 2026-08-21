@@ -165,3 +165,28 @@ syscall trace; retirement-thread record; macOS/rustdoc/workspace/policy reports;
 seal; root authorization; raw/accepted/disposition hashes and sizes; exact invocation/warmup/round/
 record counts; environment metadata; rough descriptive ratios; and Terra plus final Sol PASS/FAIL
 verdicts. Timed invocation count before authorization is exactly zero.
+
+## Terra attempt 1 — nonbenchmark gate record (2026-08-21)
+
+The shared q128 fixture completed the frozen all-rate/lane differential, exactly-32 completion
+perturbation, exactly-100 preparation/resource, and test-only ownership-protocol matrices. The
+four-lane 48-kHz/q128 audit rendered exactly 10,000 callbacks with one block-boundary replacement,
+20,000 fixed-storage observer records, fixed output storage, coordinator forbidden total `0`, and
+worker forbidden totals `[0,0,0]`; its all-thread trace retained the raw files, validator and
+SHA-256 manifest under `target/issue039/scheduler-audit-strace/`. The validator attributed the
+armed interval to the coordinator and all three active replacement workers and found zero
+syscalls for each.
+
+The remaining nonbenchmark gates passed: `cargo fmt --all -- --check`; locked workspace
+all-target/all-feature check and test; warning-denied workspace Clippy and rustdoc; workspace,
+realtime, graph, rack, builtins and scheduler policy checks plus their mutation suites; and
+`cargo check --offline --locked -p miso-engine-graph --target x86_64-apple-darwin`. The macOS
+standard-library target was installed for that compile only; this is a compile claim, not macOS
+runtime qualification.
+
+**Gate 7 did not seal.** `bash scripts/preflight-scheduler-benchmark.sh` stopped at its initial
+clean-candidate guard with the exact output `Issue-009 preflight requires a clean candidate`.
+It therefore did not run its zero-launch benchmark validation/build steps and emitted no candidate
+or binary seal. No scheduler benchmark binary, runner, timed workload, warmup or measured round
+was invoked; the timed invocation count remains `0`. Per the frozen stop rule, Terra attempt 1
+stops here for Sol review rather than treating an unsealed candidate as ready for timing.
