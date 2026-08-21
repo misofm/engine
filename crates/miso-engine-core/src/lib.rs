@@ -6,7 +6,7 @@
 mod arch;
 
 pub use arch::{
-    BiquadBankKernelError, PreparedBiquadBankKernelV1, PreparedTptBankKernelV1, TptBankKernelError,
+    DeltaBankKernelError, PreparedDeltaBankKernelV1, PreparedTptBankKernelV1, TptBankKernelError,
 };
 
 /// The version of the engine API represented by this build.

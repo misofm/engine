@@ -2,7 +2,7 @@
 
 use core::arch::aarch64::*;
 
-use super::{BiquadKernelBlock, TptKernelBlock};
+use super::{DeltaKernelBlock, TptKernelBlock};
 
 #[inline(never)]
 #[target_feature(enable = "neon")]
@@ -46,28 +46,40 @@ pub(super) fn process_tpt_aarch64_neon(block: TptKernelBlock<'_>) {
 
 #[inline(never)]
 #[target_feature(enable = "neon")]
-unsafe fn process_biquad_aarch64_neon_inner(block: BiquadKernelBlock<'_>) {
+unsafe fn process_delta_aarch64_neon_inner(block: DeltaKernelBlock<'_>) {
     // SAFETY: AArch64 NEON is prepared before render and validation proves four-lane slices.
     unsafe {
         let x = vld1q_f32(block.samples.as_ptr());
-        let b0 = vld1q_f32(block.b0.as_ptr());
-        let b1 = vld1q_f32(block.b1.as_ptr());
-        let b2 = vld1q_f32(block.b2.as_ptr());
-        let a1 = vld1q_f32(block.a1.as_ptr());
-        let a2 = vld1q_f32(block.a2.as_ptr());
+        let a = vld1q_f32(block.a.as_ptr());
+        let n0 = vld1q_f32(block.n0.as_ptr());
+        let d0 = vld1q_f32(block.d0.as_ptr());
+        let n1 = vld1q_f32(block.n1.as_ptr());
+        let d1 = vld1q_f32(block.d1.as_ptr());
+        let n2 = vld1q_f32(block.n2.as_ptr());
+        let d2 = vld1q_f32(block.d2.as_ptr());
         let old_x1 = vld1q_f32(block.x1.as_ptr());
         let old_x2 = vld1q_f32(block.x2.as_ptr());
         let old_y1 = vld1q_f32(block.y1.as_ptr());
         let old_y2 = vld1q_f32(block.y2.as_ptr());
-        let p0 = vmulq_f32(b0, x);
-        let p1 = vmulq_f32(b1, old_x1);
+        let t0 = vmulq_f32(a, x);
+        let dx = vsubq_f32(old_x1, t0);
+        let t1 = vmulq_f32(a, old_x1);
+        let t2 = vsubq_f32(old_x2, t1);
+        let t3 = vmulq_f32(a, dx);
+        let ddx = vsubq_f32(t2, t3);
+        let p0 = vmulq_f32(n0, x);
+        let p1 = vmulq_f32(n1, dx);
         let s0 = vaddq_f32(p0, p1);
-        let p2 = vmulq_f32(b2, old_x2);
-        let s1 = vaddq_f32(s0, p2);
-        let p3 = vmulq_f32(a1, old_y1);
-        let s2 = vsubq_f32(s1, p3);
-        let p4 = vmulq_f32(a2, old_y2);
-        let y = vsubq_f32(s2, p4);
+        let p2 = vmulq_f32(n2, ddx);
+        let num = vaddq_f32(s0, p2);
+        let q0 = vmulq_f32(a, d1);
+        let scale = vaddq_f32(vsubq_f32(d0, q0), d2);
+        let q1 = vmulq_f32(a, d2);
+        let q2 = vsubq_f32(vsubq_f32(d1, q1), q1);
+        let h0 = vmulq_f32(q2, old_y1);
+        let h1 = vmulq_f32(d2, old_y2);
+        let history = vaddq_f32(h0, h1);
+        let y = vdivq_f32(vsubq_f32(num, history), scale);
         let mask = vld1q_u32(block.identity_mask.as_ptr());
         let new_y2 = vbslq_f32(mask, old_x1, old_y1);
         let new_y1 = vbslq_f32(mask, x, y);
@@ -81,7 +93,7 @@ unsafe fn process_biquad_aarch64_neon_inner(block: BiquadKernelBlock<'_>) {
 }
 
 #[inline(never)]
-pub(super) fn process_biquad_aarch64_neon(block: BiquadKernelBlock<'_>) {
+pub(super) fn process_delta_aarch64_neon(block: DeltaKernelBlock<'_>) {
     // SAFETY: the prepared token proves the AArch64 NEON target capability.
-    unsafe { process_biquad_aarch64_neon_inner(block) }
+    unsafe { process_delta_aarch64_neon_inner(block) }
 }

@@ -1,6 +1,6 @@
 //! Portable scalar reference for the architecture-owned TPT operation graph.
 
-use super::{BiquadKernelBlock, TptKernelBlock};
+use super::{DeltaKernelBlock, TptKernelBlock};
 
 #[inline(never)]
 pub(super) fn process_tpt_scalar(block: TptKernelBlock<'_>) {
@@ -29,23 +29,33 @@ pub(super) fn process_tpt_scalar(block: TptKernelBlock<'_>) {
     };
 }
 
-/// Frozen non-FMA direct-form-I operation graph for one scalar lane.
+/// Frozen noncontracting endpoint-conditioned delta graph for one scalar lane.
 #[inline(never)]
-pub(super) fn process_biquad_scalar(block: BiquadKernelBlock<'_>) {
+pub(super) fn process_delta_scalar(block: DeltaKernelBlock<'_>) {
     let x = block.samples[0];
     let old_x1 = block.x1[0];
     let old_x2 = block.x2[0];
     let old_y1 = block.y1[0];
     let old_y2 = block.y2[0];
-    let p0 = block.b0[0] * x;
-    let p1 = block.b1[0] * old_x1;
+    let t0 = block.a[0] * x;
+    let dx = old_x1 - t0;
+    let t1 = block.a[0] * old_x1;
+    let t2 = old_x2 - t1;
+    let t3 = block.a[0] * dx;
+    let ddx = t2 - t3;
+    let p0 = block.n0[0] * x;
+    let p1 = block.n1[0] * dx;
     let s0 = p0 + p1;
-    let p2 = block.b2[0] * old_x2;
-    let s1 = s0 + p2;
-    let p3 = block.a1[0] * old_y1;
-    let s2 = s1 - p3;
-    let p4 = block.a2[0] * old_y2;
-    let y = s2 - p4;
+    let p2 = block.n2[0] * ddx;
+    let num = s0 + p2;
+    let q0 = block.a[0] * block.d1[0];
+    let scale = (block.d0[0] - q0) + block.d2[0];
+    let q1 = block.a[0] * block.d2[0];
+    let q2 = (block.d1[0] - q1) - q1;
+    let h0 = q2 * old_y1;
+    let h1 = block.d2[0] * old_y2;
+    let history = h0 + h1;
+    let y = (num - history) / scale;
     if block.identity_mask[0] == u32::MAX {
         block.x2[0] = old_x1;
         block.x1[0] = x;
