@@ -5,6 +5,7 @@ members = [
     "crates/miso-engine-source",
     "crates/miso-engine-effect-contract",
     "crates/miso-engine-parametric-eq",
+    "crates/miso-engine-compressor",
     "crates/miso-engine-effect-compiler",
     "crates/miso-engine-rack",
     "crates/miso-engine-rack-compiler",
@@ -59,6 +60,7 @@ miso-engine-source = { path = "crates/miso-engine-source", version = "0.1.0" }
 miso-engine-protocol = { path = "crates/miso-engine-protocol", version = "0.1.0" }
 miso-engine-effect-contract = { path = "crates/miso-engine-effect-contract", version = "0.1.0" }
 miso-engine-parametric-eq = { path = "crates/miso-engine-parametric-eq", version = "0.1.0" }
+miso-engine-compressor = { path = "crates/miso-engine-compressor", version = "0.1.0" }
 miso-engine-effect-compiler = { path = "crates/miso-engine-effect-compiler", version = "0.1.0" }
 miso-engine-rack = { path = "crates/miso-engine-rack", version = "0.1.0" }
 miso-engine-rack-compiler = { path = "crates/miso-engine-rack-compiler", version = "0.1.0" }
