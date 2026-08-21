@@ -24,10 +24,10 @@ use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
 };
 use miso_engine_graph::{
-    DependencyLevel, GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding,
-    GraphObservationBlock, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
-    StableGraphId, TrackStage,
+    DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
+    GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    GraphPreparedBuiltinBankProcessor, GraphRuntimeBindings, GraphRuntimeObserver,
+    GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
 };
 use miso_engine_rack::{AoSoaScratch, KernelDispatch};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
@@ -96,13 +96,13 @@ pub struct PreparedBuiltinInputBankV1 {
     backend: miso_engine_core::KernelBackendV1,
     width: miso_engine_effect_contract::BankWidth,
     members: Box<[GraphNodeId]>,
-    active: Box<[bool]>,
     processor: BuiltinBankProcessor,
     scratch: AoSoaScratch,
 }
 
 struct BuiltinBankProcessor {
     bank: BuiltinInputBankV1,
+    active_mask: Box<[bool]>,
     process_calls: u64,
     tpt_kernel_calls: u64,
 }
@@ -121,19 +121,57 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         self.process_calls = self.process_calls.saturating_add(1);
         self.tpt_kernel_calls = self
             .tpt_kernel_calls
-            .saturating_add(u64::from(frames).saturating_mul(2));
+            .saturating_add(u64::from(frames).saturating_mul(4));
         Ok(())
+    }
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        [self.process_calls, self.tpt_kernel_calls]
     }
 }
 
 impl PreparedBuiltinInputBankV1 {
-    fn into_graph_bank(self) -> GraphPreparedBuiltinBank {
-        let _ = (self.backend, self.width, self.active);
-        GraphPreparedBuiltinBank {
-            members: self.members,
-            processor: Box::new(self.processor),
-            scratch: self.scratch,
-        }
+    fn into_graph_bank(self) -> (GraphPreparedBuiltinBank, GraphBuiltinBankResourceEstimate) {
+        let _ = (self.backend, self.width);
+        let lanes = u64::try_from(self.members.len()).expect("bank lane count");
+        let member_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>())
+            .expect("type size")
+            .checked_mul(lanes)
+            .expect("preflighted bank member layout");
+        let processor_bytes =
+            u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).expect("type size");
+        let active_bytes = u64::try_from(self.processor.active_mask.len()).expect("lane count");
+        let scratch_samples = u64::from(self.scratch.quantum())
+            .checked_mul(u64::from(self.scratch.width().lanes()))
+            .and_then(|samples| samples.checked_mul(4))
+            .expect("preflighted scratch layout");
+        let scratch_plane_bytes = scratch_samples
+            .checked_div(4)
+            .and_then(|samples| samples.checked_mul(4))
+            .expect("preflighted scratch plane layout");
+        (
+            GraphPreparedBuiltinBank {
+                members: self.members,
+                processor: Box::new(self.processor),
+                scratch: self.scratch,
+            },
+            GraphBuiltinBankResourceEstimate {
+                bank_count: 1,
+                payload_bytes: member_bytes
+                    .checked_add(processor_bytes)
+                    .and_then(|bytes| bytes.checked_add(active_bytes))
+                    .expect("preflighted builtin payload layout"),
+                scratch_bytes: scratch_samples
+                    .checked_mul(4)
+                    .expect("preflighted scratch bytes"),
+                scratch_samples,
+                metadata_bytes: 0,
+                largest_allocation_bytes: member_bytes
+                    .max(processor_bytes)
+                    .max(active_bytes)
+                    .max(scratch_plane_bytes),
+            },
+        )
     }
 }
 
@@ -769,9 +807,9 @@ impl PreparedBuiltinsSession {
                 backend: dispatch.backend(),
                 width,
                 members: members.into_boxed_slice(),
-                active: active.into_boxed_slice(),
                 processor: BuiltinBankProcessor {
                     bank,
+                    active_mask: active.into_boxed_slice(),
                     process_calls: 0,
                     tpt_kernel_calls: 0,
                 },
@@ -784,13 +822,40 @@ impl PreparedBuiltinsSession {
         }
         self.processors
             .retain(|binding| !selected.contains(&binding.node));
+        let mut graph_banks = Vec::with_capacity(banks.len());
+        let mut resource = GraphBuiltinBankResourceEstimate::default();
+        for bank in banks {
+            let (bank, addition) = bank.into_graph_bank();
+            resource.bank_count = resource
+                .bank_count
+                .checked_add(addition.bank_count)
+                .expect("preflighted bank count");
+            resource.payload_bytes = resource
+                .payload_bytes
+                .checked_add(addition.payload_bytes)
+                .expect("preflighted bank payload");
+            resource.scratch_bytes = resource
+                .scratch_bytes
+                .checked_add(addition.scratch_bytes)
+                .expect("preflighted scratch payload");
+            resource.scratch_samples = resource
+                .scratch_samples
+                .checked_add(addition.scratch_samples)
+                .expect("preflighted scratch samples");
+            resource.largest_allocation_bytes = resource
+                .largest_allocation_bytes
+                .max(addition.largest_allocation_bytes);
+            graph_banks.push(bank);
+        }
+        resource.metadata_bytes = u64::try_from(core::mem::size_of::<GraphPreparedBuiltinBank>())
+            .expect("type size")
+            .checked_mul(u64::try_from(graph_banks.capacity()).expect("bank capacity"))
+            .expect("preflighted graph bank vector layout");
+        resource.largest_allocation_bytes = resource
+            .largest_allocation_bytes
+            .max(resource.metadata_bytes);
         let graph = graph
-            .with_builtin_banks(
-                banks
-                    .into_iter()
-                    .map(PreparedBuiltinInputBankV1::into_graph_bank)
-                    .collect(),
-            )
+            .with_builtin_banks(graph_banks, resource)
             .expect("validated fixed builtin member shape");
         PreparedBuiltinsGraphArtifact {
             graph,
@@ -938,6 +1003,12 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
     #[must_use]
     pub const fn prepared_builtin_bank_count(&self) -> usize {
         self.graph.prepared_builtin_bank_count()
+    }
+
+    /// Exact graph-owned storage after retained builtin-bank attachment.
+    #[must_use]
+    pub const fn graph_resource_estimate(&self) -> &miso_engine_graph::GraphResourceEstimate {
+        &self.graph.estimate
     }
 
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.

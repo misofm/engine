@@ -891,6 +891,9 @@ fn resource_estimate(
         delay_bytes,
         graph_metadata_bytes,
         declared_effect_bytes,
+        builtin_bank_bytes: 0,
+        builtin_bank_scratch_bytes: 0,
+        builtin_bank_count: 0,
         largest_allocation_bytes,
         incremental_plan_bytes,
         session_plus_plan_bytes: session_bytes.checked_add(incremental_plan_bytes)?,
@@ -1958,7 +1961,7 @@ mod tests {
             .expect("bank fixture track id");
         Box::new(AsymmetricTrackImpulseBinding {
             left: 0.125 * (index + 1) as f32,
-            right: -0.0625 * (12 - index) as f32,
+            right: -0.0625 * 12_u32.saturating_sub(index) as f32,
         })
     }
 
@@ -2487,12 +2490,10 @@ mod tests {
             "factory failure retained every scalar input"
         );
 
-        // This is the Issue-008 representative realtime audit: the same mixed 12-track graph
-        // is prepared afresh, then rendered for exactly 100,000 128-frame callbacks. It is
-        // explicit-release-only so ordinary workspace tests do not accidentally consume the
-        // release qualification workload. Allocation and forbidden-operation hooks are armed
-        // only after all binding/storage is complete.
-        if std::env::var_os("MISO_ENGINE_ISSUE8_AUDIT").is_some() {
+        // The Issue-037 production audit is explicit-release-only. It intentionally binds the
+        // sealed builtin artifact, rather than the old scalar fixture effect bank, and proves
+        // that real TPT builtin-bank callbacks reached the prepared render plan.
+        if std::env::var_os("MISO_ENGINE_ISSUE37_AUDIT").is_some() {
             let audit_effects = prepare_native_session_effects(
                 &session,
                 &registry,
@@ -2503,43 +2504,67 @@ mod tests {
                 },
             )
             .expect("audit effects");
-            let audit_artifact = GraphCompiler::compile(GraphCompileRequest {
-                plan_id: 1_000,
-                effects: audit_effects,
-                caps: integration_caps(),
-            })
-            .unwrap_or_else(|failure| panic!("audit graph: {:?}", failure.diagnostics));
+            let audit_builtins = prepare_session_builtins(
+                &session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("audit builtins");
+            let audit_artifact =
+                GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    plan_id: 1_000,
+                    effects: audit_effects,
+                    builtins: audit_builtins,
+                    caps: integration_caps(),
+                })
+                .unwrap_or_else(|_| panic!("audit graph"));
             let audit_backend = KernelDispatch::select(target_capabilities());
-            let expected_banks = audit_backend
+            let expected_effect_banks = audit_backend
                 .bank_width()
                 .map_or(0, |width| 12 / width.lanes() as usize);
             let expected_scalar_tails = audit_backend
                 .bank_width()
                 .map_or(12, |width| 12 % width.lanes() as usize);
-            assert_eq!(audit_artifact.graph.prepared_bank_count(), expected_banks);
+            let expected_builtin_banks = expected_effect_banks;
             assert_eq!(
-                expected_banks
+                audit_artifact.prepared_builtin_bank_count(),
+                expected_builtin_banks
+            );
+            assert_eq!(
+                expected_builtin_banks
                     * audit_backend
                         .bank_width()
                         .map_or(0, |width| width.lanes() as usize)
                     + expected_scalar_tails,
                 12
             );
-            let audit_envelope = audit_artifact.graph.envelope;
+            assert!(
+                expected_builtin_banks != 0,
+                "audit host needs a selected SIMD backend"
+            );
+            let audit_envelope = audit_artifact.envelope();
             let audit_nodes = audit_artifact
-                .graph
-                .required_bindings
-                .iter()
+                .external_binding_nodes()
                 .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
                 .collect();
-            let mut audit_plan = audit_artifact
-                .graph
-                .bind(GraphRuntimeBindings {
+            let bound = audit_artifact
+                .into_bound(GraphRuntimeBindings {
                     envelope: audit_envelope,
                     nodes: audit_nodes,
                     observers: Vec::new(),
                 })
-                .unwrap_or_else(|failure| panic!("audit bind: {}", failure.code));
+                .unwrap_or_else(|_| panic!("audit bind"));
+            let mut audit_plan = bound.plan;
             let mut audit_pcm = vec![0.0_f32; frames * 2];
             let output_address = audit_pcm.as_ptr() as usize;
             audit::warm_up();
@@ -2566,8 +2591,19 @@ mod tests {
             }
             let audit_snapshot = audit::snapshot();
             assert_eq!(audit_snapshot.total(), 0);
+            let counters = audit_plan.qualification_counters();
             assert_eq!(
-                output_hash, 0x08b0_fa64_586c_2325,
+                counters[0],
+                100_000_u64 * expected_builtin_banks as u64,
+                "exact retained builtin-bank process callbacks"
+            );
+            assert_eq!(
+                counters[1],
+                counters[0] * u64::from(audit_envelope.quantum.0) * 4,
+                "exact real HPF/LPF TPT kernel calls for independent L/R lanes"
+            );
+            assert_eq!(
+                output_hash, 0x9f30_db02_2065_6d79,
                 "deterministic mixed output hash"
             );
         }
@@ -2701,6 +2737,12 @@ mod tests {
             .bank_width()
             .map_or(0, |width| 8 / width.lanes() as usize);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+        let resource = artifact.graph_resource_estimate();
+        assert_eq!(resource.builtin_bank_count, expected_banks as u64);
+        if expected_banks != 0 {
+            assert!(resource.builtin_bank_bytes != 0);
+            assert!(resource.builtin_bank_scratch_bytes != 0);
+        }
         let envelope = artifact.envelope();
         let nodes = artifact
             .external_binding_nodes()
@@ -2736,6 +2778,164 @@ mod tests {
         )
         .expect("production builtin-bank render");
         assert!(pcm.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters() {
+        const SEED: u64 = 0x0000_0000_8a05_0a08;
+        const COUNTS: [usize; 9] = [1, 2, 3, 4, 5, 7, 8, 9, 17];
+        let mut state = SEED;
+        let mut transcript = 0xcbf2_9ce4_8422_2325_u64;
+        let mut completed = 0_u32;
+        for layout in 0..100_u32 {
+            // SplitMix64, frozen locally so this suite has no dependency on host RNG state.
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut value = state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^= value >> 31;
+            let count = COUNTS[layout as usize % COUNTS.len()];
+            let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+            let base_track = model.tracks[0].clone();
+            let base_route = model.routes[0].clone();
+            model.automation.clear();
+            model.tracks = (0..count)
+                .map(|index| {
+                    let mut track = base_track.clone();
+                    track.id = StableId::parse(&format!("bank{index}")).expect("id");
+                    track.simd1.effects.clear();
+                    track.dynamic.effects.clear();
+                    track.simd2.effects.clear();
+                    // The seeded corpus includes identity filters, enabled filters, and
+                    // intentionally asymmetric L/R coefficients without changing topology.
+                    if ((value >> (index % 31)) & 1) != 0 {
+                        track.builtins.left.hpf_hz = 0.0;
+                    }
+                    if ((value >> ((index + 7) % 31)) & 1) != 0 {
+                        track.builtins.right.lpf_hz = 0.0;
+                    }
+                    if ((value >> ((index + 13) % 31)) & 1) != 0 {
+                        track.builtins.right.polarity_invert =
+                            !track.builtins.right.polarity_invert;
+                    }
+                    track
+                })
+                .collect();
+            model.routes = model
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| {
+                    let mut route = base_route.clone();
+                    route.id =
+                        StableId::parse(&format!("seed-route-{layout}-{index}")).expect("route id");
+                    route.source = RouteSource::Track {
+                        track_id: track.id.clone(),
+                        tap: SendTap::PostMatrix,
+                    };
+                    route
+                })
+                .collect();
+            let compiled = compile_session(
+                &model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("compiled seeded layout");
+            let builtins = prepare_session_builtins(
+                &compiled,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("prepared seeded builtins");
+            let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                plan_id: u64::from(layout) + 50_000,
+                effects: EffectPreparedSession {
+                    session: compiled,
+                    entries: Vec::new(),
+                },
+                builtins,
+                caps: integration_caps(),
+            }) {
+                Ok(artifact) => artifact,
+                Err(_) => panic!("seeded graph"),
+            };
+            let width = KernelDispatch::select(target_capabilities()).bank_width();
+            let expected_banks = width.map_or(0, |width| count / width.lanes() as usize);
+            let expected_tail = width.map_or(count, |width| count % width.lanes() as usize);
+            assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+            let envelope = artifact.envelope();
+            let nodes = artifact
+                .external_binding_nodes()
+                .cloned()
+                .map(|node| {
+                    let processor = match node {
+                        GraphNodeId::TrackStage {
+                            stage: TrackStage::Input,
+                            ..
+                        } => asymmetric_input_binding(&node),
+                        _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
+                    };
+                    GraphNodeBinding::new(node, processor)
+                })
+                .collect();
+            let mut plan = match artifact.into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            }) {
+                Ok(bound) => bound.plan,
+                Err(_) => panic!("seeded bind"),
+            };
+            let frames = envelope.quantum.0 as usize;
+            let mut pcm = vec![0.0; frames * 2];
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                        .expect("seeded output"),
+                },
+                RenderTime { absolute_sample: 0 },
+            )
+            .expect("seeded render");
+            let counters = plan.qualification_counters();
+            assert_eq!(counters[0], expected_banks as u64);
+            assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0) * 4);
+            let pcm_hash = pcm.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
+                (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+            for byte in format!(
+                "{layout}:{value:016x}:{count}:{expected_banks}:{expected_tail}:{pcm_hash:016x}:{:?}",
+                counters
+            )
+            .bytes()
+            {
+                transcript ^= u64::from(byte);
+                transcript = transcript.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            completed += 1;
+        }
+        assert_eq!(completed, 100);
+        assert_eq!(
+            transcript, 0xc85b_2209_8007_7824,
+            "frozen Issue-037 seeded layout transcript"
+        );
     }
 
     #[test]

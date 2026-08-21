@@ -165,9 +165,67 @@ pub struct GraphResourceEstimate {
     pub delay_bytes: u64,
     pub graph_metadata_bytes: u64,
     pub declared_effect_bytes: u64,
+    /// Exact prepared post-input builtin bank payload retained by the graph.
+    pub builtin_bank_bytes: u64,
+    /// Exact AoSoA scratch payload retained by post-input builtin banks.
+    pub builtin_bank_scratch_bytes: u64,
+    /// Number of full retained post-input builtin banks.
+    pub builtin_bank_count: u64,
     pub largest_allocation_bytes: u64,
     pub incremental_plan_bytes: u64,
     pub session_plus_plan_bytes: u64,
+}
+
+/// Checked retained storage added by sealed post-input builtin-bank preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphBuiltinBankResourceEstimate {
+    pub bank_count: u64,
+    pub payload_bytes: u64,
+    pub scratch_bytes: u64,
+    pub scratch_samples: u64,
+    pub metadata_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphBuiltinBankAttachError {
+    InvalidMembers,
+    ResourceOverflow,
+}
+
+impl GraphResourceEstimate {
+    /// Fold exact prepared builtin-bank storage into the graph estimate before publication.
+    pub fn checked_add_builtin_banks(
+        &mut self,
+        resource: GraphBuiltinBankResourceEstimate,
+    ) -> Option<()> {
+        self.builtin_bank_count = self.builtin_bank_count.checked_add(resource.bank_count)?;
+        self.builtin_bank_bytes = self
+            .builtin_bank_bytes
+            .checked_add(resource.payload_bytes)?;
+        self.builtin_bank_scratch_bytes = self
+            .builtin_bank_scratch_bytes
+            .checked_add(resource.scratch_bytes)?;
+        self.audio_buffer_samples = self
+            .audio_buffer_samples
+            .checked_add(resource.scratch_samples)?;
+        self.graph_metadata_bytes = self
+            .graph_metadata_bytes
+            .checked_add(resource.metadata_bytes)?;
+        let retained = resource.payload_bytes.checked_add(resource.scratch_bytes)?;
+        self.incremental_plan_bytes = self.incremental_plan_bytes.checked_add(retained)?;
+        self.incremental_plan_bytes = self
+            .incremental_plan_bytes
+            .checked_add(resource.metadata_bytes)?;
+        self.session_plus_plan_bytes = self
+            .session_plus_plan_bytes
+            .checked_add(retained)?
+            .checked_add(resource.metadata_bytes)?;
+        self.largest_allocation_bytes = self
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        Some(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -358,6 +416,10 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
+    /// Cumulative `[process_calls, architecture_tpt_kernel_calls]` after render is disarmed.
+    fn qualification_counters(&self) -> [u64; 2] {
+        [0, 0]
+    }
 }
 impl PreparedGraphPlan {
     /// Number of prepared homogeneous banks retained for off-render-selected execution.
@@ -378,7 +440,11 @@ impl PreparedGraphPlan {
     }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
     /// for deciding eligibility; this validates only the immutable graph shape.
-    pub fn with_builtin_banks(mut self, banks: Vec<GraphPreparedBuiltinBank>) -> Result<Self, ()> {
+    pub fn with_builtin_banks(
+        mut self,
+        banks: Vec<GraphPreparedBuiltinBank>,
+        resource: GraphBuiltinBankResourceEstimate,
+    ) -> Result<Self, GraphBuiltinBankAttachError> {
         let mut seen = BTreeSet::new();
         for bank in &banks {
             if bank.members.len() != bank.scratch.width().lanes() as usize
@@ -392,9 +458,12 @@ impl PreparedGraphPlan {
                     ) || !seen.insert(node.clone())
                 })
             {
-                return Err(());
+                return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }
         }
+        self.estimate
+            .checked_add_builtin_banks(resource)
+            .ok_or(GraphBuiltinBankAttachError::ResourceOverflow)?;
         self.builtin_banks = banks;
         Ok(self)
     }
@@ -970,7 +1039,7 @@ impl GraphExecutor {
             .builtin_planes_mut(frames)
             .map_err(|_| RenderError::InvalidEnvelope)?;
         bank.processor.process(left, right, frames, first_sample)?;
-        for lane in 0..lanes as usize {
+        for lane in 0..lanes {
             let node_index = bank.members[lane];
             let output_buffer = self.nodes[node_index].output_buffer;
             let buffer = &mut self.buffers[output_buffer];
@@ -1070,6 +1139,15 @@ impl PreparedPlanExecutor for GraphExecutor {
         output.plane_mut(0)?.copy_from_slice(&rendered.left);
         output.plane_mut(1)?.copy_from_slice(&rendered.right);
         Ok(())
+    }
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        self.builtin_banks.iter().fold([0, 0], |mut total, bank| {
+            let counters = bank.processor.qualification_counters();
+            total[0] = total[0].saturating_add(counters[0]);
+            total[1] = total[1].saturating_add(counters[1]);
+            total
+        })
     }
 }
 
@@ -1221,6 +1299,9 @@ mod tests {
             delay_bytes: 0,
             graph_metadata_bytes: 0,
             declared_effect_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            builtin_bank_count: 0,
             largest_allocation_bytes: 0,
             incremental_plan_bytes: 0,
             session_plus_plan_bytes: 0,

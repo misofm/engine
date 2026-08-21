@@ -87,6 +87,12 @@ pub trait PreparedPlanExecutor: Send {
         output: PlanarBufferMut<'_>,
         time: RenderTime,
     ) -> Result<(), RenderError>;
+    /// Bounded implementation-owned qualification counters, read only after rendering is
+    /// disarmed. Production executors that do not expose counters retain the zero default.
+    #[doc(hidden)]
+    fn qualification_counters(&self) -> [u64; 2] {
+        [0, 0]
+    }
 }
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +211,14 @@ impl PreparedRenderPlan {
     #[must_use]
     pub fn arena(&self) -> &BufferArena {
         &self.arena
+    }
+    /// Read bounded executor qualification counters outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn qualification_counters(&self) -> [u64; 2] {
+        self.executor
+            .as_deref()
+            .map_or([0, 0], PreparedPlanExecutor::qualification_counters)
     }
     #[cfg(test)]
     pub(crate) fn set_drop_observer(

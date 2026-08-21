@@ -134,3 +134,32 @@ Candidate/source hashes; production prepared-bank membership/resource report; se
 maximum differential; state/counter isolation; exact corrected audit counters/call counts/PCM
 hash; instruction and target reports; workspace/policy results; explicit
 `timed_benchmark_invocations=0`; and Terra plus final Sol PASS/FAIL verdicts.
+
+## Terra attempt 1 evidence (2026-08-21)
+
+**FAIL — preserve as the bounded implementation checkpoint for Sol review/correction.**
+
+Implemented and verified locally:
+
+- Sealed production `PreparedBuiltinInputBankV1` ownership now flows from builtin preparation
+  into `PreparedGraphPlan`, replacing only full post-input groups selected from prepared host
+  dispatch and dependency levels. Scalar post-input bindings remain for incomplete groups.
+- Graph execution gathers/scatters the original planar buffers around the real
+  `BuiltinInputBankV1` TPT processor. It retains per-bank AoSoA scratch and bounded owned
+  `[process_calls, tpt_kernel_calls]` counters, surfaced only after render disarms.
+- `GraphResourceEstimate` includes retained builtin-bank payload/scratch/count and checked
+  arithmetic. The focused production test asserts the populated resource record.
+- The deterministic count set `1,2,3,4,5,7,8,9,17` is exercised inside exactly 100 layouts from
+  seed `0x000000008a050a08`. Frozen transcript hash: `c85b220980077824`.
+- The release-only `MISO_ENGINE_ISSUE37_AUDIT=1` graph test passed: exactly 100,000
+  48-kHz/128-frame production callbacks asserted real retained-bank/TPT counters, stable output
+  address, zero forbidden-operation snapshot, and PCM hash `9f30db0220656d79`. This was a fixed
+  functional audit; no timing value, tuning, or benchmark artifact was produced.
+- Focused core/graph/builtin/graph-compiler tests passed, including the allocation tracker;
+  warning-denied focused all-target Clippy also passed.
+
+The PASS gate is intentionally not claimed: this attempt does **not** yet prove the required
+same-target scalar differential/state comparison, cross-track/left-right isolation mutations,
+incompatible-wave/cap-overflow cases within the 100-layout corpus, or post-attachment resource
+cap rejection. Target/policy/full-workspace evidence is also not attached. No timed benchmark was
+launched: `timed_benchmark_invocations=0`.
