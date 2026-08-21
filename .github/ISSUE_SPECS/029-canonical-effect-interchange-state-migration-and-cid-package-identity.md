@@ -14,8 +14,9 @@ through exclusive render ownership. Render performs no allocation/free, locks, f
 logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are
 retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono
 L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix
-declares otherwise. Required engine rates are 44,100, 48,000, 88,200, 96,000, 176,400, 192,000,
-352,800, and 384,000 Hz; source/engine mismatches have no implicit SRC. Output is PCM.
+declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and
+96,000 Hz; 176,400, 192,000, 352,800, and 384,000 Hz are extended compatibility evidence only.
+Source/engine mismatches have no implicit SRC. Output is PCM.
 
 Issue 011 deliberately owns only semantic native descriptors, preparation, processing, immutable
 prepared metadata and current-layout common/left/right payload hooks. This issue owns every

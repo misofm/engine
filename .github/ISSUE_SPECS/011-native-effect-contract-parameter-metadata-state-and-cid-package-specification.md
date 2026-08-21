@@ -116,6 +116,9 @@ maximum-state equality; span validation does not reject overlap; the conformance
 only descriptor/configuration; checked-in vectors/docs/scripts are placeholders; all three new
 scripts lack executable permission; and the benchmark script is deliberately unavailable.
 
+The former all-eight descriptor completeness wording is historical defect/evidence context.
+Issue 032 instead requires four launch rows and permits ordered unique higher-rate compatibility rows.
+
 Observed review commands:
 
 - Focused locked tests for the contract, package, and conformance crates pass, but exercise only
@@ -212,6 +215,9 @@ counts 1/127/128, 100 impulse reprepare repetitions per configuration, main/side
 sanitization, both resets, deterministic snapshot, current-layout restore/continuation and lane
 payload isolation. The structured release report records 16 configurations, 1,840 process calls
 and zero failed gates. Separate tests prove exact mapping, smoother and segment endpoints.
+
+The all-eight-rate conformance record above is preserved historical evidence; issue 032 classifies
+its 176,400/192,000/352,800/384,000 Hz observations as informational compatibility only.
 
 Deterministic mutation evidence passes 10,000 descriptor mutations, 10,000 span mutations and
 10,000 compiled-session parameter mutations without panic or partial success. The sorted runtime

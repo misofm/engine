@@ -96,6 +96,9 @@ sidechain audio evidence, liveness coloring, graph-backed swap/destruction evide
 files, and the benchmark driver/validator were still missing. The benchmark remained forbidden.
 Benchmark invocation count after attempt 2: **0**.
 
+The all-eight-rate wording above records attempt-2 observations under its former policy. Issue 032
+preserves those measurements but treats the four higher-rate results as compatibility-only evidence.
+
 ## Sol correction attempt 3 prebenchmark evidence — 2026-08-21
 
 **Status: PASS for every frozen nonbenchmark gate; exactly one benchmark invocation is now

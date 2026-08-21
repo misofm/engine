@@ -217,3 +217,27 @@ bounded contract correction: centralize authority, enforce session/control rejec
 effect-descriptor completeness from eight required rows to four required plus optional extended
 rows, preserve the extended fixture corpus as informational compatibility evidence, and correct
 normative host/release/issue language. It does not alter audio algorithms or run benchmarks.
+
+## Terra attempt-1 evidence (2026-08-21)
+
+Implemented the core `LAUNCH_SAMPLE_RATES` and `EXTENDED_COMPATIBILITY_SAMPLE_RATES` authority
+with predicate truth-table coverage; render-plan preparation accepts only launch rates. Strict
+parse and direct typed compilation use `sample_rate.unsupported_at_launch` at
+`$.sample_rate_hz` with the frozen message. Typed transactional final-candidate validation keeps
+the existing `edits.len()` sentinel and preserves revision/model/canonical snapshot; a temporary
+extended edit followed by a launch final rate commits. Descriptor validation now requires all four
+launch rows per declared quality and permits unique ordered extended rows. Compatibility fixture
+and `PlanarBlock` parsing use the core predicates, while the byte-frozen corpus remains unchanged.
+
+Focused core/session/protocol/effect/conformance/compiler/graph tests passed. Wasm scalar and
+simd128 release builds, Android AArch64 checks, iOS AArch64 checks, `git diff --check`, and all
+workspace/session/protocol/realtime/effect/graph/conformance/DSP policy checks and mutation tests
+passed. SHA-256 comparison before/after found identical bytes for all eleven `.mepcm` files and
+`MANIFEST.tsv`.
+
+The complete workspace test run is currently **FAIL** on a pre-existing builtin numerical gate:
+`miso_engine_builtins::tests::coherent_sustained_sines_cover_launch_and_extended_compatibility_rates`
+fails at 88,200 Hz, cutoff 10 Hz, frequency 4 Hz (`residual=-94.24403629784449`, gate `<= -100 dB`).
+Warning-denied workspace Clippy is also **FAIL** on the pre-existing
+`clippy::needless_range_loop` in that builtin test. This attempt did not alter DSP algorithms,
+coefficients, tolerances, or that loop. Benchmark invocation count: **0**.

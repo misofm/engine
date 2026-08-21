@@ -79,9 +79,13 @@ the existing 65,537-track graph resource test; format, diff check, and warning-d
 Clippy also pass. Release scalar-builtins checks pass for `aarch64-linux-android`,
 `aarch64-apple-ios`, and `wasm32-unknown-unknown` both with `-simd128` and `+simd128`. The
 separate `miso-engine-dsp-reference` f64 RBJ oracle now covers an impulse through both filters at
-all eight required rates; 10,000 deterministic scalar parameter/block mutations remain finite.
+all eight required rates (historical terminology; the higher four are issue-032 compatibility-only);
+10,000 deterministic scalar parameter/block mutations remain finite.
 The complete workspace test suite and warning-denied all-target Clippy pass. The exactly-once
 benchmark invocation count is **0**.
+
+The all-eight-rate observations above are historical issue-007 numerical evidence. Issue 032 does
+not alter their values, dates, or outcome; its four higher-rate observations are compatibility-only.
 
 NOT YET SATISFIED: fixture-manifest corpus and independent f64 sweep oracle, full rate/quantum
 matrix/meter mutation and allocation audits, issue-specific one-million-call tooling, full
@@ -131,7 +135,8 @@ The replacement brief must choose and freeze all of the following together:
 2. the magnitude conformance method: runtime swept/sustained signal versus impulse DFT versus
    coefficient transfer response, with exact amplitudes, settling/window length, leakage control,
    sampled frequencies and normalization;
-3. one achievable all-eight-rate error gate for that chosen runtime realization, plus the scalar
+3. one achievable all-eight-rate error gate for that chosen runtime realization (historical
+terminology; issue 032 retains higher-rate observations as compatibility-only), plus the scalar
    versus SIMD differential gate and revised state/resource estimates.
 
 Adversarial review also found independent defects that a rebrief/restart must not hide: parameter
