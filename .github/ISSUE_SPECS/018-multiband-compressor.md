@@ -156,3 +156,17 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   miso-engine-dsp-reference`; locked multiband check; locked multiband library tests (4 passed);
   and locked all-target warning-denied multiband Clippy. No bank, registry, graph, Issue-051
   qualification/audit/target/benchmark/listening command ran; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 bank checkpoint — STOPPED
+
+- No Issue-018 bank source, core token, test, registry, graph, benchmark or other product edit
+  was made in this checkpoint; `timed_benchmark_invocations=0`.
+- The existing `PreparedTptBankKernelV1` cannot satisfy the frozen exact-parity rule for an
+  AVX2+FMA selection: `crates/miso-engine-core/src/arch/x86.rs`,
+  `process_tpt_x86_avx2_fma_inner`, uses `_mm256_fmsub_ps` for `d1`, `_mm256_fmadd_ps` for `d2`,
+  and `_mm256_fnmadd_ps` for the high observation.
+- The authoritative brief requires AVX2+FMA to alias the noncontracting scalar/base TPT graph
+  with zero TPT contractions. Binding that token would change separately rounded TPT results and
+  invalidate required scalar/W8 exact PCM/state/report parity; binding a different backend would
+  violate the requested prepared-backend contract. Stop rather than weakening either rule. No
+  test, Clippy, policy, audit, target/object, timing or benchmark command ran after this finding.
