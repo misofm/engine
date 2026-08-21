@@ -1265,13 +1265,15 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::{
         ReferenceGateExpanderParameters, ReferenceGatePhase,
         reference_gate_expander_gain_reduction_db,
     };
     use miso_engine_effect_contract::{
-        EffectProcessBlock, PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort,
-        StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
+        EffectBankProcessBlock, EffectProcessBlock, PrepareEffectLimits, PreparedNativeEffectBank,
+        PreparedPortsV1, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput,
+        validate_descriptor_v1,
     };
 
     fn initial_values() -> [InitialParameterValue; 16] {
@@ -1318,6 +1320,35 @@ mod tests {
             )
             .expect("snapshot");
         (left, right)
+    }
+
+    fn snapshot_bank(effect: &dyn PreparedNativeEffectBank, track: u32) -> (Vec<u8>, Vec<u8>) {
+        let sizes = effect.metadata().program_key.state_sizes;
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        effect
+            .snapshot_track_state_payload(
+                track,
+                StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("sizes"),
+            )
+            .expect("snapshot");
+        (left, right)
+    }
+
+    fn add_report(total: &mut ProcessReport, report: ProcessReport) {
+        total.sanitized_main_samples = total
+            .sanitized_main_samples
+            .saturating_add(report.sanitized_main_samples);
+        total.sanitized_sidechain_samples = total
+            .sanitized_sidechain_samples
+            .saturating_add(report.sanitized_sidechain_samples);
+        total.invalid_spans = total.invalid_spans.saturating_add(report.invalid_spans);
+        total.recovered_left_samples = total
+            .recovered_left_samples
+            .saturating_add(report.recovered_left_samples);
+        total.recovered_right_samples = total
+            .recovered_right_samples
+            .saturating_add(report.recovered_right_samples);
     }
 
     #[test]
@@ -1513,5 +1544,337 @@ mod tests {
         );
         assert_eq!(report.sanitized_main_samples, 1);
         assert_eq!(left[0].to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn unconnected_w8_bank_matches_scalar_pcm_state_reports_and_continuation() {
+        if PreparedGateGainKernelV1::try_new(KernelBackendV1::X86Avx2).is_err() {
+            return;
+        }
+        const WIDTH: usize = 8;
+        const FRAMES: usize = 128;
+        let factory = GateExpanderFactory;
+        let mut values = vec![initial_values(); WIDTH];
+        for (track, value) in values.iter_mut().enumerate() {
+            value[0].value = -60.0 + track as f32;
+            value[1].value = -48.0 + 0.5 * track as f32;
+            value[2].value = 2.0 + track as f32;
+            value[3].value = 3.0 + track as f32;
+            value[10].value = 0.0;
+            value[11].value = 0.0;
+            value[14].value = [0.0, 2.0, 5.0, 10.0][track % 4];
+            value[15].value = [10.0, 5.0, 2.0, 0.0][track % 4];
+        }
+        let mut requests = values
+            .iter()
+            .map(|value| request(value))
+            .collect::<Vec<_>>();
+        for request in &mut requests {
+            request.link_mode = LinkMode::Maximum;
+        }
+        let mut bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: KernelBackendV1::X86Avx2,
+                width: BankWidth::Eight,
+                requests: &requests,
+            })
+            .expect("bank prepare")
+            .expect("available W8 bank");
+        let bank_metadata = bank.metadata();
+        assert_eq!(bank_metadata.width, BankWidth::Eight);
+        assert_eq!(bank_metadata.program_key.state_sizes.total(), Some(7_856));
+        assert_eq!(
+            (bank_metadata
+                .program_key
+                .state_sizes
+                .total()
+                .expect("state")
+                + 64)
+                * 8,
+            63_360,
+            "W8 retains eight exact dual-mono state payloads plus defaults"
+        );
+        let mut scalars = requests
+            .iter()
+            .copied()
+            .map(|item| factory.prepare(item).expect("scalar"))
+            .collect::<Vec<_>>();
+        let automation = [
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 0,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: -72.0,
+                end_value: -72.0,
+            },
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Right,
+                parameter_index: 1,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 12.0,
+                end_value: 12.0,
+            },
+        ];
+        let offsets = [0, 0, 0, 1, 1, 1, 2, 2, 2];
+        let mut scalar_reports = [ProcessReport::default(); WIDTH];
+        let mut saved_bank = Vec::new();
+        let mut saved_scalar = Vec::new();
+        for block_index in 0..2 {
+            let first = (block_index * FRAMES) as u64;
+            let mut bank_left = vec![0.0; FRAMES * WIDTH];
+            let mut bank_right = vec![0.0; FRAMES * WIDTH];
+            let mut scalar_left = vec![vec![0.0; FRAMES]; WIDTH];
+            let mut scalar_right = vec![vec![0.0; FRAMES]; WIDTH];
+            for frame in 0..FRAMES {
+                for track in 0..WIDTH {
+                    let left = ((frame * 17 + track * 11 + block_index * 3) % 31) as f32 * 0.03125
+                        - 0.46875;
+                    let right =
+                        ((frame * 13 + track * 7 + block_index * 5) % 29) as f32 * 0.03125 - 0.4375;
+                    bank_left[frame * WIDTH + track] = left;
+                    bank_right[frame * WIDTH + track] = right;
+                    scalar_left[track][frame] = left;
+                    scalar_right[track][frame] = right;
+                }
+            }
+            let bank_report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    first,
+                    if block_index == 0 { &automation } else { &[] },
+                    if block_index == 0 {
+                        &offsets
+                    } else {
+                        &[0; WIDTH + 1]
+                    },
+                    128,
+                )
+                .expect("bank block"),
+            );
+            for track in 0..WIDTH {
+                let spans = if block_index == 0 && track == 2 {
+                    &automation[0..1]
+                } else if block_index == 0 && track == 5 {
+                    &automation[1..2]
+                } else {
+                    &[]
+                };
+                let report = scalars[track].process(
+                    EffectProcessBlock::new(
+                        &mut scalar_left[track],
+                        &mut scalar_right[track],
+                        None,
+                        first,
+                        spans,
+                        128,
+                    )
+                    .expect("scalar block"),
+                );
+                add_report(&mut scalar_reports[track], report);
+                assert_eq!(bank_report.reports[track], report);
+                for frame in 0..FRAMES {
+                    assert_eq!(
+                        bank_left[frame * WIDTH + track].to_bits(),
+                        scalar_left[track][frame].to_bits(),
+                        "left track {track}, frame {frame}, block {block_index}"
+                    );
+                    assert_eq!(
+                        bank_right[frame * WIDTH + track].to_bits(),
+                        scalar_right[track][frame].to_bits(),
+                        "right track {track}, frame {frame}, block {block_index}"
+                    );
+                }
+            }
+        }
+        for (track, scalar) in scalars.iter().enumerate() {
+            let bank_state = snapshot_bank(bank.as_ref(), track as u32);
+            let scalar_state = snapshot(scalar.as_ref());
+            assert_eq!(bank_state, scalar_state, "state track {track}");
+            saved_bank.push(bank_state);
+            saved_scalar.push(scalar_state);
+        }
+        assert_ne!(saved_bank[0], saved_bank[7], "track state is not shared");
+        assert_ne!(
+            saved_bank[0].0, saved_bank[0].1,
+            "left/right state is not shared"
+        );
+
+        let mut resumed_bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: KernelBackendV1::X86Avx2,
+                width: BankWidth::Eight,
+                requests: &requests,
+            })
+            .expect("resumed bank prepare")
+            .expect("available resumed W8 bank");
+        let mut resumed_scalars = requests
+            .iter()
+            .copied()
+            .map(|item| factory.prepare(item).expect("resumed scalar"))
+            .collect::<Vec<_>>();
+        for track in 0..WIDTH {
+            let sizes = resumed_scalars[track].metadata().state_sizes;
+            resumed_bank
+                .restore_track_state_payload(
+                    track as u32,
+                    1,
+                    StatePayloadInput::new(&[], &saved_bank[track].0, &saved_bank[track].1, sizes)
+                        .expect("bank input"),
+                )
+                .expect("bank restore");
+            resumed_scalars[track]
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(
+                        &[],
+                        &saved_scalar[track].0,
+                        &saved_scalar[track].1,
+                        sizes,
+                    )
+                    .expect("scalar input"),
+                )
+                .expect("scalar restore");
+        }
+        for block_index in 2..4 {
+            let first = (block_index * FRAMES) as u64;
+            let mut bank_left = vec![0.0; FRAMES * WIDTH];
+            let mut bank_right = vec![0.0; FRAMES * WIDTH];
+            let mut scalar_left = vec![vec![0.0; FRAMES]; WIDTH];
+            let mut scalar_right = vec![vec![0.0; FRAMES]; WIDTH];
+            for frame in 0..FRAMES {
+                for track in 0..WIDTH {
+                    let left =
+                        ((frame + track * 3 + block_index * 5) % 23) as f32 * 0.0625 - 0.6875;
+                    let right =
+                        ((frame * 3 + track * 5 + block_index) % 19) as f32 * 0.0625 - 0.5625;
+                    bank_left[frame * WIDTH + track] = left;
+                    bank_right[frame * WIDTH + track] = right;
+                    scalar_left[track][frame] = left;
+                    scalar_right[track][frame] = right;
+                }
+            }
+            let bank_report = resumed_bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    first,
+                    &[],
+                    &[0; WIDTH + 1],
+                    128,
+                )
+                .expect("continuation bank block"),
+            );
+            for track in 0..WIDTH {
+                let report = resumed_scalars[track].process(
+                    EffectProcessBlock::new(
+                        &mut scalar_left[track],
+                        &mut scalar_right[track],
+                        None,
+                        first,
+                        &[],
+                        128,
+                    )
+                    .expect("continuation scalar block"),
+                );
+                assert_eq!(bank_report.reports[track], report);
+                for frame in 0..FRAMES {
+                    assert_eq!(
+                        bank_left[frame * WIDTH + track].to_bits(),
+                        scalar_left[track][frame].to_bits()
+                    );
+                    assert_eq!(
+                        bank_right[frame * WIDTH + track].to_bits(),
+                        scalar_right[track][frame].to_bits()
+                    );
+                }
+            }
+        }
+        assert!(
+            scalar_reports
+                .iter()
+                .all(|report| report.invalid_spans == 0)
+        );
+    }
+
+    #[test]
+    fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
+        const WIDTH: usize = 4;
+        let factory = GateExpanderFactory;
+        let values = vec![initial_values(); WIDTH];
+        let requests = values
+            .iter()
+            .map(|value| request(value))
+            .collect::<Vec<_>>();
+        let unavailable = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: KernelBackendV1::WasmSimd128,
+                width: BankWidth::Four,
+                requests: &requests,
+            })
+            .expect("valid W4 request");
+        if PreparedGateGainKernelV1::try_new(KernelBackendV1::WasmSimd128).is_err() {
+            assert!(
+                unavailable.is_none(),
+                "unavailable backend is a legal scalar fallback"
+            );
+        }
+        let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Scalar,
+            width: BankWidth::Four,
+            requests: &requests,
+        }) {
+            Ok(_) => panic!("backend/width mismatch must reject"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.bank.requests");
+
+        let mut malformed_values = values.clone();
+        malformed_values[WIDTH - 1][0].value = f32::NAN;
+        let malformed_requests = malformed_values
+            .iter()
+            .map(|value| request(value))
+            .collect::<Vec<_>>();
+        let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::WasmSimd128,
+            width: BankWidth::Four,
+            requests: &malformed_requests,
+        }) {
+            Ok(_) => panic!("malformed member must reject before backend fallback"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.parameter.initial");
+
+        let mut connected_requests = values
+            .iter()
+            .map(|value| request(value))
+            .collect::<Vec<_>>();
+        for item in &mut connected_requests {
+            item.ports.sidechain = PreparedSidechainPort::Connected {
+                id: port_id("sidechain-in"),
+                required: false,
+            };
+        }
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::WasmSimd128,
+                    width: BankWidth::Four,
+                    requests: &connected_requests,
+                })
+                .expect("connected requests validate")
+                .is_none()
+        );
     }
 }

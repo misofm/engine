@@ -156,7 +156,10 @@ Terra and final Sol verdicts; exact successor link; and `timed_benchmark_invocat
   miso-engine-gate-expander`; `cargo test --locked -p miso-engine-core -p
   miso-engine-gate-expander` (27 core and 5 gate tests passed); and `cargo clippy --locked -p
   miso-engine-core -p miso-engine-gate-expander --all-targets -- -D warnings`.
-- Direct gate-bank PCM/state/report parity and isolation tests were not added after the explicit
-  coverage freeze at this checkpoint; this evidence therefore does not claim those representative
-  product gates. Registry/graph, qualification/audit/target and benchmark work remain untouched.
-  `timed_benchmark_invocations=0`.
+- Direct W8 scalar/bank PCM, state-payload and `ProcessReport` equality now covers asymmetric
+  per-track/per-lane preparation, active Block-Point automation, 0/2/5/10 ms lookahead, the full
+  480-sample latency boundary, and snapshot/restore continuation. It also proves lane/track state
+  isolation and width-eight retained state/default accounting (`8*(7856+64)=63360` bytes). W4 is
+  unavailable on this host, so its test proves only the legal unavailable-backend fallback;
+  malformed members reject before that fallback. Registry/graph, qualification/audit/target and
+  benchmark work remain untouched. `timed_benchmark_invocations=0`.
