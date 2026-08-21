@@ -9,6 +9,7 @@ members = [
     "crates/miso-engine-multiband-compressor",
     "crates/miso-engine-gate-expander",
     "crates/miso-engine-true-peak-limiter",
+    "crates/miso-engine-soft-clip",
     "crates/miso-engine-effect-compiler",
     "crates/miso-engine-rack",
     "crates/miso-engine-rack-compiler",
@@ -67,6 +68,7 @@ miso-engine-compressor = { path = "crates/miso-engine-compressor", version = "0.
 miso-engine-multiband-compressor = { path = "crates/miso-engine-multiband-compressor", version = "0.1.0" }
 miso-engine-gate-expander = { path = "crates/miso-engine-gate-expander", version = "0.1.0" }
 miso-engine-true-peak-limiter = { path = "crates/miso-engine-true-peak-limiter", version = "0.1.0" }
+miso-engine-soft-clip = { path = "crates/miso-engine-soft-clip", version = "0.1.0" }
 miso-engine-effect-compiler = { path = "crates/miso-engine-effect-compiler", version = "0.1.0" }
 miso-engine-rack = { path = "crates/miso-engine-rack", version = "0.1.0" }
 miso-engine-rack-compiler = { path = "crates/miso-engine-rack-compiler", version = "0.1.0" }

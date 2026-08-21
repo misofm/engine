@@ -528,6 +528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-soft-clip"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "miso-engine-source"
 version = "0.1.0"
 dependencies = [

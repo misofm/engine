@@ -11,6 +11,7 @@ mod multiband_compressor;
 mod parametric_eq;
 mod processor;
 mod signals;
+mod soft_clip;
 mod spectrum;
 mod tpt;
 
@@ -37,6 +38,7 @@ pub use processor::{IdentityProcessor, OfflineF64Processor, render_planar_f64};
 pub use signals::{
     ReferenceSignalError, deterministic_bipolar_noise, deterministic_impulse, deterministic_sine,
 };
+pub use soft_clip::{ReferenceSoftClip, ReferenceSoftClipError, reference_halfband_63};
 pub use spectrum::{Complex64, SpectrumError, direct_dft_bin, direct_dft_frequency, magnitude_db};
 pub use tpt::{ReferenceTptOutput, ReferenceTptStateSpace, rbj_butterworth_magnitude_db};
 

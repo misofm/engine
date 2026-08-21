@@ -112,3 +112,22 @@ build and instruction evidence is Issue 052.
 Candidate identity, table/response maxima, transfer and frozen alias ratios, exact state/resource
 rows, representative runtime/bank/graph results, commands, attempt count, strict verdict, successor
 link and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — scalar checkpoint (partial)
+
+- Candidate: `miso.soft-clip` Normal scalar lane, fixed-2x cubic curve, frozen 63-tap table,
+  `LatencySamples(31)`, `TailSamples::Finite(31)`, and exact 676-byte lane / 24-byte reset-default
+  resource rows.
+- Implemented: descriptor/factory/preparation; dual-mono scalar processing; converted 64-update
+  drive/output/mix ramps; 169-word LE snapshot/atomic restore; both reset modes; input sanitation;
+  lane-local finite-fault recovery; independent `f64` Blackman-halfband/cubic oracle.
+- Focused proof PASS: `cargo fmt --check`; `cargo check --locked -p miso-engine-soft-clip`;
+  `cargo test --locked -p miso-engine-soft-clip --lib` (3 passed); `cargo clippy --locked -p
+  miso-engine-soft-clip --all-targets -- -D warnings`; and `cargo test --locked -p
+  miso-engine-dsp-reference` (9 passed, 1 unrelated ignored). The scalar tests cover descriptor
+  resources/table construction, representative oracle comparison, mix-zero delayed identity,
+  block automation, reset, snapshot/restore, signed zero, sanitation, and injected lane recovery.
+- Deliberately not executed: broad response/alias qualification, million-input row, W4/W8 banks,
+  registry/graph/PDC fixture, audit, targets, listening, and benchmark. These remain later Issue
+  019/052 work; this is not a closure verdict.
+- `timed_benchmark_invocations=0`.
