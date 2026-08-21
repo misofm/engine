@@ -43,7 +43,7 @@ with ordered required `main-in`/`main-out` `DualMonoPlanar` ports. The exact par
 
 All are readable, automatable and `PerLane`; descriptor position, state-ramp order and ID-minus-one
 are identical. Preparation consumes exactly six ordered L/R values, rejects missing/extra,
-nonfinite or out-of-domain values and normalizes accepted numeric zero to positive zero. Each lane
+negative-zero, nonfinite or out-of-domain values and retains canonical positive zero. Each lane
 starts with `current=target`, `remaining=0`. Quality rows at all four rates declare latency 0,
 `TailSamples::Finite(0)`, state `{common:0,left:44,right:44}`, `scratch_fixed_bytes=24` and
 `scratch_bytes_per_frame=0`. Quantum does not affect state/resources.
@@ -129,8 +129,8 @@ Scan into a fixed pending table, saturating-count every invalid span, retain oth
 apply valid targets in stable descriptor/lane order. A Point begins update one at `first_sample`,
 reaches the target on update 64 and retargets from current. Normalize accepted numeric zero.
 
-Use the accepted `sanitize_sample`: nonfinite or subnormal input becomes positive zero and
-increments that lane's saturating sample counter once; finite signed zero remains available to
+Use the accepted `sanitize_sample`: each nonfinite or subnormal lane sample becomes positive zero
+and increments that track's aggregate saturating main-input counter once; finite signed zero remains available to
 identity output. Finite subnormal follower or computed nonidentity output becomes positive zero
 without recovery. A nonfinite follower, contrast, gain, wet or mixed value clears only that lane's
 two followers, emits sanitized `x`, and increments its recovery counter once for the host sample.

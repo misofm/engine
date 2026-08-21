@@ -98,6 +98,22 @@ impl ReferenceTransientShaper {
     }
 }
 
+/// Independently derives one one-pole time coefficient from milliseconds and sample rate.
+pub fn reference_transient_shaper_coefficient(
+    milliseconds: f64,
+    sample_rate_hz: f64,
+) -> Result<f64, ReferenceTransientShaperError> {
+    if !milliseconds.is_finite()
+        || milliseconds <= 0.0
+        || !sample_rate_hz.is_finite()
+        || sample_rate_hz <= 0.0
+    {
+        return Err(ReferenceTransientShaperError::InvalidInput);
+    }
+    Ok((-1.0 / (0.001 * milliseconds * sample_rate_hz)).exp())
+}
+
 fn coefficient(milliseconds: f64, sample_rate_hz: f64) -> f64 {
-    (-1.0 / (0.001 * milliseconds * sample_rate_hz)).exp()
+    reference_transient_shaper_coefficient(milliseconds, sample_rate_hz)
+        .expect("validated reference construction")
 }

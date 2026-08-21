@@ -675,7 +675,10 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_dsp_reference::{ReferenceTransientShaper, ReferenceTransientShaperParameters};
+    use miso_engine_dsp_reference::{
+        ReferenceTransientShaper, ReferenceTransientShaperParameters,
+        reference_transient_shaper_coefficient,
+    };
     use miso_engine_effect_contract::{
         EffectProcessBlock, InitialParameterValue, PreparedNativeEffect, StatePayloadInput,
         StatePayloadOutput, validate_descriptor_v1,
@@ -694,12 +697,21 @@ mod tests {
     }
 
     fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
+        request_with(values, 48_000, false, LinkMode::DualMono)
+    }
+
+    fn request_with<'a>(
+        values: &'a [InitialParameterValue],
+        sample_rate: u32,
+        bypass: bool,
+        link_mode: LinkMode,
+    ) -> PrepareEffectRequest<'a> {
         PrepareEffectRequest {
-            sample_rate: 48_000,
+            sample_rate,
             quantum: 128,
             quality: EffectQuality::Normal,
-            bypass: false,
-            link_mode: LinkMode::DualMono,
+            bypass,
+            link_mode,
             ports: miso_engine_effect_contract::PreparedPortsV1 {
                 sidechain: miso_engine_effect_contract::PreparedSidechainPort::None,
             },
@@ -728,6 +740,100 @@ mod tests {
             )
             .expect("snapshot");
         (left, right)
+    }
+
+    fn prepare_concrete(
+        values: &[InitialParameterValue],
+        sample_rate: u32,
+        bypass: bool,
+        link_mode: LinkMode,
+    ) -> PreparedTransientShaper {
+        let request = request_with(values, sample_rate, bypass, link_mode);
+        let metadata =
+            expected_prepared_metadata(&TRANSIENT_SHAPER_DESCRIPTOR_V1, request).expect("metadata");
+        let coefficients = coefficients(sample_rate).expect("coefficients");
+        let (left_defaults, right_defaults) = initial_defaults(values).expect("defaults");
+        PreparedTransientShaper {
+            metadata,
+            coefficients,
+            left_defaults,
+            right_defaults,
+            left: Lane::new(&left_defaults),
+            right: Lane::new(&right_defaults),
+        }
+    }
+
+    fn state_f32(bytes: &[u8], word: usize) -> f32 {
+        read_f32(bytes, word)
+    }
+
+    fn state_u32(bytes: &[u8], word: usize) -> u32 {
+        read_u32(bytes, word)
+    }
+
+    fn expected_lane_bytes(
+        envelopes: [f32; 2],
+        ramps: [(f32, f32, u32); PARAMETER_COUNT],
+    ) -> Vec<u8> {
+        let mut bytes = vec![0_u8; LANE_STATE_BYTES as usize];
+        write_f32(&mut bytes, 0, envelopes[0]);
+        write_f32(&mut bytes, 1, envelopes[1]);
+        for (index, ramp) in ramps.into_iter().enumerate() {
+            let word = 2 + index * 3;
+            write_f32(&mut bytes, word, ramp.0);
+            write_f32(&mut bytes, word + 1, ramp.1);
+            write_u32(&mut bytes, word + 2, ramp.2);
+        }
+        bytes
+    }
+
+    fn render_reference_row(
+        attack_amount: f32,
+        sustain_amount: f32,
+        signal: &[f32],
+        measured_from: usize,
+    ) -> (f64, f64, f64) {
+        let mut values = initial_values();
+        values[0].value = attack_amount;
+        values[1].value = attack_amount;
+        values[2].value = sustain_amount;
+        values[3].value = sustain_amount;
+        let mut effect = prepare(&values);
+        let mut reference = ReferenceTransientShaper::new(
+            48_000.0,
+            ReferenceTransientShaperParameters {
+                attack_amount: attack_amount as f64,
+                sustain_amount: sustain_amount as f64,
+                mix: 1.0,
+            },
+        )
+        .expect("reference");
+        let mut maximum_error_db = 0.0_f64;
+        let mut minimum_reference_gain_db = f64::INFINITY;
+        let mut maximum_reference_gain_db = f64::NEG_INFINITY;
+        for (index, input) in signal.iter().copied().enumerate() {
+            let mut left = [input];
+            let mut right = [input];
+            effect.process(
+                EffectProcessBlock::new(&mut left, &mut right, None, index as u64, &[], 128)
+                    .expect("row sample"),
+            );
+            let expected = reference.process_sample(input as f64, input.abs() as f64);
+            if index >= measured_from && input.abs() >= 1.0e-4 {
+                let production_gain_db =
+                    20.0_f64 * (left[0].abs() as f64 / input.abs() as f64).log10();
+                let reference_gain_db = 20.0_f64 * (expected.abs() / input.abs() as f64).log10();
+                maximum_error_db =
+                    maximum_error_db.max((production_gain_db - reference_gain_db).abs());
+                minimum_reference_gain_db = minimum_reference_gain_db.min(reference_gain_db);
+                maximum_reference_gain_db = maximum_reference_gain_db.max(reference_gain_db);
+            }
+        }
+        (
+            maximum_error_db,
+            minimum_reference_gain_db,
+            maximum_reference_gain_db,
+        )
     }
 
     #[test]
@@ -761,6 +867,77 @@ mod tests {
             TransientShaperFactory.prepare(too_small),
             Err(EffectPrepareError {
                 code: "effect.resource.limit"
+            })
+        ));
+    }
+
+    #[test]
+    fn independent_coefficients_time_constants_layout_and_both_caps_are_exact() {
+        const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+        const TIMES_MS: [f64; 4] = [0.5, 20.0, 10.0, 100.0];
+        let values = initial_values();
+        for ((sample_rate, production_bits), quality) in RATES
+            .into_iter()
+            .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS_V1)
+            .zip(TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities)
+        {
+            assert_eq!(quality.sample_rate, sample_rate);
+            assert_eq!(quality.maximum_state.common_bytes, 0);
+            assert_eq!(quality.maximum_state.left_bytes, 44);
+            assert_eq!(quality.maximum_state.right_bytes, 44);
+            assert_eq!(quality.scratch_fixed_bytes, 24);
+            assert_eq!(quality.scratch_bytes_per_frame, 0);
+            for ((time_ms, bits), index) in TIMES_MS
+                .into_iter()
+                .zip(production_bits)
+                .zip(0..TIMES_MS.len())
+            {
+                let independent =
+                    reference_transient_shaper_coefficient(time_ms, sample_rate as f64)
+                        .expect("independent coefficient");
+                assert_eq!(
+                    (independent as f32).to_bits(),
+                    bits,
+                    "rate={sample_rate} coefficient={index}"
+                );
+                let retained = f32::from_bits(bits) as f64;
+                let recovered_time_ms = -1000.0 / (sample_rate as f64 * retained.ln());
+                let timing_tolerance_ms = (1000.0 / sample_rate as f64).max(time_ms * 0.02);
+                assert!(
+                    (recovered_time_ms - time_ms).abs() <= timing_tolerance_ms,
+                    "rate={sample_rate} coefficient={index} recovered={recovered_time_ms}"
+                );
+            }
+            let effect = TransientShaperFactory
+                .prepare(request_with(
+                    &values,
+                    sample_rate,
+                    false,
+                    LinkMode::DualMono,
+                ))
+                .expect("exact caps");
+            let state = snapshot(effect.as_ref());
+            let expected =
+                expected_lane_bytes([0.0, 0.0], [(0.0, 0.0, 0), (0.0, 0.0, 0), (1.0, 1.0, 0)]);
+            assert_eq!(state.0.len(), STATE_WORDS * 4);
+            assert_eq!(state.0, expected);
+            assert_eq!(state.1, expected);
+        }
+
+        let mut scratch_below = request(&values);
+        scratch_below.limits.maximum_scratch_bytes = 23;
+        assert!(matches!(
+            TransientShaperFactory.prepare(scratch_below),
+            Err(EffectPrepareError {
+                code: "effect.resource.limit"
+            })
+        ));
+        let mut negative_zero = values;
+        negative_zero[0].value = -0.0;
+        assert!(matches!(
+            TransientShaperFactory.prepare(request(&negative_zero)),
+            Err(EffectPrepareError {
+                code: "effect.parameter.initial"
             })
         ));
     }
@@ -819,6 +996,306 @@ mod tests {
             linked_magnitudes(LinkMode::Average, -1.0, 0.25),
             (0.625, 0.625)
         );
+    }
+
+    #[test]
+    fn impulse_step_and_decay_cover_both_attack_and_sustain_signs() {
+        let mut impulse = vec![0.0_f32; 32];
+        impulse[0] = 1.0;
+        let (attack_boost_error, _, attack_boost_maximum) =
+            render_reference_row(1.0, 0.0, &impulse, 0);
+        assert!(attack_boost_error <= 0.01, "error={attack_boost_error}");
+        assert!(attack_boost_maximum > 0.25);
+
+        let step = vec![1.0_f32; 64];
+        let (attack_cut_error, attack_cut_minimum, _) = render_reference_row(-1.0, 0.0, &step, 0);
+        assert!(attack_cut_error <= 0.01, "error={attack_cut_error}");
+        assert!(attack_cut_minimum < -0.25);
+
+        let mut decay = vec![1.0_f32; 4_800];
+        decay.extend((0..512).map(|index| 0.9_f32 * 0.995_f32.powi(index)));
+        let (sustain_boost_error, _, sustain_boost_maximum) =
+            render_reference_row(0.0, 1.0, &decay, 4_800);
+        assert!(sustain_boost_error <= 0.01, "error={sustain_boost_error}");
+        assert!(sustain_boost_maximum > 0.25);
+        let (sustain_cut_error, sustain_cut_minimum, _) =
+            render_reference_row(0.0, -1.0, &decay, 4_800);
+        assert!(sustain_cut_error <= 0.01, "error={sustain_cut_error}");
+        assert!(sustain_cut_minimum < -0.25);
+    }
+
+    #[test]
+    fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let initial_right = snapshot(effect.as_ref()).1;
+        let target_one = PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Left,
+            parameter_index: 0,
+            start_sample: 0,
+            end_sample: 0,
+            start_value: 1.0,
+            end_value: 1.0,
+        };
+        let mut left = [0.0_f32];
+        let mut right = [0.0_f32];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[target_one], 128)
+                .expect("first update"),
+        );
+        let after_one = snapshot(effect.as_ref());
+        assert_eq!(
+            state_f32(&after_one.0, 2).to_bits(),
+            (1.0_f32 / 64.0).to_bits()
+        );
+        assert_eq!(state_f32(&after_one.0, 3).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(state_u32(&after_one.0, 4), 63);
+        assert_eq!(after_one.1, initial_right);
+
+        let mut left = [0.0_f32; 62];
+        let mut right = [0.0_f32; 62];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 1, &[], 128)
+                .expect("updates two through sixty-three"),
+        );
+        let after_sixty_three = snapshot(effect.as_ref());
+        assert_eq!(
+            state_f32(&after_sixty_three.0, 2).to_bits(),
+            (63.0_f32 / 64.0).to_bits()
+        );
+        assert_eq!(state_u32(&after_sixty_three.0, 4), 1);
+        assert_eq!(after_sixty_three.1, initial_right);
+
+        let mut left = [0.0_f32];
+        let mut right = [0.0_f32];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 63, &[], 128)
+                .expect("update sixty-four"),
+        );
+        let after_sixty_four = snapshot(effect.as_ref());
+        assert_eq!(
+            state_f32(&after_sixty_four.0, 2).to_bits(),
+            1.0_f32.to_bits()
+        );
+        assert_eq!(state_u32(&after_sixty_four.0, 4), 0);
+        assert_eq!(after_sixty_four.1, initial_right);
+
+        let retarget = PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Left,
+            parameter_index: 0,
+            start_sample: 64,
+            end_sample: 64,
+            start_value: -1.0,
+            end_value: -1.0,
+        };
+        let mut left = [0.0_f32];
+        let mut right = [0.0_f32];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 64, &[retarget], 128)
+                .expect("retarget update one"),
+        );
+        let active = snapshot(effect.as_ref());
+        assert_eq!(state_f32(&active.0, 2).to_bits(), 0.96875_f32.to_bits());
+        assert_eq!(state_f32(&active.0, 3).to_bits(), (-1.0_f32).to_bits());
+        assert_eq!(state_u32(&active.0, 4), 63);
+        assert_eq!(active.1, initial_right);
+
+        let mut restored = prepare(&values);
+        restored
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &active.0, &active.1, restored.metadata().state_sizes)
+                    .expect("active state"),
+            )
+            .expect("active restore");
+        let mut uninterrupted_left = [0.25_f32; 8];
+        let mut uninterrupted_right = [-0.125_f32; 8];
+        let mut restored_left = uninterrupted_left;
+        let mut restored_right = uninterrupted_right;
+        effect.process(
+            EffectProcessBlock::new(
+                &mut uninterrupted_left,
+                &mut uninterrupted_right,
+                None,
+                65,
+                &[],
+                128,
+            )
+            .expect("uninterrupted"),
+        );
+        restored.process(
+            EffectProcessBlock::new(&mut restored_left, &mut restored_right, None, 65, &[], 128)
+                .expect("restored"),
+        );
+        assert_eq!(
+            uninterrupted_left.map(f32::to_bits),
+            restored_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            uninterrupted_right.map(f32::to_bits),
+            restored_right.map(f32::to_bits)
+        );
+        assert_eq!(snapshot(effect.as_ref()), snapshot(restored.as_ref()));
+    }
+
+    #[test]
+    fn both_resets_have_word_exact_parameter_and_envelope_states() {
+        let mut values = initial_values();
+        values[0].value = 0.25;
+        values[1].value = -0.25;
+        values[2].value = 0.5;
+        values[3].value = -0.5;
+        values[4].value = 0.75;
+        values[5].value = 0.5;
+        let mut effect = prepare(&values);
+        let span = PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Left,
+            parameter_index: 0,
+            start_sample: 0,
+            end_sample: 0,
+            start_value: 1.0,
+            end_value: 1.0,
+        };
+        let mut left = [0.8_f32; 8];
+        let mut right = [0.2_f32; 8];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[span], 128)
+                .expect("active state"),
+        );
+
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        let discontinuity = snapshot(effect.as_ref());
+        assert_eq!(
+            discontinuity.0,
+            expected_lane_bytes([0.0, 0.0], [(1.0, 1.0, 0), (0.5, 0.5, 0), (0.75, 0.75, 0)])
+        );
+        assert_eq!(
+            discontinuity.1,
+            expected_lane_bytes(
+                [0.0, 0.0],
+                [(-0.25, -0.25, 0), (-0.5, -0.5, 0), (0.5, 0.5, 0)]
+            )
+        );
+
+        effect.reset(ResetKind::FullToDefaults);
+        let full = snapshot(effect.as_ref());
+        assert_eq!(
+            full.0,
+            expected_lane_bytes(
+                [0.0, 0.0],
+                [(0.25, 0.25, 0), (0.5, 0.5, 0), (0.75, 0.75, 0)]
+            )
+        );
+        assert_eq!(
+            full.1,
+            expected_lane_bytes(
+                [0.0, 0.0],
+                [(-0.25, -0.25, 0), (-0.5, -0.5, 0), (0.5, 0.5, 0)]
+            )
+        );
+    }
+
+    #[test]
+    fn public_identity_sanitation_and_injected_recovery_are_exact_and_isolated() {
+        let defaults = initial_values();
+        let mut identity = prepare(&defaults);
+        let mut identity_left = [-0.0_f32, 0.25, -0.5, 0.0];
+        let mut identity_right = [0.0_f32, -0.125, 0.75, -0.0];
+        let original_left = identity_left.map(f32::to_bits);
+        let original_right = identity_right.map(f32::to_bits);
+        identity.process(
+            EffectProcessBlock::new(&mut identity_left, &mut identity_right, None, 0, &[], 128)
+                .expect("default identity"),
+        );
+        assert_eq!(identity_left.map(f32::to_bits), original_left);
+        assert_eq!(identity_right.map(f32::to_bits), original_right);
+        let identity_state = snapshot(identity.as_ref());
+        assert!(state_f32(&identity_state.0, 0) > 0.0);
+        assert!(state_f32(&identity_state.0, 1) > 0.0);
+        assert!(state_f32(&identity_state.1, 0) > 0.0);
+        assert!(state_f32(&identity_state.1, 1) > 0.0);
+
+        let mut active = initial_values();
+        active[0].value = 1.0;
+        active[1].value = 1.0;
+        let mut bypass = prepare_concrete(&active, 48_000, true, LinkMode::DualMono);
+        let mut bypass_left = [-0.0_f32, 0.8];
+        let mut bypass_right = [0.0_f32, 0.4];
+        let bypass_original_left = bypass_left.map(f32::to_bits);
+        let bypass_original_right = bypass_right.map(f32::to_bits);
+        bypass.process(
+            EffectProcessBlock::new(&mut bypass_left, &mut bypass_right, None, 0, &[], 128)
+                .expect("bypass identity"),
+        );
+        assert_eq!(bypass_left.map(f32::to_bits), bypass_original_left);
+        assert_eq!(bypass_right.map(f32::to_bits), bypass_original_right);
+        let bypass_state = snapshot(&bypass);
+        assert!(state_f32(&bypass_state.0, 0) > 0.0);
+        assert!(state_f32(&bypass_state.1, 0) > 0.0);
+
+        active[4].value = 0.0;
+        active[5].value = 0.0;
+        let mut mix_zero = prepare(&active);
+        let mut mix_left = [-0.0_f32, 0.8];
+        let mut mix_right = [0.0_f32, 0.4];
+        let mix_original_left = mix_left.map(f32::to_bits);
+        let mix_original_right = mix_right.map(f32::to_bits);
+        mix_zero.process(
+            EffectProcessBlock::new(&mut mix_left, &mut mix_right, None, 0, &[], 128)
+                .expect("mix-zero identity"),
+        );
+        assert_eq!(mix_left.map(f32::to_bits), mix_original_left);
+        assert_eq!(mix_right.map(f32::to_bits), mix_original_right);
+        let mix_state = snapshot(mix_zero.as_ref());
+        assert!(state_f32(&mix_state.0, 0) > 0.0);
+        assert!(state_f32(&mix_state.1, 0) > 0.0);
+
+        let mut sanitized = prepare(&defaults);
+        let mut sanitized_left = [f32::NAN];
+        let mut sanitized_right = [f32::from_bits(1)];
+        let sanitation_report = sanitized.process(
+            EffectProcessBlock::new(&mut sanitized_left, &mut sanitized_right, None, 0, &[], 128)
+                .expect("two sanitized lane samples"),
+        );
+        assert_eq!(sanitation_report.sanitized_main_samples, 2);
+        assert_eq!(sanitized_left[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(sanitized_right[0].to_bits(), 0.0_f32.to_bits());
+
+        active[4].value = 1.0;
+        active[5].value = 1.0;
+        let mut faulted = prepare_concrete(&active, 48_000, false, LinkMode::DualMono);
+        let mut healthy = prepare_concrete(&active, 48_000, false, LinkMode::DualMono);
+        faulted.left.fast = f32::INFINITY;
+        let mut faulted_left = [-0.25_f32];
+        let mut faulted_right = [0.5_f32];
+        let mut healthy_left = faulted_left;
+        let mut healthy_right = faulted_right;
+        let faulted_report = faulted.process(
+            EffectProcessBlock::new(&mut faulted_left, &mut faulted_right, None, 0, &[], 128)
+                .expect("faulted public process"),
+        );
+        let healthy_report = healthy.process(
+            EffectProcessBlock::new(&mut healthy_left, &mut healthy_right, None, 0, &[], 128)
+                .expect("healthy public process"),
+        );
+        assert_eq!(faulted_left[0].to_bits(), (-0.25_f32).to_bits());
+        assert_eq!(faulted_report.recovered_left_samples, 1);
+        assert_eq!(faulted_report.recovered_right_samples, 0);
+        assert_eq!(healthy_report.recovered_left_samples, 0);
+        assert_eq!(healthy_report.recovered_right_samples, 0);
+        assert_eq!(
+            faulted_right.map(f32::to_bits),
+            healthy_right.map(f32::to_bits)
+        );
+        let faulted_state = snapshot(&faulted);
+        let healthy_state = snapshot(&healthy);
+        assert_eq!(state_f32(&faulted_state.0, 0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(state_f32(&faulted_state.0, 1).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(&faulted_state.0[8..], &healthy_state.0[8..]);
+        assert_eq!(faulted_state.1, healthy_state.1);
     }
 
     #[test]

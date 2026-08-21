@@ -61,6 +61,10 @@ automation, reset/restore/recovery and scalar/W4/W8 parity. Each lane state is e
 bytes; complete scalar state is 88 bytes and fixed reset defaults are 24 bytes. Exact retained
 effect envelopes are 112 bytes per scalar track, 448 bytes/W4 and 896 bytes/W8.
 
+The accepted runtime rejects negative-zero initial parameter values before factory publication;
+automation and restored numeric-zero parameter words normalize to positive zero. Sanitation reports
+one increment in the track's aggregate main-input counter for each sanitized lane sample.
+
 ## Deliverables
 
 - `miso-engine-transient-shaper` descriptor/factory, scalar and homogeneous bank products;
@@ -154,3 +158,35 @@ attempt count; strict Terra/final Sol verdict; successor link; and
 - This is a scalar-only partial checkpoint: W4/W8 banking, registry/effect-compiler/graph, Issue-054
   qualification, audits, targets and benchmark work remain unstarted. `timed_benchmark_invocations=0`.
   Terra checkpoint verdict: partial PASS; pause for root commit and Sol review.
+
+## Sol attempt 2 — bounded scalar contract correction (partial PASS)
+
+- Base candidate `d4f8c8c`. No production DSP equation, coefficient, state layout, descriptor,
+  resource value or runtime path changed. The brief now preserves the accepted runtime's rejection
+  of negative-zero initial values and names sanitation telemetry correctly as one aggregate
+  main-input increment per sanitized lane sample.
+- The independent reference now exposes its own validated f64 one-pole coefficient derivation.
+  Tests derive and cast all sixteen launch-rate/time-constant values independently, match every
+  frozen production bit pattern, and recover each 0.5/20/10/100-ms time within the greater of one
+  sample or 2% gate.
+- Compact impulse, step and warmed decaying rows execute positive and negative attack and sustain
+  shaping. Every measured production/reference gain error is at most 0.01 dB, and the decay rows
+  prove active negative contrast rather than merely comparing a rising envelope.
+- Exact payload evidence covers all 11 words/44 bytes per lane, 88-byte state and 24-byte fixed
+  defaults, exact-cap preparation, one-byte-below state and scratch rejection, and runtime
+  negative-zero-initial rejection. Automation asserts update 1, 63 and 64 bits, retarget-from-
+  current, right-lane isolation and active snapshot/restore continuation.
+- Both resets now compare every payload word with independent expected bytes. Public processing
+  proves default, bypass and mix-zero signed-bit identity while followers warm; one NaN plus one
+  subnormal lane sample produces exactly two aggregate sanitation increments. An injected left
+  follower fault exercises the public process/report path, returns dry, clears only that lane and
+  leaves right PCM/state bit-identical to a healthy peer.
+- PASS: `cargo fmt --all -- --check`; `cargo test --locked -p
+  miso-engine-transient-shaper --lib` (8 passed); `cargo test --locked -p
+  miso-engine-dsp-reference --lib` (6 passed, one pre-existing Issue-044 candidate ignored); and
+  `cargo clippy --locked -p miso-engine-transient-shaper -p miso-engine-dsp-reference
+  --all-targets -- -D warnings`.
+- This is the frozen scalar correction checkpoint within the second and final authorized attempt,
+  not an overall Issue-020 verdict. Bank, registry/effect-compiler, graph/PDC/cap and final
+  workspace/policy closure remain unstarted. Issue 054 and all audit/target/instruction/benchmark/
+  listening work remain untouched; `timed_benchmark_invocations=0`.

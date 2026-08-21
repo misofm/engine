@@ -46,6 +46,7 @@ pub use spectrum::{Complex64, SpectrumError, direct_dft_bin, direct_dft_frequenc
 pub use tpt::{ReferenceTptOutput, ReferenceTptStateSpace, rbj_butterworth_magnitude_db};
 pub use transient_shaper::{
     ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,
+    reference_transient_shaper_coefficient,
 };
 
 #[cfg(test)]
