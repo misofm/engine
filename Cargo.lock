@@ -496,6 +496,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-source-audit"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-source",
+]
+
+[[package]]
 name = "miso-engine-source-fixture"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,17 @@
+[package]
+name = "miso-engine-source-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_source_audit"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-source.workspace = true
+
+[lints]
+workspace = true
