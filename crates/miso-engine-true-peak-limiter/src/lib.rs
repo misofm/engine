@@ -2008,4 +2008,95 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn executed_w8_bypass_preserves_lane_local_signed_zero_at_fixed_latency() {
+        const WIDTH: usize = 8;
+        const FRAMES: usize = 128;
+        let values = core::array::from_fn(|_| initial_values());
+        let mut bank = w8_prepared(&values, LinkMode::DualMono);
+        bank.effect_metadata.bypass = true;
+        bank.metadata.program_key.bypass = true;
+        let mut scalars = values
+            .iter()
+            .map(|values| {
+                let mut scalar = scalar_prepared(values, LinkMode::DualMono);
+                scalar.metadata.bypass = true;
+                scalar
+            })
+            .collect::<Vec<_>>();
+        for block in 0..4 {
+            let scalar_left = (0..WIDTH)
+                .map(|track| {
+                    let mut samples = vec![0.0; FRAMES];
+                    if block == 0 && track == 0 {
+                        samples[0] = -0.0;
+                    }
+                    samples
+                })
+                .collect::<Vec<_>>();
+            let scalar_right = (0..WIDTH)
+                .map(|track| {
+                    let mut samples = vec![0.0; FRAMES];
+                    if block == 0 && track == 1 {
+                        samples[0] = -0.0;
+                    }
+                    samples
+                })
+                .collect::<Vec<_>>();
+            let mut bank_left = pack_w8(&scalar_left);
+            let mut bank_right = pack_w8(&scalar_right);
+            let report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    (block * FRAMES) as u64,
+                    &[],
+                    &[0; WIDTH + 1],
+                    128,
+                )
+                .expect("W8 bypass block"),
+            );
+            assert!(
+                report.reports[..WIDTH]
+                    .iter()
+                    .all(|report| *report == ProcessReport::default())
+            );
+            let mut expected_left = Vec::with_capacity(WIDTH);
+            let mut expected_right = Vec::with_capacity(WIDTH);
+            for track in 0..WIDTH {
+                let mut left = scalar_left[track].clone();
+                let mut right = scalar_right[track].clone();
+                assert_eq!(
+                    report.reports[track],
+                    scalars[track].process(
+                        EffectProcessBlock::new(
+                            &mut left,
+                            &mut right,
+                            None,
+                            (block * FRAMES) as u64,
+                            &[],
+                            128,
+                        )
+                        .expect("scalar bypass block")
+                    )
+                );
+                expected_left.push(left);
+                expected_right.push(right);
+            }
+            assert_w8_bits(&bank_left, &expected_left, "bypass left");
+            assert_w8_bits(&bank_right, &expected_right, "bypass right");
+            if block == 3 {
+                let delayed = 102 * WIDTH;
+                assert_eq!(bank_left[delayed].to_bits(), (-0.0_f32).to_bits());
+                assert_eq!(bank_right[delayed].to_bits(), 0.0_f32.to_bits());
+                assert_eq!(bank_left[delayed + 1].to_bits(), 0.0_f32.to_bits());
+                assert_eq!(bank_right[delayed + 1].to_bits(), (-0.0_f32).to_bits());
+            }
+        }
+    }
 }

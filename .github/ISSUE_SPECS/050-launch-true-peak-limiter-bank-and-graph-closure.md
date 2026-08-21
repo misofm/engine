@@ -173,3 +173,8 @@ and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS
 - This is a representative bank proof checkpoint, not final Issue-050 PASS: graph/registry/PDC,
   workspace/policy seals and Issue-049 qualification remain unrun. The bank signed-zero path has
   no separate W8-only assertion in this frozen tranche. `timed_benchmark_invocations=0`.
+
+- Follow-up signed-zero checkpoint on `5d610f6`: executed W8 bypass/identity processing preserved
+  track 0 left `-0`/right `+0` and track 1 left `+0`/right `-0` exactly at fixed sample 486, with
+  scalar-peer PCM/report parity. Limiter fmt, locked tests (8 passed), and all-target `-D warnings`
+  Clippy passed; `timed_benchmark_invocations=0`.
