@@ -1196,9 +1196,11 @@ fn read_f32(bytes: &[u8], word: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::KernelBackendV1;
     use miso_engine_effect_contract::{
-        EffectProcessBlock, PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort,
-        StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
+        EffectBankProcessBlock, EffectProcessBlock, PrepareEffectLimits, PreparedNativeEffectBank,
+        PreparedPortsV1, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput,
+        validate_descriptor_v1,
     };
 
     fn initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
@@ -1253,6 +1255,97 @@ mod tests {
             )
             .expect("snapshot");
         (left, right)
+    }
+
+    fn snapshot_bank(effect: &dyn PreparedNativeEffectBank, track: u32) -> (Vec<u8>, Vec<u8>) {
+        let sizes = effect.metadata().program_key.state_sizes;
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        effect
+            .snapshot_track_state_payload(
+                track,
+                StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("sizes"),
+            )
+            .expect("snapshot");
+        (left, right)
+    }
+
+    fn scalar_prepared(
+        values: &[InitialParameterValue],
+        link_mode: LinkMode,
+    ) -> PreparedTruePeakLimiter {
+        let mut preparation = request(values);
+        preparation.link_mode = link_mode;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+            .expect("metadata");
+        let (left_defaults, right_defaults) = initial_defaults(values).expect("defaults");
+        PreparedTruePeakLimiter {
+            metadata,
+            left_defaults,
+            right_defaults,
+            left: Lane::new(&left_defaults, metadata.sample_rate).expect("left lane"),
+            right: Lane::new(&right_defaults, metadata.sample_rate).expect("right lane"),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn w8_prepared(
+        values: &[[InitialParameterValue; PARAMETER_COUNT * 2]; 8],
+        link_mode: LinkMode,
+    ) -> PreparedTruePeakLimiterBank<8> {
+        let mut first = request(&values[0]);
+        first.link_mode = link_mode;
+        let effect_metadata =
+            expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, first).expect("metadata");
+        let left_defaults =
+            core::array::from_fn(|track| initial_defaults(&values[track]).expect("defaults").0);
+        let right_defaults =
+            core::array::from_fn(|track| initial_defaults(&values[track]).expect("defaults").1);
+        let kernel = PreparedGateGainKernelV1::try_new(KernelBackendV1::X86Avx2)
+            .expect("Issue 050 requires an executed available W8 backend");
+        PreparedTruePeakLimiterBank {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Eight,
+                program_key: effect_metadata.program_key(),
+            },
+            effect_metadata,
+            kernel,
+            left_defaults,
+            right_defaults,
+            left: core::array::from_fn(|track| {
+                Lane::new(&left_defaults[track], effect_metadata.sample_rate).expect("left lane")
+            }),
+            right: core::array::from_fn(|track| {
+                Lane::new(&right_defaults[track], effect_metadata.sample_rate).expect("right lane")
+            }),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn pack_w8(channels: &[Vec<f32>]) -> Vec<f32> {
+        assert_eq!(channels.len(), 8);
+        let frames = channels[0].len();
+        assert!(channels.iter().all(|channel| channel.len() == frames));
+        let mut packed = vec![0.0; frames * 8];
+        for frame in 0..frames {
+            for track in 0..8 {
+                packed[frame * 8 + track] = channels[track][frame];
+            }
+        }
+        packed
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_w8_bits(packed: &[f32], expected: &[Vec<f32>], side: &str) {
+        for (track, channel) in expected.iter().enumerate() {
+            for (frame, value) in channel.iter().enumerate() {
+                assert_eq!(
+                    packed[frame * 8 + track].to_bits(),
+                    value.to_bits(),
+                    "{side} track {track}, frame {frame}"
+                );
+            }
+        }
     }
 
     fn render_blocks(
@@ -1473,5 +1566,446 @@ mod tests {
             read_f32(&discontinuity.0, 6).to_bits(),
             (-12.0_f32).to_bits()
         );
+    }
+
+    #[test]
+    fn bank_binding_validates_before_fallback_and_retains_exact_width_bytes() {
+        let factory = TruePeakLimiterFactory;
+        for (sample_rate, dual_mono_state_bytes, w4, w8) in [
+            (44_100, 7_304_u64, 29_312_u64, 58_624_u64),
+            (48_000, 7_928, 31_808, 63_616),
+            (88_200, 14_360, 57_536, 115_072),
+            (96_000, 15_608, 62_528, 125_056),
+        ] {
+            assert_eq!((dual_mono_state_bytes + 24) * 4, w4, "W4 {sample_rate}");
+            assert_eq!((dual_mono_state_bytes + 24) * 8, w8, "W8 {sample_rate}");
+            let values = vec![initial_values(); 4];
+            let requests = values
+                .iter()
+                .map(|values| request_at_rate(values, sample_rate))
+                .collect::<Vec<_>>();
+            let result = factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::WasmSimd128,
+                    width: BankWidth::Four,
+                    requests: &requests,
+                })
+                .expect("valid W4 request");
+            if PreparedGateGainKernelV1::try_new(KernelBackendV1::WasmSimd128).is_err() {
+                assert!(
+                    result.is_none(),
+                    "legal unavailable W4 fallback {sample_rate}"
+                );
+            }
+        }
+
+        let values = vec![initial_values(); 4];
+        let mut malformed = values.clone();
+        malformed[3][0].value = f32::NAN;
+        let malformed_requests = malformed
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<PrepareEffectRequest<'_>>>();
+        let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::WasmSimd128,
+            width: BankWidth::Four,
+            requests: &malformed_requests,
+        }) {
+            Ok(_) => panic!("malformed member must reject before unavailable fallback"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.parameter.initial");
+
+        let mut changed_program = values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<PrepareEffectRequest<'_>>>();
+        changed_program[3].bypass = true;
+        assert_eq!(
+            match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: KernelBackendV1::WasmSimd128,
+                width: BankWidth::Four,
+                requests: &changed_program,
+            }) {
+                Ok(_) => panic!("program mismatch"),
+                Err(error) => error,
+            },
+            EffectPrepareError {
+                code: "effect.bank.program"
+            }
+        );
+
+        let mut invented_port = values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<PrepareEffectRequest<'_>>>();
+        invented_port[3].ports.sidechain = PreparedSidechainPort::Unconnected {
+            id: port_id("main-in"),
+            required: false,
+        };
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::WasmSimd128,
+                    width: BankWidth::Four,
+                    requests: &invented_port,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn executed_w8_matches_scalar_through_state_automation_and_lane_recovery() {
+        const WIDTH: usize = 8;
+        const FRAMES: usize = 128;
+        let values: [[InitialParameterValue; PARAMETER_COUNT * 2]; WIDTH] =
+            core::array::from_fn(|track| {
+                let mut values = initial_values();
+                values[0].value = -6.0 - track as f32;
+                values[1].value = -8.0 - track as f32;
+                values[2].value = 10.0 + track as f32;
+                values[3].value = 20.0 + track as f32;
+                values[4].value = [0.0, 5.0, 10.0][track % 3];
+                values[5].value = [10.0, 5.0, 0.0][track % 3];
+                values
+            });
+
+        for link_mode in [LinkMode::DualMono, LinkMode::Maximum] {
+            let mut bank = w8_prepared(&values, link_mode);
+            let mut scalars = values
+                .iter()
+                .map(|values| scalar_prepared(values, link_mode))
+                .collect::<Vec<_>>();
+            let automation = (0..WIDTH)
+                .map(|track| PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel: ParameterChannel::Left,
+                    parameter_index: 0,
+                    start_sample: FRAMES as u64,
+                    end_sample: FRAMES as u64,
+                    start_value: -18.0 + track as f32 * 0.5,
+                    end_value: -18.0 + track as f32 * 0.5,
+                })
+                .collect::<Vec<_>>();
+            let offsets = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+            for block_index in 0..5 {
+                let first_sample = (block_index * FRAMES) as u64;
+                let scalar_left = (0..WIDTH)
+                    .map(|track| {
+                        (0..FRAMES)
+                            .map(|frame| {
+                                if block_index == 0 && frame == 0 {
+                                    1.0 - track as f32 * 0.03125
+                                } else if block_index == 2 && frame == 11 && track == 6 {
+                                    f32::NAN
+                                } else {
+                                    0.04 + track as f32 * 0.002 + frame as f32 * 0.00001
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let scalar_right = (0..WIDTH)
+                    .map(|track| {
+                        (0..FRAMES)
+                            .map(|frame| {
+                                if block_index == 0 && frame == 0 {
+                                    0.5 - track as f32 * 0.015625
+                                } else {
+                                    -0.03 - track as f32 * 0.001 - frame as f32 * 0.00001
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let mut bank_left = pack_w8(&scalar_left);
+                let mut bank_right = pack_w8(&scalar_right);
+                let bank_report = bank.process_bank(
+                    EffectBankProcessBlock::new(
+                        &mut bank_left,
+                        &mut bank_right,
+                        None,
+                        FRAMES as u32,
+                        BankWidth::Eight,
+                        first_sample,
+                        if block_index == 1 { &automation } else { &[] },
+                        if block_index == 1 {
+                            &offsets
+                        } else {
+                            &[0; WIDTH + 1]
+                        },
+                        128,
+                    )
+                    .expect("bank block"),
+                );
+                let mut expected_left = Vec::with_capacity(WIDTH);
+                let mut expected_right = Vec::with_capacity(WIDTH);
+                for track in 0..WIDTH {
+                    let mut left = scalar_left[track].clone();
+                    let mut right = scalar_right[track].clone();
+                    let spans = if block_index == 1 {
+                        &automation[track..=track]
+                    } else {
+                        &[]
+                    };
+                    let report = scalars[track].process(
+                        EffectProcessBlock::new(
+                            &mut left,
+                            &mut right,
+                            None,
+                            first_sample,
+                            spans,
+                            128,
+                        )
+                        .expect("scalar block"),
+                    );
+                    assert_eq!(
+                        bank_report.reports[track], report,
+                        "report {link_mode:?} {track}"
+                    );
+                    expected_left.push(left);
+                    expected_right.push(right);
+                    assert_eq!(
+                        snapshot_bank(&bank, track as u32),
+                        snapshot(&scalars[track])
+                    );
+                }
+                assert_w8_bits(&bank_left, &expected_left, "left");
+                assert_w8_bits(&bank_right, &expected_right, "right");
+            }
+
+            let saved_bank: [(Vec<u8>, Vec<u8>); WIDTH] =
+                core::array::from_fn(|track| snapshot_bank(&bank, track as u32));
+            let saved_scalars = scalars
+                .iter()
+                .map(|effect| snapshot(effect))
+                .collect::<Vec<_>>();
+            let mut restored_bank = w8_prepared(&values, link_mode);
+            let mut restored_scalars = values
+                .iter()
+                .map(|values| scalar_prepared(values, link_mode))
+                .collect::<Vec<_>>();
+            for track in 0..WIDTH {
+                let sizes = restored_bank.metadata().program_key.state_sizes;
+                restored_bank
+                    .restore_track_state_payload(
+                        track as u32,
+                        1,
+                        StatePayloadInput::new(
+                            &[],
+                            &saved_bank[track].0,
+                            &saved_bank[track].1,
+                            sizes,
+                        )
+                        .expect("bank state"),
+                    )
+                    .expect("bank restore");
+                restored_scalars[track]
+                    .restore_state_payload(
+                        1,
+                        StatePayloadInput::new(
+                            &[],
+                            &saved_scalars[track].0,
+                            &saved_scalars[track].1,
+                            sizes,
+                        )
+                        .expect("scalar state"),
+                    )
+                    .expect("scalar restore");
+            }
+            let scalar_left = (0..WIDTH)
+                .map(|track| vec![0.1 + track as f32 * 0.001; FRAMES])
+                .collect::<Vec<_>>();
+            let scalar_right = (0..WIDTH)
+                .map(|track| vec![-0.05 - track as f32 * 0.001; FRAMES])
+                .collect::<Vec<_>>();
+            let mut original_left = pack_w8(&scalar_left);
+            let mut original_right = pack_w8(&scalar_right);
+            let mut restored_left = original_left.clone();
+            let mut restored_right = original_right.clone();
+            let original_report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut original_left,
+                    &mut original_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    640,
+                    &[],
+                    &[0; WIDTH + 1],
+                    128,
+                )
+                .expect("uninterrupted bank"),
+            );
+            let restored_report = restored_bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut restored_left,
+                    &mut restored_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    640,
+                    &[],
+                    &[0; WIDTH + 1],
+                    128,
+                )
+                .expect("restored bank"),
+            );
+            assert_eq!(
+                original_report, restored_report,
+                "restored report {link_mode:?}"
+            );
+            assert_eq!(
+                original_left
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                restored_left
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                original_right
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                restored_right
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            for (track, scalar) in scalars.iter_mut().enumerate() {
+                assert_eq!(
+                    snapshot_bank(&bank, track as u32),
+                    snapshot_bank(&restored_bank, track as u32)
+                );
+                let mut left = scalar_left[track].clone();
+                let mut right = scalar_right[track].clone();
+                assert_eq!(
+                    original_report.reports[track],
+                    scalar.process(
+                        EffectProcessBlock::new(&mut left, &mut right, None, 640, &[], 128)
+                            .expect("scalar continuation")
+                    )
+                );
+                assert_eq!(snapshot_bank(&bank, track as u32), snapshot(scalar));
+            }
+
+            bank.reset(ResetKind::DiscontinuityKeepParameters);
+            for (track, scalar) in scalars.iter_mut().enumerate() {
+                scalar.reset(ResetKind::DiscontinuityKeepParameters);
+                assert_eq!(snapshot_bank(&bank, track as u32), snapshot(scalar));
+            }
+            bank.reset(ResetKind::FullToDefaults);
+            for (track, scalar) in scalars.iter_mut().enumerate() {
+                scalar.reset(ResetKind::FullToDefaults);
+                assert_eq!(snapshot_bank(&bank, track as u32), snapshot(scalar));
+            }
+        }
+
+        let mut bank = w8_prepared(&values, LinkMode::DualMono);
+        let mut scalars = values
+            .iter()
+            .map(|values| scalar_prepared(values, LinkMode::DualMono))
+            .collect::<Vec<_>>();
+        for block in 0..5 {
+            let scalar_left = (0..WIDTH)
+                .map(|track| vec![0.25 + track as f32 * 0.001; FRAMES])
+                .collect::<Vec<_>>();
+            let scalar_right = (0..WIDTH)
+                .map(|track| vec![-0.125 - track as f32 * 0.001; FRAMES])
+                .collect::<Vec<_>>();
+            let mut bank_left = pack_w8(&scalar_left);
+            let mut bank_right = pack_w8(&scalar_right);
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    FRAMES as u32,
+                    BankWidth::Eight,
+                    (block * FRAMES) as u64,
+                    &[],
+                    &[0; WIDTH + 1],
+                    128,
+                )
+                .expect("warm bank"),
+            );
+            for track in 0..WIDTH {
+                let mut left = scalar_left[track].clone();
+                let mut right = scalar_right[track].clone();
+                scalars[track].process(
+                    EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        None,
+                        (block * FRAMES) as u64,
+                        &[],
+                        128,
+                    )
+                    .expect("warm scalar"),
+                );
+            }
+        }
+        bank.left[3].gain = f32::NAN;
+        scalars[3].left.gain = f32::NAN;
+        let scalar_left = (0..WIDTH)
+            .map(|track| vec![0.2 + track as f32 * 0.001])
+            .collect::<Vec<_>>();
+        let scalar_right = (0..WIDTH)
+            .map(|track| vec![-0.1 - track as f32 * 0.001])
+            .collect::<Vec<_>>();
+        let mut bank_left = pack_w8(&scalar_left);
+        let mut bank_right = pack_w8(&scalar_right);
+        let report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                1,
+                BankWidth::Eight,
+                640,
+                &[],
+                &[0; WIDTH + 1],
+                128,
+            )
+            .expect("recovery bank"),
+        );
+        assert_eq!(report.reports[3].recovered_left_samples, 1);
+        assert!(
+            report
+                .reports
+                .iter()
+                .enumerate()
+                .all(|(track, item)| track == 3 || item.recovered_left_samples == 0)
+        );
+        for track in 0..WIDTH {
+            let mut left = scalar_left[track].clone();
+            let mut right = scalar_right[track].clone();
+            let scalar_report = scalars[track].process(
+                EffectProcessBlock::new(&mut left, &mut right, None, 640, &[], 128)
+                    .expect("recovery scalar"),
+            );
+            assert_eq!(
+                report.reports[track], scalar_report,
+                "recovery report {track}"
+            );
+            assert_eq!(
+                bank_left[track].to_bits(),
+                left[0].to_bits(),
+                "recovery left {track}"
+            );
+            assert_eq!(
+                bank_right[track].to_bits(),
+                right[0].to_bits(),
+                "recovery right {track}"
+            );
+            assert_eq!(
+                snapshot_bank(&bank, track as u32),
+                snapshot(&scalars[track])
+            );
+        }
     }
 }

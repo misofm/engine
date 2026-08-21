@@ -155,3 +155,21 @@ and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS
 - The direct W4/W8 scalar-parity, snapshot/restore, recovery/isolation and resource tests were
   intentionally not added after the scope-freeze instruction, and registry/graph work did not
   start. This is not a full Issue-050 PASS verdict. `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 bank evidence checkpoint
+
+- Candidate base: `8a8acd2`; test-only changes added no production, core, registry, graph, PDC,
+  audit, target/object, benchmark, timing or listening behavior.
+- `bank_binding_validates_before_fallback_and_retains_exact_width_bytes` covers all four rate
+  width-resource rows, legal unavailable W4 fallback, malformed-member-before-fallback, immutable
+  program mismatch, and invented-sidechain rejection.
+- `executed_w8_matches_scalar_through_state_automation_and_lane_recovery` executed native W8 and
+  compared it with eight scalar peers for DualMono and Maximum: guarded impulse and hold/release,
+  per-track 0/5/10 ms lookahead, ceiling Point automation, sanitation, active transactional
+  restore, both resets, and an injected left-lane `NaN` gain recovery with track/L/R report and
+  payload isolation.
+- `cargo fmt --check --package miso-engine-true-peak-limiter`, locked limiter library tests
+  (7 passed), and locked all-target warning-denied limiter Clippy: PASS.
+- This is a representative bank proof checkpoint, not final Issue-050 PASS: graph/registry/PDC,
+  workspace/policy seals and Issue-049 qualification remain unrun. The bank signed-zero path has
+  no separate W8-only assertion in this frozen tranche. `timed_benchmark_invocations=0`.
