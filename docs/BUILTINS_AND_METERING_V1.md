@@ -32,10 +32,12 @@ those explicitly out-of-scope claims.
 ## Current evidence status
 
 The implementation tests verify scalar gain/matrix/meter basics, all named tap preparation,
-transactional duplicate/unknown meter rejection, and graph installation of exactly the three
-internal sections with infinite filter-tail propagation. Release scalar-builtins compilation also
-passes Android/iOS AArch64 and baseline/`simd128` Wasm targets. This does not yet constitute the
-full issue acceptance corpus: independent `f64` sweep fixtures, manifest-checked fixtures,
-allocation trace, one-million-call audit, full workspace target builds, and real blinded listening
-records remain required.
+transactional duplicate/unknown meter rejection, graph installation of exactly the three internal
+sections with infinite filter-tail propagation, and 10,000 deterministic bounded parameter/block
+mutations. An independent `f64` oracle re-derives RBJ HPF/LPF coefficients and verifies the
+cascaded impulse response at every required rate. Release scalar-builtins compilation also passes
+Android/iOS AArch64 and baseline/`simd128` Wasm targets. This does not yet constitute the full
+issue acceptance corpus: independent `f64` sweep fixtures, manifest-checked fixtures, allocation
+trace, one-million-call audit, full workspace target builds, and real blinded listening records
+remain required.
 The exactly-once benchmark has not been invoked.

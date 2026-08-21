@@ -78,9 +78,13 @@ tap requests, transactional invalid requests, internal binding ownership, tail p
 the existing 65,537-track graph resource test; format, diff check, and warning-denied focused
 Clippy also pass. Release scalar-builtins checks pass for `aarch64-linux-android`,
 `aarch64-apple-ios`, and `wasm32-unknown-unknown` both with `-simd128` and `+simd128`. The
-exactly-once benchmark invocation count is **0**.
+separate `miso-engine-dsp-reference` f64 RBJ oracle now covers an impulse through both filters at
+all eight required rates; 10,000 deterministic scalar parameter/block mutations remain finite.
+The complete workspace test suite and warning-denied all-target Clippy pass. The exactly-once
+benchmark invocation count is **0**.
 
 NOT YET SATISFIED: fixture-manifest corpus and independent f64 sweep oracle, full rate/quantum
-matrix/mutation/allocation audits, issue-specific policy/mutation tooling, full workspace target
-checks, real blinded listening records, and the authorized single benchmark. These remain gates;
+matrix/meter mutation and allocation audits, issue-specific one-million-call tooling, full
+workspace cross-target checks, real blinded listening records, and the authorized single
+benchmark. These remain gates;
 this evidence does not claim issue completion.

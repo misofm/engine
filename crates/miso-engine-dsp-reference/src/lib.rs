@@ -3,11 +3,13 @@
 //! This crate intentionally has no dependency on engine production kernels. It is not realtime
 //! code and exists solely as an auditable numerical oracle.
 
+mod biquad;
 mod block;
 mod processor;
 mod signals;
 mod spectrum;
 
+pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
 pub use processor::{IdentityProcessor, OfflineF64Processor, render_planar_f64};
 pub use signals::{

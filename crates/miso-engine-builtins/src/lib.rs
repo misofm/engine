@@ -931,6 +931,7 @@ fn sanitize(value: f32, count: &mut u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_dsp_reference::{ReferenceBiquad, ReferenceFilterKind};
     #[test]
     fn polarity_trim_fader_and_matrix_are_exact() {
         let mut chain = BuiltinChain::new(
@@ -1005,5 +1006,104 @@ mod tests {
         assert_eq!(snap.end_sample, 5);
         assert_eq!(snap.left.clipped_samples, 1);
         assert_eq!(snap.right.clipped_samples, 1);
+    }
+    #[test]
+    fn all_required_rates_match_the_independent_f64_rbj_oracle() {
+        for rate in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+        ] {
+            let parameters = BuiltinParameters {
+                left: ChannelParameters {
+                    hpf_hz: 100.0,
+                    lpf_hz: 1_000.0,
+                    ..ChannelParameters::default()
+                },
+                ..BuiltinParameters::default()
+            };
+            let mut chain = BuiltinChain::new(rate, parameters).expect("prepare");
+            let mut left = [0.0_f32; 256];
+            let mut right = [0.0_f32; 256];
+            left[0] = 1.0;
+            let mut high = ReferenceBiquad::rbj_butterworth(
+                f64::from(rate),
+                100.0,
+                ReferenceFilterKind::HighPass,
+            )
+            .expect("reference high pass");
+            let mut low = ReferenceBiquad::rbj_butterworth(
+                f64::from(rate),
+                1_000.0,
+                ReferenceFilterKind::LowPass,
+            )
+            .expect("reference low pass");
+            let expected: Vec<_> = (0..left.len())
+                .map(|index| low.process(high.process(if index == 0 { 1.0 } else { 0.0 })))
+                .collect();
+            let _ = chain.process_input(DualMonoBlock {
+                left: &mut left,
+                right: &mut right,
+                first_sample: 0,
+            });
+            for (actual, reference) in left.iter().zip(expected) {
+                assert!(
+                    (f64::from(*actual) - reference).abs() <= 2e-5,
+                    "rate={rate}, actual={actual}, reference={reference}"
+                );
+            }
+            assert_eq!(right, [0.0; 256]);
+        }
+    }
+    #[test]
+    fn ten_thousand_bounded_parameter_and_block_mutations_stay_finite() {
+        let mut state = 0x5EED_CAFE_1234_5678_u64;
+        for iteration in 0..10_000_u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let fraction = |shift| ((state >> shift) as u32) as f32 / u32::MAX as f32;
+            let db = |shift| -144.0 + fraction(shift) * 168.0;
+            let matrix = Matrix2x2 {
+                ll: fraction(0) * 2.0 - 1.0,
+                lr: fraction(8) * 2.0 - 1.0,
+                rl: fraction(16) * 2.0 - 1.0,
+                rr: fraction(24) * 2.0 - 1.0,
+            };
+            let rate = [44_100, 48_000, 88_200, 96_000][(state as usize) & 3];
+            let mut chain = BuiltinChain::new(
+                rate,
+                BuiltinParameters {
+                    left: ChannelParameters {
+                        polarity_invert: state & 1 != 0,
+                        trim_db: db(0),
+                        hpf_hz: 100.0,
+                        lpf_hz: 1_000.0,
+                        fader_db: db(32),
+                        muted: state & 2 != 0,
+                    },
+                    right: ChannelParameters {
+                        polarity_invert: state & 4 != 0,
+                        trim_db: db(8),
+                        hpf_hz: 0.0,
+                        lpf_hz: 0.0,
+                        fader_db: db(40),
+                        muted: state & 8 != 0,
+                    },
+                    matrix,
+                    smoothing_samples: (state as u32) & 127,
+                },
+            )
+            .expect("generated parameters are in the prepared domain");
+            chain
+                .set_matrix_target(Matrix2x2::IDENTITY)
+                .expect("identity");
+            let mut left = [0.25_f32; 127];
+            let mut right = [-0.5_f32; 127];
+            let _ = chain.process_dual_mono(DualMonoBlock {
+                left: &mut left,
+                right: &mut right,
+                first_sample: iteration.saturating_mul(127),
+            });
+            assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
+        }
     }
 }
