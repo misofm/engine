@@ -558,3 +558,31 @@ not complete resource-containment evidence: the required test-only allocation tr
 per-seal-field corruption matrix, fixture corpus, graph-backed million-render/swap audit, target
 matrix, workspace sealing, and frozen benchmark implementation remain open. Human listening is
 Issue #33 and remains pending. Timed benchmark invocation count remains **0**.
+
+## Final attempt-3 Terra evidence (2026-08-21; graph realtime/lifecycle tranche)
+
+`miso_engine_builtins_graph_audit` compiles the canonical accepted session, prepares the sealed
+builtin artifact with all seven meter requests, lowers it through `GraphCompiler`, and binds only
+the genuine external source and output nodes. It renders through `RealtimePlanOwner` at exactly
+48 kHz/128 frames for 1,000,000 blocks; no direct `BuiltinChain` render is used. The fixed
+exchange sequence applies plan 7 at a block boundary, proves plan 7 renders when plan 8 is
+deferred by the full retirement queue, then reclaims plan 6 on the dedicated retirement thread
+before applying plan 8. Both displaced plans are destroyed by that retirement owner after their
+completed render markers.
+
+The frozen audit drains exactly seven observer windows for each of six drain points. Its meter
+snapshots prove 42 queue-success windows and 6,999,958 exact queue-full/drop windows. It records
+epoch 1 rendering four blocks and epoch 2 rendering 999,996 blocks, two applied swaps, one forced
+retirement-full deferral, one prior-plan render on deferral, and unchanged planar output backing
+addresses. The audited allocator and all seven forbidden-operation hooks report zero allocation,
+deallocation, lock, log, file-I/O, network-I/O, syscall, and total violations. The native release
+`strace` gate checks all seven marker-delimited render intervals and found no syscall between
+markers. Deliberate allocation, deallocation, lock, log, file-I/O, network-I/O, and syscall
+probes each abort as required.
+
+PASS: `cargo run -p miso-engine-builtins-audit --bin miso_engine_builtins_graph_audit`,
+`scripts/test-builtins-graph-audit-probes.sh`,
+`scripts/trace-builtins-graph-audit.sh`, `scripts/check-realtime-policy.sh`, and
+`scripts/test-realtime-policy.sh`; focused warning-denied Clippy, formatting, and diff checks
+also pass. Benchmark invocation count remains **0**. This evidence does not authorize or invoke
+the timed benchmark.
