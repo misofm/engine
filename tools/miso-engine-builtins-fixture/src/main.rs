@@ -13,7 +13,9 @@ use miso_engine_builtins::{
 };
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
 use miso_engine_core::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
-use miso_engine_dsp_reference::{ReferenceFilterKind, rbj_butterworth_magnitude_db};
+use miso_engine_dsp_reference::{
+    ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput, rbj_butterworth_magnitude_db,
+};
 use miso_engine_effect_compiler::EffectPreparedSession;
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
@@ -46,6 +48,53 @@ const RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1: f64 = 0.05;
 const RESPONSE_RESIDUAL_LIMIT_DB_V1: f64 = -100.0;
 const RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1: f64 = -88.0;
 const RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB_V1: f64 = 5e-12;
+const METADATA_V1: &str = concat!(
+    "fixture_schema = 1\n",
+    "producer = \"miso-engine-builtins-fixture\"\n",
+    "production_pcm = \"miso-engine-builtins scalar f32, planar L then R\"\n",
+    "independent_response_oracle = \"miso-engine-dsp-reference::rbj_butterworth_magnitude_db\"\n",
+    "oracle_dependency_rule = \"miso-engine-dsp-reference has no production-builtin dependency\"\n",
+    "launch_rates_hz = [44100, 48000, 88200, 96000]\n",
+    "quanta_frames = [1, 127, 128, 255, 1024]\n"
+);
+const FUNCTIONAL_CASES_V1: [(&str, &str, &str); 22] = [
+    (
+        "identity-signed-zero",
+        "pcm",
+        "planar_l_then_r; signed_zero",
+    ),
+    ("polarity-gain", "pcm", "per_lane_polarity_trim_fader"),
+    ("mute", "pcm", "per_lane_mute"),
+    ("filters-asymmetric", "pcm", "left_hpf_right_lpf"),
+    ("matrix-corners", "pcm", "all_16_binary_2x2_matrices"),
+    (
+        "matrix-ramp",
+        "pcm",
+        "updates=0,1,2,127,128,u32_max_bounded_prefix",
+    ),
+    ("matrix-retarget", "pcm", "mid_ramp_target_replacement"),
+    ("reset", "pcm", "discontinuity_and_full_reset"),
+    ("lr-isolation", "pcm", "independent_filter_state"),
+    ("partition", "pcm", "all_declared_block_splits"),
+    ("graph-taps", "graph", "seven_taps_and_output_pcm"),
+    ("meter-partial", "meter", "incomplete_window"),
+    ("meter-multiple", "meter", "multiple_windows"),
+    ("meter-wrap", "meter", "ring_wrap_with_interleaved_drain"),
+    ("meter-full-drop", "meter", "full_queue_and_loss_counter"),
+    ("meter-drain", "meter", "consumer_drain"),
+    ("meter-discontinuity", "meter", "noncontiguous_sample_time"),
+    ("meter-reset", "meter", "both_reset_modes"),
+    ("meter-overflow", "meter", "sample_time_overflow"),
+    ("meter-sanitization", "meter", "nan_and_infinity"),
+    ("diagnostics", "diagnostic", "exact_code_and_path_tuples"),
+    (
+        "resource-grid",
+        "resource",
+        "tracks=1,4,65537; meters=0,1,7",
+    ),
+];
+const PCM_INPUT_LEFT_V1: [f32; 8] = [0.0, -0.0, 0.25, -0.5, 1.0, -1.0, 0.125, -0.25];
+const PCM_INPUT_RIGHT_V1: [f32; 8] = [-0.0, 0.0, -0.125, 0.5, -1.0, 1.0, -0.25, 0.25];
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -57,7 +106,7 @@ fn main() {
 fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.as_slice() {
         [mode, root] if mode == "--write" => write_and_verify(Path::new(root)),
-        [mode, root] if mode == "--check" => check_fixture_root_v1(Path::new(root)),
+        [mode, root] if mode == "--check" => check_read_only_fixture_root_v1(Path::new(root)),
         _ => {
             Err("usage: miso_engine_builtins_fixture --write|--check SCRATCH_DIRECTORY".to_owned())
         }
@@ -98,6 +147,23 @@ struct FixtureManifestEntryV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FixtureManifestV1 {
     entries: Vec<FixtureManifestEntryV1>,
+}
+
+/// One exact non-response declaration from `cases.toml`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FunctionalCaseV1 {
+    id: String,
+    category: String,
+    rate_hz: u32,
+    quantum_frames: u32,
+    detail: String,
+}
+
+/// The two typed subsets of the complete cases declaration file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedCasesV1 {
+    response_ids: BTreeSet<String>,
+    functional_cases: BTreeMap<String, FunctionalCaseV1>,
 }
 
 /// One parsed independent response row from the checked V1 CSV.
@@ -363,16 +429,7 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
 }
 
 fn metadata() -> String {
-    concat!(
-        "fixture_schema = 1\n",
-        "producer = \"miso-engine-builtins-fixture\"\n",
-        "production_pcm = \"miso-engine-builtins scalar f32, planar L then R\"\n",
-        "independent_response_oracle = \"miso-engine-dsp-reference::rbj_butterworth_magnitude_db\"\n",
-        "oracle_dependency_rule = \"miso-engine-dsp-reference has no production-builtin dependency\"\n",
-        "launch_rates_hz = [44100, 48000, 88200, 96000]\n",
-        "quanta_frames = [1, 127, 128, 255, 1024]\n"
-    )
-    .to_owned()
+    METADATA_V1.to_owned()
 }
 
 fn cases() -> String {
@@ -404,42 +461,7 @@ fn cases() -> String {
             }
         }
     }
-    for (id, category, detail) in [
-        (
-            "identity-signed-zero",
-            "pcm",
-            "planar_l_then_r; signed_zero",
-        ),
-        ("polarity-gain", "pcm", "per_lane_polarity_trim_fader"),
-        ("mute", "pcm", "per_lane_mute"),
-        ("filters-asymmetric", "pcm", "left_hpf_right_lpf"),
-        ("matrix-corners", "pcm", "all_16_binary_2x2_matrices"),
-        (
-            "matrix-ramp",
-            "pcm",
-            "updates=0,1,2,127,128,u32_max_bounded_prefix",
-        ),
-        ("matrix-retarget", "pcm", "mid_ramp_target_replacement"),
-        ("reset", "pcm", "discontinuity_and_full_reset"),
-        ("lr-isolation", "pcm", "independent_filter_state"),
-        ("partition", "pcm", "all_declared_block_splits"),
-        ("graph-taps", "graph", "seven_taps_and_output_pcm"),
-        ("meter-partial", "meter", "incomplete_window"),
-        ("meter-multiple", "meter", "multiple_windows"),
-        ("meter-wrap", "meter", "ring_wrap_with_interleaved_drain"),
-        ("meter-full-drop", "meter", "full_queue_and_loss_counter"),
-        ("meter-drain", "meter", "consumer_drain"),
-        ("meter-discontinuity", "meter", "noncontiguous_sample_time"),
-        ("meter-reset", "meter", "both_reset_modes"),
-        ("meter-overflow", "meter", "sample_time_overflow"),
-        ("meter-sanitization", "meter", "nan_and_infinity"),
-        ("diagnostics", "diagnostic", "exact_code_and_path_tuples"),
-        (
-            "resource-grid",
-            "resource",
-            "tracks=1,4,65537; meters=0,1,7",
-        ),
-    ] {
+    for (id, category, detail) in FUNCTIONAL_CASES_V1 {
         entries.push((id.to_owned(), format!("category = \"{category}\"\nrate_hz = 48000\nquantum_frames = 128\ndetail = \"{detail}\"\n")));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1422,7 +1444,7 @@ fn write_and_verify(root: &Path) -> Result<(), String> {
     fs::write(root.join("MANIFEST.tsv"), manifest(&files))
         .map_err(|error| format!("write manifest: {error}"))?;
     verify_generated_scratch(root, &files)?;
-    check_fixture_root_v1(root)
+    check_read_only_fixture_root_v1(root)
 }
 
 fn verify_generated_scratch(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
@@ -1449,14 +1471,15 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     let manifest = parse_manifest_v1(root)?;
     verify_manifest_bytes_v1(root, &manifest)?;
     verify_path_class_coverage_v1(&manifest)?;
-    let case_response_ids = verify_cases_v1(root)?;
+    let cases = verify_cases_v1(root)?;
     let csv_response_ids = verify_reference_oracle_v1(root)?;
-    if case_response_ids != csv_response_ids {
+    if cases.response_ids != csv_response_ids {
         let missing: Vec<_> = csv_response_ids
-            .difference(&case_response_ids)
+            .difference(&cases.response_ids)
             .take(1)
             .collect();
-        let unexpected: Vec<_> = case_response_ids
+        let unexpected: Vec<_> = cases
+            .response_ids
             .difference(&csv_response_ids)
             .take(1)
             .collect();
@@ -1464,8 +1487,21 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
             "cases.toml and reference/filter-response.csv response IDs differ; missing={missing:?} unexpected={unexpected:?}"
         ));
     }
+    verify_metadata_v1(root)?;
+    verify_functional_fixture_completeness_v1(root, &manifest, &cases.functional_cases)?;
     verify_jsonl_payloads_v1(root)?;
     verify_benchmark_inputs_v1(root, &manifest)?;
+    Ok(())
+}
+
+/// Runs the supplied-root checker while proving the read-only path did not mutate any byte.
+fn check_read_only_fixture_root_v1(root: &Path) -> Result<(), String> {
+    let before = fixture_tree_hash_v1(root)?;
+    check_fixture_root_v1(root)?;
+    let after = fixture_tree_hash_v1(root)?;
+    if before != after {
+        return Err("--check mutated the fixture tree".to_owned());
+    }
     Ok(())
 }
 
@@ -1618,7 +1654,7 @@ fn verify_path_class_coverage_v1(manifest: &FixtureManifestV1) -> Result<(), Str
     Ok(())
 }
 
-fn verify_cases_v1(root: &Path) -> Result<BTreeSet<String>, String> {
+fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
     let bytes = read_regular_file(&root.join("cases.toml"), "cases.toml")?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "cases.toml is not UTF-8".to_owned())?;
     let mut blocks = text.split("[[case]]\n");
@@ -1629,6 +1665,7 @@ fn verify_cases_v1(root: &Path) -> Result<BTreeSet<String>, String> {
     let mut case_count = 0_usize;
     let mut previous = None::<String>;
     let mut response_ids = BTreeSet::new();
+    let mut functional_cases = BTreeMap::new();
     for block in blocks {
         if block.is_empty() {
             continue;
@@ -1640,10 +1677,18 @@ fn verify_cases_v1(root: &Path) -> Result<BTreeSet<String>, String> {
             return Err(format!("cases.toml IDs are not strictly sorted: {id}"));
         }
         previous = Some(id.to_owned());
-        if quoted_case_field(block, "category") == Some("filter_response")
-            && !response_ids.insert(id.to_owned())
-        {
-            return Err(format!("cases.toml duplicate response ID: {id}"));
+        if quoted_case_field(block, "category") == Some("filter_response") {
+            if !response_ids.insert(id.to_owned()) {
+                return Err(format!("cases.toml duplicate response ID: {id}"));
+            }
+        } else {
+            let functional = parse_functional_case_v1(block)?;
+            if functional.id != id {
+                return Err(format!("functional case ID parse mismatch: {id}"));
+            }
+            if functional_cases.insert(id.to_owned(), functional).is_some() {
+                return Err(format!("cases.toml duplicate functional ID: {id}"));
+            }
         }
     }
     if case_count != CASE_COUNT_V1 || response_ids.len() != RESPONSE_CASE_COUNT_V1 {
@@ -1652,7 +1697,11 @@ fn verify_cases_v1(root: &Path) -> Result<BTreeSet<String>, String> {
             response_ids.len()
         ));
     }
-    Ok(response_ids)
+    verify_functional_cases_v1(&functional_cases)?;
+    Ok(VerifiedCasesV1 {
+        response_ids,
+        functional_cases,
+    })
 }
 
 fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
@@ -1660,6 +1709,546 @@ fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
         let value = line.strip_prefix(key)?.strip_prefix(" = \"")?;
         value.strip_suffix('"')
     })
+}
+
+fn parse_functional_case_v1(block: &str) -> Result<FunctionalCaseV1, String> {
+    let lines: Vec<_> = block.lines().filter(|line| !line.is_empty()).collect();
+    let [id, category, rate_hz, quantum_frames, detail] = lines.as_slice() else {
+        return Err("functional case does not have exactly five canonical fields".to_owned());
+    };
+    let id = parse_case_string_field_v1(id, "id")?;
+    let category = parse_case_string_field_v1(category, "category")?;
+    let rate_hz = parse_case_u32_field_v1(rate_hz, "rate_hz")?;
+    let quantum_frames = parse_case_u32_field_v1(quantum_frames, "quantum_frames")?;
+    let detail = parse_case_string_field_v1(detail, "detail")?;
+    Ok(FunctionalCaseV1 {
+        id,
+        category,
+        rate_hz,
+        quantum_frames,
+        detail,
+    })
+}
+
+fn parse_case_string_field_v1(line: &str, key: &str) -> Result<String, String> {
+    let value = line
+        .strip_prefix(key)
+        .and_then(|line| line.strip_prefix(" = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| format!("functional case has invalid {key} field"))?;
+    if value.contains('"') || value.contains('\\') {
+        return Err(format!("functional case has noncanonical {key} string"));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_case_u32_field_v1(line: &str, key: &str) -> Result<u32, String> {
+    let value = line
+        .strip_prefix(key)
+        .and_then(|line| line.strip_prefix(" = "))
+        .ok_or_else(|| format!("functional case has invalid {key} field"))?;
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("functional case {key} is not a canonical u32"))?;
+    if parsed.to_string() != value {
+        return Err(format!("functional case {key} is not canonical"));
+    }
+    Ok(parsed)
+}
+
+fn verify_functional_cases_v1(cases: &BTreeMap<String, FunctionalCaseV1>) -> Result<(), String> {
+    if cases.len() != FUNCTIONAL_CASES_V1.len() {
+        return Err(format!(
+            "cases.toml functional coverage differs: cases={} expected={}",
+            cases.len(),
+            FUNCTIONAL_CASES_V1.len()
+        ));
+    }
+    for (id, category, detail) in FUNCTIONAL_CASES_V1 {
+        let case = cases
+            .get(id)
+            .ok_or_else(|| format!("cases.toml missing functional case: {id}"))?;
+        if case.category != category
+            || case.rate_hz != 48_000
+            || case.quantum_frames != 128
+            || case.detail != detail
+        {
+            return Err(format!("cases.toml functional tuple differs: {id}"));
+        }
+    }
+    Ok(())
+}
+
+fn verify_metadata_v1(root: &Path) -> Result<(), String> {
+    let bytes = read_regular_file(&root.join("metadata.toml"), "metadata.toml")?;
+    if bytes != METADATA_V1.as_bytes() {
+        return Err(
+            "metadata.toml does not contain the exact canonical seven-key V1 metadata".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_functional_fixture_completeness_v1(
+    root: &Path,
+    manifest: &FixtureManifestV1,
+    cases: &BTreeMap<String, FunctionalCaseV1>,
+) -> Result<(), String> {
+    let ownership = functional_payload_ownership_v1();
+    let case_ids: BTreeSet<_> = cases.keys().map(String::as_str).collect();
+    let ownership_ids: BTreeSet<_> = ownership.keys().copied().collect();
+    if case_ids != ownership_ids {
+        return Err("functional case payload ownership is incomplete".to_owned());
+    }
+
+    let expected_payloads: BTreeSet<_> = ownership
+        .values()
+        .flat_map(|paths| paths.iter().map(String::as_str))
+        .collect();
+    let actual_payloads: BTreeSet<_> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.class,
+                FixturePathClassV1::Pcm
+                    | FixturePathClassV1::Meter
+                    | FixturePathClassV1::Diagnostics
+                    | FixturePathClassV1::Resources
+            )
+        })
+        .map(|entry| entry.path.as_str())
+        .collect();
+    if expected_payloads != actual_payloads {
+        let missing: Vec<_> = expected_payloads
+            .difference(&actual_payloads)
+            .take(1)
+            .collect();
+        let orphaned: Vec<_> = actual_payloads
+            .difference(&expected_payloads)
+            .take(1)
+            .collect();
+        return Err(format!(
+            "functional payload paths differ; missing={missing:?} orphaned={orphaned:?}"
+        ));
+    }
+
+    verify_pcm_semantics_v1(root)?;
+    verify_graph_tap_output_relation_v1(root)?;
+    Ok(())
+}
+
+fn functional_payload_ownership_v1() -> BTreeMap<&'static str, BTreeSet<String>> {
+    let mut ownership = BTreeMap::new();
+    for id in [
+        "identity-signed-zero",
+        "polarity-gain",
+        "mute",
+        "filters-asymmetric",
+        "matrix-retarget",
+        "reset",
+        "lr-isolation",
+        "partition",
+    ] {
+        ownership.insert(id, BTreeSet::from([format!("pcm/{id}.f32le")]));
+    }
+    let mut corners = BTreeSet::from(["pcm/matrix-corner.f32le".to_owned()]);
+    for bits in 0_u8..16 {
+        corners.insert(format!("pcm/matrix-corner-{bits:02}.f32le"));
+    }
+    ownership.insert("matrix-corners", corners);
+
+    let mut ramps = BTreeSet::from(["pcm/matrix-ramp.f32le".to_owned()]);
+    for updates in [0_u32, 1, 2, 127, 128, u32::MAX] {
+        ramps.insert(format!("pcm/matrix-ramp-{updates}.f32le"));
+    }
+    ownership.insert("matrix-ramp", ramps);
+    ownership.insert(
+        "graph-taps",
+        BTreeSet::from([
+            "pcm/graph-taps.f32le".to_owned(),
+            "meters/graph-taps.jsonl".to_owned(),
+        ]),
+    );
+    for id in FUNCTIONAL_CASES_V1
+        .iter()
+        .filter_map(|(id, category, _)| (*category == "meter").then_some(*id))
+    {
+        ownership.insert(
+            id,
+            BTreeSet::from(["meters/window-and-drop.jsonl".to_owned()]),
+        );
+    }
+    ownership.insert(
+        "diagnostics",
+        BTreeSet::from(["diagnostics.jsonl".to_owned()]),
+    );
+    ownership.insert(
+        "resource-grid",
+        BTreeSet::from(["resources.jsonl".to_owned()]),
+    );
+    ownership
+}
+
+fn verify_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+    verify_pcm_words_v1(
+        root,
+        "pcm/identity-signed-zero.f32le",
+        &pcm_words_v1(&PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+    )?;
+
+    let polarity_gain_left: Vec<_> = PCM_INPUT_LEFT_V1
+        .iter()
+        .copied()
+        .map(|sample| {
+            let signed = -sample;
+            let trimmed = signed * independent_db_gain_v1(-6.0);
+            trimmed * independent_db_gain_v1(-3.0)
+        })
+        .collect();
+    let polarity_gain_right: Vec<_> = PCM_INPUT_RIGHT_V1
+        .iter()
+        .copied()
+        .map(|sample| sample * independent_db_gain_v1(3.0))
+        .collect();
+    verify_pcm_words_v1(
+        root,
+        "pcm/polarity-gain.f32le",
+        &pcm_words_v1(&polarity_gain_left, &polarity_gain_right),
+    )?;
+    verify_pcm_words_v1(root, "pcm/mute.f32le", &[0.0_f32.to_bits(); 16])?;
+
+    verify_filter_pcm_semantics_v1(root)?;
+    verify_matrix_pcm_semantics_v1(root)?;
+    Ok(())
+}
+
+fn independent_db_gain_v1(db: f32) -> f32 {
+    10.0_f64.powf(f64::from(db) / 20.0) as f32
+}
+
+fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+    let filters_left =
+        retained_tpt_outputs_v1(&PCM_INPUT_LEFT_V1, 100.0, ReferenceTptOutput::HighPass)?;
+    let filters_right =
+        retained_tpt_outputs_v1(&PCM_INPUT_RIGHT_V1, 1_000.0, ReferenceTptOutput::LowPass)?;
+    verify_pcm_words_v1(
+        root,
+        "pcm/filters-asymmetric.f32le",
+        &pcm_words_v1(&filters_left, &filters_right),
+    )?;
+
+    let reset_input = [1.0, 0.0, 0.0, 0.0];
+    let mut reset_left =
+        retained_tpt_outputs_v1(&reset_input, 100.0, ReferenceTptOutput::HighPass)?;
+    reset_left.extend(retained_tpt_outputs_v1(
+        &reset_input,
+        100.0,
+        ReferenceTptOutput::HighPass,
+    )?);
+    verify_pcm_words_v1(
+        root,
+        "pcm/reset.f32le",
+        &pcm_words_v1(&reset_left, &[0.0; 8]),
+    )?;
+
+    let isolation_left = retained_tpt_outputs_v1(
+        &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        100.0,
+        ReferenceTptOutput::HighPass,
+    )?;
+    let isolation_right = retained_tpt_outputs_v1(
+        &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        1_000.0,
+        ReferenceTptOutput::LowPass,
+    )?;
+    verify_pcm_words_v1(
+        root,
+        "pcm/lr-isolation.f32le",
+        &pcm_words_v1(&isolation_left, &isolation_right),
+    )?;
+
+    let partition_left = retained_tpt_outputs_v1(
+        &[1.0, 0.0, -0.5, 0.25, 0.0, 0.0, 0.75, -0.25],
+        100.0,
+        ReferenceTptOutput::HighPass,
+    )?;
+    let partition_right = retained_tpt_outputs_v1(
+        &[-0.5, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25],
+        1_000.0,
+        ReferenceTptOutput::LowPass,
+    )?;
+    verify_pcm_words_v1(
+        root,
+        "pcm/partition.f32le",
+        &pcm_words_v1(&partition_left, &partition_right),
+    )
+}
+
+fn retained_tpt_outputs_v1(
+    input: &[f32],
+    cutoff_hz: f32,
+    output: ReferenceTptOutput,
+) -> Result<Vec<f32>, String> {
+    let mut reference = ReferenceRetainedTptF32::conditioned_butterworth(48_000, cutoff_hz, output)
+        .ok_or_else(|| {
+            "independent retained-f32 TPT design rejected a frozen PCM coordinate".to_owned()
+        })?;
+    Ok(input
+        .iter()
+        .copied()
+        .map(|sample| f32::from_bits(reference.process(sample).output_bits))
+        .collect())
+}
+
+fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+    let swap = [0.0, 1.0, 1.0, 0.0];
+    verify_pcm_words_v1(
+        root,
+        "pcm/matrix-corner.f32le",
+        &matrix_pcm_words_v1(swap, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+    )?;
+    for bits in 0_u8..16 {
+        let matrix = [
+            f32::from(bits & 1),
+            f32::from((bits >> 1) & 1),
+            f32::from((bits >> 2) & 1),
+            f32::from((bits >> 3) & 1),
+        ];
+        verify_pcm_words_v1(
+            root,
+            &format!("pcm/matrix-corner-{bits:02}.f32le"),
+            &matrix_pcm_words_v1(matrix, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+        )?;
+    }
+    for updates in [0_u32, 1, 2, 127, 128, u32::MAX] {
+        let (left, right) = matrix_ramp_outputs_v1(updates);
+        verify_pcm_words_v1(
+            root,
+            &format!("pcm/matrix-ramp-{updates}.f32le"),
+            &pcm_words_v1(&left, &right),
+        )?;
+    }
+
+    let (left, right) = matrix_retarget_outputs_v1();
+    verify_pcm_words_v1(
+        root,
+        "pcm/matrix-retarget.f32le",
+        &pcm_words_v1(&left, &right),
+    )
+}
+
+fn matrix_pcm_words_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> Vec<u32> {
+    let (left, right) = matrix_outputs_v1(matrix, left, right);
+    pcm_words_v1(&left, &right)
+}
+
+fn matrix_outputs_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    if matrix == [1.0, 0.0, 0.0, 1.0] {
+        return (left.to_vec(), right.to_vec());
+    }
+    let mut output_left = Vec::with_capacity(left.len());
+    let mut output_right = Vec::with_capacity(right.len());
+    for (&left, &right) in left.iter().zip(right) {
+        output_left.push(matrix[0] * left + matrix[1] * right);
+        output_right.push(matrix[2] * left + matrix[3] * right);
+    }
+    (output_left, output_right)
+}
+
+fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
+    let target = [0.0, 1.0, 1.0, 0.0];
+    let mut current = [1.0, 0.0, 0.0, 1.0];
+    let mut remaining = updates;
+    if remaining == 0 {
+        current = target;
+    }
+    let mut left = Vec::with_capacity(128);
+    let mut right = Vec::with_capacity(128);
+    for _ in 0..128 {
+        advance_matrix_v1(&mut current, target, &mut remaining);
+        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        left.push(output_left[0]);
+        right.push(output_right[0]);
+    }
+    (left, right)
+}
+
+fn matrix_retarget_outputs_v1() -> (Vec<f32>, Vec<f32>) {
+    let swap = [0.0, 1.0, 1.0, 0.0];
+    let identity = [1.0, 0.0, 0.0, 1.0];
+    let mut current = identity;
+    let mut remaining = 8;
+    let mut left = Vec::with_capacity(12);
+    let mut right = Vec::with_capacity(12);
+    for _ in 0..4 {
+        advance_matrix_v1(&mut current, swap, &mut remaining);
+        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        left.push(output_left[0]);
+        right.push(output_right[0]);
+    }
+    remaining = 8;
+    for _ in 0..8 {
+        advance_matrix_v1(&mut current, identity, &mut remaining);
+        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        left.push(output_left[0]);
+        right.push(output_right[0]);
+    }
+    (left, right)
+}
+
+fn advance_matrix_v1(current: &mut [f32; 4], target: [f32; 4], remaining: &mut u32) {
+    if *remaining == 0 {
+        return;
+    }
+    let divisor = *remaining as f32;
+    for (current, target) in current.iter_mut().zip(target) {
+        *current += (target - *current) / divisor;
+    }
+    *remaining -= 1;
+    if *remaining == 0 {
+        *current = target;
+    }
+}
+
+fn pcm_words_v1(left: &[f32], right: &[f32]) -> Vec<u32> {
+    left.iter()
+        .chain(right)
+        .copied()
+        .map(f32::to_bits)
+        .collect()
+}
+
+fn verify_pcm_words_v1(root: &Path, path: &str, expected: &[u32]) -> Result<(), String> {
+    let actual = read_pcm_words_v1(root, path)?;
+    if actual == expected {
+        return Ok(());
+    }
+    let index = actual
+        .iter()
+        .zip(expected)
+        .position(|(actual, expected)| actual != expected)
+        .unwrap_or_else(|| actual.len().min(expected.len()));
+    Err(format!(
+        "PCM semantic mismatch: {path}: word={index} actual={:?} expected={:?}",
+        actual.get(index).map(|bits| format!("{bits:08x}")),
+        expected.get(index).map(|bits| format!("{bits:08x}")),
+    ))
+}
+
+fn read_pcm_words_v1(root: &Path, path: &str) -> Result<Vec<u32>, String> {
+    let bytes = read_regular_file(&root.join(path), path)?;
+    let chunks = bytes.chunks_exact(4);
+    if !chunks.remainder().is_empty() || bytes.len() % 8 != 0 {
+        return Err(format!(
+            "PCM is not a planar dual-mono f32le payload: {path}"
+        ));
+    }
+    Ok(chunks
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("fixed f32 word")))
+        .collect())
+}
+
+fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
+    let bytes = read_regular_file(
+        &root.join("meters/graph-taps.jsonl"),
+        "meters/graph-taps.jsonl",
+    )?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "meters/graph-taps.jsonl is not UTF-8".to_owned())?;
+    let records: Vec<_> = text
+        .split_inclusive('\n')
+        .map(|line| {
+            line.strip_suffix('\n')
+                .ok_or_else(|| "graph tap record is not LF terminated".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let expected_taps = BTreeSet::from([
+        "Input",
+        "PostInputBuiltins",
+        "PostSimd1",
+        "PostDynamic",
+        "PostSimd2PreFader",
+        "PostFader",
+        "PostMatrix",
+    ]);
+    let actual_taps: BTreeSet<_> = records
+        .iter()
+        .map(|record| json_string_field_v1(record, "tap"))
+        .collect::<Result<_, _>>()?;
+    if actual_taps != expected_taps || records.len() != expected_taps.len() {
+        return Err(
+            "graph-taps does not contain the exact seven distinct stage records".to_owned(),
+        );
+    }
+    let post_matrix = records
+        .iter()
+        .find(|record| json_string_field_v1(record, "tap") == Ok("PostMatrix"))
+        .ok_or_else(|| "graph-taps has no PostMatrix record".to_owned())?;
+    if json_string_field_v1(post_matrix, "case")? != "graph-taps"
+        || json_u64_field_v1(post_matrix, "frames")? != 128
+    {
+        return Err("graph-taps PostMatrix declaration is invalid".to_owned());
+    }
+    let samples = read_pcm_words_v1(root, "pcm/graph-taps.f32le")?;
+    if samples.len() != 256 {
+        return Err("graph-taps PCM frame count differs".to_owned());
+    }
+    let (left, right) = samples.split_at(128);
+    verify_graph_lane_summary_v1(post_matrix, "left", left)?;
+    verify_graph_lane_summary_v1(post_matrix, "right", right)
+}
+
+fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Result<(), String> {
+    let peak = words
+        .iter()
+        .fold(0.0_f32, |peak, bits| peak.max(f32::from_bits(*bits).abs()));
+    let energy = words.iter().fold(0.0_f64, |energy, bits| {
+        let sample = f64::from(f32::from_bits(*bits));
+        energy + sample * sample
+    });
+    let peak_field = format!("{lane}_peak");
+    let energy_field = format!("{lane}_energy");
+    if json_u32_hex_field_v1(record, &peak_field)? != peak.to_bits()
+        || json_u64_hex_field_v1(record, &energy_field)? != energy.to_bits()
+    {
+        return Err(format!(
+            "graph-taps PostMatrix {lane} summary does not match output PCM"
+        ));
+    }
+    Ok(())
+}
+
+fn json_string_field_v1<'a>(record: &'a str, key: &str) -> Result<&'a str, String> {
+    let prefix = format!("\"{key}\":\"");
+    let value = record
+        .split_once(&prefix)
+        .map(|(_, value)| value)
+        .and_then(|value| value.split_once('"').map(|(value, _)| value))
+        .ok_or_else(|| format!("JSONL record is missing string field: {key}"))?;
+    Ok(value)
+}
+
+fn json_u64_field_v1(record: &str, key: &str) -> Result<u64, String> {
+    let prefix = format!("\"{key}\":");
+    let value = record
+        .split_once(&prefix)
+        .map(|(_, value)| value)
+        .and_then(|value| value.split([',', '}']).next())
+        .ok_or_else(|| format!("JSONL record is missing numeric field: {key}"))?;
+    value
+        .parse()
+        .map_err(|_| format!("JSONL field is not a decimal u64: {key}"))
+}
+
+fn json_u32_hex_field_v1(record: &str, key: &str) -> Result<u32, String> {
+    u32::from_str_radix(json_string_field_v1(record, key)?, 16)
+        .map_err(|_| format!("JSONL field is not a u32 hex word: {key}"))
+}
+
+fn json_u64_hex_field_v1(record: &str, key: &str) -> Result<u64, String> {
+    u64::from_str_radix(json_string_field_v1(record, key)?, 16)
+        .map_err(|_| format!("JSONL field is not a u64 hex word: {key}"))
 }
 
 fn verify_reference_oracle_v1(root: &Path) -> Result<BTreeSet<String>, String> {
@@ -2370,6 +2959,25 @@ fn list_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+fn fixture_tree_hash_v1(root: &Path) -> Result<[u8; 32], String> {
+    let mut paths = list_files(root)?;
+    paths.push("MANIFEST.tsv".to_owned());
+    paths.sort();
+    let mut digest = Sha256::new();
+    for path in paths {
+        let bytes = read_regular_file(&root.join(&path), &path)?;
+        digest.update(path.as_bytes());
+        digest.update([0]);
+        digest.update(
+            u64::try_from(bytes.len())
+                .map_err(|_| "fixture length overflows u64")?
+                .to_le_bytes(),
+        );
+        digest.update(bytes);
+    }
+    Ok(digest.finalize().into())
+}
+
 fn sha256(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
@@ -2390,7 +2998,7 @@ mod tests {
         write_fixture(&root, &files);
         let before = read_fixture_tree(&root);
 
-        check_fixture_root_v1(&root).expect("complete V1 fixture corpus");
+        check_read_only_fixture_root_v1(&root).expect("complete V1 fixture corpus");
 
         assert_eq!(
             before,
