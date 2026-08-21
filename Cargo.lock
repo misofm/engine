@@ -369,6 +369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-parametric-eq"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "miso-engine-protocol"
 version = "0.1.0"
 dependencies = [

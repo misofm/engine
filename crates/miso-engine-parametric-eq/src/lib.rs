@@ -1,0 +1,1183 @@
+//! Scalar V1 four-section dual-mono parametric EQ.
+//!
+//! The scalar checkpoint deliberately owns no bank/SIMD token, fixture corpus, graph integration,
+//! or delivered automation. Its prepared state and metadata are nevertheless complete and stable.
+#![allow(missing_docs)]
+
+use core::f64::consts::PI;
+
+use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
+use miso_engine_effect_contract::{
+    AutomationRate, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
+    EffectQuality as Quality, InitialParameterValue, LatencySamples, LinkModeSet,
+    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata, sanitize_sample,
+};
+
+/// Fixed cascade length in V1.
+pub const EQ_SECTION_COUNT_V1: usize = 4;
+const STATE_WORDS_PER_BAND: usize = 16;
+const STATE_BYTES_PER_LANE: usize = EQ_SECTION_COUNT_V1 * STATE_WORDS_PER_BAND * 4;
+
+/// Frozen V1 section filter families.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EqBandKindV1 {
+    Bell = 1,
+    LowShelf = 2,
+    HighShelf = 3,
+    LowPass = 4,
+    HighPass = 5,
+    Notch = 6,
+}
+
+impl EqBandKindV1 {
+    fn from_value(value: f32) -> Option<Self> {
+        match value.to_bits() {
+            bits if bits == 1.0_f32.to_bits() => Some(Self::Bell),
+            bits if bits == 2.0_f32.to_bits() => Some(Self::LowShelf),
+            bits if bits == 3.0_f32.to_bits() => Some(Self::HighShelf),
+            bits if bits == 4.0_f32.to_bits() => Some(Self::LowPass),
+            bits if bits == 5.0_f32.to_bits() => Some(Self::HighPass),
+            bits if bits == 6.0_f32.to_bits() => Some(Self::Notch),
+            _ => None,
+        }
+    }
+}
+
+/// Stable parameter IDs for one cascade position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EqBandDescriptorV1 {
+    pub index: u8,
+    pub cascade_order: u8,
+    pub enabled: ParameterId,
+    pub kind: ParameterId,
+    pub frequency_hz: ParameterId,
+    pub gain_db: ParameterId,
+    pub q: ParameterId,
+    pub shelf_slope: ParameterId,
+}
+
+const fn parameter_id(value: u32) -> ParameterId {
+    match ParameterId::new(value) {
+        Some(value) => value,
+        None => panic!("nonzero parameter id"),
+    }
+}
+
+const fn effect_id(value: &'static str) -> miso_engine_effect_contract::EffectId {
+    match miso_engine_effect_contract::EffectId::new(value) {
+        Ok(value) => value,
+        Err(_) => panic!("valid effect id"),
+    }
+}
+
+const fn port_id(value: &'static str) -> PortId {
+    match PortId::new(value) {
+        Ok(value) => value,
+        Err(_) => panic!("valid port id"),
+    }
+}
+
+/// Four static cascade positions in increasing order.
+pub const EQ_BAND_DESCRIPTORS_V1: [EqBandDescriptorV1; EQ_SECTION_COUNT_V1] = [
+    EqBandDescriptorV1 {
+        index: 0,
+        cascade_order: 0,
+        enabled: parameter_id(1),
+        kind: parameter_id(2),
+        frequency_hz: parameter_id(3),
+        gain_db: parameter_id(4),
+        q: parameter_id(5),
+        shelf_slope: parameter_id(6),
+    },
+    EqBandDescriptorV1 {
+        index: 1,
+        cascade_order: 1,
+        enabled: parameter_id(17),
+        kind: parameter_id(18),
+        frequency_hz: parameter_id(19),
+        gain_db: parameter_id(20),
+        q: parameter_id(21),
+        shelf_slope: parameter_id(22),
+    },
+    EqBandDescriptorV1 {
+        index: 2,
+        cascade_order: 2,
+        enabled: parameter_id(33),
+        kind: parameter_id(34),
+        frequency_hz: parameter_id(35),
+        gain_db: parameter_id(36),
+        q: parameter_id(37),
+        shelf_slope: parameter_id(38),
+    },
+    EqBandDescriptorV1 {
+        index: 3,
+        cascade_order: 3,
+        enabled: parameter_id(49),
+        kind: parameter_id(50),
+        frequency_hz: parameter_id(51),
+        gain_db: parameter_id(52),
+        q: parameter_id(53),
+        shelf_slope: parameter_id(54),
+    },
+];
+
+const KIND_CHOICES: [miso_engine_effect_contract::EnumChoiceV1; 6] = [
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 1.0,
+        label: "bell",
+    },
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 2.0,
+        label: "low-shelf",
+    },
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 3.0,
+        label: "high-shelf",
+    },
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 4.0,
+        label: "low-pass",
+    },
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 5.0,
+        label: "high-pass",
+    },
+    miso_engine_effect_contract::EnumChoiceV1 {
+        value: 6.0,
+        label: "notch",
+    },
+];
+
+#[allow(clippy::too_many_arguments)]
+const fn parameter(
+    id: u32,
+    name: &'static str,
+    display_unit: &'static str,
+    unit: ParameterUnit,
+    domain: ParameterDomain,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+    default_value: f32,
+    mapping: ParameterMapping,
+    automation_rate: AutomationRate,
+    smoothing: SmoothingRule,
+    smoothing_samples: u32,
+    choices: &'static [miso_engine_effect_contract::EnumChoiceV1],
+) -> ParameterDescriptorV1 {
+    ParameterDescriptorV1 {
+        id: parameter_id(id),
+        display_name: name,
+        display_unit,
+        unit,
+        domain,
+        minimum,
+        maximum,
+        default_value,
+        mapping,
+        automation_rate,
+        channel_policy: ParameterChannelPolicy::PerLane,
+        smoothing,
+        smoothing_samples,
+        readable: true,
+        automatable: matches!(
+            automation_rate,
+            AutomationRate::Sample | AutomationRate::Block
+        ),
+        enum_choices: choices,
+    }
+}
+
+const EQ_PARAMETERS: [ParameterDescriptorV1; 24] = [
+    parameter(
+        1,
+        "band-1-enabled",
+        "on/off",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        None,
+        None,
+        0.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &[],
+    ),
+    parameter(
+        2,
+        "band-1-kind",
+        "type",
+        ParameterUnit::Linear,
+        ParameterDomain::Enumeration,
+        None,
+        None,
+        1.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &KIND_CHOICES,
+    ),
+    parameter(
+        3,
+        "band-1-frequency",
+        "Hz",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        Some(10.0),
+        Some(20_000.0),
+        80.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        4,
+        "band-1-gain",
+        "dB",
+        ParameterUnit::Db,
+        ParameterDomain::Continuous,
+        Some(-24.0),
+        Some(24.0),
+        0.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        5,
+        "band-1-q",
+        "Q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(18.0),
+        0.70710677,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        6,
+        "band-1-shelf-slope",
+        "S",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(1.0),
+        1.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        17,
+        "band-2-enabled",
+        "on/off",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        None,
+        None,
+        0.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &[],
+    ),
+    parameter(
+        18,
+        "band-2-kind",
+        "type",
+        ParameterUnit::Linear,
+        ParameterDomain::Enumeration,
+        None,
+        None,
+        1.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &KIND_CHOICES,
+    ),
+    parameter(
+        19,
+        "band-2-frequency",
+        "Hz",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        Some(10.0),
+        Some(20_000.0),
+        400.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        20,
+        "band-2-gain",
+        "dB",
+        ParameterUnit::Db,
+        ParameterDomain::Continuous,
+        Some(-24.0),
+        Some(24.0),
+        0.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        21,
+        "band-2-q",
+        "Q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(18.0),
+        0.70710677,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        22,
+        "band-2-shelf-slope",
+        "S",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(1.0),
+        1.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        33,
+        "band-3-enabled",
+        "on/off",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        None,
+        None,
+        0.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &[],
+    ),
+    parameter(
+        34,
+        "band-3-kind",
+        "type",
+        ParameterUnit::Linear,
+        ParameterDomain::Enumeration,
+        None,
+        None,
+        1.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &KIND_CHOICES,
+    ),
+    parameter(
+        35,
+        "band-3-frequency",
+        "Hz",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        Some(10.0),
+        Some(20_000.0),
+        2000.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        36,
+        "band-3-gain",
+        "dB",
+        ParameterUnit::Db,
+        ParameterDomain::Continuous,
+        Some(-24.0),
+        Some(24.0),
+        0.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        37,
+        "band-3-q",
+        "Q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(18.0),
+        0.70710677,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        38,
+        "band-3-shelf-slope",
+        "S",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(1.0),
+        1.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        49,
+        "band-4-enabled",
+        "on/off",
+        ParameterUnit::Linear,
+        ParameterDomain::Boolean,
+        None,
+        None,
+        0.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &[],
+    ),
+    parameter(
+        50,
+        "band-4-kind",
+        "type",
+        ParameterUnit::Linear,
+        ParameterDomain::Enumeration,
+        None,
+        None,
+        1.0,
+        ParameterMapping::Stepped,
+        AutomationRate::None,
+        SmoothingRule::None,
+        0,
+        &KIND_CHOICES,
+    ),
+    parameter(
+        51,
+        "band-4-frequency",
+        "Hz",
+        ParameterUnit::Hz,
+        ParameterDomain::Continuous,
+        Some(10.0),
+        Some(20_000.0),
+        10_000.0,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        52,
+        "band-4-gain",
+        "dB",
+        ParameterUnit::Db,
+        ParameterDomain::Continuous,
+        Some(-24.0),
+        Some(24.0),
+        0.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        53,
+        "band-4-q",
+        "Q",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(18.0),
+        0.70710677,
+        ParameterMapping::Logarithmic,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+    parameter(
+        54,
+        "band-4-shelf-slope",
+        "S",
+        ParameterUnit::Ratio,
+        ParameterDomain::Continuous,
+        Some(0.1),
+        Some(1.0),
+        1.0,
+        ParameterMapping::Linear,
+        AutomationRate::Block,
+        SmoothingRule::Linear,
+        64,
+        &[],
+    ),
+];
+
+const PORTS: [PortDescriptorV1; 2] = [
+    PortDescriptorV1 {
+        id: port_id("main-in"),
+        role: PortRole::MainInput,
+        required: true,
+        layout: PortLayout::DualMonoPlanar,
+    },
+    PortDescriptorV1 {
+        id: port_id("main-out"),
+        role: PortRole::MainOutput,
+        required: true,
+        layout: PortLayout::DualMonoPlanar,
+    },
+];
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+    quality(44_100),
+    quality(48_000),
+    quality(88_200),
+    quality(96_000),
+];
+const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptorV1 {
+        quality: Quality::Normal,
+        sample_rate,
+        latency: LatencySamples(0),
+        tail: TailSamples::Infinite,
+        maximum_state: StatePayloadSizes {
+            common_bytes: 0,
+            left_bytes: STATE_BYTES_PER_LANE as u32,
+            right_bytes: STATE_BYTES_PER_LANE as u32,
+        },
+        scratch_fixed_bytes: 0,
+        scratch_bytes_per_frame: 0,
+    }
+}
+
+/// Authoritative static V1 effect metadata.
+pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+    id: effect_id("miso.parametric-eq"),
+    display_name: "Parametric EQ",
+    contract_major: 1,
+    contract_minor: 0,
+    state_layout_version: 1,
+    supported_link_modes: LinkModeSet::DUAL_MONO,
+    parameters: &EQ_PARAMETERS,
+    ports: &PORTS,
+    qualities: &QUALITIES,
+};
+
+/// Stateless native factory for prepared scalar EQs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParametricEqFactory;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EqCoefficientsV1 {
+    pub b0: f32,
+    pub b1: f32,
+    pub b2: f32,
+    pub a1: f32,
+    pub a2: f32,
+    pub identity: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EqDesignError {
+    InvalidInput,
+    Coefficients,
+}
+
+/// Design one RBJ section in `f64`, normalize once to `f32`, and prove strict Jury stability.
+pub fn design_biquad_v1(
+    kind: EqBandKindV1,
+    frequency_hz: f32,
+    gain_db: f32,
+    q: f32,
+    shelf_slope: f32,
+    sample_rate: SampleRateHz,
+) -> Result<EqCoefficientsV1, EqDesignError> {
+    if !is_launch_sample_rate(sample_rate)
+        || ![frequency_hz, gain_db, q, shelf_slope]
+            .into_iter()
+            .all(f32::is_finite)
+        || !(10.0..=20_000.0).contains(&frequency_hz)
+        || !(-24.0..=24.0).contains(&gain_db)
+        || !(0.1..=18.0).contains(&q)
+        || !(0.1..=1.0).contains(&shelf_slope)
+        || frequency_hz >= sample_rate.0 as f32 * 0.5
+    {
+        return Err(EqDesignError::InvalidInput);
+    }
+    if matches!(
+        kind,
+        EqBandKindV1::Bell | EqBandKindV1::LowShelf | EqBandKindV1::HighShelf
+    ) && gain_db == 0.0
+    {
+        return Ok(identity());
+    }
+    let w = 2.0 * PI * f64::from(frequency_hz) / f64::from(sample_rate.0);
+    let c = w.cos();
+    let s = w.sin();
+    let a = 10.0_f64.powf(f64::from(gain_db) / 40.0);
+    let alpha_q = s / (2.0 * f64::from(q));
+    let alpha_s = s * 0.5 * ((a + 1.0 / a) * (1.0 / f64::from(shelf_slope) - 1.0) + 2.0).sqrt();
+    let beta = 2.0 * a.sqrt() * alpha_s;
+    let (b0, b1, b2, a0, a1, a2) = match kind {
+        EqBandKindV1::LowPass => (
+            (1.0 - c) * 0.5,
+            1.0 - c,
+            (1.0 - c) * 0.5,
+            1.0 + alpha_q,
+            -2.0 * c,
+            1.0 - alpha_q,
+        ),
+        EqBandKindV1::HighPass => (
+            (1.0 + c) * 0.5,
+            -(1.0 + c),
+            (1.0 + c) * 0.5,
+            1.0 + alpha_q,
+            -2.0 * c,
+            1.0 - alpha_q,
+        ),
+        EqBandKindV1::Notch => (1.0, -2.0 * c, 1.0, 1.0 + alpha_q, -2.0 * c, 1.0 - alpha_q),
+        EqBandKindV1::Bell => (
+            1.0 + alpha_q * a,
+            -2.0 * c,
+            1.0 - alpha_q * a,
+            1.0 + alpha_q / a,
+            -2.0 * c,
+            1.0 - alpha_q / a,
+        ),
+        EqBandKindV1::LowShelf => (
+            a * ((a + 1.0) - (a - 1.0) * c + beta),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+            a * ((a + 1.0) - (a - 1.0) * c - beta),
+            (a + 1.0) + (a - 1.0) * c + beta,
+            -2.0 * ((a - 1.0) + (a + 1.0) * c),
+            (a + 1.0) + (a - 1.0) * c - beta,
+        ),
+        EqBandKindV1::HighShelf => (
+            a * ((a + 1.0) + (a - 1.0) * c + beta),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * c),
+            a * ((a + 1.0) + (a - 1.0) * c - beta),
+            (a + 1.0) - (a - 1.0) * c + beta,
+            2.0 * ((a - 1.0) - (a + 1.0) * c),
+            (a + 1.0) - (a - 1.0) * c - beta,
+        ),
+    };
+    if ![b0, b1, b2, a0, a1, a2].into_iter().all(f64::is_finite) || a0 == 0.0 {
+        return Err(EqDesignError::Coefficients);
+    }
+    let values = [
+        (b0 / a0) as f32,
+        (b1 / a0) as f32,
+        (b2 / a0) as f32,
+        (a1 / a0) as f32,
+        (a2 / a0) as f32,
+    ];
+    if !values.into_iter().all(f32::is_finite)
+        || values[4].abs() >= 1.0
+        || 1.0 + values[3] + values[4] <= 0.0
+        || 1.0 - values[3] + values[4] <= 0.0
+    {
+        return Err(EqDesignError::Coefficients);
+    }
+    Ok(EqCoefficientsV1 {
+        b0: values[0],
+        b1: values[1],
+        b2: values[2],
+        a1: values[3],
+        a2: values[4],
+        identity: false,
+    })
+}
+
+const fn identity() -> EqCoefficientsV1 {
+    EqCoefficientsV1 {
+        b0: 1.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: 0.0,
+        a2: 0.0,
+        identity: true,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BandConfiguration {
+    enabled: bool,
+    frequency: f32,
+    gain: f32,
+    q: f32,
+    slope: f32,
+    coefficients: EqCoefficientsV1,
+}
+#[derive(Clone, Copy, Default)]
+struct BiquadState {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+#[derive(Clone, Copy)]
+struct Lane {
+    state: [BiquadState; EQ_SECTION_COUNT_V1],
+}
+impl Default for Lane {
+    fn default() -> Self {
+        Self {
+            state: [BiquadState::default(); EQ_SECTION_COUNT_V1],
+        }
+    }
+}
+
+struct PreparedParametricEq {
+    metadata: PreparedEffectMetadata,
+    left_config: [BandConfiguration; EQ_SECTION_COUNT_V1],
+    right_config: [BandConfiguration; EQ_SECTION_COUNT_V1],
+    left: Lane,
+    right: Lane,
+}
+
+impl NativeEffectFactory for ParametricEqFactory {
+    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+        &PARAMETRIC_EQ_DESCRIPTOR_V1
+    }
+    fn prepare(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
+        let (left_config, right_config) =
+            configurations(request.initial_values, SampleRateHz(request.sample_rate))?;
+        Ok(Box::new(PreparedParametricEq {
+            metadata,
+            left_config,
+            right_config,
+            left: Lane::default(),
+            right: Lane::default(),
+        }))
+    }
+    fn bind_homogeneous_bank(
+        &self,
+        _request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        Ok(None)
+    }
+}
+
+fn configurations(
+    values: &[InitialParameterValue],
+    rate: SampleRateHz,
+) -> Result<([BandConfiguration; 4], [BandConfiguration; 4]), EffectPrepareError> {
+    let mut left = [default_band(0, rate)?; 4];
+    let mut right = left;
+    for lane in 0..2 {
+        for section in 0..4 {
+            let index = section * 6;
+            let lane_values = &values
+                .iter()
+                .filter(|value| {
+                    value.channel
+                        == if lane == 0 {
+                            ParameterChannel::Left
+                        } else {
+                            ParameterChannel::Right
+                        }
+                })
+                .collect::<Vec<_>>();
+            let selected = &lane_values[index..index + 6];
+            let enabled = selected[0].value.to_bits() == 1.0_f32.to_bits();
+            let kind = EqBandKindV1::from_value(selected[1].value).ok_or(EffectPrepareError {
+                code: "effect.parameter.initial",
+            })?;
+            let config = BandConfiguration {
+                enabled,
+                frequency: selected[2].value,
+                gain: selected[3].value,
+                q: selected[4].value,
+                slope: selected[5].value,
+                coefficients: if enabled {
+                    design_biquad_v1(
+                        kind,
+                        selected[2].value,
+                        selected[3].value,
+                        selected[4].value,
+                        selected[5].value,
+                        rate,
+                    )
+                    .map_err(|_| EffectPrepareError {
+                        code: "effect.eq.coefficients",
+                    })?
+                } else {
+                    identity()
+                },
+            };
+            if lane == 0 {
+                left[section] = config
+            } else {
+                right[section] = config
+            }
+        }
+    }
+    Ok((left, right))
+}
+fn default_band(
+    section: usize,
+    _rate: SampleRateHz,
+) -> Result<BandConfiguration, EffectPrepareError> {
+    let index = section * 6;
+    let p = &EQ_PARAMETERS[index..index + 6];
+    Ok(BandConfiguration {
+        enabled: false,
+        frequency: p[2].default_value,
+        gain: p[3].default_value,
+        q: p[4].default_value,
+        slope: p[5].default_value,
+        coefficients: identity(),
+    })
+}
+
+impl PreparedNativeEffect for PreparedParametricEq {
+    fn metadata(&self) -> PreparedEffectMetadata {
+        self.metadata
+    }
+    fn reset(&mut self, _kind: ResetKind) {
+        self.left = Lane::default();
+        self.right = Lane::default();
+    }
+    fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        let mut report = ProcessReport {
+            invalid_spans: block.automation.len() as u64,
+            ..ProcessReport::default()
+        };
+        for index in 0..block.left.len() {
+            let dry_left = sanitize(block.left[index], &mut report.sanitized_main_samples);
+            let dry_right = sanitize(block.right[index], &mut report.sanitized_main_samples);
+            let left = process_lane(
+                dry_left,
+                &self.left_config,
+                &mut self.left,
+                &mut report.recovered_left_samples,
+            );
+            let right = process_lane(
+                dry_right,
+                &self.right_config,
+                &mut self.right,
+                &mut report.recovered_right_samples,
+            );
+            block.left[index] = if self.metadata.bypass { dry_left } else { left };
+            block.right[index] = if self.metadata.bypass {
+                dry_right
+            } else {
+                right
+            };
+        }
+        report
+    }
+    fn snapshot_state_payload(
+        &self,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        write_lane(output.common, output.left, &self.left, &self.left_config)?;
+        write_lane(&mut [], output.right, &self.right, &self.right_config)
+    }
+    fn restore_state_payload(
+        &mut self,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        if version != 1 {
+            return Err(StatePayloadError {
+                code: "effect.state.version",
+            });
+        };
+        let left = read_lane(input.common, input.left, &self.left_config)?;
+        let right = read_lane(&[], input.right, &self.right_config)?;
+        self.left = left;
+        self.right = right;
+        Ok(())
+    }
+}
+fn sanitize(value: f32, count: &mut u64) -> f32 {
+    match sanitize_sample(value) {
+        Some(value) => value,
+        None => {
+            *count = count.saturating_add(1);
+            0.0
+        }
+    }
+}
+fn process_lane(
+    mut value: f32,
+    configs: &[BandConfiguration; 4],
+    lane: &mut Lane,
+    recovered: &mut u64,
+) -> f32 {
+    let mut did_recover = false;
+    for (index, config) in configs.iter().copied().enumerate() {
+        if !config.enabled {
+            warm(value, &mut lane.state[index]);
+            continue;
+        }
+        let state = &mut lane.state[index];
+        let c = config.coefficients;
+        let p0 = c.b0 * value;
+        let p1 = c.b1 * state.x1;
+        let s0 = p0 + p1;
+        let p2 = c.b2 * state.x2;
+        let s1 = s0 + p2;
+        let p3 = c.a1 * state.y1;
+        let s2 = s1 - p3;
+        let p4 = c.a2 * state.y2;
+        let output = s2 - p4;
+        state.x2 = state.x1;
+        state.x1 = value;
+        state.y2 = state.y1;
+        state.y1 = output;
+        if !valid(output)
+            || ![state.x1, state.x2, state.y1, state.y2]
+                .into_iter()
+                .all(valid)
+        {
+            *state = BiquadState::default();
+            value = 0.0;
+            if !did_recover {
+                *recovered = recovered.saturating_add(1);
+                did_recover = true
+            }
+        } else {
+            value = output
+        }
+    }
+    value
+}
+fn warm(input: f32, state: &mut BiquadState) {
+    let previous = state.x1;
+    state.x2 = previous;
+    state.y2 = previous;
+    state.x1 = input;
+    state.y1 = input
+}
+fn valid(value: f32) -> bool {
+    sanitize_sample(value).is_some()
+}
+fn write_lane(
+    common: &mut [u8],
+    output: &mut [u8],
+    lane: &Lane,
+    configs: &[BandConfiguration; 4],
+) -> Result<(), StatePayloadError> {
+    if !common.is_empty() || output.len() != STATE_BYTES_PER_LANE {
+        return Err(StatePayloadError {
+            code: "effect.state.length",
+        });
+    };
+    for (band, c) in configs.iter().copied().enumerate() {
+        let state = lane.state[band];
+        let words = [
+            state.x1,
+            state.x2,
+            state.y1,
+            state.y2,
+            c.frequency,
+            c.frequency,
+            0.0,
+            c.gain,
+            c.gain,
+            0.0,
+            c.q,
+            c.q,
+            0.0,
+            c.slope,
+            c.slope,
+            0.0,
+        ];
+        for (word, value) in words.into_iter().enumerate() {
+            output[(band * 16 + word) * 4..(band * 16 + word + 1) * 4]
+                .copy_from_slice(&value.to_bits().to_le_bytes())
+        }
+    }
+    Ok(())
+}
+fn read_lane(
+    common: &[u8],
+    input: &[u8],
+    configs: &[BandConfiguration; 4],
+) -> Result<Lane, StatePayloadError> {
+    if !common.is_empty() || input.len() != STATE_BYTES_PER_LANE {
+        return Err(StatePayloadError {
+            code: "effect.state.length",
+        });
+    };
+    let mut lane = Lane::default();
+    for (band, c) in configs.iter().copied().enumerate() {
+        let mut words = [0_f32; 16];
+        for (word, slot) in words.iter_mut().enumerate() {
+            let start = (band * 16 + word) * 4;
+            *slot = f32::from_bits(u32::from_le_bytes(
+                input[start..start + 4]
+                    .try_into()
+                    .map_err(|_| StatePayloadError {
+                        code: "effect.state.payload",
+                    })?,
+            ))
+        }
+        if ![words[0], words[1], words[2], words[3]]
+            .into_iter()
+            .all(valid)
+            || words[6].to_bits() != 0
+            || words[9].to_bits() != 0
+            || words[12].to_bits() != 0
+            || words[15].to_bits() != 0
+            || words[4].to_bits() != c.frequency.to_bits()
+            || words[5].to_bits() != c.frequency.to_bits()
+            || words[7].to_bits() != c.gain.to_bits()
+            || words[8].to_bits() != c.gain.to_bits()
+            || words[10].to_bits() != c.q.to_bits()
+            || words[11].to_bits() != c.q.to_bits()
+            || words[13].to_bits() != c.slope.to_bits()
+            || words[14].to_bits() != c.slope.to_bits()
+        {
+            return Err(StatePayloadError {
+                code: "effect.state.payload",
+            });
+        }
+        lane.state[band] = BiquadState {
+            x1: words[0],
+            x2: words[1],
+            y1: words[2],
+            y2: words[3],
+        }
+    }
+    Ok(lane)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miso_engine_effect_contract::{
+        LinkMode, PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort, StatePayloadInput,
+        StatePayloadOutput,
+    };
+    fn values() -> Vec<InitialParameterValue> {
+        let mut values = Vec::new();
+        for (index, p) in EQ_PARAMETERS.iter().enumerate() {
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                values.push(InitialParameterValue {
+                    parameter_index: index as u32,
+                    channel,
+                    value: p.default_value,
+                })
+            }
+        }
+        values
+    }
+    fn request<'a>(values: &'a [InitialParameterValue], bypass: bool) -> PrepareEffectRequest<'a> {
+        PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: Quality::Normal,
+            bypass,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::None,
+            },
+            initial_values: values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 512,
+                maximum_scratch_bytes: 1,
+                maximum_automation_spans_per_block: 1,
+            },
+        }
+    }
+    #[test]
+    fn descriptor_is_frozen() {
+        miso_engine_effect_contract::validate_descriptor_v1(&PARAMETRIC_EQ_DESCRIPTOR_V1)
+            .expect("descriptor");
+        assert_eq!(EQ_PARAMETERS.len(), 24);
+        assert_eq!(STATE_BYTES_PER_LANE, 256)
+    }
+    #[test]
+    fn rbj_design_is_finite_and_jury_valid() {
+        for kind in [
+            EqBandKindV1::Bell,
+            EqBandKindV1::LowShelf,
+            EqBandKindV1::HighShelf,
+            EqBandKindV1::LowPass,
+            EqBandKindV1::HighPass,
+            EqBandKindV1::Notch,
+        ] {
+            let c = design_biquad_v1(kind, 1000.0, 6.0, 1.0, 1.0, SampleRateHz(48_000))
+                .expect("design");
+            assert!(c.identity || c.a2.abs() < 1.0)
+        }
+    }
+    #[test]
+    fn identity_bypass_and_state_round_trip() {
+        let values = values();
+        let mut effect = ParametricEqFactory
+            .prepare(request(&values, true))
+            .expect("prepare");
+        let mut left = [0.0_f32, f32::NAN, 0.25];
+        let mut right = [-0.0_f32, 0.5, 0.0];
+        let block =
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block");
+        let report = effect.process(block);
+        assert_eq!(left[1].to_bits(), 0);
+        assert_eq!(right[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(report.sanitized_main_samples, 1);
+        let mut l = [0_u8; 256];
+        let mut r = [0_u8; 256];
+        effect
+            .snapshot_state_payload(
+                StatePayloadOutput::new(&mut [], &mut l, &mut r, effect.metadata().state_sizes)
+                    .expect("output"),
+            )
+            .expect("snapshot");
+        effect
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &l, &r, effect.metadata().state_sizes).expect("input"),
+            )
+            .expect("restore")
+    }
+}
