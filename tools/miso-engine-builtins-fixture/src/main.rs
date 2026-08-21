@@ -162,8 +162,38 @@ struct FunctionalCaseV1 {
 /// The two typed subsets of the complete cases declaration file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifiedCasesV1 {
-    response_ids: BTreeSet<String>,
+    response_cases: BTreeMap<String, ResponseCaseV1>,
     functional_cases: BTreeMap<String, FunctionalCaseV1>,
+}
+
+/// One complete typed response declaration from `cases.toml`.
+///
+/// The checker retains numeric fields as IEEE words after enforcing the frozen 17-place decimal
+/// representation.  That avoids both a permissive TOML parser surface and accidental tolerance
+/// comparisons on the fixture's control coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResponseCaseV1 {
+    id: String,
+    rate_hz: u32,
+    quantum_frames: u32,
+    section: ResponseSectionV1,
+    cutoff_bits: u64,
+    probe_bits: u64,
+    oracle: String,
+}
+
+/// The serialized measurements that must agree byte-for-byte across all five partitions of one
+/// frozen response coordinate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResponseMeasurementWordsV1 {
+    rbj_magnitude_db: u64,
+    cast_state_magnitude_db: u64,
+    impulse_dft_magnitude_db: u64,
+    sustained_fundamental_db: u64,
+    sustained_residual_db: u64,
+    sustained_total_db: u64,
+    tail_energy: u64,
+    recovery_count: u64,
 }
 
 /// One canonical meter snapshot, represented by its serialized IEEE-754 words.
@@ -336,6 +366,26 @@ struct ResponseCoordinateV1 {
     cutoff_bits: u64,
     probe_bits: u64,
     quantum_frames: u32,
+}
+
+/// A response coordinate independent of render partition size.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ResponseInvariantCoordinateV1 {
+    rate_hz: u32,
+    section: ResponseSectionV1,
+    cutoff_bits: u64,
+    probe_bits: u64,
+}
+
+/// Measurements independently reconstructed from the retained-`f32` recurrence.
+#[derive(Clone, Copy, Debug)]
+struct IndependentResponseMeasurementV1 {
+    impulse_dft_magnitude_db: f64,
+    sustained_fundamental_db: Option<f64>,
+    sustained_residual_db: Option<f64>,
+    sustained_total_db: Option<f64>,
+    tail_energy: f64,
+    recovery_count: u64,
 }
 
 /// One strict, complete benchmark input declaration.
@@ -1474,7 +1524,24 @@ fn render_matrix_retarget() -> Vec<u8> {
     pack_pcm(&left, &right)
 }
 
+struct ResetFixtureV1 {
+    pcm: Vec<u8>,
+    executed_resets: [BuiltinResetKind; 2],
+}
+
 fn render_reset() -> Vec<u8> {
+    let fixture = render_reset_fixture_v1();
+    debug_assert_eq!(
+        fixture.executed_resets,
+        [
+            BuiltinResetKind::DiscontinuityKeepTargets,
+            BuiltinResetKind::FullToPrepared,
+        ]
+    );
+    fixture.pcm
+}
+
+fn render_reset_fixture_v1() -> ResetFixtureV1 {
     let parameters = BuiltinParameters {
         left: ChannelParameters {
             hpf_hz: 100.0,
@@ -1488,7 +1555,8 @@ fn render_reset() -> Vec<u8> {
     chain
         .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("pre-reset"))
         .expect("pre-reset render");
-    chain.reset(BuiltinResetKind::DiscontinuityKeepTargets);
+    let discontinuity = BuiltinResetKind::DiscontinuityKeepTargets;
+    chain.reset(discontinuity);
     let mut post_left = [1.0_f32, 0.0, 0.0, 0.0];
     let mut post_right = [0.0_f32; 4];
     chain
@@ -1496,9 +1564,23 @@ fn render_reset() -> Vec<u8> {
             DualMonoBlock::new(&mut post_left, &mut post_right, 4).expect("post-reset"),
         )
         .expect("post-reset render");
+    let full = BuiltinResetKind::FullToPrepared;
+    chain.reset(full);
+    let mut full_left = [1.0_f32, 0.0, 0.0, 0.0];
+    let mut full_right = [0.0_f32; 4];
+    chain
+        .process_dual_mono(
+            DualMonoBlock::new(&mut full_left, &mut full_right, 8).expect("full-reset"),
+        )
+        .expect("full-reset render");
     left.extend(post_left);
     right.extend(post_right);
-    pack_pcm(&left, &right)
+    left.extend(full_left);
+    right.extend(full_right);
+    ResetFixtureV1 {
+        pcm: pack_pcm(&left, &right),
+        executed_resets: [discontinuity, full],
+    }
 }
 
 fn render_lr_isolation() -> Vec<u8> {
@@ -1604,21 +1686,7 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     verify_manifest_bytes_v1(root, &manifest)?;
     verify_path_class_coverage_v1(&manifest)?;
     let cases = verify_cases_v1(root)?;
-    let csv_response_ids = verify_reference_oracle_v1(root)?;
-    if cases.response_ids != csv_response_ids {
-        let missing: Vec<_> = csv_response_ids
-            .difference(&cases.response_ids)
-            .take(1)
-            .collect();
-        let unexpected: Vec<_> = cases
-            .response_ids
-            .difference(&csv_response_ids)
-            .take(1)
-            .collect();
-        return Err(format!(
-            "cases.toml and reference/filter-response.csv response IDs differ; missing={missing:?} unexpected={unexpected:?}"
-        ));
-    }
+    verify_reference_oracle_v1(root, &cases.response_cases)?;
     verify_metadata_v1(root)?;
     verify_functional_fixture_completeness_v1(root, &manifest, &cases.functional_cases)?;
     verify_jsonl_payloads_v1(root)?;
@@ -1799,7 +1867,7 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
 
     let mut case_count = 0_usize;
     let mut previous = None::<String>;
-    let mut response_ids = BTreeSet::new();
+    let mut response_cases = BTreeMap::new();
     let mut functional_cases = BTreeMap::new();
     for block in blocks {
         if block.is_empty() {
@@ -1813,7 +1881,11 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
         }
         previous = Some(id.to_owned());
         if quoted_case_field(block, "category") == Some("filter_response") {
-            if !response_ids.insert(id.to_owned()) {
+            let response = parse_response_case_v1(block)?;
+            if response.id != id {
+                return Err(format!("response case ID parse mismatch: {id}"));
+            }
+            if response_cases.insert(id.to_owned(), response).is_some() {
                 return Err(format!("cases.toml duplicate response ID: {id}"));
             }
         } else {
@@ -1826,17 +1898,28 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
             }
         }
     }
-    if case_count != CASE_COUNT_V1 || response_ids.len() != RESPONSE_CASE_COUNT_V1 {
+    if case_count != CASE_COUNT_V1 || response_cases.len() != RESPONSE_CASE_COUNT_V1 {
         return Err(format!(
             "cases.toml coverage count differs: cases={case_count} responses={}",
-            response_ids.len()
+            response_cases.len()
         ));
     }
+    verify_response_cases_v1(&response_cases)?;
     verify_functional_cases_v1(&functional_cases)?;
     Ok(VerifiedCasesV1 {
-        response_ids,
+        response_cases,
         functional_cases,
     })
+}
+
+fn verify_response_cases_v1(
+    response_cases: &BTreeMap<String, ResponseCaseV1>,
+) -> Result<(), String> {
+    if *response_cases == expected_response_cases_v1() {
+        Ok(())
+    } else {
+        Err("cases.toml response tuples differ from the frozen grid".to_owned())
+    }
 }
 
 fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
@@ -1865,6 +1948,38 @@ fn parse_functional_case_v1(block: &str) -> Result<FunctionalCaseV1, String> {
     })
 }
 
+fn parse_response_case_v1(block: &str) -> Result<ResponseCaseV1, String> {
+    let lines: Vec<_> = block.lines().filter(|line| !line.is_empty()).collect();
+    let [
+        id,
+        category,
+        rate_hz,
+        quantum_frames,
+        section,
+        cutoff_hz,
+        probe_hz,
+        oracle,
+    ] = lines.as_slice()
+    else {
+        return Err("response case does not have exactly eight canonical fields".to_owned());
+    };
+    let id = parse_case_string_field_v1(id, "id")?;
+    if parse_case_string_field_v1(category, "category")? != "filter_response" {
+        return Err(format!("response case has invalid category: {id}"));
+    }
+    let section = parse_response_section_v1(&parse_case_string_field_v1(section, "section")?)
+        .ok_or_else(|| format!("response case has invalid section: {id}"))?;
+    Ok(ResponseCaseV1 {
+        id,
+        rate_hz: parse_case_u32_field_v1(rate_hz, "rate_hz")?,
+        quantum_frames: parse_case_u32_field_v1(quantum_frames, "quantum_frames")?,
+        section,
+        cutoff_bits: parse_case_f64_17_v1(cutoff_hz, "cutoff_hz")?.to_bits(),
+        probe_bits: parse_case_f64_17_v1(probe_hz, "probe_hz")?.to_bits(),
+        oracle: parse_case_string_field_v1(oracle, "oracle")?,
+    })
+}
+
 fn parse_case_string_field_v1(line: &str, key: &str) -> Result<String, String> {
     let value = line
         .strip_prefix(key)
@@ -1889,6 +2004,14 @@ fn parse_case_u32_field_v1(line: &str, key: &str) -> Result<u32, String> {
         return Err(format!("functional case {key} is not canonical"));
     }
     Ok(parsed)
+}
+
+fn parse_case_f64_17_v1(line: &str, key: &str) -> Result<f64, String> {
+    let value = line
+        .strip_prefix(key)
+        .and_then(|line| line.strip_prefix(" = "))
+        .ok_or_else(|| format!("response case has invalid {key} field"))?;
+    parse_canonical_response_f64_v1(value, &format!("response case {key}"))
 }
 
 fn verify_functional_cases_v1(cases: &BTreeMap<String, FunctionalCaseV1>) -> Result<(), String> {
@@ -2074,17 +2197,17 @@ fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     )?;
 
     let reset_input = [1.0, 0.0, 0.0, 0.0];
-    let mut reset_left =
-        retained_tpt_outputs_v1(&reset_input, 100.0, ReferenceTptOutput::HighPass)?;
-    reset_left.extend(retained_tpt_outputs_v1(
-        &reset_input,
-        100.0,
-        ReferenceTptOutput::HighPass,
-    )?);
+    let reset_segment = retained_tpt_outputs_v1(&reset_input, 100.0, ReferenceTptOutput::HighPass)?;
+    let mut reset_left = reset_segment.clone();
+    // Both reset modes clear retained filter state for this prepared nonidentity chain.  The
+    // dedicated authoring test verifies that the fixture invokes both enum variants; the payload
+    // independently checks the resulting three fresh impulse responses.
+    reset_left.extend_from_slice(&reset_segment);
+    reset_left.extend_from_slice(&reset_segment);
     verify_pcm_words_v1(
         root,
         "pcm/reset.f32le",
-        &pcm_words_v1(&reset_left, &[0.0; 8]),
+        &pcm_words_v1(&reset_left, &[0.0; 12]),
     )?;
 
     let isolation_left = retained_tpt_outputs_v1(
@@ -2141,6 +2264,13 @@ fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     verify_pcm_words_v1(
         root,
         "pcm/matrix-corner.f32le",
+        &matrix_pcm_words_v1(swap, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+    )?;
+    // The unsuffixed payload is the prepared 64-byte swap-matrix case, not one of the
+    // 128-frame target-update ramps.  It must equal the matching matrix-corner payload.
+    verify_pcm_words_v1(
+        root,
+        "pcm/matrix-ramp.f32le",
         &matrix_pcm_words_v1(swap, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
     )?;
     for bits in 0_u8..16 {
@@ -3638,7 +3768,10 @@ fn graph_meter_snapshot_v1(
     Ok(MeterRecordV1::Snapshot(snapshot))
 }
 
-fn verify_reference_oracle_v1(root: &Path) -> Result<BTreeSet<String>, String> {
+fn verify_reference_oracle_v1(
+    root: &Path,
+    response_cases: &BTreeMap<String, ResponseCaseV1>,
+) -> Result<(), String> {
     let bytes = read_regular_file(
         &root.join("reference/filter-response.csv"),
         "reference/filter-response.csv",
@@ -3690,32 +3823,23 @@ fn verify_reference_oracle_v1(root: &Path) -> Result<BTreeSet<String>, String> {
         ));
     }
     verify_response_grid_v1(&rows)?;
+    verify_response_case_csv_tuples_v1(response_cases, &rows)?;
+    verify_response_partition_equality_v1(&rows)?;
     verify_response_oracle_tolerances_v1(&rows)?;
-    Ok(ids)
+    Ok(())
 }
 
 fn parse_response_csv_row_v1(
     fields: Vec<&str>,
     line_number: usize,
 ) -> Result<ResponseCsvRowV1, String> {
-    let rate_hz = fields[1].parse::<u32>().map_err(|_| {
-        format!("reference/filter-response.csv rate is not a u32 at row {line_number}")
+    let rate_hz = parse_canonical_response_u32_v1(fields[1], "rate_hz", line_number)?;
+    let section = parse_response_section_v1(fields[2]).ok_or_else(|| {
+        format!("reference/filter-response.csv section is invalid at row {line_number}")
     })?;
-    let section = match fields[2] {
-        "high_pass" => ResponseSectionV1::HighPass,
-        "low_pass" => ResponseSectionV1::LowPass,
-        "cascade" => ResponseSectionV1::Cascade,
-        _ => {
-            return Err(format!(
-                "reference/filter-response.csv section is invalid at row {line_number}"
-            ));
-        }
-    };
     let cutoff_hz = parse_response_f64_v1(fields[3], "cutoff_hz", line_number)?;
     let probe_hz = parse_response_f64_v1(fields[4], "probe_hz", line_number)?;
-    let quantum_frames = fields[5].parse::<u32>().map_err(|_| {
-        format!("reference/filter-response.csv quantum is not a u32 at row {line_number}")
-    })?;
+    let quantum_frames = parse_canonical_response_u32_v1(fields[5], "quantum_frames", line_number)?;
     Ok(ResponseCsvRowV1 {
         id: fields[0].to_owned(),
         rate_hz,
@@ -3746,24 +3870,69 @@ fn parse_response_csv_row_v1(
         )?,
         sustained_total_db: parse_response_f64_v1(fields[11], "sustained_total_db", line_number)?,
         tail_energy: parse_response_f64_v1(fields[12], "tail_energy", line_number)?,
-        recovery_count: fields[13].parse::<u64>().map_err(|_| {
-            format!(
-                "reference/filter-response.csv recovery_count is not a u64 at row {line_number}"
-            )
-        })?,
+        recovery_count: parse_canonical_response_u64_v1(fields[13], "recovery_count", line_number)?,
     })
 }
 
 fn parse_response_f64_v1(value: &str, field: &str, line_number: usize) -> Result<f64, String> {
-    let value = value.parse::<f64>().map_err(|_| {
-        format!("reference/filter-response.csv {field} is not an f64 at row {line_number}")
+    parse_canonical_response_f64_v1(
+        value,
+        &format!("reference/filter-response.csv {field} at row {line_number}"),
+    )
+}
+
+fn parse_canonical_response_f64_v1(value: &str, label: &str) -> Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| format!("{label} is not an f64"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{label} is not finite"));
+    }
+    if format!("{parsed:.17}") != value {
+        return Err(format!("{label} is not a canonical 17-place decimal"));
+    }
+    Ok(parsed)
+}
+
+fn parse_canonical_response_u32_v1(
+    value: &str,
+    field: &str,
+    line_number: usize,
+) -> Result<u32, String> {
+    let parsed = value.parse::<u32>().map_err(|_| {
+        format!("reference/filter-response.csv {field} is not a u32 at row {line_number}")
     })?;
-    if !value.is_finite() {
+    if parsed.to_string() != value {
         return Err(format!(
-            "reference/filter-response.csv {field} is not finite at row {line_number}"
+            "reference/filter-response.csv {field} is not canonical at row {line_number}"
         ));
     }
-    Ok(value)
+    Ok(parsed)
+}
+
+fn parse_canonical_response_u64_v1(
+    value: &str,
+    field: &str,
+    line_number: usize,
+) -> Result<u64, String> {
+    let parsed = value.parse::<u64>().map_err(|_| {
+        format!("reference/filter-response.csv {field} is not a u64 at row {line_number}")
+    })?;
+    if parsed.to_string() != value {
+        return Err(format!(
+            "reference/filter-response.csv {field} is not canonical at row {line_number}"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_response_section_v1(value: &str) -> Option<ResponseSectionV1> {
+    match value {
+        "high_pass" => Some(ResponseSectionV1::HighPass),
+        "low_pass" => Some(ResponseSectionV1::LowPass),
+        "cascade" => Some(ResponseSectionV1::Cascade),
+        _ => None,
+    }
 }
 
 fn verify_response_grid_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
@@ -3790,6 +3959,72 @@ fn response_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseCoordinateV1 {
         probe_bits: row.probe_hz.to_bits(),
         quantum_frames: row.quantum_frames,
     }
+}
+
+fn response_invariant_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseInvariantCoordinateV1 {
+    ResponseInvariantCoordinateV1 {
+        rate_hz: row.rate_hz,
+        section: row.section,
+        cutoff_bits: row.cutoff_hz.to_bits(),
+        probe_bits: row.probe_hz.to_bits(),
+    }
+}
+
+fn response_measurement_words_v1(row: &ResponseCsvRowV1) -> ResponseMeasurementWordsV1 {
+    ResponseMeasurementWordsV1 {
+        rbj_magnitude_db: row.rbj_magnitude_db.to_bits(),
+        cast_state_magnitude_db: row.cast_state_magnitude_db.to_bits(),
+        impulse_dft_magnitude_db: row.impulse_dft_magnitude_db.to_bits(),
+        sustained_fundamental_db: row.sustained_fundamental_db.to_bits(),
+        sustained_residual_db: row.sustained_residual_db.to_bits(),
+        sustained_total_db: row.sustained_total_db.to_bits(),
+        tail_energy: row.tail_energy.to_bits(),
+        recovery_count: row.recovery_count,
+    }
+}
+
+fn verify_response_partition_equality_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+    let mut partitions = BTreeMap::<
+        ResponseInvariantCoordinateV1,
+        (ResponseMeasurementWordsV1, BTreeSet<u32>),
+    >::new();
+    for row in rows {
+        let coordinate = response_invariant_coordinate_v1(row);
+        let measurements = response_measurement_words_v1(row);
+        match partitions.get_mut(&coordinate) {
+            Some((expected, quanta)) => {
+                if *expected != measurements {
+                    return Err(format!(
+                        "reference/filter-response.csv partition measurements differ: {}",
+                        row.id
+                    ));
+                }
+                if !quanta.insert(row.quantum_frames) {
+                    return Err(format!(
+                        "reference/filter-response.csv partition has duplicate quantum: {}",
+                        row.id
+                    ));
+                }
+            }
+            None => {
+                partitions.insert(
+                    coordinate,
+                    (measurements, BTreeSet::from([row.quantum_frames])),
+                );
+            }
+        }
+    }
+    let expected_quanta = BTreeSet::from(QUANTA);
+    if let Some((coordinate, (_, quanta))) = partitions
+        .iter()
+        .find(|(_, (_, quanta))| *quanta != expected_quanta)
+    {
+        return Err(format!(
+            "reference/filter-response.csv partition quanta differ: rate={} section={:?} cutoff={:016x} probe={:016x} actual={quanta:?}",
+            coordinate.rate_hz, coordinate.section, coordinate.cutoff_bits, coordinate.probe_bits
+        ));
+    }
+    Ok(())
 }
 
 fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
@@ -3825,29 +4060,88 @@ fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
 }
 
 fn expected_response_ids_v1() -> BTreeSet<String> {
-    let mut expected = BTreeSet::new();
+    expected_response_cases_v1().into_keys().collect()
+}
+
+fn expected_response_cases_v1() -> BTreeMap<String, ResponseCaseV1> {
+    let mut expected = BTreeMap::new();
     for rate_hz in RATES {
         for quantum_frames in QUANTA {
             for (cutoff_index, cutoff_hz) in response_cutoffs(rate_hz).into_iter().enumerate() {
-                for (probe_index, _) in frozen_single_section_probes_v1(rate_hz, cutoff_hz)
+                for (probe_index, probe_hz) in frozen_single_section_probes_v1(rate_hz, cutoff_hz)
                     .into_iter()
                     .enumerate()
                 {
-                    for section in ["high_pass", "low_pass"] {
-                        expected.insert(format!(
-                            "response-{section}-{rate_hz}-{quantum_frames}-{cutoff_index}-{probe_index}"
-                        ));
+                    for (section_name, section) in [
+                        ("high_pass", ResponseSectionV1::HighPass),
+                        ("low_pass", ResponseSectionV1::LowPass),
+                    ] {
+                        let id = format!(
+                            "response-{section_name}-{rate_hz}-{quantum_frames}-{cutoff_index}-{probe_index}"
+                        );
+                        expected.insert(
+                            id.clone(),
+                            ResponseCaseV1 {
+                                id,
+                                rate_hz,
+                                quantum_frames,
+                                section,
+                                cutoff_bits: cutoff_hz.to_bits(),
+                                probe_bits: probe_hz.to_bits(),
+                                oracle: "rbj_f64_and_cast_state".to_owned(),
+                            },
+                        );
                     }
                 }
             }
-            for (probe_index, _) in frozen_cascade_probes_v1(rate_hz).into_iter().enumerate() {
-                expected.insert(format!(
-                    "response-cascade-{rate_hz}-{quantum_frames}-fixed-{probe_index}"
-                ));
+            for (probe_index, probe_hz) in frozen_cascade_probes_v1(rate_hz).into_iter().enumerate()
+            {
+                let id = format!("response-cascade-{rate_hz}-{quantum_frames}-fixed-{probe_index}");
+                expected.insert(
+                    id.clone(),
+                    ResponseCaseV1 {
+                        id,
+                        rate_hz,
+                        quantum_frames,
+                        section: ResponseSectionV1::Cascade,
+                        cutoff_bits: 100.0_f64.to_bits(),
+                        probe_bits: probe_hz.to_bits(),
+                        oracle: "rbj_f64_and_cast_state".to_owned(),
+                    },
+                );
             }
         }
     }
     expected
+}
+
+fn verify_response_case_csv_tuples_v1(
+    response_cases: &BTreeMap<String, ResponseCaseV1>,
+    rows: &[ResponseCsvRowV1],
+) -> Result<(), String> {
+    if response_cases.len() != rows.len() {
+        return Err("response case/CSV counts differ".to_owned());
+    }
+    for row in rows {
+        let Some(case) = response_cases.get(&row.id) else {
+            return Err(format!(
+                "reference/filter-response.csv has no response case: {}",
+                row.id
+            ));
+        };
+        if case.rate_hz != row.rate_hz
+            || case.quantum_frames != row.quantum_frames
+            || case.section != row.section
+            || case.cutoff_bits != row.cutoff_hz.to_bits()
+            || case.probe_bits != row.probe_hz.to_bits()
+        {
+            return Err(format!(
+                "cases.toml response tuple differs from CSV coordinate: {}",
+                row.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn frozen_single_section_probes_v1(rate_hz: u32, cutoff_hz: f64) -> Vec<f64> {
@@ -3871,11 +4165,29 @@ fn sort_and_deduplicate_f64_v1(values: &mut Vec<f64>) {
 }
 
 fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+    let mut independent =
+        BTreeMap::<ResponseInvariantCoordinateV1, IndependentResponseMeasurementV1>::new();
     for row in rows {
         if row.recovery_count != 0 {
             return Err(format!(
                 "reference/filter-response.csv legal recovery count is nonzero: {} has {}",
                 row.id, row.recovery_count
+            ));
+        }
+        let coordinate = response_invariant_coordinate_v1(row);
+        if !independent.contains_key(&coordinate) {
+            independent.insert(
+                coordinate.clone(),
+                independent_response_measurement_v1(row)?,
+            );
+        }
+        let measurement = independent
+            .get(&coordinate)
+            .expect("independent coordinate inserted");
+        if measurement.recovery_count != 0 {
+            return Err(format!(
+                "independent retained-f32 response recovered for a legal row: {} has {}",
+                row.id, measurement.recovery_count
             ));
         }
         let rbj = independent_rbj_magnitude_db_v1(row)?;
@@ -3893,44 +4205,227 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
                 row.id
             ));
         }
-        if !is_coherent_measurement_probe_v1(row) {
-            continue;
-        }
         if rbj >= -120.0
-            && (row.impulse_dft_magnitude_db - rbj).abs() > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+            && ((row.impulse_dft_magnitude_db - rbj).abs() > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+                || (measurement.impulse_dft_magnitude_db - rbj).abs()
+                    > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1)
         {
             return Err(format!(
-                "reference/filter-response.csv impulse-DFT tolerance exceeds 0.05 dB: {}",
+                "reference/filter-response.csv or independent recurrence impulse-DFT exceeds the 0.05 dB RBJ gate: {}",
                 row.id
             ));
         }
+        if (row.impulse_dft_magnitude_db - measurement.impulse_dft_magnitude_db).abs()
+            > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+        {
+            return Err(format!(
+                "reference/filter-response.csv impulse-DFT differs from the independent recurrence: {}",
+                row.id
+            ));
+        }
+        if row.tail_energy < 0.0 || measurement.tail_energy < 0.0 {
+            return Err(format!(
+                "reference/filter-response.csv final-4096 tail energy is negative: {}",
+                row.id
+            ));
+        }
+        if !is_coherent_measurement_probe_v1(row) {
+            continue;
+        }
+        let fundamental = measurement
+            .sustained_fundamental_db
+            .expect("coherent rows retain sustained metrics");
+        let residual = measurement
+            .sustained_residual_db
+            .expect("coherent rows retain sustained metrics");
+        let total = measurement
+            .sustained_total_db
+            .expect("coherent rows retain sustained metrics");
         if rbj >= -90.0 {
-            if (row.sustained_fundamental_db - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1 {
+            if (row.sustained_fundamental_db - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
+                || (fundamental - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
+            {
                 return Err(format!(
-                    "reference/filter-response.csv sustained fundamental exceeds 0.05 dB: {}",
+                    "reference/filter-response.csv or independent recurrence sustained fundamental exceeds the 0.05 dB RBJ gate: {}",
                     row.id
                 ));
             }
-            if row.sustained_residual_db > RESPONSE_RESIDUAL_LIMIT_DB_V1 {
+            if (row.sustained_fundamental_db - fundamental).abs()
+                > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
+            {
+                return Err(format!(
+                    "reference/filter-response.csv sustained fundamental differs from the independent recurrence: {}",
+                    row.id
+                ));
+            }
+            if row.sustained_residual_db > RESPONSE_RESIDUAL_LIMIT_DB_V1
+                || residual > RESPONSE_RESIDUAL_LIMIT_DB_V1
+            {
                 return Err(format!(
                     "reference/filter-response.csv sustained residual exceeds -100 dB: {}",
                     row.id
                 ));
             }
-        } else if row.sustained_total_db > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1 {
+        } else if row.sustained_total_db > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1
+            || total > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1
+        {
             return Err(format!(
                 "reference/filter-response.csv attenuated total exceeds -88 dB: {}",
                 row.id
             ));
         }
-        if row.tail_energy < 0.0 {
-            return Err(format!(
-                "reference/filter-response.csv tail energy is negative: {}",
-                row.id
-            ));
-        }
     }
     Ok(())
+}
+
+enum IndependentResponseProcessorV1 {
+    HighPass(ReferenceRetainedTptF32),
+    LowPass(ReferenceRetainedTptF32),
+    Cascade {
+        high_pass: ReferenceRetainedTptF32,
+        low_pass: ReferenceRetainedTptF32,
+    },
+}
+
+impl IndependentResponseProcessorV1 {
+    fn from_row(row: &ResponseCsvRowV1) -> Result<Self, String> {
+        let section = |cutoff_hz, output| {
+            ReferenceRetainedTptF32::conditioned_butterworth(row.rate_hz, cutoff_hz, output)
+                .ok_or_else(|| {
+                    format!(
+                        "independent retained-f32 design rejected frozen response coordinate: {}",
+                        row.id
+                    )
+                })
+        };
+        match row.section {
+            ResponseSectionV1::HighPass => Ok(Self::HighPass(section(
+                row.cutoff_hz as f32,
+                ReferenceTptOutput::HighPass,
+            )?)),
+            ResponseSectionV1::LowPass => Ok(Self::LowPass(section(
+                row.cutoff_hz as f32,
+                ReferenceTptOutput::LowPass,
+            )?)),
+            ResponseSectionV1::Cascade => {
+                if row.cutoff_hz.to_bits() != 100.0_f64.to_bits() {
+                    return Err(format!(
+                        "independent retained-f32 cascade has non-frozen cutoff: {}",
+                        row.id
+                    ));
+                }
+                Ok(Self::Cascade {
+                    high_pass: section(100.0, ReferenceTptOutput::HighPass)?,
+                    low_pass: section(1_000.0, ReferenceTptOutput::LowPass)?,
+                })
+            }
+        }
+    }
+
+    fn process(&mut self, input: f32) -> (f32, u64) {
+        match self {
+            Self::HighPass(section) | Self::LowPass(section) => {
+                let step = section.process(input);
+                (f32::from_bits(step.output_bits), step.recovery_delta)
+            }
+            Self::Cascade {
+                high_pass,
+                low_pass,
+            } => {
+                let high = high_pass.process(input);
+                let low = low_pass.process(f32::from_bits(high.output_bits));
+                (
+                    f32::from_bits(low.output_bits),
+                    high.recovery_delta.saturating_add(low.recovery_delta),
+                )
+            }
+        }
+    }
+}
+
+fn independent_response_measurement_v1(
+    row: &ResponseCsvRowV1,
+) -> Result<IndependentResponseMeasurementV1, String> {
+    let mut processor = IndependentResponseProcessorV1::from_row(row)?;
+    let mut impulse = Vec::with_capacity(row.rate_hz as usize);
+    let mut recovery_count = 0_u64;
+    for frame in 0..row.rate_hz as usize {
+        let (output, recovered) = processor.process(if frame == 0 { 1.0 } else { 0.0 });
+        impulse.push(output);
+        recovery_count = recovery_count.saturating_add(recovered);
+    }
+    let tail_energy = impulse[impulse.len().saturating_sub(4096)..]
+        .iter()
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum();
+    let (sustained_fundamental_db, sustained_residual_db, sustained_total_db) =
+        if is_coherent_measurement_probe_v1(row) {
+            let (fundamental, residual, total) = independent_sustained_metrics_v1(row)?;
+            (Some(fundamental), Some(residual), Some(total))
+        } else {
+            (None, None, None)
+        };
+    Ok(IndependentResponseMeasurementV1 {
+        impulse_dft_magnitude_db: dft_magnitude_db(&impulse, f64::from(row.rate_hz), row.probe_hz),
+        sustained_fundamental_db,
+        sustained_residual_db,
+        sustained_total_db,
+        tail_energy,
+        recovery_count,
+    })
+}
+
+fn independent_sustained_metrics_v1(row: &ResponseCsvRowV1) -> Result<(f64, f64, f64), String> {
+    let mut processor = IndependentResponseProcessorV1::from_row(row)?;
+    let settle = row.rate_hz as usize / 2;
+    let frames = row.rate_hz as usize / 4;
+    let mut samples = Vec::with_capacity(frames);
+    let mut input_energy = 0.0;
+    let mut output_energy = 0.0;
+    let total_frames = settle.saturating_add(frames);
+    for start in (0..total_frames).step_by(row.quantum_frames as usize) {
+        let count = (total_frames - start).min(row.quantum_frames as usize);
+        for index in 0..count {
+            let sample_index = start + index;
+            let input = (0.5
+                * (core::f64::consts::TAU * row.probe_hz * sample_index as f64
+                    / f64::from(row.rate_hz))
+                .sin()) as f32;
+            let (output, _) = processor.process(input);
+            if sample_index >= settle {
+                input_energy += f64::from(input).powi(2);
+                samples.push(f64::from(output));
+                output_energy += f64::from(output).powi(2);
+            }
+        }
+    }
+    let count = frames as f64;
+    let (mut sin_sum, mut cos_sum, mut dc_sum) = (0.0, 0.0, 0.0);
+    for (index, sample) in samples.iter().enumerate() {
+        let phase = core::f64::consts::TAU * row.probe_hz * (settle + index) as f64
+            / f64::from(row.rate_hz);
+        sin_sum += sample * phase.sin();
+        cos_sum += sample * phase.cos();
+        dc_sum += sample;
+    }
+    let dc = dc_sum / count;
+    let sine = 2.0 * sin_sum / count;
+    let cosine = 2.0 * cos_sum / count;
+    let residual: f64 = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            let phase = core::f64::consts::TAU * row.probe_hz * (settle + index) as f64
+                / f64::from(row.rate_hz);
+            (sample - (dc + sine * phase.sin() + cosine * phase.cos())).powi(2)
+        })
+        .sum();
+    let input_rms = (input_energy / count).sqrt();
+    Ok((
+        20.0 * (sine.hypot(cosine) / 0.5).log10(),
+        20.0 * ((residual / count).sqrt() / input_rms).log10(),
+        20.0 * ((output_energy / count).sqrt() / input_rms).log10(),
+    ))
 }
 
 fn is_coherent_measurement_probe_v1(row: &ResponseCsvRowV1) -> bool {
@@ -4392,6 +4887,75 @@ mod tests {
             read_fixture_tree(&root),
             "--check mutated the fixture root"
         );
+        remove_temporary_root(root);
+    }
+
+    #[test]
+    fn issue061_response_tuples_decimals_and_partitions_reject_semantic_mutations() {
+        let expected = expected_response_cases_v1();
+        let id = "response-high_pass-44100-1-0-0";
+        let mut changed = expected.clone();
+        changed.get_mut(id).expect("frozen response case").oracle = "wrong".to_owned();
+        assert!(verify_response_cases_v1(&changed).is_err());
+        assert!(parse_canonical_response_f64_v1("10.0", "test").is_err());
+
+        let row = parse_response_csv_row_v1(
+            "response-high_pass-44100-1-0-0,44100,high_pass,10.00000000000000000,4.00000000000000000,1,-16.02738287747026291,-16.02738235825830770,-16.02737817066901727,-16.02738648600919902,-131.33618179292395212,-16.02738648903881824,0.00000000000000000,0"
+                .split(',')
+                .collect(),
+            2,
+        )
+        .expect("canonical response row");
+        let mut oracle_mutation = row.clone();
+        oracle_mutation.impulse_dft_magnitude_db = 0.0;
+        assert!(verify_response_oracle_tolerances_v1(&[oracle_mutation]).is_err());
+        let mut altered = row.clone();
+        altered.quantum_frames = 127;
+        altered.impulse_dft_magnitude_db = 0.0;
+        assert!(verify_response_partition_equality_v1(&[row, altered]).is_err());
+    }
+
+    #[test]
+    fn issue061_unsuffixed_ramp_and_reset_script_have_frozen_semantics() {
+        let ramp = pcm_cases()
+            .into_iter()
+            .find_map(|(id, bytes)| (id == "matrix-ramp").then_some(bytes))
+            .expect("unsuffixed matrix ramp");
+        let (left, right) = matrix_outputs_v1(
+            [0.0, 1.0, 1.0, 0.0],
+            &PCM_INPUT_LEFT_V1,
+            &PCM_INPUT_RIGHT_V1,
+        );
+        assert_eq!(ramp, pack_pcm(&left, &right));
+        let reset = render_reset_fixture_v1();
+        assert_eq!(
+            reset.executed_resets,
+            [
+                BuiltinResetKind::DiscontinuityKeepTargets,
+                BuiltinResetKind::FullToPrepared,
+            ]
+        );
+        assert_eq!(reset.pcm.len(), 12 * 2 * core::mem::size_of::<f32>());
+
+        let root = temporary_root("issue061-pcm-semantics");
+        fs::create_dir_all(root.join("pcm")).expect("PCM fixture directory");
+        for (id, bytes) in pcm_cases() {
+            fs::write(root.join(format!("pcm/{id}.f32le")), bytes).expect("PCM fixture");
+        }
+        let ramp_path = root.join("pcm/matrix-ramp.f32le");
+        let mut ramp_mutation = fs::read(&ramp_path).expect("unsuffixed matrix ramp");
+        ramp_mutation[0] ^= 1;
+        fs::write(&ramp_path, ramp_mutation).expect("mutated unsuffixed matrix ramp");
+        assert!(verify_matrix_pcm_semantics_v1(&root).is_err());
+
+        for (id, bytes) in pcm_cases() {
+            fs::write(root.join(format!("pcm/{id}.f32le")), bytes).expect("PCM fixture reset");
+        }
+        let reset_path = root.join("pcm/reset.f32le");
+        let mut reset_mutation = fs::read(&reset_path).expect("reset PCM");
+        reset_mutation[8 * core::mem::size_of::<f32>()] ^= 1;
+        fs::write(&reset_path, reset_mutation).expect("mutated reset PCM");
+        assert!(verify_filter_pcm_semantics_v1(&root).is_err());
         remove_temporary_root(root);
     }
 

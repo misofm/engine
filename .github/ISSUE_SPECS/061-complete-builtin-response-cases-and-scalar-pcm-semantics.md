@@ -66,3 +66,43 @@ seal, audits, targets, instruction inspection, benchmarks, timing or listening.
 Exact row/case/PCM counts and hashes; tolerance maxima; partition equality and recovery total zero;
 mutation identities; strict Terra/Sol verdicts; `workload_invocations=0` and
 `timed_benchmark_invocations=0`.
+
+## Final Sol correction and evidence — 2026-08-21
+
+**PASS.** Adversarial review found and corrected one bounded checker defect: the independent
+retained-`f32` recurrence had replaced, rather than supplemented, the frozen analytic quality
+gate. The final checker requires both the serialized production measurement and the independent
+recurrence measurement to satisfy the RBJ-relative impulse/fundamental tolerances, while also
+checking their mutual agreement. Noncoherent exact-cutoff and `0.49*rate` rows run impulse and
+tail gates; only the frozen base-probe rows run sustained gates.
+
+The sealed corpus has `1,652` cases and `1,630` response rows (`735` HPF, `735` LPF, `160`
+cascade), exactly five quanta per invariant coordinate, all seven serialized `f64` measurement
+words identical across those quanta, and total recovery `0`. Observed frozen maxima are
+`0.000001751253 dB` cast-state error, `0.024970453294 dB` one-second impulse error and
+`0.000010218267 dB` coherent fundamental error; worst coherent residual is
+`-124.325462463 dB`, and the largest deep-stop total is `-91.410151117 dB`.
+
+Every response case is an exact eight-field tuple and every CSV integer/17-place decimal token is
+canonical. All `32` non-graph PCM payloads are independently checked (`33` total including graph
+PCM). The unsuffixed ramp is explicitly the prepared 64-byte swap case. The single 96-byte reset
+payload contains three fresh four-frame impulse responses and the executed author path records
+`DiscontinuityKeepTargets` followed by `FullToPrepared`. Focused tests reject an altered response
+oracle, noncanonical decimal, partition measurement, unsuffixed-ramp word and reset-segment word.
+
+Payload identities are `cases.toml`
+`3f097580addf28280cf0c2aa3709610974e0a92d4ad00ea7267e5359a9ac7091`, response CSV
+`c2173a06aa9c2f37c7966d576f7d34dde349e05633941d9e8e4eb6d888fbf53d`, and reset PCM
+`76795b3b6044cdde0fcc3662f26c927544b8d3f9f676ec1d706212e7da40b7f9`.
+
+Executed gates:
+
+- checked-in read-only fixture validation: PASS;
+- `cargo test --locked -p miso-engine-builtins-fixture`: PASS, `8/8`;
+- `cargo test --locked -p miso-engine-dsp-reference`: PASS, `7` unit plus `3` integration tests,
+  with two separately frozen EQ matrix tests ignored;
+- warning-denied all-target Clippy for both focused packages: PASS;
+- `cargo fmt --all -- --check` and `git diff --check`: PASS.
+
+Verdict is strict PASS for Issue 061 only. Issues 062 and 064 remain out of scope.
+`workload_invocations=0`; `timed_benchmark_invocations=0`.
