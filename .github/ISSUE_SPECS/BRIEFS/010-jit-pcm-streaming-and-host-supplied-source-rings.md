@@ -1,5 +1,13 @@
 # Sol implementation brief — issue 010 JIT PCM streaming and host-supplied source rings
 
+## Post-review stop notice (2026-08-21)
+
+**STOPPED — DO NOT START ANOTHER ISSUE-010 ATTEMPT.** The historical brief and gates below remain
+the record for checkpoint `5dbe1cb` and its strict Sol FAIL. Production closure moved to
+**Issue-010 launch-critical source ownership and accounting closure**; expanded qualification moved
+to **Issue-010 source streaming qualification tooling and adversarial evidence**. Neither successor
+retroactively makes Issue 010 PASS.
+
 ## Decision and attempt budget
 
 **READY FOR TERRA ATTEMPT 1** on the current accepted dependency line. Implement one bounded

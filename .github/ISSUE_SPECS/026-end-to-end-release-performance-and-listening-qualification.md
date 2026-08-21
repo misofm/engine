@@ -42,7 +42,8 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Production SIMD builtin bank graph retention and reachability qualification
 - Issue-008 real audio benchmark workloads and exactly-once qualification
 - Native graph scheduler qualification and benchmark
-- JIT PCM streaming and host-supplied source rings
+- Issue-010 launch-critical source ownership and accounting closure
+- Issue-010 source streaming qualification tooling and adversarial evidence
 - Native effect runtime contract and conformance
 - Parametric EQ
 - Compressor

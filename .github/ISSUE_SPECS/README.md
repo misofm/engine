@@ -29,8 +29,9 @@ dependency of issues 007–010 and does not authorize another issue-006 benchmar
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
 launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;
 176,400/192,000/352,800/384,000 Hz remain extended compatibility evidence only. Dependency order
-places the accepted 007 slice -> 032 -> 034 corrections -> 036 -> 008, while 010 follows 032; downstream effects,
-hosts and release qualification follow their exact listed dependencies.
+places the accepted 007 slice -> 032 -> 034 corrections -> 036 -> 008, while the preserved
+Issue-010 streaming slice and its Issue-040 product closure follow 032; downstream effects, hosts
+and release qualification follow their exact listed dependencies.
 Historical “required/all-eight” evidence is preserved as period evidence and does not override
 issue 032.
 
@@ -80,6 +81,17 @@ benchmark. Issue 039 permits one Terra attempt plus one bounded Sol correction; 
 count starts at zero. It gates only consumers that claim qualified native parallel graph execution
 and release issue 026. Sequential streaming, effects, control work and browser/mobile adapters
 remain nonblocked.
+
+Issue 010 stopped after strict Sol review without overall PASS. Checkpoint `5dbe1cb` preserves its
+native parser/decoder, move-owned planar ring, host chunk boundary, coordinator source fan-out and
+target/Wasm evidence only as technical input. Issue 040, **Issue-010 launch-critical source
+ownership and accounting closure**, owns plan-retired worker stop/join, frozen capacity/sanitation
+telemetry, exact retained allocation/cap accounting and compact representative correctness. It
+gates Issues 022–024. Issue 041, **Issue-010 source streaming qualification tooling and adversarial
+evidence**, follows 040 and owns the expanded diagnostic corpus, exact frozen seek races, real
+worker-delay audit and actual duration-independent allocation-layout/RSS proof. Issue 041 is
+nonblocking for hosts/features and gates only release qualification Issue 026. Both successors have
+two total attempts and forbid benchmarks; invocation count remains zero.
 
 ## Shared definition
 

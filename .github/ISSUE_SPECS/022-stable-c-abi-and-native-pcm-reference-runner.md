@@ -34,7 +34,7 @@ Network server, delivery codecs, a broad unstable C++ API, host UI, or freeing c
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Issue-007 builtin qualification tooling, audits, and benchmark
 - Production SIMD builtin bank graph retention and reachability qualification
-- JIT PCM streaming and host-supplied source rings
+- Issue-010 launch-critical source ownership and accounting closure
 - Native effect runtime contract and conformance
 
 ## Hazards/decisions

@@ -31,7 +31,7 @@ Shipping a mobile UI, forcing 384k hardware I/O, implicit SRC, callback allocati
 - Stable C ABI and native PCM reference runner
 - Issue-007 builtin qualification tooling, audits, and benchmark
 - Real-time memory, buffers, queues, and plan lifetime
-- JIT PCM streaming and host-supplied source rings
+- Issue-010 launch-critical source ownership and accounting closure
 
 ## Hazards/decisions
 

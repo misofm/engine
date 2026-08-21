@@ -246,3 +246,27 @@ lifetime/API and accounting contracts first, then add only the missing represent
 and rerun the same untimed gates. No Sol implementation correction was attempted at this checkpoint
 because those production changes plus four independent missing evidence matrices are not one
 bounded correction.
+
+## Post-review rescope (2026-08-21)
+
+**STOPPED AND RESCOPED — Issue 010 remains FAIL and must not receive another implementation
+attempt.** The source crate, native RIFF/RF64 parser/decoder, move-owned planar ring, deterministic
+single-seek behavior, coordinator-owned source fan-out, existing host-ring realtime audit, target
+policy and Wasm no-atomic evidence through checkpoint `5dbe1cb` are preserved only as technical
+input. This does not convert Issue 010 or any numbered gate above to PASS.
+
+Two stateless successors own the remaining work:
+
+- **Issue-010 launch-critical source ownership and accounting closure** owns plan-retired native
+  worker stop/join, the frozen capacity and sanitation telemetry APIs, exact retained allocation and
+  combined-cap accounting, and only the representative correctness cases needed to accept the
+  product boundary. It gates source-consuming runners and hosts.
+- **Issue-010 source streaming qualification tooling and adversarial evidence** follows that
+  product closure and owns the expanded exact-diagnostic corpus, frozen randomized seek races, real
+  injected-native-worker-delay audit, actual duration-independent allocation-layout comparison and
+  descriptive RSS. It is nonblocking for feature/host implementation and gates only final release
+  qualification.
+
+Neither successor may weaken or delete this FAIL evidence, add a benchmark, or reopen Issue 010's
+attempt loop. Each successor has exactly two total attempts: one Terra attempt and at most one
+bounded Sol correction.
