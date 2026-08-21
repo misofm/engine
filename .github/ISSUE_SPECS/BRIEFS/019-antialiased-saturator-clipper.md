@@ -54,9 +54,10 @@ must not import production tables/code. Per-stage f32 response gates are `+-0.00
 `0.4Fs` and `<=-75 dB` from `0.6Fs`; expected design extrema are approximately
 `[-0.00105,+0.00150] dB` and `-75.28 dB`.
 
-The two FIR delays total 62 high-rate samples = 31 base samples. Report `LatencySamples(31)` and
-`TailSamples::Finite(31)`: graph extent is latency plus tail, and the total causal response can run
-through base sample 62. Enabled impulse support may begin before its linear-phase peak; PDC aligns
+The two FIR group delays total 62 high-rate samples = 31 base samples. Because taps 0/62 are exact
+zero, the nonzero tap support is 2..60; the cascade's last retained output is high-rate sample 120,
+base sample 60. Report `LatencySamples(31)` and `TailSamples::Finite(29)`: graph extent is latency
+plus tail. Enabled impulse support may begin before its linear-phase peak; PDC aligns
 the declared group delay. Bypass and mix-zero delay dry by 31 while warming wet state.
 
 ## Descriptor, automation and state
@@ -109,7 +110,7 @@ every scalar metadata/payload shape and total retained cap before returning lega
 
 The ten-track launch fixture uses only unconnected homogeneous `miso.soft-clip` slots. It proves
 host-width banks plus ordered scalar tails, scalar-delegate PCM across active smoothing/state/tail,
-exact 31-sample group delay, finite tail 31 and causal support through sample 62,
+exact 31-sample group delay, finite tail 29 and causal support through sample 60,
 bypass/PDC/canonical stability, exact bank accounting
 and one-byte-below ownership return.
 

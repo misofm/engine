@@ -101,7 +101,7 @@ const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples(31),
-        tail: TailSamples::Finite(31),
+        tail: TailSamples::Finite(29),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: LANE_STATE_BYTES,
@@ -160,11 +160,11 @@ const H: [f32; HISTORY] = [
     0.0,
     -1.710_855_8e-2,
     0.0,
-    2.496_97e-2,
+    2.496_969_9e-2,
     0.0,
     -3.690_095e-2,
     0.0,
-    5.726_341e-2,
+    5.726_340_8e-2,
     0.0,
     -1.021_490_2e-1,
     0.0,
@@ -174,11 +174,11 @@ const H: [f32; HISTORY] = [
     0.0,
     -1.021_490_2e-1,
     0.0,
-    5.726_341e-2,
+    5.726_340_8e-2,
     0.0,
     -3.690_095e-2,
     0.0,
-    2.496_97e-2,
+    2.496_969_9e-2,
     0.0,
     -1.710_855_8e-2,
     0.0,
@@ -535,7 +535,6 @@ fn apply_automation(
             && span.end_sample == first_sample
             && span.start_value.to_bits() == span.end_value.to_bits()
             && parameter_value_valid(parameter, span.start_value)
-            && !negative_zero(span.start_value)
             && prior.is_none_or(|previous| order > previous)
             && pending[lane][parameter].is_none();
         if !valid {
@@ -856,14 +855,19 @@ mod tests {
         assert_eq!(SOFT_CLIP_DESCRIPTOR_V1.parameters.len(), 3);
         for quality in QUALITIES {
             assert_eq!(quality.latency, LatencySamples(31));
-            assert_eq!(quality.tail, TailSamples::Finite(31));
+            assert_eq!(quality.tail, TailSamples::Finite(29));
             assert_eq!(quality.maximum_state.left_bytes, 676);
             assert_eq!(quality.maximum_state.right_bytes, 676);
             assert_eq!(quality.scratch_fixed_bytes, 24);
         }
         let reference = reference_halfband_63();
-        for (actual, expected) in H.into_iter().zip(reference) {
-            assert!((actual as f64 - expected).abs() < 1.0e-7);
+        for (index, (actual, expected)) in H.into_iter().zip(reference).enumerate() {
+            let expected = if TAPS.contains(&index) {
+                expected as f32
+            } else {
+                0.0
+            };
+            assert_eq!(actual.to_bits(), expected.to_bits(), "tap {index}");
         }
         let values = initial_values();
         let mut too_small = request(&values);
@@ -905,7 +909,158 @@ mod tests {
     }
 
     #[test]
-    fn delayed_identity_automation_reset_restore_and_recovery_are_lane_local() {
+    fn wet_impulse_has_exact_group_delay_and_final_causal_support() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let mut left = vec![0.0; 128];
+        let mut right = vec![0.0; 128];
+        left[0] = 0.001;
+        right[0] = -0.001;
+        process(effect.as_mut(), &mut left, &mut right, 0, &[]);
+        let left_peak = left
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+            .map(|(index, _)| index)
+            .expect("nonempty impulse");
+        let right_peak = right
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+            .map(|(index, _)| index)
+            .expect("nonempty impulse");
+        assert_eq!(left_peak, 31);
+        assert_eq!(right_peak, 31);
+        assert_ne!(left[60].to_bits(), 0.0_f32.to_bits());
+        assert_ne!(right[60].to_bits(), 0.0_f32.to_bits());
+        assert!(left[61..].iter().all(|sample| *sample == 0.0));
+        assert!(right[61..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn automation_active_restore_and_both_resets_are_word_exact_and_lane_local() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let spans = [
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 0,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 12.0,
+                end_value: 12.0,
+            },
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 2,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: -0.0,
+                end_value: -0.0,
+            },
+        ];
+        let mut left = [0.2];
+        let mut right = [0.1];
+        let report = process(effect.as_mut(), &mut left, &mut right, 0, &spans);
+        assert_eq!(report.invalid_spans, 0);
+        let active = snapshot(effect.as_ref());
+        let drive_target = db_gain(12.0);
+        let first_drive = 1.0_f32 + (drive_target - 1.0_f32) / 64.0_f32;
+        let first_mix = 1.0_f32 + (0.0_f32 - 1.0_f32) / 64.0_f32;
+        assert_eq!(read_f32(&active.0, 2).to_bits(), first_drive.to_bits());
+        assert_eq!(read_f32(&active.0, 3).to_bits(), drive_target.to_bits());
+        assert_eq!(read_u32(&active.0, 4), 63);
+        assert_eq!(read_f32(&active.0, 8).to_bits(), first_mix.to_bits());
+        assert_eq!(read_f32(&active.0, 9).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(read_u32(&active.0, 10), 63);
+        for word in [2, 3, 5, 6, 8, 9] {
+            assert_eq!(read_f32(&active.1, word).to_bits(), 1.0_f32.to_bits());
+        }
+        for word in [4, 7, 10] {
+            assert_eq!(read_u32(&active.1, word), 0);
+        }
+
+        let mut continuation_left = [0.3; 16];
+        let mut continuation_right = [-0.2; 16];
+        let mut expected_left = continuation_left;
+        let mut expected_right = continuation_right;
+        process(
+            effect.as_mut(),
+            &mut expected_left,
+            &mut expected_right,
+            1,
+            &[],
+        );
+        effect
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &active.0, &active.1, effect.metadata().state_sizes)
+                    .expect("active state"),
+            )
+            .expect("active restore");
+        process(
+            effect.as_mut(),
+            &mut continuation_left,
+            &mut continuation_right,
+            1,
+            &[],
+        );
+        assert_eq!(continuation_left, expected_left);
+        assert_eq!(continuation_right, expected_right);
+
+        effect
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &active.0, &active.1, effect.metadata().state_sizes)
+                    .expect("active state"),
+            )
+            .expect("active restore");
+        let mut left = [0.2; 62];
+        let mut right = [0.1; 62];
+        process(effect.as_mut(), &mut left, &mut right, 1, &[]);
+        let update_63 = snapshot(effect.as_ref());
+        assert_eq!(read_u32(&update_63.0, 4), 1);
+        assert_eq!(read_u32(&update_63.0, 10), 1);
+        assert_ne!(read_f32(&update_63.0, 2).to_bits(), drive_target.to_bits());
+        assert_ne!(read_f32(&update_63.0, 8).to_bits(), 0.0_f32.to_bits());
+        let mut left = [0.2];
+        let mut right = [0.1];
+        process(effect.as_mut(), &mut left, &mut right, 63, &[]);
+        let update_64 = snapshot(effect.as_ref());
+        assert_eq!(read_f32(&update_64.0, 2).to_bits(), drive_target.to_bits());
+        assert_eq!(read_u32(&update_64.0, 4), 0);
+        assert_eq!(read_f32(&update_64.0, 8).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(read_u32(&update_64.0, 10), 0);
+
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        let discontinuity = snapshot(effect.as_ref());
+        for lane in [&discontinuity.0, &discontinuity.1] {
+            assert_eq!(read_u32(lane, 0), 0);
+            assert_eq!(read_u32(lane, 1), 0);
+            assert!((11..STATE_WORDS).all(|word| read_u32(lane, word) == 0));
+            for word in [4, 7, 10] {
+                assert_eq!(read_u32(lane, word), 0);
+            }
+            for current in [2, 5, 8] {
+                assert_eq!(read_u32(lane, current), read_u32(lane, current + 1));
+            }
+        }
+        assert_eq!(
+            read_f32(&discontinuity.0, 2).to_bits(),
+            drive_target.to_bits()
+        );
+        assert_eq!(read_f32(&discontinuity.0, 8).to_bits(), 0.0_f32.to_bits());
+
+        effect.reset(ResetKind::FullToDefaults);
+        let full = snapshot(effect.as_ref());
+        let defaults = snapshot(prepare(&values).as_ref());
+        assert_eq!(full, defaults);
+    }
+
+    #[test]
+    fn delayed_identity_sanitation_and_recovery_are_lane_local() {
         let mut values = initial_values();
         values[4].value = 0.0;
         values[5].value = 0.0;
@@ -918,53 +1073,6 @@ mod tests {
         assert_eq!(left[62].to_bits(), 0.25_f32.to_bits());
         assert_eq!(right[62].to_bits(), (-0.5_f32).to_bits());
         assert_eq!(left[31].to_bits(), (-0.0_f32).to_bits());
-
-        let span = PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
-            channel: ParameterChannel::Left,
-            parameter_index: 0,
-            start_sample: 64,
-            end_sample: 64,
-            start_value: 12.0,
-            end_value: 12.0,
-        };
-        let mut active_left = vec![0.2; 64];
-        let mut active_right = vec![0.1; 64];
-        process(
-            effect.as_mut(),
-            &mut active_left,
-            &mut active_right,
-            64,
-            &[span],
-        );
-        let state = snapshot(effect.as_ref());
-        let mut continuation_left = vec![0.3; 32];
-        let mut continuation_right = vec![-0.2; 32];
-        let mut expected_left = continuation_left.clone();
-        let mut expected_right = continuation_right.clone();
-        process(
-            effect.as_mut(),
-            &mut expected_left,
-            &mut expected_right,
-            128,
-            &[],
-        );
-        effect
-            .restore_state_payload(
-                1,
-                StatePayloadInput::new(&[], &state.0, &state.1, effect.metadata().state_sizes)
-                    .expect("state"),
-            )
-            .expect("restore");
-        process(
-            effect.as_mut(),
-            &mut continuation_left,
-            &mut continuation_right,
-            128,
-            &[],
-        );
-        assert_eq!(continuation_left, expected_left);
-        assert_eq!(continuation_right, expected_right);
 
         let mut invalid_left = vec![f32::NAN; 1];
         let mut invalid_right = vec![0.1; 1];
