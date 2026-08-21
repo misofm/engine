@@ -1106,4 +1106,74 @@ mod tests {
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     }
+    #[test]
+    fn all_rate_sweeps_match_f64_magnitude_across_required_quanta() {
+        for rate in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+        ] {
+            for frequency in [100.0, 1_000.0, f64::from(rate) * 0.2] {
+                let frames = 4_096;
+                let mut left: Vec<f32> = (0..frames)
+                    .map(|index| {
+                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(rate)).sin()
+                            as f32
+                    })
+                    .collect();
+                let mut right = vec![0.0_f32; frames];
+                let parameters = BuiltinParameters {
+                    left: ChannelParameters {
+                        hpf_hz: 100.0,
+                        lpf_hz: 1_000.0,
+                        ..ChannelParameters::default()
+                    },
+                    ..BuiltinParameters::default()
+                };
+                let mut chain = BuiltinChain::new(rate, parameters).expect("prepare");
+                let mut offset = 0;
+                for quantum in [1, 127, 128, 255, 1_024].into_iter().cycle() {
+                    if offset == frames {
+                        break;
+                    }
+                    let end = (offset + quantum).min(frames);
+                    let _ = chain.process_input(DualMonoBlock {
+                        left: &mut left[offset..end],
+                        right: &mut right[offset..end],
+                        first_sample: offset as u64,
+                    });
+                    offset = end;
+                }
+                let mut high = ReferenceBiquad::rbj_butterworth(
+                    f64::from(rate),
+                    100.0,
+                    ReferenceFilterKind::HighPass,
+                )
+                .expect("reference high pass");
+                let mut low = ReferenceBiquad::rbj_butterworth(
+                    f64::from(rate),
+                    1_000.0,
+                    ReferenceFilterKind::LowPass,
+                )
+                .expect("reference low pass");
+                let mut actual_energy = 0.0_f64;
+                let mut reference_energy = 0.0_f64;
+                for index in 0..frames {
+                    let input =
+                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(rate)).sin();
+                    let reference = low.process(high.process(input));
+                    if index >= frames / 2 {
+                        actual_energy += f64::from(left[index]) * f64::from(left[index]);
+                        reference_energy += reference * reference;
+                    }
+                }
+                let actual_db = 10.0 * actual_energy.log10();
+                let reference_db = 10.0 * reference_energy.log10();
+                if reference_db >= -120.0 {
+                    assert!(
+                        (actual_db - reference_db).abs() <= 0.05,
+                        "rate={rate}, frequency={frequency}, actual={actual_db}, reference={reference_db}"
+                    );
+                }
+            }
+        }
+    }
 }

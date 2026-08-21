@@ -88,3 +88,9 @@ matrix/meter mutation and allocation audits, issue-specific one-million-call too
 workspace cross-target checks, real blinded listening records, and the authorized single
 benchmark. These remain gates;
 this evidence does not claim issue completion.
+
+**New failing gate, 2026-08-21:** the strict all-rate/all-quantum swept-sine test was added but
+currently fails at 192,000 Hz and 38,400 Hz: the scalar HPF/LPF cascade measures approximately
+`-35.64407 dB` versus the independent f64 reference `-35.79218 dB` (about `0.14811 dB`, exceeding
+the frozen `0.05 dB` tolerance). The test remains enabled; the tolerance was not changed and no
+benchmark was run. This is a failed Terra attempt-1 gate pending Sol review/revision.
