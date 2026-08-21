@@ -421,3 +421,33 @@ PASS: `cargo test -p miso-engine-builtins-compiler --test scale`, release
 `test-builtins-audit-probes.sh`; focused warning-denied Clippy, fixture/policy checks and mutation
 checks also pass. This is still not a whole-render-plan/swap audit of the sealed graph artifact,
 nor full workspace/target/listening qualification. Benchmark invocation count remains **0**.
+
+## Fixture sealing, targets, listening, and benchmark readiness Terra evidence (2026-08-21; partial)
+
+The checked-in builtin fixture manifest now includes a machine-readable conformance matrix fixing
+the four launch rates, five quanta, section/cascade response grid, seven taps, meter window/drop/
+reset cases, and resource-count matrix including 65,537 tracks. The fixture corruption test now
+proves content changes, manifest corruption, and unlisted payloads are all rejected. This records
+the complete intended matrix but does not falsely claim every response-output artifact or external
+f64 table is checked in.
+
+`check-builtins-targets.sh` passed the native scalar baseline, `aarch64-linux-android`,
+`aarch64-apple-ios`, and separate `wasm32-unknown-unknown` `-simd128` and `+simd128` release
+artifacts for the scalar builtin/compiler packages. Two checked listening records preregister an
+ABX filter-change procedure and randomized matrix-ramp procedure. Their machine check requires
+`Status: preregistered`, an explicit no-human-evidence statement, and no fabricated trial rows;
+they are procedures, not listening results.
+
+The exactly-once benchmark has only been prepared: a fixed ten-workload/two-round emitter, runner
+that refuses arguments and existing artifacts, JSONL validator requiring exactly twenty records,
+and readiness/mutation test that proves invalid arguments/records fail. The readiness test made
+**zero** workload launches; neither the runner nor benchmark binary was invoked. Full workspace
+sealing and actual completed human listening records remain open. Benchmark invocation count
+remains **0**.
+
+Workspace readiness also passes `cargo test --workspace`, warning-denied workspace Clippy,
+formatting, workspace policy, realtime policy (including its mutation suite), and builtin policy.
+The realtime unsafe allowlist now names only the standalone builtin audit executable's exact source
+path in addition to the previously accepted audit tools; it does not relax production-crate
+restrictions. These checks do not convert the pending sealed-artifact proof or human listening
+preregistrations into completed acceptance evidence.

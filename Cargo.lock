@@ -180,6 +180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-builtins-bench"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-builtins",
+]
+
+[[package]]
 name = "miso-engine-builtins-compiler"
 version = "0.1.0"
 dependencies = [

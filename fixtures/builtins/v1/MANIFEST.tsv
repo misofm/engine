@@ -1,4 +1,5 @@
 path	length	sha256
+conformance-matrix.toml	1012	c315357392de8e2ed93395861f8e0b2af6b304b85a5f753e8cc06db1a0cab8c8
 filter-response-cases.csv	300	01c5054de319b0ce0515ca0eeb349268a8e17c0141ba961bb683094622f0eddc
 meter-window-cases.csv	272	da7f9c65d15c49580a5697ad3ab6d9d278e9f84fbca682f8f1282a5553f470ae
 resource-cap-cases.csv	278	09ea72ec87eaaf9fcd280f1deecba3ef9a1426971f87ca974cf27953a5da6285

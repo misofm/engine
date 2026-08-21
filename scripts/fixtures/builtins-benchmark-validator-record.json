@@ -1,0 +1,1 @@
+{"schema_version":1,"workload":"input_identity_1t_128","round":1,"observations":1000,"timing_ns":1,"sample_rate_hz":48000,"quantum_frames":128,"allocations":0,"deallocations":0,"descriptive_only":true}
