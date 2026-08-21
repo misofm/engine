@@ -16,7 +16,7 @@ pub use compare::{
 pub use determinism::{DeterminismError, verify_bit_exact_repeat};
 pub use effect::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory,
-    EffectConformanceReport, FaultKind, run_effect_conformance,
+    EffectConformanceReport, EffectConformanceTierReport, FaultKind, run_effect_conformance,
 };
 pub use fixture::{FixtureError, FixtureLimits, PcmFixtureV1, crc32c};
 pub use manifest::{ManifestEntry, ManifestError, parse_manifest};

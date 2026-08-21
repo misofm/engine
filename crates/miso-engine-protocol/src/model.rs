@@ -975,6 +975,26 @@ mod tests {
     }
 
     #[test]
+    fn every_launch_rate_initializes_store_and_commits_as_the_final_candidate() {
+        for rate in miso_engine_core::LAUNCH_SAMPLE_RATES {
+            let mut initial = parse_session_toml(EXAMPLE).expect("fixture");
+            initial.sample_rate_hz = rate.0;
+            let mut store = SessionStore::new(initial, caps()).expect("launch store");
+            let revision = store.revision();
+            let commit = store
+                .apply_transaction(
+                    ExpectedRevision::Exact(revision),
+                    &[SessionEditV1::SetSampleRateHz {
+                        sample_rate_hz: rate.0,
+                    }],
+                )
+                .expect("launch final candidate");
+            assert_eq!(commit.revision, SessionRevision(revision.0 + 1));
+            assert_eq!(store.compiled().normalized_model().sample_rate_hz, rate.0);
+        }
+    }
+
+    #[test]
     fn failed_edit_and_final_validation_roll_back_wholly() {
         let mut store = store();
         let before = store.canonical_snapshot().to_owned();

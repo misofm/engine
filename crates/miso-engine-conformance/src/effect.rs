@@ -6,7 +6,10 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use miso_engine_core::realtime::audit;
+use miso_engine_core::{
+    EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz,
+    is_extended_compatibility_sample_rate, is_launch_sample_rate, realtime::audit,
+};
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectDescriptorV1, EffectId, EffectPrepareError, EffectProcessBlock,
     EffectQuality, InitialParameterValue, LatencySamples, LinkMode, LinkModeSet,
@@ -91,14 +94,14 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
     }
 }
 const QUALITIES: [QualityDescriptorV1; 8] = [
-    quality(44_100),
-    quality(48_000),
-    quality(88_200),
-    quality(96_000),
-    quality(176_400),
-    quality(192_000),
-    quality(352_800),
-    quality(384_000),
+    quality(LAUNCH_SAMPLE_RATES[0].0),
+    quality(LAUNCH_SAMPLE_RATES[1].0),
+    quality(LAUNCH_SAMPLE_RATES[2].0),
+    quality(LAUNCH_SAMPLE_RATES[3].0),
+    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[0].0),
+    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[1].0),
+    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[2].0),
+    quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[3].0),
 ];
 pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     id: MOCK_ID,
@@ -132,6 +135,7 @@ pub enum FaultKind {
     NondeterministicSnapshot,
     PartialSnapshot,
     BadRestore,
+    ExtendedRatePreparation,
     Panic,
 }
 
@@ -156,6 +160,13 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        if self.fault == FaultKind::ExtendedRatePreparation
+            && is_extended_compatibility_sample_rate(SampleRateHz(request.sample_rate))
+        {
+            return Err(EffectPrepareError {
+                code: "effect.conformance.extended_rate_probe",
+            });
+        }
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let left = request
             .initial_values
@@ -487,14 +498,35 @@ fn decode_lane(input: &[u8]) -> Result<LaneState, StatePayloadError> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EffectConformanceReport {
-    pub failed_gates: Vec<&'static str>,
+pub struct EffectConformanceTierReport {
+    pub failures: Vec<&'static str>,
     pub prepared_configurations: u64,
     pub process_calls: u64,
 }
+
+impl EffectConformanceTierReport {
+    fn new() -> Self {
+        Self {
+            failures: Vec::new(),
+            prepared_configurations: 0,
+            process_calls: 0,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.failures.sort_unstable();
+        self.failures.dedup();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectConformanceReport {
+    pub launch_gates: EffectConformanceTierReport,
+    pub extended_compatibility_probes: EffectConformanceTierReport,
+}
 impl EffectConformanceReport {
     pub fn passed(&self) -> bool {
-        self.failed_gates.is_empty()
+        self.launch_gates.failures.is_empty()
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -508,20 +540,27 @@ pub fn run_effect_conformance(
     config: ConformanceConfig,
 ) -> EffectConformanceReport {
     let mut report = EffectConformanceReport {
-        failed_gates: Vec::new(),
-        prepared_configurations: 0,
-        process_calls: 0,
+        launch_gates: EffectConformanceTierReport::new(),
+        extended_compatibility_probes: EffectConformanceTierReport::new(),
     };
     let descriptor = factory.descriptor();
     if validate_descriptor_v1(descriptor).is_err() {
-        report.failed_gates.push("descriptor.validation");
+        report.launch_gates.failures.push("descriptor.validation");
         return report;
     }
     if config.quantum < 4 || config.blocks == 0 {
-        report.failed_gates.push("configuration");
+        report.launch_gates.failures.push("configuration");
         return report;
     }
     for quality in descriptor.qualities {
+        let tier = if is_launch_sample_rate(SampleRateHz(quality.sample_rate)) {
+            &mut report.launch_gates
+        } else {
+            debug_assert!(is_extended_compatibility_sample_rate(SampleRateHz(
+                quality.sample_rate
+            )));
+            &mut report.extended_compatibility_probes
+        };
         for link_mode in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
             if !descriptor.supported_link_modes.contains(link_mode) {
                 continue;
@@ -561,20 +600,20 @@ pub fn run_effect_conformance(
                 let expected = match expected_prepared_metadata(descriptor, request) {
                     Ok(v) => v,
                     Err(_) => {
-                        report.failed_gates.push("prepare.request");
+                        tier.failures.push("prepare.request");
                         continue;
                     }
                 };
                 let mut effect = match factory.prepare(request) {
                     Ok(v) => v,
                     Err(_) => {
-                        report.failed_gates.push("prepare.factory");
+                        tier.failures.push("prepare.factory");
                         continue;
                     }
                 };
-                report.prepared_configurations += 1;
+                tier.prepared_configurations += 1;
                 if effect.metadata().program_key() != expected.program_key() {
-                    report.failed_gates.push("metadata.exact");
+                    tier.failures.push("metadata.exact");
                 }
                 let initial_right = snapshot_payload(effect.as_ref(), expected)
                     .map(|(_, _, right)| right)
@@ -589,9 +628,9 @@ pub fn run_effect_conformance(
                 let process = catch_unwind(AssertUnwindSafe(|| {
                     audit::in_render_scope(|| effect.process(block))
                 }));
-                report.process_calls += 1;
+                tier.process_calls += 1;
                 if process.is_err() {
-                    report.failed_gates.push("process.realtime_or_panic");
+                    tier.failures.push("process.realtime_or_panic");
                     continue;
                 }
                 if left
@@ -599,19 +638,19 @@ pub fn run_effect_conformance(
                     .chain(&right)
                     .any(|v| sanitize_sample(*v).is_none())
                 {
-                    report.failed_gates.push("process.sanitization");
+                    tier.failures.push("process.sanitization");
                 }
                 if left.iter().position(|v| *v != 0.0) != usize::try_from(expected.latency.0).ok() {
-                    report.failed_gates.push("latency.impulse");
+                    tier.failures.push("latency.impulse");
                 }
                 if effect.metadata().program_key() != expected.program_key() {
-                    report.failed_gates.push("metadata.changed");
+                    tier.failures.push("metadata.changed");
                 }
                 if let Some((_, _, right_after)) =
-                    snapshot_checks(effect.as_mut(), expected, &mut report.failed_gates)
+                    snapshot_checks(effect.as_mut(), expected, &mut tier.failures)
                     && initial_right != right_after
                 {
-                    report.failed_gates.push("state.lane_isolation");
+                    tier.failures.push("state.lane_isolation");
                 }
                 let malformed = [PreparedAutomationSpan {
                     kind: AutomationSpanKind::Point,
@@ -634,9 +673,9 @@ pub fn run_effect_conformance(
                 )
                 .expect("shape-valid malformed-span block");
                 let malformed_report = effect.process(block);
-                report.process_calls += 1;
+                tier.process_calls += 1;
                 if malformed_report.invalid_spans != 1 {
-                    report.failed_gates.push("automation.malformed");
+                    tier.failures.push("automation.malformed");
                 }
                 for frames in [1, config.quantum - 1, config.quantum] {
                     if !impulse_sequence(
@@ -644,9 +683,9 @@ pub fn run_effect_conformance(
                         request,
                         expected,
                         frames,
-                        &mut report.process_calls,
+                        &mut tier.process_calls,
                     ) {
-                        report.failed_gates.push("latency.frame_boundaries");
+                        tier.failures.push("latency.frame_boundaries");
                     }
                 }
                 for _ in 0..100 {
@@ -655,29 +694,29 @@ pub fn run_effect_conformance(
                         request,
                         expected,
                         config.quantum,
-                        &mut report.process_calls,
+                        &mut tier.process_calls,
                     ) {
-                        report.failed_gates.push("latency.repetition");
+                        tier.failures.push("latency.repetition");
                         break;
                     }
                 }
-                if !sanitization_probe(factory, request, &mut report.process_calls) {
-                    report.failed_gates.push("process.input_sanitization");
+                if !sanitization_probe(factory, request, &mut tier.process_calls) {
+                    tier.failures.push("process.input_sanitization");
                 }
-                if !sidechain_probe(factory, request, &mut report.process_calls) {
-                    report.failed_gates.push("process.sidechain_sanitization");
+                if !sidechain_probe(factory, request, &mut tier.process_calls) {
+                    tier.failures.push("process.sidechain_sanitization");
                 }
-                if !reset_probe(factory, request, expected, &mut report.process_calls) {
-                    report.failed_gates.push("reset.semantics");
+                if !reset_probe(factory, request, expected, &mut tier.process_calls) {
+                    tier.failures.push("reset.semantics");
                 }
-                if !continuation_probe(factory, request, expected, &mut report.process_calls) {
-                    report.failed_gates.push("state.continuation");
+                if !continuation_probe(factory, request, expected, &mut tier.process_calls) {
+                    tier.failures.push("state.continuation");
                 }
             }
         }
     }
-    report.failed_gates.sort_unstable();
-    report.failed_gates.dedup();
+    report.launch_gates.finish();
+    report.extended_compatibility_probes.finish();
     report
 }
 

@@ -241,3 +241,26 @@ fails at 88,200 Hz, cutoff 10 Hz, frequency 4 Hz (`residual=-94.24403629784449`,
 Warning-denied workspace Clippy is also **FAIL** on the pre-existing
 `clippy::needless_range_loop` in that builtin test. This attempt did not alter DSP algorithms,
 coefficients, tolerances, or that loop. Benchmark invocation count: **0**.
+
+## Sol correction/review attempt-2 checkpoint (2026-08-21)
+
+Adversarial review found that the core predicates repeated both frozen sets as literal `match`
+policies, despite the single-authority contract, and that native-effect conformance still merged
+extended-rate outcomes into launch pass/fail. The bounded correction makes both predicates inspect
+only the core constant arrays, makes fixture generation and the checked conformance descriptor
+consume those arrays, and splits effect results into explicit `launch_gates` and
+`extended_compatibility_probes`. A rate-selective fault proves that an extended preparation failure
+is retained in the informational report without failing launch gates.
+
+Coverage now checks all 16 ordered subsets of optional extended descriptor rows, multiple declared
+qualities, missing launch rows, duplicates, unordered rows, and a ninth rate. Invalid typed models
+also reject direct canonicalization with the exact one diagnostic. All launch rates initialize a
+`SessionStore` and commit as final atomic candidates. For every extended/zero/32,000/192,001 rate,
+typed-controller and complete BTLV transactions produce the same exact status, code, path, detail,
+and final-validation operation index while preserving revision, canonical snapshot, authoritative
+model, and reliable-event occupancy.
+
+Focused core/session/protocol/effect-contract/effect-compiler/conformance tests pass, including the
+one-million protocol mutation test. The complete nonbenchmark workspace, documentation, policy,
+audit, fixture-byte, and cross-target matrix remains to be rerun after this correction checkpoint.
+Benchmark invocation count: **0**.

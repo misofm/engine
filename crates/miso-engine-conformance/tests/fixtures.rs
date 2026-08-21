@@ -1,6 +1,7 @@
 //! Public API integration coverage for checked-in fixtures.
 
-use miso_engine_conformance::{FixtureLimits, PcmFixtureV1, parse_manifest};
+use miso_engine_conformance::{FixtureLimits, PcmFixtureV1, PlanarBlock, parse_manifest};
+use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz};
 
 #[test]
 fn checked_in_manifest_lists_only_valid_exact_fixtures() {
@@ -27,4 +28,18 @@ fn fixture_trailing_and_truncated_bytes_fail_before_decode() {
     let bytes =
         include_bytes!("../../../fixtures/conformance/v1/rate-048000-impulse-dual-mono.mepcm");
     assert!(PcmFixtureV1::parse(&bytes[..bytes.len() - 1], Default::default()).is_err());
+}
+
+#[test]
+fn planar_blocks_group_launch_gates_and_extended_compatibility_inputs() {
+    let samples = [0.0_f32];
+    for rate in LAUNCH_SAMPLE_RATES {
+        assert!(PlanarBlock::try_new(rate, 1, 1, &samples).is_ok());
+    }
+    for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES {
+        assert!(PlanarBlock::try_new(rate, 1, 1, &samples).is_ok());
+    }
+    for rate in [SampleRateHz(0), SampleRateHz(32_000), SampleRateHz(192_001)] {
+        assert!(PlanarBlock::try_new(rate, 1, 1, &samples).is_err());
+    }
 }

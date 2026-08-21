@@ -76,9 +76,15 @@ fn correct_mock_passes_every_enabled_conformance_gate() {
             blocks: 1,
         },
     );
-    assert!(report.passed(), "{:?}", report.failed_gates);
-    assert_eq!(report.prepared_configurations, 16);
-    assert!(report.process_calls >= 1_600);
+    assert!(report.passed(), "{:?}", report.launch_gates.failures);
+    assert!(report.extended_compatibility_probes.failures.is_empty());
+    assert_eq!(report.launch_gates.prepared_configurations, 8);
+    assert_eq!(
+        report.extended_compatibility_probes.prepared_configurations,
+        8
+    );
+    assert!(report.launch_gates.process_calls >= 800);
+    assert!(report.extended_compatibility_probes.process_calls >= 800);
 }
 
 #[test]
@@ -112,6 +118,28 @@ fn every_faulty_mock_is_detected() {
         );
         assert!(!report.passed(), "fault {fault:?} escaped detection");
     }
+}
+
+#[test]
+fn extended_rate_failures_are_reported_but_do_not_fail_launch_gates() {
+    let report = run_effect_conformance(
+        &DualAccumulatorDelayFactory::faulty(FaultKind::ExtendedRatePreparation),
+        ConformanceConfig {
+            quantum: 128,
+            blocks: 1,
+        },
+    );
+    assert!(report.passed(), "{:?}", report.launch_gates.failures);
+    assert!(report.launch_gates.failures.is_empty());
+    assert_eq!(report.launch_gates.prepared_configurations, 8);
+    assert_eq!(
+        report.extended_compatibility_probes.failures,
+        ["prepare.factory"]
+    );
+    assert_eq!(
+        report.extended_compatibility_probes.prepared_configurations,
+        0
+    );
 }
 
 #[test]
@@ -197,9 +225,7 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
 #[test]
 fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
     let original = DUAL_ACCUMULATOR_DELAY_DESCRIPTOR;
-    let launch = Box::leak(Box::new(
-        original.qualities[..4].to_vec().into_boxed_slice(),
-    ));
+    let launch = Box::leak(original.qualities[..4].to_vec().into_boxed_slice());
     let launch_only = Box::leak(Box::new(EffectDescriptorV1 {
         qualities: launch,
         ..original
@@ -219,11 +245,16 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
         assert!(validate_descriptor_v1(descriptor).is_err());
     }
 
-    for extra_count in 1..=4 {
+    for subset in 0_u8..16 {
         let rows = original.qualities[..4]
             .iter()
-            .chain(&original.qualities[4..4 + extra_count])
             .copied()
+            .chain(
+                original.qualities[4..]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| (subset & (1 << index) != 0).then_some(*row)),
+            )
             .collect::<Vec<_>>();
         let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
             qualities: Box::leak(rows.into_boxed_slice()),
@@ -231,6 +262,54 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
         }));
         assert!(validate_descriptor_v1(descriptor).is_ok());
     }
+
+    let draft_launch = original.qualities[..4]
+        .iter()
+        .map(|row| QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..*row
+        });
+    let multiple_qualities = draft_launch
+        .chain(original.qualities[..4].iter().copied())
+        .collect::<Vec<_>>();
+    let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: Box::leak(multiple_qualities.into_boxed_slice()),
+        ..original
+    }));
+    assert!(validate_descriptor_v1(descriptor).is_ok());
+
+    let incomplete_draft = original.qualities[..3]
+        .iter()
+        .map(|row| QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..*row
+        })
+        .chain(original.qualities[..4].iter().copied())
+        .collect::<Vec<_>>();
+    let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: Box::leak(incomplete_draft.into_boxed_slice()),
+        ..original
+    }));
+    assert!(validate_descriptor_v1(descriptor).is_err());
+
+    let mut duplicate = original.qualities[..4].to_vec();
+    duplicate.push(original.qualities[3]);
+    let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: Box::leak(duplicate.into_boxed_slice()),
+        ..original
+    }));
+    assert!(validate_descriptor_v1(descriptor).is_err());
+
+    let unordered = original.qualities[..4]
+        .iter()
+        .copied()
+        .chain([original.qualities[5], original.qualities[4]])
+        .collect::<Vec<_>>();
+    let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: Box::leak(unordered.into_boxed_slice()),
+        ..original
+    }));
+    assert!(validate_descriptor_v1(descriptor).is_err());
 
     let unsupported = QualityDescriptorV1 {
         sample_rate: 192_001,

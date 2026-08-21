@@ -27,11 +27,14 @@ fn source_with_rate(rate: u32) -> String {
 }
 
 fn assert_launch_diagnostic(diagnostics: &miso_engine_session::DiagnosticSet) {
-    assert!(diagnostics.diagnostics().iter().any(|diagnostic| {
-        diagnostic.code == DiagnosticCode::SampleRateUnsupportedAtLaunch
-            && diagnostic.path.to_string() == "$.sample_rate_hz"
-            && diagnostic.message == MESSAGE
-    }));
+    assert_eq!(diagnostics.diagnostics().len(), 1);
+    let diagnostic = &diagnostics.diagnostics()[0];
+    assert_eq!(
+        diagnostic.code,
+        DiagnosticCode::SampleRateUnsupportedAtLaunch
+    );
+    assert_eq!(diagnostic.path.to_string(), "$.sample_rate_hz");
+    assert_eq!(diagnostic.message, MESSAGE);
 }
 
 #[test]
@@ -56,5 +59,6 @@ fn extended_and_unrelated_engine_rates_reject_with_one_stable_diagnostic() {
         let mut typed = parse_session_toml(SESSION).expect("valid baseline");
         typed.sample_rate_hz = rate;
         assert_launch_diagnostic(&compile_session(&typed, caps()).expect_err("typed rejection"));
+        assert_launch_diagnostic(&canonical_session_toml(&typed).expect_err("canonical rejection"));
     }
 }

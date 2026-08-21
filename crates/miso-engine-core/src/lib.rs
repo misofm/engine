@@ -48,16 +48,27 @@ pub const EXTENDED_COMPATIBILITY_SAMPLE_RATES: [SampleRateHz; 4] = [
     SampleRateHz(384_000),
 ];
 
+const fn rate_set_contains(rates: &[SampleRateHz], rate: SampleRateHz) -> bool {
+    let mut index = 0;
+    while index < rates.len() {
+        if rates[index].0 == rate.0 {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Returns whether `rate` is accepted for a launch engine session or render plan.
 #[must_use]
 pub const fn is_launch_sample_rate(rate: SampleRateHz) -> bool {
-    matches!(rate.0, 44_100 | 48_000 | 88_200 | 96_000)
+    rate_set_contains(&LAUNCH_SAMPLE_RATES, rate)
 }
 
 /// Returns whether `rate` is an extended compatibility-only corpus rate.
 #[must_use]
 pub const fn is_extended_compatibility_sample_rate(rate: SampleRateHz) -> bool {
-    matches!(rate.0, 176_400 | 192_000 | 352_800 | 384_000)
+    rate_set_contains(&EXTENDED_COMPATIBILITY_SAMPLE_RATES, rate)
 }
 
 /// A caller-selected render quantum in PCM frames.

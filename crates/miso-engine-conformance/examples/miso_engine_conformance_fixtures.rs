@@ -6,7 +6,7 @@ use std::{
 };
 
 use miso_engine_conformance::{PcmFixtureV1, SplitMix64, parse_manifest};
-use miso_engine_core::SampleRateHz;
+use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz};
 
 fn main() {
     let write = match env::args().nth(1).as_deref() {
@@ -28,9 +28,11 @@ fn main() {
 
 fn generated() -> Vec<(String, Vec<u8>)> {
     let mut result = Vec::new();
-    for rate in [
-        44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-    ] {
+    for rate in LAUNCH_SAMPLE_RATES
+        .into_iter()
+        .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
+        .map(|rate| rate.0)
+    {
         let mut samples = vec![0.0_f32; 2 * 128];
         samples[7] = 1.0;
         samples[128 + 19] = -0.625;

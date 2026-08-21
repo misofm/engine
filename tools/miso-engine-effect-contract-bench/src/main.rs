@@ -212,10 +212,18 @@ fn conformance() {
             blocks: 1,
         },
     );
-    assert!(report.passed(), "failed gates: {:?}", report.failed_gates);
+    assert!(
+        report.passed(),
+        "failed launch gates: {:?}",
+        report.launch_gates.failures
+    );
     println!(
-        "{{\"schema_version\":1,\"kind\":\"effect_conformance\",\"prepared_configurations\":{},\"process_calls\":{},\"failed_gates\":0}}",
-        report.prepared_configurations, report.process_calls
+        "{{\"schema_version\":1,\"kind\":\"effect_conformance\",\"launch_prepared_configurations\":{},\"launch_process_calls\":{},\"launch_failed_gates\":0,\"extended_compatibility_prepared_configurations\":{},\"extended_compatibility_process_calls\":{},\"extended_compatibility_failed_probes\":{}}}",
+        report.launch_gates.prepared_configurations,
+        report.launch_gates.process_calls,
+        report.extended_compatibility_probes.prepared_configurations,
+        report.extended_compatibility_probes.process_calls,
+        report.extended_compatibility_probes.failures.len()
     );
 }
 

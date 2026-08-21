@@ -3851,6 +3851,107 @@ mod tests {
     }
 
     #[test]
+    fn rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics() {
+        const DETAIL: &str =
+            "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz";
+
+        fn assert_rejection(
+            controller: &mut ProtocolController<MockProvider>,
+            response: &ControllerResponse,
+            before_revision: SessionRevision,
+            before_snapshot: &str,
+            before_model: &miso_engine_session::SessionTomlV1,
+            before_events: QueueReport,
+        ) {
+            assert_eq!(response.status, StatusCode::ValidationFailed);
+            assert_eq!(response.revision, before_revision);
+            let decoded = ProtocolCodec::default()
+                .decode_non_ok_payload(&response.bytes, 2)
+                .expect("typed launch-rate diagnostic");
+            assert_eq!(decoded.omitted_diagnostics, 0);
+            assert_eq!(decoded.diagnostics.len(), 1);
+            let diagnostic = &decoded.diagnostics[0];
+            assert_eq!(diagnostic.code, "sample_rate.unsupported_at_launch");
+            assert_eq!(
+                diagnostic.path,
+                [crate::PathSegment::Field("sample_rate_hz".to_owned())]
+            );
+            assert_eq!(diagnostic.detail.as_deref(), Some(DETAIL));
+            assert_eq!(diagnostic.operation_index, Some(1));
+            assert_eq!(controller.session().revision(), before_revision);
+            assert_eq!(controller.session().canonical_snapshot(), before_snapshot);
+            assert_eq!(
+                controller.session().compiled().normalized_model(),
+                before_model
+            );
+            assert_eq!(
+                controller
+                    .queues_mut()
+                    .report(crate::QueueKind::ReliableEvent),
+                before_events
+            );
+        }
+
+        for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
+            let edits = [SessionEditV1::SetSampleRateHz {
+                sample_rate_hz: rate,
+            }];
+
+            let mut typed = controller(4, 1);
+            let before_revision = typed.session().revision();
+            let before_snapshot = typed.session().canonical_snapshot().to_owned();
+            let before_model = typed.session().compiled().normalized_model().clone();
+            let before_events = typed.queues_mut().report(crate::QueueKind::ReliableEvent);
+            let response = typed.process(ControllerRequest {
+                request_id: id(1),
+                expected_revision: ExpectedRevision::Exact(before_revision),
+                canonical_bytes: b"typed-rejected-engine-rate",
+                command: ControlCommand::SessionTransactionApply { edits: &edits },
+            });
+            assert_rejection(
+                &mut typed,
+                &response,
+                before_revision,
+                &before_snapshot,
+                &before_model,
+                before_events,
+            );
+
+            let mut btlv = controller(4, 1);
+            let before_revision = btlv.session().revision();
+            let before_snapshot = btlv.session().canonical_snapshot().to_owned();
+            let before_model = btlv.session().compiled().normalized_model().clone();
+            let before_events = btlv.queues_mut().report(crate::QueueKind::ReliableEvent);
+            let frame = crate::SessionTransactionFrame {
+                request_id: id(1),
+                expected_revision: ExpectedRevision::Exact(before_revision),
+                edits: &edits,
+            };
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![
+                0;
+                codec
+                    .encoded_session_transaction_len(&frame)
+                    .expect("transaction length")
+            ];
+            codec
+                .encode_session_transaction(&frame, &mut bytes)
+                .expect("transaction encode");
+            let response = btlv
+                .process_b1b_btlv(&bytes, &mut DecodeScratch::new(&mut [0_u16; 1]))
+                .expect("BTLV transaction response");
+            assert_rejection(
+                &mut btlv,
+                &response,
+                before_revision,
+                &before_snapshot,
+                &before_model,
+                before_events,
+            );
+        }
+    }
+
+    #[test]
     fn decoded_track_edit_reaches_same_atomic_session_store() {
         let mut controller = controller(4, 1);
         let mut fader = controller.session().compiled().normalized_model().tracks[0]
