@@ -90,6 +90,29 @@ GitHub issue must stay synchronized:
 - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
   missing, stale, or incorrectly closed entries before starting the next issue.
 
+Recovery and throughput are also hard delivery requirements:
+
+- Keep at most one uncommitted implementation tranche in the shared worktree.  As soon as a tranche
+  compiles and its focused tests pass, its owner must pause; the root agent commits and pushes that
+  exact-path checkpoint before more implementation is layered onto it.
+- Do not carry a coherent checkpoint across three agent handoffs or more than 30 minutes of active
+  work without committing it.  If the slice is not green, commit only when the failure is candidly
+  documented and the tree remains useful and buildable; otherwise reduce the slice until it is.
+- The root agent performs a status/commit/upstream audit at every checkpoint notification.  A new
+  implementation tranche must not start while an earlier coherent tranche is merely waiting to be
+  committed or pushed.
+- Limit active implementation WIP to one launch-critical feature issue.  Other agents may brief,
+  review, or work on genuinely independent bounded issues, but must not create overlapping edits or
+  make broad workspace gates unreliable.
+- Briefs must identify a smallest closable product slice and separate qualification/tooling work
+  before implementation.  If a feature cannot reasonably reach that slice in half a working day,
+  split it up front.  Fixture expansion, long audits, target matrices, listening, and benchmark
+  machinery must not keep an otherwise usable product slice open when they can be stateless
+  successor issues.
+- Report throughput as pushed, remotely synchronized capabilities.  After two consecutive
+  checkpoints without closing or materially advancing an issue, root must stop the current shape,
+  reduce scope, or create a bounded successor before authorizing more implementation.
+
 Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
 evidence needed to prove its product contract; generic harness hardening, artifact promotion,
 extended compatibility research, and human scheduling belong in separate stateless issues.  Split
