@@ -6,7 +6,7 @@ Adopt the normalized RBJ response for launch HPF, LPF, and parametric EQ. Launch
 
 ## Algorithm and equations
 
-For launch HPF/LPF, `g=tan(pi*f0/Fs)`, `k=1/Q`, `a1=1/(1+g*(g+k))`, `a2=g*a1`, and `a3=g*a2`. For states `s1,s2`: `v3=x-s2`, `v1=a1*s1+a2*v3`, `v2=s2+a2*s1+a3*v3`, `s1'=2*v1-s1`, and `s2'=2*v2-s2`; lowpass is `v2`, highpass is `x-k*v1-v2` [SIMPER-SVF] [ZAVALISHIN-TPT]. At `Q=1/sqrt(2)` its bilinear Butterworth response is independently checked against RBJ [RBJ-COOKBOOK].
+For launch HPF/LPF, `g=tan(pi*f0/Fs)`, `k=1/Q`, `d=1+g*(g+k)`, `c1=g*(g+k)/d` (the conditioned form of `1-1/d`), `a2=g/d`, and `a3=g*g/d`. For stored integrator states `ic1,ic2`, `v3=x-ic2`, `d1=a2*v3-c1*ic1`, `d2=a2*ic1+a3*v3`, `v1=ic1+d1`, `v2=ic2+d2`, `ic1'=ic1+2*d1`, and `ic2'=ic2+2*d2`; lowpass is `v2`, highpass is `x-k*v1-v2` [SIMPER-SVF] [ZAVALISHIN-TPT]. This is algebraically the trapezoidal/TPT SVF, but the incremental form avoids forming a rounded large `v` and then subtracting the old state. At `Q=1/sqrt(2)` its bilinear Butterworth response is independently checked against RBJ [RBJ-COOKBOOK].
 
 ## Coefficients and update rules
 
@@ -30,7 +30,7 @@ L/R have separate state and independently automatable coefficients. A linked con
 
 ## Adopted V2 decisions
 
-Each prepared instance owns fixed coefficient/ramp/state storage. Issue-007 production coefficients, state, audio, and intermediates are `f32`; its independent oracle is `f64`. Render remains bounded and allocation/lock/I/O/log free.
+Each prepared instance owns fixed coefficient/ramp/state storage. Issue-007 prepares conditioned `c1` directly in `f64`, casts it once, and stores `c1/a2/a3` as `f32`; render never recomputes `1-a1`. Production state, audio, and intermediates are `f32`; its independent oracle is `f64`. Render remains bounded and allocation/lock/I/O/log free.
 
 ## Denormal, signed-zero and NaN policy
 
@@ -50,7 +50,7 @@ Compare analytic state-space, impulse DFT, and coherent sustained-sine response 
 
 ## Rejected alternatives and tradeoffs
 
-`f32` TDF-II was rejected for issue-007 HPF/LPF after sustained high-rate stopband tests exposed state-rounding error hidden by coefficient and impulse-only checks. Test-only `f64` owns separate equations/state. Wider production state requires a separate issue and portable SIMD/resource evidence.
+`f32` TDF-II was rejected for issue-007 HPF/LPF after sustained high-rate stopband tests exposed state-rounding error hidden by coefficient and impulse-only checks. The first direct TPT graph was also rejected: `v=s+d` followed by `2*v-s` rounded a small integrator increment into a larger state before cancellation and failed the frozen residual gate. The algebraically equivalent incremental update passed the full prescribed rate/filter/cutoff/probe matrix without wider state. Test-only `f64` owns separate equations/state. Wider production state requires a separate issue and portable SIMD/resource evidence.
 
 ## Known gaps and follow-up
 
@@ -66,4 +66,4 @@ Record blinded ABX or randomized A/B of matched filter moves using `listening/TE
 
 ## 17. Decision record
 
-Fact: RBJ documents the response family, and trapezoidal/TPT sources derive an equivalent two-state realization with limited-precision motivation [RBJ-COOKBOOK] [SIMPER-SVF] [ZAVALISHIN-TPT]. Adoption: issue-007 HPF/LPF use `f32` TPT per lane. Measurable reason: all-rate analytic, impulse, coherent-sine, residual, and stopband gates; TDF-II failed sustained high-rate evidence. Wider production precision remains issue 031.
+Fact: RBJ documents the response family, and trapezoidal/TPT sources derive an equivalent two-state realization with limited-precision motivation [RBJ-COOKBOOK] [SIMPER-SVF] [ZAVALISHIN-TPT]. Adoption: issue-007 HPF/LPF use the exact non-fused incremental `f32` TPT recurrence per lane and a stored conditioned complement. Measurable reason: the direct TPT update failed at `-94.244 dB` residual while the incremental candidate passed all 232 launch-matrix single-section cases; a 464-case superset including the four deferred extended rates also passed, with worst residual `-116.346 dB`. Its superset worst analytic/cutoff errors (`0.00000176 dB`) were materially below recomputing `1.0_f32-a1` (`0.001324/0.001413 dB`). Wider production precision remains issue 031.

@@ -6,7 +6,7 @@ Build the bankable effect-rack execution substrate without sacrificing dual-mono
 
 ## Context
 
-Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Required engine rates are 44,100, 48,000, 88,200, 96,000, 176,400, 192,000, 352,800, and 384,000 Hz; source/engine mismatches have no implicit SRC. Output is PCM.
+Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; extended-rate SIMD qualification is deferred. Source/engine mismatches have no implicit SRC. Output is PCM.
 
 This issue is independently implementable only after its exact dependencies are complete. Its change must follow the Sol-approved brief → Terra attempt 1 with evidence → Sol adversarial review workflow; Sol may make at most two further revisions, then the work must be rescoped/rebriefed rather than weakening gates.
 
@@ -37,9 +37,11 @@ Placing arbitrary third-party Wasm in a SIMD bank, fixed global eight-track assu
 
 Wasm SIMD vectors are v128/4 f32 lanes; core spec: https://webassembly.github.io/spec/core/. AVX2/FMA need runtime detection: https://doc.rust-lang.org/std/arch/macro.is_x86_feature_detected.html.
 
-Issue 007's rescoped HPF/LPF contract is an input: each enabled filter/lane has three `f32`
-prepared coefficients and two `f32` trapezoidal/TPT state words. Four/eight-track adapters
-transpose them into `f32x4`/`f32x8` vectors and preserve the exact scalar operation graph. Base
+Issue 007's recurrence-rescoped HPF/LPF contract is an input: each enabled filter/lane has the
+three stored `f32` coefficients `c1/a2/a3`, shared-or-lane `f32 k`, and two `f32` TPT integrator
+state words. `c1` is the conditioned `f64`-prepared complement cast once to `f32`; SIMD must not
+reconstruct it from `a1`. Four/eight-track adapters transpose `c1/a2/a3` and both states into
+`f32x4`/`f32x8` vectors and preserve issue 007's exact incremental scalar operation graph. Base
 scalar, Wasm SIMD, NEON, and AVX2 do not fuse; AVX2+FMA is separate. No backend may substitute
 TDF-II, `f64`, double-single, compensated, or shared L/R state. Given identical coefficient bits,
 finite-normal input, and no sanitation, base non-FMA scalar and SIMD are bit-identical on the same

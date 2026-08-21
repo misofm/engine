@@ -6,7 +6,7 @@ Implement the fixed per-track processing contract and objective meters before us
 
 ## Context
 
-Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Required engine rates are 44,100, 48,000, 88,200, 96,000, 176,400, 192,000, 352,800, and 384,000 Hz; source/engine mismatches have no implicit SRC. Output is PCM.
+Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; 176,400, 192,000, 352,800, and 384,000 Hz are deferred extended-rate support and are not issue-007 acceptance gates. Source/engine mismatches have no implicit SRC. Output is PCM.
 
 This issue is independently implementable only after its exact dependencies are complete. Its change must follow the Sol-approved brief → Terra attempt 1 with evidence → Sol adversarial review workflow; Sol may make at most two further revisions, then the work must be rescoped/rebriefed rather than weakening gates.
 
@@ -266,3 +266,46 @@ past the failed DSP gate.
 
 The temporary diagnostic code was not retained. The failing acceptance test remains enabled.
 The exactly-once benchmark was not invoked; benchmark invocation count remains **0**.
+
+## Second recurrence rescope and workflow reset (2026-08-21)
+
+**READY FOR A NEW TERRA ATTEMPT 1.** The restarted two-attempt workflow is closed. The
+authoritative replacement brief is `target/issue7-recurrence-sol-brief.md`; both earlier briefs
+are historical evidence and are superseded. Every unfinished functional, quality, realtime,
+resource, fixture, target, listening, and benchmark gate remains in force. Benchmark invocation
+count is **0**.
+
+The accepted all-`f32` recurrence retains the TPT response and two independent state words, but
+stores the integrator states directly and updates them by explicit increments. Off render, compute
+`c1 = g*(g+k)/(1+g*(g+k))` in `f64` (the conditioned form of `1-a1`) and cast it once to a stored
+`f32`. Do not store `a1` for render and do not recompute `1-a1` per sample. For old states
+`ic1,ic2`, first derive `d1 = a2*(x-ic2)-c1*ic1` and
+`d2 = a2*ic1+a3*(x-ic2)` with the exact separately rounded order in the replacement brief;
+outputs use the midpoint values `v1=ic1+d1`, `v2=ic2+d2`, and next states are
+`ic1'=ic1+(d1+d1)`, `ic2'=ic2+(d2+d2)`. State therefore means the stored TPT integrator value at
+the preceding sample boundary, not `v1`, `v2`, a hidden residual, or a delay-line alias. Reset and
+pairwise recovery set both words to positive zero.
+
+Sol evaluated this candidate without changing production. Across all 232 launch-matrix single-
+section rate/filter/cutoff/snapped-probe cases, it produced zero failures against the existing
+analytic, one-second impulse, sustained fundamental/residual, and deep-stop thresholds. Worst
+figures below are conservative values from the 464-case superset that also included all four
+deferred extended rates; that superset likewise produced zero failures. Worst
+observations were `0.00000176 dB` analytic error, `0.00000176 dB` cutoff error, `0.015081 dB`
+impulse error, `0.0000163 dB` sustained fundamental error, `-116.346 dB` residual, and
+`-91.410 dB` total output in the `< -90 dB` reference branch. The comparison form that recomputed
+`1.0_f32-a1` per sample also passed this matrix, but its worst analytic/cutoff error grew to about
+`0.001324/0.001413 dB`; it is rejected because the conditioned stored complement is more accurate,
+removes a render operation, and gives issue 008 one immutable coefficient vector.
+
+The replacement brief freezes every cast and non-fused rounding point, the cast-coefficient state
+transition and Jury test, output observation equations, reset/sanitization semantics, issue-008
+SIMD identity contract, and exact cascade coverage. Terra must implement the recurrence and fill
+the previously audited matrix/cascade omissions before proceeding to non-DSP gates. No benchmark
+was run during this rescope.
+
+This issue-local rate correction does not silently redefine the repository-wide architecture.
+A separate stateless cross-cutting rate-tier issue must amend `AGENTS.md`, shared issue contexts,
+session validation, conformance fixtures, host/runner contracts, and release qualification before
+the four-rate launch claim is project-wide. Issue 007 may use its explicit four-rate gate now;
+extended-rate observations are diagnostic only and cannot be cited as supported qualification.
