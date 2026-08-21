@@ -7,7 +7,8 @@ use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
 
 use miso_engine_core::SampleRateHz;
 use miso_engine_source::{
-    NativeWaveDecoder, NativeWaveParseCaps, NativeWaveRegion, SourceFrame, parse_native_wave,
+    NativeWaveDecoder, NativeWaveParseCaps, NativeWaveRegion, SourceDiagnosticCode, SourceFrame,
+    parse_native_wave,
 };
 use sha2::{Digest, Sha256};
 
@@ -21,8 +22,17 @@ struct FixtureCase {
     id: &'static str,
     bytes: Vec<u8>,
     channels: u16,
+    total_frames: u64,
+    region: NativeWaveRegion,
     expected_planes: Vec<Vec<u32>>,
     expected_sanitized: u64,
+}
+
+struct InvalidCase {
+    id: &'static str,
+    bytes: Vec<u8>,
+    caps: NativeWaveParseCaps,
+    expected: SourceDiagnosticCode,
 }
 
 fn main() {
@@ -61,7 +71,7 @@ fn check() -> Result<(), String> {
     if !failures.is_empty() {
         return Err(failures.join("; "));
     }
-    corruption_rejects(&fixtures)?;
+    exact_diagnostic_matrix(&fixtures)?;
     Ok(())
 }
 
@@ -100,7 +110,7 @@ fn independently_oracled_decode(fixture: &FixtureCase) -> Result<(), String> {
         parse_native_wave(&mut cursor, CAPS).map_err(|error| format!("parse: {error:?}"))?;
     if metadata.sample_rate_hz != SampleRateHz(48_000)
         || metadata.channel_count != fixture.channels
-        || metadata.total_frames != fixture.expected_planes[0].len() as u64
+        || metadata.total_frames != fixture.total_frames
     {
         return Err("metadata differs from independent fixture declaration".to_owned());
     }
@@ -108,10 +118,7 @@ fn independently_oracled_decode(fixture: &FixtureCase) -> Result<(), String> {
     let mut decoder = NativeWaveDecoder::prepare(
         cursor,
         metadata,
-        NativeWaveRegion {
-            start_frame: SourceFrame(0),
-            length_frames: frame_count as u64,
-        },
+        fixture.region,
         NonZeroUsize::new(frame_count).ok_or_else(|| "empty fixture".to_owned())?,
     )
     .map_err(|error| format!("decoder: {error:?}"))?;
@@ -135,29 +142,174 @@ fn independently_oracled_decode(fixture: &FixtureCase) -> Result<(), String> {
     Ok(())
 }
 
-fn corruption_rejects(fixtures: &[FixtureCase]) -> Result<(), String> {
+fn exact_diagnostic_matrix(fixtures: &[FixtureCase]) -> Result<(), String> {
     let riff = fixtures
         .iter()
         .find(|fixture| fixture.id == "riff-pcm16-stereo-v1")
         .ok_or_else(|| "missing RIFF corruption base".to_owned())?;
+    let rf64 = fixtures
+        .iter()
+        .find(|fixture| fixture.id == "rf64-extensible-f32-odd-junk-v1")
+        .ok_or_else(|| "missing RF64 corruption base".to_owned())?;
 
     let mut rifx = riff.bytes.clone();
     rifx[..4].copy_from_slice(b"RIFX");
-    rejects(&rifx, CAPS, "big-endian RIFX")?;
-
-    let compressed = riff_wave(&classic_format(6, 1, 16), &[], &[0, 0]);
-    rejects(&compressed, CAPS, "unsupported compressed format")?;
-
-    let cap_exceeded = riff_wave(&classic_format(1, 1, 8), &[(b"JUNK", vec![1; 17])], &[128]);
-    rejects(&cap_exceeded, CAPS, "metadata cap")?;
-
+    let mut bad_root_size = riff.bytes.clone();
+    bad_root_size[4..8].copy_from_slice(&0_u32.to_le_bytes());
+    let mut truncated = riff.bytes.clone();
+    truncated.pop();
+    let mut malformed_ds64_table = rf64.bytes.clone();
+    let mut malformed_ds64_size = rf64.bytes.clone();
+    malformed_ds64_size[16..20].copy_from_slice(&27_u32.to_le_bytes());
+    // The RF64 `ds64` table-length field is at file offset 36. A nonzero table requires a
+    // larger `ds64` payload than this independently generated fixture contains.
+    malformed_ds64_table[36..40].copy_from_slice(&1_u32.to_le_bytes());
+    let mut rf64_missing_placeholder = rf64.bytes.clone();
+    let data_header = rf64_missing_placeholder
+        .windows(4)
+        .position(|window| window == b"data")
+        .ok_or_else(|| "RF64 fixture has no data chunk".to_owned())?;
+    rf64_missing_placeholder[data_header + 4..data_header + 8]
+        .copy_from_slice(&0_u32.to_le_bytes());
+    let mut unsupported_guid = rf64.bytes.clone();
+    // The extensible GUID begins at fmt payload byte 24; mutate only its tag byte.
+    let fmt_header = unsupported_guid
+        .windows(4)
+        .position(|window| window == b"fmt ")
+        .ok_or_else(|| "RF64 fixture has no fmt chunk".to_owned())?;
+    unsupported_guid[fmt_header + 8 + 24] = 0x7f;
+    let mut mismatched_valid_bits = rf64.bytes.clone();
+    mismatched_valid_bits[fmt_header + 8 + 18..fmt_header + 8 + 20]
+        .copy_from_slice(&16_u16.to_le_bytes());
+    let mut bad_byte_rate = riff.bytes.clone();
+    bad_byte_rate[12 + 8 + 8..12 + 8 + 12].copy_from_slice(&1_u32.to_le_bytes());
+    let mut bad_block_align = riff.bytes.clone();
+    bad_block_align[12 + 8 + 12..12 + 8 + 14].copy_from_slice(&1_u16.to_le_bytes());
+    let indivisible_data = riff_wave(&classic_format(1, 1, 16), &[], &[0, 0, 0]);
+    let duplicate_fmt = riff_wave(
+        &classic_format(1, 1, 8),
+        &[(b"fmt ", classic_format(1, 1, 8))],
+        &[128],
+    );
     let duplicate_data = riff_wave(&classic_format(1, 1, 8), &[(b"data", vec![128])], &[128]);
-    rejects(&duplicate_data, CAPS, "duplicate data")
-}
+    let compressed = riff_wave(&classic_format(6, 1, 16), &[], &[0, 0]);
+    let chunk_count = riff_wave(&classic_format(1, 1, 8), &[(b"JUNK", vec![])], &[128]);
+    let skipped_metadata = riff_wave(&classic_format(1, 1, 8), &[(b"JUNK", vec![1; 17])], &[128]);
 
-fn rejects(bytes: &[u8], caps: NativeWaveParseCaps, label: &str) -> Result<(), String> {
-    if parse_native_wave(&mut Cursor::new(bytes), caps).is_ok() {
-        return Err(format!("{label} corruption unexpectedly parsed"));
+    let cases = vec![
+        InvalidCase {
+            id: "container-rifx",
+            bytes: rifx,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "riff-root-size",
+            bytes: bad_root_size,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "truncated-container",
+            bytes: truncated,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "rf64-ds64-size",
+            bytes: malformed_ds64_size,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "rf64-ds64-table",
+            bytes: malformed_ds64_table,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "rf64-data-placeholder",
+            bytes: rf64_missing_placeholder,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "duplicate-fmt",
+            bytes: duplicate_fmt,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "duplicate-data",
+            bytes: duplicate_data,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "unsupported-compression-tag",
+            bytes: compressed,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::FormatUnsupported,
+        },
+        InvalidCase {
+            id: "unsupported-extensible-guid",
+            bytes: unsupported_guid,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::FormatUnsupported,
+        },
+        InvalidCase {
+            id: "extensible-valid-container-bits",
+            bytes: mismatched_valid_bits,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::FormatUnsupported,
+        },
+        InvalidCase {
+            id: "byte-rate",
+            bytes: bad_byte_rate,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "block-align",
+            bytes: bad_block_align,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "data-frame-divisibility",
+            bytes: indivisible_data,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ContainerInvalid,
+        },
+        InvalidCase {
+            id: "chunk-count-cap",
+            bytes: chunk_count,
+            caps: NativeWaveParseCaps {
+                max_chunk_count: 2,
+                max_skipped_metadata_bytes: 16,
+            },
+            expected: SourceDiagnosticCode::ResourceLimit,
+        },
+        InvalidCase {
+            id: "skipped-metadata-cap",
+            bytes: skipped_metadata,
+            caps: CAPS,
+            expected: SourceDiagnosticCode::ResourceLimit,
+        },
+    ];
+    for case in cases {
+        let error = match parse_native_wave(&mut Cursor::new(case.bytes), case.caps) {
+            Ok(_) => return Err(format!("{} unexpectedly parsed", case.id)),
+            Err(error) => error,
+        };
+        if error.diagnostic_code() != case.expected {
+            return Err(format!(
+                "{} diagnostic mismatch: expected {}, actual {}",
+                case.id,
+                case.expected,
+                error.diagnostic_code()
+            ));
+        }
     }
     Ok(())
 }
@@ -208,6 +360,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
                 2,
             ),
             channels: 2,
+            total_frames: 2,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 2,
+            },
             expected_planes: vec![
                 vec![0.25_f32.to_bits(), 0.5_f32.to_bits()],
                 vec![(-0.25_f32).to_bits(), (-0.5_f32).to_bits()],
@@ -218,6 +375,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-f32-signed-zero-sanitize-v1",
             bytes: riff_wave(&classic_format(3, 1, 32), &[], &f32_pcm),
             channels: 1,
+            total_frames: 4,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 4,
+            },
             expected_planes: float_sanitize_bits.clone(),
             expected_sanitized: 2,
         },
@@ -225,6 +387,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-f64-signed-zero-sanitize-v1",
             bytes: riff_wave(&classic_format(3, 1, 64), &[], &f64_pcm),
             channels: 1,
+            total_frames: 4,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 4,
+            },
             expected_planes: float_sanitize_bits,
             expected_sanitized: 2,
         },
@@ -232,6 +399,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-pcm16-stereo-v1",
             bytes: riff_wave(&classic_format(1, 2, 16), &[], &pcm16),
             channels: 2,
+            total_frames: 2,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 2,
+            },
             expected_planes: vec![
                 vec![(-1.0_f32).to_bits(), 0],
                 vec![(32_767.0_f32 / 32_768.0).to_bits(), (-0.5_f32).to_bits()],
@@ -242,6 +414,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-pcm24-multichannel-v1",
             bytes: riff_wave(&classic_format(1, 3, 24), &[], &pcm24),
             channels: 3,
+            total_frames: 1,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 1,
+            },
             expected_planes: vec![
                 vec![(-1.0_f32).to_bits()],
                 vec![0],
@@ -253,6 +430,11 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-pcm32-mono-v1",
             bytes: riff_wave(&classic_format(1, 1, 32), &[], &pcm32),
             channels: 1,
+            total_frames: 3,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 3,
+            },
             expected_planes: vec![vec![(-1.0_f32).to_bits(), 0, 1.0_f32.to_bits()]],
             expected_sanitized: 0,
         },
@@ -260,7 +442,39 @@ fn generated_fixtures() -> Vec<FixtureCase> {
             id: "riff-u8-mono-v1",
             bytes: riff_wave(&classic_format(1, 1, 8), &[], &[0, 128, 255]),
             channels: 1,
+            total_frames: 3,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 3,
+            },
             expected_planes: vec![vec![(-1.0_f32).to_bits(), 0, (127.0_f32 / 128.0).to_bits()]],
+            expected_sanitized: 0,
+        },
+        FixtureCase {
+            id: "riff-pcm16-stereo-nonzero-short-region-v1",
+            bytes: riff_wave(
+                &classic_format(1, 2, 16),
+                &[],
+                &[
+                    0_i16.to_le_bytes(),
+                    0_i16.to_le_bytes(),
+                    i16::MAX.to_le_bytes(),
+                    (-16_384_i16).to_le_bytes(),
+                    i16::MIN.to_le_bytes(),
+                    16_384_i16.to_le_bytes(),
+                ]
+                .concat(),
+            ),
+            channels: 2,
+            total_frames: 3,
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(1),
+                length_frames: 1,
+            },
+            expected_planes: vec![
+                vec![(32_767.0_f32 / 32_768.0).to_bits()],
+                vec![(-0.5_f32).to_bits()],
+            ],
             expected_sanitized: 0,
         },
     ]

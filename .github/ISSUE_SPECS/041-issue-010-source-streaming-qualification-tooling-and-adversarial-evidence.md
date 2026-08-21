@@ -139,3 +139,33 @@ table; seed/count/schedule transcript hash; real-worker lifecycle and 100,000-re
 both sparse-source identities, allocation multisets, exact reports and numeric RSS/environment;
 workspace/policy results; explicit `timed_benchmark_invocations=0`; and Terra plus final Sol
 PASS/FAIL verdicts.
+
+## Terra attempt 1 — fixture/diagnostic checkpoint (2026-08-21)
+
+**Gate 1 PASS; qualification remains incomplete.** The sole existing
+`miso-engine-source-fixture` framework and sorted `fixtures/sources/v1` manifest now contain the
+accepted RIFF/RF64 classic/extensible six-encoding corpus plus
+`riff-pcm16-stereo-nonzero-short-region-v1`: a three-frame PCM16 stereo source decoded only from
+absolute frame 1 for one frame. Its independent planar-bit oracle verifies that short terminal
+region, exact EOF, signed-zero preservation where applicable, and sanitation counts.
+
+The frozen exact diagnostic matrix is production-oracle independent and names these mutations:
+`container-rifx`, `riff-root-size`, `truncated-container`, `rf64-ds64-size`,
+`rf64-ds64-table`, `rf64-data-placeholder`, `duplicate-fmt`, `duplicate-data`,
+`unsupported-compression-tag`, `unsupported-extensible-guid`,
+`extensible-valid-container-bits`, `byte-rate`, `block-align`, `data-frame-divisibility`,
+`chunk-count-cap`, and `skipped-metadata-cap`. It requires the exact stable
+`SourceDiagnosticCode` for each rather than merely accepting an error; malformed containers map to
+`source.container.invalid`, unsupported format forms to `source.format.unsupported`, and fixed
+parser caps to `source.resource.limit`.
+
+The manifest SHA-256 is
+`cc3eb2cb547b32dee751aa0a7246ddc3926d692cda45c3418ac1b7be479e0b79`; the independent checker
+source SHA-256 is `b2bba2a13233218ebcf148821899f11ef7f172b5619883b9d13204d23b70b675`.
+Focused PASS: `cargo fmt --check -p miso-engine-source-fixture`; `cargo test -p
+miso-engine-source-fixture --locked`; direct checker invocation; and warning-denied
+`cargo clippy -p miso-engine-source-fixture --all-targets --locked -- -D warnings`.
+
+Not yet run: the frozen 256-schedule model, real-worker 100,000-render audit, sparse-duration
+allocation/RSS evidence, or broader workspace/policy gates. No production source semantics changed
+and no benchmark/timing workload was invoked; `timed_benchmark_invocations=0`.
