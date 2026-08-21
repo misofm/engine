@@ -124,3 +124,21 @@ Issue 047 and is not falsely claimed here.
 Candidate hash; descriptor/state/resource table; representative curve/timing/lookahead/link/
 sidechain/automation/state/recovery maxima; scalar/bank/graph results; focused command outputs;
 Terra and final Sol verdicts; exact successor link; and `timed_benchmark_invocations=0`.
+
+## Evidence record
+
+### Terra attempt 1 — scalar foundation checkpoint (2026-08-21)
+
+- Added the standalone `miso-engine-gate-expander` package plus test-only independent f64 static
+  curve oracle. Production has no oracle dependency.
+- Frozen descriptor and Normal resource rows are covered at 44.1/48/88.2/96 kHz: `N=Fs/100`,
+  `B=N+1`, `20+2B` words per lane, 64 scratch bytes, finite-zero tail, and one-byte-below
+  state/scratch preparation rejection.
+- Scalar tests cover the hard ratio/range curve, hysteresis transition ordering, preparation-only
+  0/5/10 ms lookahead derivation, fixed 10 ms impulse delay, connected-sidechain distinction,
+  exact 64-update automation state, all-or-none restore, and input sanitation. W4/W8 banks,
+  registry/graph work, broad qualification, targets, audits and benchmarks were not started.
+- Focused commands passed: `cargo fmt --package miso-engine-gate-expander --package
+  miso-engine-dsp-reference`; `cargo check -p miso-engine-gate-expander`; `cargo test -p
+  miso-engine-gate-expander` (5 passed); and `cargo clippy -p miso-engine-gate-expander
+  --all-targets -- -D warnings`. `timed_benchmark_invocations=0`.

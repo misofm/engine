@@ -302,6 +302,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-gate-expander"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "miso-engine-graph"
 version = "0.1.0"
 dependencies = [

@@ -6,6 +6,7 @@
 mod biquad;
 mod block;
 mod compressor;
+mod gate_expander;
 mod parametric_eq;
 mod processor;
 mod signals;
@@ -21,6 +22,10 @@ pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
 pub use compressor::{
     ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor,
+};
+pub use gate_expander::{
+    ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGatePhase,
+    reference_gate_expander_gain_reduction_db,
 };
 pub use parametric_eq::{
     ReferenceParametricEqCoefficients, ReferenceParametricEqError, ReferenceParametricEqKind,
