@@ -275,6 +275,7 @@ dependencies = [
  "miso-engine-multiband-compressor",
  "miso-engine-parametric-eq",
  "miso-engine-session",
+ "miso-engine-soft-clip",
  "miso-engine-true-peak-limiter",
 ]
 

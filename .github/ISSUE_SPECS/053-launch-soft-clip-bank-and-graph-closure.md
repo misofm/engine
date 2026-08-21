@@ -195,3 +195,33 @@ count; strict Terra/final Sol verdict; and `timed_benchmark_invocations=0`.
 - This remains a partial Issue-053 checkpoint, not overall PASS. Registry/effect-compiler,
   ten-track graph/PDC/cap and final workspace/policy closure were not started. No Issue-052,
   benchmark, timing or listening work ran; `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — registry and ten-track graph checkpoint (final-ready partial)
+
+- Base candidate `e2da972`. `miso.soft-clip` is now the sixth injected launch-native factory and an
+  exact direct dependency of the effect compiler. Baseline policy plus arbitrary-extra,
+  missing-soft-clip and substituted-soft-clip mutations pass; no registry singleton or render-time
+  lookup was introduced.
+- One accepted 48-kHz/q128 ten-track fixture uses homogeneous Normal, DualMono, no-sidechain
+  soft-clip programs with legal per-track/lane drive differences. The candidate host retained one
+  W8 bank over `eq0..eq7` plus ordered scalar tails `eq8,eq9`; the scalar-delegate artifact retained
+  no bank. Consecutive-block bank/tail PCM is bit-exact to ten scalar delegates, exercising carried
+  state; the earlier direct bank checkpoint remains the complete byte-state/report parity proof.
+- Every prepared enabled and bypassed effect reports latency 31 and finite tail 29. Enabled impulse
+  output has absolute peak 31, nonzero final support sample 60 and exact zero thereafter; the next
+  block remains zero. Enabled, scalar-delegate and bypass artifacts retain identical sequential
+  schedule, route timings, inserted delays and canonical graph bytes, with every route arriving at
+  sample 31 and zero compensation.
+- Corrected post-bank accounting is non-vacuous: the W8 graph independently derives and matches one
+  retained bank, 16,384 AoSoA scratch bytes, 8,192 runtime member-buffer bytes and the exact checked
+  bank/member metadata delta. Its audio-sample, graph-metadata, incremental-plan and session-plus-
+  plan deltas match the scalar artifact. A cap at `incremental_plan_bytes - 1` rejects with
+  `graph.resource.limit`, publishes no graph and returns all ten prepared entries/session tracks.
+- Focused PASS: exact soft-clip graph test; locked effect-compiler tests (4 passed), graph-compiler
+  library tests (20 passed) and soft-clip library tests (8 passed); warning-denied all-target Clippy
+  for soft-clip/effect-compiler/graph-compiler; `cargo fmt --all -- --check`; effect-runtime baseline
+  and mutations; rack baseline and mutations; and graph policy.
+- This checkpoint is final-product-ready but not yet an overall Issue-053 PASS: the separately
+  authorized clean workspace check/test/Clippy/rustdoc seal has not run. No Issue-052, audit,
+  cross-target, instruction, benchmark, timing or listening work ran;
+  `timed_benchmark_invocations=0`.

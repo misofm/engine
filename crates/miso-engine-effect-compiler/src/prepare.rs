@@ -82,6 +82,7 @@ pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, Regist
             as Box<dyn NativeEffectFactory>,
         Box::new(miso_engine_true_peak_limiter::TruePeakLimiterFactory)
             as Box<dyn NativeEffectFactory>,
+        Box::new(miso_engine_soft_clip::SoftClipFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
 

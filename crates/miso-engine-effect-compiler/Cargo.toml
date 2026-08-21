@@ -17,6 +17,7 @@ miso-engine-compressor.workspace = true
 miso-engine-gate-expander.workspace = true
 miso-engine-multiband-compressor.workspace = true
 miso-engine-true-peak-limiter.workspace = true
+miso-engine-soft-clip.workspace = true
 
 [lints]
 workspace = true

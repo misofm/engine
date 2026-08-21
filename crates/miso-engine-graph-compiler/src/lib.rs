@@ -2166,6 +2166,26 @@ mod tests {
         }
     }
 
+    /// One asymmetric impulse followed by silence, exposing the complete finite soft-clip support.
+    struct SoftClipImpulseBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for SoftClipImpulseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            if block.first_sample == 0 {
+                block.left[0] = self.left;
+                block.right[0] = self.right;
+            }
+            Ok(())
+        }
+    }
+
     fn asymmetric_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
         let GraphNodeId::TrackStage {
             track_id,
@@ -2239,6 +2259,25 @@ mod tests {
         Box::new(MultibandReleaseBinding {
             left: 0.5 + 0.025 * index as f32,
             right: -(0.4 + 0.02 * index as f32),
+        })
+    }
+
+    fn soft_clip_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("soft-clip fixture track id");
+        Box::new(SoftClipImpulseBinding {
+            left: 0.03125 * (index + 1) as f32,
+            right: -0.015625 * (10 - index) as f32,
         })
     }
 
@@ -2339,6 +2378,35 @@ mod tests {
             };
             effect.params.clear();
             effect.sidechain = SidechainDeclaration::None;
+        }
+        model
+    }
+
+    fn accepted_soft_clip_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model = accepted_compressor_graph_fixture();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let effect = &mut track.simd1.effects[0];
+            effect.id = StableId::parse("soft-clip").expect("stable effect id");
+            effect.identity = EffectIdentity::Native {
+                effect_id: StableId::parse("miso.soft-clip").expect("soft-clip id"),
+            };
+            effect.link_mode = miso_engine_session::LinkMode::DualMono;
+            effect.sidechain = SidechainDeclaration::None;
+            let index = index as f32;
+            effect.params = vec![
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Db,
+                    value: -6.0 + 0.5 * index,
+                },
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Db,
+                    value: -5.0 + 0.375 * index,
+                },
+            ];
         }
         model
     }
@@ -4546,6 +4614,376 @@ mod tests {
             cap_failure.effects.session.normalized_model().tracks.len(),
             10,
             "cap rejection returns every prepared multiband input"
+        );
+    }
+
+    #[test]
+    fn launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps() {
+        let model = accepted_soft_clip_graph_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        assert!(
+            model.tracks.iter().all(|track| matches!(
+                track.simd1.effects[0].sidechain,
+                SidechainDeclaration::None
+            ))
+        );
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted soft-clip fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        assert_eq!(session.quantum().0, 128);
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let soft_clip = registry
+            .get_shared_ascii("miso.soft-clip")
+            .expect("registered soft clip");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: soft_clip,
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar soft-clip registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared bank-capable soft-clip effects");
+        assert_eq!(effects.entries.len(), 10);
+        assert!(effects.entries.iter().all(|entry| {
+            entry.metadata.latency == LatencySamples(31)
+                && entry.metadata.tail == TailSamples::Finite(29)
+                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
+        }));
+        let scalar_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared scalar soft-clip effects");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_100,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_101,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar soft-clip graph: {:?}", failure.diagnostics));
+
+        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
+            let lanes = width.lanes() as usize;
+            (10 / lanes, 10 % lanes)
+        });
+        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.banks.len(),
+            expected_banks
+        );
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            expected_scalar_tails
+        );
+        let actual_members = artifact
+            .report
+            .rack_cohorts
+            .simd1
+            .banks
+            .iter()
+            .map(|bank| {
+                bank.members
+                    .iter()
+                    .map(|member| member.track_id.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected_members = width.map_or_else(Vec::new, |width| {
+            let lanes = width.lanes() as usize;
+            (0..expected_banks)
+                .map(|bank| {
+                    (bank * lanes..(bank + 1) * lanes)
+                        .map(|index| format!("eq{index}"))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(actual_members, expected_members, "stable bank membership");
+        let tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
+        assert_eq!(
+            artifact
+                .report
+                .rack_cohorts
+                .simd1
+                .scalar_tails
+                .iter()
+                .map(|tail| tail.track_id.to_string())
+                .collect::<Vec<_>>(),
+            (tail_start..10)
+                .map(|index| format!("eq{index}"))
+                .collect::<Vec<_>>(),
+            "stable scalar-tail order"
+        );
+        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+
+        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
+        let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let quantum = u64::from(session.quantum().0);
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
+        let expected_bank_metadata_bytes = bank_count
+            * u64::try_from(core::mem::size_of::<
+                miso_engine_graph::GraphPreparedEffectBank,
+            >())
+            .expect("bank metadata size")
+            + artifact
+                .report
+                .rack_cohorts
+                .simd1
+                .banks
+                .iter()
+                .flat_map(|bank| bank.members.iter())
+                .map(|member| {
+                    u64::try_from(core::mem::size_of::<EffectNodeId>())
+                        .expect("member metadata size")
+                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from("soft-clip".len()).expect("effect ID bytes")
+                })
+                .sum::<u64>();
+        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(
+            artifact.report.estimate.effect_bank_scratch_bytes,
+            expected_bank_scratch_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            expected_bank_runtime_buffer_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_metadata_bytes,
+            expected_bank_metadata_bytes
+        );
+        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(
+            artifact.report.estimate.incremental_plan_bytes,
+            scalar_artifact.report.estimate.incremental_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.session_plus_plan_bytes,
+            scalar_artifact.report.estimate.session_plus_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.sequential_schedule,
+            scalar_artifact.report.sequential_schedule
+        );
+        assert_eq!(
+            artifact.report.route_timings,
+            scalar_artifact.report.route_timings
+        );
+        assert_eq!(
+            artifact.report.inserted_delays,
+            scalar_artifact.report.inserted_delays
+        );
+        assert_eq!(
+            artifact.report.canonical_debug_bytes,
+            scalar_artifact.report.canonical_debug_bytes
+        );
+        assert!(artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(31)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(31)
+        }));
+        let expected_schedule = artifact.report.sequential_schedule.clone();
+        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_delays = artifact.report.inserted_delays.clone();
+        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+
+        let PreparedGraphArtifact {
+            graph: bank_graph, ..
+        } = artifact;
+        let PreparedGraphArtifact {
+            graph: scalar_graph,
+            ..
+        } = scalar_artifact;
+        let envelope = bank_graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let bank_nodes = bank_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), soft_clip_input_binding(node)))
+            .collect();
+        let scalar_nodes = scalar_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), soft_clip_input_binding(node)))
+            .collect();
+        let mut bank_plan = bank_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bank_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("soft-clip bank bind: {}", failure.code));
+        let mut scalar_plan = scalar_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("soft-clip scalar bind: {}", failure.code));
+        for block in 0..2_u64 {
+            let mut bank_pcm = vec![0.0_f32; frames * 2];
+            let mut scalar_pcm = vec![0.0_f32; frames * 2];
+            bank_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
+                            .expect("bank output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("bank render");
+            scalar_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                            .expect("scalar output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("scalar render");
+            assert_eq!(
+                bank_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                scalar_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "bank/tails and scalar delegates preserve consecutive carried state"
+            );
+            if block == 0 {
+                let left = &bank_pcm[..frames];
+                let right = &bank_pcm[frames..];
+                let left_peak = left
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+                    .map(|(index, _)| index)
+                    .expect("left output");
+                let right_peak = right
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+                    .map(|(index, _)| index)
+                    .expect("right output");
+                assert_eq!(left_peak, 31);
+                assert_eq!(right_peak, 31);
+                assert_ne!(left[60].to_bits(), 0.0_f32.to_bits());
+                assert_ne!(right[60].to_bits(), 0.0_f32.to_bits());
+                assert!(left[61..].iter().all(|sample| *sample == 0.0));
+                assert!(right[61..].iter().all(|sample| *sample == 0.0));
+            } else {
+                assert!(bank_pcm.iter().all(|sample| *sample == 0.0));
+            }
+        }
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.simd1.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled bypass soft-clip fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass soft-clip effects");
+        assert!(bypass_effects.entries.iter().all(|entry| {
+            entry.metadata.latency == LatencySamples(31)
+                && entry.metadata.tail == TailSamples::Finite(29)
+        }));
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_102,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass soft-clip graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            bypass_artifact.report.sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
+        assert_eq!(
+            bypass_artifact.report.canonical_debug_bytes,
+            expected_canonical_bytes
+        );
+        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(31)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(31)
+        }));
+
+        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared soft-clip effects for transactional cap");
+        let mut constrained_caps = integration_caps();
+        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
+            .checked_sub(1)
+            .expect("nonzero full graph plan estimate");
+        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_103,
+            effects: cap_effects,
+            caps: constrained_caps,
+        }) {
+            Ok(_) => panic!("one-byte-below soft-clip graph cap must reject before publication"),
+            Err(failure) => failure,
+        };
+        assert!(
+            cap_failure
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "graph.resource.limit"
+                    && diagnostic.path == "$.graph_compile_caps")
+        );
+        assert_eq!(cap_failure.effects.entries.len(), 10);
+        assert_eq!(
+            cap_failure.effects.session.normalized_model().tracks.len(),
+            10,
+            "cap rejection returns every prepared soft-clip input"
         );
     }
 
