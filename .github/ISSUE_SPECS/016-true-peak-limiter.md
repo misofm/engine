@@ -140,3 +140,21 @@ independent FIR/interpolation/output maxima; exact latency and ceiling rows; sta
 results; W8 execution and scalar parity; graph bank/tail/PDC/cap report; focused/full/policy
 outputs; unchanged accepted runtime/core API statement; attempt count; explicit Terra/final Sol
 PASS/FAIL; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — FAIL
+
+- Candidate base: `59b424a`. This scalar-only checkpoint added the limiter crate, descriptor,
+  fixed four-phase/48-tap detector, fixed-latency scalar state path, and focused tests. It made no
+  bank, registry, graph, PDC, corpus, audit, target/object, benchmark, timing, or listening work.
+- `cargo fmt --check --package miso-engine-true-peak-limiter`: PASS.
+- `cargo test -p miso-engine-true-peak-limiter --lib`: FAIL; three tests passed and one failed:
+  `tests::fixed_latency_guarded_ceiling_and_bypass_bits_hold` at
+  `crates/miso-engine-true-peak-limiter/src/lib.rs:987`.
+- At 48 kHz with 10 ms lookahead and fixed `T=486`, the frozen required-gain-ring sample order
+  begins one-pole release before the delayed impulse emerges. The resulting `left[486]` exceeds
+  the guarded-ceiling assertion. This is an early-release required-gain-ring symptom, not a
+  repaired or weakened product gate.
+- Clippy was not run after this semantic failure. `timed_benchmark_invocations=0`.
+
+**Terra attempt 1 verdict: FAIL.** Changing the required-gain timing to make this ceiling proof
+pass would alter the frozen gain law, so this checkpoint stops for Sol classification/rebrief.

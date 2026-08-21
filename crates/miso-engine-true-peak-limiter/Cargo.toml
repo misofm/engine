@@ -1,0 +1,15 @@
+[package]
+name = "miso-engine-true-peak-limiter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_true_peak_limiter"
+
+[dependencies]
+miso-engine-effect-contract.workspace = true
+
+[lints]
+workspace = true

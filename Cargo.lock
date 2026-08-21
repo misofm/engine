@@ -553,6 +553,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-true-peak-limiter"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
