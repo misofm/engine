@@ -103,3 +103,29 @@ serializes the old count (`34` at the first cascade); Issue 060 owns that corpus
 target, benchmark or timing command ran. `workload_invocations=0`;
 `timed_benchmark_invocations=0`. Terra verdict: **PASS READY FOR SOL REVIEW**, with corpus seal
 explicitly pending Issue 060.
+
+## Sol final review
+
+**PASS — candidate `7b5d09c4b9fc42f7fca613081ef313e3e1fb2080`; no Sol correction was
+required.** Adversarial inspection confirmed that only the scalar/bank retained-state boundary and
+its independent reference/test surface changed. Coefficient design/bits, retained non-fused and
+AVX2+FMA operation graphs, backend dispatch, state/resource layout, latency, Infinite tail and
+reset shape are unchanged. Finite subnormal words become positive zero without a report increment;
+pre- or post-recurrence nonfinite state still resets both words, reports lane-locally and preserves
+unaffected bank lanes.
+
+The focused four-rate test reproduced the exact Terra event totals and transcript hashes for all
+five partitions, with production/reference PCM, final state and report equality and zero recovery
+in every lane. Probe frequency is not an input to either render recurrence; the frozen timeline is
+therefore the one executable result consumed by every duplicated probe row. Issue 060's exact
+checker rule is: after regenerating response bytes from this candidate, every legal response row
+must serialize `recovery_count=0`, all rows sharing `(rate_hz, section, cutoff_bits)` must agree,
+and finite subnormal canonicalizations must never be added to that field. The stale stopped-#56
+CSV remains intentionally outside this issue.
+
+Final focused PASS: `cargo fmt --all -- --check`; the exact timeline test with all four printed
+hashes; locked builtin/reference tests (`26` builtin, `10` reference targets: `8` pass and `2`
+pre-existing ignored); warning-denied all-target Clippy for builtins, DSP reference and fixture;
+and `git diff --check`. No corpus validator, audit, target, object, workload, benchmark or timing
+command ran. Sol verdict: **PASS**. `workload_invocations=0`;
+`timed_benchmark_invocations=0`.
