@@ -148,3 +148,24 @@ silently interpolated.
 Candidate identity; exact equations/operation order; descriptor/state/resource tables; oracle,
 impulse/repeat/transition/matrix/reset/restore/recovery rows; graph/cap results; commands and policy
 results; attempt number; strict verdict; Issue-055 link; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — scalar checkpoint (partial PASS)
+
+- Added `miso-engine-delay`: Normal-only `miso.delay` scalar dynamic-rack effect with exact
+  two-second prepared L/R rings, rounded integer taps, queued 128-update output crossfades,
+  signed feedback, damping, wet/dry mix and an explicit smoothed dual-mono-to-ping-pong feedback
+  matrix. Reset/recovery use bounded logical history invalidation; snapshots canonicalize stale
+  ring cells and restore parses both lanes atomically.
+- Added a test-only independent `f64` integer-ring/matrix oracle to `miso-engine-dsp-reference`.
+  Focused tests cover all frozen rate/resource rows and cap rejection, sample-exact impulse and
+  ping-pong repeat behavior against the oracle, zero latency/Infinite tail metadata, crossfade
+  updates and queued retarget, automation/state continuation, lazy reset, sanitation and one
+  lane-local recovery injection.
+- PASS: `cargo fmt --check --package miso-engine-delay --package miso-engine-dsp-reference`;
+  `cargo test --locked -p miso-engine-delay --lib` (3 passed);
+  `cargo test --locked -p miso-engine-dsp-reference --lib` (6 passed, 1 documented ignored);
+  `cargo clippy --locked -p miso-engine-delay --all-targets -- -D warnings`.
+- This is a scalar-only partial checkpoint. Registry/effect compiler/graph, Issue-055
+  qualification, audit, target and benchmark work remain unstarted; homogeneous bank execution is
+  deliberately unavailable after validation. `timed_benchmark_invocations=0`. Terra checkpoint
+  verdict: partial PASS; pause for root commit and Sol review.

@@ -261,6 +261,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-delay"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-contract",
+]
+
+[[package]]
 name = "miso-engine-dsp-reference"
 version = "0.1.0"
 

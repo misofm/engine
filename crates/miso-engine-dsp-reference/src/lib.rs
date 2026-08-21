@@ -6,6 +6,7 @@
 mod biquad;
 mod block;
 mod compressor;
+mod delay;
 mod gate_expander;
 mod multiband_compressor;
 mod parametric_eq;
@@ -26,6 +27,7 @@ pub use block::{F64PlanarBuffer, ReferenceBlockError};
 pub use compressor::{
     ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor,
 };
+pub use delay::{ReferenceDelayError, ReferenceDelayPair, ReferenceDelayParameters};
 pub use gate_expander::{
     ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGatePhase,
     reference_gate_expander_gain_reduction_db,

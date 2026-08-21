@@ -1,0 +1,19 @@
+[package]
+name = "miso-engine-delay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_delay"
+
+[dependencies]
+miso-engine-effect-contract.workspace = true
+
+[dev-dependencies]
+# The independent f64 delay oracle is test-only and unreachable from production rendering.
+miso-engine-dsp-reference.workspace = true
+
+[lints]
+workspace = true
