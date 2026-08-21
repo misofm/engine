@@ -51,6 +51,9 @@ jq -e --argjson blocks "$blocks" '
   .kind == "graph_realtime_audit" and
   .blocks == $blocks and
   .quantum_frames == 1 and
+  .swaps_accepted == 2 and
+  .swaps_deferred == 1 and
+  .displaced_plans_destroyed_off_render == 2 and
   .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
 printf 'graph realtime syscall trace: PASS (%s blocks)\n' "$blocks"
