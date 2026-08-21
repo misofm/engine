@@ -216,27 +216,27 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
 ];
 
 #[derive(Clone, Copy)]
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
+struct TptSvf {
     a1: f32,
     a2: f32,
-    z1: f32,
-    z2: f32,
+    a3: f32,
+    k: f32,
+    s1: f32,
+    s2: f32,
+    high_pass: bool,
     enabled: bool,
 }
 
-impl Biquad {
+impl TptSvf {
     fn identity() -> Self {
         Self {
-            b0: 1.0,
-            b1: 0.0,
-            b2: 0.0,
             a1: 0.0,
             a2: 0.0,
-            z1: 0.0,
-            z2: 0.0,
+            a3: 0.0,
+            k: 0.0,
+            s1: 0.0,
+            s2: 0.0,
+            high_pass: false,
             enabled: false,
         }
     }
@@ -244,47 +244,46 @@ impl Biquad {
         if cutoff == 0.0 {
             return Ok(Self::identity());
         }
-        if !cutoff.is_finite() || cutoff <= 0.0 || f64::from(cutoff) >= f64::from(rate) / 2.0 {
+        if !cutoff.is_finite() || cutoff < 10.0 || f64::from(cutoff) >= f64::from(rate) / 2.0 {
             return Err(BuiltinParameterError::FilterCutoff);
         }
-        let w0 = 2.0_f64 * core::f64::consts::PI * f64::from(cutoff) / f64::from(rate);
-        let cosine = w0.cos();
-        let alpha = w0.sin() / (2.0 * core::f64::consts::FRAC_1_SQRT_2);
-        let (b0, b1, b2) = if high_pass {
-            ((1.0 + cosine) / 2.0, -(1.0 + cosine), (1.0 + cosine) / 2.0)
-        } else {
-            ((1.0 - cosine) / 2.0, 1.0 - cosine, (1.0 - cosine) / 2.0)
-        };
-        let a0 = 1.0 + alpha;
-        let values = [
-            b0 / a0,
-            b1 / a0,
-            b2 / a0,
-            -2.0 * cosine / a0,
-            (1.0 - alpha) / a0,
-        ];
-        let values: [f32; 5] = values.map(|value| value as f32);
+        let g = (core::f64::consts::PI * f64::from(cutoff) / f64::from(rate)).tan();
+        let k = core::f64::consts::SQRT_2;
+        let denominator = 1.0 + g * (g + k);
+        let values =
+            [1.0 / denominator, g / denominator, g * g / denominator, k].map(|value| value as f32);
         if !values.into_iter().all(normal_or_zero) {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
-        let [b0, b1, b2, a1, a2] = values;
-        if a2.abs() >= 1.0 || 1.0 + a1 + a2 <= 0.0 || 1.0 - a1 + a2 <= 0.0 {
+        let [a1, a2, a3, k] = values;
+        let transition_00 = 2.0_f64 * f64::from(a1) - 1.0;
+        let transition_01 = -2.0_f64 * f64::from(a2);
+        let transition_10 = 2.0_f64 * f64::from(a2);
+        let transition_11 = 1.0 - 2.0_f64 * f64::from(a3);
+        let trace = transition_00 + transition_11;
+        let determinant = transition_00 * transition_11 - transition_01 * transition_10;
+        let denominator_a1 = -trace;
+        let denominator_a2 = determinant;
+        if denominator_a2.abs() >= 1.0
+            || 1.0 + denominator_a1 + denominator_a2 <= 0.0
+            || 1.0 - denominator_a1 + denominator_a2 <= 0.0
+        {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
         Ok(Self {
-            b0,
-            b1,
-            b2,
             a1,
             a2,
-            z1: 0.0,
-            z2: 0.0,
+            a3,
+            k,
+            s1: 0.0,
+            s2: 0.0,
+            high_pass,
             enabled: true,
         })
     }
     fn reset(&mut self) {
-        self.z1 = 0.0;
-        self.z2 = 0.0;
+        self.s1 = 0.0;
+        self.s2 = 0.0;
     }
     fn process(
         &mut self,
@@ -295,16 +294,35 @@ impl Biquad {
         if !self.enabled {
             return input;
         }
-        if !normal_or_zero(self.z1) || !normal_or_zero(self.z2) {
+        if !normal_or_zero(self.s1) || !normal_or_zero(self.s2) {
             self.reset();
             *recovered = recovered.saturating_add(1);
         }
-        let y = self.b0 * input + self.z1;
-        let z1 = self.b1 * input - self.a1 * y + self.z2;
-        let z2 = self.b2 * input - self.a2 * y;
-        self.z1 = sanitize(z1, &mut report.sanitized_output);
-        self.z2 = sanitize(z2, &mut report.sanitized_output);
-        sanitize(y, &mut report.sanitized_output)
+        let v3 = input - self.s2;
+        let p1 = self.a1 * self.s1;
+        let p2 = self.a2 * v3;
+        let v1 = p1 + p2;
+        let p3 = self.a2 * self.s1;
+        let p4 = self.a3 * v3;
+        let t2 = self.s2 + p3;
+        let v2 = t2 + p4;
+        let n1 = 2.0 * v1 - self.s1;
+        let n2 = 2.0 * v2 - self.s2;
+        let low = v2;
+        let kh = self.k * v1;
+        let th = input - kh;
+        let high = th - v2;
+        if !normal_or_zero(n1) || !normal_or_zero(n2) {
+            self.reset();
+            *recovered = recovered.saturating_add(1);
+            return 0.0;
+        }
+        self.s1 = n1;
+        self.s2 = n2;
+        sanitize(
+            if self.high_pass { high } else { low },
+            &mut report.sanitized_output,
+        )
     }
 }
 
@@ -312,8 +330,8 @@ impl Biquad {
 struct InputLane {
     polarity: bool,
     trim: f32,
-    hpf: Biquad,
-    lpf: Biquad,
+    hpf: TptSvf,
+    lpf: TptSvf,
 }
 #[derive(Clone, Copy)]
 struct FaderLane {
@@ -433,8 +451,8 @@ fn prepare_sections(
         Ok(InputLane {
             polarity: params.polarity_invert,
             trim: db_gain(params.trim_db)?,
-            hpf: Biquad::design(sample_rate, zero(params.hpf_hz), true)?,
-            lpf: Biquad::design(sample_rate, zero(params.lpf_hz), false)?,
+            hpf: TptSvf::design(sample_rate, zero(params.hpf_hz), true)?,
+            lpf: TptSvf::design(sample_rate, zero(params.lpf_hz), false)?,
         })
     };
     let fader = |params: ChannelParameters| -> Result<FaderLane, BuiltinParameterError> {
