@@ -272,6 +272,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-gate-expander",
+ "miso-engine-multiband-compressor",
  "miso-engine-parametric-eq",
  "miso-engine-session",
  "miso-engine-true-peak-limiter",

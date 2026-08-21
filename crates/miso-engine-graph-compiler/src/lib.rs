@@ -2139,6 +2139,33 @@ mod tests {
         }
     }
 
+    /// A loud two-band burst plus a later quiet probe. The probe reaches the output while the
+    /// compressor release state from the first burst is still active.
+    struct MultibandReleaseBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for MultibandReleaseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            if block.first_sample == 0 {
+                for frame in 0..64 {
+                    let polarity = if frame & 1 == 0 { 1.0 } else { -1.0 };
+                    block.left[frame] = self.left * polarity;
+                    block.right[frame] = self.right * polarity;
+                }
+            } else if block.first_sample == 1_280 {
+                block.left[0] = self.left * 0.125;
+                block.right[0] = self.right * 0.125;
+            }
+            Ok(())
+        }
+    }
+
     fn asymmetric_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
         let GraphNodeId::TrackStage {
             track_id,
@@ -2193,6 +2220,25 @@ mod tests {
         Box::new(LimiterReleaseImpulseBinding {
             left: 1.125 + 0.0625 * index as f32,
             right: -(1.0625 + 0.03125 * index as f32),
+        })
+    }
+
+    fn multiband_compressor_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("multiband-compressor fixture track id");
+        Box::new(MultibandReleaseBinding {
+            left: 0.5 + 0.025 * index as f32,
+            right: -(0.4 + 0.02 * index as f32),
         })
     }
 
@@ -2278,6 +2324,21 @@ mod tests {
                     value: [0.0, 5.0, 10.0][index as usize % 3],
                 },
             ];
+        }
+        model
+    }
+
+    fn accepted_multiband_compressor_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model = accepted_compressor_graph_fixture();
+        for track in &mut model.tracks {
+            let effect = &mut track.simd1.effects[0];
+            effect.id = StableId::parse("multiband-compressor").expect("stable effect id");
+            effect.identity = EffectIdentity::Native {
+                effect_id: StableId::parse("miso.multiband-compressor")
+                    .expect("multiband-compressor id"),
+            };
+            effect.params.clear();
+            effect.sidechain = SidechainDeclaration::None;
         }
         model
     }
@@ -4114,6 +4175,377 @@ mod tests {
             cap_failure.effects.session.normalized_model().tracks.len(),
             10,
             "cap rejection returns every prepared limiter input"
+        );
+    }
+
+    #[test]
+    fn launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps() {
+        let model = accepted_multiband_compressor_graph_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        assert!(
+            model.tracks.iter().all(|track| matches!(
+                track.simd1.effects[0].sidechain,
+                SidechainDeclaration::None
+            ))
+        );
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted multiband-compressor fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        assert_eq!(session.quantum().0, 128);
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let multiband = registry
+            .get_shared_ascii("miso.multiband-compressor")
+            .expect("registered multiband compressor");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: multiband,
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar multiband-compressor registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared bank-capable multiband effects");
+        assert_eq!(effects.entries.len(), 10);
+        assert!(effects.entries.iter().all(|entry| {
+            entry.metadata.latency == LatencySamples(960)
+                && entry.metadata.tail == TailSamples::Infinite
+                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
+        }));
+        let scalar_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared scalar multiband effects");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_080,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("multiband graph: {:?}", failure.diagnostics));
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_081,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar multiband graph: {:?}", failure.diagnostics));
+
+        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
+            let lanes = width.lanes() as usize;
+            (10 / lanes, 10 % lanes)
+        });
+        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.banks.len(),
+            expected_banks
+        );
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            expected_scalar_tails
+        );
+        let actual_members: Vec<Vec<String>> = artifact
+            .report
+            .rack_cohorts
+            .simd1
+            .banks
+            .iter()
+            .map(|bank| {
+                bank.members
+                    .iter()
+                    .map(|member| member.track_id.to_string())
+                    .collect()
+            })
+            .collect();
+        let expected_members: Vec<Vec<String>> = width.map_or_else(Vec::new, |width| {
+            let lanes = width.lanes() as usize;
+            (0..expected_banks)
+                .map(|bank| {
+                    (bank * lanes..(bank + 1) * lanes)
+                        .map(|index| format!("eq{index}"))
+                        .collect()
+                })
+                .collect()
+        });
+        assert_eq!(
+            actual_members, expected_members,
+            "stable full-bank membership"
+        );
+        let expected_tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
+        assert_eq!(
+            artifact
+                .report
+                .rack_cohorts
+                .simd1
+                .scalar_tails
+                .iter()
+                .map(|tail| tail.track_id.to_string())
+                .collect::<Vec<_>>(),
+            (expected_tail_start..10)
+                .map(|index| format!("eq{index}"))
+                .collect::<Vec<_>>(),
+            "stable scalar-tail membership"
+        );
+        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+
+        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
+        let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let quantum = u64::from(session.quantum().0);
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
+        let expected_bank_metadata_bytes = bank_count
+            * u64::try_from(core::mem::size_of::<
+                miso_engine_graph::GraphPreparedEffectBank,
+            >())
+            .expect("bank metadata size")
+            + artifact
+                .report
+                .rack_cohorts
+                .simd1
+                .banks
+                .iter()
+                .flat_map(|bank| bank.members.iter())
+                .map(|member| {
+                    u64::try_from(core::mem::size_of::<EffectNodeId>())
+                        .expect("member metadata size")
+                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from("multiband-compressor".len()).expect("effect ID bytes")
+                })
+                .sum::<u64>();
+        assert_eq!(artifact.report.estimate.effect_bank_count, bank_count);
+        assert_eq!(
+            artifact.report.estimate.effect_bank_scratch_bytes,
+            expected_bank_scratch_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_runtime_buffer_bytes,
+            expected_bank_runtime_buffer_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.effect_bank_metadata_bytes,
+            expected_bank_metadata_bytes
+        );
+        assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
+        assert_eq!(
+            artifact.report.estimate.incremental_plan_bytes,
+            scalar_artifact.report.estimate.incremental_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.estimate.session_plus_plan_bytes,
+            scalar_artifact.report.estimate.session_plus_plan_bytes
+                + expected_bank_scratch_bytes
+                + expected_bank_runtime_buffer_bytes
+                + expected_bank_metadata_bytes
+        );
+        assert_eq!(
+            artifact.report.sequential_schedule,
+            scalar_artifact.report.sequential_schedule
+        );
+        assert_eq!(
+            artifact.report.route_timings,
+            scalar_artifact.report.route_timings
+        );
+        assert_eq!(
+            artifact.report.inserted_delays,
+            scalar_artifact.report.inserted_delays
+        );
+        assert_eq!(
+            artifact.report.canonical_debug_bytes,
+            scalar_artifact.report.canonical_debug_bytes
+        );
+        assert!(artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(960)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(960)
+        }));
+        let expected_schedule = artifact.report.sequential_schedule.clone();
+        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_delays = artifact.report.inserted_delays.clone();
+        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+
+        let PreparedGraphArtifact {
+            graph: bank_graph, ..
+        } = artifact;
+        let PreparedGraphArtifact {
+            graph: scalar_graph,
+            ..
+        } = scalar_artifact;
+        let envelope = bank_graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let bank_nodes = bank_graph
+            .required_bindings
+            .iter()
+            .map(|node| {
+                GraphNodeBinding::new(node.clone(), multiband_compressor_input_binding(node))
+            })
+            .collect();
+        let scalar_nodes = scalar_graph
+            .required_bindings
+            .iter()
+            .map(|node| {
+                GraphNodeBinding::new(node.clone(), multiband_compressor_input_binding(node))
+            })
+            .collect();
+        let mut bank_plan = bank_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bank_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("multiband bank bind: {}", failure.code));
+        let mut scalar_plan = scalar_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("multiband scalar bind: {}", failure.code));
+        let mut reached_latency = false;
+        let mut reached_release_probe = false;
+        for block in 0..20_u64 {
+            let mut bank_pcm = vec![0.0_f32; frames * 2];
+            let mut scalar_pcm = vec![0.0_f32; frames * 2];
+            bank_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
+                            .expect("bank output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("bank render");
+            scalar_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                            .expect("scalar output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("scalar render");
+            for (&bank, &scalar) in bank_pcm.iter().zip(&scalar_pcm) {
+                assert!(bank.is_finite() && scalar.is_finite());
+                let bound = 1.0e-5 + 2.0e-5 * scalar.abs();
+                assert!(
+                    (bank - scalar).abs() <= bound,
+                    "ten-track accumulated bank/scalar error: bank={bank} scalar={scalar} bound={bound}"
+                );
+            }
+            for frame in 0..frames {
+                let absolute = block * frames as u64 + frame as u64;
+                let left = bank_pcm[frame];
+                let right = bank_pcm[frames + frame];
+                if absolute < 960 {
+                    assert_eq!(left, 0.0, "left output before fixed latency");
+                    assert_eq!(right, 0.0, "right output before fixed latency");
+                } else if absolute < 1_024 {
+                    reached_latency |= left != 0.0 && right != 0.0;
+                } else if (2_240..2_304).contains(&absolute) {
+                    reached_release_probe |= left != 0.0 && right != 0.0;
+                }
+            }
+        }
+        assert!(
+            reached_latency,
+            "active burst crosses fixed 960-sample latency"
+        );
+        assert!(
+            reached_release_probe,
+            "later probe crosses latency while carried release state remains active"
+        );
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.simd1.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled bypass multiband fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass multiband effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_082,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass multiband graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            bypass_artifact.report.sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
+        assert_eq!(
+            bypass_artifact.report.canonical_debug_bytes,
+            expected_canonical_bytes
+        );
+        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(960)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(960)
+        }));
+
+        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared multiband effects for transactional cap");
+        let mut constrained_caps = integration_caps();
+        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
+            .checked_sub(1)
+            .expect("nonzero full graph plan estimate");
+        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_083,
+            effects: cap_effects,
+            caps: constrained_caps,
+        }) {
+            Ok(_) => panic!("one-byte-below multiband graph cap must reject before publication"),
+            Err(failure) => failure,
+        };
+        assert!(
+            cap_failure
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code == "graph.resource.limit"
+                        && diagnostic.path == "$.graph_compile_caps"
+                })
+        );
+        assert_eq!(cap_failure.effects.entries.len(), 10);
+        assert_eq!(
+            cap_failure.effects.session.normalized_model().tracks.len(),
+            10,
+            "cap rejection returns every prepared multiband input"
         );
     }
 

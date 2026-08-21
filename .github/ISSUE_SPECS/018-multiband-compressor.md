@@ -207,3 +207,30 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   compile-fail doctest); warning-denied all-target core plus multiband Clippy. No production source
   changed in this evidence checkpoint. Registry/graph closure is still outstanding, so overall
   Issue 018 remains incomplete. `timed_benchmark_invocations=0`.
+
+### Sol attempt 2 final registry/graph closure — PASS
+
+- Added `miso.multiband-compressor` to the immutable launch registry and exact effect-compiler
+  dependency policy. Baseline policy and mutations for arbitrary addition, removal and substitution
+  of every approved launch effect pass.
+- The accepted ten-track, 48 kHz/Q128 graph has no sidechain declaration or prepared sidechain
+  port. It retains the host-width-correct full W4/W8 banks plus ordered scalar tails, with stable
+  member IDs and exact post-bank scratch/runtime-buffer/metadata accounting. The scalar-only
+  delegate has zero bank resources and the exact bank-resource delta appears in both incremental
+  and session-plus-plan estimates.
+- Bank and scalar-delegate graph schedules, route timing, inserted PDC and canonical bytes agree.
+  Executed PCM stays within the inherited accumulated ten-track AVX2+FMA bound through the fixed
+  960-sample latency, an active burst and a later release-state probe. Bypass retains identical
+  bank membership, schedule, 960-sample route arrival, zero compensation and canonical bytes.
+  A one-byte-below post-bank plan cap rejects before publication and returns all ten prepared
+  effects and the complete compiled session.
+- PASS: focused locked effect-compiler/graph-compiler all-target/all-feature tests (4 compiler,
+  19 graph library, 2 graph binary tests and the 65,537-track scale row); focused warning-denied
+  Clippy; shell syntax; effect-runtime baseline/mutations; `cargo fmt --all -- --check`; locked
+  workspace all-target/all-feature check and tests; warning-denied workspace all-target/all-feature
+  Clippy; warning-denied workspace rustdoc; workspace, realtime, graph and rack baseline/mutation
+  policies; and `git diff --check`.
+- **Final Issue 018 verdict: PASS.** The bounded fixed two-band launch product is complete. Issue
+  051 exclusively retains expanded topology/qualification/audit/target/object/benchmark/listening
+  work. No audit main, target matrix, object inspection, benchmark, timing or listening command
+  ran; `timed_benchmark_invocations=0`.

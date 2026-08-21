@@ -6,7 +6,7 @@ dependencies() {
     awk '/^\[dependencies\]$/ { in_deps=1; next } /^\[/ { in_deps=0 } in_deps && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ { line=$0; sub(/[[:space:]]*=.*/, "", line); sub(/\.workspace$/, "", line); print line }' "$1" | sort
 }
 [[ "$(dependencies crates/miso-engine-effect-contract/Cargo.toml)" == 'miso-engine-core' ]] || fail 'effect-contract dependency boundary changed'
-expected_compiler=$'miso-engine-compressor\nmiso-engine-core\nmiso-engine-effect-contract\nmiso-engine-gate-expander\nmiso-engine-parametric-eq\nmiso-engine-session\nmiso-engine-true-peak-limiter'
+expected_compiler=$'miso-engine-compressor\nmiso-engine-core\nmiso-engine-effect-contract\nmiso-engine-gate-expander\nmiso-engine-multiband-compressor\nmiso-engine-parametric-eq\nmiso-engine-session\nmiso-engine-true-peak-limiter'
 [[ "$(dependencies crates/miso-engine-effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi
 if rg -n 'miso_engine_effect_package|miso-engine-effect-package|sha2' crates/miso-engine-{effect-contract,effect-compiler,conformance} tools/miso-engine-effect-contract-bench; then fail 'issue-029 package/hash leaked into issue-011 path'; fi
