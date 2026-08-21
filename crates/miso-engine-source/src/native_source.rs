@@ -16,10 +16,10 @@ use miso_engine_graph::{GraphNodeId, StableGraphId, TrackStage};
 use miso_engine_session::CompiledSession;
 
 use crate::{
-    HostChunkError, HostChunkProvider, NativeWaveDecoder, NativeWaveError, NativeWaveMetadata,
-    NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig,
-    PcmSourceRingError, SourceCommand, SourceDiagnostic, SourceDiagnosticCode,
-    SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
+    HostChunkError, HostChunkProvider, NativeDecoderSanitationTelemetry, NativeWaveDecoder,
+    NativeWaveError, NativeWaveMetadata, NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer,
+    PcmSourceRing, PcmSourceRingConfig, PcmSourceRingError, SourceCommand, SourceDiagnostic,
+    SourceDiagnosticCode, SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, SourceResourceReport, SourceSeekError, parse_native_wave,
     prepare_graph_source_set,
 };
@@ -130,24 +130,24 @@ pub struct NativeSessionSourcePrepareFailure {
     pub diagnostics: Vec<SourceDiagnostic>,
 }
 
-/// Prepared graph source set plus the native workers that keep its rings filled.
+/// Prepared graph source set plus separate non-render native controller endpoints.
 pub struct NativeSessionPreparedSources {
     pub source_set: miso_engine_graph::GraphPreparedSourceSet,
-    pub workers: Vec<NativeSourceWorker>,
+    pub controllers: Vec<NativeSourceController>,
     pub resources: NativeSessionSourceResourceReport,
 }
 
 impl NativeSessionPreparedSources {
-    /// Move the graph source set and its worker ownership together to plan publication/retirement.
+    /// Move the source set and its independent controllers without exposing worker join owners.
     #[must_use]
     pub fn into_parts(
         self,
     ) -> (
         miso_engine_graph::GraphPreparedSourceSet,
-        Vec<NativeSourceWorker>,
+        Vec<NativeSourceController>,
         NativeSessionSourceResourceReport,
     ) {
-        (self.source_set, self.workers, self.resources)
+        (self.source_set, self.controllers, self.resources)
     }
 }
 
@@ -251,26 +251,28 @@ struct PendingBlock {
     end_of_region: bool,
 }
 
-/// A started native worker owning one reader, decoder, source producer, and fixed staging block.
-pub struct NativeSourceWorker {
+/// Non-render endpoint for bounded native seek/wake commands and worker events.
+pub struct NativeSourceController {
     commands: SyncSender<WorkerCommand>,
     events: Receiver<NativeSourceWorkerEvent>,
-    join: Option<JoinHandle<NativeSourceWorkerExit>>,
+    sanitation: NativeDecoderSanitationTelemetry,
     next_requested_generation: SourceGeneration,
     region: NativeWaveRegion,
-    stopped: bool,
     _not_sync: PhantomData<Cell<()>>,
 }
 
-impl NativeSourceWorker {
+impl NativeSourceController {
+    /// Cumulative native decoder replacements observed through bounded prepared telemetry.
+    #[must_use]
+    pub fn native_decoder_sanitized_samples(&self) -> u64 {
+        self.sanitation.load()
+    }
+
     /// Queue a strictly increasing region-bounded source seek without blocking.
     pub fn try_seek(
         &mut self,
         command: SourceCommand,
     ) -> Result<(), NativeSourceWorkerControlError> {
-        if self.stopped {
-            return Err(NativeSourceWorkerControlError::Stopped);
-        }
         let SourceCommand::Seek { generation, frame } = command;
         if !generation.is_valid() {
             return Err(NativeSourceWorkerControlError::GenerationZero);
@@ -291,9 +293,6 @@ impl NativeSourceWorker {
 
     /// Wake a worker waiting for ring capacity after an off-render consumer-drain notification.
     pub fn try_wake(&mut self) -> Result<(), NativeSourceWorkerControlError> {
-        if self.stopped {
-            return Err(NativeSourceWorkerControlError::Stopped);
-        }
         self.try_send(WorkerCommand::Wake)
     }
 
@@ -306,12 +305,33 @@ impl NativeSourceWorker {
             .map_err(|_| NativeSourceWorkerControlError::Stopped)
     }
 
+    fn try_send(&self, command: WorkerCommand) -> Result<(), NativeSourceWorkerControlError> {
+        match self.commands.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(NativeSourceWorkerControlError::Backpressure),
+            Err(TrySendError::Disconnected(_)) => Err(NativeSourceWorkerControlError::Stopped),
+        }
+    }
+}
+
+/// Sole stop/join owner for one started native worker.
+///
+/// This token is intentionally moved only into the source-set driver. Its `Drop` implementation
+/// runs on source-set/retired-plan reclamation, never from render.
+pub struct NativeSourceWorker {
+    commands: SyncSender<WorkerCommand>,
+    join: Option<JoinHandle<NativeSourceWorkerExit>>,
+    stopped: bool,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+impl NativeSourceWorker {
     /// Stop and join the worker outside render.
     pub fn stop_and_join(
         &mut self,
     ) -> Result<NativeSourceWorkerExit, NativeSourceWorkerControlError> {
         if !self.stopped {
-            self.try_send(WorkerCommand::Stop)?;
+            let _ = self.commands.send(WorkerCommand::Stop);
             self.stopped = true;
         }
         let Some(join) = self.join.take() else {
@@ -320,13 +340,11 @@ impl NativeSourceWorker {
         join.join()
             .map_err(|_| NativeSourceWorkerControlError::WorkerPanicked)
     }
+}
 
-    fn try_send(&self, command: WorkerCommand) -> Result<(), NativeSourceWorkerControlError> {
-        match self.commands.try_send(command) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(NativeSourceWorkerControlError::Backpressure),
-            Err(TrySendError::Disconnected(_)) => Err(NativeSourceWorkerControlError::Stopped),
-        }
+impl Drop for NativeSourceWorker {
+    fn drop(&mut self) {
+        let _ = self.stop_and_join();
     }
 }
 
@@ -337,6 +355,7 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
     caps: NativeSourcePrepareCaps,
 ) -> Result<
     (
+        NativeSourceController,
         NativeSourceWorker,
         PcmSourceConsumer,
         NativeSourceResourceReport,
@@ -376,14 +395,19 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
         .try_reserve_exact(staging_samples)
         .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     planar_staging.resize(staging_samples, 0.0);
-    let (producer, consumer, ring_report) =
+    let (mut producer, mut consumer, ring_report) =
         PcmSourceRing::prepare_at_source_frame(request.ring_config, request.region.start_frame)
             .map_err(NativeSourcePrepareError::Ring)?;
     debug_assert_eq!(ring_report, report.ring);
+    let sanitation = NativeDecoderSanitationTelemetry::new();
+    producer.attach_native_decoder_sanitation(sanitation.clone());
+    consumer.attach_native_decoder_sanitation(sanitation.clone());
     let provider = producer.into_host_chunk_provider(metadata.sample_rate_hz);
     let (command_sender, command_receiver) = mpsc::sync_channel(caps.control_queue_items.get());
     let (event_sender, event_receiver) = mpsc::sync_channel(1);
     let initial_generation = request.ring_config.initial_generation;
+    let worker_commands = command_sender.clone();
+    let worker_sanitation = sanitation.clone();
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
         .spawn(move || {
@@ -394,16 +418,22 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
                 decoder,
                 planar_staging.into_boxed_slice(),
                 initial_generation,
+                worker_sanitation,
             )
         })
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
     Ok((
-        NativeSourceWorker {
+        NativeSourceController {
             commands: command_sender,
             events: event_receiver,
-            join: Some(join),
+            sanitation: sanitation.clone(),
             next_requested_generation: initial_generation,
             region: request.region,
+            _not_sync: PhantomData,
+        },
+        NativeSourceWorker {
+            commands: worker_commands,
+            join: Some(join),
             stopped: false,
             _not_sync: PhantomData,
         },
@@ -421,7 +451,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
 ) -> Result<NativeSessionPreparedSources, NativeSessionSourcePrepareFailure> {
     let model = session.normalized_model();
     let mut diagnostics = Vec::new();
-    let mut workers = Vec::with_capacity(model.sources.len());
+    let mut controllers = Vec::with_capacity(model.sources.len());
     let mut graph_sources = Vec::with_capacity(model.sources.len());
     let mut reports = Vec::with_capacity(model.sources.len());
 
@@ -444,25 +474,25 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
             },
         };
         match prepare_native_source(resolver, request, caps.source) {
-            Ok((worker, consumer, report)) => {
+            Ok((controller, worker, consumer, report)) => {
                 let additional_overhead_bytes = report
                     .total_engine_owned_bytes
                     .checked_sub(report.ring.total_engine_owned_bytes)
                     .expect("native report includes ring");
-                graph_sources.push(SourceGraphSource {
+                graph_sources.push(SourceGraphSource::with_native_worker(
                     consumer,
-                    resources: report.ring,
+                    report.ring,
                     additional_overhead_bytes,
-                    additional_largest_allocation_bytes: report.largest_allocation_bytes,
-                });
+                    report.largest_allocation_bytes,
+                    worker,
+                ));
                 reports.push(report);
-                workers.push(worker);
+                controllers.push(controller);
             }
             Err(error) => diagnostics.push(native_prepare_diagnostic(source.id.as_str(), error)),
         }
     }
     if !diagnostics.is_empty() {
-        stop_workers(&mut workers);
         sort_diagnostics(&mut diagnostics);
         return Err(NativeSessionSourcePrepareFailure { diagnostics });
     }
@@ -498,7 +528,6 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     ) {
         Ok(source_set) => source_set,
         Err(_) => {
-            stop_workers(&mut workers);
             return Err(NativeSessionSourcePrepareFailure {
                 diagnostics: vec![SourceDiagnostic::new(
                     SourceDiagnosticCode::GraphBindingMismatch,
@@ -514,7 +543,6 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         match session_runtime_bytes.checked_add(graph_resources.overhead_bytes) {
             Some(total) => total,
             None => {
-                stop_workers(&mut workers);
                 return Err(resource_failure(model.sources[0].id.as_str()));
             }
         };
@@ -528,13 +556,12 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         || combined_runtime_bytes > caps.max_combined_runtime_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
-        stop_workers(&mut workers);
         return Err(resource_failure(model.sources[0].id.as_str()));
     }
     let source_count = u64::try_from(reports.len()).expect("source vector length fits u64");
     Ok(NativeSessionPreparedSources {
         source_set,
-        workers,
+        controllers,
         resources: NativeSessionSourceResourceReport {
             source_count,
             session_runtime_bytes,
@@ -566,12 +593,6 @@ fn resource_failure(source_id: &str) -> NativeSessionSourcePrepareFailure {
 
 fn sort_diagnostics(diagnostics: &mut [SourceDiagnostic]) {
     diagnostics.sort_by(|left, right| left.path.cmp(&right.path).then(left.code.cmp(&right.code)));
-}
-
-fn stop_workers(workers: &mut [NativeSourceWorker]) {
-    for worker in workers {
-        let _ = worker.stop_and_join();
-    }
 }
 
 fn source_resource_report(
@@ -655,6 +676,7 @@ fn run_worker<R: Read + Seek>(
     mut decoder: NativeWaveDecoder<R>,
     mut planar_staging: Box<[f32]>,
     mut generation: SourceGeneration,
+    sanitation: NativeDecoderSanitationTelemetry,
 ) -> NativeSourceWorkerExit {
     let mut pending: Option<PendingBlock> = None;
     let mut end_submitted = false;
@@ -734,6 +756,7 @@ fn run_worker<R: Read + Seek>(
             Ok(report) => report,
             Err(error) => return NativeSourceWorkerExit::DecodeFailed(error),
         };
+        sanitation.store(decoded.sanitized_sample_count);
         pending = Some(PendingBlock {
             generation,
             start_frame,
@@ -983,12 +1006,12 @@ mod tests {
             length_frames: 4,
         };
         let mut native_resolver = resolver(&samples, b"exact-identity");
-        let (mut worker, mut native_consumer, report) =
+        let (controller, mut worker, mut native_consumer, report) =
             prepare_native_source(&mut native_resolver, request(region), caps()).expect("prepare");
         assert_eq!(report.decoder_read_scratch_bytes, 16);
         assert_eq!(report.worker_planar_staging_bytes, 16);
         assert_eq!(
-            worker.wait_for_event().expect("ready"),
+            controller.wait_for_event().expect("ready"),
             NativeSourceWorkerEvent::SourceReady
         );
         let native = read_one(&mut native_consumer);
@@ -1013,6 +1036,15 @@ mod tests {
         let host_pcm = read_one(&mut host_consumer);
         assert_eq!(native, host_pcm);
         assert_eq!(
+            native_consumer.telemetry().native_decoder_sanitized_samples,
+            0
+        );
+        assert_eq!(host.telemetry().native_decoder_sanitized_samples, 0);
+        assert_eq!(
+            host_consumer.telemetry().native_decoder_sanitized_samples,
+            0
+        );
+        assert_eq!(
             worker.stop_and_join().expect("stop"),
             NativeSourceWorkerExit::Stopped
         );
@@ -1023,7 +1055,7 @@ mod tests {
         let mut native_resolver = resolver(&[0.0; 8], b"exact-identity");
         let mut lifecycle_caps = caps();
         lifecycle_caps.control_queue_items = NonZeroUsize::new(3).expect("three");
-        let (mut worker, _consumer, _) = prepare_native_source(
+        let (mut controller, mut worker, _consumer, _) = prepare_native_source(
             &mut native_resolver,
             request(NativeWaveRegion {
                 start_frame: SourceFrame(0),
@@ -1032,28 +1064,28 @@ mod tests {
             lifecycle_caps,
         )
         .expect("prepare");
-        worker.wait_for_event().expect("ready");
-        worker
+        controller.wait_for_event().expect("ready");
+        controller
             .try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
                 frame: SourceFrame(4),
             })
             .expect("seek");
         assert!(matches!(
-            worker.try_seek(SourceCommand::Seek {
+            controller.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
                 frame: SourceFrame(4),
             }),
             Err(NativeSourceWorkerControlError::GenerationNotStrictlyIncreasing { .. })
         ));
         assert!(matches!(
-            worker.try_seek(SourceCommand::Seek {
+            controller.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(3),
                 frame: SourceFrame(9),
             }),
             Err(NativeSourceWorkerControlError::RegionOutOfBounds)
         ));
-        let _ = worker.try_wake();
+        let _ = controller.try_wake();
         assert_eq!(
             worker.stop_and_join().expect("stop"),
             NativeSourceWorkerExit::Stopped
@@ -1073,8 +1105,271 @@ mod tests {
             prepared.resources.source_pcm_already_charged_bytes,
             session.resource_estimate().source_ring_bytes
         );
-        let (_source_set, mut workers, _resources) = prepared.into_parts();
-        stop_workers(&mut workers);
+        let (source_set, _controllers, _resources) = prepared.into_parts();
+        drop(source_set);
+    }
+
+    #[test]
+    fn native_sanitation_reaches_after_disarm_source_set_telemetry_and_drop_retires_worker() {
+        use core::num::NonZeroUsize;
+        use miso_engine_core::realtime::RenderEnvelope;
+
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut native_resolver = resolver(
+            &[f32::INFINITY, f32::from_bits(1), -0.0, 0.25],
+            b"exact-identity",
+        );
+        let (mut controller, worker, mut consumer, report) =
+            prepare_native_source(&mut native_resolver, request(region), caps()).expect("prepare");
+        controller.wait_for_event().expect("ready");
+        let (decoded, _) = read_one(&mut consumer);
+        assert_eq!(decoded[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(decoded[1].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(controller.native_decoder_sanitized_samples(), 2);
+
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two"),
+        };
+        let node = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("voice").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let source_set = prepare_graph_source_set(
+            envelope,
+            vec![SourceGraphSource::with_native_worker(
+                consumer,
+                report.ring,
+                report
+                    .total_engine_owned_bytes
+                    .checked_sub(report.ring.total_engine_owned_bytes)
+                    .expect("native overhead"),
+                report.largest_allocation_bytes,
+                worker,
+            )],
+            vec![SourceGraphTrackMapping {
+                node,
+                source_index: 0,
+                left_channel: 0,
+                right_channel: 0,
+            }],
+        )
+        .expect("source set");
+        let mut telemetry = [0_u64; 5];
+        assert_eq!(source_set.copy_after_disarm_telemetry(&mut telemetry), 5);
+        assert_eq!(telemetry[4], 2);
+        drop(source_set);
+        assert_eq!(
+            controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
+    }
+
+    #[test]
+    fn retired_graph_plan_is_the_native_worker_join_owner() {
+        use core::num::NonZeroUsize;
+        use miso_engine_core::realtime::{
+            PlanExchangeConfig, PlanarBufferMut, PrepareRenderPlan, RenderEnvelope, RenderIo,
+            RenderTime, SwapOutcome, plan_exchange,
+        };
+        use miso_engine_effect_contract::{LatencySamples, TailSamples};
+        use miso_engine_graph::{
+            DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphPortId, GraphPortKind,
+            GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
+            PreparedGraphPlan, PreparedGraphPlanParts,
+        };
+
+        struct Noop;
+        impl GraphRuntimeProcessor for Noop {
+            fn process(
+                &mut self,
+                _block: miso_engine_graph::GraphBindingBlock<'_>,
+            ) -> Result<(), miso_engine_core::realtime::RenderError> {
+                Ok(())
+            }
+        }
+
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two"),
+        };
+        let input = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("voice").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let mut native_resolver = resolver(&[0.25; 4], b"exact-identity");
+        let (mut controller, worker, consumer, report) = prepare_native_source(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 4,
+            }),
+            caps(),
+        )
+        .expect("prepare");
+        controller.wait_for_event().expect("ready");
+        let source_set = prepare_graph_source_set(
+            envelope,
+            vec![SourceGraphSource::with_native_worker(
+                consumer,
+                report.ring,
+                report
+                    .total_engine_owned_bytes
+                    .checked_sub(report.ring.total_engine_owned_bytes)
+                    .expect("native overhead"),
+                report.largest_allocation_bytes,
+                worker,
+            )],
+            vec![SourceGraphTrackMapping {
+                node: input.clone(),
+                source_index: 0,
+                left_channel: 0,
+                right_channel: 0,
+            }],
+        )
+        .expect("source set");
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 40,
+            spec: GraphSpec {
+                nodes: vec![
+                    GraphNode {
+                        id: input.clone(),
+                        latency: LatencySamples(0),
+                        tail: TailSamples::Finite(0),
+                    },
+                    GraphNode {
+                        id: output.clone(),
+                        latency: LatencySamples(0),
+                        tail: TailSamples::Finite(0),
+                    },
+                ],
+                ports: Vec::new(),
+                edges: vec![GraphEdge {
+                    id: GraphEdgeId::RouteSource {
+                        route_id: StableGraphId::parse("voice-route").expect("ID"),
+                    },
+                    source: GraphPortId {
+                        node: input.clone(),
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: output.clone(),
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: "$.routes[0]".to_owned(),
+                }],
+            },
+            sequential_schedule: vec![input.clone(), output.clone()],
+            dependency_levels: vec![
+                DependencyLevel {
+                    level: 0,
+                    nodes: vec![input.clone()],
+                },
+                DependencyLevel {
+                    level: 1,
+                    nodes: vec![output.clone()],
+                },
+            ],
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings: vec![input, output.clone()],
+            routes: Vec::new(),
+            effects: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let old = match graph.bind_with_source_set(
+            GraphRuntimeBindings {
+                envelope,
+                nodes: vec![miso_engine_graph::GraphNodeBinding::new(
+                    output,
+                    Box::new(Noop),
+                )],
+                observers: Vec::new(),
+            },
+            source_set,
+        ) {
+            Ok(plan) => plan,
+            Err(failure) => panic!("bind failed: {}", failure.code),
+        };
+        let replacement =
+            miso_engine_core::realtime::PreparedRenderPlan::prepare(PrepareRenderPlan {
+                plan_id: 41,
+                envelope,
+                scratch: &[],
+                parameter_defaults: &[],
+                event_capacity: 0,
+            })
+            .expect("replacement");
+        let (mut publisher, mut owner, mut retirer) = plan_exchange(
+            old,
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(1).expect("one"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            },
+        )
+        .expect("exchange");
+        assert!(publisher.publish(replacement).is_ok());
+        let mut output_pcm = [0.0_f32; 8];
+        assert_eq!(
+            owner
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut output_pcm, 2, 4, 4).expect("output"),
+                    },
+                    RenderTime { absolute_sample: 0 },
+                )
+                .expect("render")
+                .swap,
+            SwapOutcome::Applied
+        );
+        let (_, retired) = retirer.try_reclaim().expect("retired plan");
+        assert_ne!(
+            controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
+        drop(retired);
+        assert_eq!(
+            controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
     }
 
     #[test]

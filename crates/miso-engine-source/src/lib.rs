@@ -10,6 +10,12 @@
 use core::{cmp, mem::size_of, num::NonZeroUsize};
 use std::fmt;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use miso_engine_core::{
     QuantumFrames, SampleRateHz,
     realtime::{
@@ -37,11 +43,11 @@ pub use native_wave::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_source::{
     NativeResolvedAsset, NativeSessionPreparedSources, NativeSessionSourcePrepareCaps,
-    NativeSessionSourcePrepareFailure, NativeSessionSourceResourceReport, NativeSourcePrepareCaps,
-    NativeSourcePrepareError, NativeSourcePrepareRequest, NativeSourceResolver,
-    NativeSourceResolverError, NativeSourceResourceReport, NativeSourceWorker,
-    NativeSourceWorkerControlError, NativeSourceWorkerEvent, NativeSourceWorkerExit,
-    prepare_native_session_sources, prepare_native_source,
+    NativeSessionSourcePrepareFailure, NativeSessionSourceResourceReport, NativeSourceController,
+    NativeSourcePrepareCaps, NativeSourcePrepareError, NativeSourcePrepareRequest,
+    NativeSourceResolver, NativeSourceResolverError, NativeSourceResourceReport,
+    NativeSourceWorker, NativeSourceWorkerControlError, NativeSourceWorkerEvent,
+    NativeSourceWorkerExit, prepare_native_session_sources, prepare_native_source,
 };
 
 /// A nonzero source-stream generation selected by an off-render controller.
@@ -181,6 +187,34 @@ pub struct PcmSourceRingConfig {
     pub frame_capacity: u64,
     /// Initially active nonzero source generation.
     pub initial_generation: SourceGeneration,
+}
+
+/// Immutable shape shared by the two endpoints of one prepared source ring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PcmSourceShape {
+    pub channel_count: u32,
+    pub quantum_frames: QuantumFrames,
+    pub frame_capacity: u64,
+    pub transfer_block_count: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(crate) struct NativeDecoderSanitationTelemetry(Arc<AtomicU64>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeDecoderSanitationTelemetry {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn store(&self, value: u64) {
+        self.0.store(value, Ordering::Release);
+    }
+
+    pub(crate) fn load(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// Exact source-owned allocation and queue accounting.
@@ -382,6 +416,8 @@ pub struct SourceProducerTelemetry {
     pub data_full_count: u64,
     pub recycle_empty_count: u64,
     pub end_of_region_submitted: bool,
+    /// Native-decoder replacements, or zero for a host-supplied producer.
+    pub native_decoder_sanitized_samples: u64,
 }
 
 /// Owner-local render telemetry copied only after the render owner is disarmed.
@@ -393,6 +429,8 @@ pub struct SourceConsumerTelemetry {
     pub underrun_frames: u64,
     pub underrun_events: u64,
     pub end_of_region: bool,
+    /// Native-decoder replacements, or zero for a host-supplied consumer.
+    pub native_decoder_sanitized_samples: u64,
 }
 
 struct TransferBlock {
@@ -511,6 +549,12 @@ impl PcmSourceRing {
             data_consumer,
             recycle_producer,
             command_consumer,
+            shape: PcmSourceShape {
+                channel_count: config.channel_count,
+                quantum_frames: config.quantum_frames,
+                frame_capacity: config.frame_capacity,
+                transfer_block_count: shape.transfer_block_count_u64,
+            },
             channel_count: config.channel_count,
             quantum_frames: config.quantum_frames.0,
             transfer_block_count: shape.transfer_block_count.get(),
@@ -524,6 +568,8 @@ impl PcmSourceRing {
             stale_generation_discard_count: 0,
             underrun_frames: 0,
             underrun_events: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_decoder_sanitation: None,
         };
         for _ in 0..shape.transfer_block_count.get() {
             let block = Box::new(TransferBlock::try_new(shape.samples_per_block)?);
@@ -537,6 +583,7 @@ impl PcmSourceRing {
                 data_producer,
                 recycle_consumer,
                 command_producer,
+                shape: consumer.shape,
                 channel_count: config.channel_count,
                 quantum_frames: config.quantum_frames.0,
                 active_generation: config.initial_generation,
@@ -544,6 +591,8 @@ impl PcmSourceRing {
                 end_of_region_submitted: false,
                 cumulative_written_frames: 0,
                 deferred_block: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                native_decoder_sanitation: None,
             },
             consumer,
             report,
@@ -602,6 +651,7 @@ pub struct PcmSourceProducer {
     data_producer: Producer<Box<TransferBlock>>,
     recycle_consumer: Consumer<Box<TransferBlock>>,
     command_producer: Producer<SourceCommand>,
+    shape: PcmSourceShape,
     channel_count: u32,
     quantum_frames: u32,
     active_generation: SourceGeneration,
@@ -609,12 +659,27 @@ pub struct PcmSourceProducer {
     end_of_region_submitted: bool,
     cumulative_written_frames: u64,
     deferred_block: Option<Box<TransferBlock>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_decoder_sanitation: Option<NativeDecoderSanitationTelemetry>,
 }
 
 /// Name for the prepared producer when it is used solely to control source seeks.
 pub type SourceController = PcmSourceProducer;
 
 impl PcmSourceProducer {
+    /// Immutable prepared ring shape shared with the consumer endpoint.
+    #[must_use]
+    pub const fn shape(&self) -> PcmSourceShape {
+        self.shape
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn attach_native_decoder_sanitation(
+        &mut self,
+        telemetry: NativeDecoderSanitationTelemetry,
+    ) {
+        self.native_decoder_sanitation = Some(telemetry);
+    }
     /// Turn this producer into an explicit-rate host PCM boundary.
     #[must_use]
     pub fn into_host_chunk_provider(self, sample_rate_hz: SampleRateHz) -> HostChunkProvider {
@@ -671,6 +736,18 @@ impl PcmSourceProducer {
             data_full_count: self.data_producer.full_count(),
             recycle_empty_count: self.recycle_consumer.empty_count(),
             end_of_region_submitted: self.end_of_region_submitted,
+            native_decoder_sanitized_samples: {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.native_decoder_sanitation
+                        .as_ref()
+                        .map_or(0, NativeDecoderSanitationTelemetry::load)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    0
+                }
+            },
         }
     }
 
@@ -908,6 +985,7 @@ pub struct PcmSourceConsumer {
     data_consumer: Consumer<Box<TransferBlock>>,
     recycle_producer: Producer<Box<TransferBlock>>,
     command_consumer: Consumer<SourceCommand>,
+    shape: PcmSourceShape,
     channel_count: u32,
     quantum_frames: u32,
     transfer_block_count: usize,
@@ -921,9 +999,24 @@ pub struct PcmSourceConsumer {
     stale_generation_discard_count: u64,
     underrun_frames: u64,
     underrun_events: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_decoder_sanitation: Option<NativeDecoderSanitationTelemetry>,
 }
 
 impl PcmSourceConsumer {
+    /// Immutable prepared ring shape shared with the producer endpoint.
+    #[must_use]
+    pub const fn shape(&self) -> PcmSourceShape {
+        self.shape
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn attach_native_decoder_sanitation(
+        &mut self,
+        telemetry: NativeDecoderSanitationTelemetry,
+    ) {
+        self.native_decoder_sanitation = Some(telemetry);
+    }
     /// Copy one exact render quantum into planar caller storage without allocation or blocking.
     pub fn read_block(
         &mut self,
@@ -1057,7 +1150,7 @@ impl PcmSourceConsumer {
 
     /// Copy render-owner telemetry after its plan/source set is disarmed.
     #[must_use]
-    pub const fn telemetry(&self) -> SourceConsumerTelemetry {
+    pub fn telemetry(&self) -> SourceConsumerTelemetry {
         SourceConsumerTelemetry {
             active_generation: self.active_generation,
             cumulative_read_frames: self.cumulative_read_frames,
@@ -1065,6 +1158,18 @@ impl PcmSourceConsumer {
             underrun_frames: self.underrun_frames,
             underrun_events: self.underrun_events,
             end_of_region: self.end_of_region,
+            native_decoder_sanitized_samples: {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.native_decoder_sanitation
+                        .as_ref()
+                        .map_or(0, NativeDecoderSanitationTelemetry::load)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    0
+                }
+            },
         }
     }
 
@@ -1254,12 +1359,51 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 
 /// One render-owned source endpoint moved into the graph fan-out wrapper.
 pub struct SourceGraphSource {
-    pub consumer: PcmSourceConsumer,
-    pub resources: SourceResourceReport,
+    consumer: PcmSourceConsumer,
+    resources: SourceResourceReport,
     /// Fixed native worker/decoder bytes not represented by the ring report.
-    pub additional_overhead_bytes: u64,
+    additional_overhead_bytes: u64,
     /// Largest fixed worker/decoder allocation, if larger than the ring allocation.
-    pub additional_largest_allocation_bytes: u64,
+    additional_largest_allocation_bytes: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    retirement_worker: Option<NativeSourceWorker>,
+}
+
+impl SourceGraphSource {
+    /// Construct one host-decoded source with no native worker retirement owner.
+    #[must_use]
+    pub fn new(
+        consumer: PcmSourceConsumer,
+        resources: SourceResourceReport,
+        additional_overhead_bytes: u64,
+        additional_largest_allocation_bytes: u64,
+    ) -> Self {
+        Self {
+            consumer,
+            resources,
+            additional_overhead_bytes,
+            additional_largest_allocation_bytes,
+            #[cfg(not(target_arch = "wasm32"))]
+            retirement_worker: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_native_worker(
+        consumer: PcmSourceConsumer,
+        resources: SourceResourceReport,
+        additional_overhead_bytes: u64,
+        additional_largest_allocation_bytes: u64,
+        retirement_worker: NativeSourceWorker,
+    ) -> Self {
+        Self {
+            consumer,
+            resources,
+            additional_overhead_bytes,
+            additional_largest_allocation_bytes,
+            retirement_worker: Some(retirement_worker),
+        }
+    }
 }
 
 /// One immutable source-channel mapping to a graph track-input node.
@@ -1284,6 +1428,17 @@ struct GraphSourceEntry {
     consumer: PcmSourceConsumer,
     channel_count: u32,
     planes: Box<[f32]>,
+    #[cfg(not(target_arch = "wasm32"))]
+    retirement_worker: Option<NativeSourceWorker>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for GraphSourceEntry {
+    fn drop(&mut self) {
+        // The containing source set is owned by a prepared plan. Its drop therefore performs
+        // native stop/join only during off-render source-set or retired-plan reclamation.
+        drop(self.retirement_worker.take());
+    }
 }
 
 struct SourceGraphSourceSetDriver {
@@ -1362,6 +1517,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 telemetry.stale_generation_discard_count,
                 telemetry.underrun_frames,
                 telemetry.underrun_events,
+                telemetry.native_decoder_sanitized_samples,
             ] {
                 let Some(slot) = output.get_mut(written) else {
                     return written;
@@ -1419,6 +1575,8 @@ pub fn prepare_graph_source_set(
             consumer: source.consumer,
             channel_count,
             planes: vec![0.0; samples].into_boxed_slice(),
+            #[cfg(not(target_arch = "wasm32"))]
+            retirement_worker: source.retirement_worker,
         });
     }
     for mapping in &mappings {
@@ -1661,6 +1819,9 @@ mod tests {
     #[test]
     fn prepared_contiguous_native_submission_matches_planar_ring_shape() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
+        assert_eq!(producer.shape(), consumer.shape());
+        assert_eq!(producer.shape().frame_capacity, 4);
+        assert_eq!(consumer.shape().transfer_block_count, 1);
         let mut provider = producer.into_host_chunk_provider(RATE);
         let planar_quantum = [1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
         provider
@@ -1837,12 +1998,7 @@ mod tests {
             .expect("source PCM");
             prepare_graph_source_set(
                 envelope,
-                vec![SourceGraphSource {
-                    consumer,
-                    resources,
-                    additional_overhead_bytes: 0,
-                    additional_largest_allocation_bytes: 0,
-                }],
+                vec![SourceGraphSource::new(consumer, resources, 0, 0)],
                 vec![
                     SourceGraphTrackMapping {
                         node: inputs[0].clone(),
