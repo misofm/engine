@@ -1,12 +1,11 @@
 # 030 Benchmark runner operational hardening and accepted-artifact promotion
 
-## Sol briefing status — 2026-08-21
+## Status — 2026-08-21
 
-**READY for Terra attempt 1.** The authoritative tracked brief is
+**FINAL PASS.** The authoritative tracked brief is
 `BRIEFS/030-benchmark-runner-operational-hardening-and-accepted-artifact-promotion.md`. This small
-tooling closure permits exactly two total attempts: one Terra implementation/review and, only if
-needed, one bounded Sol correction/review. A second failure stops and preserves all artifacts.
-Issue 030 authorizes **zero** graph benchmark workload or timed invocations in either attempt.
+tooling closure used its Terra implementation/review and one bounded Sol correction/review. Issue
+030 performed **zero** graph benchmark workload or timed invocations.
 
 ## Outcome
 
@@ -177,3 +176,30 @@ bash scripts/promote-issue006-graph-benchmark.sh
 
 Do not invoke the graph runner, Cargo benchmark package or binary. Overall Issue-030 PASS remains
 pending byte-identical accepted-output verification and final evidence after that promotion.
+
+## Final carry-forward promotion and Sol verdict — 2026-08-21
+
+Root invoked the sole authorized non-timed promotion command exactly once on clean, pushed candidate
+`97b245bce47ed46e20a27388a935613a8b89f98c`:
+
+```sh
+bash scripts/promote-issue006-graph-benchmark.sh
+```
+
+The command succeeded without invoking Cargo or a benchmark workload. Read-only post-promotion
+verification proved that both
+`target/issue6/graph-compiler-benchmark.raw.jsonl` and
+`target/issue6/graph-compiler-benchmark.jsonl` are regular non-symlink files of exactly 10,364
+bytes and six LF-terminated records, with SHA-256
+`c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5`. `cmp` reports byte
+identity, and the frozen aggregate validator accepts both files. The raw source remains unchanged.
+The ignored accepted artifact leaves the Git worktree clean.
+
+Final counters are exact: `issue_030_promotion_invocations=1`,
+`issue_030_workload_invocations=0`, and `issue_030_timed_invocations=0`. Issue 006's historical
+workload invocation count remains one, and its failed exactly-once runner attempt remains recorded
+without relabeling.
+
+**FINAL SOL VERDICT: PASS.** Issue 030 closes its shell-runner hardening and exact carry-forward
+artifact-promotion contract. This is not a new measurement, a performance threshold, or authority
+to rerun the graph benchmark.
