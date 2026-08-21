@@ -38,6 +38,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Dual-mono builtins and metering
+- Issue-007 builtin filter and matrix human listening qualification
 - AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
 - Native deterministic multicore scheduler
 - JIT PCM streaming and host-supplied source rings

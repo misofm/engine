@@ -31,6 +31,11 @@ places 007 -> 032 -> 008/010 and their downstream effects, hosts, and release qu
 Historical “required/all-eight” evidence is preserved as period evidence and does not override
 issue 032.
 
+Issue 033 owns the real human listening execution preregistered by issue 007. Issue 007 may close
+only as machine-qualified and must name human listening as pending; issue 033 remains a hard
+dependency of issue 026 and launch. This ordering lets listening use one sealed candidate artifact
+without allowing synthetic trials, an audible-quality claim, or a release bypass.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

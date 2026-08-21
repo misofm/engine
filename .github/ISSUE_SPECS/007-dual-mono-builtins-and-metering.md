@@ -470,3 +470,67 @@ PASS: graph compiler unit suite (10 tests, including forged-artifact rejection),
 warning-denied Clippy, and zero-launch benchmark preflight. Human listening is still only
 preregistered, so the issue cannot honestly be declared complete; benchmark invocation count
 remains **0**.
+
+## Final Sol adversarial review / correction attempt 2 (2026-08-21)
+
+**ATTEMPT 2: FAIL; FINAL ATTEMPT REBRIEF REQUIRED.** No timed benchmark was invoked; the
+exactly-once benchmark invocation count remains **0**.
+
+The bounded DSP correction retained in checkpoint `0627618` is sound and its focused gates pass.
+Production preparation now rejects a cast TPT state-space response outside the frozen cutoff
+tolerance. Analytic conformance uses the complete snapped probes plus exact cutoff and 0.49-Fs,
+checks explicit DC/Nyquist limits and a dense monotonic grid, and impulse conformance records tail
+energy and bit-identical block partitions. Sustained section and cascade measurements now solve
+the full three-column DC/sine/cosine normal equations rather than relying on the coherent-basis
+shortcut. Formatting, all 15 builtin tests, and warning-denied builtin all-target Clippy pass.
+
+The remaining work is not a bounded correction. Adversarial inspection found five coupled false-
+readiness surfaces:
+
+1. `miso-engine-builtins-bench` times only a dummy integer accumulator. It reports only 48 kHz,
+   uses workloads different from the frozen 48/96-kHz Cartesian matrix (including a 65,537-track
+   placeholder instead of 256-track preparation), and omits the required percentile, fixture,
+   output-identity, resource, forbidden-operation, CPU/OS/governor, toolchain, target-feature and
+   build-profile fields. Its validators faithfully accept that wrong schema.
+2. `miso-engine-builtins-audit` exercises a direct `BuiltinChain` and seven standalone meters. It
+   never compiles, binds, renders, swaps, defers, or retires a graph-backed prepared plan, and its
+   steady loop does not cover the complete preregistered ramp/reset/sanitization paths.
+3. `fixtures/builtins/v1` contains a matrix declaration and a few representative case rows, not
+   the required checked-in expected PCM bits, independent f64 response table, exact meter
+   snapshots, diagnostic/resource results, and graph-tap outputs for every required tuple.
+4. builtin resource estimates are logical approximations: they double-count transient chain
+   storage, omit retained string/session/queue-ring and allocation payloads, use saturating or
+   unchecked conversions on some paths, and allocate prepared vectors after a cap diagnostic.
+   The one-byte-below test therefore proves consistency with the estimate, not containment of all
+   retained allocations or the actual largest requested payload.
+5. `PreparedBuiltinsSession` exposes mutable public vectors. Graph validation checks mostly node/
+   handle sets derived from those same mutable values; it does not seal exact tail values,
+   consumer requests, concrete processor provenance, or an immutable canonical session identity.
+   Matching forged consumer/observer or tail values can therefore pass the advertised set proof.
+
+Related missing evidence includes end-to-end rendered values at all seven taps, complete matrix
+corner/retarget fixtures, the full invalid preparation/cap mutation matrix, and a graph observer
+path that cannot silently discard a supposedly impossible meter error. The current target and
+workspace commands may remain useful evidence, but they do not close the five defects above.
+
+Two preregistration files truthfully say that no human trial has run. Real human listening cannot
+be fabricated by an implementation agent and is most meaningful only against the sealed candidate
+artifact produced after this issue's machine gates and sole benchmark. It is therefore moved,
+without removal from launch accountability, to the stateless issue **Issue-007 builtin filter and
+matrix human listening qualification**. Issue 007 may become *machine-qualified only*; it cannot
+make an audible-quality or launch-readiness claim. The follow-up is an exact dependency of end-to-
+end release qualification, and an adverse or incomplete result blocks launch and requires a new
+corrective DSP issue.
+
+The authoritative final-attempt brief is `.github/ISSUE_SPECS/BRIEFS/007-final-sol-brief.md`. It freezes the real
+benchmark workloads/schema, graph-backed render/swap audit, complete expected-output fixture
+formats, exact resource metric and sealed artifact ownership, and the listening hand-off. Attempt
+3 is the last implementation/review attempt. Any failure stops issue 007; do not weaken a gate or
+run the benchmark again.
+
+## Final attempt-3 workflow reset (2026-08-21)
+
+**READY FOR FINAL ATTEMPT 3.** Prior briefs remain historical evidence and are superseded by
+`.github/ISSUE_SPECS/BRIEFS/007-final-sol-brief.md`. The accepted incremental TPT operation graph and checkpoint
+`0627618` remain normative. Benchmark invocation count is **0**. Only the exact final brief may
+authorize the sole two-round benchmark after every machine-verifiable nonbenchmark gate passes.
