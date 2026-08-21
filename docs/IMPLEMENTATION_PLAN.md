@@ -7,17 +7,18 @@ This is the concise index for the stateless implementation payloads in [`.github
 ## Delivery sequence
 
 1. **Foundation and proof:** 001–005 establish the workspace, research corpus, realtime memory model, TOML compiler, and control protocol.
-2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming. Issue 006 is accepted under its recorded post-stop Sol rescope; issue 007 may proceed and issue 008 follows issue 007.
+2. **Render engine:** 006–010 compile the graph, builtins, SIMD banks, deterministic native waves, and bounded source streaming. Issue 006 is accepted under its recorded post-stop Sol rescope. After issue 007, issue 032 centralizes the four-rate launch policy and must complete before issues 008 and 010; issue 009 follows issue 008.
 3. **Effects:** 011 defines only the launch native runtime contract; 012–021 implement the launch processors using it. Graph issue 006 and launch effects do not wait for external package or persisted-state formats.
 4. **Deployment:** 022–025 provide the C runner, mobile/native examples, browser AudioWorklet, and optional remote sidecar.
 5. **Qualification and extensibility:** 026 qualifies a release; 029 freezes canonical descriptor/package/CID/state interchange; 027 layers the third-party Wasm ABI on that identity contract; 028 is explicitly post-launch execution. Dependency order, not numeric order, controls 029 -> 027 -> 028.
 6. **Nonblocking tooling follow-up:** 030 hardens the graph benchmark shell wrapper and promotes the exact preserved validator-valid issue-006 raw artifact. It does not gate 007–010, does not change graph acceptance, and requires no further issue-006 benchmark run.
+7. **Rate-policy correction:** 032 makes 44.1/48/88.2/96 kHz the exact launch session/render tier and preserves 176.4/192/352.8/384 kHz only as an informational compatibility corpus. Dependency order, not numeric order, controls 007 -> 032 -> 008/010 and downstream effects, hosts, and release qualification.
 
 ## Non-negotiable release shape
 
 All rendering is planar `f32`.  The render thread exclusively owns a preallocated prepared plan whose topology/capacities are immutable and whose DSP state is mutably processed without allocation; displaced plans are reclaimed off-thread.  No compiled track ceiling exists.  Tracks are dual-mono and run `input -> polarity/trim/HPF/LPF -> SIMD1 -> dynamic -> SIMD2 -> fader/mute -> matrix/pan -> routes`.  Native effects are in launch scope.  Third-party Wasm is **not** launch scope and belongs only to the dynamic rack.
 
-The required rate set is 44.1/48/88.2/96/176.4/192/352.8/384 kHz.  Sessions are strict versioned TOML; output is PCM.  Any source, host, or control work that can allocate, block, decode, parse, log, or use I/O is outside the render path.
+The launch-supported session/render rate set is exactly 44.1/48/88.2/96 kHz. The 176.4/192/352.8/384 kHz corpus is retained only for extended compatibility research and is not launch support. Sessions are strict versioned TOML; output is PCM. Any source, host, or control work that can allocate, block, decode, parse, log, or use I/O is outside the render path.
 
 ## Review cadence
 
@@ -36,3 +37,5 @@ The checked-in control-plane documentation for issue 005 is indexed in [the docu
 | 026–028 | release proof, third-party ABI kit, then post-launch sandbox |
 | 029 | canonical descriptor/package/CID/state interchange prerequisite for 027 and future repository work |
 | 030 | nonblocking graph benchmark runner hardening and accepted-artifact promotion |
+| 031 | optional post-foundation higher-precision builtin-filter investigation |
+| 032 | four-rate launch authority and extended-rate compatibility deferral; ordered after 007 and before 008/010 |

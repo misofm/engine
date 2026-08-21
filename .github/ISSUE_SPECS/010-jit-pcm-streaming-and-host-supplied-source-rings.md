@@ -31,6 +31,7 @@ Full-stem preload, compressed-format catalog, render-thread filesystem/network/d
 - Real-time memory, buffers, queues, and plan lifetime
 - Versioned TOML schema and transactional session compiler
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
+- Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
 

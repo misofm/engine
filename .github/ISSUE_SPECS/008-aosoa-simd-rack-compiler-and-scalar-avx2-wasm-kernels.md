@@ -32,6 +32,7 @@ Placing arbitrary third-party Wasm in a SIMD bank, fixed global eight-track assu
 - Real-time memory, buffers, queues, and plan lifetime
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Dual-mono builtins and metering
+- Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
 

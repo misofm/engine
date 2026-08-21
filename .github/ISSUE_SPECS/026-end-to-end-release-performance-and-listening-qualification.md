@@ -52,6 +52,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Transient shaper
 - Dual-mono/stereo delay
 - Optional binary WebSocket sidecar
+- Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
 

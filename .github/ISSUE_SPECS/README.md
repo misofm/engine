@@ -24,6 +24,13 @@ functional evidence and the already measured validator-valid raw descriptive ben
 owns only benchmark-wrapper operational hardening and promotion of those exact bytes. It is not a
 dependency of issues 007–010 and does not authorize another issue-006 benchmark run.
 
+Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
+launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;
+176,400/192,000/352,800/384,000 Hz remain extended compatibility evidence only. Dependency order
+places 007 -> 032 -> 008/010 and their downstream effects, hosts, and release qualification.
+Historical “required/all-eight” evidence is preserved as period evidence and does not override
+issue 032.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
