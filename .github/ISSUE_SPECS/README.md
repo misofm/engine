@@ -164,6 +164,17 @@ one-warmup/two-round descriptive benchmark and listening handoff. Both allow one
 one Sol correction and start with zero timed invocations; Issue 054 gates only release
 qualification Issue 026.
 
+Issue 021, **Launch integer-time dual-mono and ping-pong delay**, owns one fixed Normal-quality
+scalar dynamic-rack product: nearest-sample 1–2000-ms taps, bounded 128-update dual-tap changes,
+per-lane signed feedback/damping/mix, an explicit shared dual-mono-to-ping-pong feedback matrix,
+fixed two-second prepared histories, zero latency, Infinite tail and representative registry/graph
+closure. Issue 055, **Launch delay qualification, realtime audit, and benchmark**, follows 021 and
+alone owns expanded corpus/long stress, realtime audit, scalar target/instruction evidence, the
+sole eventual one-warmup/two-round descriptive benchmark and listening handoff. Both allow one
+Terra attempt plus one Sol correction and start with zero timed invocations; Issue 055 gates only
+release qualification Issue 026. Any future gathered W4/W8 delay bank is a separate stateless
+product/optimization issue, not Issue 055 scope.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

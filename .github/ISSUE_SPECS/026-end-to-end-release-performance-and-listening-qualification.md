@@ -60,7 +60,8 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Launch saturator/clipper qualification, realtime audit, and benchmark
 - Launch dual-envelope transient shaper
 - Launch transient-shaper qualification, realtime audit, and benchmark
-- Dual-mono/stereo delay
+- Launch integer-time dual-mono and ping-pong delay
+- Launch delay qualification, realtime audit, and benchmark
 - Optional binary WebSocket sidecar
 
 ## Hazards/decisions
