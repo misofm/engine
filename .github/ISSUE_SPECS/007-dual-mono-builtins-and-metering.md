@@ -63,3 +63,24 @@ contract, issue-011 effect contract, or issue-008 SIMD ownership. “Loudness-re
 bounded to timestamped per-lane energy observations and loss accounting; BS.1770 K-weighting,
 gating, LUFS/LKFS, true peak, and certification are not issue-007 claims. No implementation or
 benchmark was performed during briefing, and no V1/legacy source was inspected.
+
+## Terra attempt 1 evidence (2026-08-21; partial)
+
+Implementation added scalar dual-mono input and output builtin sections, explicit matrix/pan
+smoothing, bounded meter accumulators, and prepared graph observer bindings without changing the
+V1 TOML schema, graph topology, effect contract, or SIMD ownership. The graph compiler accepts a
+complete prepared-builtin artifact transactionally, verifies canonical session/rate/quantum
+identity, binds exactly the three internal stages, returns meter consumers, and propagates the
+prepared filter tail to the post-input graph node.
+
+PASS so far: focused unit/integration tests for gain/matrix/meter behavior, all seven prepared
+tap requests, transactional invalid requests, internal binding ownership, tail propagation, and
+the existing 65,537-track graph resource test; format, diff check, and warning-denied focused
+Clippy also pass. Release scalar-builtins checks pass for `aarch64-linux-android`,
+`aarch64-apple-ios`, and `wasm32-unknown-unknown` both with `-simd128` and `+simd128`. The
+exactly-once benchmark invocation count is **0**.
+
+NOT YET SATISFIED: fixture-manifest corpus and independent f64 sweep oracle, full rate/quantum
+matrix/mutation/allocation audits, issue-specific policy/mutation tooling, full workspace target
+checks, real blinded listening records, and the authorized single benchmark. These remain gates;
+this evidence does not claim issue completion.

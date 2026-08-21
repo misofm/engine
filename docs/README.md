@@ -12,6 +12,7 @@ The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) re
 | Corpus and recorded Issue 005 evidence | [Control protocol conformance](CONTROL_PROTOCOL_CONFORMANCE.md) |
 | Session TOML model edited by the protocol | [Session schema v1](SESSION_SCHEMA_V1.md) |
 | Render lifetime and SPSC foundation | [Realtime memory](REALTIME_MEMORY.md) |
+| Fixed scalar track chain and transparent meters | [Builtins and metering V1](BUILTINS_AND_METERING_V1.md) |
 | Native effect factory and process boundary | [Effect contract V1](EFFECT_CONTRACT_V1.md) |
 | Provisional issue-029 descriptor representation | [Effect descriptor wire V1](EFFECT_DESCRIPTOR_WIRE_V1.md) |
 | Provisional issue-029 package identity and artifact hashes | [Effect package V1](EFFECT_PACKAGE_V1.md) |

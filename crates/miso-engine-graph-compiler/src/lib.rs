@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use miso_engine_builtins::BuiltinTail;
 use miso_engine_builtins_compiler::{MeterConsumer, PreparedBuiltinsSession};
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
@@ -92,11 +93,27 @@ impl GraphCompiler {
                 )]),
             });
         }
-        let compiled = match Self::compile(GraphCompileRequest {
-            plan_id,
-            effects,
-            caps,
-        }) {
+        let builtin_tails: BTreeMap<_, _> = builtins
+            .tails
+            .iter()
+            .map(|(track_id, tail)| {
+                (
+                    track_id.clone(),
+                    match tail {
+                        BuiltinTail::FiniteZero => TailSamples::Finite(0),
+                        BuiltinTail::Infinite => TailSamples::Infinite,
+                    },
+                )
+            })
+            .collect();
+        let compiled = match Self::compile_with_builtin_tails(
+            GraphCompileRequest {
+                plan_id,
+                effects,
+                caps,
+            },
+            &builtin_tails,
+        ) {
             Ok(value) => value,
             Err(failure) => {
                 return Err(GraphBuiltinsCompileFailure {
@@ -125,6 +142,13 @@ impl GraphCompiler {
     #[allow(clippy::result_large_err)]
     pub fn compile(
         request: GraphCompileRequest,
+    ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
+        Self::compile_with_builtin_tails(request, &BTreeMap::new())
+    }
+    #[allow(clippy::result_large_err)]
+    fn compile_with_builtin_tails(
+        request: GraphCompileRequest,
+        builtin_tails: &BTreeMap<String, TailSamples>,
     ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
         let GraphCompileRequest {
             plan_id,
@@ -203,13 +227,21 @@ impl GraphCompiler {
         for track in &model.tracks {
             for stage in stages() {
                 let id = track_node(track.id.as_str(), stage);
+                let tail = if stage == TrackStage::PostInputBuiltins {
+                    builtin_tails
+                        .get(track.id.as_str())
+                        .copied()
+                        .unwrap_or(TailSamples::Finite(0))
+                } else {
+                    TailSamples::Finite(0)
+                };
                 add_node(
                     &mut nodes,
                     &mut node_latency,
                     &mut node_tail,
                     id,
                     LatencySamples(0),
-                    TailSamples::Finite(0),
+                    tail,
                 );
             }
             let mut preceding = track_node(track.id.as_str(), TrackStage::Input);
@@ -1789,6 +1821,14 @@ mod tests {
         })
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.graph.required_bindings.len(), 2);
+        let tail = artifact
+            .report
+            .nodes
+            .iter()
+            .find(|node| node.id == track_node("vocal", TrackStage::PostInputBuiltins))
+            .expect("input builtins node")
+            .tail;
+        assert_eq!(tail, TailSamples::Infinite);
     }
 
     #[test]
