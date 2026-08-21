@@ -1206,7 +1206,9 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 mod tests {
     use super::*;
     use miso_engine_core::KernelBackendV1;
-    use miso_engine_dsp_reference::{ReferenceSoftClip, reference_halfband_63};
+    use miso_engine_dsp_reference::{
+        ReferenceSoftClip, reference_cubic_soft_clip, reference_halfband_63,
+    };
     use miso_engine_effect_contract::{
         BankWidth, EffectBankProcessBlock, EffectProcessBlock, LinkMode, PrepareEffectBankRequest,
         PrepareEffectLimits, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1,
@@ -1289,6 +1291,30 @@ mod tests {
         values.iter().map(|value| value.to_bits()).collect()
     }
 
+    fn rectangular_nonfundamental_ratio_db(samples: &[f64], fundamental_bin: usize) -> f64 {
+        assert!(fundamental_bin != 0 && fundamental_bin < samples.len() / 2);
+        let length = samples.len() as f64;
+        let mut time_energy = 0.0_f64;
+        let mut dc = 0.0_f64;
+        let mut fundamental_re = 0.0_f64;
+        let mut fundamental_im = 0.0_f64;
+        for (index, sample) in samples.iter().copied().enumerate() {
+            let phase = -core::f64::consts::TAU * fundamental_bin as f64 * index as f64 / length;
+            time_energy += sample * sample;
+            dc += sample;
+            fundamental_re += sample * phase.cos();
+            fundamental_im += sample * phase.sin();
+        }
+        let total_dft_energy = length * time_energy;
+        let dc_energy = dc * dc;
+        let fundamental_energy =
+            2.0 * (fundamental_re * fundamental_re + fundamental_im * fundamental_im);
+        let nonfundamental_energy = (total_dft_energy - dc_energy - fundamental_energy).max(0.0);
+        assert!(fundamental_energy.is_finite() && fundamental_energy > 0.0);
+        assert!(nonfundamental_energy.is_finite() && nonfundamental_energy > 0.0);
+        10.0 * (nonfundamental_energy / fundamental_energy).log10()
+    }
+
     fn bank_request<'a>(
         width: BankWidth,
         backend: KernelBackendV1,
@@ -1362,6 +1388,66 @@ mod tests {
                 "actual={actual:?}, expected={expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn frozen_alias_claim_improves_over_independent_naive_cubic() {
+        const LENGTH: usize = 16_384;
+        const FUNDAMENTAL_BIN: usize = 3_001;
+        const WARM_PERIODS: usize = 3;
+        const BLOCK: usize = 128;
+
+        let mut values = initial_values();
+        values[0].value = 18.0;
+        values[1].value = 18.0;
+        let mut effect = prepare(&values);
+        let mut fixed_2x = Vec::with_capacity(LENGTH);
+        for block_start in (0..((WARM_PERIODS + 1) * LENGTH)).step_by(BLOCK) {
+            let mut left = [0.0_f32; BLOCK];
+            for (offset, sample) in left.iter_mut().enumerate() {
+                let index = (block_start + offset) % LENGTH;
+                let phase =
+                    core::f64::consts::TAU * FUNDAMENTAL_BIN as f64 * index as f64 / LENGTH as f64;
+                *sample = phase.sin() as f32;
+            }
+            let mut right = left;
+            let report = process(
+                effect.as_mut(),
+                &mut left,
+                &mut right,
+                block_start as u64,
+                &[],
+            );
+            assert_eq!(report, ProcessReport::default());
+            assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
+            if block_start >= WARM_PERIODS * LENGTH {
+                fixed_2x.extend(left.into_iter().map(f64::from));
+            }
+        }
+        assert_eq!(fixed_2x.len(), LENGTH);
+
+        let drive = 10.0_f64.powf(18.0 * 0.05);
+        let naive_1x = (0..LENGTH)
+            .map(|index| {
+                let phase =
+                    core::f64::consts::TAU * FUNDAMENTAL_BIN as f64 * index as f64 / LENGTH as f64;
+                reference_cubic_soft_clip(drive * phase.sin())
+            })
+            .collect::<Vec<_>>();
+        let fixed_2x_ratio_db = rectangular_nonfundamental_ratio_db(&fixed_2x, FUNDAMENTAL_BIN);
+        let naive_1x_ratio_db = rectangular_nonfundamental_ratio_db(&naive_1x, FUNDAMENTAL_BIN);
+        let improvement_db = naive_1x_ratio_db - fixed_2x_ratio_db;
+        println!(
+            "issue_053_alias fixed_2x_nonfundamental_ratio_db={fixed_2x_ratio_db:.12} \
+             naive_1x_nonfundamental_ratio_db={naive_1x_ratio_db:.12} \
+             improvement_db={improvement_db:.12}"
+        );
+        assert!(fixed_2x_ratio_db.is_finite());
+        assert!(naive_1x_ratio_db.is_finite());
+        assert!(
+            improvement_db >= 2.0,
+            "fixed-2x improvement {improvement_db:.12} dB is below 2.0 dB"
+        );
     }
 
     #[test]

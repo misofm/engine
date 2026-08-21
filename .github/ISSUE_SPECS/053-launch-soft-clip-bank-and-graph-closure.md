@@ -173,3 +173,25 @@ count; strict Terra/final Sol verdict; and `timed_benchmark_invocations=0`.
 - This is the first bounded Sol correction checkpoint, not overall Issue-053 PASS. The frozen alias
   row, registry/effect-compiler, graph/PDC/cap and final workspace/policy gates were not started.
   Issue-052 qualification remains untouched; `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 — frozen representative alias checkpoint (partial)
+
+- Base candidate `6b5f5d4`; production DSP, coefficient table, domains, state, resources and
+  tolerances are unchanged. Added only the frozen `N=16,384`, bin-3001, unit-sine, `+18 dB` drive,
+  `0 dB` output, mix-one row after three complete warm periods.
+- The production scalar output is measured with a rectangular DFT energy identity: direct DC and
+  fundamental-pair evaluation plus Parseval includes every other positive and negative bin as
+  nonfundamental energy. The baseline calls the independent reference crate's f64 memoryless cubic
+  at naive 1x; it imports no production table or implementation.
+- Deterministic serialized result:
+  `fixed_2x_nonfundamental_ratio_db=-17.090501510225`,
+  `naive_1x_nonfundamental_ratio_db=-7.291819669285`,
+  `improvement_db=9.798681840940`. The frozen `>=2.0 dB` gate therefore passes without a retry or
+  adjustment.
+- Focused PASS: exact test with `--nocapture`; `cargo test --locked -p miso-engine-soft-clip --lib`
+  (8 passed); `cargo test --locked -p miso-engine-dsp-reference` (9 passed, 1 unrelated ignored);
+  `cargo clippy --locked -p miso-engine-soft-clip -p miso-engine-dsp-reference --all-targets -- -D
+  warnings`; and `cargo fmt --all -- --check`.
+- This remains a partial Issue-053 checkpoint, not overall PASS. Registry/effect-compiler,
+  ten-track graph/PDC/cap and final workspace/policy closure were not started. No Issue-052,
+  benchmark, timing or listening work ran; `timed_benchmark_invocations=0`.

@@ -42,6 +42,12 @@ pub fn reference_halfband_63() -> [f64; 63] {
     table
 }
 
+/// Evaluate the independent memoryless cubic used by the naive one-times alias baseline.
+#[must_use]
+pub fn reference_cubic_soft_clip(value: f64) -> f64 {
+    cubic(value)
+}
+
 /// Offline, independent `f64` realization of the frozen scalar lane.
 #[derive(Clone, Debug)]
 pub struct ReferenceSoftClip {
