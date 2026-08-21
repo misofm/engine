@@ -224,3 +224,24 @@ Focused candidate evidence (no benchmark or timed command):
 Expanded corpus, 10,000/randomized and million-sample matrices, realtime audit, target/object
 qualification, benchmark, and completed listening were not run or claimed; transfer them to the
 planned stateless Issue 046 qualification successor. `timed_benchmark_invocations = 0`.
+
+## Final Sol product-closure evidence
+
+**PASS.** Candidate `bd33226` passed formatting; locked workspace all-target/all-feature check;
+locked workspace all-feature tests; warning-denied workspace all-target/all-feature Clippy;
+warning-denied workspace rustdoc; workspace/realtime policies and mutations; graph policy; rack
+policy and mutations; clean diff; and static no-artifact scans. No functional audit main, target
+matrix, object inspection, benchmark/preflight, or timing command ran.
+
+The sole closure blocker was a stale effect-runtime policy allowlist. The bounded correction makes
+the exact effect-compiler dependency set compressor, core, effect-contract, parametric EQ, and
+session. Its mutation suite first proves the unmodified fixture passes, then rejects an arbitrary
+extra dependency and the removal or substitution of either approved native effect. Final focused
+evidence:
+
+- shell syntax, effect-runtime baseline and mutation policy, and `git diff --check` — PASS;
+- `cargo check --locked -p miso-engine-effect-compiler` — PASS; and
+- `cargo test --locked -p miso-engine-effect-compiler --test native_session` — PASS, 4 tests.
+
+This closes the launch-product contract only. The explicitly deferred qualification matrix remains
+owned by planned stateless Issue 046. `timed_benchmark_invocations = 0`.
