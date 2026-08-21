@@ -7,13 +7,18 @@
 
 #![allow(missing_docs)]
 
-use core::{cmp, mem::size_of, num::NonZeroUsize};
+use core::{
+    alloc::Layout,
+    cmp,
+    mem::{align_of, size_of},
+    num::NonZeroUsize,
+};
 use std::fmt;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use miso_engine_core::{
@@ -200,20 +205,37 @@ pub struct PcmSourceShape {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
-pub(crate) struct NativeDecoderSanitationTelemetry(Arc<AtomicU64>);
+pub(crate) struct NativeDecoderSanitationTelemetry(Arc<NativeWorkerSharedTelemetry>);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeWorkerSharedTelemetry {
+    sanitation: AtomicU64,
+    stop_requested: AtomicBool,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeDecoderSanitationTelemetry {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(0)))
+        Self(Arc::new(NativeWorkerSharedTelemetry {
+            sanitation: AtomicU64::new(0),
+            stop_requested: AtomicBool::new(false),
+        }))
     }
 
     pub(crate) fn store(&self, value: u64) {
-        self.0.store(value, Ordering::Release);
+        self.0.sanitation.store(value, Ordering::Release);
     }
 
     pub(crate) fn load(&self) -> u64 {
-        self.0.load(Ordering::Acquire)
+        self.0.sanitation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.0.stop_requested.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.0.stop_requested.load(Ordering::Acquire)
     }
 }
 
@@ -244,6 +266,55 @@ pub struct SourceResourceReport {
     pub total_engine_owned_bytes: u64,
     /// Largest exact engine-owned allocation request.
     pub largest_allocation_bytes: u64,
+}
+
+/// One exact retained allocation class, excluding allocator headers and page rounding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRetainedAllocation {
+    pub item_count: u64,
+    pub bytes: u64,
+    pub largest_allocation_bytes: u64,
+    pub alignment_bytes: u64,
+}
+
+/// Enumerated source-set allocations retained after successful graph binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSetRetainedResourceReport {
+    pub source_entries: SourceRetainedAllocation,
+    pub mappings: SourceRetainedAllocation,
+    pub claims: SourceRetainedAllocation,
+    pub driver: SourceRetainedAllocation,
+    pub source_planes: SourceRetainedAllocation,
+    pub owned_stable_id_payloads: SourceRetainedAllocation,
+}
+
+impl SourceSetRetainedResourceReport {
+    fn overhead_bytes(self) -> Option<u64> {
+        [
+            self.source_entries.bytes,
+            self.mappings.bytes,
+            self.claims.bytes,
+            self.driver.bytes,
+            self.source_planes.bytes,
+            self.owned_stable_id_payloads.bytes,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+    }
+
+    fn largest_allocation_bytes(self) -> u64 {
+        [
+            self.source_entries.largest_allocation_bytes,
+            self.mappings.largest_allocation_bytes,
+            self.claims.largest_allocation_bytes,
+            self.driver.largest_allocation_bytes,
+            self.source_planes.largest_allocation_bytes,
+            self.owned_stable_id_payloads.largest_allocation_bytes,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
 }
 
 /// Preparation failure that occurs before a usable producer/consumer split exists.
@@ -1447,6 +1518,85 @@ struct SourceGraphSourceSetDriver {
     quantum_frames: u32,
 }
 
+fn allocation_class<T>(
+    count: usize,
+) -> Result<SourceRetainedAllocation, SourceGraphSourceSetError> {
+    let layout =
+        Layout::array::<T>(count).map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let count = u64::try_from(count).map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let bytes =
+        u64::try_from(layout.size()).map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    Ok(SourceRetainedAllocation {
+        item_count: count,
+        bytes,
+        largest_allocation_bytes: bytes,
+        alignment_bytes: u64::try_from(layout.align()).expect("alignment fits u64"),
+    })
+}
+
+fn source_set_retained_resources(
+    sources: &[SourceGraphSource],
+    mappings: &[SourceGraphTrackMapping],
+    quantum: usize,
+) -> Result<SourceSetRetainedResourceReport, SourceGraphSourceSetError> {
+    let source_entries = allocation_class::<GraphSourceEntry>(sources.len())?;
+    let mappings_report = allocation_class::<SourceGraphTrackMapping>(mappings.len())?;
+    let claims = allocation_class::<GraphSourceInputClaim>(mappings.len())?;
+    let driver = allocation_class::<SourceGraphSourceSetDriver>(1)?;
+    let mut planes = SourceRetainedAllocation {
+        item_count: 0,
+        bytes: 0,
+        largest_allocation_bytes: 0,
+        alignment_bytes: u64::try_from(align_of::<f32>()).expect("alignment fits u64"),
+    };
+    for source in sources {
+        let samples = usize::try_from(source.consumer.channel_count())
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
+            .checked_mul(quantum)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        let class = allocation_class::<f32>(samples)?;
+        planes.item_count = planes.item_count.saturating_add(1);
+        planes.bytes = planes
+            .bytes
+            .checked_add(class.bytes)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        planes.largest_allocation_bytes = planes
+            .largest_allocation_bytes
+            .max(class.largest_allocation_bytes);
+    }
+    let mut ids = SourceRetainedAllocation {
+        item_count: 0,
+        bytes: 0,
+        largest_allocation_bytes: 0,
+        alignment_bytes: 1,
+    };
+    for mapping in mappings {
+        let GraphNodeId::TrackStage { track_id, .. } = &mapping.node else {
+            return Err(SourceGraphSourceSetError::SourceIndex);
+        };
+        let bytes = u64::try_from(track_id.as_str().len())
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+        ids.item_count = ids.item_count.saturating_add(2);
+        ids.bytes = ids
+            .bytes
+            .checked_add(
+                bytes
+                    .checked_mul(2)
+                    .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?,
+            )
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        ids.largest_allocation_bytes = ids.largest_allocation_bytes.max(bytes);
+    }
+    Ok(SourceSetRetainedResourceReport {
+        source_entries,
+        mappings: mappings_report,
+        claims,
+        driver,
+        source_planes: planes,
+        owned_stable_id_payloads: ids,
+    })
+}
+
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     fn claim_count(&self) -> usize {
         self.mappings.len()
@@ -1545,6 +1695,7 @@ pub fn prepare_graph_source_set(
     }
     let quantum = usize::try_from(envelope.quantum.0)
         .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let retained = source_set_retained_resources(&sources, &mappings, quantum)?;
     let mut pcm_payload = 0_u64;
     let mut overhead = 0_u64;
     let mut largest = 0_u64;
@@ -1555,22 +1706,16 @@ pub fn prepare_graph_source_set(
             .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
             .checked_mul(quantum)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        let plane_bytes = u64::try_from(samples)
-            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
-            .checked_mul(u64::try_from(size_of::<f32>()).expect("f32 size fits u64"))
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         pcm_payload = pcm_payload
             .checked_add(source.resources.pcm_payload_already_charged_bytes)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         overhead = overhead
             .checked_add(source.resources.overhead_bytes)
             .and_then(|value| value.checked_add(source.additional_overhead_bytes))
-            .and_then(|value| value.checked_add(plane_bytes))
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         largest = largest
             .max(source.resources.largest_allocation_bytes)
-            .max(source.additional_largest_allocation_bytes)
-            .max(plane_bytes);
+            .max(source.additional_largest_allocation_bytes);
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
             channel_count,
@@ -1579,6 +1724,14 @@ pub fn prepare_graph_source_set(
             retirement_worker: source.retirement_worker,
         });
     }
+    overhead = overhead
+        .checked_add(
+            retained
+                .overhead_bytes()
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?,
+        )
+        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+    largest = largest.max(retained.largest_allocation_bytes());
     for mapping in &mappings {
         let source = entries
             .get(mapping.source_index)
