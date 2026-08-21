@@ -151,3 +151,29 @@ validator returned zero. The real accepted path remains absent. GNU Bash was
 and Issue 006's failed historical runner record was not edited or relabeled. Terra verdict:
 **PARTIAL / GREEN SHELL CHECKPOINT** — ready for root commit/push and Sol review before the sole
 promotion-only action.
+
+## Sol correction/review attempt 2 — pre-promotion PASS (2026-08-21)
+
+Sol reviewed clean Terra checkpoint `6d34956`. Runner status propagation, raw preservation,
+validator ordering, temporary-copy publication and no-clobber checks conform to the brief. The
+promotion helper has no Cargo/benchmark launch token and accepts only the frozen no-argument path.
+A bounded test-only correction made the interruption case terminate the counted scratch stub with
+real `SIGTERM` and require status 143, added the missing-Cargo and missing-raw gates, and changed
+the detached-`if !` mutation into the original syntactically valid but semantically wrong shape.
+
+`bash -n`, the complete hermetic lifecycle/mutation suite, exact source size/line/LF/hash checks,
+the frozen aggregate validator, executable/static launch-token scans and `git diff --check` pass.
+The real accepted path is still absent. Real Cargo/Rust graph workload launches: **0**. Scratch
+promotion tests only; real promotions: **0**. `issue_030_workload_invocations=0` and
+`issue_030_timed_invocations=0` remain exact.
+
+**Verdict: PASS TO THE SOLE NON-TIMED PROMOTION ACTION.** After this test-only correction is
+committed and the candidate is clean/upstream-synchronized, root may recheck the frozen source
+identity, validator result and absent destination, then invoke exactly once:
+
+```sh
+bash scripts/promote-issue006-graph-benchmark.sh
+```
+
+Do not invoke the graph runner, Cargo benchmark package or binary. Overall Issue-030 PASS remains
+pending byte-identical accepted-output verification and final evidence after that promotion.

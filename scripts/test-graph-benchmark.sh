@@ -46,7 +46,7 @@ printf 'cargo-stub\n' >>"$MISO_TEST_LAUNCH_LOG"
 case "${MISO_TEST_MODE:?}" in
     success) cat "$MISO_TEST_FROZEN_RAW" ;;
     workload_failure) printf '{"partial":"workload"}\n'; exit 73 ;;
-    interrupted_partial) printf '{"partial":"interrupted"}\n'; exit 130 ;;
+    interrupted_partial) printf '{"partial":"interrupted"}\n'; kill -TERM "$BASHPID" ;;
     validator_failure) printf '{}\n' ;;
     *) exit 91 ;;
 esac
@@ -112,7 +112,7 @@ set +e
 run_runner interrupted_partial >"$case_root/result" 2>&1
 status=$?
 set -e
-[[ "$status" == 130 ]]
+[[ "$status" == 143 ]]
 grep -Fqx '{"partial":"interrupted"}' "$case_root/target/issue6/graph-compiler-benchmark.raw.jsonl"
 expect_no_accepted
 
@@ -146,6 +146,17 @@ mkdir -p "$case_root/no-jq"
 ln -s "$(command -v dirname)" "$case_root/no-jq/dirname"
 if PATH="$case_root/no-jq" /bin/bash "$case_root/scripts/run-graph-compiler-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
 [[ ! -e "$launch_log" ]]
+
+new_case missing-cargo
+mkdir -p "$case_root/no-cargo"
+ln -s "$(command -v dirname)" "$case_root/no-cargo/dirname"
+ln -s "$(command -v jq)" "$case_root/no-cargo/jq"
+if PATH="$case_root/no-cargo" /bin/bash "$case_root/scripts/run-graph-compiler-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+[[ ! -e "$launch_log" ]]
+
+new_case promotion-missing-source
+if run_promotion >/dev/null 2>&1; then exit 1; fi
+expect_no_accepted
 
 new_case promotion-success
 cp "$case_root/frozen.raw.jsonl" "$case_root/target/issue6/graph-compiler-benchmark.raw.jsonl"
@@ -199,10 +210,18 @@ status=$?
 set -e
 [[ "$status" != 73 ]]
 new_case detached-if-mutation
-sed 's/^if ! ($/if !/' "$case_root/scripts/run-graph-compiler-benchmark.sh" >"$case_root/mutated-runner.sh"
-if bash -n "$case_root/mutated-runner.sh"; then
-    printf 'detached if mutation remained syntactically accepted\n' >&2
+sed -e 's/^if ! ($/if !/' \
+    -e '/^    status=\$?$/,/^    exit "\$status"$/d' \
+    -e 's/^); then$/then/' \
+    "$case_root/scripts/run-graph-compiler-benchmark.sh" >"$case_root/mutated-runner.sh"
+chmod 755 "$case_root/mutated-runner.sh"
+bash -n "$case_root/mutated-runner.sh"
+if MISO_TEST_MODE=success MISO_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" PATH="$case_root/bin:$PATH" \
+    bash "$case_root/mutated-runner.sh" >/dev/null 2>&1; then
+    printf 'detached if mutation preserved the successful runner contract\n' >&2
     exit 1
 fi
+expect_no_accepted
 
 printf 'graph benchmark Issue-030 hermetic lifecycle: PASS (real workload launches: 0; promotions: scratch only)\n'
