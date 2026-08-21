@@ -1017,6 +1017,61 @@ mod tests {
     }
 
     #[test]
+    fn launch_rate_final_validation_is_atomic_and_uses_session_diagnostic() {
+        use miso_engine_session::DiagnosticCode;
+
+        for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
+            let mut store = store();
+            let before_revision = store.revision();
+            let before_snapshot = store.canonical_snapshot().to_owned();
+            let before_model = store.compiled().normalized_model().clone();
+            let edits = [SessionEditV1::SetSampleRateHz {
+                sample_rate_hz: rate,
+            }];
+            let error = store
+                .apply_transaction(ExpectedRevision::Exact(before_revision), &edits)
+                .expect_err("non-launch final candidate rejects");
+            match error {
+                SessionStoreError::Validation {
+                    operation_index,
+                    diagnostics,
+                } => {
+                    assert_eq!(operation_index, edits.len());
+                    assert!(diagnostics.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code == DiagnosticCode::SampleRateUnsupportedAtLaunch
+                            && diagnostic.path.to_string() == "$.sample_rate_hz"
+                            && diagnostic.message
+                                == "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz"
+                    }));
+                }
+                other => panic!("unexpected transaction result: {other:?}"),
+            }
+            assert_eq!(store.revision(), before_revision);
+            assert_eq!(store.canonical_snapshot(), before_snapshot);
+            assert_eq!(store.compiled().normalized_model(), &before_model);
+        }
+    }
+
+    #[test]
+    fn temporary_extended_rate_is_permitted_when_final_candidate_is_launch_rate() {
+        let mut store = store();
+        let revision = store.revision();
+        let edits = [
+            SessionEditV1::SetSampleRateHz {
+                sample_rate_hz: 176_400,
+            },
+            SessionEditV1::SetSampleRateHz {
+                sample_rate_hz: 96_000,
+            },
+        ];
+        let commit = store
+            .apply_transaction(ExpectedRevision::Exact(revision), &edits)
+            .expect("only final candidate is policy checked");
+        assert_eq!(commit.applied_operations, edits.len());
+        assert_eq!(store.compiled().normalized_model().sample_rate_hz, 96_000);
+    }
+
+    #[test]
     fn effects_and_parameters_follow_exact_key_rules() {
         let mut store = store();
         let edit = SessionEditV1::UpsertEffectParam {

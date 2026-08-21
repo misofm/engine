@@ -30,11 +30,6 @@ pub use spsc::{
     Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, bounded_spsc,
 };
 
-/// Supported explicit engine sample rates.
-pub const SUPPORTED_SAMPLE_RATES: [u32; 8] = [
-    44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,12 +172,12 @@ mod tests {
     }
 
     #[test]
-    fn all_required_sample_rates_prepare_and_render() {
-        for (index, rate) in SUPPORTED_SAMPLE_RATES.into_iter().enumerate() {
+    fn launch_sample_rates_prepare_and_render() {
+        for (index, rate) in crate::LAUNCH_SAMPLE_RATES.into_iter().enumerate() {
             let mut plan = PreparedRenderPlan::prepare(PrepareRenderPlan {
                 plan_id: index as u64,
                 envelope: RenderEnvelope {
-                    sample_rate: SampleRateHz(rate),
+                    sample_rate: rate,
                     quantum: QuantumFrames(1),
                     input_channels: None,
                     output_channels: NonZeroUsize::new(1).expect("one"),
@@ -191,7 +186,7 @@ mod tests {
                 parameter_defaults: &[],
                 event_capacity: 0,
             })
-            .expect("required rate");
+            .expect("launch rate");
             let mut output = [1.0];
             plan.render(
                 RenderIo {
@@ -202,6 +197,30 @@ mod tests {
             )
             .expect("render");
             assert_eq!(output, [0.0]);
+        }
+    }
+
+    #[test]
+    fn extended_and_unrelated_rates_reject_before_plan_publication() {
+        for rate in crate::EXTENDED_COMPATIBILITY_SAMPLE_RATES
+            .into_iter()
+            .chain([SampleRateHz(0), SampleRateHz(32_000), SampleRateHz(192_001)])
+        {
+            assert!(matches!(
+                PreparedRenderPlan::prepare(PrepareRenderPlan {
+                    plan_id: 0,
+                    envelope: RenderEnvelope {
+                        sample_rate: rate,
+                        quantum: QuantumFrames(1),
+                        input_channels: None,
+                        output_channels: NonZeroUsize::new(1).expect("one"),
+                    },
+                    scratch: &[],
+                    parameter_defaults: &[],
+                    event_capacity: 0,
+                }),
+                Err(RenderError::UnsupportedRate)
+            ));
         }
     }
 

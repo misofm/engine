@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
+
 use crate::{
     AutomationShape, Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, Effect,
     MatrixOrPan, ParameterUnit, Rack, RackName, RouteDestination, RouteSource,
@@ -18,15 +20,12 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
             "only version 1 is accepted",
         );
     }
-    if !matches!(
-        session.sample_rate_hz,
-        44_100 | 48_000 | 88_200 | 96_000 | 176_400 | 192_000 | 352_800 | 384_000
-    ) {
+    if !is_launch_sample_rate(SampleRateHz(session.sample_rate_hz)) {
         error(
             &mut diagnostics,
-            DiagnosticCode::NumericOutOfSchemaRange,
+            DiagnosticCode::SampleRateUnsupportedAtLaunch,
             "$.sample_rate_hz",
-            "unsupported engine sample rate",
+            "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
         );
     }
     if session.quantum_frames == 0 {

@@ -14,6 +14,7 @@ use crate::{
     SourceMapping, SourceRegion, SourceSpan, StableId, Submix, Track,
     value::{bounded_f32, f32_value},
 };
+use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 
 struct Parser {
     span: SourceSpan,
@@ -299,16 +300,11 @@ fn parse_root(parser: &mut Parser, value: &Value, path: DiagnosticPath) -> Optio
         parser.required(table, "sample_rate_hz", &path),
         path.key("sample_rate_hz"),
     );
-    if sample_rate_hz.is_some_and(|rate| {
-        !matches!(
-            rate,
-            44_100 | 48_000 | 88_200 | 96_000 | 176_400 | 192_000 | 352_800 | 384_000
-        )
-    }) {
+    if sample_rate_hz.is_some_and(|rate| !is_launch_sample_rate(SampleRateHz(rate))) {
         parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
+            DiagnosticCode::SampleRateUnsupportedAtLaunch,
             path.key("sample_rate_hz"),
-            "sample_rate_hz must be one of the eight supported engine rates",
+            "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
         );
     }
     let quantum_frames = parser.u32(

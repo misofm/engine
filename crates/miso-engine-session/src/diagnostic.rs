@@ -28,6 +28,8 @@ pub enum DiagnosticCode {
     InvalidEnum,
     /// A numeric token is NaN or infinity.
     NumericNonFinite,
+    /// An engine session rate is outside the launch-supported tier.
+    SampleRateUnsupportedAtLaunch,
     /// A finite numeric token cannot be represented as `f32`.
     NumericNotF32Representable,
     /// A numeric token is outside its schema-local domain.
@@ -68,6 +70,7 @@ impl DiagnosticCode {
             Self::MissingEntityReference => "reference.missing_entity",
             Self::InvalidEnum => "schema.invalid_enum",
             Self::NumericNonFinite => "numeric.non_finite",
+            Self::SampleRateUnsupportedAtLaunch => "sample_rate.unsupported_at_launch",
             Self::NumericNotF32Representable => "numeric.not_f32_representable",
             Self::NumericOutOfSchemaRange => "numeric.out_of_schema_range",
             Self::UnitInvalid => "unit.invalid",

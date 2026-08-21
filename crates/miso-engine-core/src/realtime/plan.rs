@@ -6,7 +6,7 @@ use super::{
     BufferArena, BufferArenaError, ParameterEventBuffer, ParameterValues, PlanarBufferMut,
     PlanarBufferRef,
 };
-use crate::{QuantumFrames, SampleRateHz};
+use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{cell::Cell, num::NonZeroUsize};
 
 /// Exact rate, quantum, and external I/O shape accepted by a plan.
@@ -22,9 +22,9 @@ pub struct RenderEnvelope {
     pub output_channels: NonZeroUsize,
 }
 impl RenderEnvelope {
-    /// Validate supported nonzero rate and quantum.
+    /// Validate a launch-supported rate and nonzero quantum.
     pub fn validate(self) -> Result<Self, RenderError> {
-        if !super::SUPPORTED_SAMPLE_RATES.contains(&self.sample_rate.0) {
+        if !is_launch_sample_rate(self.sample_rate) {
             return Err(RenderError::UnsupportedRate);
         }
         if self.quantum.0 == 0 {
@@ -97,7 +97,7 @@ pub struct RenderTime {
 /// Bounded render failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenderError {
-    /// The caller selected a sample rate outside the required engine set.
+    /// The caller selected a sample rate outside the launch engine set.
     UnsupportedRate,
     /// The prepared envelope contains a zero or otherwise invalid dimension.
     InvalidEnvelope,

@@ -1,11 +1,13 @@
 //! Validated borrowed planar blocks.
 
-use miso_engine_core::SampleRateHz;
+use miso_engine_core::{
+    SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+};
 
 /// `PlanarBlock` construction errors.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockError {
-    /// Rate is zero or not an engine-supported rate.
+    /// Rate is neither a launch rate nor an extended compatibility corpus rate.
     InvalidRate,
     /// Channels or frames is zero.
     Empty,
@@ -32,10 +34,7 @@ impl<'a, T> PlanarBlock<'a, T> {
         frames: usize,
         samples: &'a [T],
     ) -> Result<Self, BlockError> {
-        if !matches!(
-            rate.0,
-            44_100 | 48_000 | 88_200 | 96_000 | 176_400 | 192_000 | 352_800 | 384_000
-        ) {
+        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
             return Err(BlockError::InvalidRate);
         }
         if channels == 0 || frames == 0 {

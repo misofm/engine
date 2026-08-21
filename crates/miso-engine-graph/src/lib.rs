@@ -811,6 +811,7 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use miso_engine_conformance::DualAccumulatorDelayFactory;
+    use miso_engine_core::LAUNCH_SAMPLE_RATES;
     use miso_engine_effect_contract::{
         EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode, LinkModeSet,
         NativeEffectFactory, ParameterChannel, PortDescriptorV1, PortId, PortLayout, PortRole,
@@ -1757,8 +1758,8 @@ mod tests {
     }
 
     #[test]
-    fn enabled_and_bypass_pdc_align_at_all_rates_and_quanta() {
-        for rate in miso_engine_core::realtime::SUPPORTED_SAMPLE_RATES {
+    fn enabled_and_bypass_pdc_align_at_launch_rates_and_quanta() {
+        for rate in LAUNCH_SAMPLE_RATES.into_iter().map(|rate| rate.0) {
             for quantum in [1, 127, 128, 255, 1024] {
                 for bypass in [false, true] {
                     let mut plan = effect_pdc_plan(rate, quantum, bypass);

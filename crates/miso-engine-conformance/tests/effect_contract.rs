@@ -8,8 +8,8 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, EffectDescriptorV1, EffectQuality, InitialParameterValue, LinkMode,
     ParameterChannel, ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedPortsV1, PreparedSidechainPort,
-    SmoothingRule, automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
-    inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
+    QualityDescriptorV1, SmoothingRule, automation_segment_value, expected_prepared_metadata,
+    inverse_map_normalized, inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
     validate_automation_block, validate_descriptor_v1,
 };
 
@@ -192,4 +192,58 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
         );
         assert!(validate_automation_block(&[span], metadata, 0, 128).is_err());
     }
+}
+
+#[test]
+fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
+    let original = DUAL_ACCUMULATOR_DELAY_DESCRIPTOR;
+    let launch = Box::leak(Box::new(
+        original.qualities[..4].to_vec().into_boxed_slice(),
+    ));
+    let launch_only = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: launch,
+        ..original
+    }));
+    assert!(validate_descriptor_v1(launch_only).is_ok());
+
+    for missing in 0..4 {
+        let rows = original.qualities[..4]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| (index != missing).then_some(*row))
+            .collect::<Vec<_>>();
+        let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+            qualities: Box::leak(rows.into_boxed_slice()),
+            ..original
+        }));
+        assert!(validate_descriptor_v1(descriptor).is_err());
+    }
+
+    for extra_count in 1..=4 {
+        let rows = original.qualities[..4]
+            .iter()
+            .chain(&original.qualities[4..4 + extra_count])
+            .copied()
+            .collect::<Vec<_>>();
+        let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+            qualities: Box::leak(rows.into_boxed_slice()),
+            ..original
+        }));
+        assert!(validate_descriptor_v1(descriptor).is_ok());
+    }
+
+    let unsupported = QualityDescriptorV1 {
+        sample_rate: 192_001,
+        ..original.qualities[3]
+    };
+    let rows = original.qualities[..4]
+        .iter()
+        .copied()
+        .chain([unsupported])
+        .collect::<Vec<_>>();
+    let descriptor = Box::leak(Box::new(EffectDescriptorV1 {
+        qualities: Box::leak(rows.into_boxed_slice()),
+        ..original
+    }));
+    assert!(validate_descriptor_v1(descriptor).is_err());
 }

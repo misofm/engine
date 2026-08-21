@@ -5,11 +5,10 @@
 #![allow(missing_docs)]
 
 use core::{fmt, hash::Hash};
+use miso_engine_core::{
+    LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+};
 use std::collections::{BTreeMap, BTreeSet};
-
-pub const REQUIRED_SAMPLE_RATES: [u32; 8] = [
-    44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaticIdError {
@@ -468,7 +467,8 @@ pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), Desc
             })
         }
         qprior = Some(key);
-        if !REQUIRED_SAMPLE_RATES.contains(&q.sample_rate) {
+        let rate = SampleRateHz(q.sample_rate);
+        if !(is_launch_sample_rate(rate) || is_extended_compatibility_sample_rate(rate)) {
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,
@@ -489,7 +489,7 @@ pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), Desc
         })
     }
     for r in qrates.values() {
-        if r.len() != 8 || REQUIRED_SAMPLE_RATES.iter().any(|n| !r.contains(n)) {
+        if LAUNCH_SAMPLE_RATES.iter().any(|rate| !r.contains(&rate.0)) {
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,
