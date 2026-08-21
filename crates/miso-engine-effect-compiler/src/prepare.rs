@@ -1,8 +1,8 @@
 use miso_engine_effect_contract::{
-    EffectQuality, InitialParameterValue, LinkMode, NativeEffectRegistry, ParameterChannel,
-    ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort,
-    expected_prepared_metadata,
+    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
+    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedEffectMetadata, PreparedNativeEffect, PreparedPortsV1,
+    PreparedSidechainPort, RegistryError, expected_prepared_metadata,
 };
 use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
@@ -67,6 +67,16 @@ pub enum EffectRack {
 pub struct EffectPreparedSession {
     pub session: CompiledSession,
     pub entries: Vec<EffectPreparedEntry>,
+}
+
+/// Construct the caller-injected native registry for the V1 launch effect set.
+///
+/// Registry construction is control-plane work. Callers retain and inject the immutable registry
+/// into [`prepare_native_session_effects`]; there is no render-reachable global catalog.
+pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, RegistryError> {
+    NativeEffectRegistry::new([
+        Box::new(miso_engine_parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>
+    ])
 }
 
 pub fn prepare_native_session_effects(

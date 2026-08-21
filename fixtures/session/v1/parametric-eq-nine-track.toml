@@ -1,0 +1,133 @@
+schema_version = 1
+session_id = "parametric-eq-nine-track"
+revision = 42
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "native", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 1024, control_queue_messages = 64, memory_bytes = 16777216 }
+sources = [
+  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:parametric-eq-nine-track", locator = "host:parametric-eq-nine-track" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+]
+submixes = []
+outputs = [{ id = "main-out" }]
+routes = [
+  { id = "eq0-main", source = { kind = "track", track_id = "eq0", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq1-main", source = { kind = "track", track_id = "eq1", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq2-main", source = { kind = "track", track_id = "eq2", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq3-main", source = { kind = "track", track_id = "eq3", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq4-main", source = { kind = "track", track_id = "eq4", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq5-main", source = { kind = "track", track_id = "eq5", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq6-main", source = { kind = "track", track_id = "eq6", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq7-main", source = { kind = "track", track_id = "eq7", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "eq8-main", source = { kind = "track", track_id = "eq8", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+]
+automation = []
+
+[[tracks]]
+id = "eq0"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 3, channel = "left", unit = "hz", value = 120.0 }, { parameter_id = 3, channel = "right", unit = "hz", value = 2400.0 }, { parameter_id = 4, channel = "left", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "right", unit = "db", value = -9.0 }, { parameter_id = 5, channel = "both", unit = "ratio", value = 0.70710677 }, { parameter_id = 6, channel = "both", unit = "ratio", value = 1.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq1"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq2"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq3"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq4"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq5"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq6"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq7"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }
+
+[[tracks]]
+id = "eq8"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }

@@ -12,6 +12,7 @@ name = "miso_engine_effect_compiler"
 miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-parametric-eq.workspace = true
 
 [lints]
 workspace = true

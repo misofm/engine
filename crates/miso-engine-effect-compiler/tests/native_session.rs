@@ -1,6 +1,8 @@
 //! Transactional native-session preparation coverage.
 
-use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use miso_engine_effect_compiler::{
+    EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
+};
 use miso_engine_effect_contract::*;
 use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 
@@ -156,6 +158,32 @@ fn caps() -> EffectCompileCaps {
         maximum_scratch_bytes: 1 << 20,
         maximum_automation_spans_per_block: 32,
     }
+}
+
+#[test]
+fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
+    let model = parse_session_toml(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+    ))
+    .expect("accepted fixture");
+    assert_eq!(model.tracks.len(), 9);
+    let session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled fixture");
+    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    assert_eq!(registry.len(), 1);
+    assert!(registry.get_ascii("miso.parametric-eq").is_some());
+    let prepared = prepare_native_session_effects(&session, &registry, caps()).expect("prepared");
+    assert_eq!(prepared.entries.len(), 9);
 }
 
 #[test]

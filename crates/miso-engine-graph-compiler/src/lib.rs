@@ -1912,7 +1912,8 @@ mod tests {
         target_capabilities,
     };
     use miso_engine_effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects,
+        EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry_v1,
+        prepare_native_session_effects,
     };
     use miso_engine_effect_contract::{
         EffectPrepareError, NativeEffectFactory, NativeEffectRegistry, PrepareEffectBankRequest,
@@ -1933,6 +1934,8 @@ mod tests {
     };
 
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+    const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
 
     struct IdentityBinding;
     impl GraphRuntimeProcessor for IdentityBinding {
@@ -1994,6 +1997,25 @@ mod tests {
         })
     }
 
+    fn parametric_eq_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("parametric-EQ fixture track id");
+        Box::new(AsymmetricTrackImpulseBinding {
+            left: 0.03125 * (index + 1) as f32,
+            right: -0.015625 * 9_u32.saturating_sub(index) as f32,
+        })
+    }
+
     /// A deterministic factory failure used to prove the bank binder leaves its already prepared
     /// scalar ownership intact for the caller's transactional failure path.
     struct BankBindErrorFactory;
@@ -2036,6 +2058,29 @@ mod tests {
         }
     }
 
+    /// Test-only scalar fallback for an otherwise identical launch factory. This keeps the
+    /// session descriptor and scalar processor identical while exercising graph bank selection.
+    struct ScalarOnlyDelegateFactory {
+        delegate: Arc<dyn NativeEffectFactory>,
+    }
+    impl NativeEffectFactory for ScalarOnlyDelegateFactory {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+            self.delegate.descriptor()
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            self.delegate.prepare(request)
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            _: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            Ok(None)
+        }
+    }
+
     struct OrderedPostBankObserver {
         expected_order: u64,
         order: Arc<AtomicU64>,
@@ -2050,6 +2095,31 @@ mod tests {
                 self.order.fetch_add(1, Ordering::SeqCst),
                 self.expected_order,
                 "observers run in stable handle order"
+            );
+            self.observed_post_bank_audio.store(
+                block.left.iter().any(|sample| *sample != 0.0)
+                    && block.right.iter().any(|sample| *sample != 0.0),
+                Ordering::SeqCst,
+            );
+            Ok(())
+        }
+    }
+
+    struct RepeatedOrderedPostBankObserver {
+        expected_order: u64,
+        order: Arc<AtomicU64>,
+        observed_post_bank_audio: Arc<AtomicBool>,
+    }
+    impl GraphRuntimeObserver for RepeatedOrderedPostBankObserver {
+        fn observe(
+            &mut self,
+            block: GraphObservationBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            let order = self.order.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                order % 2,
+                self.expected_order,
+                "observers run in stable handle order on every block"
             );
             self.observed_post_bank_audio.store(
                 block.left.iter().any(|sample| *sample != 0.0)
@@ -2666,6 +2736,284 @@ mod tests {
                 "deterministic mixed output hash"
             );
         }
+    }
+
+    #[test]
+    fn launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks() {
+        let model = parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
+            .expect("accepted parametric-EQ fixture");
+        assert_eq!(model.tracks.len(), 9);
+        let first_effect = &model.tracks[0].simd1.effects[0];
+        assert!(first_effect.params.iter().any(|parameter| {
+            parameter.parameter_id == 3
+                && parameter.channel == ParameterChannel::Left
+                && parameter.value == 120.0
+        }));
+        assert!(first_effect.params.iter().any(|parameter| {
+            parameter.parameter_id == 3
+                && parameter.channel == ParameterChannel::Right
+                && parameter.value == 2400.0
+        }));
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled parametric-EQ fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: registry
+                .get_shared_ascii("miso.parametric-eq")
+                .expect("registered launch parametric EQ"),
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("scalar launch registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let bank_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared bank-capable effects");
+        let scalar_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared scalar effects");
+        let bank_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_042,
+            effects: bank_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_043,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
+
+        let width = bank_artifact.report.rack_cohorts.dispatch.bank_width();
+        let (expected_banks, expected_scalar_tails) = width.map_or((0, 9), |width| {
+            let lanes = width.lanes() as usize;
+            (9 / lanes, 9 % lanes)
+        });
+        assert_eq!(bank_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            bank_artifact.report.rack_cohorts.simd1.banks.len(),
+            expected_banks
+        );
+        assert_eq!(
+            bank_artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            expected_scalar_tails
+        );
+        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(
+            scalar_artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            expected_scalar_tails,
+            "cohort planning is independent of the factory's legal scalar fallback"
+        );
+        assert_eq!(
+            bank_artifact.report.sequential_schedule,
+            scalar_artifact.report.sequential_schedule
+        );
+        assert_eq!(
+            bank_artifact.report.route_timings,
+            scalar_artifact.report.route_timings
+        );
+        assert_eq!(
+            bank_artifact.report.inserted_delays,
+            scalar_artifact.report.inserted_delays
+        );
+        let expected_schedule = bank_artifact.report.sequential_schedule.clone();
+        let expected_route_timings = bank_artifact.report.route_timings.clone();
+
+        let PreparedGraphArtifact {
+            graph: bank_graph,
+            report: _,
+        } = bank_artifact;
+        let envelope = bank_graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let bank_nodes = bank_graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor = parametric_eq_input_binding(&node);
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let observer_order = Arc::new(AtomicU64::new(0));
+        let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
+        let mut bank_plan = bank_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bank_nodes,
+                // Deliberately reverse insertion order: binding handles, not insertion order,
+                // decide the stable observer schedule after the SIMD rack boundary.
+                observers: vec![
+                    GraphNodeObserverBinding::new(
+                        track_node("eq0", TrackStage::PostSimd1),
+                        2,
+                        Box::new(RepeatedOrderedPostBankObserver {
+                            expected_order: 1,
+                            order: Arc::clone(&observer_order),
+                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                        }),
+                    ),
+                    GraphNodeObserverBinding::new(
+                        track_node("eq0", TrackStage::PostSimd1),
+                        1,
+                        Box::new(RepeatedOrderedPostBankObserver {
+                            expected_order: 0,
+                            order: Arc::clone(&observer_order),
+                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                        }),
+                    ),
+                ],
+            })
+            .unwrap_or_else(|failure| panic!("bank graph bind: {}", failure.code));
+        let PreparedGraphArtifact {
+            graph: scalar_graph,
+            report: _,
+        } = scalar_artifact;
+        let scalar_nodes = scalar_graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor = parametric_eq_input_binding(&node);
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let mut scalar_plan = scalar_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("scalar graph bind: {}", failure.code));
+        let mut bank_blocks = Vec::new();
+        for block in 0..2_u64 {
+            let mut bank_pcm = vec![0.0_f32; frames * 2];
+            let mut scalar_pcm = vec![0.0_f32; frames * 2];
+            bank_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
+                            .expect("bank output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("bank render");
+            scalar_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                            .expect("scalar output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("scalar render");
+            for (sample, scalar_sample) in bank_pcm.iter().zip(&scalar_pcm) {
+                assert_eq!(
+                    sample.to_bits(),
+                    scalar_sample.to_bits(),
+                    "bank/scalar PCM must be exact"
+                );
+            }
+            bank_blocks.push(bank_pcm);
+        }
+        assert!(
+            bank_blocks[0]
+                .iter()
+                .zip(&bank_blocks[1])
+                .any(|(first, second)| first.to_bits() != second.to_bits()),
+            "the second block must retain the first block's EQ state"
+        );
+        assert_eq!(observer_order.load(Ordering::SeqCst), 4);
+        assert!(observed_post_bank_audio.load(Ordering::SeqCst));
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.simd1.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled bypass fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass effects");
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_044,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass graph: {:?}", failure.diagnostics));
+        assert_eq!(
+            bypass_artifact.report.sequential_schedule, expected_schedule,
+            "bypass does not change graph scheduling"
+        );
+        assert_eq!(
+            bypass_artifact.report.route_timings, expected_route_timings,
+            "bypass does not change PDC timings"
+        );
+        let bypass_graph = bypass_artifact.graph;
+        let bypass_nodes = bypass_graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor = parametric_eq_input_binding(&node);
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let mut bypass_plan = bypass_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bypass_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bypass graph bind: {}", failure.code));
+        let mut bypass_pcm = vec![0.0_f32; frames * 2];
+        bypass_plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut bypass_pcm, 2, frames, frames)
+                        .expect("bypass output"),
+                },
+                RenderTime { absolute_sample: 0 },
+            )
+            .expect("bypass render");
+        assert_eq!(bypass_pcm[0].to_bits(), 1.40625_f32.to_bits());
+        assert_eq!(bypass_pcm[frames].to_bits(), (-0.703125_f32).to_bits());
+        assert!(
+            bypass_pcm
+                .iter()
+                .enumerate()
+                .all(|(index, sample)| index == 0 || index == frames || *sample == 0.0),
+            "bypass retains the dry impulse without changing the rack graph"
+        );
     }
 
     #[test]
