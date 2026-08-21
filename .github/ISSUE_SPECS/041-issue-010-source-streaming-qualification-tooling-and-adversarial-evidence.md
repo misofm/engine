@@ -227,3 +227,32 @@ currently externally blocked by pre-existing unapproved `unsafe` in
 `tools/miso-engine-graph-audit/src/parametric_eq_main.rs` (outside Issue 041); no source policy
 exception was added. No Gate 4 RSS/allocation-layout work was started and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — actual duration/layout and RSS checkpoint (2026-08-21)
+
+**Gate 4 PASS; qualification remains incomplete.** The existing source-audit package now provides
+the `miso_engine_source_duration_audit` binary; no second fixture or audit framework was added.
+On Linux it creates a materialized one-minute mono 48-kHz Float32 RIFF/WAVE source (2,880,000
+frames; 11,520,044 bytes) and a three-hour sparse equivalent (518,400,000 frames;
+2,073,600,044 bytes). Both are actual temporary WAVE files, are resolved and prepared through the
+production native resolver/parser/decoder path with the same 128-frame quantum, one channel, and
+640-frame ring configuration, and are removed after verification.
+
+A `test-support`-only control-plane layout enumerator captures the concrete source-owned allocation
+requests: SPSC headers and slots, transfer metadata and PCM blocks, decoder scratch, planar
+staging, and worker command/event/stop queues. Its sorted entries carry semantic category,
+requested bytes, alignment, and count. Both inputs produced the same 16-entry layout totaling
+exactly 4,504 bytes; that sum equals `NativeSourceResourceReport.total_engine_owned_bytes`. The
+complete layout vectors, `NativeSourceResourceReport`s, and graph source-set resource reports are
+exactly equal. Duration changes only file/parser metadata and source region, not retained engine
+allocation layout; PCM is not double charged.
+
+The final record included `minute_rss_bytes=3514368`, `multi_hour_rss_bytes=3645440`, Linux,
+`x86_64`, and `rustc 1.97.1 (8bab26f4f 2026-07-14)`. RSS is a numeric descriptive observation
+only: it has no threshold or acceptance comparison. The multi-hour WAVE is sparse via `set_len`,
+and no duration-sized PCM is checked in or retained by the engine.
+
+Focused PASS: direct duration-audit invocation; source/source-audit format check; locked source
+and audit check/tests (29 source unit tests plus one compile-fail doctest); warning-denied Clippy
+including test support; and `git diff --check`. No Gate 5 full workspace/policy gate, benchmark,
+or timing workload was invoked; `timed_benchmark_invocations=0`.

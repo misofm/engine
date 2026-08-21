@@ -53,7 +53,10 @@ pub use native_source::{
 };
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]
-pub use native_source::{NativeWorkerAuditGate, prepare_native_source_with_audit_gate};
+pub use native_source::{
+    NativeSourceAllocationLayoutEntry, NativeWorkerAuditGate, native_source_allocation_layout,
+    prepare_native_source_with_audit_gate,
+};
 
 /// A nonzero source-stream generation selected by an off-render controller.
 #[repr(transparent)]

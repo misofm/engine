@@ -129,6 +129,128 @@ pub struct NativeSourceResourceReport {
     pub largest_allocation_bytes: u64,
 }
 
+/// One exact retained allocation request used by the test-support duration audit.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[doc(hidden)]
+pub struct NativeSourceAllocationLayoutEntry {
+    pub category: &'static str,
+    pub requested_size_bytes: u64,
+    pub alignment_bytes: u64,
+    pub count: u64,
+}
+
+/// Enumerate the exact source-owned allocation requests for an accepted prepared source.
+///
+/// This control-plane-only test support is derived from the same concrete queue/block layouts the
+/// preparation path allocates; it excludes asset bytes, allocator headers, thread stacks and RSS.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn native_source_allocation_layout(
+    ring_config: PcmSourceRingConfig,
+    caps: NativeSourcePrepareCaps,
+    report: NativeSourceResourceReport,
+) -> Result<Vec<NativeSourceAllocationLayoutEntry>, NativeSourcePrepareError> {
+    fn push_queue<T: Send + 'static>(
+        entries: &mut Vec<NativeSourceAllocationLayoutEntry>,
+        category: &'static str,
+        capacity: NonZeroUsize,
+    ) -> Result<(), NativeSourcePrepareError> {
+        let payload = bounded_spsc_retained_payload::<T>(capacity)
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+        entries.push(NativeSourceAllocationLayoutEntry {
+            category,
+            requested_size_bytes: u64::try_from(payload.ring_header_bytes)
+                .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+            alignment_bytes: u64::try_from(payload.ring_header_align)
+                .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+            count: 1,
+        });
+        entries.push(NativeSourceAllocationLayoutEntry {
+            category,
+            requested_size_bytes: u64::try_from(payload.slot_payload_bytes)
+                .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+            alignment_bytes: u64::try_from(payload.slot_payload_align)
+                .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+            count: 1,
+        });
+        Ok(())
+    }
+
+    let block_count = report.ring.transfer_block_count;
+    let samples_per_block = u64::from(ring_config.channel_count)
+        .checked_mul(u64::from(ring_config.quantum_frames.0))
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    let pcm_per_block = samples_per_block
+        .checked_mul(u64::try_from(core::mem::size_of::<f32>()).expect("f32 size"))
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    let mut entries = Vec::with_capacity(15);
+    push_queue::<Box<crate::TransferBlock>>(
+        &mut entries,
+        "ring.data_queue",
+        NonZeroUsize::new(
+            usize::try_from(block_count).map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        )
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?,
+    )?;
+    push_queue::<Box<crate::TransferBlock>>(
+        &mut entries,
+        "ring.recycle_queue",
+        NonZeroUsize::new(
+            usize::try_from(block_count).map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        )
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?,
+    )?;
+    push_queue::<SourceCommand>(
+        &mut entries,
+        "ring.seek_queue",
+        NonZeroUsize::new(1).expect("one seek"),
+    )?;
+    entries.push(NativeSourceAllocationLayoutEntry {
+        category: "ring.transfer_block_metadata",
+        requested_size_bytes: u64::try_from(core::mem::size_of::<crate::TransferBlock>())
+            .expect("platform size"),
+        alignment_bytes: u64::try_from(core::mem::align_of::<crate::TransferBlock>())
+            .expect("platform alignment"),
+        count: block_count,
+    });
+    entries.push(NativeSourceAllocationLayoutEntry {
+        category: "ring.transfer_block_pcm",
+        requested_size_bytes: pcm_per_block,
+        alignment_bytes: u64::try_from(core::mem::align_of::<f32>()).expect("f32 alignment"),
+        count: block_count,
+    });
+    entries.push(NativeSourceAllocationLayoutEntry {
+        category: "decoder.read_scratch",
+        requested_size_bytes: report.decoder_read_scratch_bytes,
+        alignment_bytes: 1,
+        count: 1,
+    });
+    entries.push(NativeSourceAllocationLayoutEntry {
+        category: "worker.planar_staging",
+        requested_size_bytes: report.worker_planar_staging_bytes,
+        alignment_bytes: u64::try_from(core::mem::align_of::<f32>()).expect("f32 alignment"),
+        count: 1,
+    });
+    push_queue::<WorkerCommand>(
+        &mut entries,
+        "worker.command_queue",
+        caps.control_queue_items,
+    )?;
+    push_queue::<NativeSourceWorkerEvent>(
+        &mut entries,
+        "worker.event_queue",
+        NonZeroUsize::new(2).expect("two events"),
+    )?;
+    push_queue::<()>(
+        &mut entries,
+        "worker.stop_queue",
+        NonZeroUsize::new(1).expect("one stop"),
+    )?;
+    entries.sort();
+    Ok(entries)
+}
+
 /// Fixed caps for preparing every declared native session source as one transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeSessionSourcePrepareCaps {
