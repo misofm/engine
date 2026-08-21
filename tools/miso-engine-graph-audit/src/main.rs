@@ -346,6 +346,7 @@ fn prepared_graph(
                 }),
             ),
         ],
+        observers: Vec::new(),
     }) {
         Ok(plan) => plan,
         Err(GraphBindFailure { code, .. }) => panic!("graph bind: {code}"),

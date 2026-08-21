@@ -177,10 +177,12 @@ pub enum BuiltinTail {
 pub struct BuiltinParameterDescriptorV1 {
     pub id: u32,
     pub name: &'static str,
-    pub per_lane: bool,
-    pub unit: BuiltinParameterUnit,
-    pub minimum: f32,
-    pub maximum: f32,
+    /// The state ownership boundary for this stable parameter ID.
+    pub scope: BuiltinParameterScope,
+    /// The semantic mapping used to interpret the stored `f32` value.
+    pub mapping: BuiltinParameterMapping,
+    /// The finite, rate-aware domain accepted during preparation.
+    pub domain: BuiltinParameterDomain,
     pub default: f32,
     pub update_rate: BuiltinParameterUpdateRate,
     pub smoothing: BuiltinSmoothingPolicy,
@@ -189,11 +191,53 @@ pub struct BuiltinParameterDescriptorV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BuiltinParameterUnit {
+pub enum BuiltinParameterScope {
+    PerLane,
+    MatrixShared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinParameterMapping {
+    /// Exact numeric encodings `0.0` for false and `1.0` for true.
     Boolean,
-    Decibels,
+    /// Amplitude gain mapping `10^(dB / 20)`.
+    DecibelAmplitude,
     Hertz,
     Linear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BuiltinParameterDomain {
+    /// Only the exact false and true encodings are accepted.
+    BooleanExact,
+    /// A finite inclusive numeric range.
+    FiniteInclusive { minimum: f32, maximum: f32 },
+    /// Zero disables a filter; enabled cutoffs are `[minimum_hz, sample_rate / 2)`.
+    DisabledOrRateBoundedHertz { disabled: f32, minimum_hz: f32 },
+}
+
+impl BuiltinParameterDomain {
+    /// Validate a value against this descriptor's prepared sample-rate contract.
+    #[must_use]
+    pub fn contains(self, value: f32, sample_rate: u32) -> bool {
+        match self {
+            Self::BooleanExact => {
+                value.to_bits() == 0.0_f32.to_bits() || value.to_bits() == 1.0_f32.to_bits()
+            }
+            Self::FiniteInclusive { minimum, maximum } => {
+                value.is_finite() && value >= minimum && value <= maximum
+            }
+            Self::DisabledOrRateBoundedHertz {
+                disabled,
+                minimum_hz,
+            } => {
+                value == disabled
+                    || (value.is_finite()
+                        && value >= minimum_hz
+                        && f64::from(value) < f64::from(sample_rate) / 2.0)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,7 +249,8 @@ pub enum BuiltinParameterUpdateRate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinSmoothingPolicy {
     None,
-    MatrixLinearUpdates,
+    /// Exact linear interpolation over the requested number of sample updates.
+    LinearNUpdates,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,10 +263,9 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 1,
         name: "polarity_invert",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Boolean,
-        minimum: 0.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Boolean,
+        domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -231,10 +275,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 2,
         name: "trim_db",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Decibels,
-        minimum: -144.0,
-        maximum: 24.0,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::DecibelAmplitude,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -144.0,
+            maximum: 24.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -244,10 +290,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 3,
         name: "hpf_hz",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Hertz,
-        minimum: 0.0,
-        maximum: f32::INFINITY,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Hertz,
+        domain: BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+            disabled: 0.0,
+            minimum_hz: 10.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -257,10 +305,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 4,
         name: "lpf_hz",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Hertz,
-        minimum: 0.0,
-        maximum: f32::INFINITY,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Hertz,
+        domain: BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+            disabled: 0.0,
+            minimum_hz: 10.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -270,10 +320,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 5,
         name: "fader_db",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Decibels,
-        minimum: -144.0,
-        maximum: 24.0,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::DecibelAmplitude,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -144.0,
+            maximum: 24.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -283,10 +335,9 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 6,
         name: "mute",
-        per_lane: true,
-        unit: BuiltinParameterUnit::Boolean,
-        minimum: 0.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Boolean,
+        domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
@@ -296,52 +347,60 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     BuiltinParameterDescriptorV1 {
         id: 7,
         name: "matrix_ll",
-        per_lane: false,
-        unit: BuiltinParameterUnit::Linear,
-        minimum: -1.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::MatrixShared,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -1.0,
+            maximum: 1.0,
+        },
         default: 1.0,
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
-        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 8,
         name: "matrix_lr",
-        per_lane: false,
-        unit: BuiltinParameterUnit::Linear,
-        minimum: -1.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::MatrixShared,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -1.0,
+            maximum: 1.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
-        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 9,
         name: "matrix_rl",
-        per_lane: false,
-        unit: BuiltinParameterUnit::Linear,
-        minimum: -1.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::MatrixShared,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -1.0,
+            maximum: 1.0,
+        },
         default: 0.0,
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
-        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
     BuiltinParameterDescriptorV1 {
         id: 10,
         name: "matrix_rr",
-        per_lane: false,
-        unit: BuiltinParameterUnit::Linear,
-        minimum: -1.0,
-        maximum: 1.0,
+        scope: BuiltinParameterScope::MatrixShared,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -1.0,
+            maximum: 1.0,
+        },
         default: 1.0,
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
-        smoothing: BuiltinSmoothingPolicy::MatrixLinearUpdates,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
@@ -1302,18 +1361,49 @@ mod tests {
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         let hpf = BUILTIN_PARAMETER_DESCRIPTORS_V1[2];
-        assert_eq!(hpf.unit, BuiltinParameterUnit::Hertz);
+        assert_eq!(hpf.scope, BuiltinParameterScope::PerLane);
+        assert_eq!(hpf.mapping, BuiltinParameterMapping::Hertz);
         assert_eq!(hpf.disabled_value, Some(0.0));
-        assert_eq!(hpf.minimum, 0.0);
-        assert!(hpf.maximum.is_infinite());
+        assert!(hpf.domain.contains(0.0, 44_100));
+        assert!(hpf.domain.contains(10.0, 44_100));
+        assert!(hpf.domain.contains(22_049.0, 44_100));
+        assert!(!hpf.domain.contains(22_050.0, 44_100));
+        assert!(!hpf.domain.contains(f32::INFINITY, 44_100));
         let matrix = BUILTIN_PARAMETER_DESCRIPTORS_V1[6];
-        assert!(!matrix.per_lane);
-        assert_eq!(matrix.unit, BuiltinParameterUnit::Linear);
-        assert_eq!(
-            matrix.smoothing,
-            BuiltinSmoothingPolicy::MatrixLinearUpdates
-        );
+        assert_eq!(matrix.scope, BuiltinParameterScope::MatrixShared);
+        assert_eq!(matrix.mapping, BuiltinParameterMapping::Linear);
+        assert_eq!(matrix.smoothing, BuiltinSmoothingPolicy::LinearNUpdates);
         assert_eq!(matrix.reset, BuiltinParameterReset::KeepTargetResetCurrent);
+    }
+
+    #[test]
+    fn descriptor_domains_are_exhaustive_at_launch_rates() {
+        for rate in [44_100, 48_000, 88_200, 96_000] {
+            for descriptor in BUILTIN_PARAMETER_DESCRIPTORS_V1 {
+                assert!(descriptor.domain.contains(descriptor.default, rate));
+                assert!(!descriptor.domain.contains(f32::NAN, rate));
+                assert!(!descriptor.domain.contains(f32::INFINITY, rate));
+                assert!(!descriptor.domain.contains(f32::NEG_INFINITY, rate));
+            }
+            for descriptor in [
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
+                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            ] {
+                assert!(!descriptor.domain.contains(9.999, rate));
+                assert!(descriptor.domain.contains(10.0, rate));
+                assert!(descriptor.domain.contains(rate as f32 / 2.0 - 0.5, rate));
+                assert!(!descriptor.domain.contains(rate as f32 / 2.0, rate));
+            }
+        }
+        let boolean = BUILTIN_PARAMETER_DESCRIPTORS_V1[0];
+        assert!(boolean.domain.contains(0.0, 48_000));
+        assert!(boolean.domain.contains(1.0, 48_000));
+        assert!(!boolean.domain.contains(-0.0, 48_000));
+        assert!(!boolean.domain.contains(0.5, 48_000));
+        let decibels = BUILTIN_PARAMETER_DESCRIPTORS_V1[1];
+        assert!(decibels.domain.contains(-144.0, 48_000));
+        assert!(decibels.domain.contains(24.0, 48_000));
+        assert!(!decibels.domain.contains(24.001, 48_000));
     }
     #[test]
     fn blocks_reject_before_processing_and_reports_are_per_call() {

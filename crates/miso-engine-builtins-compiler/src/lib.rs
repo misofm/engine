@@ -218,6 +218,12 @@ pub struct BuiltinResourceEstimate {
     pub retained_allocation_count: u64,
 }
 
+/// Versioned public name for the exact engine-owned retained-payload report.
+///
+/// This is deliberately an alias rather than a duplicate accounting type: a caller cannot
+/// accidentally read one report while the compiler validates another.
+pub type BuiltinResourceReportV1 = BuiltinResourceEstimate;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ResourceAccumulator {
     total: u64,
@@ -362,7 +368,7 @@ impl PreparedBuiltinsSession {
     pub fn test_only_corrupt_for_compiler_test(&mut self, corruption: PreparedBuiltinsCorruption) {
         match corruption {
             PreparedBuiltinsCorruption::SessionIdentity => {
-                self.seal.sample_rate = self.seal.sample_rate.saturating_add(1);
+                self.seal.sample_rate = self.seal.sample_rate.checked_add(1).unwrap_or(0);
             }
             PreparedBuiltinsCorruption::Tracks => self.seal.tracks.clear(),
             PreparedBuiltinsCorruption::Processors => self.seal.processors.clear(),
@@ -391,7 +397,8 @@ impl PreparedBuiltinsSession {
                 self.resources.engine_owned_retained_payload_bytes = self
                     .resources
                     .engine_owned_retained_payload_bytes
-                    .saturating_add(1);
+                    .checked_add(1)
+                    .unwrap_or(0);
             }
         }
     }
@@ -497,7 +504,7 @@ pub fn prepare_session_builtins(
     {
         diagnostics.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
     }
-    if requests.len() as u64 > caps.maximum_meter_streams {
+    if u64::try_from(requests.len()).map_or(true, |count| count > caps.maximum_meter_streams) {
         diagnostics.push(diag("builtin.resource.limit", "$.meter_requests"));
     }
     let mut request_keys = BTreeSet::new();
@@ -1179,5 +1186,125 @@ mod tests {
                 vec![diag("builtin.resource.limit", "$.builtin_compile_caps")]
             );
         }
+    }
+
+    /// Frozen issue-034 compiler-mutation seed. This exercises preparation requests and caps,
+    /// never the scalar DSP render path or a timed workload.
+    const BUILTIN_COMPILER_MUTATION_SEED: u64 = 0x34_007_c10_u64;
+
+    #[test]
+    fn deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases() {
+        let accepted = session();
+        let base_config = MeterConfig {
+            period_frames: NonZeroU32::new(16).expect("constant"),
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(4).expect("constant"),
+            reset_generation: 0,
+        };
+        let baseline_request = MeterRequest {
+            track_id: "vocal".to_owned(),
+            tap: MeterTap::Input,
+            config: base_config,
+        };
+        let baseline = prepare_session_builtins(&accepted, &[baseline_request], caps())
+            .expect("baseline preparation");
+        let report = baseline.resource_report();
+        let mut state = BUILTIN_COMPILER_MUTATION_SEED;
+        let mut transcript_hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut seen_taps = BTreeSet::new();
+        let mut classes = [false; 8];
+        let mut completed = 0_u32;
+        for case in 0_u32..10_000 {
+            // xorshift64* is intentionally local and fixed; case descriptions are mixed into a
+            // transcript hash so accidental coverage drift is visible in this test.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let value = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            let tap = [
+                MeterTap::Input,
+                MeterTap::PostInputBuiltins,
+                MeterTap::PostSimd1,
+                MeterTap::PostDynamic,
+                MeterTap::PostSimd2PreFader,
+                MeterTap::PostFader,
+                MeterTap::PostMatrix,
+            ][usize::try_from(value % 7).expect("bounded tap index")];
+            seen_taps.insert(tap);
+            let class = usize::try_from(case % 8).expect("bounded mutation class");
+            classes[class] = true;
+            let mut request = MeterRequest {
+                track_id: "vocal".to_owned(),
+                tap,
+                config: MeterConfig {
+                    period_frames: NonZeroU32::new(match class {
+                        0 => 1,
+                        1 => 127,
+                        2 => 128,
+                        _ => 16,
+                    })
+                    .expect("positive period"),
+                    peak_hold_frames: match class {
+                        3 => u32::MAX,
+                        _ => {
+                            u32::try_from(value & u64::from(u32::MAX)).expect("masked to u32") % 128
+                        }
+                    },
+                    peak_decay_db_per_second: if class == 4 { f32::NAN } else { 0.0 },
+                    queue_capacity: NonZeroUsize::new(match class {
+                        5 => 1,
+                        _ => 4,
+                    })
+                    .expect("positive queue"),
+                    reset_generation: value,
+                },
+            };
+            let mut requests = vec![request.clone()];
+            if class == 5 {
+                requests.push(request.clone());
+            } else if class == 6 {
+                request.track_id = "unknown-track".to_owned();
+                requests[0] = request;
+            }
+            let mut mutation_caps = caps();
+            if class == 7 {
+                mutation_caps.maximum_total_state_bytes = report
+                    .engine_owned_processor_payload_bytes
+                    .checked_sub(1)
+                    .expect("nonzero baseline state report");
+            }
+            let result = prepare_session_builtins(&accepted, &requests, mutation_caps);
+            match result {
+                Ok(prepared) => {
+                    assert!(
+                        prepared
+                            .resource_report()
+                            .engine_owned_retained_payload_bytes
+                            > 0
+                    );
+                    transcript_hash ^= 0x51;
+                }
+                Err(diagnostics) => {
+                    assert!(diagnostics.0.windows(2).all(|pair| pair[0] < pair[1]));
+                    for diagnostic in diagnostics.0 {
+                        for byte in diagnostic.code.bytes().chain(diagnostic.path.bytes()) {
+                            transcript_hash ^= u64::from(byte);
+                            transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+                        }
+                    }
+                }
+            }
+            transcript_hash ^= u64::from(case);
+            transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+            completed = completed.checked_add(1).expect("fixed case count");
+        }
+        assert_eq!(completed, 10_000);
+        assert_eq!(seen_taps.len(), 7);
+        assert!(classes.into_iter().all(core::convert::identity));
+        assert_eq!(
+            transcript_hash, 565_235_985_001_749_527,
+            "updated only through a deliberate frozen-case change"
+        );
     }
 }

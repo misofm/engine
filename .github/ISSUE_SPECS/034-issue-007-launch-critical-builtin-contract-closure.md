@@ -189,6 +189,36 @@ Native scalar build/test plus compile checks for `aarch64-linux-android`, `aarch
 `wasm32-unknown-unknown` with `-simd128` and `+simd128`. These are contract/portability checks, not
 the complete target qualification owned by issue 035.
 
+## Terra attempt 1 evidence (2026-08-21)
+
+Implementation checkpoint pending Sol review. `BuiltinParameterDescriptorV1` now uses explicit
+scope, mapping and rate-aware domain enums; the filter contract is represented as
+`DisabledOrRateBoundedHertz`, with no infinite public maximum. `PreparedGraphBuiltinsArtifact`
+now privately owns the compiler-produced processor/observer parts and exposes only consuming
+sealed binding of disjoint external nodes; the public generic
+`PreparedGraphPlan::attach_internal_bindings` capability is removed. `BuiltinResourceReportV1`
+aliases the single exact retained-payload report type and resource-cap conversion is checked.
+
+The deterministic compiler preparation matrix uses seed `0x000000034007c10`, executes exactly
+10,000 cases, observes all seven taps and eight frozen mutation classes, and checks a frozen
+diagnostic transcript hash `565235985001749527`. It performs no render benchmark.
+
+Passing commands: `cargo fmt --check`; `cargo test -p miso-engine-builtins --lib`; `cargo test
+-p miso-engine-builtins-compiler --features test-support`; `cargo test -p
+miso-engine-graph-compiler --lib`; `cargo test -p miso-engine-graph-compiler --doc`; `cargo check
+--workspace`; `cargo test --workspace --locked`; `RUSTFLAGS='-Dwarnings' cargo clippy --workspace
+--all-targets -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`; `bash
+scripts/test-builtins-policy.sh`; `bash scripts/check-builtins-policy.sh`; `bash
+scripts/check-graph-policy.sh`; `bash scripts/check-realtime-policy.sh`; `bash
+scripts/check-workspace-policy.sh`; `bash scripts/check-graph-determinism.sh`; and `bash
+scripts/check-builtins-targets.sh`.
+
+Candidate source SHA-256: builtins `59e5ebf08d39a4699dec90b6cf1fa23fbae6ada57320d6ad2f771562dd327f11`;
+builtin compiler `e8eb45863654f326adff9fb5fa6912649c8566425b10a14843092ff4d7ad0e47`;
+graph `acf7cb6f9f932a05ecba7447f399c265f02897cbe18a5cf9b785d4b801e4e957`;
+graph compiler `4263f592b241089b689564e207a16456c8f674f8c5b4d0acc1fa69c8a8ff9da4`.
+`timed_benchmark_invocations=0`; no benchmark artifact was created.
+
 ## Required evidence
 
 Descriptor table dump; external compile-fail transcript; eight-category corruption results;

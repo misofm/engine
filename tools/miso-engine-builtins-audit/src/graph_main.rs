@@ -432,12 +432,10 @@ fn prepare_graph_plan(
         },
     })
     .unwrap_or_else(|_| panic!("graph compile"));
-    assert_eq!(artifact.graph.required_bindings.len(), 2);
-    let envelope = artifact.graph.envelope;
+    assert_eq!(artifact.external_binding_nodes().count(), 2);
+    let envelope = artifact.envelope();
     let nodes = artifact
-        .graph
-        .required_bindings
-        .iter()
+        .external_binding_nodes()
         .cloned()
         .map(|node| match node {
             GraphNodeId::TrackStage {
@@ -457,12 +455,14 @@ fn prepare_graph_plan(
             _ => panic!("only external source and output may be bound"),
         })
         .collect();
-    let meters = artifact.meter_consumers;
-    let plan = artifact
-        .graph
-        .bind(GraphRuntimeBindings { envelope, nodes })
+    let bound = artifact
+        .into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        })
         .unwrap_or_else(|_| panic!("graph bind"));
-    (plan, meters)
+    (bound.plan, bound.meter_consumers)
 }
 
 fn run_probe(operation: ForbiddenOperation) -> ! {

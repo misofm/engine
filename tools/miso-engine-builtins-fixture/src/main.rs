@@ -172,11 +172,9 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         },
     })
     .unwrap_or_else(|_| panic!("compile graph"));
-    let envelope = artifact.graph.envelope;
+    let envelope = artifact.envelope();
     let bindings = artifact
-        .graph
-        .required_bindings
-        .iter()
+        .external_binding_nodes()
         .cloned()
         .map(|node| {
             let processor: Box<dyn GraphRuntimeProcessor> = matches!(
@@ -191,13 +189,14 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
             GraphNodeBinding::new(node, processor)
         })
         .collect();
-    let mut plan = artifact
-        .graph
-        .bind(GraphRuntimeBindings {
+    let bound = artifact
+        .into_bound(GraphRuntimeBindings {
             envelope,
             nodes: bindings,
+            observers: Vec::new(),
         })
         .unwrap_or_else(|_| panic!("bind graph"));
+    let mut plan = bound.plan;
     let frames = envelope.quantum.0 as usize;
     let mut pcm = vec![0.0_f32; frames * 2];
     plan.render(
@@ -209,7 +208,7 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
     )
     .expect("render graph");
     let mut records = Vec::new();
-    for mut consumer in artifact.meter_consumers {
+    for mut consumer in bound.meter_consumers {
         let snapshot = consumer
             .consumer
             .try_pop()

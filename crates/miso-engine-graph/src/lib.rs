@@ -327,7 +327,6 @@ pub struct PreparedGraphPlan {
     routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
     observers: Vec<GraphNodeObserverBinding>,
-    internal_bindings: Vec<GraphNodeBinding>,
     _not_sync: Cell<()>,
 }
 pub struct GraphPreparedEffect {
@@ -351,7 +350,6 @@ impl PreparedGraphPlan {
             routes: parts.routes,
             effects: parts.effects,
             observers: parts.observers,
-            internal_bindings: Vec::new(),
             _not_sync: Cell::new(()),
         }
     }
@@ -366,24 +364,21 @@ impl PreparedGraphPlan {
             .collect();
         let required: BTreeSet<_> = self.required_bindings.iter().cloned().collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
-        let overlaps_internal = self
-            .internal_bindings
-            .iter()
-            .any(|binding| supplied.contains(&binding.node));
         let valid_observers = self
             .observers
             .iter()
+            .chain(bindings.observers.iter())
             .all(|binding| matches!(binding.node, GraphNodeId::TrackStage { .. }))
             && {
                 let mut pairs: BTreeSet<_> = BTreeSet::new();
                 self.observers
                     .iter()
+                    .chain(bindings.observers.iter())
                     .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
             };
         if bindings.envelope != self.envelope
             || supplied != required
             || duplicate_binding
-            || overlaps_internal
             || !valid_observers
         {
             let envelope_mismatch = bindings.envelope != self.envelope;
@@ -407,12 +402,12 @@ impl PreparedGraphPlan {
             self.buffer_assignments,
             self.routes,
             self.effects,
-            self.observers,
             {
-                let mut all = self.internal_bindings;
-                all.append(&mut bindings.nodes);
-                all
+                let mut observers = self.observers;
+                observers.append(&mut bindings.observers);
+                observers
             },
+            bindings.nodes,
             envelope.quantum.0 as usize,
         );
         Ok(PreparedRenderPlan::prepare_with_executor(
@@ -426,22 +421,6 @@ impl PreparedGraphPlan {
             Box::new(executor),
         )
         .expect("prevalidated graph plan"))
-    }
-    /// Attach already-prepared internal processors without altering graph topology.
-    pub fn attach_internal_bindings(
-        mut self,
-        mut processors: Vec<GraphNodeBinding>,
-        mut observers: Vec<GraphNodeObserverBinding>,
-    ) -> Self {
-        let internal: BTreeSet<_> = processors
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        self.required_bindings
-            .retain(|node| !internal.contains(node));
-        self.internal_bindings.append(&mut processors);
-        self.observers.append(&mut observers);
-        self
     }
 }
 pub struct PreparedGraphPlanParts {
@@ -462,6 +441,9 @@ pub struct PreparedGraphPlanParts {
 pub struct GraphRuntimeBindings {
     pub envelope: RenderEnvelope,
     pub nodes: Vec<GraphNodeBinding>,
+    /// Ordinary graph observation bindings. Compiler-owned builtins are appended only by their
+    /// sealed artifact wrapper, never by a generic internal-attachment capability.
+    pub observers: Vec<GraphNodeObserverBinding>,
 }
 pub struct GraphBindFailure {
     pub plan: Box<PreparedGraphPlan>,
@@ -1026,6 +1008,7 @@ mod tests {
                     .into_iter()
                     .map(|node| GraphNodeBinding::new(node, Box::new(Noop)))
                     .collect(),
+                observers: Vec::new(),
             },
             input,
         )
@@ -1280,6 +1263,7 @@ mod tests {
                 ),
                 GraphNodeBinding::new(output_node, Box::new(Noop)),
             ],
+            observers: Vec::new(),
         };
         let mut plan = match plan.bind(bindings) {
             Ok(plan) => plan,
@@ -1512,6 +1496,7 @@ mod tests {
                 ),
                 GraphNodeBinding::new(output_node, Box::new(Noop)),
             ],
+            observers: Vec::new(),
         };
         match graph.bind(bindings) {
             Ok(plan) => plan,
@@ -1750,6 +1735,7 @@ mod tests {
                 ),
                 GraphNodeBinding::new(output_node, Box::new(Noop)),
             ],
+            observers: Vec::new(),
         };
         match graph.bind(bindings) {
             Ok(plan) => plan,

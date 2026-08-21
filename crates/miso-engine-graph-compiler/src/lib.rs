@@ -42,9 +42,36 @@ pub struct GraphBuiltinsCompileRequest {
     pub caps: GraphCompileCaps,
 }
 pub struct PreparedGraphBuiltinsArtifact {
-    pub graph: PreparedGraphPlan,
+    graph: PreparedGraphPlan,
+    builtin_processors: Vec<miso_engine_graph::GraphNodeBinding>,
+    builtin_observers: Vec<miso_engine_graph::GraphNodeObserverBinding>,
     pub report: GraphCompileReport,
+    meter_consumers: Vec<MeterConsumer>,
+}
+/// The one-way, sealed builtin attachment result.
+///
+/// ```compile_fail
+/// use miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact;
+///
+/// // The compiler-owned graph and builtin parts are private: external bindings cannot create
+/// // a value carrying internal-builtin provenance.
+/// let _ = PreparedGraphBuiltinsArtifact {};
+/// ```
+///
+/// ```compile_fail
+/// fn generic_internal_attachment(plan: miso_engine_graph::PreparedGraphPlan) {
+///     let _ = plan.attach_internal_bindings(Vec::new(), Vec::new());
+/// }
+/// ```
+pub struct PreparedGraphBuiltinsBound {
+    pub plan: miso_engine_core::realtime::PreparedRenderPlan,
     pub meter_consumers: Vec<MeterConsumer>,
+}
+/// A rejected external binding retains the sealed artifact and caller-owned bindings unchanged.
+pub struct GraphBuiltinsBindFailure {
+    pub artifact: PreparedGraphBuiltinsArtifact,
+    pub bindings: miso_engine_graph::GraphRuntimeBindings,
+    pub code: &'static str,
 }
 pub struct GraphBuiltinsCompileFailure {
     pub effects: EffectPreparedSession,
@@ -125,9 +152,9 @@ impl GraphCompiler {
         };
         let parts = builtins.into_graph_parts();
         Ok(PreparedGraphBuiltinsArtifact {
-            graph: compiled
-                .graph
-                .attach_internal_bindings(parts.processors, parts.observers),
+            graph: compiled.graph,
+            builtin_processors: parts.processors,
+            builtin_observers: parts.observers,
             report: compiled.report,
             meter_consumers: parts.meter_consumers,
         })
@@ -572,6 +599,95 @@ impl GraphCompiler {
                 sha256,
                 dot,
             },
+        })
+    }
+}
+
+impl PreparedGraphBuiltinsArtifact {
+    /// Envelope required by the still-unbound graph.
+    #[must_use]
+    pub const fn envelope(&self) -> RenderEnvelope {
+        self.graph.envelope
+    }
+
+    /// The ordinary external nodes required in addition to compiler-owned builtin processors.
+    pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| &binding.node)
+            .collect();
+        self.graph
+            .required_bindings
+            .iter()
+            .filter(move |node| !builtin_nodes.contains(node))
+    }
+
+    /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
+    ///
+    /// Ordinary callers provide only the external graph nodes. They cannot supply, replace, or
+    /// mark any node as compiler-owned builtin state.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound(
+        mut self,
+        mut bindings: miso_engine_graph::GraphRuntimeBindings,
+    ) -> Result<PreparedGraphBuiltinsBound, GraphBuiltinsBindFailure> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let expected: BTreeSet<_> = self
+            .graph
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_nodes.contains(*node))
+            .cloned()
+            .collect();
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let duplicate_nodes = supplied.len() != bindings.nodes.len();
+        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
+        let mut observer_pairs = BTreeSet::new();
+        let valid_observers = bindings
+            .observers
+            .iter()
+            .chain(self.builtin_observers.iter())
+            .all(|observer| {
+                matches!(observer.node, GraphNodeId::TrackStage { .. })
+                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+            });
+        if bindings.envelope != self.graph.envelope
+            || duplicate_nodes
+            || overlaps_builtin
+            || supplied != expected
+            || !valid_observers
+        {
+            let code = if !valid_observers {
+                "graph.plan.observer"
+            } else if bindings.envelope != self.graph.envelope {
+                "graph.plan.envelope_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err(GraphBuiltinsBindFailure {
+                artifact: self,
+                bindings,
+                code,
+            });
+        }
+        bindings.nodes.append(&mut self.builtin_processors);
+        bindings.observers.append(&mut self.builtin_observers);
+        let plan = match self.graph.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
+        };
+        Ok(PreparedGraphBuiltinsBound {
+            plan,
+            meter_consumers: self.meter_consumers,
         })
     }
 }
@@ -1817,7 +1933,7 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|_| panic!("graph"));
-        assert_eq!(artifact.graph.required_bindings.len(), 2);
+        assert_eq!(artifact.external_binding_nodes().count(), 2);
         let tail = artifact
             .report
             .nodes
@@ -2102,10 +2218,11 @@ mod tests {
                 GraphNodeBinding::new(node, processor)
             })
             .collect();
-        let mut plan = match artifact
-            .graph
-            .bind(GraphRuntimeBindings { envelope, nodes })
-        {
+        let mut plan = match artifact.graph.bind(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        }) {
             Ok(plan) => plan,
             Err(failure) => panic!("bind: {}", failure.code),
         };
