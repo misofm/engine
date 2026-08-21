@@ -189,3 +189,21 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   evidence is still required before an overall verdict.
 - No Issue-051 corpus/audit/target/object/benchmark/listening work ran;
   `timed_benchmark_invocations=0`. **Overall Issue 018 remains incomplete, not PASS.**
+
+### Sol attempt 2 executed bank evidence checkpoint
+
+- Added test-only native W8 evidence with eight distinct per-track states. Base AVX2 is bit-exact
+  to scalar for PCM, complete state payloads and reports across flat recombination, isolated
+  low/high and both-band compression, lookahead 0/5/20 ms, all link modes, one canonical
+  automation Point, signed-zero identity and main-input sanitation. Executed AVX2+FMA remains
+  within the frozen accepted sample bound.
+- Valid track restore and both reset kinds preserve scalar/bank state parity; malformed filter-state
+  restore rejects atomically. Directly injected nonfinite W8 filter state recovers only the matching
+  left lane with output, state and report parity; other lanes/tracks remain unchanged.
+- Exact retained envelopes are 23,544 bytes/track, 94,176 bytes/W4 and 188,352 bytes/W8. Wrong
+  width/count rejects, every malformed request rejects before an unavailable-backend fallback, and
+  a legal W4 backend returns `None` only when either accepted prepared kernel is unavailable.
+- PASS: `cargo fmt --all -- --check`; locked core plus multiband tests (27 core, 7 multiband and one
+  compile-fail doctest); warning-denied all-target core plus multiband Clippy. No production source
+  changed in this evidence checkpoint. Registry/graph closure is still outstanding, so overall
+  Issue 018 remains incomplete. `timed_benchmark_invocations=0`.
