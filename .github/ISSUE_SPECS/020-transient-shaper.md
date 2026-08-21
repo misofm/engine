@@ -30,7 +30,7 @@ Source classification, unbounded history, hidden auto-gain, or implicit channel 
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
-- Compressor
+- Launch feed-forward peak compressor
 
 ## Hazards/decisions
 

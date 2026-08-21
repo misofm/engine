@@ -31,7 +31,7 @@ Unbounded runtime band creation, third-party modules, implicit sidechain link, o
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
 - Launch parametric EQ recurrence derivation and runtime proof
-- Compressor
+- Launch feed-forward peak compressor
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 
 ## Hazards/decisions

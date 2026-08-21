@@ -30,7 +30,7 @@ Unlimited bands, zero-latency claim without proof, hidden phase policy, or adapt
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
-- Compressor
+- Launch feed-forward peak compressor
 
 ## Hazards/decisions
 

@@ -46,7 +46,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Issue-010 source streaming qualification tooling and adversarial evidence
 - Native effect runtime contract and conformance
 - Launch parametric EQ recurrence derivation and runtime proof
-- Compressor
+- Launch feed-forward peak compressor
 - Gate/expander
 - De-esser
 - True-peak limiter

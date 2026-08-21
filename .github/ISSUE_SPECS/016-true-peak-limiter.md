@@ -30,7 +30,7 @@ Claiming a sample-peak limiter is true peak, undeclared latency, dynamic oversam
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
-- Compressor
+- Launch feed-forward peak compressor
 
 ## Hazards/decisions
 
