@@ -44,14 +44,17 @@ Issue 036, **Representable TPT cutoff domain and builtin contract acceptance**, 
 remaining numerical boundary and final nonbenchmark acceptance. Issue 035, **Issue-007 builtin
 qualification tooling, audits, and benchmark**, stopped after two attempts at accepted typed
 fixture-contract checkpoint `0edc51c`; it has no overall PASS and ran no benchmark. Issue 056,
-**Complete independent builtin corpus and corruption proof**, consumes that checkpoint. Issue 057,
-**Builtin direct and graph realtime audit and target qualification**, follows 056. Issue 058,
+**Complete independent builtin corpus and corruption proof**, also stopped after its fixed response
+candidate exposed unresolved repeated cascade recovery. Issue 059, **Builtin cascade decay and
+recovery contract**, owns that decision and any bounded product correction. Issue 060, **Complete
+independent builtin corpus after recovery acceptance**, then owns the remaining corpus seal. Issue 057,
+**Builtin direct and graph realtime audit and target qualification**, follows 060. Issue 058,
 **Builtin benchmark preflight and exactly-once qualification**, follows 057 and alone owns the
-eventual one-invocation/two-round builtin benchmark. Issues 056–058 each permit one Terra attempt
+eventual one-invocation/two-round builtin benchmark. Issues 057–060 each permit one Terra attempt
 plus one Sol correction. The successor timed invocation count is currently zero.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
-then 035 checkpoint -> 056 -> 057 -> 058. Issue 008 needs 036's accepted preparation/metadata and
+then 035 checkpoint -> stopped 056 -> 059 -> 060 -> 057 -> 058. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
 for 057's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 058 seals that candidate and its accepted benchmark; issue 026 waits for both

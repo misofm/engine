@@ -39,6 +39,12 @@ const BENCHMARK_KINDS_V1: [&str; 5] = [
     "meter_success_full",
     "prepare_256_tracks",
 ];
+const RESPONSE_CAST_STATE_TOLERANCE_DB_V1: f64 = 0.005;
+const RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1: f64 = 0.05;
+const RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1: f64 = 0.05;
+const RESPONSE_RESIDUAL_LIMIT_DB_V1: f64 = -100.0;
+const RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1: f64 = -88.0;
+const RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB_V1: f64 = 5e-12;
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -91,6 +97,46 @@ struct FixtureManifestEntryV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FixtureManifestV1 {
     entries: Vec<FixtureManifestEntryV1>,
+}
+
+/// One parsed independent response row from the checked V1 CSV.
+#[derive(Clone, Debug)]
+struct ResponseCsvRowV1 {
+    id: String,
+    rate_hz: u32,
+    section: ResponseSectionV1,
+    cutoff_hz: f64,
+    probe_hz: f64,
+    quantum_frames: u32,
+    rbj_magnitude_db: f64,
+    cast_state_magnitude_db: f64,
+    impulse_dft_magnitude_db: f64,
+    sustained_fundamental_db: f64,
+    sustained_residual_db: f64,
+    sustained_total_db: f64,
+    tail_energy: f64,
+    recovery_count: u64,
+}
+
+/// The frozen response topology encoded by one CSV row.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ResponseSectionV1 {
+    /// One high-pass Butterworth section.
+    HighPass,
+    /// One low-pass Butterworth section.
+    LowPass,
+    /// A fixed 100-Hz HPF followed by a fixed 1-kHz LPF.
+    Cascade,
+}
+
+/// One rate/quantum/section/cutoff/probe response coordinate.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ResponseCoordinateV1 {
+    rate_hz: u32,
+    section: ResponseSectionV1,
+    cutoff_bits: u64,
+    probe_bits: u64,
+    quantum_frames: u32,
 }
 
 /// One strict, complete benchmark input declaration.
@@ -410,34 +456,42 @@ fn responses() -> String {
         "case,rate_hz,section,cutoff_hz,probe_hz,quantum_frames,rbj_magnitude_db,cast_state_magnitude_db,impulse_dft_magnitude_db,sustained_fundamental_db,sustained_residual_db,sustained_total_db,tail_energy,recovery_count\n",
     );
     for rate in RATES {
-        for (section, kind) in response_sections() {
+        for (section, kind) in [
+            ("high_pass", ReferenceFilterKind::HighPass),
+            ("low_pass", ReferenceFilterKind::LowPass),
+        ] {
             for (cutoff_index, cutoff) in response_cutoffs(rate).into_iter().enumerate() {
-                for (probe_index, probe) in probes(rate, cutoff).into_iter().enumerate() {
-                    let rbj = if section == "cascade" {
-                        let (hpf, lpf) = cascade_cutoffs(rate, cutoff);
-                        rbj_butterworth_magnitude_db(
-                            f64::from(rate),
-                            hpf,
-                            ReferenceFilterKind::HighPass,
-                            probe,
-                        )
-                        .expect("HPF oracle")
-                            + rbj_butterworth_magnitude_db(
-                                f64::from(rate),
-                                lpf,
-                                ReferenceFilterKind::LowPass,
-                                probe,
-                            )
-                            .expect("LPF oracle")
-                    } else {
-                        rbj_butterworth_magnitude_db(f64::from(rate), cutoff, kind, probe)
-                            .expect("oracle")
-                    };
+                for (probe_index, probe) in frozen_single_section_probes_v1(rate, cutoff)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let rbj = rbj_butterworth_magnitude_db(f64::from(rate), cutoff, kind, probe)
+                        .expect("independent RBJ oracle");
                     for quantum in QUANTA {
                         let measurement = measure_response(rate, section, cutoff, probe, quantum);
                         writeln!(output, "response-{section}-{rate}-{quantum}-{cutoff_index}-{probe_index},{rate},{section},{cutoff:.17},{probe:.17},{quantum},{rbj:.17},{:.17},{:.17},{:.17},{:.17},{:.17},{:.17},{}", measurement.0, measurement.1, measurement.2, measurement.3, measurement.4, measurement.5, measurement.6).expect("string");
                     }
                 }
+            }
+        }
+        for (probe_index, probe) in frozen_cascade_probes_v1(rate).into_iter().enumerate() {
+            let rbj = rbj_butterworth_magnitude_db(
+                f64::from(rate),
+                100.0,
+                ReferenceFilterKind::HighPass,
+                probe,
+            )
+            .expect("independent HPF RBJ oracle")
+                + rbj_butterworth_magnitude_db(
+                    f64::from(rate),
+                    1_000.0,
+                    ReferenceFilterKind::LowPass,
+                    probe,
+                )
+                .expect("independent LPF RBJ oracle");
+            for quantum in QUANTA {
+                let measurement = measure_response(rate, "cascade", 100.0, probe, quantum);
+                writeln!(output, "response-cascade-{rate}-{quantum}-fixed-{probe_index},{rate},cascade,100.00000000000000000,{probe:.17},{quantum},{rbj:.17},{:.17},{:.17},{:.17},{:.17},{:.17},{:.17},{}", measurement.0, measurement.1, measurement.2, measurement.3, measurement.4, measurement.5, measurement.6).expect("string");
             }
         }
     }
@@ -462,11 +516,11 @@ fn measure_response(
             parameters.right.lpf_hz = cutoff as f32;
         }
         "cascade" => {
-            let (hpf, lpf) = cascade_cutoffs(rate, cutoff);
-            parameters.left.hpf_hz = hpf as f32;
-            parameters.left.lpf_hz = lpf as f32;
-            parameters.right.hpf_hz = hpf as f32;
-            parameters.right.lpf_hz = lpf as f32;
+            debug_assert_eq!(cutoff.to_bits(), 100.0_f64.to_bits());
+            parameters.left.hpf_hz = 100.0;
+            parameters.left.lpf_hz = 1_000.0;
+            parameters.right.hpf_hz = 100.0;
+            parameters.right.lpf_hz = 1_000.0;
         }
         _ => panic!("unknown response section"),
     }
@@ -509,21 +563,14 @@ fn measure_response(
     )
 }
 
-fn cascade_cutoffs(rate: u32, cutoff: f64) -> (f64, f64) {
-    let hpf = (0.5 * cutoff).max(10.0);
-    let lpf = (2.0 * cutoff).min(0.475 * f64::from(rate));
-    debug_assert!(hpf < lpf);
-    (hpf, lpf)
-}
-
 fn cast_state_response_db(rate: u32, section: &str, cutoff: f64, probe: f64) -> f64 {
     match section {
         "high_pass" => cast_state_magnitude_db(rate, cutoff as f32, true, probe),
         "low_pass" => cast_state_magnitude_db(rate, cutoff as f32, false, probe),
         "cascade" => {
-            let (hpf, lpf) = cascade_cutoffs(rate, cutoff);
-            cast_state_magnitude_db(rate, hpf as f32, true, probe)
-                + cast_state_magnitude_db(rate, lpf as f32, false, probe)
+            debug_assert_eq!(cutoff.to_bits(), 100.0_f64.to_bits());
+            cast_state_magnitude_db(rate, 100.0, true, probe)
+                + cast_state_magnitude_db(rate, 1_000.0, false, probe)
         }
         _ => panic!("unknown response section"),
     }
@@ -1389,8 +1436,8 @@ fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
     let manifest = parse_manifest_v1(root)?;
     verify_manifest_bytes_v1(root, &manifest)?;
     verify_path_class_coverage_v1(&manifest)?;
-    let response_ids = verify_cases_v1(root)?;
-    verify_reference_coverage_v1(root, &response_ids)?;
+    let _response_ids = verify_cases_v1(root)?;
+    verify_reference_oracle_v1(root)?;
     verify_jsonl_payloads_v1(root)?;
     verify_benchmark_inputs_v1(root, &manifest)?;
     Ok(())
@@ -1589,7 +1636,7 @@ fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn verify_reference_coverage_v1(root: &Path, expected: &BTreeSet<String>) -> Result<(), String> {
+fn verify_reference_oracle_v1(root: &Path) -> Result<(), String> {
     let bytes = read_regular_file(
         &root.join("reference/filter-response.csv"),
         "reference/filter-response.csv",
@@ -1601,7 +1648,8 @@ fn verify_reference_coverage_v1(root: &Path, expected: &BTreeSet<String>) -> Res
     if lines.next() != Some(HEADER) {
         return Err("reference/filter-response.csv has an invalid V1 header".to_owned());
     }
-    let mut actual = BTreeSet::new();
+    let mut rows = Vec::new();
+    let mut ids = BTreeSet::new();
     for (index, line) in lines.enumerate() {
         let line = line.strip_suffix('\n').ok_or_else(|| {
             format!(
@@ -1616,17 +1664,303 @@ fn verify_reference_coverage_v1(root: &Path, expected: &BTreeSet<String>) -> Res
                 index + 2
             ));
         }
-        if !actual.insert(fields[0].to_owned()) {
+        let row = parse_response_csv_row_v1(fields, index + 2)?;
+        if !ids.insert(row.id.clone()) {
             return Err(format!(
                 "reference/filter-response.csv has duplicate case: {}",
-                fields[0]
+                row.id
+            ));
+        }
+        rows.push(row);
+    }
+    verify_response_grid_v1(&rows)?;
+    verify_response_oracle_tolerances_v1(&rows)?;
+    Ok(())
+}
+
+fn parse_response_csv_row_v1(
+    fields: Vec<&str>,
+    line_number: usize,
+) -> Result<ResponseCsvRowV1, String> {
+    let rate_hz = fields[1].parse::<u32>().map_err(|_| {
+        format!("reference/filter-response.csv rate is not a u32 at row {line_number}")
+    })?;
+    let section = match fields[2] {
+        "high_pass" => ResponseSectionV1::HighPass,
+        "low_pass" => ResponseSectionV1::LowPass,
+        "cascade" => ResponseSectionV1::Cascade,
+        _ => {
+            return Err(format!(
+                "reference/filter-response.csv section is invalid at row {line_number}"
+            ));
+        }
+    };
+    let cutoff_hz = parse_response_f64_v1(fields[3], "cutoff_hz", line_number)?;
+    let probe_hz = parse_response_f64_v1(fields[4], "probe_hz", line_number)?;
+    let quantum_frames = fields[5].parse::<u32>().map_err(|_| {
+        format!("reference/filter-response.csv quantum is not a u32 at row {line_number}")
+    })?;
+    Ok(ResponseCsvRowV1 {
+        id: fields[0].to_owned(),
+        rate_hz,
+        section,
+        cutoff_hz,
+        probe_hz,
+        quantum_frames,
+        rbj_magnitude_db: parse_response_f64_v1(fields[6], "rbj_magnitude_db", line_number)?,
+        cast_state_magnitude_db: parse_response_f64_v1(
+            fields[7],
+            "cast_state_magnitude_db",
+            line_number,
+        )?,
+        impulse_dft_magnitude_db: parse_response_f64_v1(
+            fields[8],
+            "impulse_dft_magnitude_db",
+            line_number,
+        )?,
+        sustained_fundamental_db: parse_response_f64_v1(
+            fields[9],
+            "sustained_fundamental_db",
+            line_number,
+        )?,
+        sustained_residual_db: parse_response_f64_v1(
+            fields[10],
+            "sustained_residual_db",
+            line_number,
+        )?,
+        sustained_total_db: parse_response_f64_v1(fields[11], "sustained_total_db", line_number)?,
+        tail_energy: parse_response_f64_v1(fields[12], "tail_energy", line_number)?,
+        recovery_count: fields[13].parse::<u64>().map_err(|_| {
+            format!(
+                "reference/filter-response.csv recovery_count is not a u64 at row {line_number}"
+            )
+        })?,
+    })
+}
+
+fn parse_response_f64_v1(value: &str, field: &str, line_number: usize) -> Result<f64, String> {
+    let value = value.parse::<f64>().map_err(|_| {
+        format!("reference/filter-response.csv {field} is not an f64 at row {line_number}")
+    })?;
+    if !value.is_finite() {
+        return Err(format!(
+            "reference/filter-response.csv {field} is not finite at row {line_number}"
+        ));
+    }
+    Ok(value)
+}
+
+fn verify_response_grid_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+    let actual: BTreeSet<_> = rows.iter().map(response_coordinate_v1).collect();
+    if actual.len() != rows.len() {
+        return Err("reference/filter-response.csv has duplicate response coordinates".to_owned());
+    }
+    let expected = expected_response_coordinates_v1();
+    if actual != expected {
+        let missing: Vec<_> = expected.difference(&actual).take(1).collect();
+        let unexpected: Vec<_> = actual.difference(&expected).take(1).collect();
+        return Err(format!(
+            "reference/filter-response.csv frozen grid differs; missing={missing:?} unexpected={unexpected:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn response_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseCoordinateV1 {
+    ResponseCoordinateV1 {
+        rate_hz: row.rate_hz,
+        section: row.section,
+        cutoff_bits: row.cutoff_hz.to_bits(),
+        probe_bits: row.probe_hz.to_bits(),
+        quantum_frames: row.quantum_frames,
+    }
+}
+
+fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
+    let mut expected = BTreeSet::new();
+    for rate_hz in RATES {
+        for quantum_frames in QUANTA {
+            for cutoff_hz in response_cutoffs(rate_hz) {
+                let probes = frozen_single_section_probes_v1(rate_hz, cutoff_hz);
+                for section in [ResponseSectionV1::HighPass, ResponseSectionV1::LowPass] {
+                    for probe_hz in &probes {
+                        expected.insert(ResponseCoordinateV1 {
+                            rate_hz,
+                            section,
+                            cutoff_bits: cutoff_hz.to_bits(),
+                            probe_bits: probe_hz.to_bits(),
+                            quantum_frames,
+                        });
+                    }
+                }
+            }
+            for probe_hz in frozen_cascade_probes_v1(rate_hz) {
+                expected.insert(ResponseCoordinateV1 {
+                    rate_hz,
+                    section: ResponseSectionV1::Cascade,
+                    cutoff_bits: 100.0_f64.to_bits(),
+                    probe_bits: probe_hz.to_bits(),
+                    quantum_frames,
+                });
+            }
+        }
+    }
+    expected
+}
+
+fn frozen_single_section_probes_v1(rate_hz: u32, cutoff_hz: f64) -> Vec<f64> {
+    let mut probes = probes(rate_hz, cutoff_hz);
+    probes.push(cutoff_hz);
+    probes.push(0.49 * f64::from(rate_hz));
+    sort_and_deduplicate_f64_v1(&mut probes);
+    probes
+}
+
+fn frozen_cascade_probes_v1(rate_hz: u32) -> Vec<f64> {
+    let mut values = probes(rate_hz, 100.0);
+    values.extend(probes(rate_hz, 1_000.0));
+    sort_and_deduplicate_f64_v1(&mut values);
+    values
+}
+
+fn sort_and_deduplicate_f64_v1(values: &mut Vec<f64>) {
+    values.sort_by(f64::total_cmp);
+    values.dedup_by(|left, right| left.to_bits() == right.to_bits());
+}
+
+fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+    let mut recovery_counts = BTreeMap::new();
+    for row in rows {
+        let recovery_limit = match row.section {
+            ResponseSectionV1::HighPass | ResponseSectionV1::LowPass => 2,
+            ResponseSectionV1::Cascade => 4,
+        };
+        if row.recovery_count > recovery_limit {
+            return Err(format!(
+                "reference/filter-response.csv recovery count exceeds one per section/lane: {} has {}, limit {}",
+                row.id, row.recovery_count, recovery_limit
+            ));
+        }
+        let recovery_coordinate = (row.rate_hz, row.section, row.cutoff_hz.to_bits());
+        if let Some(expected) = recovery_counts.insert(recovery_coordinate, row.recovery_count)
+            && expected != row.recovery_count
+        {
+            return Err(format!(
+                "reference/filter-response.csv recovery count differs across probe/quantum rows: {} has {}, expected {}",
+                row.id, row.recovery_count, expected
+            ));
+        }
+        let rbj = independent_rbj_magnitude_db_v1(row)?;
+        if (row.rbj_magnitude_db - rbj).abs() > RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB_V1 {
+            return Err(format!(
+                "reference/filter-response.csv independent RBJ provenance differs: {}",
+                row.id
+            ));
+        }
+        if rbj >= -120.0
+            && (row.cast_state_magnitude_db - rbj).abs() > RESPONSE_CAST_STATE_TOLERANCE_DB_V1
+        {
+            return Err(format!(
+                "reference/filter-response.csv cast-state tolerance exceeds 0.005 dB: {}",
+                row.id
+            ));
+        }
+        if !is_coherent_measurement_probe_v1(row) {
+            continue;
+        }
+        if rbj >= -120.0
+            && (row.impulse_dft_magnitude_db - rbj).abs() > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+        {
+            return Err(format!(
+                "reference/filter-response.csv impulse-DFT tolerance exceeds 0.05 dB: {}",
+                row.id
+            ));
+        }
+        if rbj >= -90.0 {
+            if (row.sustained_fundamental_db - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1 {
+                return Err(format!(
+                    "reference/filter-response.csv sustained fundamental exceeds 0.05 dB: {}",
+                    row.id
+                ));
+            }
+            if row.sustained_residual_db > RESPONSE_RESIDUAL_LIMIT_DB_V1 {
+                return Err(format!(
+                    "reference/filter-response.csv sustained residual exceeds -100 dB: {}",
+                    row.id
+                ));
+            }
+        } else if row.sustained_total_db > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1 {
+            return Err(format!(
+                "reference/filter-response.csv attenuated total exceeds -88 dB: {}",
+                row.id
+            ));
+        }
+        if row.tail_energy < 0.0 {
+            return Err(format!(
+                "reference/filter-response.csv tail energy is negative: {}",
+                row.id
             ));
         }
     }
-    if &actual != expected {
-        return Err("reference/filter-response.csv coverage differs from cases.toml".to_owned());
-    }
     Ok(())
+}
+
+fn is_coherent_measurement_probe_v1(row: &ResponseCsvRowV1) -> bool {
+    match row.section {
+        ResponseSectionV1::HighPass | ResponseSectionV1::LowPass => {
+            probes(row.rate_hz, row.cutoff_hz)
+                .into_iter()
+                .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits())
+        }
+        ResponseSectionV1::Cascade => frozen_cascade_probes_v1(row.rate_hz)
+            .into_iter()
+            .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits()),
+    }
+}
+
+fn independent_rbj_magnitude_db_v1(row: &ResponseCsvRowV1) -> Result<f64, String> {
+    let rate_hz = f64::from(row.rate_hz);
+    let magnitude = match row.section {
+        ResponseSectionV1::HighPass => rbj_butterworth_magnitude_db(
+            rate_hz,
+            row.cutoff_hz,
+            ReferenceFilterKind::HighPass,
+            row.probe_hz,
+        ),
+        ResponseSectionV1::LowPass => rbj_butterworth_magnitude_db(
+            rate_hz,
+            row.cutoff_hz,
+            ReferenceFilterKind::LowPass,
+            row.probe_hz,
+        ),
+        ResponseSectionV1::Cascade => {
+            if row.cutoff_hz.to_bits() != 100.0_f64.to_bits() {
+                return Err(format!(
+                    "reference/filter-response.csv cascade cutoff is not fixed 100 Hz: {}",
+                    row.id
+                ));
+            }
+            let hpf = rbj_butterworth_magnitude_db(
+                rate_hz,
+                100.0,
+                ReferenceFilterKind::HighPass,
+                row.probe_hz,
+            );
+            let lpf = rbj_butterworth_magnitude_db(
+                rate_hz,
+                1_000.0,
+                ReferenceFilterKind::LowPass,
+                row.probe_hz,
+            );
+            hpf.zip(lpf).map(|(hpf, lpf)| hpf + lpf)
+        }
+    };
+    magnitude.ok_or_else(|| {
+        format!(
+            "independent RBJ oracle rejected frozen response coordinate: {}",
+            row.id
+        )
+    })
 }
 
 fn verify_jsonl_payloads_v1(root: &Path) -> Result<(), String> {

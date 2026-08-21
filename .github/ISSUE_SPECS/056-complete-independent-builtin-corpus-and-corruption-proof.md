@@ -1,5 +1,13 @@
 # 056 Complete independent builtin corpus and corruption proof
 
+## Status
+
+**STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the single bounded Sol correction
+are exhausted. The accepted benchmark-input checkpoint is clean commit `3aeb39c`; the current
+fixed-grid response/checker/CSV candidate is failed technical input only. Issue 059 owns the
+cascade recovery contract and any bounded product correction. Issue 060 then owns completion and
+sealing of the corpus before audit/target qualification may start.
+
 ## Outcome
 
 Complete and seal the independent checked builtin fixture corpus on top of Issue 035's accepted
@@ -85,3 +93,27 @@ Focused PASS: package format and locked check; four focused V1 checker tests; wa
 all-target Clippy; `scripts/check-builtins-fixtures.sh` over 50 manifest-listed files; and
 `git diff --check`. Response/oracle, remaining PCM/meter/diagnostic/resource completeness and the
 final corpus seal remain pending. `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Sol correction — response checkpoint and final verdict
+
+The fixed four-rate response grid, independent analytic checks and serialized production
+measurements were added without changing the frozen rates, domains or tolerances. The original
+checker incorrectly required `recovery_count == 0`; read-only diagnosis proved the legal 44.1-kHz
+20-Hz single HPF row reports exactly one subnormal-state recovery per lane, or aggregate `2`.
+
+The bounded correction instead enforced one recovery per enabled section/lane: aggregate maximum
+`2` for one HPF or LPF and `4` for the fixed HPF-then-LPF cascade, with exact recovery-count
+equality across every probe/quantum row sharing `(rate_hz, section, cutoff_bits)`. The checked
+candidate then failed:
+
+```text
+reference/filter-response.csv recovery count exceeds one per section/lane:
+response-cascade-44100-1-fixed-0 has 34, limit 4
+```
+
+The read-only checked-corpus command and focused valid-corpus test both failed on that same row.
+Workspace format, warning-denied package Clippy and `git diff --check` passed. The response values,
+CSV, manifest, production DSP, tolerances and domains were not changed by the Sol correction.
+Whether repeated downstream cascade recoveries are valid deterministic underflow handling or a
+production defect is unresolved; therefore the corpus is not sealed and Issue 056 has no overall
+PASS. `workload_invocations=0`; `timed_benchmark_invocations=0`; benchmark count remains zero.
