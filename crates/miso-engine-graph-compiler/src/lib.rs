@@ -2853,10 +2853,10 @@ mod tests {
             },
             NativeGraphBindConfigV1 {
                 render_mode: NativeGraphRenderModeV1::DependencyWaves,
-                scheduler: NativeSchedulerConfigV1 {
-                    render_lanes: NonZeroUsize::new(4).expect("four lanes"),
-                    enabled: true,
-                },
+                scheduler: NativeSchedulerConfigV1::new(
+                    NonZeroUsize::new(4).expect("four lanes"),
+                    true,
+                ),
                 maximum_retained_bytes: 1 << 28,
             },
         ) {

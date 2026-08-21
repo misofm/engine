@@ -8,6 +8,9 @@ publish.workspace = true
 [lib]
 name = "miso_engine_graph"
 
+[features]
+test-support = ["miso-engine-native-scheduler/test-support"]
+
 [dependencies]
 miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true

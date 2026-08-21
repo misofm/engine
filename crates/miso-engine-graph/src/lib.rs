@@ -2904,10 +2904,10 @@ mod tests {
                 native_bindings,
                 NativeGraphBindConfigV1 {
                     render_mode: NativeGraphRenderModeV1::DependencyWaves,
-                    scheduler: NativeSchedulerConfigV1 {
-                        render_lanes: core::num::NonZeroUsize::new(2).expect("two lanes"),
-                        enabled: true,
-                    },
+                    scheduler: NativeSchedulerConfigV1::new(
+                        core::num::NonZeroUsize::new(2).expect("two lanes"),
+                        true,
+                    ),
                     maximum_retained_bytes: 1 << 20,
                 },
             ) {
@@ -2962,10 +2962,10 @@ mod tests {
             bindings,
             NativeGraphBindConfigV1 {
                 render_mode: NativeGraphRenderModeV1::SingleThread,
-                scheduler: NativeSchedulerConfigV1 {
-                    render_lanes: core::num::NonZeroUsize::new(4).expect("four lanes"),
-                    enabled: true,
-                },
+                scheduler: NativeSchedulerConfigV1::new(
+                    core::num::NonZeroUsize::new(4).expect("four lanes"),
+                    true,
+                ),
                 maximum_retained_bytes: 1 << 20,
             },
         ) {
@@ -2984,10 +2984,10 @@ mod tests {
             bindings,
             NativeGraphBindConfigV1 {
                 render_mode: NativeGraphRenderModeV1::DependencyWaves,
-                scheduler: NativeSchedulerConfigV1 {
-                    render_lanes: core::num::NonZeroUsize::new(2).expect("two lanes"),
-                    enabled: true,
-                },
+                scheduler: NativeSchedulerConfigV1::new(
+                    core::num::NonZeroUsize::new(2).expect("two lanes"),
+                    true,
+                ),
                 maximum_retained_bytes: 1,
             },
         ) {

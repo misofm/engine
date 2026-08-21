@@ -14,7 +14,7 @@ miso-engine-conformance.workspace = true
 miso-engine-core.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true
-miso-engine-graph.workspace = true
+miso-engine-graph = { workspace = true, features = ["test-support"] }
 miso-engine-graph-compiler.workspace = true
 miso-engine-session.workspace = true
 

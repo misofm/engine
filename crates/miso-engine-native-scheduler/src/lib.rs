@@ -15,6 +15,37 @@ pub struct NativeSchedulerConfigV1 {
     pub render_lanes: NonZeroUsize,
     /// Host policy permission to arm native auxiliary workers.
     pub enabled: bool,
+    /// Fixed test-only coordinator delays applied after each worker completion is dequeued and
+    /// before its parcel is accepted back into the canonical partition. This field is absent from
+    /// normal production builds.
+    #[cfg(feature = "test-support")]
+    test_completion_acceptance_spins: [u16; 3],
+}
+
+impl NativeSchedulerConfigV1 {
+    /// Construct an ordinary production scheduler configuration.
+    #[must_use]
+    pub const fn new(render_lanes: NonZeroUsize, enabled: bool) -> Self {
+        Self {
+            render_lanes,
+            enabled,
+            #[cfg(feature = "test-support")]
+            test_completion_acceptance_spins: [0; 3],
+        }
+    }
+
+    /// Configure bounded test-only completion-acceptance delays.
+    ///
+    /// The test configuration is compiled only with the scheduler's `test-support` feature. It
+    /// delays coordinator acceptance after a real SPSC completion has returned; it cannot affect
+    /// worker execution, parcel ownership, arithmetic, or observer order.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_test_completion_acceptance_spins(mut self, spins: [u16; 3]) -> Self {
+        self.test_completion_acceptance_spins = spins;
+        self
+    }
 }
 
 /// Immutable reason a prepared scheduler uses the sequential parcel driver.
@@ -440,6 +471,8 @@ mod platform {
         workers: Vec<Worker<J>>,
         parallel: bool,
         retained_queue_bytes: usize,
+        #[cfg(feature = "test-support")]
+        completion_acceptance_spins: [u16; 3],
     }
 
     impl<J: NativeSchedulerJobV1> PlatformScheduler<J> {
@@ -453,6 +486,8 @@ mod platform {
                     workers: Vec::new(),
                     parallel: false,
                     retained_queue_bytes: 0,
+                    #[cfg(feature = "test-support")]
+                    completion_acceptance_spins: config.test_completion_acceptance_spins,
                 });
             }
             let worker_count = config.render_lanes.get() - 1;
@@ -537,6 +572,8 @@ mod platform {
                 workers,
                 parallel: true,
                 retained_queue_bytes,
+                #[cfg(feature = "test-support")]
+                completion_acceptance_spins: config.test_completion_acceptance_spins,
             })
         }
 
@@ -558,6 +595,8 @@ mod platform {
             let wave_id = wave.layout().level_id;
             let mut report = SchedulerDispatchReportV1::default();
             let mut issued = 0_usize;
+            #[cfg(feature = "test-support")]
+            let completion_acceptance_spins = self.completion_acceptance_spins;
             for partition_index in 1..wave.partition_count() {
                 let Some(parcel) = wave.partitions[partition_index].parcel.take() else {
                     let recovered = recover_issued(
@@ -567,6 +606,8 @@ mod platform {
                         generation,
                         wave_id,
                         &mut report,
+                        #[cfg(feature = "test-support")]
+                        completion_acceptance_spins,
                     );
                     if let Some(worker_id) = recovered.mismatch {
                         return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -590,6 +631,8 @@ mod platform {
                             generation,
                             wave_id,
                             &mut report,
+                            #[cfg(feature = "test-support")]
+                            completion_acceptance_spins,
                         );
                         if let Some(worker_id) = recovered.mismatch {
                             return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -606,6 +649,8 @@ mod platform {
                         generation,
                         wave_id,
                         &mut report,
+                        #[cfg(feature = "test-support")]
+                        completion_acceptance_spins,
                     );
                     if let Some(worker_id) = recovered.mismatch {
                         return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -625,6 +670,8 @@ mod platform {
                     generation,
                     wave_id,
                     &mut report,
+                    #[cfg(feature = "test-support")]
+                    completion_acceptance_spins,
                 );
                 if let Some(worker_id) = recovered.mismatch {
                     return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -641,6 +688,8 @@ mod platform {
                 generation,
                 wave_id,
                 &mut report,
+                #[cfg(feature = "test-support")]
+                completion_acceptance_spins,
             );
             if let Some(worker_id) = recovered.mismatch {
                 return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -751,6 +800,7 @@ mod platform {
         generation: u64,
         wave_id: u64,
         report: &mut SchedulerDispatchReportV1,
+        #[cfg(feature = "test-support")] completion_acceptance_spins: [u16; 3],
     ) -> Recovery<J::Error> {
         let mut first_error = None;
         let mut mismatch = None;
@@ -761,6 +811,13 @@ mod platform {
                 }
                 core::hint::spin_loop();
             };
+            #[cfg(feature = "test-support")]
+            delay_completion_acceptance(
+                completion_acceptance_spins
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
             let expected_partition = worker_id + 1;
             if completion.generation != generation
                 || completion.wave_id != wave_id
@@ -786,6 +843,13 @@ mod platform {
         Recovery {
             mismatch,
             first_error,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn delay_completion_acceptance(spins: u16) {
+        for _ in 0..spins {
+            core::hint::spin_loop();
         }
     }
 
@@ -967,10 +1031,7 @@ mod tests {
     fn disabled_and_narrow_preparation_select_the_same_sequential_parcels() {
         let transcript = Arc::new(Mutex::new(Vec::new()));
         let mut scheduler = NativeSchedulerV1::prepare(
-            NativeSchedulerConfigV1 {
-                render_lanes: NonZeroUsize::new(4).expect("lanes"),
-                enabled: false,
-            },
+            NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), false),
             4,
             9,
         )
@@ -1010,10 +1071,7 @@ mod tests {
             .collect();
         let mut rendered = RenderWaveV1::new(8, partitions).expect("wave");
         let mut scheduler = NativeSchedulerV1::prepare(
-            NativeSchedulerConfigV1 {
-                render_lanes: NonZeroUsize::new(4).expect("lanes"),
-                enabled: true,
-            },
+            NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true),
             4,
             10,
         )

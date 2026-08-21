@@ -211,6 +211,30 @@ mod native {
         plan_id: u64,
         transcript_capacity: usize,
     ) -> Result<PreparedQ128Fixture, String> {
+        prepare_q128_fixture_with_completion_acceptance_spins(
+            sample_rate_hz,
+            render_lanes,
+            render_mode,
+            plan_id,
+            transcript_capacity,
+            [0; 3],
+        )
+    }
+
+    /// Prepare the q128 graph with fixed test-only worker-completion acceptance delays.
+    ///
+    /// The delays are carried by the prepared scheduler and apply only after a real completion
+    /// parcel has been dequeued by the coordinator. They are unavailable from normal engine
+    /// production builds and do not alter graph execution, reduction, or observation ordering.
+    #[doc(hidden)]
+    pub fn prepare_q128_fixture_with_completion_acceptance_spins(
+        sample_rate_hz: u32,
+        render_lanes: usize,
+        render_mode: Q128RenderMode,
+        plan_id: u64,
+        transcript_capacity: usize,
+        completion_acceptance_spins: [u16; 3],
+    ) -> Result<PreparedQ128Fixture, String> {
         let mut model = parse_session_toml(SESSION_FIXTURE).map_err(|_| "q128.parse".to_owned())?;
         model.sample_rate_hz = sample_rate_hz;
         model.quantum_frames = Q128_QUANTUM_FRAMES as u32;
@@ -385,11 +409,11 @@ mod native {
                 },
                 NativeGraphBindConfigV1 {
                     render_mode: render_mode.native_mode(),
-                    scheduler: NativeSchedulerConfigV1 {
-                        render_lanes: NonZeroUsize::new(render_lanes)
-                            .ok_or_else(|| "q128.lanes".to_owned())?,
-                        enabled: true,
-                    },
+                    scheduler: NativeSchedulerConfigV1::new(
+                        NonZeroUsize::new(render_lanes).ok_or_else(|| "q128.lanes".to_owned())?,
+                        true,
+                    )
+                    .with_test_completion_acceptance_spins(completion_acceptance_spins),
                     maximum_retained_bytes: 1 << 29,
                 },
             )
@@ -529,6 +553,7 @@ mod tests {
     const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
     const BLOCKS: u64 = 3;
     const OBSERVERS_PER_BLOCK: usize = 2;
+    const PERTURBATION_SEED: u64 = 0x0000_0000_0009_d37a;
 
     #[test]
     fn q128_is_byte_identical_at_every_launch_rate_and_lane_count() {
@@ -579,6 +604,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn q128_exactly_32_seeded_completion_acceptance_perturbations_match_sequential() {
+        let perturbations = seeded_completion_acceptance_perturbations();
+        assert_eq!(perturbations.len(), 32);
+        assert_eq!(
+            perturbation_transcript_hash(&perturbations),
+            0x48b7_2da8_4e0c_35e7,
+            "frozen completion-acceptance perturbation transcript"
+        );
+
+        let mut baseline = fixture(48_000, 1, Q128RenderMode::Sequential, 39_101);
+        let baseline_pcm = render_blocks(&mut baseline);
+        let baseline_counters = baseline.plan.qualification_counters();
+        let baseline_observers = baseline.observer_records();
+        let baseline_pdc = baseline.pdc_samples;
+
+        for (index, spins) in perturbations.into_iter().enumerate() {
+            let mut perturbed = prepare_q128_fixture_with_completion_acceptance_spins(
+                48_000,
+                4,
+                Q128RenderMode::DependencyWaves,
+                39_200 + index as u64,
+                BLOCKS as usize * OBSERVERS_PER_BLOCK,
+                spins,
+            )
+            .unwrap_or_else(|error| {
+                panic!("perturbation {index} fixture preparation failed: {error}")
+            });
+            let pcm = render_blocks(&mut perturbed);
+            for (block, (expected, actual)) in baseline_pcm.iter().zip(&pcm).enumerate() {
+                assert_pcm_eq(
+                    expected,
+                    actual,
+                    48_000,
+                    block as u64,
+                    "four_lane_perturbed",
+                );
+            }
+            assert_eq!(
+                perturbed.pdc_samples, baseline_pdc,
+                "perturbation {index} PDC"
+            );
+            assert_eq!(
+                perturbed.plan.qualification_counters(),
+                baseline_counters,
+                "perturbation {index} counters"
+            );
+            assert_eq!(
+                perturbed.observer_records(),
+                baseline_observers,
+                "perturbation {index} observer transcript"
+            );
+            assert_eq!(
+                perturbed.observer_record_count(),
+                BLOCKS as usize * OBSERVERS_PER_BLOCK,
+                "perturbation {index} complete observer transcript"
+            );
+        }
+    }
+
     fn fixture(rate: u32, lanes: usize, mode: Q128RenderMode, plan_id: u64) -> PreparedQ128Fixture {
         prepare_q128_fixture(
             rate,
@@ -595,6 +680,35 @@ mod tests {
         plan.render(&mut pcm, absolute_sample)
             .unwrap_or_else(|error| panic!("q128 render failed: {error:?}"));
         pcm
+    }
+
+    fn render_blocks(plan: &mut PreparedQ128Fixture) -> Vec<Vec<f32>> {
+        (0..BLOCKS)
+            .map(|block| render(plan, block * Q128_QUANTUM_FRAMES as u64))
+            .collect()
+    }
+
+    fn seeded_completion_acceptance_perturbations() -> [[u16; 3]; 32] {
+        let mut state = PERTURBATION_SEED;
+        core::array::from_fn(|_| {
+            core::array::from_fn(|_| {
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut word = state;
+                word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                word ^= word >> 31;
+                ((word & 0x3f) as u16).saturating_add(1)
+            })
+        })
+    }
+
+    fn perturbation_transcript_hash(perturbations: &[[u16; 3]; 32]) -> u64 {
+        perturbations
+            .iter()
+            .flat_map(|spins| spins.iter().flat_map(|spin| spin.to_le_bytes()))
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
     }
 
     fn assert_pcm_eq(left: &[f32], right: &[f32], rate: u32, block: u64, mode: &str) {

@@ -8,6 +8,9 @@ publish.workspace = true
 [lib]
 name = "miso_engine_native_scheduler"
 
+[features]
+test-support = []
+
 [dependencies]
 miso-engine-core.workspace = true
 

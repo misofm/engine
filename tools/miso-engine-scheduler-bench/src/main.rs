@@ -376,10 +376,10 @@ fn prepared_graph(
             },
             NativeGraphBindConfigV1 {
                 render_mode: mode.render_mode(),
-                scheduler: NativeSchedulerConfigV1 {
-                    render_lanes: NonZeroUsize::new(mode.lanes()).expect("nonzero lanes"),
-                    enabled: true,
-                },
+                scheduler: NativeSchedulerConfigV1::new(
+                    NonZeroUsize::new(mode.lanes()).expect("nonzero lanes"),
+                    true,
+                ),
                 maximum_retained_bytes: 1 << 29,
             },
         )
