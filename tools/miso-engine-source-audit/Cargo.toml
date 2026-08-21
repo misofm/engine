@@ -10,7 +10,7 @@ name = "miso_engine_source_audit"
 path = "src/main.rs"
 
 [[bin]]
-name = "miso_engine_source_duration_audit"
+name = "miso_engine_source_audit_duration"
 path = "src/duration_main.rs"
 
 [dependencies]

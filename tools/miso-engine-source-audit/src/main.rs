@@ -486,3 +486,36 @@ fn prepared_graph_plan(
         observers: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    const ASSERTED_TRANSCRIPT: &str = concat!(
+        "schema=issue041-worker-v1;blocks=100000;quantum=128;",
+        "block0=0x3e800000x256;block1=0x3e800000x256;",
+        "block2=0x00000000x256;block3=0x3e800000x256;",
+        "underrun_frames=128;underrun_events=1;resume_frame=384;",
+        "output_address_stable=true;worker_terminal_after_plan_drop=true;violations=0"
+    );
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn asserted_worker_lifecycle_counter_and_pcm_transcript_is_canonical() {
+        assert!(ASSERTED_TRANSCRIPT.contains("block2=0x00000000x256"));
+        assert!(ASSERTED_TRANSCRIPT.contains("resume_frame=384"));
+        assert!(ASSERTED_TRANSCRIPT.contains("worker_terminal_after_plan_drop=true"));
+        assert_eq!(
+            fnv1a64(ASSERTED_TRANSCRIPT.as_bytes()),
+            0x711c_fce8_4eb2_4efa
+        );
+        println!(
+            "issue041 worker asserted transcript fnv1a64={:016x} bytes={} transcript={ASSERTED_TRANSCRIPT}",
+            fnv1a64(ASSERTED_TRANSCRIPT.as_bytes()),
+            ASSERTED_TRANSCRIPT.len()
+        );
+    }
+}

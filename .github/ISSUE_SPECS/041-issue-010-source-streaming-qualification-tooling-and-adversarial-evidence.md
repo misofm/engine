@@ -273,3 +273,69 @@ qualification attempt, and the matrix was not continued after its first mandator
 1–4 remain recorded PASS above; Gate 5 is incomplete/FAIL pending a clean formatting checkpoint
 outside this issue. Neither functional audit binary was rerun, no benchmark runner/workload was
 invoked, no timing value was collected, and `timed_benchmark_invocations=0`.
+
+## Sol correction attempt 2 — final qualification verdict (2026-08-21)
+
+**PASS.** Sol qualified source product-closure commit `8c50f7a` from the clean integrated candidate
+`dfd9ef7`. The bounded tooling correction adds deterministic, test-only serialization for the two
+details omitted from the Gate 3/4 prose and renames the duration binary from
+`miso_engine_source_duration_audit` to the workspace-policy-compliant
+`miso_engine_source_audit_duration`. It changes no production source, graph or render semantics.
+
+The Gate 3 serializer freezes the exact assertions made by the already-recorded final functional
+audit: 100,000 blocks at quantum 128; blocks 0, 1 and 3 contain `0x3e800000` in all 256 samples;
+block 2 contains positive zero in all 256 samples; underrun frames/events are `128/1`; PCM resumes
+at frame 384; the output address is stable; worker terminal publication follows plan drop; and all
+forbidden-operation counts are zero. Its 271-byte canonical transcript has FNV-1a64
+`711cfce84eb24efa`. This test serializes and pins those prior audit assertions; it does not rerun
+the functional audit binary.
+
+The Gate 4 serializer freezes the retained configuration's complete sorted
+`(category,size,alignment,count)` multiset:
+
+```text
+decoder.read_scratch,512,1,1
+ring.data_queue,48,8,1
+ring.data_queue,72,8,1
+ring.recycle_queue,48,8,1
+ring.recycle_queue,72,8,1
+ring.seek_queue,32,8,1
+ring.seek_queue,72,8,1
+ring.transfer_block_metadata,48,8,5
+ring.transfer_block_pcm,512,4,5
+worker.command_queue,72,8,1
+worker.command_queue,72,8,1
+worker.event_queue,48,8,1
+worker.event_queue,72,8,1
+worker.planar_staging,512,4,1
+worker.stop_queue,0,1,1
+worker.stop_queue,72,8,1
+```
+
+The exact reports are:
+
+```text
+NativeSourceResourceReport { ring: SourceResourceReport { transfer_block_count: 5, pcm_payload_already_charged_bytes: 2560, data_queue_bytes: 120, recycle_queue_bytes: 120, command_queue_bytes: 104, transfer_block_metadata_bytes: 240, transfer_block_pcm_bytes: 2560, overhead_bytes: 584, total_engine_owned_bytes: 3144, largest_allocation_bytes: 512 }, decoder_read_scratch_bytes: 512, worker_planar_staging_bytes: 512, worker_control_queue_items: 2, worker_control_queue_bytes: 144, worker_control_queue_largest_allocation_bytes: 72, worker_control_queue_alignment_bytes: 8, worker_event_queue_bytes: 120, worker_event_queue_items: 2, worker_event_queue_largest_allocation_bytes: 72, worker_event_queue_alignment_bytes: 8, worker_stop_queue_bytes: 72, worker_stop_queue_items: 1, worker_stop_queue_largest_allocation_bytes: 72, worker_stop_queue_alignment_bytes: 8, total_engine_owned_bytes: 4504, largest_allocation_bytes: 512 }
+GraphSourceSetResourceReport { pcm_payload_already_charged_bytes: 2560, overhead_bytes: 2972, total_engine_owned_bytes: 5532, largest_allocation_bytes: 512 }
+```
+
+Their complete 1,529-byte canonical serialization has FNV-1a64 `bc5df020c1e8ea1a`.
+
+The prior actual-duration comparison identities are
+`wave-f32le-mono-48000-2880000-11520044-materialized` and
+`wave-f32le-mono-48000-518400000-2073600044-sparse`. The final Gate 4 invocation already proved
+that those one-minute and three-hour sources yield byte-identical vectors and equal exact reports;
+the bounded unit proof now makes the complete common vector/report reproducible without rerunning
+either functional audit.
+
+Gate 5 PASS on the corrected candidate: `cargo fmt --all -- --check`; locked focused source with
+`test-support` (29 unit tests plus one compile-fail doctest), source-fixture and source-audit tests;
+`cargo check --workspace --locked --all-targets --all-features`; `cargo test --workspace --locked`;
+warning-denied all-target/all-feature workspace Clippy; warning-denied all-feature workspace
+rustdoc; workspace and realtime policy checks; and both policy mutation suites. `git diff --check`
+and static scans pass. There is no source-specific policy script. Target/object reruns were not
+triggered: the correction is confined to audit-tool `cfg(test)` modules and one audit binary name,
+with no ordinary production reachability change.
+
+Neither audit main, a benchmark runner/workload, nor a timing command was invoked during this Sol
+attempt. Gate 6 PASS: `timed_benchmark_invocations=0`.

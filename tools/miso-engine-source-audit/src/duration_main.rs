@@ -283,3 +283,54 @@ fn layout_total(entries: &[NativeSourceAllocationLayoutEntry]) -> Result<u64, St
             .ok_or_else(|| "layout total overflow".to_owned())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical_accounting(capture: &Capture) -> String {
+        let mut text = String::new();
+        for entry in &capture.layout {
+            text.push_str(entry.category);
+            text.push('=');
+            text.push_str(&entry.requested_size_bytes.to_string());
+            text.push('/');
+            text.push_str(&entry.alignment_bytes.to_string());
+            text.push('/');
+            text.push_str(&entry.count.to_string());
+            text.push(';');
+        }
+        text.push_str(&format!(
+            "source={:?};graph={:?}",
+            capture.source_report, capture.graph_report
+        ));
+        text
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn exact_duration_independent_accounting_serialization_is_canonical() {
+        let path = std::env::temp_dir().join(format!(
+            "miso-engine-source-audit-unit-{}.wav",
+            std::process::id()
+        ));
+        write_wave(&path, QUANTUM.into(), false).expect("write bounded unit WAVE");
+        let capture = capture(&path, QUANTUM.into()).expect("capture bounded unit accounting");
+        remove_file(&path).expect("remove bounded unit WAVE");
+
+        assert_eq!(capture.layout.len(), 16);
+        assert_eq!(layout_total(&capture.layout).expect("layout total"), 4_504);
+        let canonical = canonical_accounting(&capture);
+        assert_eq!(fnv1a64(canonical.as_bytes()), 0xbc5d_f020_c1e8_ea1a);
+        println!(
+            "issue041 accounting fnv1a64={:016x} bytes={} minute_identity=wave-f32le-mono-48000-2880000-11520044-materialized multi_hour_identity=wave-f32le-mono-48000-518400000-2073600044-sparse accounting={canonical}",
+            fnv1a64(canonical.as_bytes()),
+            canonical.len()
+        );
+    }
+}
