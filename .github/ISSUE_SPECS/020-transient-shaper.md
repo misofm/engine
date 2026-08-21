@@ -1,49 +1,137 @@
-# 020 Transient shaper
+# 020 Launch dual-envelope transient shaper
 
 ## Outcome
 
-Implement a dual-mono transient shaper with explicit envelope, separation and lookahead behavior.
+Deliver one causal, dual-mono transient shaper whose fast/slow peak-envelope contrast controls
+attack and sustain gain, with scalar processing, homogeneous W4/W8 banks, scalar tails and one
+launch-registry-to-graph vertical.
 
 ## Context
 
-Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; 176,400, 192,000, 352,800, and 384,000 Hz are extended compatibility evidence only. Source/engine mismatches have no implicit SRC. Output is PCM.
+Engine V2 is greenfield and must never inspect or inherit V1/legacy. The realtime plane owns a
+preallocated immutable-shape `PreparedRenderPlan`; render performs no allocation/free, locks,
+feature detection, I/O, logging, syscalls, panic/unwind, structural mutation or data-dependent
+unbounded work. Audio/state/parameters are dual-mono except for an explicit detector-link mode.
+Launch rates are exactly 44,100, 48,000, 88,200 and 96,000 Hz.
 
-This issue is independently implementable only after its exact dependencies are complete. Its change must follow the Sol-approved brief → Terra attempt 1 with evidence → Sol adversarial review workflow; Sol may make at most two further revisions, then the work must be rescoped/rebriefed rather than weakening gates.
+This issue consumes the accepted native-effect runtime, Issue-013 dynamics conventions, prepared
+compressor gain/mix bank kernel, launch registry and graph/PDC seams. It has exactly **two total
+attempts**: Terra attempt 1 and one bounded Sol correction/review. A second failure stops and
+requires a stateless rebrief; no gate may weaken. `timed_benchmark_invocations=0` and no benchmark
+is authorized here.
 
 ## Scope
 
-Implement attack/sustain amounts, detector speed, sensitivity, range, link mode, optional lookahead, mix and quality modes using bounded state.
+- Add `miso.transient-shaper`, contract 1.0, state layout 1 and Normal quality at every launch
+  rate, with required dual-mono `main-in`/`main-out` and no sidechain.
+- Use fixed causal fast and slow instantaneous-peak followers. Their signed dB contrast selects
+  attack versus sustain shaping; output gain is bounded to +/-18 dB.
+- Reuse `LinkMode::{DualMono, Maximum, Average}`. Linking shares only the current detector
+  magnitude; envelope, parameter, recovery and state payload remain lane-local.
+- Automate only attack amount, sustain amount and wet mix with exact 64-update Block Point ramps.
+  V1 has fixed detector timing/range, no lookahead, zero latency and `TailSamples::Finite(0)`.
+- Implement scalar and homogeneous W4/W8 banks using the accepted prepared compressor gain/mix
+  kernel, scalar tails, registry/effect-compiler integration and one ten-track graph fixture.
 
 ## Required public interfaces/contracts
 
-`TransientShaper` implements `NativeEffect`; envelope/difference equation and timing units are documented; latency/tail and parameter smoothing are declared.
+`TransientShaperFactory` implements `NativeEffectFactory`; scalar and bank products implement the
+accepted `PreparedNativeEffect` and `PreparedNativeEffectBank` traits. Descriptor positions and
+stable IDs are identical; all controls are readable `PerLane` values:
+
+| ID | control | unit | inclusive domain | default | mapping | automation/smoothing |
+|---:|---|---|---:|---:|---|---|
+| 1 | attack amount | linear (`%` display) | -1..1 | 0 | linear | Block Point / Linear 64 |
+| 2 | sustain amount | linear (`%` display) | -1..1 | 0 | linear | Block Point / Linear 64 |
+| 3 | mix | linear | 0..1 | 1 | linear | Block Point / Linear 64 |
+
+For linked detector magnitude `u`, fixed fast/slow envelopes `f,s`, and smoothed values `A,S,M`:
+
+```text
+e = a*e_previous + (1-a)*u       // attack coefficient when u>e_previous, release otherwise
+c = clamp(20*log10(max(f,1e-8)) - 20*log10(max(s,1e-8)), -24, 24)
+shape_db = clamp(A*max(c,0) + S*max(-c,0), -18, 18)
+gain = 10^(0.05*shape_db)
+wet = x*gain
+out = x + M*(wet-x)
+```
+
+The tracked brief freezes coefficient bits, operation order, identity selection, state/resources,
+automation, reset/restore/recovery and scalar/W4/W8 parity. Each lane state is exactly 11 words / 44
+bytes; complete scalar state is 88 bytes and fixed reset defaults are 24 bytes. Exact retained
+effect envelopes are 112 bytes per scalar track, 448 bytes/W4 and 896 bytes/W8.
 
 ## Deliverables
 
-Effect/note, impulse/decay fixtures, metadata, SIMD kernels, tests, benchmark and listening evidence.
+- `miso-engine-transient-shaper` descriptor/factory, scalar and homogeneous bank products;
+- the smallest effect-compiler/registry integration using existing seams;
+- independent representative envelope/contrast/identity/state/recovery tests; and
+- one width-correct ten-track bank-plus-tail graph/resource fixture.
 
 ## Explicit non-goals
 
-Source classification, unbounded history, hidden auto-gain, or implicit channel linkage.
+Lookahead, sidechain, RMS, hold, adaptive/program-dependent timing, detector filters, user detector
+speed/sensitivity/range controls, another envelope topology, another quality or mode, auto gain,
+clipping, broad corpus/matrices, 10,000 or million-sample rows, realtime audit, cross-target or
+instruction qualification, benchmark/preflight/timing, optimization, audition or completed
+listening. Qualification belongs only to Issue 054, **Launch transient-shaper qualification,
+realtime audit, and benchmark**.
 
 ## Dependencies by exact issue title
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
+- AoSoA SIMD rack compiler and scalar/AVX2/WASM kernels
+- Production SIMD builtin bank graph retention and reachability qualification
+- Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Launch feed-forward peak compressor
+
+Stopped Issue 008 contributes only its preserved generic bank architecture, not an overall PASS or
+benchmark claim.
+
+## Sol implementation brief
+
+**READY FOR TERRA ATTEMPT 1 after local/remote synchronization.** The authoritative brief is
+`.github/ISSUE_SPECS/BRIEFS/020-transient-shaper.md`. This docs checkpoint performs no
+implementation, benchmark or GitHub mutation.
 
 ## Hazards/decisions
 
-Transient processing must document how attack and sustain paths are separated and safe behavior for zero/silence/denormals.
+The product is truthfully described as a fixed dual-envelope contrast shaper, not a source
+classifier. Detector/gain separation and one-pole time constants follow `[REISS-COMP]`; bounded
+filter state follows `[SMITH-SASP]`. Zero lookahead avoids an invented latency framework. A zero
+audio input produces zero output despite retained envelope state, so the exact audio tail is zero.
 
 ## Acceptance gates with objective measurements
 
-Impulse and decaying-envelope gain match the independent design within 0.1 dB and timing within the greater of one sample or 2%; behavior is invariant across all four launch rates and tested quanta within the frozen scalar tolerance; null setting preserves signal within 1e-6; no NaN/Inf after one million samples; 0 render alloc.
+1. Descriptor/program/quality/link/port/parameter/resource mutations reject transactionally at all
+   launch rates; exact and one-byte-below state/scratch/bank caps pass.
+2. Independent `f64` impulse, step and decaying-burst rows prove the four frozen envelope time
+   constants, contrast sign and active +/-attack/sustain behavior within 0.01 dB and the greater of
+   one sample or 2% timing.
+3. Defaults, bypass, mix zero and computed zero shape return input bits exactly while warming state;
+   signed-zero, silence and zero-latency/tail metadata pass.
+4. All links distinguish as specified. Exact first/63rd/64th automation updates, retarget, both
+   resets, active continuation restore, sanitation, injected lane recovery and lane/track isolation
+   pass without hidden coupling.
+5. Available same-target scalar/W4/W8 output, complete state and reports are bit-identical for
+   finite-normal inputs. AVX2+FMA has zero contractions; unavailable legal backends fall back only
+   after complete request validation. Scalar tails cover every count.
+6. A ten-track graph retains host-width-correct full banks plus scalar tails, stable membership,
+   zero latency/PDC, canonical enabled/bypass shape, scalar-delegate PCM/state and transactional
+   corrected post-bank one-byte-below ownership return.
+7. Focused and clean locked workspace format/check/test/Clippy/rustdoc plus applicable workspace,
+   realtime, effect-runtime, rack and graph policies pass. No Issue-054 or excluded command runs;
+   `timed_benchmark_invocations=0`.
 
 ## Target matrix
 
-Native scalar/AVX2 and 4-lane portable/Wasm.
+Product closure executes scalar and the available native bank backend. W4/W8 source/selection
+contracts are mandatory; complete native/AArch64/Wasm target and instruction evidence is Issue 054.
 
 ## Required evidence
 
-Envelope plots, null/stress results, performance data, and listening evidence.
+Candidate identity; descriptor/coefficient/state/resource tables; independent representative
+maxima; identity/link/automation/reset/restore/recovery/bank/graph rows; exact commands and policies;
+attempt count; strict Terra/final Sol verdict; successor link; and
+`timed_benchmark_invocations=0`.

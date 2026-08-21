@@ -155,6 +155,15 @@ instructions, the sole eventual one-warmup/two-round descriptive benchmark and l
 Issues 053 and 052 each permit one Terra attempt plus one Sol correction and start with zero timed
 invocations; Issue 052 gates only release qualification Issue 026.
 
+Issue 020, **Launch dual-envelope transient shaper**, owns one fixed Normal-quality causal product:
+fast/slow peak-envelope contrast, attack/sustain/mix controls, explicit detector links, zero
+latency/tail, scalar/W4/W8 execution and representative registry/graph closure. Issue 054,
+**Launch transient-shaper qualification, realtime audit, and benchmark**, follows 020 and alone owns
+the expanded corpus, exact seeded/long rows, realtime audit, targets/instructions, sole eventual
+one-warmup/two-round descriptive benchmark and listening handoff. Both allow one Terra attempt plus
+one Sol correction and start with zero timed invocations; Issue 054 gates only release
+qualification Issue 026.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

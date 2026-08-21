@@ -58,7 +58,8 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Launch multiband compressor qualification, realtime audit, and benchmark
 - Launch soft-clip bank and graph closure
 - Launch saturator/clipper qualification, realtime audit, and benchmark
-- Transient shaper
+- Launch dual-envelope transient shaper
+- Launch transient-shaper qualification, realtime audit, and benchmark
 - Dual-mono/stereo delay
 - Optional binary WebSocket sidecar
 
