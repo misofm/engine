@@ -51,7 +51,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Launch gate reset, restore, and recovery proof
 - Launch gate/expander qualification, realtime audit, and benchmark
 - De-esser
-- Launch fixed-4x true-peak safety limiter
+- Launch true-peak limiter bank and graph closure
 - Launch true-peak limiter qualification, realtime audit, and benchmark
 - Dynamic EQ
 - Multiband compressor

@@ -190,5 +190,6 @@ pass would alter the frozen gain law, so this checkpoint stops for Sol classific
 **Final Sol verdict: FAIL/STOP for Issue 016 overall.** The same-architecture scalar correction is
 accepted technical input, but homogeneous banks, registry/graph/PDC and the remaining frozen
 product evidence were not implemented in either authorized attempt. They cannot be reported as
-PASS or completed in a third attempt. Preserve this scalar checkpoint and move only the unfinished
-launch-product closure to a new stateless successor before Issue 049 qualification.
+PASS or completed in a third attempt. Preserve this scalar checkpoint. Issue 050, **Launch
+true-peak limiter bank and graph closure**, is the stateless successor for only the unfinished
+launch-product closure and must pass before Issue 049 qualification.

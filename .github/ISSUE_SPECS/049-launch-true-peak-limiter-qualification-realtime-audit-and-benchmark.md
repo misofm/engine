@@ -8,10 +8,11 @@ one controlled descriptive benchmark and an honest audition/listening handoff.
 
 ## Context
 
-Issue **Launch fixed-4x true-peak safety limiter** owns the complete product contract: estimator,
-guard, gain law, parameters, latency, state/resources, scalar/W4/W8 processing and graph/PDC
-vertical. This stateless successor adds qualification only. It cannot change those contracts; a
-production defect fails and returns to a new product issue.
+Stopped Issue **Launch fixed-4x true-peak safety limiter** preserves the accepted corrected scalar
+contract as technical input. Issue **Launch true-peak limiter bank and graph closure** owns the
+remaining W4/W8, scalar-tail, registry/effect-compiler and graph/PDC product closure. This stateless
+successor starts only after Issue 050 passes and adds qualification only. It cannot change either
+accepted product contract; a production defect fails and returns to a new product issue.
 
 There are exactly **two total attempts**: one Terra qualification/review attempt and one bounded
 Sol test/tool correction. A second failure stops. No benchmark is authorized at creation;
@@ -48,11 +49,11 @@ browser runtime claims without execution; benchmark retry; or fabricated human l
 
 ## Dependencies by exact issue title
 
-- Launch fixed-4x true-peak safety limiter
+- Launch true-peak limiter bank and graph closure
 
 ## Sol implementation brief
 
-**REQUIRES A TRACKED SOL BRIEF AFTER ISSUE 016 PASSES.** Freeze exact official fixture identities,
+**REQUIRES A TRACKED SOL BRIEF AFTER ISSUE 050 PASSES.** Freeze exact official fixture identities,
 independent reconstruction, deterministic seeds/rows, audit graph/counters, target/object commands,
 benchmark workloads/schema and listening handoff before implementation. No timing is authorized by
 this issue body.
@@ -62,9 +63,9 @@ this issue body.
 1. Checked independent fixtures cover estimator under-read, high-frequency/intersample peaks,
    limiter ceiling, release/lookahead/link/automation/state/recovery boundaries and reject every
    production-oracle dependency or corpus integrity mutation.
-2. Frozen deterministic long matrices at all launch rates remain finite, meet the Issue-016
-   estimator/ceiling contracts and report zero recovery for valid input; invalid probes affect only
-   the injected lane.
+2. Frozen deterministic long matrices at all launch rates remain finite, meet the accepted
+   Issue-016 scalar and Issue-050 product-closure contracts and report zero recovery for valid
+   input; invalid probes affect only the injected lane.
 3. Expanded counts/cohorts and repeated equivalent preparation preserve bank membership, scalar
    tails, graph/PDC bytes, PCM/state/report hashes and transactional ownership.
 4. Exactly 100,000 real prepared-graph renders exercise bank and scalar paths with stable addresses
@@ -87,7 +88,8 @@ Native scalar and runtime-gated x86 AVX2/AVX2+FMA; AArch64 NEON W4; wasm32 scala
 
 ## Required evidence
 
-Accepted Issue-016 candidate identity; official/reference/corpus hashes and maxima; frozen matrix
+Accepted Issue-016 scalar and Issue-050 product candidate identities; official/reference/corpus
+hashes and maxima; frozen matrix
 seeds/rows/transcript hashes; exact cohort/graph/audit counters; target/instruction outputs;
 preflight `workload_launches=0`; benchmark authorization and, only afterward, raw/accepted hashes
 and record count; audition/preregistration hashes; attempt count; explicit

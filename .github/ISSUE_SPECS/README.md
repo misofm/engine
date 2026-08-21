@@ -125,13 +125,16 @@ listening handoff. Issues 048 and 047 each permit one Terra attempt plus one Sol
 timed invocation counts start at zero. Issue 047 gates only Issue 026 and does not block unrelated
 effect implementations.
 
-Issue 016, **Launch fixed-4x true-peak safety limiter**, owns one bounded product: the fixed
-four-times BS.1770 Annex-2 detector, conservative ceiling guard, scalar/W4/W8 state and the public
-graph/PDC vertical. Issue 049, **Launch true-peak limiter qualification, realtime audit, and
-benchmark**, owns expanded standard/corpus matrices, long sequences, the 100,000-render audit,
-targets/instructions, the sole eventual one-warmup/two-round descriptive benchmark and audition/
-listening handoff. Both issues allow one Terra attempt plus one Sol correction. Their timed
-invocation counts start at zero; Issue 049 gates only release qualification Issue 026.
+Issue 016, **Launch fixed-4x true-peak safety limiter**, stopped after its two attempts without
+overall PASS. Its corrected fixed-four-times BS.1770 Annex-2 scalar detector, guarded gain/hold law,
+fixed latency and state checkpoint remain accepted technical input. Issue 050, **Launch true-peak
+limiter bank and graph closure**, owns only the missing W4/W8 gain-apply banks, scalar tails,
+registry/effect-compiler and representative graph/PDC product closure. Issue 049, **Launch true-peak
+limiter qualification, realtime audit, and benchmark**, follows 050 and owns expanded standard/
+corpus matrices, long sequences, the 100,000-render audit, targets/instructions, the sole eventual
+one-warmup/two-round descriptive benchmark and audition/listening handoff. Issues 050 and 049 each
+allow one Terra attempt plus one Sol correction. Their timed invocation counts start at zero;
+Issue 049 gates only release qualification Issue 026.
 
 ## Shared definition
 
