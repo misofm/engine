@@ -17,6 +17,10 @@ use miso_engine_core::{
         bounded_spsc_move, bounded_spsc_retained_payload,
     },
 };
+use miso_engine_graph::{
+    GraphNodeId, GraphPreparedSourceSet, GraphPreparedSourceSetDriver, GraphSourceInputClaim,
+    GraphSourceSetResourceReport,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native_wave;
@@ -973,6 +977,70 @@ impl PcmSourceConsumer {
         })
     }
 
+    /// Copy one exact render quantum into preallocated contiguous planar storage.
+    ///
+    /// Planes are laid out consecutively, each with `quantum_frames()` samples. This is the
+    /// coordinator-facing variant used by graph source fan-out and performs no allocation.
+    pub fn read_block_contiguous(
+        &mut self,
+        output: &mut [f32],
+    ) -> Result<SourceReadReport, SourceReadError> {
+        let expected = usize::try_from(self.channel_count)
+            .expect("u32 fits usize")
+            .checked_mul(usize::try_from(self.quantum_frames).expect("u32 fits usize"))
+            .expect("prepared source shape");
+        if output.len() != expected {
+            return Err(SourceReadError::PlaneLength {
+                expected_frames: self.quantum_frames,
+            });
+        }
+        self.flush_deferred_recycle();
+        self.observe_seek_at_block_boundary();
+        output.fill(0.0);
+        self.acquire_current_block();
+        let mut copied_frames = 0_u32;
+        let mut underrun_frames = 0_u32;
+        if self.end_reached() {
+            self.end_of_region = true;
+        } else if self.current_matches_next_frame() {
+            copied_frames = self.copy_current_block_contiguous(output);
+        } else {
+            let available_until_end = self
+                .end_frame
+                .map(|end| end.0.saturating_sub(self.next_frame.0))
+                .unwrap_or(u64::from(self.quantum_frames));
+            underrun_frames = u32::try_from(cmp::min(
+                u64::from(self.quantum_frames),
+                available_until_end,
+            ))
+            .expect("bounded by quantum");
+            self.next_frame = SourceFrame(
+                self.next_frame
+                    .0
+                    .saturating_add(u64::from(self.quantum_frames)),
+            );
+            if underrun_frames != 0 {
+                self.underrun_frames = self
+                    .underrun_frames
+                    .saturating_add(u64::from(underrun_frames));
+                self.underrun_events = self.underrun_events.saturating_add(1);
+            }
+            if self.end_reached() {
+                self.end_of_region = true;
+            }
+        }
+        Ok(SourceReadReport {
+            copied_frames,
+            underrun_frames,
+            underrun_event: underrun_frames != 0,
+            end_of_region: self.end_of_region,
+            active_generation: self.active_generation,
+            cumulative_read_frames: self.cumulative_read_frames,
+            cumulative_underrun_frames: self.underrun_frames,
+            cumulative_underrun_events: self.underrun_events,
+        })
+    }
+
     /// Exact source channel count.
     #[must_use]
     pub const fn channel_count(&self) -> u32 {
@@ -1082,6 +1150,31 @@ impl PcmSourceConsumer {
         u32::try_from(frames).expect("source block frame count is u32")
     }
 
+    fn copy_current_block_contiguous(&mut self, output: &mut [f32]) -> u32 {
+        let Some(mut block) = self.current.take() else {
+            return 0;
+        };
+        let frames = usize::try_from(block.frames).expect("u32 fits usize");
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
+            let offset = channel
+                .checked_mul(quantum)
+                .expect("prepared channel offset");
+            output[offset..offset + frames]
+                .copy_from_slice(&block.samples[offset..offset + frames]);
+        }
+        self.next_frame = SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
+        self.cumulative_read_frames = self
+            .cumulative_read_frames
+            .saturating_add(u64::from(block.frames));
+        if block.end_of_region {
+            self.end_of_region = true;
+        }
+        block.reset_metadata();
+        self.recycle_block(block);
+        u32::try_from(frames).expect("source block frame count is u32")
+    }
+
     fn note_end_and_discard(&mut self, block: Box<TransferBlock>) {
         if block.end_of_region && block.generation == self.active_generation {
             self.note_end_frame(&block);
@@ -1155,6 +1248,205 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
     match error {
         SpscError::CapacityOverflow => PcmSourceRingError::ArithmeticOverflow,
     }
+}
+
+/// One render-owned source endpoint moved into the graph fan-out wrapper.
+pub struct SourceGraphSource {
+    pub consumer: PcmSourceConsumer,
+    pub resources: SourceResourceReport,
+}
+
+/// One immutable source-channel mapping to a graph track-input node.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceGraphTrackMapping {
+    pub node: GraphNodeId,
+    pub source_index: usize,
+    pub left_channel: u32,
+    pub right_channel: u32,
+}
+
+/// Rejection while sealing source consumers and mappings for graph fan-out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceGraphSourceSetError {
+    EmptySources,
+    SourceIndex,
+    ChannelIndex,
+    ArithmeticOverflow,
+}
+
+struct GraphSourceEntry {
+    consumer: PcmSourceConsumer,
+    channel_count: u32,
+    planes: Box<[f32]>,
+}
+
+struct SourceGraphSourceSetDriver {
+    sources: Box<[GraphSourceEntry]>,
+    mappings: Box<[SourceGraphTrackMapping]>,
+    quantum_frames: u32,
+}
+
+impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
+    fn claim_count(&self) -> usize {
+        self.mappings.len()
+    }
+
+    fn begin_block(
+        &mut self,
+        _first_sample: u64,
+        frames: u32,
+    ) -> Result<(), miso_engine_core::realtime::RenderError> {
+        if frames != self.quantum_frames {
+            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
+        }
+        for source in &mut self.sources {
+            source
+                .consumer
+                .read_block_contiguous(&mut source.planes)
+                .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        }
+        Ok(())
+    }
+
+    fn copy_track_input(
+        &mut self,
+        claim_index: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), miso_engine_core::realtime::RenderError> {
+        let mapping = self
+            .mappings
+            .get(claim_index)
+            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        let source = self
+            .sources
+            .get(mapping.source_index)
+            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        let quantum = usize::try_from(self.quantum_frames)
+            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        if left.len() != quantum || right.len() != quantum {
+            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
+        }
+        let left_channel = usize::try_from(mapping.left_channel)
+            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        let right_channel = usize::try_from(mapping.right_channel)
+            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        if left_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
+            || right_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
+        {
+            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
+        }
+        let left_offset = left_channel
+            .checked_mul(quantum)
+            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        let right_offset = right_channel
+            .checked_mul(quantum)
+            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        left.copy_from_slice(&source.planes[left_offset..left_offset + quantum]);
+        right.copy_from_slice(&source.planes[right_offset..right_offset + quantum]);
+        Ok(())
+    }
+
+    fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
+        let mut written = 0;
+        for source in &self.sources {
+            let telemetry = source.consumer.telemetry();
+            for value in [
+                telemetry.cumulative_read_frames,
+                telemetry.stale_generation_discard_count,
+                telemetry.underrun_frames,
+                telemetry.underrun_events,
+            ] {
+                let Some(slot) = output.get_mut(written) else {
+                    return written;
+                };
+                *slot = value;
+                written += 1;
+            }
+        }
+        written
+    }
+}
+
+/// Seal one or more prepared source consumers into a graph-owned fan-out source set.
+///
+/// The wrapper owns exactly one consumer and preallocated contiguous source planes per source.
+/// The graph calls `begin_block` once, then copies each declared mapping without allowing native
+/// workers to observe a consumer or ring.
+pub fn prepare_graph_source_set(
+    envelope: miso_engine_core::realtime::RenderEnvelope,
+    sources: Vec<SourceGraphSource>,
+    mappings: Vec<SourceGraphTrackMapping>,
+) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
+    if sources.is_empty() {
+        return Err(SourceGraphSourceSetError::EmptySources);
+    }
+    let quantum = usize::try_from(envelope.quantum.0)
+        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let mut pcm_payload = 0_u64;
+    let mut overhead = 0_u64;
+    let mut largest = 0_u64;
+    let mut entries = Vec::with_capacity(sources.len());
+    for source in sources {
+        let channel_count = source.consumer.channel_count();
+        let samples = usize::try_from(channel_count)
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
+            .checked_mul(quantum)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        let plane_bytes = u64::try_from(samples)
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
+            .checked_mul(u64::try_from(size_of::<f32>()).expect("f32 size fits u64"))
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        pcm_payload = pcm_payload
+            .checked_add(source.resources.pcm_payload_already_charged_bytes)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        overhead = overhead
+            .checked_add(source.resources.overhead_bytes)
+            .and_then(|value| value.checked_add(plane_bytes))
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        largest = largest
+            .max(source.resources.largest_allocation_bytes)
+            .max(plane_bytes);
+        entries.push(GraphSourceEntry {
+            consumer: source.consumer,
+            channel_count,
+            planes: vec![0.0; samples].into_boxed_slice(),
+        });
+    }
+    for mapping in &mappings {
+        let source = entries
+            .get(mapping.source_index)
+            .ok_or(SourceGraphSourceSetError::SourceIndex)?;
+        if mapping.left_channel >= source.channel_count
+            || mapping.right_channel >= source.channel_count
+        {
+            return Err(SourceGraphSourceSetError::ChannelIndex);
+        }
+    }
+    let total = pcm_payload
+        .checked_add(overhead)
+        .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+    let claims = mappings
+        .iter()
+        .map(|mapping| GraphSourceInputClaim {
+            node: mapping.node.clone(),
+        })
+        .collect();
+    Ok(GraphPreparedSourceSet::new(
+        envelope,
+        claims,
+        GraphSourceSetResourceReport {
+            pcm_payload_already_charged_bytes: pcm_payload,
+            overhead_bytes: overhead,
+            total_engine_owned_bytes: total,
+            largest_allocation_bytes: largest,
+        },
+        Box::new(SourceGraphSourceSetDriver {
+            sources: entries.into_boxed_slice(),
+            mappings: mappings.into_boxed_slice(),
+            quantum_frames: envelope.quantum.0,
+        }),
+    ))
 }
 
 #[cfg(test)]
@@ -1379,5 +1671,236 @@ mod tests {
         assert_eq!(report.copied_frames, 4);
         assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(right, [-1.0, -2.0, -3.0, -4.0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn one_four_channel_source_fans_out_to_three_inputs_in_sequential_and_native_fallback() {
+        use core::num::NonZeroUsize;
+        use miso_engine_core::{
+            QuantumFrames,
+            realtime::{PlanarBufferMut, RenderEnvelope, RenderIo, RenderTime},
+        };
+        use miso_engine_effect_contract::{LatencySamples, TailSamples};
+        use miso_engine_graph::{
+            DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphPortId, GraphPortKind,
+            GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
+            NativeGraphBindConfigV1, NativeGraphRenderModeV1, NativeSchedulerConfigV1,
+            PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
+        };
+
+        struct Noop;
+        impl GraphRuntimeProcessor for Noop {
+            fn process(
+                &mut self,
+                _block: miso_engine_graph::GraphBindingBlock<'_>,
+            ) -> Result<(), miso_engine_core::realtime::RenderError> {
+                Ok(())
+            }
+        }
+
+        let envelope = RenderEnvelope {
+            sample_rate: RATE,
+            quantum: QuantumFrames(2),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two"),
+        };
+        let track = |id| miso_engine_graph::GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(id).expect("track ID"),
+            stage: TrackStage::Input,
+        };
+        let inputs = [track("a"), track("b"), track("c")];
+        let output = miso_engine_graph::GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let edge = |source: miso_engine_graph::GraphNodeId, route: &str| GraphEdge {
+            id: GraphEdgeId::RouteSource {
+                route_id: StableGraphId::parse(route).expect("route ID"),
+            },
+            source: GraphPortId {
+                node: source,
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: format!("$.{route}"),
+        };
+        let schedule = vec![
+            inputs[0].clone(),
+            inputs[1].clone(),
+            inputs[2].clone(),
+            output.clone(),
+        ];
+        let make_plan = || {
+            PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 10,
+                spec: GraphSpec {
+                    nodes: schedule
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                    ports: Vec::new(),
+                    edges: vec![
+                        edge(inputs[0].clone(), "a"),
+                        edge(inputs[1].clone(), "b"),
+                        edge(inputs[2].clone(), "c"),
+                    ],
+                },
+                sequential_schedule: schedule.clone(),
+                dependency_levels: vec![
+                    DependencyLevel {
+                        level: 0,
+                        nodes: inputs.to_vec(),
+                    },
+                    DependencyLevel {
+                        level: 1,
+                        nodes: vec![output.clone()],
+                    },
+                ],
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: GraphResourceEstimate {
+                    logical_nodes: 0,
+                    materialized_nodes: 0,
+                    edges: 0,
+                    schedule_items: 0,
+                    dependency_levels: 0,
+                    reductions: 0,
+                    routes: 0,
+                    effects: 0,
+                    audio_buffer_samples: 0,
+                    total_delay_samples: 0,
+                    delay_bytes: 0,
+                    graph_metadata_bytes: 0,
+                    declared_effect_bytes: 0,
+                    builtin_bank_bytes: 0,
+                    builtin_bank_scratch_bytes: 0,
+                    builtin_bank_count: 0,
+                    largest_allocation_bytes: 0,
+                    incremental_plan_bytes: 0,
+                    session_plus_plan_bytes: 0,
+                },
+                envelope,
+                required_bindings: [
+                    inputs[0].clone(),
+                    inputs[1].clone(),
+                    inputs[2].clone(),
+                    output.clone(),
+                ]
+                .to_vec(),
+                routes: Vec::new(),
+                effects: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers: Vec::new(),
+            })
+        };
+        let make_source_set = || {
+            let config = PcmSourceRingConfig {
+                channel_count: 4,
+                quantum_frames: QuantumFrames(2),
+                frame_capacity: 2,
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let c0 = [1.0_f32, 1.0];
+            let c1 = [2.0_f32, 2.0];
+            let c2 = [4.0_f32, 4.0];
+            let c3 = [8.0_f32, 8.0];
+            host.submit(HostPlanarChunk {
+                sample_rate_hz: RATE,
+                generation: SourceGeneration(1),
+                start_frame: SourceFrame(0),
+                planes: &[&c0, &c1, &c2, &c3],
+                frames: 2,
+                end_of_region: true,
+            })
+            .expect("source PCM");
+            prepare_graph_source_set(
+                envelope,
+                vec![SourceGraphSource {
+                    consumer,
+                    resources,
+                }],
+                vec![
+                    SourceGraphTrackMapping {
+                        node: inputs[0].clone(),
+                        source_index: 0,
+                        left_channel: 0,
+                        right_channel: 1,
+                    },
+                    SourceGraphTrackMapping {
+                        node: inputs[1].clone(),
+                        source_index: 0,
+                        left_channel: 3,
+                        right_channel: 2,
+                    },
+                    SourceGraphTrackMapping {
+                        node: inputs[2].clone(),
+                        source_index: 0,
+                        left_channel: 0,
+                        right_channel: 2,
+                    },
+                ],
+            )
+            .expect("source set")
+        };
+        let bindings = || GraphRuntimeBindings {
+            envelope,
+            nodes: vec![miso_engine_graph::GraphNodeBinding::new(
+                output.clone(),
+                Box::new(Noop),
+            )],
+            observers: Vec::new(),
+        };
+        let mut sequential = match make_plan().bind_with_source_set(bindings(), make_source_set()) {
+            Ok(plan) => plan,
+            Err(failure) => panic!("sequential bind failed: {}", failure.code),
+        };
+        let mut native = match make_plan().bind_native_with_source_set(
+            bindings(),
+            NativeGraphBindConfigV1 {
+                render_mode: NativeGraphRenderModeV1::SingleThread,
+                scheduler: NativeSchedulerConfigV1::new(NonZeroUsize::new(1).expect("lane"), false),
+                maximum_retained_bytes: 1 << 20,
+            },
+            make_source_set(),
+        ) {
+            Ok(plan) => plan.into_plan(),
+            Err(failure) => panic!("native bind failed: {}", failure.code),
+        };
+        let mut sequential_pcm = [0.0_f32; 4];
+        let mut native_pcm = [0.0_f32; 4];
+        for plan_and_pcm in [
+            (&mut sequential, &mut sequential_pcm),
+            (&mut native, &mut native_pcm),
+        ] {
+            plan_and_pcm
+                .0
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(plan_and_pcm.1, 2, 2, 2).expect("output"),
+                    },
+                    RenderTime { absolute_sample: 0 },
+                )
+                .expect("render");
+        }
+        assert_eq!(sequential_pcm, [10.0, 10.0, 10.0, 10.0]);
+        assert_eq!(
+            native_pcm.map(f32::to_bits),
+            sequential_pcm.map(f32::to_bits)
+        );
     }
 }

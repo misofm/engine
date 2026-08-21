@@ -554,8 +554,50 @@ impl PreparedGraphPlan {
     }
     pub fn bind(
         self,
-        mut bindings: GraphRuntimeBindings,
+        bindings: GraphRuntimeBindings,
     ) -> Result<PreparedRenderPlan, GraphBindFailure> {
+        match self.bind_optional_source_set(bindings, None) {
+            Ok(plan) => Ok(plan),
+            Err((plan, bindings, _, code)) => Err(GraphBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                code,
+            }),
+        }
+    }
+
+    /// Transactionally bind one sealed coordinator-owned source set.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_source_set(
+        self,
+        bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+    ) -> Result<PreparedRenderPlan, GraphSourceBindFailure> {
+        self.bind_optional_source_set(bindings, Some(source_set))
+            .map_err(
+                |(plan, bindings, source_set, code)| GraphSourceBindFailure {
+                    plan: Box::new(plan),
+                    bindings,
+                    source_set: source_set.expect("source-set bind retains source set"),
+                    code,
+                },
+            )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn bind_optional_source_set(
+        self,
+        mut bindings: GraphRuntimeBindings,
+        mut source_set: Option<GraphPreparedSourceSet>,
+    ) -> Result<
+        PreparedRenderPlan,
+        (
+            Self,
+            GraphRuntimeBindings,
+            Option<GraphPreparedSourceSet>,
+            &'static str,
+        ),
+    > {
         let supplied: BTreeSet<_> = bindings
             .nodes
             .iter()
@@ -569,6 +611,19 @@ impl PreparedGraphPlan {
             .cloned()
             .collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
+        let source_claims = source_set
+            .as_ref()
+            .map(GraphPreparedSourceSet::claimed_nodes)
+            .unwrap_or_default();
+        let source_claim_set: BTreeSet<_> = source_claims.iter().cloned().collect();
+        let source_claims_valid = source_set.as_ref().is_none_or(|set| {
+            set.envelope == self.envelope
+                && set.is_valid()
+                && source_claim_set.len() == source_claims.len()
+        });
+        let mut all_supplied = supplied.clone();
+        all_supplied.extend(source_claim_set.iter().cloned());
+        let source_overlap = supplied.iter().any(|node| source_claim_set.contains(node));
         let valid_observers = self
             .observers
             .iter()
@@ -582,22 +637,25 @@ impl PreparedGraphPlan {
                     .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
             };
         if bindings.envelope != self.envelope
-            || supplied != required
+            || all_supplied != required
             || duplicate_binding
+            || source_overlap
+            || !source_claims_valid
             || !valid_observers
         {
             let envelope_mismatch = bindings.envelope != self.envelope;
-            return Err(GraphBindFailure {
-                plan: Box::new(self),
-                bindings,
-                code: if !valid_observers {
-                    "graph.plan.observer"
-                } else if envelope_mismatch {
-                    "graph.plan.envelope_mismatch"
-                } else {
-                    "graph.plan.binding"
-                },
-            });
+            let code = if source_set.is_some()
+                && (!source_claims_valid || source_overlap || all_supplied != required)
+            {
+                "source.graph.binding_mismatch"
+            } else if !valid_observers {
+                "graph.plan.observer"
+            } else if envelope_mismatch {
+                "graph.plan.envelope_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err((self, bindings, source_set, code));
         }
         let envelope = self.envelope;
         let executor = GraphExecutor::new(
@@ -616,6 +674,7 @@ impl PreparedGraphPlan {
             },
             bindings.nodes,
             envelope.quantum.0 as usize,
+            source_set.take(),
         );
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
@@ -635,9 +694,58 @@ impl PreparedGraphPlan {
     #[allow(clippy::result_large_err)]
     pub fn bind_native(
         self,
-        mut bindings: GraphRuntimeBindings,
+        bindings: GraphRuntimeBindings,
         config: NativeGraphBindConfigV1,
     ) -> Result<PreparedNativeGraphPlanV1, GraphNativeBindFailure> {
+        match self.bind_native_optional_source_set(bindings, config, None) {
+            Ok(plan) => Ok(plan),
+            Err((plan, bindings, _, config, code)) => Err(GraphNativeBindFailure {
+                plan: Box::new(plan),
+                bindings,
+                config,
+                code,
+            }),
+        }
+    }
+
+    /// Transactionally bind the native executor with one coordinator-owned source set.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    pub fn bind_native_with_source_set(
+        self,
+        bindings: GraphRuntimeBindings,
+        config: NativeGraphBindConfigV1,
+        source_set: GraphPreparedSourceSet,
+    ) -> Result<PreparedNativeGraphPlanV1, GraphNativeSourceBindFailure> {
+        self.bind_native_optional_source_set(bindings, config, Some(source_set))
+            .map_err(
+                |(plan, bindings, source_set, config, code)| GraphNativeSourceBindFailure {
+                    plan: Box::new(plan),
+                    bindings,
+                    source_set: source_set.expect("source-set bind retains source set"),
+                    config,
+                    code,
+                },
+            )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    fn bind_native_optional_source_set(
+        self,
+        mut bindings: GraphRuntimeBindings,
+        config: NativeGraphBindConfigV1,
+        mut source_set: Option<GraphPreparedSourceSet>,
+    ) -> Result<
+        PreparedNativeGraphPlanV1,
+        (
+            Self,
+            GraphRuntimeBindings,
+            Option<GraphPreparedSourceSet>,
+            NativeGraphBindConfigV1,
+            &'static str,
+        ),
+    > {
         let supplied: BTreeSet<_> = bindings
             .nodes
             .iter()
@@ -651,6 +759,19 @@ impl PreparedGraphPlan {
             .cloned()
             .collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
+        let source_claims = source_set
+            .as_ref()
+            .map(GraphPreparedSourceSet::claimed_nodes)
+            .unwrap_or_default();
+        let source_claim_set: BTreeSet<_> = source_claims.iter().cloned().collect();
+        let source_claims_valid = source_set.as_ref().is_none_or(|set| {
+            set.envelope == self.envelope
+                && set.is_valid()
+                && source_claim_set.len() == source_claims.len()
+        });
+        let mut all_supplied = supplied.clone();
+        all_supplied.extend(source_claim_set.iter().cloned());
+        let source_overlap = supplied.iter().any(|node| source_claim_set.contains(node));
         let valid_observers = self
             .observers
             .iter()
@@ -664,34 +785,31 @@ impl PreparedGraphPlan {
                     .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
             };
         if bindings.envelope != self.envelope
-            || supplied != required
+            || all_supplied != required
             || duplicate_binding
+            || source_overlap
+            || !source_claims_valid
             || !valid_observers
         {
             let envelope_mismatch = bindings.envelope != self.envelope;
-            return Err(GraphNativeBindFailure {
-                plan: Box::new(self),
-                bindings,
-                config,
-                code: if !valid_observers {
-                    "graph.plan.observer"
-                } else if envelope_mismatch {
-                    "graph.plan.envelope_mismatch"
-                } else {
-                    "graph.plan.binding"
-                },
-            });
+            let code = if source_set.is_some()
+                && (!source_claims_valid || source_overlap || all_supplied != required)
+            {
+                "source.graph.binding_mismatch"
+            } else if !valid_observers {
+                "graph.plan.observer"
+            } else if envelope_mismatch {
+                "graph.plan.envelope_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err((self, bindings, source_set, config, code));
         }
         let blueprint = match NativeGraphBlueprint::prepare(&self, config, bindings.observers.len())
         {
             Ok(blueprint) => blueprint,
             Err(code) => {
-                return Err(GraphNativeBindFailure {
-                    plan: Box::new(self),
-                    bindings,
-                    config,
-                    code,
-                });
+                return Err((self, bindings, source_set, config, code));
             }
         };
         let explicit_fallback = (config.render_mode == NativeGraphRenderModeV1::SingleThread)
@@ -710,12 +828,7 @@ impl PreparedGraphPlan {
                     SchedulerPrepareErrorV1::EmptyWave
                     | SchedulerPrepareErrorV1::InvalidPartition => "graph.scheduler.layout",
                 };
-                return Err(GraphNativeBindFailure {
-                    plan: Box::new(self),
-                    bindings,
-                    config,
-                    code,
-                });
+                return Err((self, bindings, source_set, config, code));
             }
         };
         let scheduler_resources = scheduler.resource_report(
@@ -727,20 +840,16 @@ impl PreparedGraphPlan {
             .graph_job_bytes
             .checked_add(scheduler_resources.retained_queue_bytes)
         else {
-            return Err(GraphNativeBindFailure {
-                plan: Box::new(self),
+            return Err((
+                self,
                 bindings,
+                source_set,
                 config,
-                code: "graph.scheduler.resource",
-            });
+                "graph.scheduler.resource",
+            ));
         };
         if total_retained_bytes > config.maximum_retained_bytes {
-            return Err(GraphNativeBindFailure {
-                plan: Box::new(self),
-                bindings,
-                config,
-                code: "graph.scheduler.cap",
-            });
+            return Err((self, bindings, source_set, config, "graph.scheduler.cap"));
         }
         let envelope = self.envelope;
         let plan_id = self.plan_id;
@@ -759,6 +868,7 @@ impl PreparedGraphPlan {
             blueprint,
             scheduler,
             resources,
+            source_set.take(),
             #[cfg(feature = "test-support")]
             test_preparation_transcript,
         );
@@ -863,6 +973,16 @@ pub struct GraphNativeBindFailure {
     pub config: NativeGraphBindConfigV1,
     pub code: &'static str,
 }
+
+/// Transactional native source-set binding rejection returning every caller-owned input.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct GraphNativeSourceBindFailure {
+    pub plan: Box<PreparedGraphPlan>,
+    pub bindings: GraphRuntimeBindings,
+    pub source_set: GraphPreparedSourceSet,
+    pub config: NativeGraphBindConfigV1,
+    pub code: &'static str,
+}
 pub struct PreparedGraphPlanParts {
     pub plan_id: u64,
     pub spec: GraphSpec,
@@ -886,6 +1006,144 @@ pub struct GraphRuntimeBindings {
     /// Ordinary graph observation bindings. Compiler-owned builtins are appended only by their
     /// sealed artifact wrapper, never by a generic internal-attachment capability.
     pub observers: Vec<GraphNodeObserverBinding>,
+}
+
+/// One immutable source-owned claim for a track input node.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GraphSourceInputClaim {
+    pub node: GraphNodeId,
+}
+
+/// Exact source-set allocations presented to graph binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphSourceSetResourceReport {
+    /// PCM retained by the source layer and already charged by the session declaration.
+    pub pcm_payload_already_charged_bytes: u64,
+    /// Source transfer queues, metadata, and coordinator source-plane copies.
+    pub overhead_bytes: u64,
+    /// Exact total engine-owned source allocation bytes.
+    pub total_engine_owned_bytes: u64,
+    /// Largest individual prepared source allocation.
+    pub largest_allocation_bytes: u64,
+}
+
+impl GraphSourceSetResourceReport {
+    fn is_consistent(self) -> bool {
+        self.pcm_payload_already_charged_bytes
+            .checked_add(self.overhead_bytes)
+            == Some(self.total_engine_owned_bytes)
+            && self.largest_allocation_bytes <= self.total_engine_owned_bytes
+    }
+}
+
+/// Render-coordinator implementation behind one sealed prepared source set.
+///
+/// Implementors own prepared source consumers and source-plane storage. The graph invokes this
+/// only on its coordinator before ordinary nodes or native dependency waves begin.
+pub trait GraphPreparedSourceSetDriver: Send {
+    fn claim_count(&self) -> usize;
+    fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError>;
+    fn copy_track_input(
+        &mut self,
+        claim_index: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), RenderError>;
+    fn copy_after_disarm_telemetry(&self, _output: &mut [u64]) -> usize {
+        0
+    }
+}
+
+/// A graph-owned, coordinator-only source-set capability.
+///
+/// Its claims, envelope, resource report, and driver ownership become immutable once prepared;
+/// callers can only move it into a transactional graph bind.
+pub struct GraphPreparedSourceSet {
+    envelope: RenderEnvelope,
+    claims: Box<[GraphSourceInputClaim]>,
+    resources: GraphSourceSetResourceReport,
+    driver: Box<dyn GraphPreparedSourceSetDriver>,
+}
+
+impl GraphPreparedSourceSet {
+    #[must_use]
+    pub fn new(
+        envelope: RenderEnvelope,
+        claims: Vec<GraphSourceInputClaim>,
+        resources: GraphSourceSetResourceReport,
+        driver: Box<dyn GraphPreparedSourceSetDriver>,
+    ) -> Self {
+        Self {
+            envelope,
+            claims: claims.into_boxed_slice(),
+            resources,
+            driver,
+        }
+    }
+
+    #[must_use]
+    pub fn claims(&self) -> &[GraphSourceInputClaim] {
+        &self.claims
+    }
+
+    #[must_use]
+    pub const fn resource_report(&self) -> GraphSourceSetResourceReport {
+        self.resources
+    }
+
+    fn claimed_nodes(&self) -> Vec<GraphNodeId> {
+        self.claims.iter().map(|claim| claim.node.clone()).collect()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.resources.is_consistent()
+            && self.driver.claim_count() == self.claims.len()
+            && self.claims.windows(2).all(|pair| pair[0] < pair[1])
+            && self.claims.iter().all(|claim| {
+                matches!(
+                    claim.node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                )
+            })
+    }
+
+    fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError> {
+        if frames != self.envelope.quantum.0 {
+            return Err(RenderError::InvalidEnvelope);
+        }
+        self.driver.begin_block(first_sample, frames)
+    }
+
+    fn copy_track_input(
+        &mut self,
+        claim_index: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), RenderError> {
+        if claim_index >= self.claims.len()
+            || left.len() != self.envelope.quantum.0 as usize
+            || right.len() != self.envelope.quantum.0 as usize
+        {
+            return Err(RenderError::InvalidEnvelope);
+        }
+        self.driver.copy_track_input(claim_index, left, right)
+    }
+
+    /// Copy bounded render-owner telemetry only after the prepared plan is disarmed.
+    pub fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
+        self.driver.copy_after_disarm_telemetry(output)
+    }
+}
+
+/// Transactional source-set binding rejection returning every caller-owned input.
+pub struct GraphSourceBindFailure {
+    pub plan: Box<PreparedGraphPlan>,
+    pub bindings: GraphRuntimeBindings,
+    pub source_set: GraphPreparedSourceSet,
+    pub code: &'static str,
 }
 pub struct GraphBindFailure {
     pub plan: Box<PreparedGraphPlan>,
@@ -960,6 +1218,7 @@ struct RuntimeEdge {
 }
 enum RuntimeNodeKind {
     Identity,
+    SourceInput,
     Bound(Box<dyn GraphRuntimeProcessor>),
     Effect(GraphPreparedEffect),
     BankMember(usize),
@@ -982,6 +1241,8 @@ struct GraphExecutor {
     bank_rendered: Box<[bool]>,
     builtin_banks: Vec<RuntimeBuiltinBank>,
     builtin_bank_rendered: Box<[bool]>,
+    source_set: Option<GraphPreparedSourceSet>,
+    source_input_buffers: Box<[(usize, usize)]>,
     sanitized_samples: u64,
 }
 struct RuntimeBank {
@@ -1008,6 +1269,7 @@ impl GraphExecutor {
         observer_bindings: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         frames: usize,
+        source_set: Option<GraphPreparedSourceSet>,
     ) -> Self {
         let mut assigned_buffers: BTreeMap<_, _> = buffer_assignments
             .into_iter()
@@ -1081,6 +1343,10 @@ impl GraphExecutor {
             .into_iter()
             .map(|binding| (binding.node, binding.processor))
             .collect();
+        let source_input_nodes: BTreeSet<_> = source_set
+            .as_ref()
+            .map(|set| set.claimed_nodes().into_iter().collect())
+            .unwrap_or_default();
         let mut observers: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for observer in observer_bindings {
             observers
@@ -1123,7 +1389,9 @@ impl GraphExecutor {
                 })
                 .collect();
             maximum_inputs = maximum_inputs.max(incoming.len());
-            let kind = if let Some(bank) = builtin_bank_by_node.get(node_id) {
+            let kind = if source_input_nodes.contains(node_id) {
+                RuntimeNodeKind::SourceInput
+            } else if let Some(bank) = builtin_bank_by_node.get(node_id) {
                 RuntimeNodeKind::BuiltinBankMember(*bank)
             } else if let Some(processor) = bindings.remove(node_id) {
                 RuntimeNodeKind::Bound(processor)
@@ -1193,6 +1461,16 @@ impl GraphExecutor {
                 scratch: bank.scratch,
             })
             .collect::<Vec<_>>();
+        let source_input_buffers = source_set
+            .as_ref()
+            .map(|set| {
+                set.claims()
+                    .iter()
+                    .enumerate()
+                    .map(|(claim_index, claim)| (claim_index, node_indices[&claim.node]))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             nodes,
             buffers: (0..buffer_count)
@@ -1204,6 +1482,8 @@ impl GraphExecutor {
             banks: runtime_banks,
             builtin_bank_rendered: vec![false; runtime_builtin_banks.len()].into_boxed_slice(),
             builtin_banks: runtime_builtin_banks,
+            source_set,
+            source_input_buffers,
             sanitized_samples: 0,
         }
     }
@@ -1356,6 +1636,14 @@ impl PreparedPlanExecutor for GraphExecutor {
         mut output: PlanarBufferMut<'_>,
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
+        if let Some(source_set) = &mut self.source_set {
+            source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
+            for &(claim_index, node_index) in &self.source_input_buffers {
+                let output_buffer = self.nodes[node_index].output_buffer;
+                let buffer = &mut self.buffers[output_buffer];
+                source_set.copy_track_input(claim_index, &mut buffer.left, &mut buffer.right)?;
+            }
+        }
         self.bank_rendered.fill(false);
         self.builtin_bank_rendered.fill(false);
         for node_index in 0..self.nodes.len() {
@@ -1367,7 +1655,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 RuntimeNodeKind::BuiltinBankMember(index) => Some(index),
                 _ => None,
             };
-            if let Some(bank) = bank {
+            if matches!(self.nodes[node_index].kind, RuntimeNodeKind::SourceInput) {
+            } else if let Some(bank) = bank {
                 if !self.bank_rendered[bank] {
                     self.render_bank(bank, time.absolute_sample)?;
                     self.bank_rendered[bank] = true;
@@ -1387,6 +1676,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                 let rendered = &mut self.buffers[output_buffer];
                 match &mut current.kind {
                     RuntimeNodeKind::Identity
+                    | RuntimeNodeKind::SourceInput
                     | RuntimeNodeKind::Reduction
                     | RuntimeNodeKind::BuiltinBankMember(_) => {}
                     RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
@@ -1494,6 +1784,7 @@ struct NativeGraphBlueprint {
     stage_operations: Box<[Box<[NativeStageOperation]>]>,
     observation_order: Box<[Box<[NativeNodeLocation]>]>,
     output: NativeNodeLocation,
+    locations: BTreeMap<GraphNodeId, NativeNodeLocation>,
     largest_wave_width: usize,
     unit_count: usize,
     partition_count: usize,
@@ -1687,6 +1978,7 @@ impl NativeGraphBlueprint {
                 .collect(),
             observation_order,
             output,
+            locations,
             largest_wave_width,
             unit_count,
             partition_count,
@@ -1983,6 +2275,7 @@ enum NativeRuntimeNodeKind {
 struct NativeRuntimeNode {
     incoming: Box<[NativeRuntimeEdge]>,
     output: StereoBuffer,
+    source_input: bool,
     reduction_scratch: Box<[f32]>,
     kind: NativeRuntimeNodeKind,
     observers: Box<[GraphNodeObserverBinding]>,
@@ -2025,7 +2318,9 @@ impl NativeRuntimeNode {
         first_sample: u64,
         sanitized_samples: &mut u64,
     ) -> Result<(), RenderError> {
-        self.reduce(sanitized_samples);
+        if !self.source_input {
+            self.reduce(sanitized_samples);
+        }
         match &mut self.kind {
             NativeRuntimeNodeKind::Identity | NativeRuntimeNodeKind::Reduction => {}
             NativeRuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
@@ -2246,6 +2541,8 @@ struct NativeGraphExecutor {
     observation_order: Box<[Box<[NativeNodeLocation]>]>,
     output: NativeNodeLocation,
     scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
+    source_set: Option<GraphPreparedSourceSet>,
+    source_input_targets: Box<[(usize, NativeNodeLocation)]>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2256,9 +2553,24 @@ impl NativeGraphExecutor {
         blueprint: NativeGraphBlueprint,
         scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
         resources: NativeGraphResourceReportV1,
+        source_set: Option<GraphPreparedSourceSet>,
         #[cfg(feature = "test-support")]
         test_preparation_transcript: NativeGraphPreparationTranscriptV1,
     ) -> (Self, NativeGraphPreparedMetadataV1) {
+        let source_input_targets = source_set
+            .as_ref()
+            .map(|set| {
+                set.claims()
+                    .iter()
+                    .enumerate()
+                    .map(|(claim_index, claim)| (claim_index, blueprint.locations[&claim.node]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source_input_nodes: BTreeSet<_> = source_set
+            .as_ref()
+            .map(|set| set.claimed_nodes().into_iter().collect())
+            .unwrap_or_default();
         let PreparedGraphPlan {
             spec,
             inserted_delays,
@@ -2328,6 +2640,7 @@ impl NativeGraphExecutor {
                             &mut effects,
                             &mut bindings,
                             &mut observers_by_node,
+                            source_input_nodes.contains(&unit.members[0]),
                         )),
                         NativeUnitBlueprintKind::EffectBank(index) => {
                             let bank = banks[index]
@@ -2347,6 +2660,7 @@ impl NativeGraphExecutor {
                                         &mut effects,
                                         &mut bindings,
                                         &mut observers_by_node,
+                                        source_input_nodes.contains(member),
                                     )
                                 })
                                 .collect();
@@ -2374,6 +2688,7 @@ impl NativeGraphExecutor {
                                         &mut effects,
                                         &mut bindings,
                                         &mut observers_by_node,
+                                        source_input_nodes.contains(member),
                                     )
                                 })
                                 .collect();
@@ -2424,6 +2739,8 @@ impl NativeGraphExecutor {
                 observation_order: blueprint.observation_order,
                 output: blueprint.output,
                 scheduler,
+                source_set,
+                source_input_targets,
             },
             metadata,
         )
@@ -2491,6 +2808,20 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
         mut output: PlanarBufferMut<'_>,
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
+        if let Some(source_set) = &mut self.source_set {
+            source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
+            for &(claim_index, location) in &self.source_input_targets {
+                let node = self.waves[location.wave]
+                    .recovered_parcel_mut(location.partition)
+                    .and_then(|parcel| parcel.node_mut(location))
+                    .ok_or(RenderError::InvalidEnvelope)?;
+                source_set.copy_track_input(
+                    claim_index,
+                    &mut node.output.left,
+                    &mut node.output.right,
+                )?;
+            }
+        }
         for wave_index in 0..self.waves.len() {
             self.stage_wave(wave_index, time.absolute_sample)?;
             match self.scheduler.render_wave(&mut self.waves[wave_index]) {
@@ -2544,6 +2875,7 @@ fn build_native_node(
     effects: &mut BTreeMap<GraphNodeId, GraphPreparedEffect>,
     bindings: &mut BTreeMap<GraphNodeId, Box<dyn GraphRuntimeProcessor>>,
     observers: &mut BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
+    source_input: bool,
 ) -> NativeRuntimeNode {
     let incoming: Vec<_> = incoming_by_node
         .remove(node_id)
@@ -2579,6 +2911,7 @@ fn build_native_node(
     NativeRuntimeNode {
         incoming: incoming.into_boxed_slice(),
         output: StereoBuffer::new(frames),
+        source_input,
         reduction_scratch: vec![0.0; main_inputs].into_boxed_slice(),
         kind,
         observers: observers
