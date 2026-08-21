@@ -70,7 +70,7 @@ t0=g+k; t1=g*t0; den=1+t1
 c1=t1/den; a2=g/den; a3=(g*g)/den
 ```
 
-One conditioned section, with each operation separately rounded in `f32`, is:
+One conditioned base-backend section, with each operation separately rounded in `f32`, is:
 
 ```text
 v3=x-s2
@@ -189,8 +189,13 @@ the four sections with `PreparedTptBankKernelV1`, and applies two gains through
 `PreparedCompressorGainMixKernelV1` with `mix=1` and exact masks. Audio remains sample-major AoSoA;
 lane-local transcendental/link work walks ascending tracks. Scalar tails cover all counts.
 
-W4 is Wasm base `simd128` or AArch64 NEON; W8 is AVX2. AVX2+FMA aliases noncontracting kernels:
-zero TPT/compressor FMA contractions. Feature detection/function preparation stays off render.
+W4 is Wasm base `simd128` or AArch64 NEON; W8 is AVX2. Scalar, W4 and base AVX2 preserve the
+separately rounded graph bit-exactly for finite-normal inputs without sanitation. The existing
+`X86Avx2Fma` TPT backend is not forked or disabled: it contracts only
+`d1=a2*v3-p2`, `d2=a2*s1+p4`, and `th=x-k*v1`, with `p2`/`p4` already rounded and every other step
+unchanged. Its sample/state comparison uses the previously accepted frozen bound
+`abs(error) <= 1e-6 + 2e-5*abs(scalar)`. The compressor gain/mix kernel has zero contractions on
+all backends. Feature detection and function preparation stay off render.
 
 The ten-track fixture asserts host-width-correct full banks and scalar tails, not a hard-coded bank
 count on every host. Registry, compiler, schedule, PDC, bypass latency, observer boundaries and
@@ -204,8 +209,8 @@ graph shape remain stable. Post-bank cap failure returns all effect/source owner
 4. Lookahead 0/5/20, bypass/identity latency, links and asymmetric dual-mono.
 5. Automation restart/update 64, both resets, active restore, signed zero, sanitation, injected
    recovery and isolation.
-6. Scalar/W4/W8 parity, width-correct ten-track graph/PDC/cap transaction, focused format/tests/
-   Clippy and relevant policies.
+6. Bit-exact base-backend and frozen-tolerance AVX2+FMA parity, width-correct ten-track graph/PDC/
+   cap transaction, focused format/tests/Clippy and relevant policies.
 
 Issue 051 owns expanded matrices, long rows, realtime audit, complete targets/instructions,
 benchmark and listening. A third band, alternate topology, new core framework, sidechain, changed

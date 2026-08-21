@@ -119,8 +119,11 @@ prepared, never automated. Research authority is `[REISS-COMP]`, `[ORFANIDIS-ISP
    whole-effect identity/bypass returns delayed-dry bits exactly.
 5. Exact 64-update automation, both resets, transactional continuation restore, signed-zero
    identity, sanitation, lane-local recovery and L/R/track isolation pass.
-6. Scalar/W4/W8 TPT/gain paths meet the frozen parity contract. The ten-track graph retains
-   width-correct banks/tails, exact PDC and one-byte-below ownership return.
+6. Scalar, Wasm/NEON W4 and base-AVX2 W8 TPT/gain paths are bit-exact for finite-normal inputs.
+   Existing AVX2+FMA retains exactly the accepted three TPT contractions and frozen
+   `abs(error) <= 1e-6 + 2e-5*abs(scalar)` tolerance; its compressor gain kernel remains
+   noncontracting. The ten-track graph retains width-correct banks/tails, exact PDC and
+   one-byte-below ownership return.
 7. Focused format/check/tests/Clippy and relevant policies pass; static scans prove the realtime,
    backend/FMA and no-track-cap contracts.
 
@@ -170,3 +173,19 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   invalidate required scalar/W8 exact PCM/state/report parity; binding a different backend would
   violate the requested prepared-backend contract. Stop rather than weakening either rule. No
   test, Clippy, policy, audit, target/object, timing or benchmark command ran after this finding.
+
+## Sol attempt 2 bank checkpoint — incomplete
+
+- Corrected the brief-only blocker by inheriting the accepted Issue-008 TPT contract: base
+  backends are bit-exact to scalar, while AVX2+FMA retains its existing exact three contraction
+  sites and frozen tolerance. No backend is forked, disabled or silently substituted.
+- Added the bounded W4/W8 bank implementation using only `PreparedTptBankKernelV1` and
+  `PreparedCompressorGainMixKernelV1`, with complete request validation before fallback, per-track
+  lane state, scalar-compatible filter flush/recovery, automation, reset and track snapshot/restore.
+  Registry/effect-compiler/graph integration remains intentionally unmodified at this checkpoint.
+- PASS: `cargo fmt --all -- --check`; locked core plus multiband tests (27 core, 4 multiband and one
+  compile-fail doctest passed); warning-denied all-target core plus multiband Clippy. The existing
+  four scalar product tests remain green; dedicated bank parity/state/recovery and graph closure
+  evidence is still required before an overall verdict.
+- No Issue-051 corpus/audit/target/object/benchmark/listening work ran;
+  `timed_benchmark_invocations=0`. **Overall Issue 018 remains incomplete, not PASS.**
