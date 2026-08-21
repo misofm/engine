@@ -211,25 +211,7 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         let decoded_frames_usize =
             usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
         if decoded_frames_usize != 0 {
-            let source_frame = self
-                .region
-                .start_frame
-                .0
-                .checked_add(self.next_region_frame)
-                .ok_or(NativeWaveError::ArithmeticOverflow)?;
-            let byte_offset = source_frame
-                .checked_mul(u64::from(self.metadata.block_align_bytes))
-                .and_then(|offset| self.metadata.data_offset_bytes.checked_add(offset))
-                .ok_or(NativeWaveError::ArithmeticOverflow)?;
-            let read_bytes = decoded_frames_usize
-                .checked_mul(usize::from(self.metadata.block_align_bytes))
-                .ok_or(NativeWaveError::ArithmeticOverflow)?;
-            self.reader
-                .seek(SeekFrom::Start(byte_offset))
-                .map_err(io_error)?;
-            self.reader
-                .read_exact(&mut self.scratch[..read_bytes])
-                .map_err(io_error)?;
+            self.read_decoded_frames(decoded_frames_usize)?;
             self.copy_decoded(output_planes, decoded_frames_usize)?;
             self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
         }
@@ -251,6 +233,70 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
     #[must_use]
     pub const fn region(&self) -> NativeWaveRegion {
         self.region
+    }
+
+    /// Return the absolute source frame that the next decode will read.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn next_source_frame(&self) -> SourceFrame {
+        SourceFrame(
+            self.region
+                .start_frame
+                .0
+                .saturating_add(self.next_region_frame),
+        )
+    }
+
+    /// Reposition the prepared decoder at a validated absolute source frame in its region.
+    #[allow(dead_code)]
+    pub(crate) fn seek_to_source_frame(
+        &mut self,
+        frame: SourceFrame,
+    ) -> Result<(), NativeWaveError> {
+        let region_end = self
+            .region
+            .start_frame
+            .0
+            .checked_add(self.region.length_frames)
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        if frame.0 < self.region.start_frame.0 || frame.0 > region_end {
+            return Err(NativeWaveError::RegionOutOfBounds);
+        }
+        self.next_region_frame = frame.0 - self.region.start_frame.0;
+        Ok(())
+    }
+
+    /// Decode one prepared quantum into a contiguous `[channel][quantum]` worker block.
+    #[allow(dead_code)]
+    pub(crate) fn decode_quantum_into_planar(
+        &mut self,
+        planar_quantum: &mut [f32],
+    ) -> Result<NativeDecodeReport, NativeWaveError> {
+        let quantum = self.max_frames_per_decode.get();
+        let expected_samples = usize::from(self.metadata.channel_count)
+            .checked_mul(quantum)
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        if planar_quantum.len() != expected_samples {
+            return Err(NativeWaveError::OutputShape);
+        }
+        let remaining = self
+            .region
+            .length_frames
+            .saturating_sub(self.next_region_frame);
+        let decoded_frames = cmp::min(u64::try_from(quantum).expect("usize fits u64"), remaining);
+        let decoded_frames_usize =
+            usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
+        if decoded_frames_usize != 0 {
+            self.read_decoded_frames(decoded_frames_usize)?;
+            self.copy_decoded_to_planar(planar_quantum, decoded_frames_usize)?;
+            self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
+        }
+        Ok(NativeDecodeReport {
+            decoded_frames: u32::try_from(decoded_frames_usize)
+                .map_err(|_| NativeWaveError::ArithmeticOverflow)?,
+            end_of_region: self.next_region_frame == self.region.length_frames,
+            sanitized_sample_count: self.sanitized_sample_count,
+        })
     }
 
     fn validate_output_shape(
@@ -297,6 +343,66 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
                 let (sample, sanitized) =
                     decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
                 output[frame] = sample;
+                if sanitized {
+                    self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_decoded_frames(&mut self, decoded_frames: usize) -> Result<(), NativeWaveError> {
+        let source_frame = self
+            .region
+            .start_frame
+            .0
+            .checked_add(self.next_region_frame)
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        let byte_offset = source_frame
+            .checked_mul(u64::from(self.metadata.block_align_bytes))
+            .and_then(|offset| self.metadata.data_offset_bytes.checked_add(offset))
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        let read_bytes = decoded_frames
+            .checked_mul(usize::from(self.metadata.block_align_bytes))
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        self.reader
+            .seek(SeekFrom::Start(byte_offset))
+            .map_err(io_error)?;
+        self.reader
+            .read_exact(&mut self.scratch[..read_bytes])
+            .map_err(io_error)
+    }
+
+    fn copy_decoded_to_planar(
+        &mut self,
+        planar_quantum: &mut [f32],
+        decoded_frames: usize,
+    ) -> Result<(), NativeWaveError> {
+        let sample_bytes = usize::from(self.metadata.encoding.bytes_per_sample());
+        let block_align = usize::from(self.metadata.block_align_bytes);
+        let quantum = self.max_frames_per_decode.get();
+        for frame in 0..decoded_frames {
+            let frame_start = frame
+                .checked_mul(block_align)
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
+            for channel in 0..usize::from(self.metadata.channel_count) {
+                let offset = frame_start
+                    .checked_add(
+                        channel
+                            .checked_mul(sample_bytes)
+                            .ok_or(NativeWaveError::ArithmeticOverflow)?,
+                    )
+                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
+                let end = offset
+                    .checked_add(sample_bytes)
+                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
+                let (sample, sanitized) =
+                    decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
+                let destination = channel
+                    .checked_mul(quantum)
+                    .and_then(|offset| offset.checked_add(frame))
+                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
+                planar_quantum[destination] = sample;
                 if sanitized {
                     self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(1);
                 }
@@ -831,6 +937,44 @@ mod tests {
         let rf64_metadata = parse_native_wave(&mut rf64_cursor, CAPS).expect("rf64");
         assert_eq!(rf64_metadata.container, NativeWaveContainer::Rf64);
         assert_eq!(rf64_metadata.total_frames, 1);
+    }
+
+    #[test]
+    fn prepared_quantum_decode_uses_contiguous_planar_worker_storage() {
+        let bytes = riff_wave(
+            format_chunk(NativeWaveEncoding::Float32, false),
+            &[
+                0.25_f32.to_le_bytes(),
+                (-0.5_f32).to_le_bytes(),
+                0.75_f32.to_le_bytes(),
+                (-1.0_f32).to_le_bytes(),
+            ]
+            .concat(),
+            &[],
+        );
+        let mut cursor = Cursor::new(bytes);
+        let metadata = parse_native_wave(&mut cursor, CAPS).expect("parse");
+        let mut decoder = NativeWaveDecoder::prepare(
+            cursor,
+            metadata,
+            NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 4,
+            },
+            NonZeroUsize::new(4).expect("four"),
+        )
+        .expect("decoder");
+        assert_eq!(decoder.next_source_frame(), SourceFrame(0));
+        let mut planar = [0.0; 4];
+        let report = decoder
+            .decode_quantum_into_planar(&mut planar)
+            .expect("decode quantum");
+        assert_eq!(report.decoded_frames, 4);
+        assert_eq!(planar, [0.25, -0.5, 0.75, -1.0]);
+        decoder
+            .seek_to_source_frame(SourceFrame(2))
+            .expect("prepared seek");
+        assert_eq!(decoder.next_source_frame(), SourceFrame(2));
     }
 
     #[test]

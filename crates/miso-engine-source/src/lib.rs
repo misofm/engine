@@ -468,6 +468,14 @@ impl PcmSourceRing {
         config: PcmSourceRingConfig,
     ) -> Result<(PcmSourceProducer, PcmSourceConsumer, SourceResourceReport), PcmSourceRingError>
     {
+        Self::prepare_at_source_frame(config, SourceFrame(0))
+    }
+
+    pub(crate) fn prepare_at_source_frame(
+        config: PcmSourceRingConfig,
+        initial_frame: SourceFrame,
+    ) -> Result<(PcmSourceProducer, PcmSourceConsumer, SourceResourceReport), PcmSourceRingError>
+    {
         let shape = PreparedShape::validate(config)?;
         let report = Self::resource_report(config)?;
         let queue_generation = QueueGeneration(config.initial_generation.0);
@@ -490,7 +498,7 @@ impl PcmSourceRing {
             quantum_frames: config.quantum_frames.0,
             transfer_block_count: shape.transfer_block_count.get(),
             active_generation: config.initial_generation,
-            next_frame: SourceFrame(0),
+            next_frame: initial_frame,
             end_frame: None,
             end_of_region: false,
             current: None,
@@ -515,7 +523,7 @@ impl PcmSourceRing {
                 channel_count: config.channel_count,
                 quantum_frames: config.quantum_frames.0,
                 active_generation: config.initial_generation,
-                next_write_frame: SourceFrame(0),
+                next_write_frame: initial_frame,
                 end_of_region_submitted: false,
                 cumulative_written_frames: 0,
                 deferred_block: None,
@@ -683,21 +691,72 @@ impl PcmSourceProducer {
                 .expect("prepared channel offset");
             block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
         }
+        self.publish_block(block, chunk.frames, chunk.end_of_region)
+    }
+
+    #[allow(dead_code)]
+    fn submit_contiguous_planar(
+        &mut self,
+        generation: SourceGeneration,
+        start_frame: SourceFrame,
+        planar_quantum: &[f32],
+        frames: u32,
+        end_of_region: bool,
+    ) -> Result<SubmitReport, HostChunkError> {
+        validate_submission_metadata(
+            self,
+            generation,
+            start_frame,
+            frames,
+            end_of_region,
+            self.channel_count,
+        )?;
+        let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
+        let expected_samples = usize::try_from(self.channel_count)
+            .expect("u32 fits usize")
+            .checked_mul(quantum)
+            .expect("prepared planar samples");
+        if planar_quantum.len() != expected_samples {
+            return Err(HostChunkError::InternalInvariant);
+        }
+        let mut block = self.take_recycled_block()?;
+        block.generation = generation;
+        block.start_frame = start_frame;
+        block.frames = frames;
+        block.end_of_region = end_of_region;
+        let frames = usize::try_from(frames).expect("u32 fits usize");
+        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
+            let offset = channel
+                .checked_mul(quantum)
+                .expect("prepared channel offset");
+            block.samples[offset..offset + frames]
+                .copy_from_slice(&planar_quantum[offset..offset + frames]);
+        }
+        self.publish_block(
+            block,
+            u32::try_from(frames).expect("source frames are u32"),
+            end_of_region,
+        )
+    }
+
+    fn publish_block(
+        &mut self,
+        block: Box<TransferBlock>,
+        frames: u32,
+        end_of_region: bool,
+    ) -> Result<SubmitReport, HostChunkError> {
         match self.data_producer.try_push(block) {
             Ok(()) => {
-                self.next_write_frame = SourceFrame(
-                    self.next_write_frame
-                        .0
-                        .saturating_add(u64::from(chunk.frames)),
-                );
+                self.next_write_frame =
+                    SourceFrame(self.next_write_frame.0.saturating_add(u64::from(frames)));
                 self.cumulative_written_frames = self
                     .cumulative_written_frames
-                    .saturating_add(u64::from(chunk.frames));
-                if chunk.end_of_region {
+                    .saturating_add(u64::from(frames));
+                if end_of_region {
                     self.end_of_region_submitted = true;
                 }
                 Ok(SubmitReport {
-                    accepted_frames: chunk.frames,
+                    accepted_frames: frames,
                     cumulative_written_frames: self.cumulative_written_frames,
                     active_generation: self.active_generation,
                 })
@@ -740,34 +799,39 @@ impl HostChunkProvider {
     pub fn telemetry(&self) -> SourceProducerTelemetry {
         self.producer.telemetry()
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(dead_code)]
+    pub(crate) fn submit_native_planar(
+        &mut self,
+        generation: SourceGeneration,
+        start_frame: SourceFrame,
+        planar_quantum: &[f32],
+        frames: u32,
+        end_of_region: bool,
+    ) -> Result<SubmitReport, HostChunkError> {
+        self.producer.submit_contiguous_planar(
+            generation,
+            start_frame,
+            planar_quantum,
+            frames,
+            end_of_region,
+        )
+    }
 }
 
 fn validate_host_chunk(
     producer: &PcmSourceProducer,
     chunk: HostPlanarChunk<'_>,
 ) -> Result<(), HostChunkError> {
-    if chunk.generation != producer.active_generation {
-        return Err(HostChunkError::StaleGeneration {
-            active: producer.active_generation,
-            submitted: chunk.generation,
-        });
-    }
-    if chunk.planes.len() != usize::try_from(producer.channel_count).expect("u32 fits usize") {
-        return Err(HostChunkError::ChannelCount {
-            expected: producer.channel_count,
-            actual: chunk.planes.len(),
-        });
-    }
-    if chunk.frames > producer.quantum_frames
-        || (chunk.frames < producer.quantum_frames && !chunk.end_of_region)
-        || (chunk.frames == 0 && !chunk.end_of_region)
-    {
-        return Err(HostChunkError::FrameCount {
-            quantum_frames: producer.quantum_frames,
-            submitted_frames: chunk.frames,
-            end_of_region: chunk.end_of_region,
-        });
-    }
+    validate_submission_metadata(
+        producer,
+        chunk.generation,
+        chunk.start_frame,
+        chunk.frames,
+        chunk.end_of_region,
+        u32::try_from(chunk.planes.len()).map_err(|_| HostChunkError::InternalInvariant)?,
+    )?;
     if chunk
         .planes
         .iter()
@@ -777,10 +841,43 @@ fn validate_host_chunk(
             expected_frames: chunk.frames,
         });
     }
-    if chunk.start_frame != producer.next_write_frame {
+    Ok(())
+}
+
+fn validate_submission_metadata(
+    producer: &PcmSourceProducer,
+    generation: SourceGeneration,
+    start_frame: SourceFrame,
+    frames: u32,
+    end_of_region: bool,
+    channel_count: u32,
+) -> Result<(), HostChunkError> {
+    if generation != producer.active_generation {
+        return Err(HostChunkError::StaleGeneration {
+            active: producer.active_generation,
+            submitted: generation,
+        });
+    }
+    if channel_count != producer.channel_count {
+        return Err(HostChunkError::ChannelCount {
+            expected: producer.channel_count,
+            actual: usize::try_from(channel_count).expect("u32 fits usize"),
+        });
+    }
+    if frames > producer.quantum_frames
+        || (frames < producer.quantum_frames && !end_of_region)
+        || (frames == 0 && !end_of_region)
+    {
+        return Err(HostChunkError::FrameCount {
+            quantum_frames: producer.quantum_frames,
+            submitted_frames: frames,
+            end_of_region,
+        });
+    }
+    if start_frame != producer.next_write_frame {
         return Err(HostChunkError::NonContiguous {
             expected: producer.next_write_frame,
-            actual: chunk.start_frame,
+            actual: start_frame,
         });
     }
     if producer.end_of_region_submitted {
@@ -1247,5 +1344,29 @@ mod tests {
             }),
             Err(HostChunkError::WrongSampleRate { .. })
         ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn prepared_contiguous_native_submission_matches_planar_ring_shape() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
+        let mut provider = producer.into_host_chunk_provider(RATE);
+        let planar_quantum = [1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
+        provider
+            .submit_native_planar(
+                SourceGeneration(1),
+                SourceFrame(0),
+                &planar_quantum,
+                4,
+                true,
+            )
+            .expect("native planar submit");
+        let mut left = [0.0; 4];
+        let mut right = [0.0; 4];
+        let mut output = [&mut left[..], &mut right[..]];
+        let report = consumer.read_block(&mut output).expect("read");
+        assert_eq!(report.copied_frames, 4);
+        assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(right, [-1.0, -2.0, -3.0, -4.0]);
     }
 }
