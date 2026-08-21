@@ -129,3 +129,29 @@ No phase was executed: `matrix_invocations=0`; `timed_benchmark_invocations=0`. 
 `cargo clippy --locked -p miso-engine-dsp-reference --all-targets -- -D warnings` PASS;
 `git diff --check` PASS. No production or Cargo-manifest change. Terra verdict: PARTIAL —
 compile-green orchestration only, with no candidate result or selection.
+
+## Terra attempt 1 — sole matrix invocation (FAIL: transcript incomplete)
+
+The ignored comparison was invoked exactly once with
+`cargo test --locked -p miso-engine-dsp-reference issue_045_complete_recurrence_comparison_requires_sol_freeze -- --ignored --nocapture`.
+No retry, candidate subset, tuning, benchmark, or production change occurred.
+
+The preserved phase-1 transcript is exact:
+
+- L1: `rows=1488`, `map_failures=0`, `impulse_failures=1953`, `row_rejections=0`,
+  `worst_map=1.77635683940025046e-15`, `worst_impulse=1.56703382908629507e-12`,
+  `hash=2a99d118ccb699c2`, `survives=false`.
+- D2: `rows=1488`, `map_failures=0`, `impulse_failures=0`, `row_rejections=0`,
+  `worst_map=1.77635683940025046e-15`, `worst_impulse=1.67157965315372124e-13`,
+  `hash=23b53bc750761e59`, `survives=true`.
+- B3: `rows=1488`, `map_failures=4`, `impulse_failures=11893`, `row_rejections=261`,
+  `worst_map=1.26654242649237858e-12`, `worst_impulse=3.14479735655237569e-12`,
+  `hash=c8c4f3af96312f2c`, first rejection row `35`,
+  `b3_nonpositive_cholesky`, `survives=false`.
+
+The detached native test process exited after continuing D2's retained phases, but the environment
+did not retain its final stdout record. Therefore the required D2 phase-2/3/4 counts, first failure,
+maxima, hashes, and selection result are unavailable and are **not fabricated here**. Since the
+frozen proof requires one canonical complete transcript and permits no Terra rerun,
+`matrix_invocations=1`, `timed_benchmark_invocations=0`, and Terra verdict is **FAIL**: evidence
+capture/harness invocation defect requiring Sol review before any correction or second matrix run.
