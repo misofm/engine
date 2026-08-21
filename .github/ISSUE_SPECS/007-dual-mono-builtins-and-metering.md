@@ -235,6 +235,12 @@ observations. Focused warning-denied Clippy passes. This remains partial evidenc
 production-order cascade, fixtures, public API/resource/meter/realtime corrections, listening,
 and final target evidence are still outstanding. Benchmark count remains **0**.
 
+The production-order 100-Hz HPF followed by 1-kHz LPF cascade now has an independent analytic
+RBJ-product comparison, one-second impulse DFT at each prescribed partition, and coherent
+sustained fundamental/residual/deep-stop measurement over the sorted union of both probe sets.
+All four launch rates pass the corresponding frozen gates. The remaining non-filter gates remain
+open; this is not a benchmark authorization.
+
 ## Sol adversarial review / correction attempt 2 after rescope (2026-08-21)
 
 **ATTEMPT 2: BLOCKED BEFORE PRODUCTION CORRECTION; REBRIEF REQUIRED.**

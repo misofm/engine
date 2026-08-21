@@ -1396,6 +1396,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn production_order_hpf_lpf_cascade_meets_all_launch_response_gates() {
+        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+            let probes = cascade_probes(rate);
+            let high_state = TptSvf::design(rate, 100.0, true).expect("high pass");
+            let low_state = TptSvf::design(rate, 1_000.0, false).expect("low pass");
+            let high_space = ReferenceTptStateSpace::from_cast_coefficients(
+                high_state.c1,
+                high_state.a2,
+                high_state.a3,
+                high_state.k,
+                ReferenceTptOutput::HighPass,
+            );
+            let low_space = ReferenceTptStateSpace::from_cast_coefficients(
+                low_state.c1,
+                low_state.a2,
+                low_state.a3,
+                low_state.k,
+                ReferenceTptOutput::LowPass,
+            );
+            for frequency in probes
+                .iter()
+                .copied()
+                .chain([100.0, 1_000.0, 0.49 * f64::from(rate)])
+            {
+                let reference = rbj_butterworth_magnitude_db(
+                    f64::from(rate),
+                    100.0,
+                    ReferenceFilterKind::HighPass,
+                    frequency,
+                )
+                .expect("reference high")
+                    + rbj_butterworth_magnitude_db(
+                        f64::from(rate),
+                        1_000.0,
+                        ReferenceFilterKind::LowPass,
+                        frequency,
+                    )
+                    .expect("reference low");
+                let actual = high_space
+                    .magnitude_db(f64::from(rate), frequency)
+                    .expect("state high")
+                    + low_space
+                        .magnitude_db(f64::from(rate), frequency)
+                        .expect("state low");
+                if reference >= -120.0 {
+                    assert!(
+                        (actual - reference).abs() <= 0.005,
+                        "analytic rate={rate}, frequency={frequency}, actual={actual}, reference={reference}"
+                    );
+                }
+            }
+            for quantum in [1, 127, 128, 255, 1_024] {
+                let mut high = TptSvf::design(rate, 100.0, true).expect("high pass");
+                let mut low = TptSvf::design(rate, 1_000.0, false).expect("low pass");
+                let mut report = BuiltinProcessReport::default();
+                let mut recovered = 0;
+                let mut impulse = vec![0.0_f32; rate as usize];
+                for start in (0..impulse.len()).step_by(quantum) {
+                    let end = (start + quantum).min(impulse.len());
+                    for (offset, sample) in impulse[start..end].iter_mut().enumerate() {
+                        let input = if start + offset == 0 { 1.0 } else { 0.0 };
+                        let high_output = high.process(input, &mut recovered, &mut report);
+                        *sample = low.process(high_output, &mut recovered, &mut report);
+                    }
+                }
+                assert!(impulse.iter().all(|sample| sample.is_finite()));
+                for frequency in &probes {
+                    let reference = rbj_butterworth_magnitude_db(
+                        f64::from(rate),
+                        100.0,
+                        ReferenceFilterKind::HighPass,
+                        *frequency,
+                    )
+                    .expect("reference high")
+                        + rbj_butterworth_magnitude_db(
+                            f64::from(rate),
+                            1_000.0,
+                            ReferenceFilterKind::LowPass,
+                            *frequency,
+                        )
+                        .expect("reference low");
+                    let actual = impulse_dft_magnitude_db(&impulse, f64::from(rate), *frequency);
+                    if reference >= -120.0 {
+                        assert!(
+                            (actual - reference).abs() <= 0.05,
+                            "impulse rate={rate}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
+                        );
+                    } else {
+                        assert!(
+                            actual <= -115.0,
+                            "impulse rate={rate}, quantum={quantum}, frequency={frequency}, actual={actual}"
+                        );
+                    }
+                }
+            }
+            for frequency in probes {
+                let measurement = sustained_cascade_measurement(rate, frequency);
+                if measurement.reference_gain_db >= -90.0 {
+                    assert!(
+                        (measurement.production_gain_db - measurement.reference_gain_db).abs()
+                            <= 0.05,
+                        "sustained rate={rate}, frequency={frequency}, production={}, reference={}",
+                        measurement.production_gain_db,
+                        measurement.reference_gain_db
+                    );
+                    assert!(
+                        measurement.residual_db <= -100.0,
+                        "sustained rate={rate}, frequency={frequency}, residual={}",
+                        measurement.residual_db
+                    );
+                } else {
+                    assert!(
+                        measurement.total_output_db <= -88.0,
+                        "sustained rate={rate}, frequency={frequency}, output={}",
+                        measurement.total_output_db
+                    );
+                }
+            }
+        }
+    }
+
     struct SustainedMeasurement {
         production_gain_db: f64,
         reference_gain_db: f64,
@@ -1468,6 +1590,75 @@ mod tests {
         }
     }
 
+    fn sustained_cascade_measurement(rate: u32, frequency: f64) -> SustainedMeasurement {
+        let mut high = TptSvf::design(rate, 100.0, true).expect("high pass");
+        let mut low = TptSvf::design(rate, 1_000.0, false).expect("low pass");
+        let mut high_reference =
+            ReferenceBiquad::rbj_butterworth(f64::from(rate), 100.0, ReferenceFilterKind::HighPass)
+                .expect("reference high");
+        let mut low_reference = ReferenceBiquad::rbj_butterworth(
+            f64::from(rate),
+            1_000.0,
+            ReferenceFilterKind::LowPass,
+        )
+        .expect("reference low");
+        let settle = rate as usize / 2;
+        let frames = rate as usize / 4;
+        let rate_f64 = f64::from(rate);
+        let mut report = BuiltinProcessReport::default();
+        let mut recovered = 0;
+        let mut output_sum = 0.0_f64;
+        let mut output_sine = 0.0_f64;
+        let mut output_cosine = 0.0_f64;
+        let mut reference_sine = 0.0_f64;
+        let mut reference_cosine = 0.0_f64;
+        let mut input_energy = 0.0_f64;
+        let mut output_energy = 0.0_f64;
+        let mut measured_outputs = Vec::with_capacity(frames);
+        for index in 0..settle + frames {
+            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
+            let input = (0.5 * phase.sin()) as f32;
+            let high_output = high.process(input, &mut recovered, &mut report);
+            let output = low.process(high_output, &mut recovered, &mut report);
+            let reference = low_reference.process(high_reference.process(f64::from(input)));
+            if index >= settle {
+                let (sine, cosine) = (phase.sin(), phase.cos());
+                let output = f64::from(output);
+                measured_outputs.push(output);
+                output_sum += output;
+                output_sine += output * sine;
+                output_cosine += output * cosine;
+                reference_sine += reference * sine;
+                reference_cosine += reference * cosine;
+                input_energy += f64::from(input) * f64::from(input);
+                output_energy += output * output;
+            }
+        }
+        let frames_f64 = frames as f64;
+        let input_rms = (input_energy / frames_f64).sqrt();
+        let dc = output_sum / frames_f64;
+        let sine = 2.0 * output_sine / frames_f64;
+        let cosine = 2.0 * output_cosine / frames_f64;
+        let production_amplitude = sine.hypot(cosine);
+        let reference_amplitude =
+            (2.0 * reference_sine / frames_f64).hypot(2.0 * reference_cosine / frames_f64);
+        let residual_energy = measured_outputs
+            .into_iter()
+            .enumerate()
+            .map(|(offset, output)| {
+                let phase =
+                    core::f64::consts::TAU * frequency * (settle + offset) as f64 / rate_f64;
+                (output - (dc + sine * phase.sin() + cosine * phase.cos())).powi(2)
+            })
+            .sum::<f64>();
+        SustainedMeasurement {
+            production_gain_db: 20.0 * (production_amplitude / 0.5).log10(),
+            reference_gain_db: 20.0 * (reference_amplitude / 0.5).log10(),
+            residual_db: 20.0 * ((residual_energy / frames_f64).sqrt() / input_rms).log10(),
+            total_output_db: 20.0 * ((output_energy / frames_f64).sqrt() / input_rms).log10(),
+        }
+    }
+
     fn coherent_probes(rate: u32, cutoff: f64) -> Vec<f64> {
         let nyquist = 0.5 * f64::from(rate);
         let mut probes = [
@@ -1481,6 +1672,14 @@ mod tests {
         .map(|probe| probe.clamp(4.0, nyquist - 4.0))
         .map(|probe| (probe / 4.0).round() * 4.0)
         .collect::<Vec<_>>();
+        probes.sort_by(f64::total_cmp);
+        probes.dedup_by(|left, right| *left == *right);
+        probes
+    }
+
+    fn cascade_probes(rate: u32) -> Vec<f64> {
+        let mut probes = coherent_probes(rate, 100.0);
+        probes.extend(coherent_probes(rate, 1_000.0));
         probes.sort_by(f64::total_cmp);
         probes.dedup_by(|left, right| *left == *right);
         probes
