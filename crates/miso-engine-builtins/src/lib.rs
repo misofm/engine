@@ -407,6 +407,11 @@ impl TptSvf {
         {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
+        let cutoff_db = cast_tpt_magnitude_db(rate, cutoff, c1, a2, a3, k, high_pass)
+            .ok_or(BuiltinParameterError::FilterCoefficients)?;
+        if (cutoff_db + 3.010_299_956_6).abs() > 0.005 {
+            return Err(BuiltinParameterError::FilterCoefficients);
+        }
         Ok(Self {
             c1,
             a2,
@@ -463,6 +468,72 @@ impl TptSvf {
             if self.high_pass { high } else { low },
             &mut report.sanitized_output,
         )
+    }
+}
+
+/// Evaluate the exact-real state-space response implied by the stored `f32` coefficient bits.
+///
+/// This runs only during preparation.  It deliberately does not call the test/reference crate:
+/// the production compiler must reject a cast coefficient set that misses the frozen cutoff gate
+/// even when conformance tests are not linked into the host.
+#[allow(clippy::too_many_arguments)]
+fn cast_tpt_magnitude_db(
+    rate: u32,
+    frequency: f32,
+    c1: f32,
+    a2: f32,
+    a3: f32,
+    k: f32,
+    high_pass: bool,
+) -> Option<f64> {
+    let (c1, a2, a3, k) = (f64::from(c1), f64::from(a2), f64::from(a3), f64::from(k));
+    let a00 = 1.0 - 2.0 * c1;
+    let a01 = -2.0 * a2;
+    let a10 = 2.0 * a2;
+    let a11 = 1.0 - 2.0 * a3;
+    let b0 = 2.0 * a2;
+    let b1 = 2.0 * a3;
+    let (output_c0, output_c1, direct) = if high_pass {
+        (-k * (1.0 - c1) - a2, k * a2 - (1.0 - a3), 1.0 - k * a2 - a3)
+    } else {
+        (a2, 1.0 - a3, a3)
+    };
+
+    let phase = core::f64::consts::TAU * f64::from(frequency) / f64::from(rate);
+    let (z_real, z_imaginary) = (phase.cos(), phase.sin());
+    let m00_real = z_real - a00;
+    let m11_real = z_real - a11;
+    let m01_real = -a01;
+    let m10_real = -a10;
+    let determinant_real = m00_real * m11_real - z_imaginary * z_imaginary - m01_real * m10_real;
+    let determinant_imaginary = z_imaginary * (m00_real + m11_real);
+    let determinant_norm =
+        determinant_real * determinant_real + determinant_imaginary * determinant_imaginary;
+    if determinant_norm == 0.0 || !determinant_norm.is_finite() {
+        return None;
+    }
+
+    let state0_numerator_real = m11_real * b0 - m01_real * b1;
+    let state0_numerator_imaginary = z_imaginary * b0;
+    let state1_numerator_real = -m10_real * b0 + m00_real * b1;
+    let state1_numerator_imaginary = z_imaginary * b1;
+    let divide = |numerator_real: f64, numerator_imaginary: f64| {
+        (
+            (numerator_real * determinant_real + numerator_imaginary * determinant_imaginary)
+                / determinant_norm,
+            (numerator_imaginary * determinant_real - numerator_real * determinant_imaginary)
+                / determinant_norm,
+        )
+    };
+    let (state0_real, state0_imaginary) = divide(state0_numerator_real, state0_numerator_imaginary);
+    let (state1_real, state1_imaginary) = divide(state1_numerator_real, state1_numerator_imaginary);
+    let response_real = direct + output_c0 * state0_real + output_c1 * state1_real;
+    let response_imaginary = output_c0 * state0_imaginary + output_c1 * state1_imaginary;
+    let magnitude = response_real.hypot(response_imaginary);
+    if magnitude.is_finite() && magnitude > 0.0 {
+        Some(20.0 * magnitude.log10())
+    } else {
+        None
     }
 }
 
@@ -1641,15 +1712,9 @@ mod tests {
                     let state = ReferenceTptStateSpace::from_cast_coefficients(
                         filter.c1, filter.a2, filter.a3, filter.k, output,
                     );
-                    let mut probes = vec![
-                        0.25 * cutoff,
-                        *cutoff,
-                        4.0 * cutoff,
-                        0.2 * f64::from(rate),
-                        0.45 * f64::from(rate),
-                        0.49 * f64::from(rate),
-                    ];
-                    probes.retain(|probe| *probe > 0.0 && *probe < 0.5 * f64::from(rate));
+                    assert_tpt_limits_and_monotonic(state, rate, high_pass, *cutoff);
+                    let mut probes = coherent_probes(rate, *cutoff);
+                    probes.extend([*cutoff, 0.49 * f64::from(rate)]);
                     probes.sort_by(f64::total_cmp);
                     probes.dedup_by(|left, right| *left == *right);
                     for frequency in probes {
@@ -1695,6 +1760,7 @@ mod tests {
                 (false, ReferenceFilterKind::LowPass),
             ] {
                 for cutoff in &cutoffs {
+                    let mut partition_reference: Option<Vec<f32>> = None;
                     for quantum in [1, 127, 128, 255, 1_024] {
                         let mut filter = TptSvf::design(rate, *cutoff as f32, high_pass)
                             .expect("valid matrix cutoff");
@@ -1714,6 +1780,26 @@ mod tests {
                             }
                         }
                         assert!(impulse.iter().all(|sample| sample.is_finite()));
+                        assert!(
+                            recovered <= 1,
+                            "rate={rate}, cutoff={cutoff}, recoveries={recovered}"
+                        );
+                        let tail_energy = impulse[impulse.len().saturating_sub(4_096)..]
+                            .iter()
+                            .map(|sample| f64::from(*sample) * f64::from(*sample))
+                            .sum::<f64>();
+                        assert!(
+                            tail_energy.is_finite() && tail_energy <= 1e-8,
+                            "rate={rate}, cutoff={cutoff}, quantum={quantum}, tail_energy={tail_energy}"
+                        );
+                        if let Some(reference) = &partition_reference {
+                            assert_eq!(
+                                &impulse, reference,
+                                "block partition changed bits: rate={rate}, cutoff={cutoff}, quantum={quantum}"
+                            );
+                        } else {
+                            partition_reference = Some(impulse.clone());
+                        }
                         for frequency in coherent_probes(rate, *cutoff) {
                             let reference = rbj_butterworth_magnitude_db(
                                 f64::from(rate),
@@ -1934,14 +2020,10 @@ mod tests {
         let frames = rate as usize / 4;
         let mut report = BuiltinProcessReport::default();
         let mut recovered = 0;
-        let mut production_sum = 0.0_f64;
-        let mut production_sine = 0.0_f64;
-        let mut production_cosine = 0.0_f64;
-        let mut reference_sine = 0.0_f64;
-        let mut reference_cosine = 0.0_f64;
         let mut input_energy = 0.0_f64;
         let mut output_energy = 0.0_f64;
         let mut measured_outputs = Vec::with_capacity(frames);
+        let mut reference_outputs = Vec::with_capacity(frames);
         let rate_f64 = f64::from(rate);
         for index in 0..settle + frames {
             let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
@@ -1949,29 +2031,26 @@ mod tests {
             let output = production.process(input, &mut recovered, &mut report);
             let reference_output = reference.process(f64::from(input));
             if index >= settle {
-                let sine = phase.sin();
-                let cosine = phase.cos();
                 let output = f64::from(output);
                 measured_outputs.push(output);
-                production_sum += output;
-                production_sine += output * sine;
-                production_cosine += output * cosine;
-                reference_sine += reference_output * sine;
-                reference_cosine += reference_output * cosine;
+                reference_outputs.push(reference_output);
                 input_energy += f64::from(input) * f64::from(input);
                 output_energy += output * output;
             }
         }
         let frames_f64 = frames as f64;
         let input_rms = (input_energy / frames_f64).sqrt();
-        let production_dc = production_sum / frames_f64;
-        let production_sine_coefficient = 2.0 * production_sine / frames_f64;
-        let production_cosine_coefficient = 2.0 * production_cosine / frames_f64;
+        let [
+            production_dc,
+            production_sine_coefficient,
+            production_cosine_coefficient,
+        ] = fit_dc_sine_cosine(&measured_outputs, settle, rate_f64, frequency);
+        let [_, reference_sine_coefficient, reference_cosine_coefficient] =
+            fit_dc_sine_cosine(&reference_outputs, settle, rate_f64, frequency);
         let production_amplitude = production_sine_coefficient.hypot(production_cosine_coefficient);
-        let reference_amplitude =
-            (2.0 * reference_sine / frames_f64).hypot(2.0 * reference_cosine / frames_f64);
+        let reference_amplitude = reference_sine_coefficient.hypot(reference_cosine_coefficient);
         let mut residual_energy = 0.0_f64;
-        for (offset, output) in measured_outputs.into_iter().enumerate() {
+        for (offset, output) in measured_outputs.iter().copied().enumerate() {
             let index = settle + offset;
             let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
             let fitted = production_dc
@@ -2006,14 +2085,10 @@ mod tests {
         let rate_f64 = f64::from(rate);
         let mut report = BuiltinProcessReport::default();
         let mut recovered = 0;
-        let mut output_sum = 0.0_f64;
-        let mut output_sine = 0.0_f64;
-        let mut output_cosine = 0.0_f64;
-        let mut reference_sine = 0.0_f64;
-        let mut reference_cosine = 0.0_f64;
         let mut input_energy = 0.0_f64;
         let mut output_energy = 0.0_f64;
         let mut measured_outputs = Vec::with_capacity(frames);
+        let mut reference_outputs = Vec::with_capacity(frames);
         for index in 0..settle + frames {
             let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
             let input = (0.5 * phase.sin()) as f32;
@@ -2021,28 +2096,23 @@ mod tests {
             let output = low.process(high_output, &mut recovered, &mut report);
             let reference = low_reference.process(high_reference.process(f64::from(input)));
             if index >= settle {
-                let (sine, cosine) = (phase.sin(), phase.cos());
                 let output = f64::from(output);
                 measured_outputs.push(output);
-                output_sum += output;
-                output_sine += output * sine;
-                output_cosine += output * cosine;
-                reference_sine += reference * sine;
-                reference_cosine += reference * cosine;
+                reference_outputs.push(reference);
                 input_energy += f64::from(input) * f64::from(input);
                 output_energy += output * output;
             }
         }
         let frames_f64 = frames as f64;
         let input_rms = (input_energy / frames_f64).sqrt();
-        let dc = output_sum / frames_f64;
-        let sine = 2.0 * output_sine / frames_f64;
-        let cosine = 2.0 * output_cosine / frames_f64;
+        let [dc, sine, cosine] = fit_dc_sine_cosine(&measured_outputs, settle, rate_f64, frequency);
+        let [_, reference_sine, reference_cosine] =
+            fit_dc_sine_cosine(&reference_outputs, settle, rate_f64, frequency);
         let production_amplitude = sine.hypot(cosine);
-        let reference_amplitude =
-            (2.0 * reference_sine / frames_f64).hypot(2.0 * reference_cosine / frames_f64);
+        let reference_amplitude = reference_sine.hypot(reference_cosine);
         let residual_energy = measured_outputs
-            .into_iter()
+            .iter()
+            .copied()
             .enumerate()
             .map(|(offset, output)| {
                 let phase =
@@ -2055,6 +2125,110 @@ mod tests {
             reference_gain_db: 20.0 * (reference_amplitude / 0.5).log10(),
             residual_db: 20.0 * ((residual_energy / frames_f64).sqrt() / input_rms).log10(),
             total_output_db: 20.0 * ((output_energy / frames_f64).sqrt() / input_rms).log10(),
+        }
+    }
+
+    fn fit_dc_sine_cosine(
+        samples: &[f64],
+        first_index: usize,
+        rate: f64,
+        frequency: f64,
+    ) -> [f64; 3] {
+        let mut normal = [[0.0_f64; 3]; 3];
+        let mut right = [0.0_f64; 3];
+        for (offset, sample) in samples.iter().copied().enumerate() {
+            let phase = core::f64::consts::TAU * frequency * (first_index + offset) as f64 / rate;
+            let basis = [1.0, phase.sin(), phase.cos()];
+            for row in 0..3 {
+                right[row] += basis[row] * sample;
+                for column in 0..3 {
+                    normal[row][column] += basis[row] * basis[column];
+                }
+            }
+        }
+        solve_three_by_three([
+            [normal[0][0], normal[0][1], normal[0][2], right[0]],
+            [normal[1][0], normal[1][1], normal[1][2], right[1]],
+            [normal[2][0], normal[2][1], normal[2][2], right[2]],
+        ])
+    }
+
+    fn solve_three_by_three(mut augmented: [[f64; 4]; 3]) -> [f64; 3] {
+        for column in 0..3 {
+            let mut pivot = column;
+            for row in column + 1..3 {
+                if augmented[row][column].abs() > augmented[pivot][column].abs() {
+                    pivot = row;
+                }
+            }
+            augmented.swap(column, pivot);
+            let divisor = augmented[column][column];
+            assert!(divisor.is_finite() && divisor.abs() > f64::EPSILON);
+            for value in &mut augmented[column][column..] {
+                *value /= divisor;
+            }
+            let pivot_row = augmented[column];
+            for (row_index, row) in augmented.iter_mut().enumerate() {
+                if row_index == column {
+                    continue;
+                }
+                let factor = row[column];
+                for (value, pivot_value) in row[column..].iter_mut().zip(&pivot_row[column..]) {
+                    *value -= factor * pivot_value;
+                }
+            }
+        }
+        [augmented[0][3], augmented[1][3], augmented[2][3]]
+    }
+
+    fn assert_tpt_limits_and_monotonic(
+        state: ReferenceTptStateSpace,
+        rate: u32,
+        high_pass: bool,
+        cutoff: f64,
+    ) {
+        let nyquist = 0.5 * f64::from(rate);
+        let magnitude = |frequency| {
+            let (real, imaginary) = state
+                .response(f64::from(rate), frequency)
+                .expect("finite state-space response");
+            real.hypot(imaginary)
+        };
+        let (dc, at_nyquist) = (magnitude(0.0), magnitude(nyquist));
+        if high_pass {
+            assert!(
+                dc <= 1e-6,
+                "HPF DC limit: rate={rate}, cutoff={cutoff}, value={dc}"
+            );
+            assert!(
+                (at_nyquist - 1.0).abs() <= 1e-6,
+                "HPF Nyquist limit: rate={rate}, cutoff={cutoff}, value={at_nyquist}"
+            );
+        } else {
+            assert!(
+                (dc - 1.0).abs() <= 1e-6,
+                "LPF DC limit: rate={rate}, cutoff={cutoff}, value={dc}"
+            );
+            assert!(
+                at_nyquist <= 1e-6,
+                "LPF Nyquist limit: rate={rate}, cutoff={cutoff}, value={at_nyquist}"
+            );
+        }
+        let mut previous = magnitude(0.0);
+        for index in 1..=4_096 {
+            let current = magnitude(nyquist * f64::from(index) / 4_096.0);
+            if high_pass {
+                assert!(
+                    current + 2e-6 >= previous,
+                    "HPF monotonicity: rate={rate}, cutoff={cutoff}, index={index}, previous={previous}, current={current}"
+                );
+            } else {
+                assert!(
+                    current <= previous + 2e-6,
+                    "LPF monotonicity: rate={rate}, cutoff={cutoff}, index={index}, previous={previous}, current={current}"
+                );
+            }
+            previous = current;
         }
     }
 
