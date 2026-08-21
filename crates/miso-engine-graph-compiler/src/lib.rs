@@ -1978,6 +1978,27 @@ mod tests {
         }
     }
 
+    /// A one-shot above-ceiling impulse followed by silence. The delayed limiter output therefore
+    /// crosses its fixed latency and continues through its frozen release state on later blocks.
+    struct LimiterReleaseImpulseBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for LimiterReleaseImpulseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            if block.first_sample == 0 {
+                block.left[0] = self.left;
+                block.right[0] = self.right;
+            }
+            Ok(())
+        }
+    }
+
     fn asymmetric_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
         let GraphNodeId::TrackStage {
             track_id,
@@ -2013,6 +2034,25 @@ mod tests {
         Box::new(AsymmetricTrackImpulseBinding {
             left: 0.03125 * (index + 1) as f32,
             right: -0.015625 * 9_u32.saturating_sub(index) as f32,
+        })
+    }
+
+    fn true_peak_limiter_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("eq")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("true-peak limiter fixture track id");
+        Box::new(LimiterReleaseImpulseBinding {
+            left: 1.125 + 0.0625 * index as f32,
+            right: -(1.0625 + 0.03125 * index as f32),
         })
     }
 
@@ -2057,6 +2097,47 @@ mod tests {
             effect.identity = EffectIdentity::Native {
                 effect_id: StableId::parse("miso.gate-expander").expect("gate/expander id"),
             };
+        }
+        model
+    }
+
+    fn accepted_true_peak_limiter_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model = accepted_compressor_graph_fixture();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let effect = &mut track.simd1.effects[0];
+            effect.id = StableId::parse("true-peak-limiter").expect("limiter effect id");
+            effect.identity = EffectIdentity::Native {
+                effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+            };
+            effect.link_mode = miso_engine_session::LinkMode::Maximum;
+            effect.sidechain = SidechainDeclaration::None;
+            let index = index as f32;
+            effect.params = vec![
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Left,
+                    unit: ParameterUnit::Db,
+                    value: -1.0 - 0.1 * index,
+                },
+                EffectParam {
+                    parameter_id: 1,
+                    channel: ParameterChannel::Right,
+                    unit: ParameterUnit::Db,
+                    value: -1.5 - 0.1 * index,
+                },
+                EffectParam {
+                    parameter_id: 2,
+                    channel: ParameterChannel::Both,
+                    unit: ParameterUnit::Milliseconds,
+                    value: 100.0 + 10.0 * index,
+                },
+                EffectParam {
+                    parameter_id: 3,
+                    channel: ParameterChannel::Both,
+                    unit: ParameterUnit::Milliseconds,
+                    value: [0.0, 5.0, 10.0][index as usize % 3],
+                },
+            ];
         }
         model
     }
@@ -3513,6 +3594,314 @@ mod tests {
             expected_schedule
         );
         assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+    }
+
+    #[test]
+    fn launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps() {
+        let model = accepted_true_peak_limiter_graph_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted true-peak limiter fixture");
+        assert_eq!(session.sample_rate().0, 48_000);
+        assert_eq!(session.quantum().0, 128);
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let limiter = registry
+            .get_shared_ascii("miso.true-peak-limiter")
+            .expect("registered true-peak limiter");
+        let scalar_registry =
+            NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory { delegate: limiter })
+                as Box<dyn NativeEffectFactory>])
+            .expect("scalar limiter registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared bank-capable limiter effects");
+        assert_eq!(effects.entries.len(), 10);
+        assert!(effects.entries.iter().all(|entry| {
+            entry.metadata.latency == LatencySamples(486)
+                && entry.metadata.tail == TailSamples::Infinite
+        }));
+        let scalar_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared scalar limiter effects");
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_050,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_051,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar limiter graph: {:?}", failure.diagnostics));
+
+        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
+            let lanes = width.lanes() as usize;
+            (10 / lanes, 10 % lanes)
+        });
+        assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.banks.len(),
+            expected_banks
+        );
+        assert_eq!(
+            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            expected_scalar_tails
+        );
+        let actual_members: Vec<Vec<String>> = artifact
+            .report
+            .rack_cohorts
+            .simd1
+            .banks
+            .iter()
+            .map(|bank| {
+                bank.members
+                    .iter()
+                    .map(|member| member.track_id.to_string())
+                    .collect()
+            })
+            .collect();
+        let expected_members: Vec<Vec<String>> = width.map_or_else(Vec::new, |width| {
+            let lanes = width.lanes() as usize;
+            (0..expected_banks)
+                .map(|bank| {
+                    (bank * lanes..(bank + 1) * lanes)
+                        .map(|index| format!("eq{index}"))
+                        .collect()
+                })
+                .collect()
+        });
+        assert_eq!(
+            actual_members, expected_members,
+            "full banks retain stable membership"
+        );
+        let actual_tails: Vec<_> = artifact
+            .report
+            .rack_cohorts
+            .simd1
+            .scalar_tails
+            .iter()
+            .map(|tail| tail.track_id.to_string())
+            .collect();
+        let expected_tails: Vec<_> =
+            (expected_banks * width.map_or(1, |width| width.lanes() as usize)..10)
+                .map(|index| format!("eq{index}"))
+                .collect();
+        assert_eq!(actual_tails, expected_tails, "scalar tail order is stable");
+        assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        assert_eq!(
+            artifact.report.sequential_schedule,
+            scalar_artifact.report.sequential_schedule
+        );
+        assert_eq!(
+            artifact.report.route_timings,
+            scalar_artifact.report.route_timings
+        );
+        assert_eq!(
+            artifact.report.inserted_delays,
+            scalar_artifact.report.inserted_delays
+        );
+        assert_eq!(
+            artifact.report.canonical_debug_bytes,
+            scalar_artifact.report.canonical_debug_bytes
+        );
+        assert!(artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(486)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(486)
+        }));
+        let expected_schedule = artifact.report.sequential_schedule.clone();
+        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_delays = artifact.report.inserted_delays.clone();
+        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
+
+        let PreparedGraphArtifact {
+            graph: bank_graph,
+            report: _,
+        } = artifact;
+        let PreparedGraphArtifact {
+            graph: scalar_graph,
+            report: _,
+        } = scalar_artifact;
+        let envelope = bank_graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let bank_nodes = bank_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), true_peak_limiter_input_binding(node)))
+            .collect();
+        let scalar_nodes = scalar_graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), true_peak_limiter_input_binding(node)))
+            .collect();
+        let mut bank_plan = bank_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bank_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("limiter bank bind: {}", failure.code));
+        let mut scalar_plan = scalar_graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("limiter scalar bind: {}", failure.code));
+        let mut reached_fixed_latency = false;
+        for block in 0..16_u64 {
+            let mut bank_pcm = vec![0.0_f32; frames * 2];
+            let mut scalar_pcm = vec![0.0_f32; frames * 2];
+            bank_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
+                            .expect("bank output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("bank render");
+            scalar_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                            .expect("scalar output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("scalar render");
+            assert_eq!(
+                bank_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                scalar_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "bank, tails, and scalar limiter render exact carried release state"
+            );
+            for frame in 0..frames {
+                let absolute = block * frames as u64 + frame as u64;
+                let left = bank_pcm[frame];
+                let right = bank_pcm[frames + frame];
+                if absolute < 486 {
+                    assert_eq!(left, 0.0, "left output before fixed limiter latency");
+                    assert_eq!(right, 0.0, "right output before fixed limiter latency");
+                }
+                if absolute == 486 {
+                    reached_fixed_latency = left != 0.0 && right != 0.0;
+                }
+            }
+        }
+        assert!(
+            reached_fixed_latency,
+            "one-shot limiter input first appears at the frozen T=486 samples"
+        );
+
+        let mut bypass_model = model.clone();
+        for track in &mut bypass_model.tracks {
+            track.simd1.effects[0].bypass = true;
+        }
+        let bypass_session = compile_session(
+            &bypass_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled bypass limiter fixture");
+        let bypass_effects =
+            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
+                .expect("prepared bypass limiter effects");
+        assert!(
+            bypass_effects
+                .entries
+                .iter()
+                .all(|entry| entry.metadata.latency == LatencySamples(486))
+        );
+        let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_052,
+            effects: bypass_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bypass limiter graph: {:?}", failure.diagnostics));
+        assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(
+            bypass_artifact.report.sequential_schedule,
+            expected_schedule
+        );
+        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
+        assert_eq!(
+            bypass_artifact.report.canonical_debug_bytes,
+            expected_canonical_bytes
+        );
+        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+            route.source_arrival == LatencySamples(486)
+                && route.compensation_delay == LatencySamples(0)
+                && route.destination_arrival == LatencySamples(486)
+        }));
+
+        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared limiter effects for transactional cap");
+        let mut constrained_caps = integration_caps();
+        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
+            .checked_sub(1)
+            .expect("nonzero full graph plan estimate");
+        let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_053,
+            effects: cap_effects,
+            caps: constrained_caps,
+        }) {
+            Ok(_) => panic!("one-byte-below limiter graph cap must reject before publication"),
+            Err(failure) => failure,
+        };
+        assert!(
+            cap_failure
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code == "graph.resource.limit"
+                        && diagnostic.path == "$.graph_compile_caps"
+                })
+        );
+        assert_eq!(cap_failure.effects.entries.len(), 10);
+        assert_eq!(
+            cap_failure.effects.session.normalized_model().tracks.len(),
+            10,
+            "cap rejection returns every prepared limiter input"
+        );
     }
 
     #[test]

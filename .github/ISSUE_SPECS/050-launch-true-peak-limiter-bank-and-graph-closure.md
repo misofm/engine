@@ -178,3 +178,29 @@ and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS
   track 0 left `-0`/right `+0` and track 1 left `+0`/right `-0` exactly at fixed sample 486, with
   scalar-peer PCM/report parity. Limiter fmt, locked tests (8 passed), and all-target `-D warnings`
   Clippy passed; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 final candidate — PASS pending Sol review
+
+- Candidate base: `f293b41`. The accepted Issue-016 scalar descriptor, 48-tap detector, guarded
+  gain/hold/release law, fixed `T=N+6`, snapshot layout, reset/recovery and scalar output were not
+  changed. The four launch-rate state/default rows and W4/W8 exact retained-byte tests remain the
+  direct bank evidence recorded above.
+- `miso.true-peak-limiter` is now an approved direct dependency of the injected launch registry
+  and is registered beside EQ, compressor and gate/expander. The effect-runtime dependency
+  allowlist and its missing/substituted-dependency mutation coverage were updated accordingly.
+- The one accepted ten-track 48-kHz/128-frame graph fixture uses homogeneous Normal,
+  no-sidechain limiter programs with legal per-track/lane parameter differences. It verifies the
+  selected native W8 shape (one full eight-member bank plus `eq8`/`eq9` scalar tails; W4/scalar
+  expectations remain width-conditional), stable ascending membership, ten independent scalar
+  control instances, exact PCM over the one-shot guarded-impulse/fixed-latency/release sequence,
+  and unchanged schedule, PDC, inserted-delay and canonical graph bytes.
+- Every enabled and bypassed fixture instance declares and routes exactly `T=486`; all route
+  arrivals are 486 with zero compensation. Bypass preserves the same prepared-bank count,
+  schedule, PDC and canonical bytes. A plan cap one byte below the checked final estimate rejects
+  with `graph.resource.limit` and returns all ten prepared effect inputs, without publishing a
+  graph.
+- PASS: focused formatting; locked core (27), limiter (8), effect-compiler (4), and graph
+  compiler (18) tests; all-target warning-denied focused Clippy; workspace/realtime/effect-runtime/
+  rack/graph policy and mutation scripts; locked workspace check, test, all-target Clippy and
+  warning-denied rustdoc. No Issue-049 corpus/audit/target/object/timing/listening command ran;
+  `timed_benchmark_invocations=0`.

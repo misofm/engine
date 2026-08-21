@@ -78,6 +78,8 @@ pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, Regist
         Box::new(miso_engine_parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
         Box::new(miso_engine_compressor::CompressorFactory) as Box<dyn NativeEffectFactory>,
         Box::new(miso_engine_gate_expander::GateExpanderFactory) as Box<dyn NativeEffectFactory>,
+        Box::new(miso_engine_true_peak_limiter::TruePeakLimiterFactory)
+            as Box<dyn NativeEffectFactory>,
     ])
 }
 

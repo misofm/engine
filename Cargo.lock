@@ -274,6 +274,7 @@ dependencies = [
  "miso-engine-gate-expander",
  "miso-engine-parametric-eq",
  "miso-engine-session",
+ "miso-engine-true-peak-limiter",
 ]
 
 [[package]]

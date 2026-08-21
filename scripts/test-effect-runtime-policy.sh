@@ -36,6 +36,10 @@ sed -i '/^miso-engine-gate-expander[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-gate-expander
 sed -i 's/^miso-engine-gate-expander[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-gate-expander
+sed -i '/^miso-engine-true-peak-limiter[.]workspace = true$/d' "$compiler_manifest"
+expect_dependency_failure missing-true-peak-limiter
+sed -i 's/^miso-engine-true-peak-limiter[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+expect_dependency_failure substituted-true-peak-limiter
 
 printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
