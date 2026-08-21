@@ -276,6 +276,7 @@ dependencies = [
  "miso-engine-parametric-eq",
  "miso-engine-session",
  "miso-engine-soft-clip",
+ "miso-engine-transient-shaper",
  "miso-engine-true-peak-limiter",
 ]
 

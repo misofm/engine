@@ -213,3 +213,30 @@ attempt count; strict Terra/final Sol verdict; successor link; and
 - This remains a partial Issue-020 checkpoint. Registry/effect-compiler and graph/PDC/cap closure
   are deliberately unstarted, as are all Issue-054 qualification gates. No broad workspace,
   audit, target, benchmark or listening command ran; `timed_benchmark_invocations=0`.
+
+### Sol attempt 2 — registry and graph checkpoint (partial PASS)
+
+- Base candidate `632cb75`. Added `miso.transient-shaper` to the caller-owned launch registry and
+  exact effect-compiler dependency allowlist. Baseline and mutation policy now require the
+  transient-shaper dependency and reject its removal, substitution, or an arbitrary extra effect
+  dependency.
+- The frozen 48-kHz/q128 ten-track fixture uses one homogeneous dual-mono program with distinct
+  per-track initial values and no sidechain. It proves host-width full-bank membership plus stable
+  scalar-tail order, and compares two consecutive rendered blocks bit-for-bit with a scalar-only
+  delegate graph while follower state crosses the block boundary.
+- Enabled and bypass graphs both retain zero latency, zero PDC, identical schedule, route timing,
+  inserted-delay set and canonical debug bytes. Exact post-bank bank-count, scratch, runtime-buffer
+  and metadata rows reconcile with both incremental-plan and session-plus-plan estimates. A plan
+  cap one byte below the complete post-bank estimate rejects transactionally and returns all ten
+  prepared effect owners.
+- PASS: `cargo fmt --all -- --check`; `cargo test --locked -p
+  miso-engine-effect-compiler --test native_session` (4 passed); `cargo test --locked -p
+  miso-engine-graph-compiler --lib
+  launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps` (1 passed, 20
+  filtered); `cargo clippy --locked -p miso-engine-effect-compiler -p
+  miso-engine-graph-compiler --all-targets -- -D warnings`; `bash
+  scripts/check-effect-runtime-policy.sh .`; `bash scripts/test-effect-runtime-policy.sh .`; and
+  `bash -n scripts/check-effect-runtime-policy.sh scripts/test-effect-runtime-policy.sh`.
+- This is the final focused product checkpoint before the separately authorized clean workspace
+  seal, not an overall Issue-020 verdict. Issue 054, audit mains, target/instruction inspection,
+  benchmarks and listening remain untouched; `timed_benchmark_invocations=0`.
