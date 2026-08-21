@@ -231,10 +231,15 @@ track restore changes no track.
 ## Scalar, W4, W8, and FMA operation graphs
 
 Scalar executes the exact sample graph above independently for L and R. A homogeneous bank owns
-sample-position-major main/detector rings and transposed per-track cursor, `G`, ramp and prepared
-default arrays for each channel. It walks tracks in ascending lane order for sanitation, linking,
-ring access, scalar `log10/exp/powf`, gain-computer and smoother work. It then calls one prepared
-architecture gain/mix kernel per channel/sample.
+exactly `W` independent per-track `Lane` states per channel, including each lane's two fixed-size
+ring allocations, cursor, `G`, ramps and prepared defaults. This is an internal layout choice:
+public state payloads remain byte-compatible per track, while graph audio remains sample-major
+AoSoA and the gain/mix step remains one packed W4/W8 call per channel/sample. The bank walks tracks
+in ascending lane order for sanitation, linking, ring access, scalar `log10/exp/powf`, gain-computer
+and smoother work. Retained state and fixed defaults are exactly `W` times the descriptor's
+per-effect envelope: for latency `N`, `lane_bytes = 4 * (24 + 2 * (N + 1))`, and the bank retains
+exactly `W * (2 * lane_bytes + 64)` declared bytes. Allocator headers and object-vtable storage are
+not state-payload bytes.
 
 Add the safe `PreparedCompressorGainMixKernelV1` following the existing prepared core-kernel seam.
 Its call accepts exact-width `samples`, `gains`, `mixes`, `dry_mask`, and `wet_mask`; masks are only
@@ -300,11 +305,12 @@ Objective comparisons:
 ## Registry, graph, realtime, and target gates
 
 The public launch registry contains both the accepted existing effects and `miso.compressor`.
-Prepare a deterministic nine-track, 48-kHz/128-frame fixture: eight stable-ID tracks have the same
+Prepare a deterministic ten-track, 48-kHz/128-frame fixture: nine stable-ID tracks have the same
 unconnected compressor program in SIMD rack 1 with asymmetric per-lane/per-track parameters; the
-ninth has a connected sidechain sourced from one of those tracks and remains scalar. Host W8
-retains one full bank plus the connected scalar; W4 retains two full banks plus that scalar; scalar
-dispatch retains all scalar. Compare with a scalar-only registry across consecutive blocks.
+tenth has a connected sidechain sourced from one of those tracks and remains scalar. Host W8
+retains one full bank, one unconnected scalar tail and the connected scalar; W4 retains two full
+banks, one unconnected scalar tail and the connected scalar; scalar dispatch retains all scalar.
+Compare with a scalar-only registry across consecutive blocks.
 
 Assert exact member IDs/order, no padding, program keys, latency/tail, connected fallback, scalar
 remainder, resource report, sidechain and main PDC, topological/reduction/observer order, canonical
@@ -325,7 +331,7 @@ Run, on one candidate before timing:
 2. descriptor/prepare/session/span/state/resource/ownership mutation tests;
 3. complete fixtures, static/envelope/latency/link/sidechain and seeded/million-sample gates;
 4. scalar/W4/W8 differential, operation graph, state/report and isolation tests;
-5. public nine-track graph vertical and the release 100,000-render audit;
+5. public ten-track graph vertical and the release 100,000-render audit;
 6. locked workspace check/tests and warning-denied all-target Clippy/rustdoc;
 7. workspace/realtime/effect/rack/graph/research/compressor policies and applicable mutations;
 8. native scalar baseline, x86 AVX2 and AVX2+FMA, Android/iOS AArch64, Wasm scalar and `+simd128`;
@@ -349,7 +355,7 @@ bash scripts/run-compressor-benchmark.sh
 The command accepts no arguments and refuses overwrite. It performs one untimed warmup and exactly
 two measured rounds, with no retry, tuning, optimization loop, or timing threshold. Each round has
 1,000 observations for exactly three 48-kHz/128-frame workloads: one unconnected DualMono scalar
-track; one full host-selected unconnected Maximum-link bank; and the nine-track production graph
+track; one full host-selected unconnected Maximum-link bank; and the ten-track production graph
 bank plus connected-sidechain scalar fallback. Exactly six JSONL records report nearest-rank
 min/p50/p95/p99/p99.9/max ns/frame/track, cycles when available, backend/width, fixture/build hashes,
 allocations/frees, CPU/OS/governor/Rust/LLVM/features/optimization/LTO/codegen, and explicit missing

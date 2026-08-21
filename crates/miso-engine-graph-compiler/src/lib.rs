@@ -3104,10 +3104,19 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar compressor graph: {:?}", failure.diagnostics));
         let width = artifact.report.rack_cohorts.dispatch.bank_width();
-        if width.is_some() {
-            assert_eq!(artifact.graph.prepared_bank_count(), 1);
-            assert_eq!(artifact.report.rack_cohorts.simd1.banks.len(), 1);
-            assert_eq!(artifact.report.rack_cohorts.simd1.scalar_tails.len(), 2);
+        if let Some(width) = width {
+            let lanes = width.lanes() as usize;
+            let expected_banks = 9 / lanes;
+            let expected_scalar_tails = 1 + 9 % lanes;
+            assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
+            assert_eq!(
+                artifact.report.rack_cohorts.simd1.banks.len(),
+                expected_banks
+            );
+            assert_eq!(
+                artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+                expected_scalar_tails
+            );
             assert!(
                 artifact
                     .report

@@ -68,7 +68,7 @@ counts, SIMD/FMA policy, sanitation and restore transaction are frozen in
 - one `miso-engine-compressor` package and the smallest direct core/effect-compiler/graph seams;
 - descriptor, factory, scalar processor, W4/W8 bank, scalar tail and launch registry integration;
 - independent `f64` reference, compact checked fixtures and deterministic differential tests;
-- one nine-track registry/session/graph bank-plus-connected-sidechain-fallback fixture;
+- one ten-track registry/session/graph bank-plus-scalar-tail-plus-connected-sidechain fixture;
 - one 100,000-render non-timed realtime audit and native/ARM/Wasm target/instruction evidence;
 - workload-free benchmark preflight followed, only when authorized, by one invocation containing
   one warmup and two measured rounds; and
@@ -129,10 +129,10 @@ approximations. AVX2+FMA has zero contractions for this V1 operation graph.
 6. Same-target scalar/W4/W8 non-FMA output and carried state are bit-identical for finite-normal
    no-sanitation inputs; cross-target comparison passes the brief's fixed tolerance. Named object
    inspection proves scalar, W4, W8 and zero-FMA operation graphs.
-7. The public nine-track graph retains exact host-selected full bank(s), the connected-sidechain
-   scalar fallback and scalar tail without graph/PDC/schedule/observer changes. Exactly 100,000
-   prepared 128-frame renders report zero forbidden operations while armed; destruction is
-   off-render.
+7. The public ten-track graph retains exact host-selected full bank(s), the connected-sidechain
+   scalar fallback and unconnected scalar tail without graph/PDC/schedule/observer changes.
+   Exactly 100,000 prepared 128-frame renders report zero forbidden operations while armed;
+   destruction is off-render.
 8. Focused and locked full workspace tests, warning-denied Clippy/rustdoc, policies/mutations, native
    baseline, x86 AVX2/AVX2+FMA, Android/iOS AArch64, and Wasm scalar/simd128 gates pass.
 9. Benchmark preflight launches zero workloads. Only after all nonbenchmark gates and explicit root
@@ -197,3 +197,30 @@ Focused evidence run by Terra (no benchmark invocation):
 This remains a bounded graph integration checkpoint only. It does not claim a checked corpus,
 full target/runtime qualification, the realtime audit, seeded or million-sample matrices, or any
 benchmark/listening result.
+
+## Sol correction attempt 2 — launch-product checkpoint
+
+**PASS for the bounded product correction; not an overall qualification verdict.** Detector-delay
+tap derivation now occurs only at prepare, restore, and full reset. Restore accepts every finite,
+in-domain parameter value accepted by preparation/automation while retaining transactional
+two-lane replacement. Every bank member is validated before a legal unavailable-backend or
+connected-sidechain/heterogeneous-program scalar fallback can return. The bank retains independent
+per-track `Lane` state while preserving sample-major AoSoA audio and the packed W4/W8 gain/mix
+kernel.
+
+At each launch rate, the checked descriptor identity is `lane_bytes = 4 * (24 + 2 * (N + 1))`;
+prepared retained payload plus defaults is exactly `W * (2 * lane_bytes + 64)` bytes for W4/W8.
+The independent oracle renders 2,048 samples past the 960-sample 48-kHz latency and proves active
+gain reduction. The frozen ten-track graph now asserts width-correct W8 `1 bank + 2 scalar` and W4
+`2 banks + 2 scalar` shapes.
+
+Focused candidate evidence (no benchmark or timed command):
+
+- `cargo test --locked -p miso-engine-compressor --lib` — PASS, 10 tests.
+- focused graph fixture, core compressor kernel, and registry integration tests — PASS, 1/3/1.
+- `cargo fmt --all -- --check` — PASS.
+- warning-denied focused four-package all-target Clippy — PASS.
+
+Expanded corpus, 10,000/randomized and million-sample matrices, realtime audit, target/object
+qualification, benchmark, and completed listening were not run or claimed; transfer them to the
+planned stateless Issue 046 qualification successor. `timed_benchmark_invocations = 0`.

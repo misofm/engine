@@ -280,6 +280,7 @@ impl Ramp {
 struct Lane {
     cursor: u32,
     lookahead_ms: f32,
+    detector_delay: usize,
     gain_reduction_db: f32,
     ramps: [Ramp; RAMP_COUNT],
     main_ring: Box<[f32]>,
@@ -296,10 +297,11 @@ struct GainMixFrame {
 }
 
 impl Lane {
-    fn new(defaults: &[f32; PARAMETER_COUNT], ring_length: usize) -> Self {
+    fn new(defaults: &[f32; PARAMETER_COUNT], ring_length: usize, sample_rate: u32) -> Self {
         Self {
             cursor: 0,
             lookahead_ms: defaults[7],
+            detector_delay: detector_delay(defaults[7], sample_rate, ring_length),
             gain_reduction_db: 0.0,
             ramps: core::array::from_fn(|index| Ramp::fixed(defaults[index])),
             main_ring: vec![0.0; ring_length].into_boxed_slice(),
@@ -307,9 +309,10 @@ impl Lane {
         }
     }
 
-    fn full_reset(&mut self, defaults: &[f32; PARAMETER_COUNT]) {
+    fn full_reset(&mut self, defaults: &[f32; PARAMETER_COUNT], sample_rate: u32) {
         self.cursor = 0;
         self.lookahead_ms = defaults[7];
+        self.detector_delay = detector_delay(defaults[7], sample_rate, self.main_ring.len());
         self.gain_reduction_db = 0.0;
         self.ramps = core::array::from_fn(|index| Ramp::fixed(defaults[index]));
         self.main_ring.fill(0.0);
@@ -326,13 +329,12 @@ impl Lane {
         self.main_ring.fill(0.0);
         self.detector_ring.fill(0.0);
     }
+}
 
-    fn detector_delay(&self, sample_rate: u32) -> usize {
-        let latency = self.main_ring.len() - 1;
-        let lookahead =
-            ((self.lookahead_ms as f64 * sample_rate as f64 / 1000.0) + 0.5).floor() as usize;
-        latency - lookahead.min(latency)
-    }
+fn detector_delay(lookahead_ms: f32, sample_rate: u32, ring_length: usize) -> usize {
+    let latency = ring_length - 1;
+    let lookahead = ((lookahead_ms as f64 * sample_rate as f64 / 1000.0) + 0.5).floor() as usize;
+    latency - lookahead.min(latency)
 }
 
 /// A prepared allocation-free scalar compressor instance.
@@ -376,8 +378,8 @@ impl NativeEffectFactory for CompressorFactory {
             metadata,
             left_defaults,
             right_defaults,
-            left: Lane::new(&left_defaults, ring_length),
-            right: Lane::new(&right_defaults, ring_length),
+            left: Lane::new(&left_defaults, ring_length, metadata.sample_rate),
+            right: Lane::new(&right_defaults, ring_length, metadata.sample_rate),
         }))
     }
 
@@ -392,18 +394,9 @@ impl NativeEffectFactory for CompressorFactory {
                 code: "effect.bank.requests",
             });
         }
-        let kernel = match PreparedCompressorGainMixKernelV1::try_new(request.backend) {
-            Ok(kernel) => kernel,
-            Err(CompressorGainMixKernelError::BackendUnavailable) => return Ok(None),
-            Err(_) => {
-                return Err(EffectPrepareError {
-                    code: "effect.bank.backend",
-                });
-            }
-        };
         match request.width {
-            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request, kernel),
-            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request, kernel),
+            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
+            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
         }
     }
 }
@@ -411,7 +404,6 @@ impl NativeEffectFactory for CompressorFactory {
 fn prepare_homogeneous_bank<const W: usize>(
     factory: &CompressorFactory,
     request: PrepareEffectBankRequest<'_>,
-    kernel: PreparedCompressorGainMixKernelV1,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     let first_request = request
         .requests
@@ -421,6 +413,23 @@ fn prepare_homogeneous_bank<const W: usize>(
             code: "effect.bank.requests",
         })?;
     let metadata = expected_prepared_metadata(factory.descriptor(), first_request)?;
+    let (first_left_defaults, first_right_defaults) =
+        initial_defaults(first_request.initial_values)?;
+    let mut left_defaults = [first_left_defaults; W];
+    let mut right_defaults = [first_right_defaults; W];
+    let mut same_program = true;
+    for (track, item) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
+        }
+        let (left, right) = initial_defaults(item.initial_values)?;
+        left_defaults[track] = left;
+        right_defaults[track] = right;
+    }
+    if !same_program {
+        return Ok(None);
+    }
     if !matches!(
         metadata.ports.sidechain,
         miso_engine_effect_contract::PreparedSidechainPort::Unconnected {
@@ -430,27 +439,15 @@ fn prepare_homogeneous_bank<const W: usize>(
     ) {
         return Ok(None);
     }
-    let (first_left_defaults, first_right_defaults) =
-        initial_defaults(first_request.initial_values)?;
-    let mut left_defaults = [first_left_defaults; W];
-    let mut right_defaults = [first_right_defaults; W];
-    for (track, item) in request.requests.iter().copied().enumerate() {
-        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
-        if candidate.program_key() != metadata.program_key()
-            || !matches!(
-                candidate.ports.sidechain,
-                miso_engine_effect_contract::PreparedSidechainPort::Unconnected {
-                    id,
-                    required: false,
-                } if id == port_id("sidechain-in")
-            )
-        {
-            return Ok(None);
+    let kernel = match PreparedCompressorGainMixKernelV1::try_new(request.backend) {
+        Ok(kernel) => kernel,
+        Err(CompressorGainMixKernelError::BackendUnavailable) => return Ok(None),
+        Err(_) => {
+            return Err(EffectPrepareError {
+                code: "effect.bank.backend",
+            });
         }
-        let (left, right) = initial_defaults(item.initial_values)?;
-        left_defaults[track] = left;
-        right_defaults[track] = right;
-    }
+    };
     let ring_length = usize::try_from(metadata.latency.0)
         .ok()
         .and_then(|latency| latency.checked_add(1))
@@ -466,8 +463,12 @@ fn prepare_homogeneous_bank<const W: usize>(
         kernel,
         left_defaults,
         right_defaults,
-        left: core::array::from_fn(|track| Lane::new(&left_defaults[track], ring_length)),
-        right: core::array::from_fn(|track| Lane::new(&right_defaults[track], ring_length)),
+        left: core::array::from_fn(|track| {
+            Lane::new(&left_defaults[track], ring_length, metadata.sample_rate)
+        }),
+        right: core::array::from_fn(|track| {
+            Lane::new(&right_defaults[track], ring_length, metadata.sample_rate)
+        }),
     })))
 }
 
@@ -527,8 +528,10 @@ impl PreparedNativeEffect for PreparedCompressor {
     fn reset(&mut self, kind: ResetKind) {
         match kind {
             ResetKind::FullToDefaults => {
-                self.left.full_reset(&self.left_defaults);
-                self.right.full_reset(&self.right_defaults);
+                self.left
+                    .full_reset(&self.left_defaults, self.metadata.sample_rate);
+                self.right
+                    .full_reset(&self.right_defaults, self.metadata.sample_rate);
             }
             ResetKind::DiscontinuityKeepParameters => {
                 self.left.discontinuity_reset();
@@ -621,8 +624,8 @@ impl PreparedNativeEffect for PreparedCompressor {
             self.metadata.state_sizes,
         )?;
         let ring_length = self.left.main_ring.len();
-        let left = read_lane(input.left, ring_length)?;
-        let right = read_lane(input.right, ring_length)?;
+        let left = read_lane(input.left, ring_length, self.metadata.sample_rate)?;
+        let right = read_lane(input.right, ring_length, self.metadata.sample_rate)?;
         self.left = left;
         self.right = right;
         Ok(())
@@ -638,8 +641,12 @@ impl<const W: usize> PreparedNativeEffectBank for PreparedCompressorBank<W> {
         for track in 0..W {
             match kind {
                 ResetKind::FullToDefaults => {
-                    self.left[track].full_reset(&self.left_defaults[track]);
-                    self.right[track].full_reset(&self.right_defaults[track]);
+                    self.left[track]
+                        .full_reset(&self.left_defaults[track], self.effect_metadata.sample_rate);
+                    self.right[track].full_reset(
+                        &self.right_defaults[track],
+                        self.effect_metadata.sample_rate,
+                    );
                 }
                 ResetKind::DiscontinuityKeepParameters => {
                     self.left[track].discontinuity_reset();
@@ -718,8 +725,8 @@ impl<const W: usize> PreparedNativeEffectBank for PreparedCompressorBank<W> {
             self.effect_metadata.state_sizes,
         )?;
         let ring_length = self.left[track].main_ring.len();
-        let left = read_lane(input.left, ring_length)?;
-        let right = read_lane(input.right, ring_length)?;
+        let left = read_lane(input.left, ring_length, self.effect_metadata.sample_rate)?;
+        let right = read_lane(input.right, ring_length, self.effect_metadata.sample_rate)?;
         self.left[track] = left;
         self.right[track] = right;
         Ok(())
@@ -919,8 +926,7 @@ fn prepare_lane_gain(
     lane.main_ring[cursor] = main;
     lane.detector_ring[cursor] = detector;
     let delayed = lane.main_ring[(cursor + 1) % ring_length];
-    let detector_delay = lane.detector_delay(sample_rate);
-    let detector = lane.detector_ring[(cursor + ring_length - detector_delay) % ring_length];
+    let detector = lane.detector_ring[(cursor + ring_length - lane.detector_delay) % ring_length];
     lane.cursor = ((cursor + 1) % ring_length) as u32;
 
     let threshold = lane.ramps[0].current;
@@ -1125,7 +1131,11 @@ fn write_f32(bytes: &mut [u8], word: usize, value: f32) {
     write_u32(bytes, word, value.to_bits());
 }
 
-fn read_lane(bytes: &[u8], ring_length: usize) -> Result<Lane, StatePayloadError> {
+fn read_lane(
+    bytes: &[u8],
+    ring_length: usize,
+    sample_rate: u32,
+) -> Result<Lane, StatePayloadError> {
     let expected_length = (STATE_HEADER_WORDS + 2 * ring_length)
         .checked_mul(4)
         .ok_or(state_error("effect.state.length"))?;
@@ -1165,6 +1175,7 @@ fn read_lane(bytes: &[u8], ring_length: usize) -> Result<Lane, StatePayloadError
     let mut lane = Lane::new(
         &[0.0, 1.0, 0.0, 0.1, 5.0, 0.0, 0.0, lookahead_ms],
         ring_length,
+        sample_rate,
     );
     lane.cursor = cursor;
     lane.lookahead_ms = lookahead_ms;
@@ -1203,9 +1214,7 @@ fn normal_or_zero(value: f32) -> bool {
 }
 
 fn parameter_state_valid(index: usize, value: f32) -> bool {
-    !negative_zero(value)
-        && normal_or_zero(value)
-        && parameter_value_valid(&COMPRESSOR_PARAMETERS_V1[index], value)
+    !negative_zero(value) && parameter_value_valid(&COMPRESSOR_PARAMETERS_V1[index], value)
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
@@ -1259,17 +1268,99 @@ mod tests {
         }
     }
 
+    fn lane_defaults() -> [f32; PARAMETER_COUNT] {
+        core::array::from_fn(|index| COMPRESSOR_PARAMETERS_V1[index].default_value)
+    }
+
+    fn add_report(total: &mut ProcessReport, report: ProcessReport) {
+        total.sanitized_main_samples = total
+            .sanitized_main_samples
+            .saturating_add(report.sanitized_main_samples);
+        total.sanitized_sidechain_samples = total
+            .sanitized_sidechain_samples
+            .saturating_add(report.sanitized_sidechain_samples);
+        total.invalid_spans = total.invalid_spans.saturating_add(report.invalid_spans);
+        total.recovered_left_samples = total
+            .recovered_left_samples
+            .saturating_add(report.recovered_left_samples);
+        total.recovered_right_samples = total
+            .recovered_right_samples
+            .saturating_add(report.recovered_right_samples);
+    }
+
+    fn process_blocks(
+        effect: &mut dyn PreparedNativeEffect,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> ProcessReport {
+        let mut total = ProcessReport::default();
+        let mut offset = 0;
+        while offset < left.len() {
+            let end = (offset + 128).min(left.len());
+            let sidechain =
+                sidechain.map(|(left, right)| (&left[offset..end], &right[offset..end]));
+            let report = effect.process(
+                EffectProcessBlock::new(
+                    &mut left[offset..end],
+                    &mut right[offset..end],
+                    sidechain,
+                    offset as u64,
+                    &[],
+                    128,
+                )
+                .expect("bounded block"),
+            );
+            add_report(&mut total, report);
+            offset = end;
+        }
+        total
+    }
+
+    fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>) {
+        let sizes = effect.metadata().state_sizes;
+        let mut left = vec![0_u8; sizes.left_bytes as usize];
+        let mut right = vec![0_u8; sizes.right_bytes as usize];
+        effect
+            .snapshot_state_payload(
+                StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("payload"),
+            )
+            .expect("snapshot");
+        (left, right)
+    }
+
     #[test]
     fn descriptor_rows_and_resource_envelope_are_frozen() {
         validate_descriptor_v1(&COMPRESSOR_DESCRIPTOR_V1).expect("descriptor");
         assert_eq!(COMPRESSOR_DESCRIPTOR_V1.id.as_str(), "miso.compressor");
         assert_eq!(COMPRESSOR_PARAMETERS_V1.len(), 8);
-        assert_eq!(QUALITIES[0].maximum_state.left_bytes, 7_160);
-        assert_eq!(QUALITIES[1].latency, LatencySamples(960));
-        assert_eq!(QUALITIES[1].maximum_state.left_bytes, 7_784);
-        assert_eq!(QUALITIES[3].maximum_state.left_bytes, 15_464);
-        assert_eq!(QUALITIES[3].maximum_state.total(), Some(30_928));
-        assert_eq!(QUALITIES[1].scratch_fixed_bytes, 64);
+        for (quality, (rate, latency, lane_bytes, total_bytes)) in QUALITIES.iter().zip([
+            (44_100, 882, 7_160, 14_320),
+            (48_000, 960, 7_784, 15_568),
+            (88_200, 1_764, 14_216, 28_432),
+            (96_000, 1_920, 15_464, 30_928),
+        ]) {
+            let ring_length = latency as usize + 1;
+            assert_eq!(quality.sample_rate, rate);
+            assert_eq!(quality.latency, LatencySamples(latency));
+            assert_eq!(quality.maximum_state.left_bytes, lane_bytes);
+            assert_eq!(quality.maximum_state.right_bytes, lane_bytes);
+            assert_eq!(quality.maximum_state.total(), Some(total_bytes));
+            assert_eq!(quality.scratch_fixed_bytes, 64);
+            assert_eq!(quality.scratch_bytes_per_frame, 0);
+            assert_eq!(
+                lane_bytes as usize,
+                (STATE_HEADER_WORDS + 2 * ring_length) * 4
+            );
+            assert_eq!(
+                total_bytes * 4 + 64 * 4,
+                (u64::from(lane_bytes) * 2 + 64) * 4
+            );
+            assert_eq!(
+                total_bytes * 8 + 64 * 8,
+                (u64::from(lane_bytes) * 2 + 64) * 8
+            );
+        }
     }
 
     #[test]
@@ -1290,6 +1381,109 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code, "effect.resource.limit");
+
+        let mut below_scratch = request(&values);
+        below_scratch.limits.maximum_scratch_bytes -= 1;
+        let error = match factory.prepare(below_scratch) {
+            Ok(_) => panic!("one byte below scratch must reject"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.resource.limit");
+    }
+
+    #[test]
+    fn lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset() {
+        let mut defaults = lane_defaults();
+        for (lookahead_ms, expected_delay) in [(0.0, 960), (5.0, 720), (20.0, 0)] {
+            defaults[7] = lookahead_ms;
+            let mut lane = Lane::new(&defaults, 961, 48_000);
+            assert_eq!(lane.detector_delay, expected_delay);
+            let mut reset_defaults = defaults;
+            reset_defaults[7] = 20.0 - lookahead_ms;
+            lane.full_reset(&reset_defaults, 48_000);
+            assert_eq!(
+                lane.detector_delay,
+                detector_delay(reset_defaults[7], 48_000, 961)
+            );
+        }
+    }
+
+    #[test]
+    fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
+        let factory = CompressorFactory;
+        let (backend, width) = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            (KernelBackendV1::Aarch64Neon, BankWidth::Four)
+        } else {
+            (KernelBackendV1::X86Avx2, BankWidth::Eight)
+        };
+        let lanes = width.lanes() as usize;
+
+        let mut malformed_values = vec![initial_values(); lanes];
+        malformed_values[lanes - 1][0].value = f32::NAN;
+        let malformed_requests = malformed_values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<_>>();
+        let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &malformed_requests,
+        }) {
+            Ok(_) => panic!("unavailable backend must not hide malformed values"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.parameter.initial");
+
+        let connected_values = vec![initial_values(); lanes];
+        let mut connected_requests = connected_values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<_>>();
+        for request in &mut connected_requests {
+            request.ports.sidechain = PreparedSidechainPort::Connected {
+                id: port_id("sidechain-in"),
+                required: false,
+            };
+        }
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &connected_requests,
+                })
+                .expect("valid connected fallback")
+                .is_none()
+        );
+        connected_requests[lanes - 1]
+            .limits
+            .maximum_total_state_bytes -= 1;
+        let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &connected_requests,
+        }) {
+            Ok(_) => panic!("connected fallback must validate every request"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "effect.resource.limit");
+
+        let values = vec![initial_values(); lanes];
+        let mut requests = values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<_>>();
+        requests[lanes - 1].bypass = true;
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &requests,
+                })
+                .expect("valid heterogeneous fallback")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1362,8 +1556,8 @@ mod tests {
             lookahead_ms: 0.0,
         };
         let mut reference = ReferencePeakCompressor::new(48_000.0, parameters).expect("oracle");
-        let input = (0..128)
-            .map(|index| if index < 96 { 0.9_f32 } else { 0.1_f32 })
+        let input = (0..2_048)
+            .map(|index| if index < 1_280 { 0.9_f32 } else { 0.1_f32 })
             .collect::<Vec<_>>();
         let expected = input
             .iter()
@@ -1371,8 +1565,18 @@ mod tests {
             .collect::<Vec<_>>();
         let mut left = input.clone();
         let mut right = input;
-        effect.process(
-            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"),
+        for (block_index, (left, right)) in
+            left.chunks_mut(128).zip(right.chunks_mut(128)).enumerate()
+        {
+            effect.process(
+                EffectProcessBlock::new(left, right, None, (block_index * 128) as u64, &[], 128)
+                    .expect("block"),
+            );
+        }
+        assert!(left[960..].iter().any(|sample| *sample != 0.0));
+        assert!(
+            left[1_200] < 0.9,
+            "oracle test must exercise gain reduction"
         );
         for (actual, expected) in left.iter().zip(expected) {
             assert!(
@@ -1380,6 +1584,53 @@ mod tests {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn links_are_exact_and_connected_sidechain_is_distinct_from_main_detection() {
+        assert_eq!(linked_levels(LinkMode::DualMono, -0.25, 0.75), (0.25, 0.75));
+        assert_eq!(linked_levels(LinkMode::Maximum, -0.25, 0.75), (0.75, 0.75));
+        assert_eq!(linked_levels(LinkMode::Average, -0.25, 0.75), (0.5, 0.5));
+
+        let mut values = initial_values();
+        for lane in 0..2 {
+            values[lane].value = -40.0;
+            values[2 + lane].value = 20.0;
+            values[4 + lane].value = 0.0;
+            values[6 + lane].value = 0.1;
+            values[12 + lane].value = 1.0;
+            values[14 + lane].value = 20.0;
+        }
+        let factory = CompressorFactory;
+        let mut unconnected = factory.prepare(request(&values)).expect("unconnected");
+        let mut connected_request = request(&values);
+        connected_request.ports.sidechain = PreparedSidechainPort::Connected {
+            id: port_id("sidechain-in"),
+            required: false,
+        };
+        let mut connected = factory.prepare(connected_request).expect("connected");
+        let mut unconnected_left = vec![0.25; 1_024];
+        let mut unconnected_right = vec![0.25; 1_024];
+        let mut connected_left = unconnected_left.clone();
+        let mut connected_right = unconnected_right.clone();
+        let sidechain_left = vec![0.0; 1_024];
+        let sidechain_right = vec![0.0; 1_024];
+        process_blocks(
+            unconnected.as_mut(),
+            &mut unconnected_left,
+            &mut unconnected_right,
+            None,
+        );
+        process_blocks(
+            connected.as_mut(),
+            &mut connected_left,
+            &mut connected_right,
+            Some((&sidechain_left, &sidechain_right)),
+        );
+        assert_eq!(connected_left[960].to_bits(), 0.25_f32.to_bits());
+        assert_eq!(connected_right[960].to_bits(), 0.25_f32.to_bits());
+        assert!(unconnected_left[960] < connected_left[960]);
+        assert!(unconnected_right[960] < connected_right[960]);
     }
 
     #[test]
@@ -1422,10 +1673,11 @@ mod tests {
             .expect("prepare");
         let mut left = vec![0.5; 128];
         let mut right = vec![-0.25; 128];
+        right[0] = f32::NAN;
         let report = effect.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"),
         );
-        assert_eq!(report.sanitized_main_samples, 0);
+        assert_eq!(report.sanitized_main_samples, 1);
         let sizes = effect.metadata().state_sizes;
         let mut left_state = vec![0_u8; sizes.left_bytes as usize];
         let mut right_state = vec![0_u8; sizes.right_bytes as usize];
@@ -1435,6 +1687,14 @@ mod tests {
                     .expect("payload"),
             )
             .expect("snapshot");
+        assert_eq!(
+            read_f32(&left_state, STATE_HEADER_WORDS).to_bits(),
+            0.5_f32.to_bits()
+        );
+        assert_eq!(
+            read_f32(&right_state, STATE_HEADER_WORDS).to_bits(),
+            0.0_f32.to_bits()
+        );
         let saved_left = left_state.clone();
         let saved_right = right_state.clone();
         let mut malformed_right = right_state.clone();
@@ -1456,6 +1716,49 @@ mod tests {
             .expect("snapshot");
         assert_eq!(left_state, saved_left);
         assert_eq!(right_state, saved_right);
+
+        let positive_subnormal = f32::from_bits(1);
+        write_f32(&mut left_state, 1, positive_subnormal);
+        write_f32(&mut left_state, 9, positive_subnormal);
+        write_f32(&mut left_state, 10, positive_subnormal);
+        effect
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &left_state, &right_state, sizes).expect("payload"),
+            )
+            .expect("every preparation-legal finite parameter state restores");
+        let (restored_left, _) = snapshot(effect.as_ref());
+        assert_eq!(
+            read_f32(&restored_left, 1).to_bits(),
+            positive_subnormal.to_bits()
+        );
+        assert_eq!(
+            read_f32(&restored_left, 9).to_bits(),
+            positive_subnormal.to_bits()
+        );
+        assert_eq!(
+            read_f32(&restored_left, 10).to_bits(),
+            positive_subnormal.to_bits()
+        );
+
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        let (discontinuity_left, _) = snapshot(effect.as_ref());
+        assert_eq!(read_u32(&discontinuity_left, 0), 0);
+        assert_eq!(
+            read_f32(&discontinuity_left, 2).to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert_eq!(read_u32(&discontinuity_left, 11), 0);
+        assert!(
+            discontinuity_left[STATE_HEADER_WORDS * 4..]
+                .chunks_exact(4)
+                .all(|word| word == 0.0_f32.to_le_bytes())
+        );
+
+        effect.reset(ResetKind::FullToDefaults);
+        let (default_left, _) = snapshot(effect.as_ref());
+        assert_eq!(read_f32(&default_left, 1).to_bits(), 5.0_f32.to_bits());
+        assert_eq!(read_f32(&default_left, 3).to_bits(), (-18.0_f32).to_bits());
     }
 
     #[test]
