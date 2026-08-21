@@ -2,6 +2,7 @@
 members = [
     "crates/miso-engine-core",
     "crates/miso-engine-session",
+    "crates/miso-engine-source",
     "crates/miso-engine-effect-contract",
     "crates/miso-engine-effect-compiler",
     "crates/miso-engine-rack",
@@ -51,6 +52,7 @@ miso-engine-target-smoke = { path = "crates/miso-engine-target-smoke", version =
 miso-engine-dsp-reference = { path = "crates/miso-engine-dsp-reference", version = "0.1.0" }
 miso-engine-conformance = { path = "crates/miso-engine-conformance", version = "0.1.0" }
 miso-engine-session = { path = "crates/miso-engine-session", version = "0.1.0" }
+miso-engine-source = { path = "crates/miso-engine-source", version = "0.1.0" }
 miso-engine-protocol = { path = "crates/miso-engine-protocol", version = "0.1.0" }
 miso-engine-effect-contract = { path = "crates/miso-engine-effect-contract", version = "0.1.0" }
 miso-engine-effect-compiler = { path = "crates/miso-engine-effect-compiler", version = "0.1.0" }

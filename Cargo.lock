@@ -489,6 +489,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-source"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+]
+
+[[package]]
 name = "miso-engine-target-smoke"
 version = "0.1.0"
 dependencies = [
