@@ -471,7 +471,19 @@ fn unlimited_graph_caps() -> GraphCompileCaps {
 fn metadata() -> Metadata {
     let mut missing = Vec::new();
     let value = |name: &str, missing: &mut Vec<String>| match env::var(name) {
-        Ok(value) if !value.is_empty() => value,
+        Ok(value)
+            if !value.is_empty()
+                && !matches!(
+                    value.as_str(),
+                    "unknown" | "not measured" | "default" | "target-default"
+                ) =>
+        {
+            value
+        }
+        Ok(value) if !value.is_empty() => {
+            missing.push(name.to_owned());
+            value
+        }
         _ => {
             missing.push(name.to_owned());
             "unknown".to_owned()
