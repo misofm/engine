@@ -18,6 +18,15 @@ use miso_engine_core::{
     },
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+mod native_wave;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_wave::{
+    NativeDecodeReport, NativeWaveContainer, NativeWaveDecoder, NativeWaveEncoding,
+    NativeWaveError, NativeWaveMetadata, NativeWaveParseCaps, NativeWaveRegion, parse_native_wave,
+};
+
 /// A nonzero source-stream generation selected by an off-render controller.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
