@@ -163,3 +163,27 @@ Terra and final Sol verdicts; exact successor link; and `timed_benchmark_invocat
   unavailable on this host, so its test proves only the legal unavailable-backend fallback;
   malformed members reject before that fallback. Registry/graph, qualification/audit/target and
   benchmark work remain untouched. `timed_benchmark_invocations=0`.
+
+### Terra attempt 1 — launch registry and graph vertical (2026-08-21)
+
+- The injected launch registry now exposes `miso.gate-expander`; its native-session coverage
+  confirms all three launch factories are available. No render-reachable global registry was
+  introduced.
+- One accepted ten-track graph test has nine matching unconnected gate/expander programs plus an
+  `eq8` routed-sidechain scalar fallback. Available dispatch retains only full-width banks,
+  preserves both the connected fallback and the unconnected scalar tail (`eq9`), and matches an
+  otherwise identical scalar-delegate plan bit-for-bit across sixteen sequential quanta.
+- Every graph-prepared gate reports `LatencySamples(480)` and `TailSamples::Finite(0)` at 48 kHz;
+  nonzero PCM first reaches the fully compensated output after the fixed delay. The bypass graph
+  retains the same latency, sequential schedule and route timings. Existing direct preparation
+  tests retain the one-byte-below resource-cap transactional rejection evidence.
+- Focused commands passed: `cargo fmt --check --package miso-engine-effect-compiler --package
+  miso-engine-graph-compiler --package miso-engine-gate-expander`; `cargo test --locked -p
+  miso-engine-effect-compiler --test native_session` (4 passed); targeted locked gate graph test
+  (1 passed); `cargo test --locked -p miso-engine-gate-expander` (7 passed); and warning-denied
+  all-target Clippy for the three packages. `git diff --check` passed.
+
+**Terra attempt-1 verdict: candidate PASS for the bounded Issue-014 product implementation,
+pending Sol adversarial review.** Issue 047 remains the sole owner of expanded corpus/sequences,
+realtime audit, target/instruction evidence, benchmark and listening handoff. No such work ran;
+`timed_benchmark_invocations=0`.

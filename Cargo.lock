@@ -271,6 +271,7 @@ dependencies = [
  "miso-engine-compressor",
  "miso-engine-core",
  "miso-engine-effect-contract",
+ "miso-engine-gate-expander",
  "miso-engine-parametric-eq",
  "miso-engine-session",
 ]
