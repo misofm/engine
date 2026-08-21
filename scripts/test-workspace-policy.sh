@@ -71,6 +71,14 @@ mutate_bin_identifier() {
         "$root/hosts/miso-engine-binary/Cargo.toml"
 }
 
+allow_secondary_tool_bin() {
+    local root="$1"
+    create_valid_fixture "$root"
+    sed -i 's/name = "miso_engine_binary"/name = "miso_engine_binary_probe"/' \
+        "$root/hosts/miso-engine-binary/Cargo.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
 mutate_hardware_feature() {
     local root="$1"
     printf 'avx2 = []\n' >>"$root/crates/miso-engine-library with spaces/Cargo.toml"
@@ -99,5 +107,6 @@ expect_failure bin-identifier mutate_bin_identifier
 expect_failure hardware-feature mutate_hardware_feature
 expect_failure track-limit mutate_track_limit
 expect_failure global-isa mutate_global_isa
+allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 
 printf 'workspace policy mutation tests: ok\n'

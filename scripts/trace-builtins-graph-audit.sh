@@ -2,10 +2,10 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/miso_engine_builtins_graph_audit"
+binary="$workspace_dir/target/release/miso_engine_builtins_audit_graph"
 trace_root="$workspace_dir/target/issue7/graph-strace"
 cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p miso-engine-builtins-audit --bin miso_engine_builtins_graph_audit
+  -p miso-engine-builtins-audit --bin miso_engine_builtins_audit_graph
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the issue-007 graph lifecycle syscall gate\n' >&2
   exit 1

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/debug/miso_engine_builtins_graph_audit"
+binary="$workspace_dir/target/debug/miso_engine_builtins_audit_graph"
 cargo build --quiet --locked --manifest-path "$workspace_dir/Cargo.toml" \
-  -p miso-engine-builtins-audit --bin miso_engine_builtins_graph_audit
+  -p miso-engine-builtins-audit --bin miso_engine_builtins_audit_graph
 for operation in allocation deallocation lock log file-io network-io syscall; do
   if ("$binary" --probe "$operation") >/dev/null 2>&1; then
     printf 'builtins graph realtime probe escaped: %s\n' "$operation" >&2

@@ -16,7 +16,7 @@ realtime_root="crates/miso-engine-core/src/realtime"
 unsafe_matches="$({
     rg -n 'unsafe[[:space:]]+(impl|fn)|unsafe[[:space:]]*\{' \
         crates tools --glob '*.rs' || true
-} | rg -v '^crates/miso-engine-core/src/realtime/spsc.rs:|^tools/miso-engine-realtime-audit/src/main.rs:|^tools/miso-engine-protocol-audit/src/main.rs:|^tools/miso-engine-protocol-bench/src/main.rs:|^tools/miso-engine-effect-contract-bench/src/main.rs:|^tools/miso-engine-graph-audit/src/main.rs:|^tools/miso-engine-builtins-audit/src/(main|graph_main).rs:' || true)"
+} | rg -v '^crates/miso-engine-core/src/realtime/spsc.rs:|^crates/miso-engine-builtins-compiler/tests/allocation_tracker.rs:|^tools/miso-engine-realtime-audit/src/main.rs:|^tools/miso-engine-protocol-audit/src/main.rs:|^tools/miso-engine-protocol-bench/src/main.rs:|^tools/miso-engine-effect-contract-bench/src/main.rs:|^tools/miso-engine-graph-audit/src/main.rs:|^tools/miso-engine-builtins-audit/src/(main|graph_main).rs:|^tools/miso-engine-builtins-bench/src/main.rs:' || true)"
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"

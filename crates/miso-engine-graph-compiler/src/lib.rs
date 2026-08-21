@@ -1655,7 +1655,9 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+    use miso_engine_builtins_compiler::{
+        BuiltinCompileCaps, PreparedBuiltinsCorruption, prepare_session_builtins,
+    };
     use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
     use miso_engine_effect_compiler::EffectPreparedSession;
     use miso_engine_graph::{
@@ -1827,58 +1829,98 @@ mod tests {
     }
 
     #[test]
-    fn forged_builtin_tail_set_is_rejected_before_graph_attachment() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
-        model.tracks[0].dynamic.effects.clear();
-        model.automation.clear();
-        let compiled = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled");
-        let mut builtins = prepare_session_builtins(
-            &compiled,
-            &[],
-            BuiltinCompileCaps {
-                maximum_total_state_bytes: u64::MAX,
-                maximum_total_meter_items: u64::MAX,
-                maximum_total_meter_bytes: u64::MAX,
-                maximum_single_allocation_bytes: u64::MAX,
-                maximum_meter_streams: u64::MAX,
-                maximum_period_frames: u32::MAX,
-                maximum_peak_hold_frames: u32::MAX,
-                maximum_smoothing_samples: u32::MAX,
-            },
-        )
-        .expect("builtins");
-        builtins.test_only_remove_tail_for_compiler_test();
-        let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            plan_id: 78,
-            effects: EffectPreparedSession {
-                session: compiled,
-                entries: Vec::new(),
-            },
-            builtins,
-            caps: integration_caps(),
-        }) else {
-            panic!("forged builtin artifact must reject");
-        };
-        assert_eq!(
-            failure
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .map(|diagnostic| diagnostic.code)
-                .collect::<Vec<_>>(),
-            vec!["builtin.prepared.tail_set"]
-        );
+    fn each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment() {
+        let cases = [
+            (
+                PreparedBuiltinsCorruption::SessionIdentity,
+                "builtin.session.mismatch",
+            ),
+            (
+                PreparedBuiltinsCorruption::Tracks,
+                "builtin.prepared.track_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Processors,
+                "builtin.prepared.processor_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Tails,
+                "builtin.prepared.tail_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Requests,
+                "builtin.prepared.request_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Observers,
+                "builtin.prepared.observer_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Consumers,
+                "builtin.prepared.consumer_set",
+            ),
+            (
+                PreparedBuiltinsCorruption::Resources,
+                "builtin.prepared.resource_report",
+            ),
+        ];
+        for (corruption, expected) in cases {
+            let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+            model.tracks[0].dynamic.effects.clear();
+            model.automation.clear();
+            let compiled = compile_session(
+                &model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("compiled");
+            let mut builtins = prepare_session_builtins(
+                &compiled,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("builtins");
+            builtins.test_only_corrupt_for_compiler_test(corruption);
+            let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                plan_id: 78,
+                effects: EffectPreparedSession {
+                    session: compiled,
+                    entries: Vec::new(),
+                },
+                builtins,
+                caps: integration_caps(),
+            }) else {
+                panic!("forged builtin artifact must reject: {corruption:?}");
+            };
+            assert_eq!(
+                failure
+                    .diagnostics
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| diagnostic.code)
+                    .collect::<Vec<_>>(),
+                vec![expected]
+            );
+            // Rejection is transactional: the compiler returns both inputs rather than consuming
+            // either one into graph bindings.
+            assert_eq!(failure.effects.entries.len(), 0);
+            assert_eq!(failure.builtins.processor_count(), 3);
+        }
     }
 
     #[test]

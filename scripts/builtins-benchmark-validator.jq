@@ -1,17 +1,14 @@
 include "builtins-benchmark-record-validator";
 
+def expected: ["full_chain_filters", "identity_chain", "matrix_ramp", "meter_success_full", "prepare_256_tracks"];
+
 length == 20 and
 all(builtins_benchmark_record_valid) and
-([.[] | .workload] | unique | sort) == [
-  "combined_1t_128",
-  "combined_4t_128",
-  "fader_mute_1t_128",
-  "input_filters_1t_128",
-  "input_identity_1t_128",
-  "matrix_identity_1t_128",
-  "matrix_ramp_1t_128",
-  "meter_full_7taps_128",
-  "meter_success_7taps_128",
-  "prepare_65537t"
-] and
-(group_by(.workload) | all(length == 2 and ([.[].round] | sort) == [1, 2]))
+([.[] | .workload_kind] | unique | sort) == expected and
+([.[] | .sample_rate_hz] | unique | sort) == [48000, 96000] and
+([.[] | [.workload_kind, .sample_rate_hz, .round] | @json] | unique | length) == 20 and
+(group_by([.workload_kind, .sample_rate_hz]) |
+ all(length == 2 and ([.[].round] | sort) == [1, 2] and
+     ([.[].fixture_manifest_sha256] | unique | length) == 1 and
+     ([.[].input_fixture_sha256] | unique | length) == 1 and
+     ([.[].workload_id] | unique | length) == 1))

@@ -11,6 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 miso-engine-builtins.workspace = true
+miso-engine-builtins-compiler.workspace = true
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-session.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

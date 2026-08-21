@@ -298,8 +298,11 @@ fn cases() -> String {
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut output = String::from("fixture_schema = 1\n\n");
-    for (id, body) in entries {
-        writeln!(output, "[[case]]\nid = \"{id}\"\n{body}").expect("string");
+    for (index, (id, body)) in entries.into_iter().enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        write!(output, "[[case]]\nid = \"{id}\"\n{body}").expect("string");
     }
     output
 }

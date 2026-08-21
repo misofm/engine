@@ -4,6 +4,9 @@
 use core::num::NonZeroU64;
 use std::collections::BTreeSet;
 
+#[cfg(feature = "test-support")]
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
@@ -101,11 +104,103 @@ struct MeterRequestSeal {
 type ObserverSeal = (Box<str>, TrackStage, u64);
 type ConsumerSeal = (u64, Box<str>, MeterTap);
 
+/// Test-only phase-two allocation accounting.  The production resource report deliberately
+/// remains a layout calculation; this probe independently observes the allocator requests made
+/// after phase-one validation has accepted the artifact.
+#[cfg(feature = "test-support")]
+static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-support")]
+static TEST_PHASE_TWO_TOTAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static TEST_PHASE_TWO_LARGEST: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_reset_phase_two_allocation_tracker() {
+    TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
+    TEST_PHASE_TWO_TOTAL.store(0, Ordering::SeqCst);
+    TEST_PHASE_TWO_LARGEST.store(0, Ordering::SeqCst);
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
+    if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let size = u64::try_from(layout.size()).expect("platform usize fits u64");
+    TEST_PHASE_TWO_TOTAL.fetch_add(size, Ordering::Relaxed);
+    let mut largest = TEST_PHASE_TWO_LARGEST.load(Ordering::Relaxed);
+    while size > largest {
+        match TEST_PHASE_TWO_LARGEST.compare_exchange_weak(
+            largest,
+            size,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => largest = actual,
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_phase_two_allocation_snapshot() -> (u64, u64) {
+    (
+        TEST_PHASE_TWO_TOTAL.load(Ordering::SeqCst),
+        TEST_PHASE_TWO_LARGEST.load(Ordering::SeqCst),
+    )
+}
+
+#[cfg(feature = "test-support")]
+struct TestPhaseTwoAllocationGuard;
+#[cfg(feature = "test-support")]
+impl TestPhaseTwoAllocationGuard {
+    fn begin() -> Self {
+        TEST_PHASE_TWO_ACTIVE.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+#[cfg(feature = "test-support")]
+impl Drop for TestPhaseTwoAllocationGuard {
+    fn drop(&mut self) {
+        TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
 /// The only graph-lowering payload obtainable from a sealed builtin artifact.
 pub struct PreparedBuiltinsGraphParts {
     pub processors: Vec<miso_engine_graph::GraphNodeBinding>,
     pub observers: Vec<GraphNodeObserverBinding>,
     pub meter_consumers: Vec<MeterConsumer>,
+}
+
+/// Deliberate seal corruption available only to the graph compiler's adversarial tests.
+///
+/// This is not a wire format and is compiled out of production artifacts.  Keeping each seal
+/// field independently reachable lets the graph boundary prove that it rejects the exact
+/// corrupted tuple before it consumes either prepared input.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum PreparedBuiltinsCorruption {
+    /// The prepared session identity does not match the graph session.
+    SessionIdentity,
+    /// The sealed track set does not match the prepared bindings.
+    Tracks,
+    /// The sealed processor set does not match the prepared bindings.
+    Processors,
+    /// The retained tail records do not match their seal.
+    Tails,
+    /// The sealed meter request records do not match their seal.
+    Requests,
+    /// The sealed observer records do not match their bindings.
+    Observers,
+    /// The sealed consumer records do not match their queues.
+    Consumers,
+    /// The sealed resource report does not match the retained report.
+    Resources,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -264,8 +359,41 @@ impl PreparedBuiltinsSession {
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
-    pub fn test_only_remove_tail_for_compiler_test(&mut self) {
-        self.tails.clear();
+    pub fn test_only_corrupt_for_compiler_test(&mut self, corruption: PreparedBuiltinsCorruption) {
+        match corruption {
+            PreparedBuiltinsCorruption::SessionIdentity => {
+                self.seal.sample_rate = self.seal.sample_rate.saturating_add(1);
+            }
+            PreparedBuiltinsCorruption::Tracks => self.seal.tracks.clear(),
+            PreparedBuiltinsCorruption::Processors => self.seal.processors.clear(),
+            PreparedBuiltinsCorruption::Tails => self.tails.clear(),
+            PreparedBuiltinsCorruption::Requests => self.seal.requests.push(MeterRequestSeal {
+                handle: u64::MAX,
+                track_id: "forged-request".into(),
+                tap: MeterTap::Input,
+                reset_generation: 0,
+                period_frames: 1,
+                peak_hold_frames: 0,
+                peak_decay_bits: 0,
+                queue_capacity: 1,
+            }),
+            PreparedBuiltinsCorruption::Observers => {
+                self.seal
+                    .observers
+                    .push(("forged-observer".into(), TrackStage::Input, u64::MAX))
+            }
+            PreparedBuiltinsCorruption::Consumers => {
+                self.seal
+                    .consumers
+                    .push((u64::MAX, "forged-consumer".into(), MeterTap::Input))
+            }
+            PreparedBuiltinsCorruption::Resources => {
+                self.resources.engine_owned_retained_payload_bytes = self
+                    .resources
+                    .engine_owned_retained_payload_bytes
+                    .saturating_add(1);
+            }
+        }
     }
 }
 
@@ -431,6 +559,8 @@ pub fn prepare_session_builtins(
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
     let resources = resource_plan.expect("validated resource plan").report;
+    #[cfg(feature = "test-support")]
+    let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().tracks.len();
     let processor_count = track_count
         .checked_mul(3)
@@ -551,8 +681,9 @@ fn resource_plan(
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
     for track in &session.normalized_model().tracks {
         let bytes = track.id.as_str().len();
-        // Three stable graph IDs, one retained tail ID, and the three compact seal IDs.
-        for _ in 0..7 {
+        // The three graph IDs are independently cloned into their stage bindings, alongside the
+        // retained tail, compact track seal, processor seal, and the seal's cloned tail ID.
+        for _ in 0..9 {
             processor
                 .add_bytes(bytes)
                 .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;

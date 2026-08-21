@@ -163,6 +163,7 @@ section = "cascade"
 cutoff_hz = 10.00000000000000000
 probe_hz = 4.00000000000000000
 oracle = "rbj_f64_and_cast_state"
+
 [[case]]
 id = "response-cascade-44100-1-0-1"
 category = "filter_response"

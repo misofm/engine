@@ -33,14 +33,15 @@ those explicitly out-of-scope claims.
 
 ## Current evidence status
 
-The implementation tests verify scalar gain/matrix/meter basics, all named tap preparation,
-transactional duplicate/unknown meter rejection, graph installation of exactly the three internal
-sections with infinite filter-tail propagation, deterministic parameter/block and meter mutations,
-and realization-aware section/cascade response families. The checked-in
-`fixtures/builtins/v1/MANIFEST.tsv` fixes representative filter, meter-window, and resource-cap
-case declarations; its validator rejects changed, missing, or unlisted payloads. An independent
-`f64` oracle re-derives the RBJ response without calling production code. This does not yet
-constitute full issue acceptance: the one-million-call allocation/forbidden-operation audit,
-full workspace target builds, complete prepared-artifact sealing, and real blinded listening
-records remain required.
-The exactly-once benchmark has not been invoked.
+The machine-qualified fixture corpus covers the declared filter, gain, matrix, graph-tap, meter,
+diagnostic, and resource tuples. Its sorted manifest rejects changed, missing, unlisted, and
+coverage-hole artifacts; the independent `f64` oracle never calls production builtins. The opaque
+prepared artifact has an independently corruptible test-only seal probe, while phase-two allocator
+tracking verifies the reported retained payload total and largest request. Direct and graph-backed
+one-million-render audits cover the forbidden-operation hooks, bounded meter queues, swaps, and
+retirement ownership; target, workspace, policy, mutation, formatting, lint, and rustdoc gates are
+recorded by the issue preflight.
+
+Human listening remains pending under Issue 033. The frozen Issue-007 benchmark runner is present
+but has not been invoked; the authorized timing-launch count remains zero until its separate
+authorization.

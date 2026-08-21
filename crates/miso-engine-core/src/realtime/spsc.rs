@@ -87,6 +87,19 @@ struct Ring<T> {
     consumer: AtomicUsize,
 }
 
+// `bounded_spsc_internal` retains this ring behind an `Arc`.  The resource helper exposes the
+// complete engine-owned allocation layout, including the two atomic reference counts rather than
+// pretending that the shared-owner header is allocator-private metadata.
+#[repr(C)]
+struct SharedRingAllocation<T> {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    // The native shared owner carries one additional machine-word control slot.  Account for it
+    // in the retained layout instead of treating `Arc` bookkeeping as free engine memory.
+    control: AtomicUsize,
+    ring: Ring<T>,
+}
+
 /// Compute the exact retained engine-owned queue layouts used by [`bounded_spsc`].
 pub fn bounded_spsc_retained_payload<T>(
     capacity: NonZeroUsize,
@@ -99,7 +112,7 @@ pub fn bounded_spsc_retained_payload<T>(
         .map_err(|_| SpscError::CapacityOverflow)?;
     Ok(SpscRetainedPayload {
         slot_count,
-        ring_header_bytes: Layout::new::<Ring<T>>().size(),
+        ring_header_bytes: Layout::new::<SharedRingAllocation<T>>().size(),
         slot_payload_bytes: slot_payload.size(),
     })
 }

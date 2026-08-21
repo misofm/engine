@@ -61,8 +61,8 @@ while IFS= read -r manifest; do
     fi
 
     while IFS= read -r bin_name; do
-        [[ "$bin_name" == "$expected_crate_name" ]] || {
-            fail "$manifest bin name must be $expected_crate_name"
+        [[ "$bin_name" == "$expected_crate_name" || "$bin_name" == "$expected_crate_name"_* ]] || {
+            fail "$manifest bin name must be $expected_crate_name or its underscored audit/tool suffix"
         }
     done < <(toml_array_names bin "$manifest")
 done < <(find crates hosts tools -name Cargo.toml -type f | sort)
