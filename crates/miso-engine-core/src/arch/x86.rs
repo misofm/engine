@@ -5,7 +5,104 @@ use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, TptKernelBlock};
+use super::{
+    CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, SOFT_CLIP_HISTORY_WORDS,
+    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock,
+};
+
+#[inline(never)]
+#[target_feature(enable = "avx2")]
+unsafe fn process_soft_clip_x86_avx2_inner(block: SoftClipKernelBlock<'_>) {
+    // SAFETY: the token proves AVX2 and validates all eight-lane/sample-major slices.
+    unsafe {
+        const LANES: usize = 8;
+        for lane in 0..LANES {
+            let cursor = block.cursors[lane] as usize;
+            block.interpolation_history[cursor * LANES + lane] = block.samples[lane];
+        }
+        let interpolated = soft_clip_convolve_x86(
+            block.interpolation_history,
+            block.coefficients,
+            block.cursors,
+        );
+        let shaped = soft_clip_cubic_x86(interpolated);
+        for (lane, shaped_value) in shaped.into_iter().enumerate() {
+            let cursor = block.cursors[lane] as usize;
+            block.decimation_history[cursor * LANES + lane] = shaped_value;
+        }
+        let output =
+            soft_clip_convolve_x86(block.decimation_history, block.coefficients, block.cursors);
+        block.samples.copy_from_slice(&output);
+        for cursor in block.cursors {
+            *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+        }
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_soft_clip_x86_avx2(block: SoftClipKernelBlock<'_>) {
+    // SAFETY: the prepared token retains this shim only after AVX2 detection.
+    unsafe { process_soft_clip_x86_avx2_inner(block) }
+}
+
+#[inline(never)]
+pub(super) fn process_soft_clip_x86_avx2_fma(block: SoftClipKernelBlock<'_>) {
+    // The FMA selection deliberately aliases the frozen noncontracting AVX2 graph.
+    process_soft_clip_x86_avx2(block);
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn soft_clip_convolve_x86(
+    history: &[f32],
+    coefficients: &[f32],
+    cursors: &[u32],
+) -> [f32; 8] {
+    // SAFETY: callers are the AVX2 phase implementation, where the token has validated all
+    // lengths and each local gather has exactly eight f32 words.
+    unsafe {
+        const LANES: usize = 8;
+        let mut accumulator = _mm256_setzero_ps();
+        for tap in SOFT_CLIP_NONZERO_TAPS {
+            let mut gathered = [0.0_f32; LANES];
+            for lane in 0..LANES {
+                let cursor = cursors[lane] as usize;
+                let index = (cursor + SOFT_CLIP_HISTORY_WORDS - tap) % SOFT_CLIP_HISTORY_WORDS;
+                gathered[lane] = history[index * LANES + lane];
+            }
+            let coefficient = _mm256_set1_ps(coefficients[tap]);
+            let product = _mm256_mul_ps(coefficient, _mm256_loadu_ps(gathered.as_ptr()));
+            accumulator = _mm256_add_ps(accumulator, product);
+        }
+        let mut output = [0.0_f32; LANES];
+        _mm256_storeu_ps(output.as_mut_ptr(), accumulator);
+        output
+    }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn soft_clip_cubic_x86(input: [f32; 8]) -> [f32; 8] {
+    // SAFETY: this helper runs only under the validated AVX2 phase token and accesses local
+    // eight-lane arrays. It emits separate multiply, divide, and subtraction instructions.
+    unsafe {
+        let value = _mm256_loadu_ps(input.as_ptr());
+        let negative_mask = _mm256_cmp_ps(value, _mm256_set1_ps(-1.0), _CMP_LE_OQ);
+        let positive_mask = _mm256_cmp_ps(value, _mm256_set1_ps(1.0), _CMP_GE_OQ);
+        let saturated = _mm256_or_ps(negative_mask, positive_mask);
+        let all = _mm256_castsi256_ps(_mm256_set1_epi32(-1));
+        let interior_mask = _mm256_andnot_ps(saturated, all);
+        let zero = _mm256_setzero_ps();
+        let interior = _mm256_blendv_ps(zero, value, interior_mask);
+        let p0 = _mm256_mul_ps(interior, interior);
+        let p1 = _mm256_mul_ps(p0, interior);
+        let p2 = _mm256_div_ps(p1, _mm256_set1_ps(3.0));
+        let polynomial = _mm256_sub_ps(interior, p2);
+        let negative = _mm256_blendv_ps(polynomial, _mm256_set1_ps(-2.0 / 3.0), negative_mask);
+        let output = _mm256_blendv_ps(negative, _mm256_set1_ps(2.0 / 3.0), positive_mask);
+        let mut values = [0.0_f32; 8];
+        _mm256_storeu_ps(values.as_mut_ptr(), output);
+        values
+    }
+}
 
 #[inline(never)]
 #[target_feature(enable = "avx2")]

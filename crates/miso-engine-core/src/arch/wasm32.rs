@@ -2,7 +2,96 @@
 
 use core::arch::wasm32::*;
 
-use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, TptKernelBlock};
+use super::{
+    CompressorGainMixKernelBlock, DeltaKernelBlock, GateGainKernelBlock, SOFT_CLIP_HISTORY_WORDS,
+    SOFT_CLIP_NONZERO_TAPS, SoftClipKernelBlock, TptKernelBlock,
+};
+
+#[inline(never)]
+#[target_feature(enable = "simd128")]
+unsafe fn process_soft_clip_wasm_simd128_inner(block: SoftClipKernelBlock<'_>) {
+    // SAFETY: the token validates four-lane/sample-major slices before entering this SIMD path.
+    unsafe {
+        const LANES: usize = 4;
+        for lane in 0..LANES {
+            let cursor = block.cursors[lane] as usize;
+            block.interpolation_history[cursor * LANES + lane] = block.samples[lane];
+        }
+        let interpolated = soft_clip_convolve_wasm(
+            block.interpolation_history,
+            block.coefficients,
+            block.cursors,
+        );
+        let shaped = soft_clip_cubic_wasm(interpolated);
+        for (lane, shaped_value) in shaped.into_iter().enumerate() {
+            let cursor = block.cursors[lane] as usize;
+            block.decimation_history[cursor * LANES + lane] = shaped_value;
+        }
+        let output =
+            soft_clip_convolve_wasm(block.decimation_history, block.coefficients, block.cursors);
+        block.samples.copy_from_slice(&output);
+        for cursor in block.cursors {
+            *cursor = ((*cursor as usize + 1) % SOFT_CLIP_HISTORY_WORDS) as u32;
+        }
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_soft_clip_wasm_simd128(block: SoftClipKernelBlock<'_>) {
+    // SAFETY: the artifact and prepared token prove `simd128` before this call.
+    unsafe { process_soft_clip_wasm_simd128_inner(block) }
+}
+
+#[target_feature(enable = "simd128")]
+unsafe fn soft_clip_convolve_wasm(
+    history: &[f32],
+    coefficients: &[f32],
+    cursors: &[u32],
+) -> [f32; 4] {
+    // SAFETY: caller validates all exact four-lane/sample-major slices before calling.
+    unsafe {
+        const LANES: usize = 4;
+        let mut accumulator = f32x4_splat(0.0);
+        for tap in SOFT_CLIP_NONZERO_TAPS {
+            let mut gathered = [0.0_f32; LANES];
+            for lane in 0..LANES {
+                let cursor = cursors[lane] as usize;
+                let index = (cursor + SOFT_CLIP_HISTORY_WORDS - tap) % SOFT_CLIP_HISTORY_WORDS;
+                gathered[lane] = history[index * LANES + lane];
+            }
+            let product = f32x4_mul(
+                f32x4_splat(coefficients[tap]),
+                v128_load(gathered.as_ptr().cast::<v128>()),
+            );
+            accumulator = f32x4_add(accumulator, product);
+        }
+        let mut output = [0.0_f32; LANES];
+        v128_store(output.as_mut_ptr().cast::<v128>(), accumulator);
+        output
+    }
+}
+
+#[target_feature(enable = "simd128")]
+unsafe fn soft_clip_cubic_wasm(input: [f32; 4]) -> [f32; 4] {
+    // SAFETY: caller enters only from the target-feature-gated four-lane phase function.
+    unsafe {
+        let value = v128_load(input.as_ptr().cast::<v128>());
+        let negative_mask = f32x4_le(value, f32x4_splat(-1.0));
+        let positive_mask = f32x4_ge(value, f32x4_splat(1.0));
+        let saturated = v128_or(negative_mask, positive_mask);
+        let interior_mask = v128_xor(saturated, i32x4_splat(-1));
+        let interior = v128_bitselect(value, f32x4_splat(0.0), interior_mask);
+        let p0 = f32x4_mul(interior, interior);
+        let p1 = f32x4_mul(p0, interior);
+        let p2 = f32x4_div(p1, f32x4_splat(3.0));
+        let polynomial = f32x4_sub(interior, p2);
+        let negative = v128_bitselect(f32x4_splat(-2.0 / 3.0), polynomial, negative_mask);
+        let output = v128_bitselect(f32x4_splat(2.0 / 3.0), negative, positive_mask);
+        let mut values = [0.0_f32; 4];
+        v128_store(values.as_mut_ptr().cast::<v128>(), output);
+        values
+    }
+}
 
 #[inline(never)]
 #[target_feature(enable = "simd128")]
