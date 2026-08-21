@@ -949,10 +949,21 @@ fn sanitize(value: f32, count: &mut u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
     use miso_engine_dsp_reference::{
         ReferenceBiquad, ReferenceFilterKind, ReferenceTptOutput, ReferenceTptStateSpace,
         rbj_butterworth_magnitude_db,
     };
+
+    // Issue 032: the first tier is launch-gated; the second remains informational compatibility
+    // evidence from issue 007 and is not an engine session or host support claim.
+    fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
+        LAUNCH_SAMPLE_RATES
+            .into_iter()
+            .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
+            .map(|rate| rate.0)
+    }
+
     #[test]
     fn polarity_trim_fader_and_matrix_are_exact() {
         let mut chain = BuiltinChain::new(
@@ -1029,10 +1040,8 @@ mod tests {
         assert_eq!(snap.right.clipped_samples, 1);
     }
     #[test]
-    fn all_required_rates_match_the_independent_f64_rbj_oracle() {
-        for rate in [
-            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-        ] {
+    fn launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle() {
+        for rate in launch_and_extended_compatibility_rates() {
             let parameters = BuiltinParameters {
                 left: ChannelParameters {
                     hpf_hz: 100.0,
@@ -1128,10 +1137,8 @@ mod tests {
         }
     }
     #[test]
-    fn all_rate_sweeps_match_f64_magnitude_across_required_quanta() {
-        for rate in [
-            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-        ] {
+    fn launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude() {
+        for rate in launch_and_extended_compatibility_rates() {
             for frequency in [100.0, 1_000.0, f64::from(rate) * 0.2] {
                 let frames = 4_096;
                 let mut left: Vec<f32> = (0..frames)
@@ -1198,10 +1205,8 @@ mod tests {
         }
     }
     #[test]
-    fn cast_tpt_state_space_matches_independent_rbj_transfer() {
-        for rate in [
-            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-        ] {
+    fn cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates() {
+        for rate in launch_and_extended_compatibility_rates() {
             let mut cutoffs = vec![
                 10.0,
                 20.0,
@@ -1266,10 +1271,8 @@ mod tests {
         }
     }
     #[test]
-    fn one_second_impulse_dfts_match_rbj_at_all_rates_and_quanta() {
-        for rate in [
-            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-        ] {
+    fn one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates() {
+        for rate in launch_and_extended_compatibility_rates() {
             let mut cutoffs = vec![
                 10.0,
                 20.0,
@@ -1333,10 +1336,8 @@ mod tests {
     }
 
     #[test]
-    fn coherent_sustained_sines_meet_fundamental_and_residual_gates() {
-        for rate in [
-            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-        ] {
+    fn coherent_sustained_sines_cover_launch_and_extended_compatibility_rates() {
+        for rate in launch_and_extended_compatibility_rates() {
             let mut cutoffs = vec![
                 10.0,
                 20.0,
