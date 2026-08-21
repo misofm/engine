@@ -1,8 +1,26 @@
 # Sol implementation brief — issue 012 Parametric EQ
 
+## Post-stop verdict (2026-08-21)
+
+**STOPPED/RESCOPED; no overall PASS.** Do not continue this brief, change its tolerances/probes or
+invoke its benchmark. Checkpoints `46b4a37`, `7b9c01b` and `cf739ef` preserve bounded scalar,
+automation and architecture-kernel work only as technical input for Issue 042.
+
+The independent oracle reproduced the frozen 44,100 Hz, 10 Hz, -24 dB, S=0.1 low-shelf case as
+-23.9999999963 dB at DC, while the exact independently rounded production `f32` coefficients
+evaluate to -23.4572457785 dB. The 0.5427542178 dB miss is caused by cancellation in the retained
+near-`1,-2,1` direct-form coefficients, not by the f64 oracle or transfer evaluator. Removing DC is
+insufficient: the same row misses by 0.00776, 0.02292, 0.10107 and 0.08333 dB at the 10 Hz probe
+for 44.1, 48, 88.2 and 96 kHz respectively. Low-frequency bell/pass/notch rows and exact notch
+nulls expose the same representation limit.
+
+The original frozen brief below remains historical failure evidence. **Numerically conditioned
+launch parametric EQ realization** must compare conditioned candidates across the full unchanged
+grid before Sol freezes any replacement coefficient/state representation or recurrence.
+
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1.** Implement one four-section dual-mono EQ vertical. The normal
+**HISTORICAL PRE-STOP DECISION; NOT READY FOR FURTHER WORK.** Implement one four-section dual-mono EQ vertical. The normal
 workflow permits Terra attempt 1 and at most two Sol corrections/reviews, then stops for rescope.
 Never inspect V1/legacy.
 

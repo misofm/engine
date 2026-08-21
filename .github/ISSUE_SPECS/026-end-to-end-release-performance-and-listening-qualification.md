@@ -45,7 +45,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Issue-010 launch-critical source ownership and accounting closure
 - Issue-010 source streaming qualification tooling and adversarial evidence
 - Native effect runtime contract and conformance
-- Parametric EQ
+- Numerically conditioned launch parametric EQ realization
 - Compressor
 - Gate/expander
 - De-esser

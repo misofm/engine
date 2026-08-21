@@ -68,7 +68,7 @@ without retry; its evidence remains descriptive rather than an optimization clai
 Issues 009, 022, 024, 031 and 026 wait for 037 because their completed product contracts require
 the retained production builtin-SIMD graph. Issue 038 is a dependency only of release
 qualification issue 026; it does not block scheduler issue 009, streaming issue 010, effects or
-deployment feature work. Issues 012, 013, 014, 019 and 021 continue to consume Issue 008's
+deployment feature work. Issue 042 and Issues 013, 014, 019 and 021 continue to consume Issue 008's
 preserved generic architecture/effect-bank slice without treating its stopped issue as PASS.
 
 Issue 009 stopped after its two-attempt budget without overall PASS. Upstream checkpoint `3236b9c`
@@ -92,6 +92,15 @@ evidence**, follows 040 and owns the expanded diagnostic corpus, exact frozen se
 worker-delay audit and actual duration-independent allocation-layout/RSS proof. Issue 041 is
 nonblocking for hosts/features and gates only release qualification Issue 026. Both successors have
 two total attempts and forbid benchmarks; invocation count remains zero.
+
+Issue 012 stopped without overall PASS when its first independent-oracle gate disproved the frozen
+five-`f32`-coefficient direct-form-I numerical contract at low normalized frequencies. Checkpoints
+`46b4a37`, `7b9c01b` and `cf739ef` preserve descriptor/scalar, automation and safe architecture-
+kernel work only as technical input. Issue 042, **Numerically conditioned launch parametric EQ
+realization**, retains the 10–20,000 Hz domain and response tolerances. It must compare
+TPT/state-variable, coupled-form and delta-operator candidates across the complete grid before Sol
+freezes any replacement representation/state/recurrence. Issue 042 has two total attempts and
+forbids benchmarks; Issues 015, 017 and 026 depend on it instead of stopped Issue 012.
 
 ## Shared definition
 

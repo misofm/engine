@@ -1,5 +1,24 @@
 # 012 Parametric EQ
 
+## Status — STOPPED/RESCOPED (2026-08-21)
+
+**STOPPED/RESCOPED; no overall PASS.** The landed scalar contract, automation and architecture
+kernel checkpoints `46b4a37`, `7b9c01b` and `cf739ef` remain technical input only. The first
+independent-oracle gate disproved the frozen five-`f32`-coefficient direct-form-I numerical
+contract before fixture, graph, realtime-audit or benchmark acceptance.
+
+The exact 44,100 Hz, 10 Hz, -24 dB, S=0.1 low-shelf case produced -23.4572457785 dB at DC from
+the cast coefficients while the independent `f64` design produced -23.9999999963 dB: a
+0.5427542178 dB error against the unchanged 0.005 dB gate. The f64 numerator/denominator DC sums
+were `5.053482540207099e-7` and `8.009230072603124e-6`; independent `f32` casts changed them to
+`5.364418029785156e-7` and `7.987022399902344e-6`. The same case also exceeds the gate at the
+audible 10 Hz probe, so deleting only the DC probe is not a valid correction. Broader frozen-grid
+inspection found the same low-frequency pole/zero cancellation in bell, pass and notch rows.
+
+No Issue-012 tolerance, probe or domain was weakened, no benchmark was invoked, and no overall
+PASS may be inferred from its checkpoints. **Numerically conditioned launch parametric EQ
+realization** owns the replacement decision and product closure.
+
 ## Outcome
 
 Implement a launch-bounded four-section dual-mono parametric EQ as a bankable native effect, with
@@ -76,10 +95,12 @@ treat Issue 008 as passed or depend on its builtin-retention/benchmark successor
 
 ## Sol implementation brief
 
-**READY FOR TERRA ATTEMPT 1.** The authoritative brief is
+**STOPPED/RESCOPED; DO NOT CONTINUE IMPLEMENTATION OR RUN THE BENCHMARK.** The historical
+authoritative brief is
 `.github/ISSUE_SPECS/BRIEFS/012-parametric-eq.md`. It freezes parameters/state, RBJ equations,
 DF-I/FMA graphs, smoothing/recovery, bank semantics, objective evidence, one realtime audit and the
-sole benchmark authorization.
+former benchmark authorization. The numerical failure above invalidates that authorization;
+Issue 042 is the only continuation.
 
 ## Hazards/decisions
 

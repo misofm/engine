@@ -30,17 +30,21 @@ Unbounded runtime band creation, third-party modules, implicit sidechain link, o
 
 - DSP research corpus and conformance harness
 - Native effect runtime contract and conformance
-- Parametric EQ
+- Numerically conditioned launch parametric EQ realization
 - Compressor
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 
 ## Hazards/decisions
 
-Use RBJ and dynamics references from issues 012/013, restated in the effect note; parameters must define order of filter/gain updates.
+Use the conditioned filter decision from issue 042 and dynamics references from issue 013,
+restated in the effect note; parameters must define the order of filter/gain updates.
 
 ## Acceptance gates with objective measurements
 
-Static mode matches issue 012’s 0.05 dB/0.1% response gates; dynamic gain matches the independent design within 0.1 dB and timing within the greater of one sample or 2%; external sidechain routing/PDC and bypass latency are sample-exact; the maximum prepared band count has 0 process allocations.
+Static mode matches issue 042's 0.05 dB/0.1% response gates; dynamic gain matches the independent
+design within 0.1 dB and timing within the greater of one sample or 2%; external sidechain
+routing/PDC and bypass latency are sample-exact; the maximum prepared band count has 0 process
+allocations.
 
 ## Target matrix
 
