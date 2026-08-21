@@ -262,6 +262,15 @@ No gate was weakened. The two-attempt budget is exhausted, issue 034 remains ope
 rescope/rebrief is required before issue 008 or 035. `timed_benchmark_invocations=0`; no timed
 workload or benchmark artifact was created.
 
+## Post-stop rescope (2026-08-21)
+
+**ISSUE 034 IS STOPPED AND DID NOT PASS.** Preserve the complete attempt and failure evidence
+above. Checkpoint `9c57af8` remains reusable input for its bounded metadata, opacity, corruption
+and resource-accounting corrections, but those corrections are not a PASS for this issue.
+**Representable TPT cutoff domain and builtin contract acceptance** owns the single numerical
+boundary defect and the final composite matrix/nonbenchmark acceptance. Issues 008 and 035 now
+depend on that successor. `timed_benchmark_invocations=0` remains authoritative.
+
 ## Required evidence
 
 Descriptor table dump; external compile-fail transcript; eight-category corruption results;

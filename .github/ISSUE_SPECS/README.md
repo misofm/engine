@@ -29,7 +29,7 @@ dependency of issues 007–010 and does not authorize another issue-006 benchmar
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
 launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;
 176,400/192,000/352,800/384,000 Hz remain extended compatibility evidence only. Dependency order
-places the accepted 007 slice -> 032 -> 034 -> 008, while 010 follows 032; downstream effects,
+places the accepted 007 slice -> 032 -> 034 corrections -> 036 -> 008, while 010 follows 032; downstream effects,
 hosts and release qualification follow their exact listed dependencies.
 Historical “required/all-eight” evidence is preserved as period evidence and does not override
 issue 032.
@@ -37,14 +37,17 @@ issue 032.
 Issue 007 stopped after three failed attempts. Its post-stop Sol rescope accepts only the proven
 conditioned scalar TPT/builtin runtime slice as reusable technical foundation; it does not claim
 machine qualification and preserves every failure. Issue 034, **Issue-007 launch-critical builtin
-contract closure**, owns parameter metadata, sealed-only graph attachment, exact checked resource
-accounting and compiler mutations. Issue 035, **Issue-007 builtin qualification tooling, audits,
-and benchmark**, depends on 034 and owns the complete fixture/audit/target evidence and the sole
-eventual one-invocation/two-round builtin benchmark. Both corrective workflows have at most two
-attempts. The timed invocation count is currently zero; issue 034 cannot authorize a run.
+contract closure**, stopped after two failed attempts; its landed metadata, sealed-only graph,
+checked resource-accounting and composite-matrix corrections remain bounded input, not PASS.
+Issue 036, **Representable TPT cutoff domain and builtin contract acceptance**, owns the sole
+remaining numerical boundary and final nonbenchmark acceptance. Issue 035, **Issue-007 builtin
+qualification tooling, audits, and benchmark**, depends on 036 and owns the complete fixture/audit/
+target evidence and the sole eventual one-invocation/two-round builtin benchmark. Issues 035 and
+036 have at most two attempts each. The timed invocation count is currently zero; neither issue
+034 nor 036 can authorize a run.
 
-Dependency order is 007 accepted slice -> 034 -> both 008 and 035. Issue 008 needs 034's stable
-preparation/metadata and sealed graph/resource contract but not 035's scalar qualification
+Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and 035. Issue 008
+needs 036's accepted preparation/metadata and sealed graph/resource contract but not 035's scalar qualification
 tooling. Issues 022, 023 and 024 wait for 035's corrected machine candidate. Issue 033 runs the
 real preregistered human listening only after 035 seals that candidate and its accepted benchmark;
 issue 026 waits for both 035 and 033. This ordering forbids synthetic trials, audible-quality

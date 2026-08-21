@@ -2,12 +2,12 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1 ONLY AFTER ISSUE 034 PASSES.** This issue has at most two total
+**READY FOR TERRA ATTEMPT 1 ONLY AFTER ISSUE 036 PASSES.** This issue has at most two total
 implementation attempts: Terra attempt 1 and one bounded Sol correction/review attempt. A second
 failure stops and requires a new stateless rescope. Never inspect V1/legacy, relax a retained DSP
 threshold, tune expected bytes to an observed defect, or fabricate human listening.
 
-Issue 034's final candidate is the only input. Production coefficients, incremental non-fused
+Issue 036's final candidate is the only input. Production coefficients, incremental non-fused
 all-`f32` TPT operation order, scalar chain, matrix/pan behavior and meter math are frozen and out
 of implementation scope. A discovered DSP defect fails this issue and creates a separate
 corrective issue.
@@ -92,7 +92,7 @@ categories.
 
 ## Frozen graph/swap/retirement audit
 
-Compile the canonical session/effect and issue-034 sealed builtin artifacts with seven meters.
+Compile the canonical session/effect and issue-036 accepted sealed builtin artifacts with seven meters.
 Use production graph and `RealtimePlanOwner` APIs, binding only genuine external source/output and
 the fixture processors for the declared racks/PDC route. Never render a direct `BuiltinChain`.
 The rack processors are nonidentity so every one of the seven tap values is distinct; a fixed
@@ -190,7 +190,7 @@ synthetic mutations, but reports `workload_launches=0` and creates no raw/accept
 
 ## Ordered nonbenchmark gates
 
-1. Complete fixture/reference/coverage/corruption checks and issue-034 contract tests.
+1. Complete fixture/reference/coverage/corruption checks and issue-036 contract tests.
 2. Direct and graph audits, exact output/lifecycle checks, traces and nine probes.
 3. Native debug/pinned scalar release; Android/iOS pure-Rust release; Wasm `-simd128/+simd128`.
 4. Locked workspace tests; warning-denied all-target Clippy/rustdoc; format; all workspace,

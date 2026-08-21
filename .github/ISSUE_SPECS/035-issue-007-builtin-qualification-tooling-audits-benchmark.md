@@ -21,9 +21,9 @@ planar `f32`; L/R parameters and state remain independent unless an explicit lin
 
 Issue 007 stopped after three attempts. Its retained conditioned incremental all-`f32` TPT
 recurrence, scalar builtin chain, matrix/pan behavior and seven meter-tap semantics are reusable
-technical input, not machine qualification. **Issue-007 launch-critical builtin contract
-closure** first fixes parameter metadata, sealed-only graph attachment, exact checked resource
-accounting and the builtin compiler mutation gate. This issue then owns every remaining
+technical input, not machine qualification. **Representable TPT cutoff domain and builtin
+contract acceptance** accepts the corrected rate-keyed cutoff metadata, sealed-only graph
+attachment, exact checked resource accounting and builtin compiler mutation gate. This issue then owns every remaining
 machine-qualification deliverable and is the only issue that may eventually authorize the
 builtin timed workload. Issue **Issue-007 builtin filter and matrix human listening
 qualification** runs only against this issue's sealed accepted candidate and remains required for
@@ -69,7 +69,7 @@ Production DSP semantics are out of scope for modification. HPF/LPF are second-o
 `f32` integrator states per enabled filter/lane and the retained non-fused incremental operation
 order. Preparation rejects a cast-state cutoff response outside
 `-3.0102999566 +/- 0.005 dB`. Reset/recovery sets both state words to positive zero. Enabled
-cutoff is `10 Hz <= f < sample_rate/2`; exact zero disables. Builtin latency is zero and an
+cutoff is `10 Hz <= f <= maximum_hz(sample_rate)` under issue 036's exact rate-keyed table; exact zero disables. Builtin latency is zero and an
 enabled filter has infinite tail.
 
 The independent `miso-engine-dsp-reference` oracle cannot depend on production builtins. At all
@@ -293,7 +293,7 @@ benchmark, executing real listening, creating synthetic listeners, or making a l
 
 ## Dependencies by exact issue title
 
-- Issue-007 launch-critical builtin contract closure
+- Representable TPT cutoff domain and builtin contract acceptance
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
@@ -301,7 +301,7 @@ benchmark, executing real listening, creating synthetic listeners, or making a l
 
 ## Sol implementation brief (2026-08-21)
 
-**READY FOR TERRA ATTEMPT 1 ONLY AFTER ISSUE 034 PASSES.** The tracked authoritative brief is
+**READY FOR TERRA ATTEMPT 1 ONLY AFTER ISSUE 036 PASSES.** The tracked authoritative brief is
 `.github/ISSUE_SPECS/BRIEFS/035-issue-007-builtin-qualification-tooling-audits-benchmark.md`. It
 freezes the two-attempt budget, complete expected-output/corruption grid, exact direct/graph
 million-call audits, target sequence and schema-v2 binary/runner/validator. This issue alone may

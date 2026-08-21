@@ -31,7 +31,7 @@ Placing arbitrary third-party Wasm in a SIMD bank, fixed global eight-track assu
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- Issue-007 launch-critical builtin contract closure
+- Representable TPT cutoff domain and builtin contract acceptance
 - Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 
 ## Hazards/decisions
@@ -49,11 +49,12 @@ finite-normal input, and no sanitation, base non-FMA scalar and SIMD are bit-ide
 target; cross-target and FMA paths also pass issue 007's response gates and the declared samplewise
 tolerance. A future precision mode belongs to issue 031 and would require a new cohort/ABI decision.
 
-The issue-007 post-stop rescope accepts that DSP operation graph only as technical input. This
-issue waits for **Issue-007 launch-critical builtin contract closure** because bank adapters
-consume its stable per-lane preparation/metadata and sealed graph/resource contract. It does not
-wait for **Issue-007 builtin qualification tooling, audits, and benchmark**: that successor owns
-scalar expected-output/audit/benchmark evidence and does not define SIMD semantics.
+The issue-007 post-stop rescope accepts that DSP operation graph only as technical input. Issue
+034 stopped after landing bounded contract corrections; this issue waits for **Representable TPT
+cutoff domain and builtin contract acceptance** because bank adapters consume its accepted
+per-lane preparation/metadata and sealed graph/resource contract. It does not wait for
+**Issue-007 builtin qualification tooling, audits, and benchmark**: that successor owns scalar
+expected-output/audit/benchmark evidence and does not define SIMD semantics.
 
 ## Acceptance gates with objective measurements
 
