@@ -4,7 +4,7 @@
 //! the opened reader, decoder, prepared source producer, and all decoded staging storage; it never
 //! shares those mutable objects with a render worker.
 
-use core::{alloc::Layout, cell::Cell, marker::PhantomData, mem::size_of, num::NonZeroUsize};
+use core::{alloc::Layout, cell::Cell, marker::PhantomData, num::NonZeroUsize};
 use std::{
     io::{Read, Seek},
     thread::{self, JoinHandle},
@@ -21,10 +21,10 @@ use miso_engine_graph::{GraphNodeId, StableGraphId, TrackStage};
 use miso_engine_session::CompiledSession;
 
 use crate::{
-    HostChunkError, HostChunkProvider, NativeDecoderSanitationTelemetry, NativeWaveDecoder,
-    NativeWaveError, NativeWaveMetadata, NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer,
-    PcmSourceRing, PcmSourceRingConfig, PcmSourceRingError, SourceCommand, SourceDiagnostic,
-    SourceDiagnosticCode, SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
+    HostChunkError, HostChunkProvider, NativeWaveDecoder, NativeWaveError, NativeWaveMetadata,
+    NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig,
+    PcmSourceRingError, SourceCommand, SourceDiagnostic, SourceDiagnosticCode,
+    SourceDiagnosticPath, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, SourceResourceReport, SourceSeekError, parse_native_wave,
     prepare_graph_source_set,
 };
@@ -105,8 +105,12 @@ pub struct NativeSourceResourceReport {
     pub worker_control_queue_bytes: u64,
     /// Exact SPSC worker-event queue header and slot payload bytes.
     pub worker_event_queue_bytes: u64,
-    /// One shared native sanitation/stop telemetry payload allocation.
-    pub worker_shared_telemetry_bytes: u64,
+    /// Exact worker event queue item capacity: ready plus one snapshot-or-terminal slot.
+    pub worker_event_queue_items: u64,
+    /// Exact capacity-one SPSC worker-stop queue header and slot payload bytes.
+    pub worker_stop_queue_bytes: u64,
+    /// Exact worker stop queue item capacity.
+    pub worker_stop_queue_items: u64,
     /// Exact source ring plus fixed decoder/staging allocation total.
     pub total_engine_owned_bytes: u64,
     /// Largest exact allocation among ring, decoder scratch, and planar staging.
@@ -259,7 +263,17 @@ impl NativeSourcePrepareError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeSourceWorkerEvent {
     /// First PCM chunk or zero-frame end marker has been submitted to the prepared ring.
-    SourceReady,
+    SourceReady {
+        native_decoder_sanitized_samples: u64,
+    },
+    /// Response to one explicit controller snapshot request.
+    SanitationSnapshot {
+        native_decoder_sanitized_samples: u64,
+    },
+    /// Final worker-local sanitation watermark, published before the worker exits.
+    Terminal {
+        native_decoder_sanitized_samples: u64,
+    },
 }
 
 /// Worker terminal state returned after an off-render join.
@@ -304,6 +318,7 @@ enum WorkerCommand {
         frame: SourceFrame,
     },
     Wake,
+    SnapshotSanitation,
 }
 
 #[derive(Clone, Copy)]
@@ -312,13 +327,15 @@ struct PendingBlock {
     start_frame: SourceFrame,
     frames: u32,
     end_of_region: bool,
+    native_decoder_sanitized_samples: u64,
 }
 
 /// Non-render endpoint for bounded native seek/wake commands and worker events.
 pub struct NativeSourceController {
     commands: Producer<WorkerCommand>,
     events: Consumer<NativeSourceWorkerEvent>,
-    sanitation: NativeDecoderSanitationTelemetry,
+    observed_sanitation: u64,
+    terminal_observed: bool,
     next_requested_generation: SourceGeneration,
     region: NativeWaveRegion,
     _not_sync: PhantomData<Cell<()>>,
@@ -328,7 +345,23 @@ impl NativeSourceController {
     /// Cumulative native decoder replacements observed through bounded prepared telemetry.
     #[must_use]
     pub fn native_decoder_sanitized_samples(&self) -> u64 {
-        self.sanitation.load()
+        self.observed_sanitation
+    }
+
+    /// Request and wait for a synchronized native decoder sanitation watermark outside render.
+    pub fn snapshot_native_decoder_sanitized_samples(
+        &mut self,
+    ) -> Result<u64, NativeSourceWorkerControlError> {
+        self.try_send(WorkerCommand::SnapshotSanitation)?;
+        loop {
+            match self.wait_for_event()? {
+                NativeSourceWorkerEvent::SanitationSnapshot { .. }
+                | NativeSourceWorkerEvent::Terminal { .. } => {
+                    return Ok(self.observed_sanitation);
+                }
+                NativeSourceWorkerEvent::SourceReady { .. } => {}
+            }
+        }
     }
 
     /// Queue a strictly increasing region-bounded source seek without blocking.
@@ -365,8 +398,11 @@ impl NativeSourceController {
     ) -> Result<NativeSourceWorkerEvent, NativeSourceWorkerControlError> {
         loop {
             match self.events.try_pop() {
-                Ok(event) => return Ok(event),
-                Err(QueueEmpty { .. }) if self.sanitation.stop_requested() => {
+                Ok(event) => {
+                    self.observe_event(event);
+                    return Ok(event);
+                }
+                Err(QueueEmpty { .. }) if self.terminal_observed => {
                     return Err(NativeSourceWorkerControlError::Stopped);
                 }
                 Err(QueueEmpty { .. }) => thread::yield_now(),
@@ -375,12 +411,30 @@ impl NativeSourceController {
     }
 
     fn try_send(&mut self, command: WorkerCommand) -> Result<(), NativeSourceWorkerControlError> {
-        if self.sanitation.stop_requested() {
+        if self.terminal_observed {
             return Err(NativeSourceWorkerControlError::Stopped);
         }
         match self.commands.try_push(command) {
             Ok(()) => Ok(()),
             Err(QueueFull { .. }) => Err(NativeSourceWorkerControlError::Backpressure),
+        }
+    }
+
+    fn observe_event(&mut self, event: NativeSourceWorkerEvent) {
+        let value = match event {
+            NativeSourceWorkerEvent::SourceReady {
+                native_decoder_sanitized_samples,
+            }
+            | NativeSourceWorkerEvent::SanitationSnapshot {
+                native_decoder_sanitized_samples,
+            }
+            | NativeSourceWorkerEvent::Terminal {
+                native_decoder_sanitized_samples,
+            } => native_decoder_sanitized_samples,
+        };
+        self.observed_sanitation = self.observed_sanitation.max(value);
+        if matches!(event, NativeSourceWorkerEvent::Terminal { .. }) {
+            self.terminal_observed = true;
         }
     }
 }
@@ -392,7 +446,7 @@ impl NativeSourceController {
 pub(crate) struct NativeSourceWorker {
     join: Option<JoinHandle<NativeSourceWorkerExit>>,
     stopped: bool,
-    sanitation: NativeDecoderSanitationTelemetry,
+    stop: Producer<()>,
     _not_sync: PhantomData<Cell<()>>,
 }
 
@@ -402,7 +456,9 @@ impl NativeSourceWorker {
         &mut self,
     ) -> Result<NativeSourceWorkerExit, NativeSourceWorkerControlError> {
         if !self.stopped {
-            self.sanitation.request_stop();
+            self.stop
+                .try_push(())
+                .map_err(|_| NativeSourceWorkerControlError::Stopped)?;
             self.stopped = true;
         }
         let Some(join) = self.join.take() else {
@@ -487,24 +543,23 @@ fn prepare_native_source_parts<S: NativeSourceResolver>(
         .try_reserve_exact(staging_samples)
         .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     planar_staging.resize(staging_samples, 0.0);
-    let (mut producer, mut consumer, ring_report) =
+    let (producer, consumer, ring_report) =
         PcmSourceRing::prepare_at_source_frame(request.ring_config, request.region.start_frame)
             .map_err(NativeSourcePrepareError::Ring)?;
     debug_assert_eq!(ring_report, report.ring);
-    let sanitation = NativeDecoderSanitationTelemetry::new();
-    producer.attach_native_decoder_sanitation(sanitation.clone());
-    consumer.attach_native_decoder_sanitation(sanitation.clone());
     let provider = producer.into_host_chunk_provider(metadata.sample_rate_hz);
     let (command_sender, command_receiver) =
         bounded_spsc(caps.control_queue_items, QueueGeneration(11))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let (event_sender, event_receiver) = bounded_spsc(
-        NonZeroUsize::new(1).expect("one event"),
+        NonZeroUsize::new(2).expect("two events"),
         QueueGeneration(12),
     )
     .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let initial_generation = request.ring_config.initial_generation;
-    let worker_sanitation = sanitation.clone();
+    let (stop_sender, stop_receiver) =
+        bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
         .spawn(move || {
@@ -515,7 +570,7 @@ fn prepare_native_source_parts<S: NativeSourceResolver>(
                 decoder,
                 planar_staging.into_boxed_slice(),
                 initial_generation,
-                worker_sanitation,
+                stop_receiver,
             )
         })
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
@@ -523,7 +578,8 @@ fn prepare_native_source_parts<S: NativeSourceResolver>(
         NativeSourceController {
             commands: command_sender,
             events: event_receiver,
-            sanitation: sanitation.clone(),
+            observed_sanitation: 0,
+            terminal_observed: false,
             next_requested_generation: initial_generation,
             region: request.region,
             _not_sync: PhantomData,
@@ -531,7 +587,7 @@ fn prepare_native_source_parts<S: NativeSourceResolver>(
         NativeSourceWorker {
             join: Some(join),
             stopped: false,
-            sanitation: sanitation.clone(),
+            stop: stop_sender,
             _not_sync: PhantomData,
         },
         consumer,
@@ -712,17 +768,15 @@ fn source_resource_report(
     }
     let worker_control_queue_bytes = exact_queue_bytes::<WorkerCommand>(caps.control_queue_items)?;
     let worker_event_queue_bytes =
-        exact_queue_bytes::<NativeSourceWorkerEvent>(NonZeroUsize::new(1).expect("one event"))?;
-    let worker_shared_telemetry_bytes =
-        u64::try_from(size_of::<crate::NativeWorkerSharedTelemetry>())
-            .expect("native telemetry payload size fits u64");
+        exact_queue_bytes::<NativeSourceWorkerEvent>(NonZeroUsize::new(2).expect("two events"))?;
+    let worker_stop_queue_bytes = exact_queue_bytes::<()>(NonZeroUsize::new(1).expect("one stop"))?;
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
         .checked_add(decoder_read_scratch_bytes)
         .and_then(|total| total.checked_add(worker_planar_staging_bytes))
         .and_then(|total| total.checked_add(worker_control_queue_bytes))
         .and_then(|total| total.checked_add(worker_event_queue_bytes))
-        .and_then(|total| total.checked_add(worker_shared_telemetry_bytes))
+        .and_then(|total| total.checked_add(worker_stop_queue_bytes))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let largest_allocation_bytes = ring
         .largest_allocation_bytes
@@ -730,7 +784,7 @@ fn source_resource_report(
         .max(worker_planar_staging_bytes)
         .max(worker_control_queue_bytes)
         .max(worker_event_queue_bytes)
-        .max(worker_shared_telemetry_bytes);
+        .max(worker_stop_queue_bytes);
     if total_engine_owned_bytes > caps.max_total_engine_owned_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
@@ -744,7 +798,9 @@ fn source_resource_report(
             .expect("usize fits u64"),
         worker_control_queue_bytes,
         worker_event_queue_bytes,
-        worker_shared_telemetry_bytes,
+        worker_event_queue_items: 2,
+        worker_stop_queue_bytes,
+        worker_stop_queue_items: 1,
         total_engine_owned_bytes,
         largest_allocation_bytes,
     })
@@ -805,21 +861,15 @@ fn run_worker<R: Read + Seek>(
     mut decoder: NativeWaveDecoder<R>,
     mut planar_staging: Box<[f32]>,
     mut generation: SourceGeneration,
-    sanitation: NativeDecoderSanitationTelemetry,
+    mut stop: Consumer<()>,
 ) -> NativeSourceWorkerExit {
-    struct StopOnExit(NativeDecoderSanitationTelemetry);
-    impl Drop for StopOnExit {
-        fn drop(&mut self) {
-            self.0.request_stop();
-        }
-    }
-    let _stop_on_exit = StopOnExit(sanitation.clone());
     let mut pending: Option<PendingBlock> = None;
     let mut end_submitted = false;
     let mut source_ready_sent = false;
-    loop {
-        if sanitation.stop_requested() {
-            return NativeSourceWorkerExit::Stopped;
+    let mut sanitation = 0_u64;
+    let exit = loop {
+        if stop.try_pop().is_ok() {
+            break NativeSourceWorkerExit::Stopped;
         }
         if let Ok(command) = commands.try_pop() {
             match apply_command(command, &mut provider, &mut decoder, &mut generation) {
@@ -829,7 +879,15 @@ fn run_worker<R: Read + Seek>(
                     continue;
                 }
                 Ok(CommandResult::Wake) => {}
-                Err(exit) => return exit,
+                Ok(CommandResult::Snapshot) => {
+                    publish_worker_event(
+                        &mut events,
+                        NativeSourceWorkerEvent::SanitationSnapshot {
+                            native_decoder_sanitized_samples: sanitation,
+                        },
+                    );
+                }
+                Err(exit) => break exit,
             }
         }
         if let Some(block) = pending.take() {
@@ -839,11 +897,17 @@ fn run_worker<R: Read + Seek>(
                 &planar_staging,
                 block.frames,
                 block.end_of_region,
+                block.native_decoder_sanitized_samples,
             ) {
                 Ok(_) => {
                     end_submitted = block.end_of_region;
                     if !source_ready_sent {
-                        let _ = events.try_push(NativeSourceWorkerEvent::SourceReady);
+                        publish_worker_event(
+                            &mut events,
+                            NativeSourceWorkerEvent::SourceReady {
+                                native_decoder_sanitized_samples: sanitation,
+                            },
+                        );
                         source_ready_sent = true;
                     }
                     continue;
@@ -853,7 +917,7 @@ fn run_worker<R: Read + Seek>(
                     thread::yield_now();
                     continue;
                 }
-                Err(error) => return NativeSourceWorkerExit::SubmitFailed(error),
+                Err(error) => break NativeSourceWorkerExit::SubmitFailed(error),
             }
         }
         if end_submitted {
@@ -863,21 +927,46 @@ fn run_worker<R: Read + Seek>(
         let start_frame = decoder.next_source_frame();
         let decoded = match decoder.decode_quantum_into_planar(&mut planar_staging) {
             Ok(report) => report,
-            Err(error) => return NativeSourceWorkerExit::DecodeFailed(error),
+            Err(error) => break NativeSourceWorkerExit::DecodeFailed(error),
         };
-        sanitation.store(decoded.sanitized_sample_count);
+        sanitation = sanitation.saturating_add(decoded.sanitized_sample_count);
         pending = Some(PendingBlock {
             generation,
             start_frame,
             frames: decoded.decoded_frames,
             end_of_region: decoded.end_of_region,
+            native_decoder_sanitized_samples: sanitation,
         });
+    };
+    publish_worker_event(
+        &mut events,
+        NativeSourceWorkerEvent::Terminal {
+            native_decoder_sanitized_samples: sanitation,
+        },
+    );
+    exit
+}
+
+fn publish_worker_event(
+    events: &mut Producer<NativeSourceWorkerEvent>,
+    event: NativeSourceWorkerEvent,
+) {
+    let mut pending = event;
+    loop {
+        match events.try_push(pending) {
+            Ok(()) => return,
+            Err(QueueFull { value, .. }) => {
+                pending = value;
+                thread::yield_now();
+            }
+        }
     }
 }
 
 enum CommandResult {
     Wake,
     Seek,
+    Snapshot,
 }
 
 fn apply_command<R: Read + Seek>(
@@ -888,6 +977,7 @@ fn apply_command<R: Read + Seek>(
 ) -> Result<CommandResult, NativeSourceWorkerExit> {
     match command {
         WorkerCommand::Wake => Ok(CommandResult::Wake),
+        WorkerCommand::SnapshotSanitation => Ok(CommandResult::Snapshot),
         WorkerCommand::Seek {
             generation: requested,
             frame,
@@ -1122,10 +1212,10 @@ mod tests {
                 .expect("prepare");
         assert_eq!(report.decoder_read_scratch_bytes, 16);
         assert_eq!(report.worker_planar_staging_bytes, 16);
-        assert_eq!(
+        assert!(matches!(
             controller.wait_for_event().expect("ready"),
-            NativeSourceWorkerEvent::SourceReady
-        );
+            NativeSourceWorkerEvent::SourceReady { .. }
+        ));
         let native = read_one(&mut native_consumer);
 
         let (producer, mut host_consumer, _) = PcmSourceRing::prepare(PcmSourceRingConfig {
@@ -1158,6 +1248,64 @@ mod tests {
         );
         assert_eq!(
             worker.stop_and_join().expect("stop"),
+            NativeSourceWorkerExit::Stopped
+        );
+    }
+
+    #[test]
+    fn controller_snapshot_and_terminal_watermarks_are_exact_and_monotonic() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut native_resolver = resolver(
+            &[f32::INFINITY, f32::from_bits(1), -0.0, 0.25],
+            b"exact-identity",
+        );
+        let (mut controller, mut worker, mut consumer, _) =
+            prepare_native_source_parts(&mut native_resolver, request(region), caps())
+                .expect("prepare");
+        assert!(matches!(
+            controller.wait_for_event().expect("ready"),
+            NativeSourceWorkerEvent::SourceReady {
+                native_decoder_sanitized_samples: 2
+            }
+        ));
+        assert_eq!(controller.native_decoder_sanitized_samples(), 2);
+        assert_eq!(
+            controller
+                .snapshot_native_decoder_sanitized_samples()
+                .expect("snapshot"),
+            2
+        );
+        let _ = read_one(&mut consumer);
+        assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 2);
+        assert_eq!(
+            worker.stop_and_join().expect("stop"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                native_decoder_sanitized_samples: 2
+            }
+        ));
+        assert_eq!(controller.native_decoder_sanitized_samples(), 2);
+    }
+
+    #[test]
+    fn controller_first_drop_does_not_detach_the_retirement_stop_owner() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut native_resolver = resolver(&[0.25; 4], b"exact-identity");
+        let (controller, mut worker, _consumer, _) =
+            prepare_native_source_parts(&mut native_resolver, request(region), caps())
+                .expect("prepare");
+        drop(controller);
+        assert_eq!(
+            worker.stop_and_join().expect("retirement stop and join"),
             NativeSourceWorkerExit::Stopped
         );
     }
@@ -1277,6 +1425,12 @@ mod tests {
         assert_eq!(source_set.copy_after_disarm_telemetry(&mut telemetry), 5);
         assert_eq!(telemetry[4], 2);
         drop(source_set);
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                native_decoder_sanitized_samples: 2
+            }
+        ));
         assert_eq!(
             controller.try_wake(),
             Err(NativeSourceWorkerControlError::Stopped)
@@ -1479,6 +1633,10 @@ mod tests {
             Err(NativeSourceWorkerControlError::Stopped)
         );
         drop(retired);
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal { .. }
+        ));
         assert_eq!(
             controller.try_wake(),
             Err(NativeSourceWorkerControlError::Stopped)

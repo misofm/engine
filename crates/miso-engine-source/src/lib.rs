@@ -15,12 +15,6 @@ use core::{
 };
 use std::fmt;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
-
 use miso_engine_core::{
     QuantumFrames, SampleRateHz,
     realtime::{
@@ -204,42 +198,6 @@ pub struct PcmSourceShape {
     pub quantum_frames: QuantumFrames,
     pub frame_capacity: u64,
     pub transfer_block_count: u64,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-pub(crate) struct NativeDecoderSanitationTelemetry(Arc<NativeWorkerSharedTelemetry>);
-
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeWorkerSharedTelemetry {
-    sanitation: AtomicU64,
-    stop_requested: AtomicBool,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeDecoderSanitationTelemetry {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(NativeWorkerSharedTelemetry {
-            sanitation: AtomicU64::new(0),
-            stop_requested: AtomicBool::new(false),
-        }))
-    }
-
-    pub(crate) fn store(&self, value: u64) {
-        self.0.sanitation.store(value, Ordering::Release);
-    }
-
-    pub(crate) fn load(&self) -> u64 {
-        self.0.sanitation.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn request_stop(&self) {
-        self.0.stop_requested.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn stop_requested(&self) -> bool {
-        self.0.stop_requested.load(Ordering::Acquire)
-    }
 }
 
 /// Exact source-owned allocation and queue accounting.
@@ -512,6 +470,7 @@ struct TransferBlock {
     start_frame: SourceFrame,
     frames: u32,
     end_of_region: bool,
+    native_decoder_sanitized_samples: u64,
     samples: Box<[f32]>,
 }
 
@@ -527,6 +486,7 @@ impl TransferBlock {
             start_frame: SourceFrame(0),
             frames: 0,
             end_of_region: false,
+            native_decoder_sanitized_samples: 0,
             samples: samples.into_boxed_slice(),
         })
     }
@@ -536,6 +496,7 @@ impl TransferBlock {
         self.start_frame = SourceFrame(0);
         self.frames = 0;
         self.end_of_region = false;
+        self.native_decoder_sanitized_samples = 0;
     }
 }
 
@@ -642,8 +603,7 @@ impl PcmSourceRing {
             stale_generation_discard_count: 0,
             underrun_frames: 0,
             underrun_events: 0,
-            #[cfg(not(target_arch = "wasm32"))]
-            native_decoder_sanitation: None,
+            native_decoder_sanitized_samples: 0,
         };
         for _ in 0..shape.transfer_block_count.get() {
             let block = Box::new(TransferBlock::try_new(shape.samples_per_block)?);
@@ -665,8 +625,7 @@ impl PcmSourceRing {
                 end_of_region_submitted: false,
                 cumulative_written_frames: 0,
                 deferred_block: None,
-                #[cfg(not(target_arch = "wasm32"))]
-                native_decoder_sanitation: None,
+                native_decoder_sanitized_samples: 0,
             },
             consumer,
             report,
@@ -733,8 +692,7 @@ pub struct PcmSourceProducer {
     end_of_region_submitted: bool,
     cumulative_written_frames: u64,
     deferred_block: Option<Box<TransferBlock>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    native_decoder_sanitation: Option<NativeDecoderSanitationTelemetry>,
+    native_decoder_sanitized_samples: u64,
 }
 
 /// Name for the prepared producer when it is used solely to control source seeks.
@@ -747,13 +705,6 @@ impl PcmSourceProducer {
         self.shape
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn attach_native_decoder_sanitation(
-        &mut self,
-        telemetry: NativeDecoderSanitationTelemetry,
-    ) {
-        self.native_decoder_sanitation = Some(telemetry);
-    }
     /// Turn this producer into an explicit-rate host PCM boundary.
     #[must_use]
     pub fn into_host_chunk_provider(self, sample_rate_hz: SampleRateHz) -> HostChunkProvider {
@@ -810,18 +761,7 @@ impl PcmSourceProducer {
             data_full_count: self.data_producer.full_count(),
             recycle_empty_count: self.recycle_consumer.empty_count(),
             end_of_region_submitted: self.end_of_region_submitted,
-            native_decoder_sanitized_samples: {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.native_decoder_sanitation
-                        .as_ref()
-                        .map_or(0, NativeDecoderSanitationTelemetry::load)
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    0
-                }
-            },
+            native_decoder_sanitized_samples: self.native_decoder_sanitized_samples,
         }
     }
 
@@ -851,6 +791,7 @@ impl PcmSourceProducer {
         block.start_frame = chunk.start_frame;
         block.frames = chunk.frames;
         block.end_of_region = chunk.end_of_region;
+        block.native_decoder_sanitized_samples = 0;
         let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
         let frames = usize::try_from(chunk.frames).expect("u32 fits usize");
         for (channel, plane) in chunk.planes.iter().enumerate() {
@@ -870,6 +811,7 @@ impl PcmSourceProducer {
         planar_quantum: &[f32],
         frames: u32,
         end_of_region: bool,
+        native_decoder_sanitized_samples: u64,
     ) -> Result<SubmitReport, HostChunkError> {
         validate_submission_metadata(
             self,
@@ -892,6 +834,10 @@ impl PcmSourceProducer {
         block.start_frame = start_frame;
         block.frames = frames;
         block.end_of_region = end_of_region;
+        block.native_decoder_sanitized_samples = native_decoder_sanitized_samples;
+        self.native_decoder_sanitized_samples = self
+            .native_decoder_sanitized_samples
+            .max(native_decoder_sanitized_samples);
         let frames = usize::try_from(frames).expect("u32 fits usize");
         for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
             let offset = channel
@@ -977,6 +923,7 @@ impl HostChunkProvider {
         planar_quantum: &[f32],
         frames: u32,
         end_of_region: bool,
+        native_decoder_sanitized_samples: u64,
     ) -> Result<SubmitReport, HostChunkError> {
         self.producer.submit_contiguous_planar(
             generation,
@@ -984,6 +931,7 @@ impl HostChunkProvider {
             planar_quantum,
             frames,
             end_of_region,
+            native_decoder_sanitized_samples,
         )
     }
 }
@@ -1073,8 +1021,7 @@ pub struct PcmSourceConsumer {
     stale_generation_discard_count: u64,
     underrun_frames: u64,
     underrun_events: u64,
-    #[cfg(not(target_arch = "wasm32"))]
-    native_decoder_sanitation: Option<NativeDecoderSanitationTelemetry>,
+    native_decoder_sanitized_samples: u64,
 }
 
 impl PcmSourceConsumer {
@@ -1084,13 +1031,6 @@ impl PcmSourceConsumer {
         self.shape
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn attach_native_decoder_sanitation(
-        &mut self,
-        telemetry: NativeDecoderSanitationTelemetry,
-    ) {
-        self.native_decoder_sanitation = Some(telemetry);
-    }
     /// Copy one exact render quantum into planar caller storage without allocation or blocking.
     pub fn read_block(
         &mut self,
@@ -1232,18 +1172,7 @@ impl PcmSourceConsumer {
             underrun_frames: self.underrun_frames,
             underrun_events: self.underrun_events,
             end_of_region: self.end_of_region,
-            native_decoder_sanitized_samples: {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.native_decoder_sanitation
-                        .as_ref()
-                        .map_or(0, NativeDecoderSanitationTelemetry::load)
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    0
-                }
-            },
+            native_decoder_sanitized_samples: self.native_decoder_sanitized_samples,
         }
     }
 
@@ -1288,6 +1217,9 @@ impl PcmSourceConsumer {
             let Ok(block) = self.data_consumer.try_pop() else {
                 break;
             };
+            self.native_decoder_sanitized_samples = self
+                .native_decoder_sanitized_samples
+                .max(block.native_decoder_sanitized_samples);
             if block.generation != self.active_generation || block.start_frame.0 < self.next_frame.0
             {
                 self.note_end_and_discard(block);
@@ -1987,6 +1919,7 @@ mod tests {
                 &planar_quantum,
                 4,
                 true,
+                0,
             )
             .expect("native planar submit");
         let mut left = [0.0; 4];
@@ -1996,6 +1929,63 @@ mod tests {
         assert_eq!(report.copied_frames, 4);
         assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(right, [-1.0, -2.0, -3.0, -4.0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stamped_native_watermark_survives_seek_stale_discard_and_saturates() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 12)).expect("ring");
+        let mut provider = producer.into_host_chunk_provider(RATE);
+        let old = [1.0_f32; 4];
+        provider
+            .submit_native_planar(SourceGeneration(1), SourceFrame(0), &old, 4, false, 7)
+            .expect("old native block");
+        provider
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(100),
+            })
+            .expect("seek");
+        let fresh = [2.0_f32; 4];
+        provider
+            .submit_native_planar(
+                SourceGeneration(2),
+                SourceFrame(100),
+                &fresh,
+                4,
+                false,
+                u64::MAX,
+            )
+            .expect("fresh native block");
+        let wrapped = [3.0_f32; 4];
+        provider
+            .submit_native_planar(
+                SourceGeneration(2),
+                SourceFrame(104),
+                &wrapped,
+                4,
+                true,
+                u64::MAX,
+            )
+            .expect("wrapped native block");
+        let mut output = [0.0_f32; 4];
+        consumer
+            .read_block(&mut [&mut output])
+            .expect("fresh read after stale discard");
+        assert_eq!(output, fresh);
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 1);
+        assert_eq!(
+            consumer.telemetry().native_decoder_sanitized_samples,
+            u64::MAX
+        );
+        consumer
+            .read_block(&mut [&mut output])
+            .expect("wrapped read");
+        assert_eq!(output, wrapped);
+        assert_eq!(
+            consumer.telemetry().native_decoder_sanitized_samples,
+            u64::MAX
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -98,3 +98,28 @@ Browser Wasm retains only the host ring and no native worker or baseline atomic.
 Candidate hash; public API diff; ownership/event transcript; exact sanitation counts; retained
 allocation table and exact/one-below results; focused/full/policy/target results; explicit external
 blockers; `timed_benchmark_invocations=0`; and Terra plus final Sol PASS/FAIL verdicts.
+
+## Terra attempt 1 focused checkpoint (2026-08-21)
+
+**Focused source gates: PASS; awaiting Sol review/full evidence.** Native telemetry no longer uses
+`Arc`, `Rc`, custom shared ownership, raw pointers, new `unsafe`, or a render-side atomic. The
+source-set retirement token owns a capacity-one stop SPSC producer; the worker owns its consumer
+and emits a terminal watermark before the off-render join returns. Native transfer blocks now carry
+the worker-local cumulative sanitation watermark, and consumer/source-set telemetry takes the
+saturating maximum even while discarding stale blocks. Controller ready/snapshot/terminal events
+are an exactly two-item SPSC exchange, and the public worker-token compile-fail proof remains.
+
+- Updated accounting removes the pseudo-exact shared-telemetry category and adds exact stop-queue
+  bytes/items; the worker event queue is exactly two items. Transfer-block metadata is included by
+  the existing ring metadata layout. Existing combined exact/one-byte-short transaction test
+  remains green.
+- Focused tests cover controller-first and source-set-first retirement, ready/snapshot/final
+  watermarks, stale stamped block discard, saturation, deterministic seek, host-zero telemetry,
+  wrapped host submission, and exact-cap rejection.
+- PASS: `cargo fmt --check`; `cargo test -p miso-engine-source --locked` (27 unit tests plus one
+  compile-fail doctest); `cargo clippy -p miso-engine-source --all-targets --locked -- -D warnings`;
+  static source-path absence check for `Arc`, `Rc`, `unsafe`, and prior shared telemetry types.
+- Not run at this focused checkpoint: workspace/policy/target gates. No benchmark or timing
+  command was run.
+
+`timed_benchmark_invocations=0`.
