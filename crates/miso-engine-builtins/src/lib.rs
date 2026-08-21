@@ -4,9 +4,10 @@
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use miso_engine_core::{
-    SampleRateHz, is_extended_compatibility_sample_rate,
+    KernelBackendV1, SampleRateHz, is_extended_compatibility_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
+use miso_engine_effect_contract::BankWidth;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelLinkMode {
@@ -755,6 +756,12 @@ impl BuiltinChain {
     pub fn into_sections(self) -> (InputBuiltins, FaderMuteBuiltins, MatrixBuiltins) {
         (self.input, self.fader_mute, self.matrix)
     }
+    /// Consume the chain and retain only its bankable post-input section.
+    ///
+    /// Fader/mute and matrix intentionally remain scalar graph processors.
+    pub fn into_input_builtins(self) -> InputBuiltins {
+        self.input
+    }
 }
 
 fn prepare_sections(
@@ -858,6 +865,203 @@ impl InputBuiltins {
         self.lifetime_recovered_left = 0;
         self.lifetime_recovered_right = 0;
     }
+}
+
+/// Prepared homogeneous adapter for the post-input-builtins TPT section.
+///
+/// It contains independent L/R HPF/LPF state for every lane. The storage is fixed at eight
+/// lanes, while `width` is always exactly four or eight; no scalar one-lane bank exists.
+pub struct BuiltinInputBankV1 {
+    backend: KernelBackendV1,
+    width: BankWidth,
+    lanes: [BuiltinBankLane; 8],
+    active: [bool; 8],
+    recovered_left: [u64; 8],
+    recovered_right: [u64; 8],
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinBankLane {
+    left: InputLane,
+    right: InputLane,
+}
+
+impl BuiltinInputBankV1 {
+    /// Build a complete four/eight-lane input bank from independently prepared tracks.
+    pub fn new(
+        backend: KernelBackendV1,
+        width: BankWidth,
+        inputs: Vec<InputBuiltins>,
+        active: &[bool],
+    ) -> Result<Self, BuiltinParameterError> {
+        if !width.matches_backend(backend)
+            || inputs.len() != width.lanes() as usize
+            || active.len() != width.lanes() as usize
+        {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let identity = BuiltinBankLane {
+            left: InputLane {
+                polarity: false,
+                trim: 1.0,
+                hpf: TptSvf::identity(),
+                lpf: TptSvf::identity(),
+            },
+            right: InputLane {
+                polarity: false,
+                trim: 1.0,
+                hpf: TptSvf::identity(),
+                lpf: TptSvf::identity(),
+            },
+        };
+        let mut lanes = [identity; 8];
+        for (index, input) in inputs.into_iter().enumerate() {
+            lanes[index] = BuiltinBankLane {
+                left: input.left,
+                right: input.right,
+            };
+        }
+        let mut active_lanes = [false; 8];
+        active_lanes[..active.len()].copy_from_slice(active);
+        Ok(Self {
+            backend,
+            width,
+            lanes,
+            active: active_lanes,
+            recovered_left: [0; 8],
+            recovered_right: [0; 8],
+        })
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> KernelBackendV1 {
+        self.backend
+    }
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+
+    /// Process sample-major AoSoA L/R slices with the frozen nonfused or FMA TPT graph.
+    pub fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
+        let lanes = self.width.lanes() as usize;
+        let expected = (frames as usize)
+            .checked_mul(lanes)
+            .ok_or(BuiltinParameterError::LaneLength)?;
+        if frames == 0
+            || left.len() != expected
+            || right.len() != expected
+            || first_sample.checked_add(u64::from(frames)).is_none()
+        {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let mut report = BuiltinProcessReport::default();
+        for sample in 0..frames as usize {
+            for lane in 0..lanes {
+                let index = sample * lanes + lane;
+                if !self.active[lane] {
+                    continue;
+                }
+                left[index] = process_bank_input_lane(
+                    &mut self.lanes[lane].left,
+                    left[index],
+                    &mut self.recovered_left[lane],
+                    &mut report,
+                    self.backend,
+                );
+                right[index] = process_bank_input_lane(
+                    &mut self.lanes[lane].right,
+                    right[index],
+                    &mut self.recovered_right[lane],
+                    &mut report,
+                    self.backend,
+                );
+            }
+        }
+        report.recovered_left_state = self.recovered_left[..lanes].iter().copied().sum();
+        report.recovered_right_state = self.recovered_right[..lanes].iter().copied().sum();
+        Ok(report)
+    }
+
+    /// Reset only the per-lane filter state; preparation-time parameters remain unchanged.
+    pub fn reset(&mut self) {
+        for lane in &mut self.lanes[..self.width.lanes() as usize] {
+            lane.left.hpf.reset();
+            lane.left.lpf.reset();
+            lane.right.hpf.reset();
+            lane.right.lpf.reset();
+        }
+        self.recovered_left = [0; 8];
+        self.recovered_right = [0; 8];
+    }
+}
+
+fn process_bank_input_lane(
+    lane: &mut InputLane,
+    sample: f32,
+    recovered: &mut u64,
+    report: &mut BuiltinProcessReport,
+    backend: KernelBackendV1,
+) -> f32 {
+    let sample = sanitize_input(sample, &mut report.sanitized_input);
+    let signed = if lane.polarity { -sample } else { sample };
+    let trimmed = sanitize(signed * lane.trim, &mut report.sanitized_output);
+    let high = process_tpt_bank(&mut lane.hpf, trimmed, recovered, report, backend);
+    process_tpt_bank(&mut lane.lpf, high, recovered, report, backend)
+}
+
+fn process_tpt_bank(
+    filter: &mut TptSvf,
+    input: f32,
+    recovered: &mut u64,
+    report: &mut BuiltinProcessReport,
+    backend: KernelBackendV1,
+) -> f32 {
+    if !filter.enabled {
+        return input;
+    }
+    if !normal_or_zero(filter.s1) || !normal_or_zero(filter.s2) {
+        filter.reset();
+        *recovered = recovered.saturating_add(1);
+    }
+    let v3 = input - filter.s2;
+    let p2 = filter.c1 * filter.s1;
+    let p4 = filter.a3 * v3;
+    let (d1, d2, th) = if matches!(backend, KernelBackendV1::X86Avx2Fma) {
+        let d1 = filter.a2.mul_add(v3, -p2);
+        let d2 = filter.a2.mul_add(filter.s1, p4);
+        let v1 = filter.s1 + d1;
+        (d1, d2, (-filter.k).mul_add(v1, input))
+    } else {
+        let p1 = filter.a2 * v3;
+        let d1 = p1 - p2;
+        let p3 = filter.a2 * filter.s1;
+        let d2 = p3 + p4;
+        let v1 = filter.s1 + d1;
+        (d1, d2, input - filter.k * v1)
+    };
+    let v2 = filter.s2 + d2;
+    let n1 = filter.s1 + (d1 + d1);
+    let n2 = filter.s2 + (d2 + d2);
+    let low = v2;
+    let high = th - v2;
+    if !normal_or_zero(n1) || !normal_or_zero(n2) {
+        filter.reset();
+        *recovered = recovered.saturating_add(1);
+        return 0.0;
+    }
+    filter.s1 = n1;
+    filter.s2 = n2;
+    sanitize(
+        if filter.high_pass { high } else { low },
+        &mut report.sanitized_output,
+    )
 }
 
 fn process_input_lane(
@@ -1652,6 +1856,191 @@ mod tests {
             parameters.left.lpf_hz = cutoff;
         }
         parameters
+    }
+
+    fn bank_parameters(index: usize) -> BuiltinParameters {
+        let mut parameters = BuiltinParameters::default();
+        parameters.left = ChannelParameters {
+            polarity_invert: index % 2 == 1,
+            trim_db: index as f32 - 2.0,
+            hpf_hz: 80.0 + index as f32 * 11.0,
+            lpf_hz: 2_000.0 + index as f32 * 101.0,
+            ..ChannelParameters::default()
+        };
+        parameters.right = ChannelParameters {
+            polarity_invert: index % 3 == 1,
+            trim_db: 2.0 - index as f32,
+            hpf_hz: 120.0 + index as f32 * 13.0,
+            lpf_hz: 3_000.0 + index as f32 * 97.0,
+            ..ChannelParameters::default()
+        };
+        parameters
+    }
+
+    fn prepared_input(parameters: BuiltinParameters) -> InputBuiltins {
+        BuiltinChain::new(48_000, parameters)
+            .expect("accepted input builtins")
+            .into_input_builtins()
+    }
+
+    fn assert_tpt_tolerance(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-6 + 2.0e-5 * expected.abs(),
+            "actual={actual:e} expected={expected:e}"
+        );
+    }
+
+    #[test]
+    fn four_lane_nonfused_bank_is_bit_identical_to_independent_scalar_tpt() {
+        let frames = 31usize;
+        let params: Vec<_> = (0..4).map(bank_parameters).collect();
+        let mut scalar: Vec<_> = params.iter().copied().map(prepared_input).collect();
+        let mut bank = BuiltinInputBankV1::new(
+            KernelBackendV1::WasmSimd128,
+            BankWidth::Four,
+            params.into_iter().map(prepared_input).collect(),
+            &[true; 4],
+        )
+        .expect("four lane bank");
+        let mut left = vec![0.0; frames * 4];
+        let mut right = vec![0.0; frames * 4];
+        let mut expected_left = vec![vec![0.0; frames]; 4];
+        let mut expected_right = vec![vec![0.0; frames]; 4];
+        for frame in 0..frames {
+            for lane in 0..4 {
+                let value = ((frame * 17 + lane * 31) as f32 * 0.011).sin() * 0.7;
+                let index = frame * 4 + lane;
+                left[index] = value;
+                right[index] = -value * 0.73 + lane as f32 * 0.001;
+                expected_left[lane][frame] = left[index];
+                expected_right[lane][frame] = right[index];
+            }
+        }
+        for lane in 0..4 {
+            scalar[lane]
+                .process(
+                    DualMonoBlock::new(&mut expected_left[lane], &mut expected_right[lane], 99)
+                        .expect("block"),
+                )
+                .expect("scalar input");
+        }
+        bank.process(&mut left, &mut right, frames as u32, 99)
+            .expect("bank input");
+        for frame in 0..frames {
+            for lane in 0..4 {
+                let index = frame * 4 + lane;
+                assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
+                assert_eq!(
+                    right[index].to_bits(),
+                    expected_right[lane][frame].to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eight_lane_fma_bank_obeys_frozen_scalar_tolerance_and_right_isolation() {
+        let frames = 19usize;
+        let params: Vec<_> = (0..8).map(bank_parameters).collect();
+        let mut scalar: Vec<_> = params.iter().copied().map(prepared_input).collect();
+        let mut fma = BuiltinInputBankV1::new(
+            KernelBackendV1::X86Avx2Fma,
+            BankWidth::Eight,
+            params.into_iter().map(prepared_input).collect(),
+            &[true; 8],
+        )
+        .expect("eight lane bank");
+        let mut left = vec![0.0; frames * 8];
+        let mut right = vec![0.0; frames * 8];
+        let mut expected_left = vec![vec![0.0; frames]; 8];
+        let mut expected_right = vec![vec![0.0; frames]; 8];
+        for frame in 0..frames {
+            for lane in 0..8 {
+                let index = frame * 8 + lane;
+                left[index] = ((frame * 5 + lane * 7) as f32 * 0.071).cos() * 0.8;
+                right[index] = ((frame * 11 + lane * 3) as f32 * 0.037).sin() * 0.6;
+                expected_left[lane][frame] = left[index];
+                expected_right[lane][frame] = right[index];
+            }
+        }
+        for lane in 0..8 {
+            scalar[lane]
+                .process(
+                    DualMonoBlock::new(&mut expected_left[lane], &mut expected_right[lane], 0)
+                        .expect("block"),
+                )
+                .expect("scalar input");
+        }
+        fma.process(&mut left, &mut right, frames as u32, 0)
+            .expect("fma input");
+        for frame in 0..frames {
+            for lane in 0..8 {
+                let index = frame * 8 + lane;
+                assert_tpt_tolerance(left[index], expected_left[lane][frame]);
+                assert_tpt_tolerance(right[index], expected_right[lane][frame]);
+            }
+        }
+        let control_params: Vec<_> = (0..4).map(bank_parameters).collect();
+        let mut control = BuiltinInputBankV1::new(
+            KernelBackendV1::WasmSimd128,
+            BankWidth::Four,
+            control_params.iter().copied().map(prepared_input).collect(),
+            &[true; 4],
+        )
+        .expect("control");
+        let mut perturbed = BuiltinInputBankV1::new(
+            KernelBackendV1::WasmSimd128,
+            BankWidth::Four,
+            control_params.into_iter().map(prepared_input).collect(),
+            &[true; 4],
+        )
+        .expect("perturbed");
+        let mut control_left = vec![0.2; 4 * 8];
+        let mut perturbed_left = control_left.clone();
+        for value in perturbed_left.iter_mut().step_by(4) {
+            *value = -0.7;
+        }
+        let mut control_right = vec![0.3; 4 * 8];
+        let mut perturbed_right = control_right.clone();
+        control
+            .process(&mut control_left, &mut control_right, 8, 0)
+            .expect("control render");
+        perturbed
+            .process(&mut perturbed_left, &mut perturbed_right, 8, 0)
+            .expect("perturbed render");
+        assert_eq!(
+            control_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            perturbed_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn inactive_bank_lane_is_exact_identity() {
+        let mut bank = BuiltinInputBankV1::new(
+            KernelBackendV1::Aarch64Neon,
+            BankWidth::Four,
+            (0..4).map(bank_parameters).map(prepared_input).collect(),
+            &[true, false, true, true],
+        )
+        .expect("bank");
+        let mut left = vec![0.0; 12];
+        let mut right = vec![0.0; 12];
+        for index in (1..12).step_by(4) {
+            left[index] = -0.0;
+            right[index] = 0.25;
+        }
+        bank.process(&mut left, &mut right, 3, 0)
+            .expect("bank render");
+        for index in (1..12).step_by(4) {
+            assert_eq!(left[index].to_bits(), (-0.0_f32).to_bits());
+            assert_eq!(right[index].to_bits(), 0.25_f32.to_bits());
+        }
     }
 
     #[test]
