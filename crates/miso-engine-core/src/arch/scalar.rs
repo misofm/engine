@@ -1,6 +1,23 @@
 //! Portable scalar reference for the architecture-owned TPT operation graph.
 
-use super::{DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+
+/// Frozen noncontracting compressor dry/gain/mix graph for one scalar lane.
+#[inline(never)]
+pub(super) fn process_compressor_gain_mix_scalar(block: CompressorGainMixKernelBlock<'_>) {
+    let dry = block.samples[0];
+    let p0 = dry * block.gains[0];
+    let p1 = p0 - dry;
+    let p2 = block.mixes[0] * p1;
+    let p3 = dry + p2;
+    block.samples[0] = if block.dry_mask[0] == u32::MAX {
+        dry
+    } else if block.wet_mask[0] == u32::MAX {
+        p0
+    } else {
+        p3
+    };
+}
 
 #[inline(never)]
 pub(super) fn process_tpt_scalar(block: TptKernelBlock<'_>) {

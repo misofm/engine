@@ -2,7 +2,33 @@
 
 use core::arch::aarch64::*;
 
-use super::{DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+
+#[inline(never)]
+#[target_feature(enable = "neon")]
+unsafe fn process_compressor_gain_mix_aarch64_neon_inner(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: the prepared token proves AArch64 NEON and all slices have the required four lanes.
+    unsafe {
+        let dry = vld1q_f32(block.samples.as_ptr());
+        let gain = vld1q_f32(block.gains.as_ptr());
+        let mix = vld1q_f32(block.mixes.as_ptr());
+        let p0 = vmulq_f32(dry, gain);
+        let p1 = vsubq_f32(p0, dry);
+        let p2 = vmulq_f32(mix, p1);
+        let p3 = vaddq_f32(dry, p2);
+        let dry_mask = vld1q_u32(block.dry_mask.as_ptr());
+        let wet_mask = vld1q_u32(block.wet_mask.as_ptr());
+        let mixed_or_wet = vbslq_f32(wet_mask, p0, p3);
+        let output = vbslq_f32(dry_mask, dry, mixed_or_wet);
+        vst1q_f32(block.samples.as_mut_ptr(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_compressor_gain_mix_aarch64_neon(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: the prepared token admits this shim only on the mandatory AArch64 NEON facility.
+    unsafe { process_compressor_gain_mix_aarch64_neon_inner(block) }
+}
 
 #[inline(never)]
 #[target_feature(enable = "neon")]

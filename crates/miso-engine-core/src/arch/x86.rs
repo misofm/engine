@@ -5,7 +5,44 @@ use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-use super::{DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+
+#[inline(never)]
+#[target_feature(enable = "avx2")]
+unsafe fn process_compressor_gain_mix_x86_avx2_inner(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: the prepared token proves AVX2 and exact eight-lane slices for each unaligned
+    // vector access. The graph deliberately contains only separate mul/sub/add operations.
+    unsafe {
+        let dry = _mm256_loadu_ps(block.samples.as_ptr());
+        let gain = _mm256_loadu_ps(block.gains.as_ptr());
+        let mix = _mm256_loadu_ps(block.mixes.as_ptr());
+        let p0 = _mm256_mul_ps(dry, gain);
+        let p1 = _mm256_sub_ps(p0, dry);
+        let p2 = _mm256_mul_ps(mix, p1);
+        let p3 = _mm256_add_ps(dry, p2);
+        let dry_mask = _mm256_castsi256_ps(_mm256_loadu_si256(
+            block.dry_mask.as_ptr().cast::<__m256i>(),
+        ));
+        let wet_mask = _mm256_castsi256_ps(_mm256_loadu_si256(
+            block.wet_mask.as_ptr().cast::<__m256i>(),
+        ));
+        let mixed_or_wet = _mm256_blendv_ps(p3, p0, wet_mask);
+        let output = _mm256_blendv_ps(mixed_or_wet, dry, dry_mask);
+        _mm256_storeu_ps(block.samples.as_mut_ptr(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_compressor_gain_mix_x86_avx2(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: the prepared token invokes this shim only after AVX2 detection.
+    unsafe { process_compressor_gain_mix_x86_avx2_inner(block) }
+}
+
+#[inline(never)]
+pub(super) fn process_compressor_gain_mix_x86_avx2_fma(block: CompressorGainMixKernelBlock<'_>) {
+    // V1 explicitly aliases the base AVX2 graph: no FMA intrinsic or contraction is permitted.
+    process_compressor_gain_mix_x86_avx2(block);
+}
 
 #[inline(never)]
 #[target_feature(enable = "avx2")]

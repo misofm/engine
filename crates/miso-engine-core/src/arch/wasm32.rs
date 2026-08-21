@@ -2,7 +2,33 @@
 
 use core::arch::wasm32::*;
 
-use super::{DeltaKernelBlock, TptKernelBlock};
+use super::{CompressorGainMixKernelBlock, DeltaKernelBlock, TptKernelBlock};
+
+#[inline(never)]
+#[target_feature(enable = "simd128")]
+unsafe fn process_compressor_gain_mix_wasm_simd128_inner(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: the `simd128` artifact and prepared token prove support; all slices have four lanes.
+    unsafe {
+        let dry = v128_load(block.samples.as_ptr().cast::<v128>());
+        let gain = v128_load(block.gains.as_ptr().cast::<v128>());
+        let mix = v128_load(block.mixes.as_ptr().cast::<v128>());
+        let p0 = f32x4_mul(dry, gain);
+        let p1 = f32x4_sub(p0, dry);
+        let p2 = f32x4_mul(mix, p1);
+        let p3 = f32x4_add(dry, p2);
+        let dry_mask = v128_load(block.dry_mask.as_ptr().cast::<v128>());
+        let wet_mask = v128_load(block.wet_mask.as_ptr().cast::<v128>());
+        let mixed_or_wet = v128_bitselect(p0, p3, wet_mask);
+        let output = v128_bitselect(dry, mixed_or_wet, dry_mask);
+        v128_store(block.samples.as_mut_ptr().cast::<v128>(), output);
+    }
+}
+
+#[inline(never)]
+pub(super) fn process_compressor_gain_mix_wasm_simd128(block: CompressorGainMixKernelBlock<'_>) {
+    // SAFETY: module cfg and the prepared token prove base `simd128` before this call.
+    unsafe { process_compressor_gain_mix_wasm_simd128_inner(block) }
+}
 
 #[inline(never)]
 #[target_feature(enable = "simd128")]

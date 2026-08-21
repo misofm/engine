@@ -15,6 +15,7 @@ use crate::KernelBackendV1;
 
 type TptKernelFn = for<'a> fn(TptKernelBlock<'a>);
 type DeltaKernelFn = for<'a> fn(DeltaKernelBlock<'a>);
+type CompressorGainMixKernelFn = for<'a> fn(CompressorGainMixKernelBlock<'a>);
 
 /// Preparation or shape failure for an architecture-owned TPT bank kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +37,19 @@ pub enum DeltaBankKernelError {
     LaneLength,
     /// An identity selection mask was neither all-zero nor all-one.
     MaskValue,
+}
+
+/// Preparation or input-shape failure for the compressor gain/mix bank kernel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompressorGainMixKernelError {
+    /// The selected semantic backend cannot execute on this build/current processor.
+    BackendUnavailable,
+    /// Every slice must contain exactly the backend's logical lane count.
+    LaneLength,
+    /// A dry or wet mask value was neither all-zero nor all-one.
+    MaskValue,
+    /// A lane selected both exact dry and exact wet output.
+    MaskOverlap,
 }
 
 /// A safe, immutable dispatch token prepared before realtime rendering.
@@ -220,6 +234,86 @@ impl PreparedDeltaBankKernelV1 {
     }
 }
 
+/// A safe, immutable prepared compressor gain/mix bank dispatch token.
+///
+/// Preparation performs feature detection once. Render only validates fixed-width slices and calls
+/// the retained safe function pointer; no SIMD feature detection or unsafe caller contract leaks
+/// into an effect implementation.
+#[derive(Clone, Copy)]
+pub struct PreparedCompressorGainMixKernelV1 {
+    backend: KernelBackendV1,
+    process: CompressorGainMixKernelFn,
+}
+
+impl PreparedCompressorGainMixKernelV1 {
+    /// Prepare the exact semantic backend when it is executable by this artifact and processor.
+    pub fn try_new(backend: KernelBackendV1) -> Result<Self, CompressorGainMixKernelError> {
+        let process = match backend {
+            KernelBackendV1::Scalar => scalar::process_compressor_gain_mix_scalar,
+            KernelBackendV1::WasmSimd128 => compressor_wasm_kernel()?,
+            KernelBackendV1::Aarch64Neon => compressor_neon_kernel()?,
+            KernelBackendV1::X86Avx2 => compressor_x86_avx2_kernel()?,
+            KernelBackendV1::X86Avx2Fma => compressor_x86_avx2_fma_kernel()?,
+        };
+        Ok(Self { backend, process })
+    }
+
+    /// Semantic backend whose target preconditions were proved at preparation.
+    #[must_use]
+    pub const fn backend(self) -> KernelBackendV1 {
+        self.backend
+    }
+
+    /// Apply the frozen noncontracting dry/gain/mix selection graph to one bank sample.
+    ///
+    /// Each slice must have exactly the prepared backend width. `dry_mask` and `wet_mask` accept
+    /// only zero or `u32::MAX`; a lane may not select both exact identity paths.
+    pub fn process_gain_mix(
+        self,
+        samples: &mut [f32],
+        gains: &[f32],
+        mixes: &[f32],
+        dry_mask: &[u32],
+        wet_mask: &[u32],
+    ) -> Result<(), CompressorGainMixKernelError> {
+        let lanes = self.backend.lanes() as usize;
+        if [
+            samples.len(),
+            gains.len(),
+            mixes.len(),
+            dry_mask.len(),
+            wet_mask.len(),
+        ]
+        .into_iter()
+        .any(|length| length != lanes)
+        {
+            return Err(CompressorGainMixKernelError::LaneLength);
+        }
+        if dry_mask
+            .iter()
+            .chain(wet_mask)
+            .any(|mask| !matches!(*mask, 0 | u32::MAX))
+        {
+            return Err(CompressorGainMixKernelError::MaskValue);
+        }
+        if dry_mask
+            .iter()
+            .zip(wet_mask)
+            .any(|(dry, wet)| *dry == u32::MAX && *wet == u32::MAX)
+        {
+            return Err(CompressorGainMixKernelError::MaskOverlap);
+        }
+        (self.process)(CompressorGainMixKernelBlock {
+            samples,
+            gains,
+            mixes,
+            dry_mask,
+            wet_mask,
+        });
+        Ok(())
+    }
+}
+
 pub(super) struct TptKernelBlock<'a> {
     pub(super) samples: &'a mut [f32],
     pub(super) c1: &'a [f32],
@@ -247,6 +341,14 @@ pub(super) struct DeltaKernelBlock<'a> {
     pub(super) identity_mask: &'a [u32],
 }
 
+pub(super) struct CompressorGainMixKernelBlock<'a> {
+    pub(super) samples: &'a mut [f32],
+    pub(super) gains: &'a [f32],
+    pub(super) mixes: &'a [f32],
+    pub(super) dry_mask: &'a [u32],
+    pub(super) wet_mask: &'a [u32],
+}
+
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn wasm_kernel() -> Result<TptKernelFn, TptBankKernelError> {
     Ok(wasm32::process_tpt_wasm_simd128)
@@ -257,9 +359,19 @@ fn delta_wasm_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Ok(wasm32::process_delta_wasm_simd128)
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn compressor_wasm_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Ok(wasm32::process_compressor_gain_mix_wasm_simd128)
+}
+
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 fn delta_wasm_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+fn compressor_wasm_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Err(CompressorGainMixKernelError::BackendUnavailable)
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
@@ -277,9 +389,19 @@ fn delta_neon_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Ok(aarch64::process_delta_aarch64_neon)
 }
 
+#[cfg(target_arch = "aarch64")]
+fn compressor_neon_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Ok(aarch64::process_compressor_gain_mix_aarch64_neon)
+}
+
 #[cfg(not(target_arch = "aarch64"))]
 fn delta_neon_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn compressor_neon_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Err(CompressorGainMixKernelError::BackendUnavailable)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -305,9 +427,23 @@ fn delta_x86_avx2_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn compressor_x86_avx2_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    if std::is_x86_feature_detected!("avx2") {
+        Ok(x86::process_compressor_gain_mix_x86_avx2)
+    } else {
+        Err(CompressorGainMixKernelError::BackendUnavailable)
+    }
+}
+
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn delta_x86_avx2_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn compressor_x86_avx2_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Err(CompressorGainMixKernelError::BackendUnavailable)
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -333,9 +469,27 @@ fn delta_x86_avx2_fma_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn compressor_x86_avx2_fma_kernel()
+-> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        // The compressor graph intentionally has no FMA contractions; this remains a separately
+        // prepared backend to preserve the explicit capability/program-key distinction.
+        Ok(x86::process_compressor_gain_mix_x86_avx2_fma)
+    } else {
+        Err(CompressorGainMixKernelError::BackendUnavailable)
+    }
+}
+
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn delta_x86_avx2_fma_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn compressor_x86_avx2_fma_kernel()
+-> Result<CompressorGainMixKernelFn, CompressorGainMixKernelError> {
+    Err(CompressorGainMixKernelError::BackendUnavailable)
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -346,6 +500,93 @@ fn x86_avx2_fma_kernel() -> Result<TptKernelFn, TptBankKernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_compressor_gain_mix_preserves_the_frozen_graph() {
+        let kernel =
+            PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::Scalar).expect("scalar");
+        let mut samples = [-0.375_f32];
+        let gains = [0.5_f32];
+        let mixes = [0.25_f32];
+        let dry = samples[0];
+        let p0 = dry * gains[0];
+        let p1 = p0 - dry;
+        let p2 = mixes[0] * p1;
+        let expected = dry + p2;
+        kernel
+            .process_gain_mix(&mut samples, &gains, &mixes, &[0], &[0])
+            .expect("process");
+        assert_eq!(samples[0].to_bits(), expected.to_bits());
+
+        let mut dry_selected = [-0.0_f32];
+        kernel
+            .process_gain_mix(&mut dry_selected, &[2.0], &[1.0], &[u32::MAX], &[0])
+            .expect("dry identity");
+        assert_eq!(dry_selected[0].to_bits(), (-0.0_f32).to_bits());
+        let mut wet_selected = [0.25_f32];
+        kernel
+            .process_gain_mix(&mut wet_selected, &[0.5], &[0.0], &[0], &[u32::MAX])
+            .expect("wet identity");
+        assert_eq!(wet_selected[0].to_bits(), 0.125_f32.to_bits());
+    }
+
+    #[test]
+    fn compressor_gain_mix_rejects_invalid_width_masks_and_overlap() {
+        let kernel =
+            PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::Scalar).expect("scalar");
+        let mut samples = [0.0_f32];
+        assert_eq!(
+            kernel.process_gain_mix(&mut samples, &[], &[0.0], &[0], &[0]),
+            Err(CompressorGainMixKernelError::LaneLength)
+        );
+        assert_eq!(
+            kernel.process_gain_mix(&mut samples, &[1.0], &[0.0], &[1], &[0]),
+            Err(CompressorGainMixKernelError::MaskValue)
+        );
+        assert_eq!(
+            kernel.process_gain_mix(&mut samples, &[1.0], &[0.0], &[u32::MAX], &[u32::MAX]),
+            Err(CompressorGainMixKernelError::MaskOverlap)
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn x86_compressor_gain_mix_matches_scalar_and_fma_is_noncontracting() {
+        let Ok(base) = PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::X86Avx2) else {
+            return;
+        };
+        let scalar =
+            PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::Scalar).expect("scalar");
+        let original = [0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -1.0];
+        let gains = [0.5, 0.75, 1.25, 1.5, 0.25, 2.0, 0.125, 1.0];
+        let mixes = [0.0, 1.0, 0.25, 0.5, 0.75, 0.125, 1.0, 0.5];
+        let dry_mask = [0, u32::MAX, 0, 0, 0, u32::MAX, 0, 0];
+        let wet_mask = [0, 0, u32::MAX, 0, 0, 0, u32::MAX, 0];
+        let mut expected = original;
+        for lane in 0..8 {
+            scalar
+                .process_gain_mix(
+                    &mut expected[lane..=lane],
+                    &gains[lane..=lane],
+                    &mixes[lane..=lane],
+                    &dry_mask[lane..=lane],
+                    &wet_mask[lane..=lane],
+                )
+                .expect("scalar lane");
+        }
+        let mut base_actual = original;
+        base.process_gain_mix(&mut base_actual, &gains, &mixes, &dry_mask, &wet_mask)
+            .expect("base");
+        assert_eq!(base_actual.map(f32::to_bits), expected.map(f32::to_bits));
+        let Ok(fma) = PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::X86Avx2Fma)
+        else {
+            return;
+        };
+        let mut fma_actual = original;
+        fma.process_gain_mix(&mut fma_actual, &gains, &mixes, &dry_mask, &wet_mask)
+            .expect("fma alias");
+        assert_eq!(fma_actual.map(f32::to_bits), expected.map(f32::to_bits));
+    }
 
     #[test]
     fn scalar_delta_preserves_the_frozen_noncontracting_graph() {
