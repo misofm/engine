@@ -7,6 +7,7 @@
 #![allow(unsafe_code)]
 
 use core::{
+    alloc::Layout,
     cell::{Cell, UnsafeCell},
     marker::PhantomData,
     mem::MaybeUninit,
@@ -24,6 +25,37 @@ pub struct QueueGeneration(pub u64);
 pub enum SpscError {
     /// `capacity + 1` cannot be represented by `usize`.
     CapacityOverflow,
+}
+/// Exact engine-owned retained payload layouts for one bounded SPSC queue.
+///
+/// This deliberately excludes allocator headers and page rounding. The ring header and slot
+/// backing allocation are the two payload allocations retained by the queue itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpscRetainedPayload {
+    /// Requested logical capacity plus the one sentinel slot.
+    pub slot_count: usize,
+    /// Engine-owned ring header layout size.
+    pub ring_header_bytes: usize,
+    /// Engine-owned backing slot layout size including element alignment padding.
+    pub slot_payload_bytes: usize,
+}
+
+impl SpscRetainedPayload {
+    /// Total retained queue payload bytes.
+    #[must_use]
+    pub const fn total_bytes(self) -> Option<usize> {
+        self.ring_header_bytes.checked_add(self.slot_payload_bytes)
+    }
+
+    /// Largest requested engine-owned allocation for this queue.
+    #[must_use]
+    pub const fn largest_allocation_bytes(self) -> usize {
+        if self.ring_header_bytes > self.slot_payload_bytes {
+            self.ring_header_bytes
+        } else {
+            self.slot_payload_bytes
+        }
+    }
 }
 /// A full result preserving the item for caller-owned retry/defer policy.
 #[must_use]
@@ -53,6 +85,23 @@ struct Ring<T> {
     generation: QueueGeneration,
     producer: AtomicUsize,
     consumer: AtomicUsize,
+}
+
+/// Compute the exact retained engine-owned queue layouts used by [`bounded_spsc`].
+pub fn bounded_spsc_retained_payload<T>(
+    capacity: NonZeroUsize,
+) -> Result<SpscRetainedPayload, SpscError> {
+    let slot_count = capacity
+        .get()
+        .checked_add(1)
+        .ok_or(SpscError::CapacityOverflow)?;
+    let slot_payload = Layout::array::<UnsafeCell<MaybeUninit<T>>>(slot_count)
+        .map_err(|_| SpscError::CapacityOverflow)?;
+    Ok(SpscRetainedPayload {
+        slot_count,
+        ring_header_bytes: Layout::new::<Ring<T>>().size(),
+        slot_payload_bytes: slot_payload.size(),
+    })
 }
 // SAFETY: the only shared operations are atomics and slot access governed by SPSC cursor order.
 unsafe impl<T: Send> Sync for Ring<T> {}

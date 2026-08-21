@@ -194,6 +194,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-graph",
  "miso-engine-session",
+ "sha2",
 ]
 
 [[package]]

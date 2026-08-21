@@ -80,33 +80,25 @@ impl GraphCompiler {
             builtins,
             caps,
         } = request;
-        if effects.session.canonical_toml() != builtins.session.canonical_toml()
-            || effects.session.sample_rate() != builtins.session.sample_rate()
-            || effects.session.quantum() != builtins.session.quantum()
-        {
+        let builtin_diagnostics = builtins.validate_for_session(&effects.session);
+        if !builtin_diagnostics.0.is_empty() {
             return Err(GraphBuiltinsCompileFailure {
                 effects,
                 builtins,
-                diagnostics: GraphDiagnosticSet::sorted(vec![diag(
-                    "builtin.session.mismatch",
-                    "$.session",
-                )]),
-            });
-        }
-        let builtin_diagnostics = validate_builtin_artifact(&builtins);
-        if !builtin_diagnostics.is_empty() {
-            return Err(GraphBuiltinsCompileFailure {
-                effects,
-                builtins,
-                diagnostics: GraphDiagnosticSet::sorted(builtin_diagnostics),
+                diagnostics: GraphDiagnosticSet::sorted(
+                    builtin_diagnostics
+                        .0
+                        .into_iter()
+                        .map(|diagnostic| diag(diagnostic.code, &diagnostic.path))
+                        .collect(),
+                ),
             });
         }
         let builtin_tails: BTreeMap<_, _> = builtins
-            .tails
-            .iter()
+            .tails()
             .map(|(track_id, tail)| {
                 (
-                    track_id.clone(),
+                    track_id.to_owned(),
                     match tail {
                         BuiltinTail::FiniteZero => TailSamples::Finite(0),
                         BuiltinTail::Infinite => TailSamples::Infinite,
@@ -131,18 +123,13 @@ impl GraphCompiler {
                 });
             }
         };
-        let PreparedBuiltinsSession {
-            processors,
-            observers,
-            meter_consumers,
-            ..
-        } = builtins;
+        let parts = builtins.into_graph_parts();
         Ok(PreparedGraphBuiltinsArtifact {
             graph: compiled
                 .graph
-                .attach_internal_bindings(processors, observers),
+                .attach_internal_bindings(parts.processors, parts.observers),
             report: compiled.report,
-            meter_consumers,
+            meter_consumers: parts.meter_consumers,
         })
     }
     // The frozen transactional API returns the complete prepared-effect input by value on
@@ -586,81 +573,6 @@ impl GraphCompiler {
                 dot,
             },
         })
-    }
-}
-
-fn validate_builtin_artifact(builtins: &PreparedBuiltinsSession) -> Vec<GraphDiagnostic> {
-    let mut diagnostics = Vec::new();
-    let tracks: BTreeSet<_> = builtins
-        .session
-        .normalized_model()
-        .tracks
-        .iter()
-        .map(|track| track.id.as_str().to_owned())
-        .collect();
-    let expected_processors: BTreeSet<_> = tracks
-        .iter()
-        .flat_map(|track_id| {
-            [
-                TrackStage::PostInputBuiltins,
-                TrackStage::PostFader,
-                TrackStage::PostMatrix,
-            ]
-            .map(|stage| track_node(track_id, stage))
-        })
-        .collect();
-    let actual_processors: BTreeSet<_> = builtins
-        .processors
-        .iter()
-        .map(|binding| binding.node.clone())
-        .collect();
-    if actual_processors != expected_processors
-        || builtins.processors.len() != expected_processors.len()
-    {
-        diagnostics.push(diag(
-            "builtin.prepared.processor_set",
-            "$.builtins.processors",
-        ));
-    }
-    let actual_tails: BTreeSet<_> = builtins.tails.iter().map(|(id, _)| id.clone()).collect();
-    if actual_tails != tracks || builtins.tails.len() != tracks.len() {
-        diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
-    }
-    let expected_observers: BTreeSet<_> = builtins
-        .meter_consumers
-        .iter()
-        .map(|consumer| {
-            (
-                track_node(&consumer.track_id, meter_stage(consumer.tap)),
-                consumer.handle.0.get(),
-            )
-        })
-        .collect();
-    let actual_observers: BTreeSet<_> = builtins
-        .observers
-        .iter()
-        .map(|observer| (observer.node.clone(), observer.handle))
-        .collect();
-    if actual_observers != expected_observers
-        || builtins.observers.len() != expected_observers.len()
-    {
-        diagnostics.push(diag(
-            "builtin.prepared.observer_set",
-            "$.builtins.observers",
-        ));
-    }
-    diagnostics
-}
-
-fn meter_stage(tap: miso_engine_builtins::MeterTap) -> TrackStage {
-    match tap {
-        miso_engine_builtins::MeterTap::Input => TrackStage::Input,
-        miso_engine_builtins::MeterTap::PostInputBuiltins => TrackStage::PostInputBuiltins,
-        miso_engine_builtins::MeterTap::PostSimd1 => TrackStage::PostSimd1,
-        miso_engine_builtins::MeterTap::PostDynamic => TrackStage::PostDynamic,
-        miso_engine_builtins::MeterTap::PostSimd2PreFader => TrackStage::PostSimd2PreFader,
-        miso_engine_builtins::MeterTap::PostFader => TrackStage::PostFader,
-        miso_engine_builtins::MeterTap::PostMatrix => TrackStage::PostMatrix,
     }
 }
 
@@ -1946,7 +1858,7 @@ mod tests {
             },
         )
         .expect("builtins");
-        builtins.tails.clear();
+        builtins.test_only_remove_tail_for_compiler_test();
         let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             plan_id: 78,
             effects: EffectPreparedSession {

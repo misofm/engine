@@ -4,15 +4,17 @@
 use core::num::NonZeroU64;
 use std::collections::BTreeSet;
 
+use sha2::{Digest, Sha256};
+
 use miso_engine_builtins::{
     BuiltinChain, BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters,
     DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
     MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
 };
-use miso_engine_core::realtime::{Consumer, RenderError};
+use miso_engine_core::realtime::{Consumer, RenderError, bounded_spsc_retained_payload};
 use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
-    GraphObservationBlock, GraphRuntimeObserver, GraphRuntimeProcessor, StableGraphId, TrackStage,
+    GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
+    GraphRuntimeObserver, GraphRuntimeProcessor, StableGraphId, TrackStage,
 };
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
@@ -54,26 +56,299 @@ impl BuiltinDiagnosticSet {
 
 pub struct MeterConsumer {
     pub handle: MeterHandle,
-    pub track_id: String,
+    pub track_id: Box<str>,
     pub tap: MeterTap,
     pub consumer: Consumer<MeterSnapshot>,
 }
 
+/// Opaque, sealed builtin payload. It can only be lowered into a graph once.
 pub struct PreparedBuiltinsSession {
-    pub session: CompiledSession,
+    seal: BuiltinSessionSeal,
+    processors: Vec<miso_engine_graph::GraphNodeBinding>,
+    observers: Vec<GraphNodeObserverBinding>,
+    meter_consumers: Vec<MeterConsumer>,
+    tails: Vec<(Box<str>, BuiltinTail)>,
+    requests: Vec<MeterRequestSeal>,
+    resources: BuiltinResourceEstimate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BuiltinSessionSeal {
+    session_sha256: [u8; 32],
+    sample_rate: u32,
+    quantum: u32,
+    tracks: Vec<Box<str>>,
+    processors: Vec<(Box<str>, TrackStage)>,
+    tails: Vec<(Box<str>, BuiltinTail)>,
+    requests: Vec<MeterRequestSeal>,
+    observers: Vec<(Box<str>, TrackStage, u64)>,
+    consumers: Vec<(u64, Box<str>, MeterTap)>,
+    resources: BuiltinResourceEstimate,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MeterRequestSeal {
+    handle: u64,
+    track_id: Box<str>,
+    tap: MeterTap,
+    reset_generation: u64,
+    period_frames: u32,
+    peak_hold_frames: u32,
+    peak_decay_bits: u32,
+    queue_capacity: usize,
+}
+
+type ObserverSeal = (Box<str>, TrackStage, u64);
+type ConsumerSeal = (u64, Box<str>, MeterTap);
+
+/// The only graph-lowering payload obtainable from a sealed builtin artifact.
+pub struct PreparedBuiltinsGraphParts {
     pub processors: Vec<miso_engine_graph::GraphNodeBinding>,
     pub observers: Vec<GraphNodeObserverBinding>,
     pub meter_consumers: Vec<MeterConsumer>,
-    pub tails: Vec<(String, BuiltinTail)>,
-    pub resources: BuiltinResourceEstimate,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BuiltinResourceEstimate {
-    pub retained_processor_bytes: u64,
-    pub retained_meter_bytes: u64,
+    /// Exact engine-owned processor, seal and binding payload bytes retained by this artifact.
+    pub engine_owned_processor_payload_bytes: u64,
+    /// Exact engine-owned meter and queue payload bytes retained by this artifact.
+    pub engine_owned_meter_payload_bytes: u64,
+    /// Exact total of all engine-owned retained payload bytes in this artifact.
+    pub engine_owned_retained_payload_bytes: u64,
     pub meter_items: u64,
-    pub largest_allocation_bytes: u64,
+    /// Largest requested engine-owned payload allocation retained by this artifact.
+    pub maximum_single_allocation_bytes: u64,
+    /// Count of retained engine-owned payload allocations represented by this report.
+    pub retained_allocation_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ResourceAccumulator {
+    total: u64,
+    largest: u64,
+    allocations: u64,
+}
+
+impl ResourceAccumulator {
+    fn add_layout(&mut self, layout: core::alloc::Layout) -> Option<()> {
+        let bytes = u64::try_from(layout.size()).ok()?;
+        self.total = self.total.checked_add(bytes)?;
+        self.largest = self.largest.max(bytes);
+        self.allocations = self.allocations.checked_add(1)?;
+        Some(())
+    }
+
+    fn add_bytes(&mut self, bytes: usize) -> Option<()> {
+        self.add_layout(core::alloc::Layout::from_size_align(bytes, 1).ok()?)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BuiltinResourcePlan {
+    report: BuiltinResourceEstimate,
+}
+
+impl PreparedBuiltinsSession {
+    /// Read-only retained-payload resource report.
+    #[must_use]
+    pub const fn resource_report(&self) -> BuiltinResourceEstimate {
+        self.resources
+    }
+
+    /// Number of sealed builtin processor bindings.
+    #[must_use]
+    pub fn processor_count(&self) -> usize {
+        self.processors.len()
+    }
+
+    /// Number of sealed builtin tails.
+    #[must_use]
+    pub fn tail_count(&self) -> usize {
+        self.tails.len()
+    }
+
+    /// Number of sealed meter observer bindings.
+    #[must_use]
+    pub fn observer_count(&self) -> usize {
+        self.observers.len()
+    }
+
+    /// Number of sealed meter consumer endpoints.
+    #[must_use]
+    pub fn meter_consumer_count(&self) -> usize {
+        self.meter_consumers.len()
+    }
+
+    /// Read-only builtin tails used by graph lowering.
+    pub fn tails(&self) -> impl Iterator<Item = (&str, BuiltinTail)> {
+        self.tails
+            .iter()
+            .map(|(track, tail)| (track.as_ref(), *tail))
+    }
+
+    /// Validate the immutable payload against the exact effect-prepared session.
+    pub fn validate_for_session(&self, session: &CompiledSession) -> BuiltinDiagnosticSet {
+        let mut diagnostics = Vec::new();
+        if self.seal.session_sha256 != session_identity(session)
+            || self.seal.sample_rate != session.sample_rate().0
+            || self.seal.quantum != session.quantum().0
+        {
+            diagnostics.push(diag("builtin.session.mismatch", "$.session"));
+        }
+        let expected_tracks: Vec<Box<str>> = session
+            .normalized_model()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().into())
+            .collect();
+        if self.seal.tracks != expected_tracks {
+            diagnostics.push(diag("builtin.prepared.track_set", "$.builtins.tracks"));
+        }
+        let expected_processors = processor_seal(&expected_tracks);
+        if self.seal.processors != expected_processors
+            || !processors_match(&self.processors, &expected_processors)
+        {
+            diagnostics.push(diag(
+                "builtin.prepared.processor_set",
+                "$.builtins.processors",
+            ));
+        }
+        let expected_tails = match expected_tails(session) {
+            Ok(value) => value,
+            Err(()) => {
+                diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
+                Vec::new()
+            }
+        };
+        if self.seal.tails != expected_tails || self.tails != expected_tails {
+            diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
+        }
+        let (actual_observers, actual_consumers) =
+            actual_meter_seals(&self.observers, &self.meter_consumers);
+        if self.seal.requests != self.requests {
+            diagnostics.push(diag(
+                "builtin.prepared.request_set",
+                "$.builtins.meter_requests",
+            ));
+        }
+        if self.seal.observers != actual_observers {
+            diagnostics.push(diag(
+                "builtin.prepared.observer_set",
+                "$.builtins.observers",
+            ));
+        }
+        if self.seal.consumers != actual_consumers {
+            diagnostics.push(diag(
+                "builtin.prepared.consumer_set",
+                "$.builtins.meter_consumers",
+            ));
+        }
+        if self.seal.resources != self.resources {
+            diagnostics.push(diag(
+                "builtin.prepared.resource_report",
+                "$.builtins.resources",
+            ));
+        }
+        BuiltinDiagnosticSet::sorted(diagnostics)
+    }
+
+    /// Consume a validated sealed artifact into the graph's private bindings.
+    pub fn into_graph_parts(self) -> PreparedBuiltinsGraphParts {
+        PreparedBuiltinsGraphParts {
+            processors: self.processors,
+            observers: self.observers,
+            meter_consumers: self.meter_consumers,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_only_remove_tail_for_compiler_test(&mut self) {
+        self.tails.clear();
+    }
+}
+
+fn session_identity(session: &CompiledSession) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(session.canonical_toml().as_bytes());
+    hash.update(session.sample_rate().0.to_le_bytes());
+    hash.update(session.quantum().0.to_le_bytes());
+    hash.finalize().into()
+}
+
+fn processor_seal(tracks: &[Box<str>]) -> Vec<(Box<str>, TrackStage)> {
+    let mut values: Vec<_> = tracks
+        .iter()
+        .flat_map(|track| {
+            [
+                TrackStage::PostInputBuiltins,
+                TrackStage::PostFader,
+                TrackStage::PostMatrix,
+            ]
+            .into_iter()
+            .map(move |stage| (track.clone(), stage))
+        })
+        .collect();
+    values.sort();
+    values
+}
+
+fn processors_match(
+    processors: &[miso_engine_graph::GraphNodeBinding],
+    expected: &[(Box<str>, TrackStage)],
+) -> bool {
+    let mut actual: Vec<_> = processors
+        .iter()
+        .filter_map(|binding| match &binding.node {
+            GraphNodeId::TrackStage { track_id, stage } => {
+                Some((Box::<str>::from(track_id.as_str()), *stage))
+            }
+            _ => None,
+        })
+        .collect();
+    actual.sort();
+    actual.len() == processors.len() && actual == expected
+}
+
+fn expected_tails(session: &CompiledSession) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
+    let mut values: Vec<(Box<str>, BuiltinTail)> =
+        Vec::with_capacity(session.normalized_model().tracks.len());
+    for track in &session.normalized_model().tracks {
+        let parameters = track_parameters(track, u32::MAX).map_err(|_| ())?;
+        let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
+        values.push((track.id.as_str().into(), chain.tail()));
+    }
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(values)
+}
+
+fn actual_meter_seals(
+    observers: &[GraphNodeObserverBinding],
+    consumers: &[MeterConsumer],
+) -> (Vec<ObserverSeal>, Vec<ConsumerSeal>) {
+    let mut observer_values: Vec<_> = observers
+        .iter()
+        .filter_map(|observer| match &observer.node {
+            GraphNodeId::TrackStage { track_id, stage } => {
+                Some((Box::<str>::from(track_id.as_str()), *stage, observer.handle))
+            }
+            _ => None,
+        })
+        .collect();
+    observer_values.sort();
+    let mut consumer_values: Vec<_> = consumers
+        .iter()
+        .map(|consumer| {
+            (
+                consumer.handle.0.get(),
+                Box::<str>::from(&*consumer.track_id),
+                consumer.tap,
+            )
+        })
+        .collect();
+    consumer_values.sort();
+    (observer_values, consumer_values)
 }
 
 pub fn prepare_session_builtins(
@@ -125,133 +400,52 @@ pub fn prepare_session_builtins(
             diagnostics.push(diag("builtin.meter.unknown_track", &meter_path(request)));
         }
     }
-    let mut estimated_items = 0_u64;
-    let mut estimated_meter_bytes = 0_u64;
-    let mut largest_allocation_bytes = 0_u64;
-    for request in requests {
-        let slots = match u64::try_from(request.config.queue_capacity.get())
-            .ok()
-            .and_then(|value| value.checked_add(1))
-        {
-            Some(value) => value,
-            None => {
-                diagnostics.push(diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &meter_path(request),
-                ));
-                continue;
-            }
-        };
-        estimated_items = match estimated_items.checked_add(slots) {
-            Some(value) => value,
-            None => {
-                diagnostics.push(diag(
-                    "builtin.resource.arithmetic_overflow",
-                    "$.meter_requests",
-                ));
-                continue;
-            }
-        };
-        let queue_payload_bytes = match u64::try_from(core::mem::size_of::<MeterSnapshot>())
-            .ok()
-            .and_then(|bytes| bytes.checked_mul(slots))
-        {
-            Some(value) => value,
-            None => {
-                diagnostics.push(diag(
-                    "builtin.resource.arithmetic_overflow",
-                    "$.meter_requests",
-                ));
-                continue;
-            }
-        };
-        largest_allocation_bytes = largest_allocation_bytes.max(queue_payload_bytes);
-        let meter_endpoint_bytes = checked_type_bytes::<MeterObserver>(1)
-            .and_then(|bytes| bytes.checked_add(checked_type_bytes::<MeterConsumer>(1)?))
-            .and_then(|bytes| {
-                bytes.checked_add(checked_type_bytes::<GraphNodeObserverBinding>(1)?)
-            });
-        estimated_meter_bytes = match meter_endpoint_bytes
-            .and_then(|bytes| queue_payload_bytes.checked_add(bytes))
-            .and_then(|bytes| estimated_meter_bytes.checked_add(bytes))
-        {
-            Some(value) => value,
-            None => {
-                diagnostics.push(diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &meter_path(request),
-                ));
-                continue;
-            }
-        };
-    }
-    let track_count = match u64::try_from(session.normalized_model().tracks.len()) {
-        Ok(value) => value,
-        Err(_) => {
-            diagnostics.push(diag("builtin.resource.arithmetic_overflow", "$.tracks"));
-            0
-        }
-    };
-    let estimated_state = checked_type_bytes::<BuiltinChain>(track_count)
-        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<InputProcessor>(track_count)?))
-        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<FaderProcessor>(track_count)?))
-        .and_then(|bytes| bytes.checked_add(checked_type_bytes::<MatrixProcessor>(track_count)?))
-        .and_then(|bytes| {
-            bytes.checked_add(checked_type_bytes::<GraphNodeBinding>(
-                track_count.checked_mul(3)?,
-            )?)
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(checked_type_bytes::<(String, BuiltinTail)>(track_count)?)
-        })
-        .unwrap_or_else(|| {
-            diagnostics.push(diag("builtin.resource.arithmetic_overflow", "$.tracks"));
-            u64::MAX
-        });
-    largest_allocation_bytes = largest_allocation_bytes
-        .max(
-            checked_type_bytes::<GraphNodeBinding>(track_count.saturating_mul(3))
-                .unwrap_or(u64::MAX),
-        )
-        .max(
-            checked_type_bytes::<GraphNodeObserverBinding>(requests.len() as u64)
-                .unwrap_or(u64::MAX),
-        )
-        .max(checked_type_bytes::<MeterConsumer>(requests.len() as u64).unwrap_or(u64::MAX))
-        .max(checked_type_bytes::<(String, BuiltinTail)>(track_count).unwrap_or(u64::MAX));
-    if estimated_state > caps.maximum_total_state_bytes
-        || estimated_items > caps.maximum_total_meter_items
-        || estimated_meter_bytes > caps.maximum_total_meter_bytes
-        || largest_allocation_bytes > caps.maximum_single_allocation_bytes
-    {
-        diagnostics.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
-    }
-
-    let mut prepared = Vec::with_capacity(session.normalized_model().tracks.len());
-    let mut tails = Vec::with_capacity(session.normalized_model().tracks.len());
     for track in &session.normalized_model().tracks {
-        match track_parameters(track, caps.maximum_smoothing_samples) {
-            Ok(parameters) => match BuiltinChain::new(session.sample_rate().0, parameters) {
-                Ok(chain) => {
-                    tails.push((track.id.as_str().to_owned(), chain.tail()));
-                    prepared.push((track.id.as_str().to_owned(), chain.into_sections()));
-                }
-                Err(error) => {
-                    diagnostics.push(parameter_diagnostic(track, error, session.sample_rate().0))
-                }
-            },
+        match track_parameters(track, caps.maximum_smoothing_samples)
+            .and_then(|parameters| BuiltinChain::new(session.sample_rate().0, parameters))
+        {
+            Ok(_) => {}
             Err(error) => {
                 diagnostics.push(parameter_diagnostic(track, error, session.sample_rate().0))
             }
         }
     }
+    let resource_plan = match resource_plan(session, requests) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            diagnostics.push(error);
+            None
+        }
+    };
+    if let Some(plan) = resource_plan {
+        let report = plan.report;
+        if report.engine_owned_processor_payload_bytes > caps.maximum_total_state_bytes
+            || report.meter_items > caps.maximum_total_meter_items
+            || report.engine_owned_meter_payload_bytes > caps.maximum_total_meter_bytes
+            || report.maximum_single_allocation_bytes > caps.maximum_single_allocation_bytes
+        {
+            diagnostics.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+        }
+    }
     if !diagnostics.is_empty() {
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
-
-    let mut processors = Vec::with_capacity(prepared.len().saturating_mul(3));
-    for (track_id, (input, fader, matrix)) in prepared {
-        let graph_id = StableGraphId::parse(&track_id).expect("accepted session IDs are graph IDs");
+    let resources = resource_plan.expect("validated resource plan").report;
+    let track_count = session.normalized_model().tracks.len();
+    let processor_count = track_count
+        .checked_mul(3)
+        .expect("preflighted processor count");
+    let mut processors = Vec::with_capacity(processor_count);
+    let mut tails = Vec::with_capacity(track_count);
+    for track in &session.normalized_model().tracks {
+        let parameters = track_parameters(track, caps.maximum_smoothing_samples)
+            .expect("preflighted parameters");
+        let chain = BuiltinChain::new(session.sample_rate().0, parameters)
+            .expect("preflighted coefficients");
+        let tail = chain.tail();
+        let (input, fader, matrix) = chain.into_sections();
+        tails.push((Box::<str>::from(track.id.as_str()), tail));
+        let graph_id = StableGraphId::parse(track.id.as_str()).expect("preflighted stable ID");
         processors.push(miso_engine_graph::GraphNodeBinding::new(
             stage_node(graph_id.clone(), TrackStage::PostInputBuiltins),
             Box::new(InputProcessor(input)),
@@ -267,6 +461,7 @@ pub fn prepare_session_builtins(
     }
     let mut observers = Vec::with_capacity(requests.len());
     let mut meter_consumers = Vec::with_capacity(requests.len());
+    let mut request_seals = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
         let handle = MeterHandle(
             NonZeroU64::new(
@@ -291,31 +486,160 @@ pub fn prepare_session_builtins(
         ));
         meter_consumers.push(MeterConsumer {
             handle,
-            track_id: request.track_id.clone(),
+            track_id: request.track_id.as_str().into(),
             tap: request.tap,
             consumer,
         });
+        request_seals.push(MeterRequestSeal {
+            handle: handle.0.get(),
+            track_id: request.track_id.as_str().into(),
+            tap: request.tap,
+            reset_generation: request.config.reset_generation,
+            period_frames: request.config.period_frames.get(),
+            peak_hold_frames: request.config.peak_hold_frames,
+            peak_decay_bits: request.config.peak_decay_db_per_second.to_bits(),
+            queue_capacity: request.config.queue_capacity.get(),
+        });
     }
     tails.sort_by(|left, right| left.0.cmp(&right.0));
+    request_seals.sort();
+    let tracks: Vec<Box<str>> = session
+        .normalized_model()
+        .tracks
+        .iter()
+        .map(|track| track.id.as_str().into())
+        .collect();
+    let processor_seal = processor_seal(&tracks);
+    let (observer_seal, consumer_seal) = actual_meter_seals(&observers, &meter_consumers);
     Ok(PreparedBuiltinsSession {
-        session: session.clone(),
+        seal: BuiltinSessionSeal {
+            session_sha256: session_identity(session),
+            sample_rate: session.sample_rate().0,
+            quantum: session.quantum().0,
+            tracks,
+            processors: processor_seal,
+            tails: tails.clone(),
+            requests: request_seals.clone(),
+            observers: observer_seal,
+            consumers: consumer_seal,
+            resources,
+        },
         processors,
         observers,
         meter_consumers,
         tails,
-        resources: BuiltinResourceEstimate {
-            retained_processor_bytes: estimated_state,
-            retained_meter_bytes: estimated_meter_bytes,
-            meter_items: estimated_items,
-            largest_allocation_bytes,
+        requests: request_seals,
+        resources,
+    })
+}
+
+fn resource_plan(
+    session: &CompiledSession,
+    requests: &[MeterRequest],
+) -> Result<BuiltinResourcePlan, BuiltinDiagnostic> {
+    let track_count = session.normalized_model().tracks.len();
+    let processor_count = track_count
+        .checked_mul(3)
+        .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
+    let request_count = requests.len();
+    let mut processor = ResourceAccumulator::default();
+    let mut meter = ResourceAccumulator::default();
+    add_vector_layout::<miso_engine_graph::GraphNodeBinding>(&mut processor, processor_count)?;
+    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    add_vector_layout::<Box<str>>(&mut processor, track_count)?;
+    add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, processor_count)?;
+    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    for track in &session.normalized_model().tracks {
+        let bytes = track.id.as_str().len();
+        // Three stable graph IDs, one retained tail ID, and the three compact seal IDs.
+        for _ in 0..7 {
+            processor
+                .add_bytes(bytes)
+                .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
+        }
+        processor
+            .add_layout(core::alloc::Layout::new::<InputProcessor>())
+            .and_then(|_| processor.add_layout(core::alloc::Layout::new::<FaderProcessor>()))
+            .and_then(|_| processor.add_layout(core::alloc::Layout::new::<MatrixProcessor>()))
+            .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
+    }
+    add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
+    add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
+    add_vector_layout::<MeterRequestSeal>(&mut meter, request_count)?;
+    add_vector_layout::<MeterRequestSeal>(&mut meter, request_count)?;
+    add_vector_layout::<(Box<str>, TrackStage, u64)>(&mut meter, request_count)?;
+    add_vector_layout::<(u64, Box<str>, MeterTap)>(&mut meter, request_count)?;
+    let mut meter_items = 0_u64;
+    for request in requests {
+        let queue =
+            bounded_spsc_retained_payload::<MeterSnapshot>(request.config.queue_capacity)
+                .map_err(|_| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?;
+        meter_items = meter_items
+            .checked_add(
+                u64::try_from(queue.slot_count).map_err(|_| {
+                    diag("builtin.resource.arithmetic_overflow", &meter_path(request))
+                })?,
+            )
+            .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?;
+        meter
+            .add_bytes(queue.ring_header_bytes)
+            .and_then(|_| meter.add_bytes(queue.slot_payload_bytes))
+            .and_then(|_| meter.add_layout(core::alloc::Layout::new::<MeterObserver>()))
+            .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?;
+        let bytes = request.track_id.len();
+        // Observer graph ID, public consumer ID, retained request, and three seal identities.
+        for _ in 0..6 {
+            meter.add_bytes(bytes).ok_or_else(|| {
+                diag("builtin.resource.arithmetic_overflow", &meter_path(request))
+            })?;
+        }
+    }
+    let total = processor.total.checked_add(meter.total).ok_or_else(|| {
+        diag(
+            "builtin.resource.arithmetic_overflow",
+            "$.builtin_compile_caps",
+        )
+    })?;
+    let allocations = processor
+        .allocations
+        .checked_add(meter.allocations)
+        .ok_or_else(|| {
+            diag(
+                "builtin.resource.arithmetic_overflow",
+                "$.builtin_compile_caps",
+            )
+        })?;
+    Ok(BuiltinResourcePlan {
+        report: BuiltinResourceEstimate {
+            engine_owned_processor_payload_bytes: processor.total,
+            engine_owned_meter_payload_bytes: meter.total,
+            engine_owned_retained_payload_bytes: total,
+            meter_items,
+            maximum_single_allocation_bytes: processor.largest.max(meter.largest),
+            retained_allocation_count: allocations,
         },
     })
 }
 
-fn checked_type_bytes<T>(items: u64) -> Option<u64> {
-    u64::try_from(core::mem::size_of::<T>())
-        .ok()?
-        .checked_mul(items)
+fn add_vector_layout<T>(
+    accumulator: &mut ResourceAccumulator,
+    items: usize,
+) -> Result<(), BuiltinDiagnostic> {
+    if items == 0 {
+        return Ok(());
+    }
+    let layout = core::alloc::Layout::array::<T>(items).map_err(|_| {
+        diag(
+            "builtin.resource.arithmetic_overflow",
+            "$.builtin_compile_caps",
+        )
+    })?;
+    accumulator.add_layout(layout).ok_or_else(|| {
+        diag(
+            "builtin.resource.arithmetic_overflow",
+            "$.builtin_compile_caps",
+        )
+    })
 }
 
 struct InputProcessor(InputBuiltins);
@@ -356,8 +680,17 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
-    fn observe(&mut self, block: GraphObservationBlock<'_>) {
-        let _ = self.0.observe(block.left, block.right, block.first_sample);
+    fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+        self.0
+            .observe(block.left, block.right, block.first_sample)
+            .map_err(|error| match error {
+                miso_engine_builtins::MeterObservationError::SampleTimeOverflow => {
+                    RenderError::TimeOverflow
+                }
+                miso_engine_builtins::MeterObservationError::LaneLength => {
+                    RenderError::InvalidEnvelope
+                }
+            })
     }
 }
 
@@ -603,18 +936,18 @@ mod tests {
         assert_eq!(prepared.observers.len(), 7);
         assert_eq!(prepared.meter_consumers.len(), 7);
         assert_eq!(prepared.resources.meter_items, 35);
-        assert!(prepared.resources.retained_processor_bytes > 0);
+        assert!(prepared.resources.engine_owned_processor_payload_bytes > 0);
         assert!(
-            prepared.resources.retained_meter_bytes
+            prepared.resources.engine_owned_meter_payload_bytes
                 > 35 * core::mem::size_of::<MeterSnapshot>() as u64
         );
         assert!(
-            prepared.resources.largest_allocation_bytes
+            prepared.resources.maximum_single_allocation_bytes
                 >= 5 * core::mem::size_of::<MeterSnapshot>() as u64
         );
         assert_eq!(
-            prepared.tails,
-            vec![("vocal".to_owned(), BuiltinTail::Infinite)]
+            prepared.tails().collect::<Vec<_>>(),
+            vec![("vocal", BuiltinTail::Infinite)]
         );
     }
     #[test]
@@ -669,7 +1002,7 @@ mod tests {
         let mut constrained = caps();
         constrained.maximum_single_allocation_bytes = baseline
             .resources
-            .largest_allocation_bytes
+            .maximum_single_allocation_bytes
             .saturating_sub(1);
         let Err(error) = prepare_session_builtins(&session(), &requests, constrained) else {
             panic!("largest retained payload must be capped");
@@ -678,5 +1011,42 @@ mod tests {
             error.0,
             vec![diag("builtin.resource.limit", "$.builtin_compile_caps")]
         );
+    }
+
+    #[test]
+    fn retained_payload_boundaries_reject_in_phase_one() {
+        let config = MeterConfig {
+            period_frames: NonZeroU32::new(16).expect("constant"),
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: NonZeroUsize::new(1).expect("constant"),
+            reset_generation: 0,
+        };
+        let requests = [MeterRequest {
+            track_id: "vocal".to_owned(),
+            tap: MeterTap::PostMatrix,
+            config,
+        }];
+        let baseline = prepare_session_builtins(&session(), &requests, caps()).expect("prepare");
+        let report = baseline.resource_report();
+        let mut state_limited = caps();
+        state_limited.maximum_total_state_bytes = report
+            .engine_owned_processor_payload_bytes
+            .checked_sub(1)
+            .expect("nonzero processor payload");
+        let mut meter_limited = caps();
+        meter_limited.maximum_total_meter_bytes = report
+            .engine_owned_meter_payload_bytes
+            .checked_sub(1)
+            .expect("nonzero meter payload");
+        for limited in [state_limited, meter_limited] {
+            let Err(error) = prepare_session_builtins(&session(), &requests, limited) else {
+                panic!("one byte below a retained-payload boundary must reject");
+            };
+            assert_eq!(
+                error.0,
+                vec![diag("builtin.resource.limit", "$.builtin_compile_caps")]
+            );
+        }
     }
 }

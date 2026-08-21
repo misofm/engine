@@ -534,3 +534,27 @@ run the benchmark again.
 `.github/ISSUE_SPECS/BRIEFS/007-final-sol-brief.md`. The accepted incremental TPT operation graph and checkpoint
 `0627618` remain normative. Benchmark invocation count is **0**. Only the exact final brief may
 authorize the sole two-round benchmark after every machine-verifiable nonbenchmark gate passes.
+
+## Final attempt-3 Terra evidence (2026-08-21; artifact/resource tranche)
+
+`PreparedBuiltinsSession` is now opaque outside `miso-engine-builtins-compiler`; it retains a
+private SHA-256 session/rate/quantum seal, exact track/stage/tail identities, ordered meter
+request/observer/consumer identities, and its resource report. Graph lowering validates the seal
+against the effect-prepared session before ownership moves, then consumes the artifact only into
+private graph bindings. The existing forged-tail test now uses the compiler-owned test-support
+seam rather than a public mutable artifact field. Graph observer failures are returned as bounded
+`RenderError`s; the meter adapter no longer discards an observation error.
+
+Builtin resource reporting now names engine-owned retained payload bytes and computes checked
+`Layout` sizes for retained binding/seal vectors, processor/observer boxes, stable-ID payloads,
+meter endpoint payloads, and exact SPSC ring-header plus `capacity + 1` slot layouts. It excludes
+allocator headers and page rounding. Preparation validates parameter/resource domains and all
+caps before constructing builtin processor, meter, or artifact payloads; one-byte-below
+processor, meter, and largest-allocation boundaries reject with `builtin.resource.limit`.
+
+PASS: focused builtin-compiler and graph-compiler tests (including the 65,537-track scale gates),
+warning-denied Clippy for core/builtin/compiler/graph crates, formatting, and diff check. This is
+not complete resource-containment evidence: the required test-only allocation tracker, complete
+per-seal-field corruption matrix, fixture corpus, graph-backed million-render/swap audit, target
+matrix, workspace sealing, and frozen benchmark implementation remain open. Human listening is
+Issue #33 and remains pending. Timed benchmark invocation count remains **0**.

@@ -54,14 +54,14 @@ fn prepares_65_537_tracks_or_rejects_only_the_configured_resource() {
     let session = compile_session(&model, session_caps()).expect("scale session");
 
     let prepared = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
-    assert_eq!(prepared.processors.len(), 65_537 * 3);
-    assert_eq!(prepared.tails.len(), 65_537);
-    assert_eq!(prepared.resources.meter_items, 0);
+    assert_eq!(prepared.processor_count(), 65_537 * 3);
+    assert_eq!(prepared.tail_count(), 65_537);
+    assert_eq!(prepared.resource_report().meter_items, 0);
 
     let mut constrained = builtin_caps();
     constrained.maximum_total_state_bytes = prepared
-        .resources
-        .retained_processor_bytes
+        .resource_report()
+        .engine_owned_processor_payload_bytes
         .saturating_sub(1);
     let Err(error) = prepare_session_builtins(&session, &[], constrained) else {
         panic!("configured builtin resource cap must reject");

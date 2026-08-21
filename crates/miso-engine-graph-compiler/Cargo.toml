@@ -18,5 +18,8 @@ miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+miso-engine-builtins-compiler = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

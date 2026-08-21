@@ -13,6 +13,10 @@ miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-builtins.workspace = true
+sha2.workspace = true
+
+[features]
+test-support = []
 
 [lints]
 workspace = true

@@ -493,7 +493,7 @@ pub struct GraphObservationBlock<'a> {
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
-    fn observe(&mut self, block: GraphObservationBlock<'_>);
+    fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError>;
 }
 /// One immutable prepared observer binding, ordered by its stable meter handle.
 pub struct GraphNodeObserverBinding {
@@ -793,7 +793,7 @@ impl PreparedPlanExecutor for GraphExecutor {
                     left: &rendered.left,
                     right: &rendered.right,
                     first_sample: time.absolute_sample,
-                });
+                })?;
             }
         }
         let rendered = &self.buffers[self.nodes[self.output_node].output_buffer];

@@ -27,7 +27,8 @@ pub use plan_exchange::{
     RealtimeRenderReport, SwapOutcome, plan_exchange,
 };
 pub use spsc::{
-    Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, bounded_spsc,
+    Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
+    SpscRetainedPayload, bounded_spsc, bounded_spsc_retained_payload,
 };
 
 #[cfg(test)]
