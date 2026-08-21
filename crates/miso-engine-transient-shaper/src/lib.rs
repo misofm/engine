@@ -4,15 +4,17 @@
 //! registration are deliberately deferred to their separately bounded checkpoints.
 #![allow(missing_docs)]
 
+use miso_engine_core::{CompressorGainMixKernelError, PreparedCompressorGainMixKernelV1};
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, sanitize_sample,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata, sanitize_sample,
 };
 
 const PARAMETER_COUNT: usize = 3;
@@ -239,6 +241,17 @@ pub struct PreparedTransientShaper {
     right: Lane,
 }
 
+struct PreparedTransientShaperBank<const W: usize> {
+    metadata: PreparedBankMetadata,
+    effect_metadata: PreparedEffectMetadata,
+    coefficients: Coefficients,
+    kernel: PreparedCompressorGainMixKernelV1,
+    left_defaults: [[f32; PARAMETER_COUNT]; W],
+    right_defaults: [[f32; PARAMETER_COUNT]; W],
+    left: [Lane; W],
+    right: [Lane; W],
+}
+
 impl NativeEffectFactory for TransientShaperFactory {
     fn descriptor(&self) -> &'static EffectDescriptorV1 {
         &TRANSIENT_SHAPER_DESCRIPTOR_V1
@@ -265,16 +278,76 @@ impl NativeEffectFactory for TransientShaperFactory {
 
     fn bind_homogeneous_bank(
         &self,
-        _request: PrepareEffectBankRequest<'_>,
-    ) -> Result<
-        Option<Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>>,
-        EffectPrepareError,
-    > {
-        // Issue 020 scalar checkpoint: the separate bank checkpoint owns binding validation and
-        // the compressor gain/mix kernel use. Returning no cohort cannot make scalar preparation
-        // unpublished or change its immutable program metadata.
-        Ok(None)
+        request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        if !request.has_matching_backend_width()
+            || request.requests.len() != request.width.lanes() as usize
+        {
+            return Err(EffectPrepareError {
+                code: "effect.bank.requests",
+            });
+        }
+        match request.width {
+            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
+            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
+        }
     }
+}
+
+fn prepare_homogeneous_bank<const W: usize>(
+    factory: &TransientShaperFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    let first_request = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(factory.descriptor(), first_request)?;
+    let coefficients = coefficients(metadata.sample_rate).ok_or(EffectPrepareError {
+        code: "effect.quality.unsupported",
+    })?;
+    let (first_left_defaults, first_right_defaults) =
+        initial_defaults(first_request.initial_values)?;
+    let mut left_defaults = [first_left_defaults; W];
+    let mut right_defaults = [first_right_defaults; W];
+    let mut same_program = true;
+    for (track, item) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
+        }
+        let (left, right) = initial_defaults(item.initial_values)?;
+        left_defaults[track] = left;
+        right_defaults[track] = right;
+    }
+    if !same_program {
+        return Ok(None);
+    }
+    let kernel = match PreparedCompressorGainMixKernelV1::try_new(request.backend) {
+        Ok(kernel) => kernel,
+        Err(CompressorGainMixKernelError::BackendUnavailable) => return Ok(None),
+        Err(_) => {
+            return Err(EffectPrepareError {
+                code: "effect.bank.backend",
+            });
+        }
+    };
+    Ok(Some(Box::new(PreparedTransientShaperBank::<W> {
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+        effect_metadata: metadata,
+        coefficients,
+        kernel,
+        left_defaults,
+        right_defaults,
+        left: core::array::from_fn(|track| Lane::new(&left_defaults[track])),
+        right: core::array::from_fn(|track| Lane::new(&right_defaults[track])),
+    })))
 }
 
 impl PreparedNativeEffect for PreparedTransientShaper {
@@ -373,6 +446,111 @@ impl PreparedNativeEffect for PreparedTransientShaper {
     }
 }
 
+impl<const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<W> {
+    fn metadata(&self) -> PreparedBankMetadata {
+        self.metadata.clone()
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        for track in 0..W {
+            match kind {
+                ResetKind::FullToDefaults => {
+                    self.left[track].full_reset(&self.left_defaults[track]);
+                    self.right[track].full_reset(&self.right_defaults[track]);
+                }
+                ResetKind::DiscontinuityKeepParameters => {
+                    self.left[track].discontinuity_reset();
+                    self.right[track].discontinuity_reset();
+                }
+            }
+        }
+    }
+
+    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.metadata.width);
+        if block.width != self.metadata.width
+            || block.frames > self.effect_metadata.quantum
+            || block.sidechain.is_some()
+            || W != self.metadata.width.lanes() as usize
+        {
+            return report;
+        }
+        for track in 0..W {
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.effect_metadata,
+                block.first_sample,
+                &mut self.left[track],
+                &mut self.right[track],
+                &mut report.reports[track],
+            );
+        }
+        for frame in 0..block.frames as usize {
+            process_bank_frame(
+                &mut self.left,
+                &mut self.right,
+                self.coefficients,
+                self.kernel,
+                self.effect_metadata,
+                &mut report,
+                &mut block.left[frame * W..(frame + 1) * W],
+                &mut block.right[frame * W..(frame + 1) * W],
+            );
+        }
+        report
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        validate_state_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        write_lane(output.left, self.left[track]);
+        write_lane(output.right, self.right[track]);
+        Ok(())
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, W)?;
+        if state_layout_version != 1 {
+            return Err(state_error("effect.state.version"));
+        }
+        validate_state_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        let left = read_lane(input.left)?;
+        let right = read_lane(input.right)?;
+        self.left[track] = left;
+        self.right[track] = right;
+        Ok(())
+    }
+}
+
+fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
+    let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
+    if track >= width {
+        return Err(state_error("effect.state.track"));
+    }
+    Ok(track)
+}
+
 fn initial_defaults(
     values: &[InitialParameterValue],
 ) -> Result<([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]), EffectPrepareError> {
@@ -443,6 +621,15 @@ fn linked_magnitudes(link_mode: LinkMode, left: f32, right: f32) -> (f32, f32) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct GainMixFrame {
+    dry: f32,
+    gain: f32,
+    mix: f32,
+    dry_identity: bool,
+    wet_identity: bool,
+}
+
 fn process_lane(
     input: f32,
     detector: f32,
@@ -451,6 +638,32 @@ fn process_lane(
     lane: &mut Lane,
     recovered: &mut u64,
 ) -> f32 {
+    let frame = prepare_lane_gain(input, detector, coefficients, bypass, lane, recovered);
+    if frame.dry_identity {
+        return frame.dry;
+    }
+    let Some(wet) = flush(frame.dry * frame.gain) else {
+        return recover(lane, frame.dry, recovered);
+    };
+    if frame.wet_identity {
+        return wet;
+    }
+    let delta = wet - frame.dry;
+    let scaled = frame.mix * delta;
+    match flush(frame.dry + scaled) {
+        Some(value) => value,
+        None => recover(lane, frame.dry, recovered),
+    }
+}
+
+fn prepare_lane_gain(
+    input: f32,
+    detector: f32,
+    coefficients: Coefficients,
+    bypass: bool,
+    lane: &mut Lane,
+    recovered: &mut u64,
+) -> GainMixFrame {
     let fast_coefficient = if detector > lane.fast {
         coefficients.fast_attack
     } else {
@@ -464,12 +677,12 @@ fn process_lane(
     let fast0 = fast_coefficient * lane.fast;
     let fast1 = (1.0_f32 - fast_coefficient) * detector;
     let Some(fast) = flush(fast0 + fast1) else {
-        return recover(lane, input, recovered);
+        return recover_gain_mix(lane, input, recovered);
     };
     let slow0 = slow_coefficient * lane.slow;
     let slow1 = (1.0_f32 - slow_coefficient) * detector;
     let Some(slow) = flush(slow0 + slow1) else {
-        return recover(lane, input, recovered);
+        return recover_gain_mix(lane, input, recovered);
     };
     lane.fast = fast;
     lane.slow = slow;
@@ -477,7 +690,7 @@ fn process_lane(
     let fast_db = 20.0_f32 * fast.max(1.0e-8_f32).log10();
     let slow_db = 20.0_f32 * slow.max(1.0e-8_f32).log10();
     let Some(contrast_raw) = flush(fast_db - slow_db) else {
-        return recover(lane, input, recovered);
+        return recover_gain_mix(lane, input, recovered);
     };
     let contrast = contrast_raw.clamp(-24.0_f32, 24.0_f32);
     let attack_term = contrast.max(0.0_f32);
@@ -485,28 +698,143 @@ fn process_lane(
     let shape0 = lane.ramps[0].current * attack_term;
     let shape1 = lane.ramps[1].current * sustain_term;
     let Some(shape_raw) = flush(shape0 + shape1) else {
-        return recover(lane, input, recovered);
+        return recover_gain_mix(lane, input, recovered);
     };
     let shape = normalize_zero(shape_raw.clamp(-18.0_f32, 18.0_f32));
     let gain_exponent = shape * 0.05_f32;
     let Some(gain) = flush(10.0_f32.powf(gain_exponent)) else {
-        return recover(lane, input, recovered);
+        return recover_gain_mix(lane, input, recovered);
     };
     let mix = lane.ramps[2].current;
-    if bypass || mix == 0.0 || shape == 0.0 {
-        return input;
+    GainMixFrame {
+        dry: input,
+        gain,
+        mix,
+        dry_identity: bypass || mix == 0.0 || shape == 0.0,
+        wet_identity: mix == 1.0,
     }
-    let Some(wet) = flush(input * gain) else {
-        return recover(lane, input, recovered);
-    };
-    if mix == 1.0 {
-        return wet;
+}
+
+fn recover_gain_mix(lane: &mut Lane, input: f32, recovered: &mut u64) -> GainMixFrame {
+    let dry = recover(lane, input, recovered);
+    GainMixFrame {
+        dry,
+        gain: 1.0,
+        mix: 0.0,
+        dry_identity: true,
+        wet_identity: false,
     }
-    let delta = wet - input;
-    let scaled = mix * delta;
-    match flush(input + scaled) {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_bank_frame<const W: usize>(
+    left_lanes: &mut [Lane; W],
+    right_lanes: &mut [Lane; W],
+    coefficients: Coefficients,
+    kernel: PreparedCompressorGainMixKernelV1,
+    metadata: PreparedEffectMetadata,
+    report: &mut BankProcessReport,
+    left_samples: &mut [f32],
+    right_samples: &mut [f32],
+) {
+    let mut left_dry = [0.0; W];
+    let mut right_dry = [0.0; W];
+    for track in 0..W {
+        for ramp in &mut left_lanes[track].ramps {
+            ramp.advance();
+        }
+        for ramp in &mut right_lanes[track].ramps {
+            ramp.advance();
+        }
+        left_dry[track] = sanitize(
+            left_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+        right_dry[track] = sanitize(
+            right_samples[track],
+            &mut report.reports[track].sanitized_main_samples,
+        );
+    }
+
+    let mut left_gain = [0.0; W];
+    let mut right_gain = [0.0; W];
+    let mut left_mix = [0.0; W];
+    let mut right_mix = [0.0; W];
+    let mut left_dry_mask = [0_u32; W];
+    let mut right_dry_mask = [0_u32; W];
+    let mut left_wet_mask = [0_u32; W];
+    let mut right_wet_mask = [0_u32; W];
+    for track in 0..W {
+        let (detector_left, detector_right) =
+            linked_magnitudes(metadata.link_mode, left_dry[track], right_dry[track]);
+        let left = prepare_lane_gain(
+            left_dry[track],
+            detector_left,
+            coefficients,
+            metadata.bypass,
+            &mut left_lanes[track],
+            &mut report.reports[track].recovered_left_samples,
+        );
+        let right = prepare_lane_gain(
+            right_dry[track],
+            detector_right,
+            coefficients,
+            metadata.bypass,
+            &mut right_lanes[track],
+            &mut report.reports[track].recovered_right_samples,
+        );
+        left_samples[track] = left.dry;
+        right_samples[track] = right.dry;
+        left_gain[track] = left.gain;
+        right_gain[track] = right.gain;
+        left_mix[track] = left.mix;
+        right_mix[track] = right.mix;
+        left_dry_mask[track] = u32::from(left.dry_identity).wrapping_neg();
+        right_dry_mask[track] = u32::from(right.dry_identity).wrapping_neg();
+        left_wet_mask[track] = u32::from(!left.dry_identity && left.wet_identity).wrapping_neg();
+        right_wet_mask[track] = u32::from(!right.dry_identity && right.wet_identity).wrapping_neg();
+    }
+    if kernel
+        .process_gain_mix(
+            left_samples,
+            &left_gain,
+            &left_mix,
+            &left_dry_mask,
+            &left_wet_mask,
+        )
+        .is_err()
+        || kernel
+            .process_gain_mix(
+                right_samples,
+                &right_gain,
+                &right_mix,
+                &right_dry_mask,
+                &right_wet_mask,
+            )
+            .is_err()
+    {
+        return;
+    }
+    for track in 0..W {
+        left_samples[track] = finish_bank_output(
+            left_samples[track],
+            left_dry[track],
+            &mut left_lanes[track],
+            &mut report.reports[track].recovered_left_samples,
+        );
+        right_samples[track] = finish_bank_output(
+            right_samples[track],
+            right_dry[track],
+            &mut right_lanes[track],
+            &mut report.reports[track].recovered_right_samples,
+        );
+    }
+}
+
+fn finish_bank_output(value: f32, dry: f32, lane: &mut Lane, recovered: &mut u64) -> f32 {
+    match flush(value) {
         Some(value) => value,
-        None => recover(lane, input, recovered),
+        None => recover(lane, dry, recovered),
     }
 }
 
@@ -675,13 +1003,15 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::{
         ReferenceTransientShaper, ReferenceTransientShaperParameters,
         reference_transient_shaper_coefficient,
     };
     use miso_engine_effect_contract::{
-        EffectProcessBlock, InitialParameterValue, PreparedNativeEffect, StatePayloadInput,
-        StatePayloadOutput, validate_descriptor_v1,
+        EffectBankProcessBlock, EffectProcessBlock, InitialParameterValue,
+        PrepareEffectBankRequest, PreparedNativeEffect, StatePayloadInput, StatePayloadOutput,
+        validate_descriptor_v1,
     };
 
     fn initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
@@ -740,6 +1070,30 @@ mod tests {
             )
             .expect("snapshot");
         (left, right)
+    }
+
+    fn bank_snapshot(
+        bank: &dyn PreparedNativeEffectBank,
+        track: u32,
+        sizes: StatePayloadSizes,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        bank.snapshot_track_state_payload(
+            track,
+            StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("output"),
+        )
+        .expect("bank snapshot");
+        (left, right)
+    }
+
+    fn bank_error(
+        result: Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>,
+    ) -> EffectPrepareError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("bank request must reject"),
+        }
     }
 
     fn prepare_concrete(
@@ -1424,5 +1778,331 @@ mod tests {
         );
         assert_eq!(report.sanitized_main_samples, 1);
         assert_eq!(sanitized_left[0].to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
+        assert_eq!(4 * (88 + 24), 448);
+        assert_eq!(8 * (88 + 24), 896);
+        let factory = TransientShaperFactory;
+        let (backend, width) = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+            (KernelBackendV1::Aarch64Neon, BankWidth::Four)
+        } else {
+            (KernelBackendV1::X86Avx2, BankWidth::Eight)
+        };
+        let lanes = width.lanes() as usize;
+        let values = vec![initial_values(); lanes];
+        let requests = values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<_>>();
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &requests,
+                })
+                .expect("legal unavailable fallback")
+                .is_none()
+        );
+
+        let mut malformed_values = values.clone();
+        malformed_values[lanes - 1][0].value = f32::NAN;
+        let malformed_requests = malformed_values
+            .iter()
+            .map(|values| request(values))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bank_error(factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &malformed_requests,
+            }))
+            .code,
+            "effect.parameter.initial"
+        );
+
+        let mut below_state = requests.clone();
+        below_state[lanes - 1].limits.maximum_total_state_bytes = 87;
+        assert_eq!(
+            bank_error(factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &below_state,
+            }))
+            .code,
+            "effect.resource.limit"
+        );
+        let mut below_scratch = requests.clone();
+        below_scratch[lanes - 1].limits.maximum_scratch_bytes = 23;
+        assert_eq!(
+            bank_error(factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &below_scratch,
+            }))
+            .code,
+            "effect.resource.limit"
+        );
+
+        let mut heterogeneous = requests.clone();
+        heterogeneous[lanes - 1].bypass = true;
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &heterogeneous,
+                })
+                .expect("valid heterogeneous fallback")
+                .is_none()
+        );
+        assert_eq!(
+            bank_error(factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: KernelBackendV1::X86Avx2,
+                width: BankWidth::Four,
+                requests: &requests,
+            }))
+            .code,
+            "effect.bank.requests"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn w8_bank_matches_scalar_pcm_state_reports_links_automation_and_sanitation() {
+        if PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::X86Avx2).is_err() {
+            return;
+        }
+        for link_mode in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+            let mut values = [initial_values(); 8];
+            for (track, track_values) in values.iter_mut().enumerate() {
+                let attack = -0.75 + track as f32 * 0.2;
+                let sustain = 0.6 - track as f32 * 0.15;
+                track_values[0].value = attack;
+                track_values[1].value = attack;
+                track_values[2].value = sustain;
+                track_values[3].value = sustain;
+                track_values[4].value = 0.25 + track as f32 * 0.1;
+                track_values[5].value = 1.0 - track as f32 * 0.1;
+            }
+            let requests = values
+                .iter()
+                .map(|values| request_with(values, 48_000, false, link_mode))
+                .collect::<Vec<_>>();
+            let mut bank = TransientShaperFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::X86Avx2,
+                    width: BankWidth::Eight,
+                    requests: &requests,
+                })
+                .expect("bank binding")
+                .expect("available W8 bank");
+            let mut scalar = values
+                .iter()
+                .map(|values| prepare_concrete(values, 48_000, false, link_mode))
+                .collect::<Vec<_>>();
+            let spans = (0..8)
+                .map(|track| PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel: if track % 2 == 0 {
+                        ParameterChannel::Left
+                    } else {
+                        ParameterChannel::Right
+                    },
+                    parameter_index: (track % PARAMETER_COUNT) as u32,
+                    start_sample: 0,
+                    end_sample: 0,
+                    start_value: if track % PARAMETER_COUNT == 2 {
+                        0.5
+                    } else {
+                        -0.5 + track as f32 * 0.1
+                    },
+                    end_value: if track % PARAMETER_COUNT == 2 {
+                        0.5
+                    } else {
+                        -0.5 + track as f32 * 0.1
+                    },
+                })
+                .collect::<Vec<_>>();
+            let offsets = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+            let frames = 96;
+            let mut bank_left = vec![0.0_f32; frames * 8];
+            let mut bank_right = vec![0.0_f32; frames * 8];
+            for frame in 0..frames {
+                for track in 0..8 {
+                    bank_left[frame * 8 + track] =
+                        (frame as f32 * 0.037 + track as f32 * 0.11).sin() * 0.8;
+                    bank_right[frame * 8 + track] =
+                        (frame as f32 * 0.029 - track as f32 * 0.07).cos() * 0.55;
+                }
+            }
+            bank_left[0] = -0.0;
+            bank_right[0] = 0.0;
+            bank_left[8 + 2] = f32::NAN;
+            bank_right[8 + 3] = f32::from_bits(1);
+            let mut scalar_left: [Vec<f32>; 8] = core::array::from_fn(|track| {
+                (0..frames)
+                    .map(|frame| bank_left[frame * 8 + track])
+                    .collect()
+            });
+            let mut scalar_right: [Vec<f32>; 8] = core::array::from_fn(|track| {
+                (0..frames)
+                    .map(|frame| bank_right[frame * 8 + track])
+                    .collect()
+            });
+            let mut scalar_reports = [ProcessReport::default(); 8];
+            for track in 0..8 {
+                scalar_reports[track] = scalar[track].process(
+                    EffectProcessBlock::new(
+                        &mut scalar_left[track],
+                        &mut scalar_right[track],
+                        None,
+                        0,
+                        core::slice::from_ref(&spans[track]),
+                        128,
+                    )
+                    .expect("scalar block"),
+                );
+            }
+            let report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    frames as u32,
+                    BankWidth::Eight,
+                    0,
+                    &spans,
+                    &offsets,
+                    128,
+                )
+                .expect("bank block"),
+            );
+            assert_eq!(&report.reports[..8], &scalar_reports);
+            for frame in 0..frames {
+                for track in 0..8 {
+                    assert_eq!(
+                        bank_left[frame * 8 + track].to_bits(),
+                        scalar_left[track][frame].to_bits(),
+                        "left {link_mode:?} frame={frame} track={track}"
+                    );
+                    assert_eq!(
+                        bank_right[frame * 8 + track].to_bits(),
+                        scalar_right[track][frame].to_bits(),
+                        "right {link_mode:?} frame={frame} track={track}"
+                    );
+                }
+            }
+            for (track, scalar) in scalar.iter().enumerate() {
+                assert_eq!(
+                    bank_snapshot(bank.as_ref(), track as u32, scalar.metadata.state_sizes),
+                    snapshot(scalar)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn w8_bank_reset_restore_and_injected_recovery_are_track_local() {
+        let Ok(kernel) = PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::X86Avx2)
+        else {
+            return;
+        };
+        let mut values = [initial_values(); 8];
+        for track_values in &mut values {
+            track_values[0].value = 1.0;
+            track_values[1].value = 1.0;
+            track_values[2].value = -0.5;
+            track_values[3].value = -0.5;
+        }
+        let request = request_with(&values[0], 48_000, false, LinkMode::DualMono);
+        let metadata =
+            expected_prepared_metadata(&TRANSIENT_SHAPER_DESCRIPTOR_V1, request).expect("metadata");
+        let defaults = values.map(|values| initial_defaults(&values).expect("defaults"));
+        let left_defaults = defaults.map(|defaults| defaults.0);
+        let right_defaults = defaults.map(|defaults| defaults.1);
+        let mut bank = PreparedTransientShaperBank::<8> {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Eight,
+                program_key: metadata.program_key(),
+            },
+            effect_metadata: metadata,
+            coefficients: coefficients(48_000).expect("coefficients"),
+            kernel,
+            left_defaults,
+            right_defaults,
+            left: core::array::from_fn(|track| Lane::new(&left_defaults[track])),
+            right: core::array::from_fn(|track| Lane::new(&right_defaults[track])),
+        };
+        let mut scalar: [PreparedTransientShaper; 8] = core::array::from_fn(|track| {
+            prepare_concrete(&values[track], 48_000, false, LinkMode::DualMono)
+        });
+        bank.left[3].fast = f32::INFINITY;
+        scalar[3].left.fast = f32::INFINITY;
+        let mut bank_left = [-0.25_f32; 8];
+        let mut bank_right = [0.5_f32; 8];
+        bank_left[4] = -0.0;
+        let mut scalar_left = bank_left;
+        let mut scalar_right = bank_right;
+        let mut scalar_reports = [ProcessReport::default(); 8];
+        for track in 0..8 {
+            scalar_reports[track] = scalar[track].process(
+                EffectProcessBlock::new(
+                    core::slice::from_mut(&mut scalar_left[track]),
+                    core::slice::from_mut(&mut scalar_right[track]),
+                    None,
+                    0,
+                    &[],
+                    128,
+                )
+                .expect("scalar sample"),
+            );
+        }
+        let report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                1,
+                BankWidth::Eight,
+                0,
+                &[],
+                &[0; 9],
+                128,
+            )
+            .expect("bank sample"),
+        );
+        assert_eq!(bank_left.map(f32::to_bits), scalar_left.map(f32::to_bits));
+        assert_eq!(bank_right.map(f32::to_bits), scalar_right.map(f32::to_bits));
+        assert_eq!(&report.reports[..8], &scalar_reports);
+        assert_eq!(report.reports[3].recovered_left_samples, 1);
+        for (track, scalar) in scalar.iter().enumerate() {
+            assert_eq!(
+                bank_snapshot(&bank, track as u32, metadata.state_sizes),
+                snapshot(scalar)
+            );
+        }
+
+        let saved = bank_snapshot(&bank, 5, metadata.state_sizes);
+        bank.reset(ResetKind::DiscontinuityKeepParameters);
+        bank.restore_track_state_payload(
+            5,
+            1,
+            StatePayloadInput::new(&[], &saved.0, &saved.1, metadata.state_sizes)
+                .expect("saved payload"),
+        )
+        .expect("track restore");
+        assert_eq!(bank_snapshot(&bank, 5, metadata.state_sizes), saved);
+        bank.reset(ResetKind::FullToDefaults);
+        for (track, scalar) in scalar.iter_mut().enumerate() {
+            scalar.reset(ResetKind::FullToDefaults);
+            assert_eq!(
+                bank_snapshot(&bank, track as u32, metadata.state_sizes),
+                snapshot(scalar)
+            );
+        }
     }
 }

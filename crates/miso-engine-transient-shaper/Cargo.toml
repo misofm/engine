@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_transient_shaper"
 
 [dependencies]
+miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 
 [dev-dependencies]

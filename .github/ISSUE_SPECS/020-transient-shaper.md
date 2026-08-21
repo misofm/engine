@@ -190,3 +190,26 @@ attempt count; strict Terra/final Sol verdict; successor link; and
   not an overall Issue-020 verdict. Bank, registry/effect-compiler, graph/PDC/cap and final
   workspace/policy closure remain unstarted. Issue 054 and all audit/target/instruction/benchmark/
   listening work remain untouched; `timed_benchmark_invocations=0`.
+
+### Sol attempt 2 — homogeneous-bank checkpoint (partial PASS)
+
+- Base candidate `bc38407`. Added W4/W8 homogeneous binding through the already accepted
+  `PreparedCompressorGainMixKernelV1`. Each bank retains independent scalar-equivalent follower,
+  ramp and reset-default rows, walks sample-major tracks deterministically, uses the frozen
+  dry/wet identity masks, and exposes byte-compatible per-track snapshot/atomic restore/reset.
+- Every member's metadata, initial values and exact 88-byte state/24-byte scratch caps validate
+  before heterogeneous or unavailable-backend fallback. Executed evidence freezes retained
+  envelopes at `4*(88+24)=448` and `8*(88+24)=896`; one-byte-below state and scratch members reject
+  before legal unavailable W4 fallback, and mismatched backend/width/count rejects.
+- Native W8 evidence is bit-exact to eight scalar peers for sample-major PCM, all state words and
+  reports across DualMono/Maximum/Average links, distinct per-track defaults, block automation,
+  signed zero, NaN/subnormal sanitation, both resets, track restore, injected lane-local recovery
+  and healthy-track isolation. The core prepared token's existing tests continue to prove the W8
+  operation graph and zero-contraction AVX2/FMA alias.
+- PASS: `cargo fmt --all -- --check`; `cargo test --locked -p
+  miso-engine-transient-shaper --lib` (11 passed); `cargo test --locked -p
+  miso-engine-core --lib` (31 passed); `cargo clippy --locked -p miso-engine-core -p
+  miso-engine-transient-shaper --all-targets -- -D warnings`.
+- This remains a partial Issue-020 checkpoint. Registry/effect-compiler and graph/PDC/cap closure
+  are deliberately unstarted, as are all Issue-054 qualification gates. No broad workspace,
+  audit, target, benchmark or listening command ran; `timed_benchmark_invocations=0`.
