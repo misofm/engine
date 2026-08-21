@@ -1,5 +1,0 @@
-case,tracks,meter_streams,queue_capacity,expected
-single-track-seven-meters,1,7,4,accept-with-sufficient-caps
-zero-meter-tail,1,0,0,accept-with-sufficient-caps
-single-allocation-boundary,1,1,1,reject-with-resource-limit
-scale-65537,65537,0,0,accept-or-configured-resource-limit

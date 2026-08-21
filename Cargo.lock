@@ -198,6 +198,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-builtins-fixture"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-builtins",
+ "miso-engine-builtins-compiler",
+ "miso-engine-core",
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-compiler",
+ "miso-engine-graph",
+ "miso-engine-graph-compiler",
+ "miso-engine-session",
+ "sha2",
+]
+
+[[package]]
 name = "miso-engine-capi"
 version = "0.1.0"
 

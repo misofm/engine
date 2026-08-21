@@ -28,6 +28,7 @@ members = [
     "tools/miso-engine-graph-bench",
     "tools/miso-engine-builtins-audit",
     "tools/miso-engine-builtins-bench",
+    "tools/miso-engine-builtins-fixture",
 ]
 resolver = "3"
 

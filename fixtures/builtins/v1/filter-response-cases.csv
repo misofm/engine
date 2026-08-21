@@ -1,6 +1,0 @@
-case,section,rate_hz,cutoff_hz,probe_hz,quantum_frames
-lp-cutoff-044100,low_pass,44100,1000,1000,1
-hp-cutoff-048000,high_pass,48000,100,100,127
-lp-near-nyquist-088200,low_pass,88200,39690,39688,128
-hp-deep-stop-096000,high_pass,96000,10,4,255
-cascade-100-1000-048000,hpf_then_lpf,48000,100,1000,1024

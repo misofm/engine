@@ -1,0 +1,13 @@
+{"case":"block-length","code":"builtin.block.length","path":"$.render.block","error":"LaneLength"}
+{"case":"block-overflow","code":"builtin.block.sample_time_overflow","path":"$.render.first_sample","error":"SampleTimeOverflow"}
+{"case":"filter-cutoff","code":"builtin.filter.cutoff","path":"$.tracks[id=vocal].builtins.left.hpf_hz"}
+{"case":"filter-order","code":"builtin.filter.cutoff","path":"$.tracks[id=vocal].builtins.left"}
+{"case":"gain-domain","code":"builtin.gain.domain","path":"$.tracks[id=vocal].fader.left_db"}
+{"case":"matrix-coefficient","code":"builtin.matrix.coefficient","path":"$.tracks[id=vocal].matrix_or_pan.ll"}
+{"case":"meter-request","code":"builtin.meter.duplicate","path":"$.meters[track_id=vocal,tap=Input]"}
+{"case":"meter-request","code":"builtin.meter.unknown_track","path":"$.meters[track_id=missing,tap=PostFader]"}
+{"case":"resource-cap","code":"builtin.resource.limit","path":"$.builtin_compile_caps"}
+{"case":"seal-session-mismatch","code":"builtin.prepared.processor_set","path":"$.builtins.processors"}
+{"case":"seal-session-mismatch","code":"builtin.prepared.tail_set","path":"$.builtins.tails"}
+{"case":"seal-session-mismatch","code":"builtin.prepared.track_set","path":"$.builtins.tracks"}
+{"case":"seal-session-mismatch","code":"builtin.session.mismatch","path":"$.session"}

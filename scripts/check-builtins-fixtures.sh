@@ -4,6 +4,7 @@ set -euo pipefail
 cd "${1:-.}"
 root="fixtures/builtins/v1"
 manifest="$root/MANIFEST.tsv"
+workspace_root="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$manifest" ]] || { printf 'missing builtins fixture manifest\n' >&2; exit 1; }
 [[ "$(head -n 1 "$manifest")" == $'path\tlength\tsha256' ]] || {
     printf 'invalid builtins fixture manifest header\n' >&2; exit 1;
@@ -26,4 +27,11 @@ while IFS=$'\t' read -r path length hash; do
 done <"$manifest"
 find "$root" -type f ! -name MANIFEST.tsv -printf '%P\n' | sort >"$actual"
 cmp -s "$listed" "$actual" || { printf 'builtins fixture missing/unlisted file\n' >&2; exit 1; }
+if [[ -d "$workspace_root/tools/miso-engine-builtins-fixture" ]]; then
+    cargo run --quiet --manifest-path "$workspace_root/tools/miso-engine-builtins-fixture/Cargo.toml" \
+        -- --check "$(pwd)/$root" || {
+        printf 'builtins fixture expected-output check failed\n' >&2
+        exit 1
+    }
+fi
 printf 'builtins fixtures: ok (%s files)\n' "$(wc -l <"$actual" | tr -d ' ')"

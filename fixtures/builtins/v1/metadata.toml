@@ -1,0 +1,7 @@
+fixture_schema = 1
+producer = "miso-engine-builtins-fixture"
+production_pcm = "miso-engine-builtins scalar f32, planar L then R"
+independent_response_oracle = "miso-engine-dsp-reference::rbj_butterworth_magnitude_db"
+oracle_dependency_rule = "miso-engine-dsp-reference has no production-builtin dependency"
+launch_rates_hz = [44100, 48000, 88200, 96000]
+quanta_frames = [1, 127, 128, 255, 1024]
