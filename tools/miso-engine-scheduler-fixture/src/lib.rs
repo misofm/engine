@@ -260,29 +260,29 @@ mod native {
         plan_id: u64,
         transcript_capacity: usize,
     ) -> Result<PreparedQ128Fixture, String> {
-        prepare_q128_fixture_with_completion_acceptance_spins(
+        prepare_q128_fixture_with_completion_acceptance_order(
             sample_rate_hz,
             render_lanes,
             render_mode,
             plan_id,
             transcript_capacity,
-            [0; 3],
+            [0, 1, 2],
         )
     }
 
-    /// Prepare the q128 graph with fixed test-only worker-completion acceptance delays.
+    /// Prepare the q128 graph with a fixed test-only worker-completion acceptance order.
     ///
-    /// The delays are carried by the prepared scheduler and apply only after a real completion
-    /// parcel has been dequeued by the coordinator. They are unavailable from normal engine
-    /// production builds and do not alter graph execution, reduction, or observation ordering.
+    /// The order is carried by the prepared scheduler and controls which real SPSC completion
+    /// parcel the coordinator dequeues next. It is unavailable from normal engine production
+    /// builds and does not alter graph execution, reduction, or observation ordering.
     #[doc(hidden)]
-    pub fn prepare_q128_fixture_with_completion_acceptance_spins(
+    pub fn prepare_q128_fixture_with_completion_acceptance_order(
         sample_rate_hz: u32,
         render_lanes: usize,
         render_mode: Q128RenderMode,
         plan_id: u64,
         transcript_capacity: usize,
-        completion_acceptance_spins: [u16; 3],
+        completion_acceptance_order: [u8; 3],
     ) -> Result<PreparedQ128Fixture, String> {
         prepare_fixture_with_track_count(
             sample_rate_hz,
@@ -290,7 +290,7 @@ mod native {
             render_mode,
             plan_id,
             transcript_capacity,
-            completion_acceptance_spins,
+            completion_acceptance_order,
             Q128_TRACK_COUNT,
             1 << 29,
             true,
@@ -312,7 +312,7 @@ mod native {
             Q128RenderMode::DependencyWaves,
             plan_id,
             0,
-            [0; 3],
+            [0, 1, 2],
             track_count,
             maximum_retained_bytes,
             false,
@@ -326,7 +326,7 @@ mod native {
         render_mode: Q128RenderMode,
         plan_id: u64,
         transcript_capacity: usize,
-        completion_acceptance_spins: [u16; 3],
+        completion_acceptance_order: [u8; 3],
         track_count: usize,
         maximum_retained_bytes: usize,
         require_q128_bank_and_pdc: bool,
@@ -526,7 +526,7 @@ mod native {
                         NonZeroUsize::new(render_lanes).ok_or_else(|| "q128.lanes".to_owned())?,
                         true,
                     )
-                    .with_test_completion_acceptance_spins(completion_acceptance_spins),
+                    .with_test_completion_acceptance_order(completion_acceptance_order),
                     maximum_retained_bytes,
                 },
             )
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(perturbations.len(), 32);
         assert_eq!(
             perturbation_transcript_hash(&perturbations),
-            0x48b7_2da8_4e0c_35e7,
+            0x59b0_0a34_1747_bb7d,
             "frozen completion-acceptance perturbation transcript"
         );
 
@@ -738,14 +738,15 @@ mod tests {
         let baseline_observers = baseline.observer_records();
         let baseline_pdc = baseline.pdc_samples;
 
-        for (index, spins) in perturbations.into_iter().enumerate() {
-            let mut perturbed = prepare_q128_fixture_with_completion_acceptance_spins(
+        for (index, order) in perturbations.into_iter().enumerate() {
+            assert_ne!(order, [0, 1, 2], "perturbation {index} is canonical");
+            let mut perturbed = prepare_q128_fixture_with_completion_acceptance_order(
                 48_000,
                 4,
                 Q128RenderMode::DependencyWaves,
                 39_200 + index as u64,
                 BLOCKS as usize * OBSERVERS_PER_BLOCK,
-                spins,
+                order,
             )
             .unwrap_or_else(|error| {
                 panic!("perturbation {index} fixture preparation failed: {error}")
@@ -855,7 +856,7 @@ mod tests {
             "frozen q128 native wave/unit/partition transcript"
         );
         assert_eq!(
-            aggregate_hash, 0xb487_421b_d0a3_a204,
+            aggregate_hash, 0xccbc_40a5_15d0_4b5e,
             "frozen exact-100 preparation matrix transcript"
         );
         let reference = reference.expect("one twelve-track preparation");
@@ -965,24 +966,24 @@ mod tests {
         hash
     }
 
-    fn seeded_completion_acceptance_perturbations() -> [[u16; 3]; 32] {
+    fn seeded_completion_acceptance_perturbations() -> [[u8; 3]; 32] {
+        const NONCANONICAL_ORDERS: [[u8; 3]; 5] =
+            [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
         let mut state = PERTURBATION_SEED;
         core::array::from_fn(|_| {
-            core::array::from_fn(|_| {
-                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                let mut word = state;
-                word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                word ^= word >> 31;
-                ((word & 0x3f) as u16).saturating_add(1)
-            })
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut word = state;
+            word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            word ^= word >> 31;
+            NONCANONICAL_ORDERS[word as usize % NONCANONICAL_ORDERS.len()]
         })
     }
 
-    fn perturbation_transcript_hash(perturbations: &[[u16; 3]; 32]) -> u64 {
+    fn perturbation_transcript_hash(perturbations: &[[u8; 3]; 32]) -> u64 {
         perturbations
             .iter()
-            .flat_map(|spins| spins.iter().flat_map(|spin| spin.to_le_bytes()))
+            .flat_map(|order| order.iter().copied())
             .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
             })

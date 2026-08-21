@@ -15,11 +15,10 @@ pub struct NativeSchedulerConfigV1 {
     pub render_lanes: NonZeroUsize,
     /// Host policy permission to arm native auxiliary workers.
     pub enabled: bool,
-    /// Fixed test-only coordinator delays applied after each worker completion is dequeued and
-    /// before its parcel is accepted back into the canonical partition. This field is absent from
-    /// normal production builds.
+    /// Fixed test-only order in which the coordinator dequeues and accepts real worker
+    /// completions. This field is absent from normal production builds.
     #[cfg(feature = "test-support")]
-    test_completion_acceptance_spins: [u16; 3],
+    test_completion_acceptance_order: [u16; 3],
     /// Test-only bounded ownership-protocol fault selected before the prepared scheduler is
     /// published. This field is absent from normal production builds.
     #[cfg(feature = "test-support")]
@@ -90,22 +89,23 @@ impl NativeSchedulerConfigV1 {
             render_lanes,
             enabled,
             #[cfg(feature = "test-support")]
-            test_completion_acceptance_spins: [0; 3],
+            test_completion_acceptance_order: [0, 1, 2],
             #[cfg(feature = "test-support")]
             test_protocol_injection: SchedulerTestProtocolInjectionV1::None,
         }
     }
 
-    /// Configure bounded test-only completion-acceptance delays.
+    /// Configure a bounded test-only worker-completion acceptance order.
     ///
     /// The test configuration is compiled only with the scheduler's `test-support` feature. It
-    /// delays coordinator acceptance after a real SPSC completion has returned; it cannot affect
-    /// worker execution, parcel ownership, arithmetic, or observer order.
+    /// selects only the order in which real SPSC completion parcels are dequeued and recovered;
+    /// it cannot affect worker execution, parcel ownership, arithmetic, or observer order. The
+    /// supplied values must be a permutation of the first three zero-based worker IDs.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     #[must_use]
-    pub const fn with_test_completion_acceptance_spins(mut self, spins: [u16; 3]) -> Self {
-        self.test_completion_acceptance_spins = spins;
+    pub const fn with_test_completion_acceptance_order(mut self, order: [u8; 3]) -> Self {
+        self.test_completion_acceptance_order = [order[0] as u16, order[1] as u16, order[2] as u16];
         self
     }
 
@@ -473,6 +473,14 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
     ) -> usize {
         self.platform.copy_worker_audit_snapshots(output)
     }
+
+    /// Return the actual partition-completion acceptance order from the last successful wave.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_last_completion_acceptance_order(&self) -> ([u8; 3], u8) {
+        self.platform.test_last_completion_acceptance_order()
+    }
 }
 
 impl<J: NativeSchedulerJobV1> Drop for NativeSchedulerV1<J> {
@@ -550,7 +558,11 @@ mod platform {
         parallel: bool,
         retained_queue_bytes: usize,
         #[cfg(feature = "test-support")]
-        completion_acceptance_spins: [u16; 3],
+        completion_acceptance_order: [u16; 3],
+        #[cfg(feature = "test-support")]
+        last_completion_acceptance_order: [u8; 3],
+        #[cfg(feature = "test-support")]
+        last_completion_acceptance_count: u8,
         #[cfg(feature = "test-support")]
         protocol_injection: SchedulerTestProtocolInjectionV1,
     }
@@ -567,12 +579,20 @@ mod platform {
                     parallel: false,
                     retained_queue_bytes: 0,
                     #[cfg(feature = "test-support")]
-                    completion_acceptance_spins: config.test_completion_acceptance_spins,
+                    completion_acceptance_order: config.test_completion_acceptance_order,
+                    #[cfg(feature = "test-support")]
+                    last_completion_acceptance_order: [0; 3],
+                    #[cfg(feature = "test-support")]
+                    last_completion_acceptance_count: 0,
                     #[cfg(feature = "test-support")]
                     protocol_injection: config.test_protocol_injection,
                 });
             }
             let worker_count = config.render_lanes.get() - 1;
+            #[cfg(feature = "test-support")]
+            if !test_completion_acceptance_order_is_valid(config.test_completion_acceptance_order) {
+                return Err(SchedulerPrepareErrorV1::InvalidPartition);
+            }
             let command_bytes = miso_engine_core::realtime::bounded_spsc_retained_payload::<
                 WorkerMessage<J>,
             >(NonZeroUsize::new(1).expect("nonzero queue capacity"))
@@ -663,7 +683,11 @@ mod platform {
                 parallel: true,
                 retained_queue_bytes,
                 #[cfg(feature = "test-support")]
-                completion_acceptance_spins: config.test_completion_acceptance_spins,
+                completion_acceptance_order: config.test_completion_acceptance_order,
+                #[cfg(feature = "test-support")]
+                last_completion_acceptance_order: [0; 3],
+                #[cfg(feature = "test-support")]
+                last_completion_acceptance_count: 0,
                 #[cfg(feature = "test-support")]
                 protocol_injection: config.test_protocol_injection,
             })
@@ -688,7 +712,7 @@ mod platform {
             let mut report = SchedulerDispatchReportV1::default();
             let mut issued = 0_usize;
             #[cfg(feature = "test-support")]
-            let completion_acceptance_spins = self.completion_acceptance_spins;
+            let completion_acceptance_order = self.completion_acceptance_order;
             for partition_index in 1..wave.partition_count() {
                 #[cfg(feature = "test-support")]
                 if self
@@ -702,7 +726,7 @@ mod platform {
                         generation,
                         wave_id,
                         &mut report,
-                        completion_acceptance_spins,
+                        completion_acceptance_order,
                     );
                     if let Some(worker_id) = recovered.mismatch {
                         return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -720,7 +744,7 @@ mod platform {
                         wave_id,
                         &mut report,
                         #[cfg(feature = "test-support")]
-                        completion_acceptance_spins,
+                        completion_acceptance_order,
                     );
                     if let Some(worker_id) = recovered.mismatch {
                         return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -747,7 +771,7 @@ mod platform {
                             wave_id,
                             &mut report,
                             #[cfg(feature = "test-support")]
-                            completion_acceptance_spins,
+                            completion_acceptance_order,
                         );
                         if let Some(worker_id) = recovered.mismatch {
                             return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -765,7 +789,7 @@ mod platform {
                         wave_id,
                         &mut report,
                         #[cfg(feature = "test-support")]
-                        completion_acceptance_spins,
+                        completion_acceptance_order,
                     );
                     if let Some(worker_id) = recovered.mismatch {
                         return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -786,7 +810,7 @@ mod platform {
                     wave_id,
                     &mut report,
                     #[cfg(feature = "test-support")]
-                    completion_acceptance_spins,
+                    completion_acceptance_order,
                 );
                 if let Some(worker_id) = recovered.mismatch {
                     return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
@@ -804,8 +828,13 @@ mod platform {
                 wave_id,
                 &mut report,
                 #[cfg(feature = "test-support")]
-                completion_acceptance_spins,
+                completion_acceptance_order,
             );
+            #[cfg(feature = "test-support")]
+            {
+                self.last_completion_acceptance_order = recovered.test_acceptance_order;
+                self.last_completion_acceptance_count = recovered.test_acceptance_count;
+            }
             if let Some(worker_id) = recovered.mismatch {
                 return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
             }
@@ -867,6 +896,14 @@ mod platform {
             }
             count
         }
+
+        #[cfg(feature = "test-support")]
+        pub(super) const fn test_last_completion_acceptance_order(&self) -> ([u8; 3], u8) {
+            (
+                self.last_completion_acceptance_order,
+                self.last_completion_acceptance_count,
+            )
+        }
     }
 
     fn execute_sequential<J: NativeSchedulerJobV1>(
@@ -906,6 +943,10 @@ mod platform {
     struct Recovery<E> {
         mismatch: Option<usize>,
         first_error: Option<SchedulerJobFailureV1<E>>,
+        #[cfg(feature = "test-support")]
+        test_acceptance_order: [u8; 3],
+        #[cfg(feature = "test-support")]
+        test_acceptance_count: u8,
     }
 
     fn recover_issued<J: NativeSchedulerJobV1>(
@@ -915,11 +956,24 @@ mod platform {
         generation: u64,
         wave_id: u64,
         report: &mut SchedulerDispatchReportV1,
-        #[cfg(feature = "test-support")] completion_acceptance_spins: [u16; 3],
+        #[cfg(feature = "test-support")] completion_acceptance_order: [u16; 3],
     ) -> Recovery<J::Error> {
         let mut first_error = None;
         let mut mismatch = None;
-        for (worker_id, worker) in workers.iter_mut().enumerate().take(issued) {
+        #[cfg(feature = "test-support")]
+        let mut test_acceptance_order = [0_u8; 3];
+        #[cfg(feature = "test-support")]
+        let mut test_acceptance_count = 0_u8;
+        for acceptance_index in 0..issued {
+            #[cfg(feature = "test-support")]
+            let worker_id = test_completion_acceptance_worker_id(
+                completion_acceptance_order,
+                issued,
+                acceptance_index,
+            );
+            #[cfg(not(feature = "test-support"))]
+            let worker_id = acceptance_index;
+            let worker = &mut workers[worker_id];
             let completion = loop {
                 if let Ok(completion) = worker.completions.try_pop() {
                     break completion;
@@ -927,12 +981,11 @@ mod platform {
                 core::hint::spin_loop();
             };
             #[cfg(feature = "test-support")]
-            delay_completion_acceptance(
-                completion_acceptance_spins
-                    .get(worker_id)
-                    .copied()
-                    .unwrap_or(0),
-            );
+            if usize::from(test_acceptance_count) < test_acceptance_order.len() {
+                let index = usize::from(test_acceptance_count);
+                test_acceptance_order[index] = (worker_id + 1) as u8;
+                test_acceptance_count = test_acceptance_count.saturating_add(1);
+            }
             let expected_partition = worker_id + 1;
             if completion.generation != generation
                 || completion.wave_id != wave_id
@@ -946,26 +999,61 @@ mod platform {
             }
             worker.audit = completion.audit;
             report.worker_completions = report.worker_completions.saturating_add(1);
-            if first_error.is_none()
-                && let Err(error) = completion.result
-            {
-                first_error = Some(SchedulerJobFailureV1 {
-                    partition_id: expected_partition,
-                    error,
-                });
+            if let Err(error) = completion.result {
+                let replaces =
+                    first_error
+                        .as_ref()
+                        .is_none_or(|current: &SchedulerJobFailureV1<J::Error>| {
+                            expected_partition < current.partition_id
+                        });
+                if replaces {
+                    first_error = Some(SchedulerJobFailureV1 {
+                        partition_id: expected_partition,
+                        error,
+                    });
+                }
             }
         }
         Recovery {
             mismatch,
             first_error,
+            #[cfg(feature = "test-support")]
+            test_acceptance_order,
+            #[cfg(feature = "test-support")]
+            test_acceptance_count,
         }
     }
 
     #[cfg(feature = "test-support")]
-    fn delay_completion_acceptance(spins: u16) {
-        for _ in 0..spins {
-            core::hint::spin_loop();
+    const fn test_completion_acceptance_order_is_valid(order: [u16; 3]) -> bool {
+        let mut seen = 0_u8;
+        let mut index = 0;
+        while index < order.len() {
+            let worker = order[index];
+            if worker >= 3 || seen & (1 << worker) != 0 {
+                return false;
+            }
+            seen |= 1 << worker;
+            index += 1;
         }
+        seen == 0b111
+    }
+
+    #[cfg(feature = "test-support")]
+    fn test_completion_acceptance_worker_id(
+        order: [u16; 3],
+        issued: usize,
+        acceptance_index: usize,
+    ) -> usize {
+        if issued > order.len() && acceptance_index >= order.len() {
+            return acceptance_index;
+        }
+        order
+            .into_iter()
+            .map(usize::from)
+            .filter(|worker_id| *worker_id < issued)
+            .nth(acceptance_index)
+            .expect("validated test completion acceptance permutation")
     }
 
     fn worker_loop<J: NativeSchedulerJobV1>(
@@ -1333,18 +1421,70 @@ mod tests {
         let audit = Arc::new(ProtocolAudit::new());
         let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
         let mut scheduler =
-            protocol_scheduler(SchedulerTestProtocolInjectionV1::CommandQueueFull { worker_id: 0 });
+            protocol_scheduler(SchedulerTestProtocolInjectionV1::CommandQueueFull { worker_id: 2 });
 
         assert!(matches!(
             scheduler.render_wave(&mut wave),
-            Err(SchedulerDispatchErrorV1::CommandQueueFull { worker_id: 0 })
+            Err(SchedulerDispatchErrorV1::CommandQueueFull { worker_id: 2 })
         ));
         assert!(wave.all_recovered());
-        audit.assert_counts([0; 4], [0; 4]);
+        audit.assert_counts([0, 1, 1, 0], [0; 4]);
 
         drop(scheduler);
         drop(wave);
-        audit.assert_counts([0; 4], [1; 4]);
+        audit.assert_counts([0, 1, 1, 0], [1; 4]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_completion_acceptance_order_genuinely_reorders_real_parcels() {
+        for order in [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let audit = Arc::new(ProtocolAudit::new());
+            let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
+            let mut scheduler = NativeSchedulerV1::prepare(
+                NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true)
+                    .with_test_completion_acceptance_order(order),
+                4,
+                41,
+            )
+            .expect("parallel completion-order scheduler");
+
+            let report = scheduler
+                .render_wave(&mut wave)
+                .expect("completion-order wave");
+            assert_eq!(report.worker_commands, 3);
+            assert_eq!(report.worker_completions, 3);
+            let (accepted, accepted_count) = scheduler.test_last_completion_acceptance_order();
+            assert_eq!(accepted_count, 3);
+            assert_eq!(
+                accepted,
+                order.map(|worker_id| worker_id + 1),
+                "reported partition acceptance order must match actual dequeues"
+            );
+            assert_ne!(accepted, [1, 2, 3]);
+            assert!(wave.all_recovered());
+            audit.assert_counts([1; 4], [0; 4]);
+
+            drop(scheduler);
+            drop(wave);
+            audit.assert_counts([1; 4], [1; 4]);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_completion_acceptance_order_rejects_invalid_permutations_before_startup() {
+        for order in [[0, 0, 1], [0, 1, 3]] {
+            assert!(matches!(
+                NativeSchedulerV1::<ProtocolJob>::prepare(
+                    NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true,)
+                        .with_test_completion_acceptance_order(order),
+                    4,
+                    41,
+                ),
+                Err(SchedulerPrepareErrorV1::InvalidPartition)
+            ));
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -1394,7 +1534,13 @@ mod tests {
     fn test_protocol_returns_worker_errors_in_stable_partition_order() {
         let audit = Arc::new(ProtocolAudit::new());
         let mut wave = protocol_wave(Arc::clone(&audit), [false, true, true, false]);
-        let mut scheduler = protocol_scheduler(SchedulerTestProtocolInjectionV1::None);
+        let mut scheduler = NativeSchedulerV1::prepare(
+            NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true)
+                .with_test_completion_acceptance_order([2, 1, 0]),
+            4,
+            41,
+        )
+        .expect("parallel protocol scheduler");
 
         match scheduler.render_wave(&mut wave) {
             Err(SchedulerDispatchErrorV1::Job(error)) => {
