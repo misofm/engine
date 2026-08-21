@@ -54,7 +54,8 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Launch true-peak limiter bank and graph closure
 - Launch true-peak limiter qualification, realtime audit, and benchmark
 - Dynamic EQ
-- Multiband compressor
+- Launch two-band LR4 multiband compressor
+- Launch multiband compressor qualification, realtime audit, and benchmark
 - Antialiased saturator/clipper
 - Transient shaper
 - Dual-mono/stereo delay

@@ -136,6 +136,15 @@ one-warmup/two-round descriptive benchmark and audition/listening handoff. Issue
 allow one Terra attempt plus one Sol correction. Their timed invocation counts start at zero;
 Issue 049 gates only release qualification Issue 026.
 
+Issue 018, **Launch two-band LR4 multiband compressor**, owns only the fixed Normal-quality
+two-band LR4 product: one accepted conditioned-TPT crossover, two Issue-013-style compressors,
+scalar/W4/W8 execution and representative registry/graph/PDC closure. Issue 051, **Launch
+multiband compressor qualification, realtime audit, and benchmark**, follows 018 and owns expanded
+corpus/matrices, nonlaunch three-to-eight-band/topology research, long rows, the 100,000-render
+audit, targets/instructions, the sole eventual one-warmup/two-round descriptive benchmark and
+audition/listening handoff. Both permit one Terra attempt plus one Sol correction. Their timed
+invocation counts start at zero; Issue 051 gates only release qualification Issue 026.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
