@@ -168,6 +168,19 @@ pub fn bounded_spsc<T: Copy + Send + 'static>(
 ) -> Result<(Producer<T>, Consumer<T>), SpscError> {
     bounded_spsc_internal(capacity, generation)
 }
+/// Create a native bounded SPSC queue that transfers move-only values.
+///
+/// The queue has the same acquire/release publication protocol and endpoint ownership invariant
+/// as [`bounded_spsc`].  Unlike that convenience constructor, its values need not be `Copy`:
+/// a full push returns the original value to its sole producer, and a successful pop transfers
+/// the initialized slot to its sole consumer exactly once.  This is the only public move-only
+/// extension of the core SPSC boundary; scheduler workers use it for prepared parcels.
+pub fn bounded_spsc_move<T: Send + 'static>(
+    capacity: NonZeroUsize,
+    generation: QueueGeneration,
+) -> Result<(Producer<T>, Consumer<T>), SpscError> {
+    bounded_spsc_internal(capacity, generation)
+}
 /// Internal move-only variant for plan ownership; it is not public API.
 pub(crate) fn bounded_spsc_internal<T: Send + 'static>(
     capacity: NonZeroUsize,

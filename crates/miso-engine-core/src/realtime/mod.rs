@@ -28,7 +28,7 @@ pub use plan_exchange::{
 };
 pub use spsc::{
     Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
-    SpscRetainedPayload, bounded_spsc, bounded_spsc_retained_payload,
+    SpscRetainedPayload, bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
 };
 
 #[cfg(test)]
@@ -98,6 +98,21 @@ mod tests {
         assert_eq!(producer.success_count(), 3);
         assert_eq!(producer.full_count(), 1);
         assert_eq!(consumer.success_count(), 3);
+    }
+
+    #[test]
+    fn move_only_spsc_preserves_full_value_and_drops_once_after_transfer() {
+        #[derive(Debug)]
+        struct MoveOnly(u32);
+        let (mut producer, mut consumer) =
+            bounded_spsc_move::<MoveOnly>(NonZeroUsize::new(1).expect("one"), QueueGeneration(10))
+                .expect("queue");
+        producer.try_push(MoveOnly(7)).expect("first transfer");
+        let full = producer
+            .try_push(MoveOnly(9))
+            .expect_err("full queue returns move-only item");
+        assert_eq!(full.value.0, 9);
+        assert_eq!(consumer.try_pop().expect("single consumer transfer").0, 7);
     }
 
     #[test]

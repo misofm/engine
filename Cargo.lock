@@ -361,6 +361,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-native-scheduler"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+]
+
+[[package]]
 name = "miso-engine-protocol"
 version = "0.1.0"
 dependencies = [
