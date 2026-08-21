@@ -213,3 +213,31 @@ That single invocation owns one warmup and two measured rounds. Any workload or 
 consumes the authorization; preserve raw/disposition bytes and do not retry. Final Issue-038 PASS
 still requires the six accepted records, byte-identical raw/accepted hashes, PASS disposition and
 remote evidence synchronization.
+
+## Final exactly-once benchmark result (2026-08-21)
+
+**PASS.** Root ran `bash scripts/preflight-rack-benchmark.sh` on clean commit `ccd3967`; it passed
+with `workload_launches=0`, one warmup, two measured rounds and six required records. Root then
+invoked `bash scripts/run-rack-benchmark.sh` exactly once. The runner exited zero; no retry or
+tuning occurred. Final timed invocation count is **1**.
+
+The accepted artifact contains exactly six records and is 10,978 bytes. Raw and accepted JSONL are
+byte-identical with SHA-256
+`7abce9d0532c5fbc9326a4f03b76be6e50ccd2319406ee9245165ad756f37e07`; the PASS disposition is
+715 bytes with SHA-256 `1ac6dd71f26f9573076143bd0e610be0465008e4faea3504c4868f6efaef3c3f`.
+The frozen aggregate validator passes the accepted bytes. Every record reports zero render errors,
+allocations, deallocations and forbidden operations, stable workload-specific input/output hashes,
+and complete host/build metadata.
+
+Nearest-rank descriptive results in `ns_per_frame` were:
+
+| Workload | Backend | Round 1 p50 / p95 / p99 | Round 2 p50 / p95 / p99 |
+| --- | --- | --- | --- |
+| eight independent scalar TPT tracks | Scalar | 100 / 103 / 200 | 100 / 101 / 201 |
+| one eight-track bank | X86Avx2Fma | 138 / 138 / 276 | 138 / 138 / 147 |
+| sealed mixed twelve-track graph | X86Avx2Fma | 781 / 810 / 822 | 805 / 817 / 820 |
+
+These are rough host-specific observations on an AMD Ryzen 7 9700X under the `powersave` governor
+with uncontrolled background load. They have no pass/fail threshold and establish no speedup
+claim. In this harness the bank p50 is slower than eight independent scalar chains; optimization is
+therefore deferred to the weekly performance workflow rather than reopening Issue 038.
