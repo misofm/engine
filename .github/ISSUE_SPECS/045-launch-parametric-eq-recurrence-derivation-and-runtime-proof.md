@@ -96,3 +96,19 @@ production cross-target work belongs to a later implementation issue after selec
 Issue-042/044 hashes and failures; citations/derivations; f64-equivalence and retained-f32 matrices;
 storage/operation tables; deterministic hashes; Terra and Sol verdicts; production no-diff proof;
 and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 — phase-one harness checkpoint (partial)
+
+Added a test-boundary-only, ignored f64 derivation scaffold in
+`crates/miso-engine-dsp-reference/src/parametric_eq_recurrence_proof.rs`. It fixes the frozen
+candidate order and 1,488-row grid, reconstructs L1/D2/B3 back to normalized RBJ coefficients,
+uses deterministic partial-pivot Lyapunov solves plus canonical balanced-B3 eigenvector signs, and
+contains the required 4,096-sample zero-state impulse comparison against the independent f64 DFI
+oracle. The test is deliberately ignored until it can be extended into the one permitted complete
+four-phase invocation; no candidate subset was executed or combined with later evidence.
+
+Checkpoint gates: `cargo fmt --check -p miso-engine-dsp-reference` PASS;
+`cargo test --locked -p miso-engine-dsp-reference --no-run` PASS;
+`cargo clippy --locked -p miso-engine-dsp-reference --all-targets -- -D warnings` PASS.
+Matrix invocations: 0. Timed benchmark invocations: 0. No production or Cargo-manifest change.
+Terra verdict: PARTIAL — compile-green phase-one harness only; no numerical selection result.

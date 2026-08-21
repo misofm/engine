@@ -20,6 +20,8 @@ mod transient_shaper;
 #[cfg(test)]
 mod parametric_eq_candidates;
 #[cfg(test)]
+mod parametric_eq_recurrence_proof;
+#[cfg(test)]
 mod parametric_eq_time_domain_candidates;
 
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
