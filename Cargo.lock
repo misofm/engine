@@ -172,6 +172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-builtins-audit"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-builtins",
+ "miso-engine-core",
+]
+
+[[package]]
 name = "miso-engine-builtins-compiler"
 version = "0.1.0"
 dependencies = [

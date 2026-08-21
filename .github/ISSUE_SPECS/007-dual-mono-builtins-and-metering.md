@@ -6,7 +6,7 @@ Implement the fixed per-track processing contract and objective meters before us
 
 ## Context
 
-Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; 176,400, 192,000, 352,800, and 384,000 Hz are deferred extended-rate support and are not issue-007 acceptance gates. Source/engine mismatches have no implicit SRC. Output is PCM.
+Engine V2 is a greenfield Rust, agent-first mixing/mastering engine. Never inspect, copy, benchmark, or inherit V1/legacy work. The realtime plane exclusively owns a preallocated `PreparedRenderPlan`: graph/schedule/capacities are immutable while its DSP state is mutated only through exclusive render ownership. Render performs no allocation/free, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded work; displaced plans are retired and freed off-thread. There is no compiled track limit. Audio is planar `f32`; dual-mono L/R state and parameters are independent unless an explicit link mode or smoothed 2x2 matrix declares otherwise. Launch-supported session/render rates are exactly 44,100, 48,000, 88,200, and 96,000 Hz; 176,400, 192,000, 352,800, and 384,000 Hz are extended compatibility evidence only and are not issue-007 acceptance gates. Source/engine mismatches have no implicit SRC. Output is PCM.
 
 This issue is independently implementable only after its exact dependencies are complete. Its change must follow the Sol-approved brief → Terra attempt 1 with evidence → Sol adversarial review workflow; Sol may make at most two further revisions, then the work must be rescoped/rebriefed rather than weakening gates.
 
@@ -38,7 +38,7 @@ Dual mono never aliases L and R state. Matrix changes must smooth and remain fin
 
 ## Acceptance gates with objective measurements
 
-Polarity/trim/fader impulses match analytic gain within 1e-6; conventional pan/balance adapters match their documented matrix and pan law within 1e-6; HPF/LPF analytic, impulse, and sustained-signal responses pass the realization-aware gates frozen below at every required rate; matrix ramp has no NaN/Inf and obeys its frozen per-sample slew bound; L-only input never changes R absent an explicit non-diagonal matrix; render allocation count is 0.
+Polarity/trim/fader impulses match analytic gain within 1e-6; conventional pan/balance adapters match their documented matrix and pan law within 1e-6; HPF/LPF analytic, impulse, and sustained-signal responses pass the realization-aware gates frozen below at all four launch rates; matrix ramp has no NaN/Inf and obeys its frozen per-sample slew bound; L-only input never changes R absent an explicit non-diagonal matrix; render allocation count is 0.
 
 ## Target matrix
 
@@ -202,9 +202,11 @@ Production HPF/LPF now uses the rescope's `f32` non-fused TPT/SVF operation grap
 off-render design, cast-coefficient transition/Jury validation, 10-Hz enabled-cutoff floor, and
 pairwise state recovery. The former TDF-II sustained-sine failure is not retained as a production
 gate. A separate f64 state-space oracle built from the exact cast TPT coefficient bits compares
-against its independently derived RBJ transfer response across every required rate, section,
-cutoff, and prescribed analytic probes; the current `0.005 dB` analytic gate passes. The existing
-all-rate impulse/sweep and bounded mutation tests also pass under the new realization.
+against its independently derived RBJ transfer response across every then-required rate, section,
+cutoff, and prescribed analytic probe; the current `0.005 dB` analytic gate passes. This is
+historical all-eight-rate evidence: issue 032 makes the higher four observations informational
+compatibility probes. The existing all-rate impulse/sweep and bounded mutation tests also pass
+under the new realization.
 
 This is not issue completion: the full one-second impulse DFT, coherent sustained-signal,
 manifest fixtures, public API/resource/meter corrections, allocation/realtime audits, listening,
@@ -395,3 +397,27 @@ focused builtins/compiler test suite (15 + 3 tests). Allocation/forbidden-operat
 65,537-track builtin preparation, full fixture corpus, sealed-artifact equality, workspace/target
 evidence, listening, and the final benchmark remain open. Benchmark invocation count remains
 **0**.
+
+## Scale and realtime-audit Terra evidence (2026-08-21; partial)
+
+The new builtins compiler scale integration test prepares 65,537 independently named tracks with
+no meters and no fixed-track ceiling. It produces exactly three prepared processors and one tail
+record per track, then repeats preparation with a state cap one byte below the measured retained
+payload and receives only `builtin.resource.limit`. This is a configured-resource rejection, not
+a hidden track limit.
+
+`miso-engine-builtins-audit` prepares a scalar chain and seven bounded meter accumulators off
+render, then runs one million 128-frame full-chain calls inside the realtime allocator guard. The
+first window succeeds for each observer and all following windows exercise bounded queue-full/drop
+behavior. The release record was `blocks=1000000`, `observers=7`, `queue_success_windows=7`,
+`queue_full_windows=6999993`, and zero allocations, deallocations, locks, logs, file I/O, network
+I/O, syscalls, and total violations. The left/right backing addresses were unchanged. The strace
+gate found no system call between the explicit render markers. Deliberate probes for allocation,
+deallocation, lock, log, file I/O, network I/O, and syscall each terminated as required, proving
+the detector path is armed.
+
+PASS: `cargo test -p miso-engine-builtins-compiler --test scale`, release
+`miso-engine-builtins-audit --blocks 1000000`, `trace-builtins-audit.sh 1000000`, and
+`test-builtins-audit-probes.sh`; focused warning-denied Clippy, fixture/policy checks and mutation
+checks also pass. This is still not a whole-render-plan/swap audit of the sealed graph artifact,
+nor full workspace/target/listening qualification. Benchmark invocation count remains **0**.

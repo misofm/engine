@@ -1000,6 +1000,10 @@ impl MeterAccumulator {
             self.dropped = 0;
         }
     }
+    #[must_use]
+    pub const fn dropped_snapshots(&self) -> u64 {
+        self.dropped
+    }
     fn discontinuity(&mut self, first_sample: u64) {
         self.start = Some(first_sample);
         self.frames = 0;
@@ -1495,7 +1499,7 @@ mod tests {
                 rl: fraction(16) * 2.0 - 1.0,
                 rr: fraction(24) * 2.0 - 1.0,
             };
-            let rate = [44_100, 48_000, 88_200, 96_000][(state as usize) & 3];
+            let rate = LAUNCH_SAMPLE_RATES[(state as usize) & 3].0;
             let mut chain = BuiltinChain::new(
                 rate,
                 BuiltinParameters {
