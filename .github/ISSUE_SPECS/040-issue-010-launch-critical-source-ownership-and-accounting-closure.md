@@ -152,3 +152,36 @@ Candidate/source hashes; public API diff; lifecycle/drop/join/retirement transcr
 sanitation counters; enumerated retained-allocation report and exact/one-below cap results;
 representative rate/seek/fan-out/rejection transcripts; realtime/workspace/policy/target results;
 explicit `timed_benchmark_invocations=0`; and Terra plus final Sol PASS/FAIL verdicts.
+
+## Terra attempt 1 evidence (2026-08-21)
+
+**Status: FAIL — hold for Sol review/correction.** The focused source checkpoint is green, but the
+required full locked workspace test gate is not: `miso-engine-parametric-eq` fails
+`production_coefficients_and_analytic_response_match_the_independent_f64_oracle` at `LowShelf`,
+44,100 Hz, 10 Hz, probe 0 (`-23.457245778509655` versus
+`-23.999999996345114`). This is outside Issue 040's source/graph boundary and was not modified.
+
+- Public ownership surface: `prepare_native_source` now returns opaque `PreparedNativeSource`;
+  its only graph conversion transfers the consumer and crate-private uncloneable join owner into
+  `SourceGraphSource`. A `compile_fail` doctest proves `NativeSourceWorker` is not public.
+  Source-set/retired-plan lifecycle tests prove the worker remains alive until off-render source
+  set or retired-plan destruction; controllers receive `Stopped` afterward.
+- Source reports enumerate ring, fixed decoder/staging, worker command/event queues, shared
+  telemetry payload, graph source entries/mappings/claims/driver/planes/stable-ID payloads, and
+  controller records. PCM remains separately session charged. The focused retained-layout grid
+  covers 1, 4 and 65,537 count arithmetic without duration-sized PCM; exact combined cap accepts
+  and one-byte-short rejects before publication.
+- Product tests pass for producer/consumer frozen shapes, native sanitation and host zero
+  sanitation, all four matching launch rates, 192 kHz mismatch rejection, delayed-old-generation
+  seek discard, four-channel/three-track sequential plus native-fallback fan-out, and transactional
+  missing/extra/duplicate/ordinary-overlap source claim rejection.
+- PASS: `cargo test -p miso-engine-source` (24 unit tests plus one API compile-fail doctest),
+  focused fan-out/claim test, source Clippy with warnings denied, locked workspace check, workspace
+  Clippy with warnings denied, warning-denied workspace rustdoc, workspace/realtime/graph policy
+  checks and mutation tests, Wasm no-atomic check, and source+graph checks for Android ARM64, iOS
+  ARM64, Wasm scalar and Wasm `+simd128`.
+- FAIL: `cargo test --workspace --locked` only for the parametric-EQ oracle failure above. The
+  existing source render audit was not re-run in this checkpoint to avoid Issue 041's expanded
+  audit matrix; no benchmark command or timing command was run.
+
+`timed_benchmark_invocations=0`.

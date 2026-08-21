@@ -4,7 +4,7 @@
 //! the opened reader, decoder, prepared source producer, and all decoded staging storage; it never
 //! shares those mutable objects with a render worker.
 
-use core::{cell::Cell, marker::PhantomData, num::NonZeroUsize};
+use core::{alloc::Layout, cell::Cell, marker::PhantomData, mem::size_of, num::NonZeroUsize};
 use std::{
     io::{Read, Seek},
     thread::{self, JoinHandle},
@@ -105,6 +105,8 @@ pub struct NativeSourceResourceReport {
     pub worker_control_queue_bytes: u64,
     /// Exact SPSC worker-event queue header and slot payload bytes.
     pub worker_event_queue_bytes: u64,
+    /// One shared native sanitation/stop telemetry payload allocation.
+    pub worker_shared_telemetry_bytes: u64,
     /// Exact source ring plus fixed decoder/staging allocation total.
     pub total_engine_owned_bytes: u64,
     /// Largest exact allocation among ring, decoder scratch, and planar staging.
@@ -129,8 +131,61 @@ pub struct NativeSessionSourceResourceReport {
     pub session_runtime_bytes: u64,
     pub source_pcm_already_charged_bytes: u64,
     pub source_overhead_bytes: u64,
+    /// Exact vector allocation retaining one non-render controller per native source.
+    pub controller_records_bytes: u64,
     pub combined_runtime_bytes: u64,
     pub largest_allocation_bytes: u64,
+}
+
+/// One opaque, started native source before it is transactionally moved into a graph source set.
+///
+/// The native join owner is deliberately not exposed. Convert this object with
+/// [`Self::into_graph_source`] only on a control/retirement path; that conversion moves the
+/// consumer and join owner together into the graph-owned source entry.
+pub struct PreparedNativeSource {
+    controller: NativeSourceController,
+    consumer: PcmSourceConsumer,
+    resources: NativeSourceResourceReport,
+    worker: NativeSourceWorker,
+}
+
+impl PreparedNativeSource {
+    /// Borrow the sole non-render controller endpoint before graph publication.
+    #[must_use]
+    pub fn controller(&mut self) -> &mut NativeSourceController {
+        &mut self.controller
+    }
+
+    /// Exact fixed source resource accounting prepared for this source.
+    #[must_use]
+    pub const fn resource_report(&self) -> NativeSourceResourceReport {
+        self.resources
+    }
+
+    /// Move the controller and native source into their separate prepared ownership domains.
+    #[must_use]
+    pub fn into_graph_source(self) -> (NativeSourceController, SourceGraphSource) {
+        let Self {
+            controller,
+            consumer,
+            resources,
+            worker,
+        } = self;
+        let additional_overhead_bytes = resources
+            .total_engine_owned_bytes
+            .checked_sub(resources.ring.total_engine_owned_bytes)
+            .expect("native report includes ring");
+        (
+            controller,
+            SourceGraphSource::with_native_worker(
+                consumer,
+                resources.ring,
+                additional_overhead_bytes,
+                resources.largest_allocation_bytes,
+                worker,
+            ),
+        )
+    }
 }
 
 /// A failed all-or-nothing session source preparation with sorted stable diagnostics.
@@ -334,7 +389,7 @@ impl NativeSourceController {
 ///
 /// This token is intentionally moved only into the source-set driver. Its `Drop` implementation
 /// runs on source-set/retired-plan reclamation, never from render.
-pub struct NativeSourceWorker {
+pub(crate) struct NativeSourceWorker {
     join: Option<JoinHandle<NativeSourceWorkerExit>>,
     stopped: bool,
     sanitation: NativeDecoderSanitationTelemetry,
@@ -343,7 +398,7 @@ pub struct NativeSourceWorker {
 
 impl NativeSourceWorker {
     /// Stop and join the worker outside render.
-    pub fn stop_and_join(
+    pub(crate) fn stop_and_join(
         &mut self,
     ) -> Result<NativeSourceWorkerExit, NativeSourceWorkerControlError> {
         if !self.stopped {
@@ -365,7 +420,28 @@ impl Drop for NativeSourceWorker {
 }
 
 /// Resolve, validate, prepare, and start one native source worker transactionally.
+/// ```compile_fail
+/// use miso_engine_source::NativeSourceWorker;
+/// ```
+///
+/// The worker join token is private: callers can only move it into a graph source entry through
+/// [`PreparedNativeSource::into_graph_source`].
 pub fn prepare_native_source<S: NativeSourceResolver>(
+    resolver: &mut S,
+    request: NativeSourcePrepareRequest,
+    caps: NativeSourcePrepareCaps,
+) -> Result<PreparedNativeSource, NativeSourcePrepareError> {
+    let (controller, worker, consumer, resources) =
+        prepare_native_source_parts(resolver, request, caps)?;
+    Ok(PreparedNativeSource {
+        controller,
+        consumer,
+        resources,
+        worker,
+    })
+}
+
+fn prepare_native_source_parts<S: NativeSourceResolver>(
     resolver: &mut S,
     request: NativeSourcePrepareRequest,
     caps: NativeSourcePrepareCaps,
@@ -495,18 +571,10 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
             },
         };
         match prepare_native_source(resolver, request, caps.source) {
-            Ok((controller, worker, consumer, report)) => {
-                let additional_overhead_bytes = report
-                    .total_engine_owned_bytes
-                    .checked_sub(report.ring.total_engine_owned_bytes)
-                    .expect("native report includes ring");
-                graph_sources.push(SourceGraphSource::with_native_worker(
-                    consumer,
-                    report.ring,
-                    additional_overhead_bytes,
-                    report.largest_allocation_bytes,
-                    worker,
-                ));
+            Ok(prepared) => {
+                let report = prepared.resource_report();
+                let (controller, graph_source) = prepared.into_graph_source();
+                graph_sources.push(graph_source);
                 reports.push(report);
                 controllers.push(controller);
             }
@@ -559,18 +627,24 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         }
     };
     let graph_resources = source_set.resource_report();
+    let controller_records_bytes =
+        retained_array_bytes::<NativeSourceController>(controllers.len())
+            .ok_or_else(|| resource_failure(model.sources[0].id.as_str()))?;
     let session_runtime_bytes = session.resource_estimate().requested_runtime_bytes;
-    let combined_runtime_bytes =
-        match session_runtime_bytes.checked_add(graph_resources.overhead_bytes) {
-            Some(total) => total,
-            None => {
-                return Err(resource_failure(model.sources[0].id.as_str()));
-            }
-        };
+    let combined_runtime_bytes = match session_runtime_bytes
+        .checked_add(graph_resources.overhead_bytes)
+        .and_then(|total| total.checked_add(controller_records_bytes))
+    {
+        Some(total) => total,
+        None => {
+            return Err(resource_failure(model.sources[0].id.as_str()));
+        }
+    };
     let largest_allocation_bytes = session
         .resource_estimate()
         .single_allocation_bytes
-        .max(graph_resources.largest_allocation_bytes);
+        .max(graph_resources.largest_allocation_bytes)
+        .max(controller_records_bytes);
     if graph_resources.pcm_payload_already_charged_bytes
         != session.resource_estimate().source_ring_bytes
         || combined_runtime_bytes > model.limits.memory_bytes
@@ -588,6 +662,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
             session_runtime_bytes,
             source_pcm_already_charged_bytes: graph_resources.pcm_payload_already_charged_bytes,
             source_overhead_bytes: graph_resources.overhead_bytes,
+            controller_records_bytes,
             combined_runtime_bytes,
             largest_allocation_bytes,
         },
@@ -638,19 +713,24 @@ fn source_resource_report(
     let worker_control_queue_bytes = exact_queue_bytes::<WorkerCommand>(caps.control_queue_items)?;
     let worker_event_queue_bytes =
         exact_queue_bytes::<NativeSourceWorkerEvent>(NonZeroUsize::new(1).expect("one event"))?;
+    let worker_shared_telemetry_bytes =
+        u64::try_from(size_of::<crate::NativeWorkerSharedTelemetry>())
+            .expect("native telemetry payload size fits u64");
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
         .checked_add(decoder_read_scratch_bytes)
         .and_then(|total| total.checked_add(worker_planar_staging_bytes))
         .and_then(|total| total.checked_add(worker_control_queue_bytes))
         .and_then(|total| total.checked_add(worker_event_queue_bytes))
+        .and_then(|total| total.checked_add(worker_shared_telemetry_bytes))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let largest_allocation_bytes = ring
         .largest_allocation_bytes
         .max(decoder_read_scratch_bytes)
         .max(worker_planar_staging_bytes)
         .max(worker_control_queue_bytes)
-        .max(worker_event_queue_bytes);
+        .max(worker_event_queue_bytes)
+        .max(worker_shared_telemetry_bytes);
     if total_engine_owned_bytes > caps.max_total_engine_owned_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
@@ -664,9 +744,15 @@ fn source_resource_report(
             .expect("usize fits u64"),
         worker_control_queue_bytes,
         worker_event_queue_bytes,
+        worker_shared_telemetry_bytes,
         total_engine_owned_bytes,
         largest_allocation_bytes,
     })
+}
+
+fn retained_array_bytes<T>(count: usize) -> Option<u64> {
+    let layout = Layout::array::<T>(count).ok()?;
+    u64::try_from(layout.size()).ok()
 }
 
 fn exact_queue_bytes<T: Send + 'static>(
@@ -850,10 +936,14 @@ mod tests {
     }
 
     fn resolver(samples: &[f32], identity: &[u8]) -> Resolver {
+        resolver_wave(float32_wave(samples), identity)
+    }
+
+    fn resolver_wave(wave: Vec<u8>, identity: &[u8]) -> Resolver {
         Resolver {
             asset: Some(NativeResolvedAsset {
                 observed_identity: identity.to_vec(),
-                reader: Cursor::new(float32_wave(samples)),
+                reader: Cursor::new(wave),
             }),
         }
     }
@@ -1028,7 +1118,8 @@ mod tests {
         };
         let mut native_resolver = resolver(&samples, b"exact-identity");
         let (mut controller, mut worker, mut native_consumer, report) =
-            prepare_native_source(&mut native_resolver, request(region), caps()).expect("prepare");
+            prepare_native_source_parts(&mut native_resolver, request(region), caps())
+                .expect("prepare");
         assert_eq!(report.decoder_read_scratch_bytes, 16);
         assert_eq!(report.worker_planar_staging_bytes, 16);
         assert_eq!(
@@ -1076,7 +1167,7 @@ mod tests {
         let mut native_resolver = resolver(&[0.0; 8], b"exact-identity");
         let mut lifecycle_caps = caps();
         lifecycle_caps.control_queue_items = NonZeroUsize::new(3).expect("three");
-        let (mut controller, mut worker, _consumer, _) = prepare_native_source(
+        let (mut controller, mut worker, _consumer, _) = prepare_native_source_parts(
             &mut native_resolver,
             request(NativeWaveRegion {
                 start_frame: SourceFrame(0),
@@ -1144,7 +1235,8 @@ mod tests {
             b"exact-identity",
         );
         let (mut controller, worker, mut consumer, report) =
-            prepare_native_source(&mut native_resolver, request(region), caps()).expect("prepare");
+            prepare_native_source_parts(&mut native_resolver, request(region), caps())
+                .expect("prepare");
         controller.wait_for_event().expect("ready");
         let (decoded, _) = read_one(&mut consumer);
         assert_eq!(decoded[0].to_bits(), 0.0_f32.to_bits());
@@ -1229,7 +1321,7 @@ mod tests {
             output_id: StableGraphId::parse("main").expect("ID"),
         };
         let mut native_resolver = resolver(&[0.25; 4], b"exact-identity");
-        let (mut controller, worker, consumer, report) = prepare_native_source(
+        let (mut controller, worker, consumer, report) = prepare_native_source_parts(
             &mut native_resolver,
             request(NativeWaveRegion {
                 start_frame: SourceFrame(0),
@@ -1425,6 +1517,92 @@ mod tests {
     }
 
     #[test]
+    fn combined_retained_cap_accepts_exactly_and_rejects_one_byte_short() {
+        let session = compiled_source_session();
+        let mut initial_resolver = session_resolver(b"sha256:demo");
+        let initial =
+            prepare_native_session_sources(&session, &mut initial_resolver, session_caps())
+                .expect("uncapped preparation");
+        let exact_total = initial.resources.combined_runtime_bytes;
+        assert!(initial.resources.controller_records_bytes > 0);
+        drop(initial);
+
+        let mut exact_caps = session_caps();
+        exact_caps.max_combined_runtime_bytes = exact_total;
+        let mut exact_resolver = session_resolver(b"sha256:demo");
+        let exact = prepare_native_session_sources(&session, &mut exact_resolver, exact_caps)
+            .expect("exact retained cap");
+        assert_eq!(exact.resources.combined_runtime_bytes, exact_total);
+        drop(exact);
+
+        let mut short_caps = session_caps();
+        short_caps.max_combined_runtime_bytes = exact_total.checked_sub(1).expect("nonzero total");
+        let mut short_resolver = session_resolver(b"sha256:demo");
+        let short = match prepare_native_session_sources(&session, &mut short_resolver, short_caps)
+        {
+            Ok(_) => panic!("one byte short cap unexpectedly prepared"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            short.diagnostics[0].code,
+            SourceDiagnosticCode::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn launch_rates_prepare_and_extended_rate_mismatch_is_rejected() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        for rate_hz in [44_100, 48_000, 88_200, 96_000] {
+            let mut native_resolver =
+                resolver_wave(float32_wave_at_rate(&[0.0; 4], rate_hz), b"exact-identity");
+            let mut prepare_request = request(region);
+            prepare_request.declared_sample_rate_hz = SampleRateHz(rate_hz);
+            prepare_request.engine_sample_rate_hz = SampleRateHz(rate_hz);
+            let prepared = prepare_native_source(&mut native_resolver, prepare_request, caps())
+                .expect("launch rate preparation");
+            drop(prepared);
+        }
+
+        let mut extended_resolver =
+            resolver_wave(float32_wave_at_rate(&[0.0; 4], 192_000), b"exact-identity");
+        let mut extended_request = request(region);
+        extended_request.declared_sample_rate_hz = SampleRateHz(192_000);
+        let mismatch = match prepare_native_source(&mut extended_resolver, extended_request, caps())
+        {
+            Ok(_) => panic!("extended source unexpectedly prepared with implicit conversion"),
+            Err(error) => error,
+        };
+        assert_eq!(mismatch, NativeSourcePrepareError::RateMismatch);
+    }
+
+    #[test]
+    fn retained_layout_grid_is_checked_without_source_duration_storage() {
+        for count in [1_usize, 4, 65_537] {
+            let entries =
+                crate::allocation_class::<crate::GraphSourceEntry>(count).expect("entry layout");
+            let mappings =
+                crate::allocation_class::<SourceGraphTrackMapping>(count).expect("mapping layout");
+            let claims = crate::allocation_class::<miso_engine_graph::GraphSourceInputClaim>(count)
+                .expect("claim layout");
+            let controllers =
+                retained_array_bytes::<NativeSourceController>(count).expect("controller layout");
+            assert_eq!(entries.item_count, u64::try_from(count).expect("count"));
+            assert_eq!(mappings.item_count, entries.item_count);
+            assert_eq!(claims.item_count, entries.item_count);
+            assert_eq!(
+                controllers,
+                u64::try_from(size_of::<NativeSourceController>())
+                    .expect("size")
+                    .checked_mul(entries.item_count)
+                    .expect("checked grid")
+            );
+        }
+    }
+
+    #[test]
     fn compiled_session_source_rollback_stops_earlier_worker() {
         let mut session_toml =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
@@ -1471,11 +1649,20 @@ mod tests {
     }
 
     fn float32_wave(samples: &[f32]) -> Vec<u8> {
+        float32_wave_at_rate(samples, 48_000)
+    }
+
+    fn float32_wave_at_rate(samples: &[f32], sample_rate_hz: u32) -> Vec<u8> {
         let mut format = Vec::new();
         format.extend_from_slice(&3_u16.to_le_bytes());
         format.extend_from_slice(&1_u16.to_le_bytes());
-        format.extend_from_slice(&48_000_u32.to_le_bytes());
-        format.extend_from_slice(&192_000_u32.to_le_bytes());
+        format.extend_from_slice(&sample_rate_hz.to_le_bytes());
+        format.extend_from_slice(
+            &sample_rate_hz
+                .checked_mul(4)
+                .expect("float32 byte rate")
+                .to_le_bytes(),
+        );
         format.extend_from_slice(&4_u16.to_le_bytes());
         format.extend_from_slice(&32_u16.to_le_bytes());
         let mut data = Vec::new();

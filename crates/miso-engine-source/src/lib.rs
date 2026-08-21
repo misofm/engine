@@ -40,6 +40,9 @@ mod native_wave;
 mod native_source;
 
 #[cfg(not(target_arch = "wasm32"))]
+use native_source::NativeSourceWorker;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub use native_wave::{
     NativeDecodeReport, NativeWaveContainer, NativeWaveDecoder, NativeWaveEncoding,
     NativeWaveError, NativeWaveMetadata, NativeWaveParseCaps, NativeWaveRegion, parse_native_wave,
@@ -51,8 +54,8 @@ pub use native_source::{
     NativeSessionSourcePrepareFailure, NativeSessionSourceResourceReport, NativeSourceController,
     NativeSourcePrepareCaps, NativeSourcePrepareError, NativeSourcePrepareRequest,
     NativeSourceResolver, NativeSourceResolverError, NativeSourceResourceReport,
-    NativeSourceWorker, NativeSourceWorkerControlError, NativeSourceWorkerEvent,
-    NativeSourceWorkerExit, prepare_native_session_sources, prepare_native_source,
+    NativeSourceWorkerControlError, NativeSourceWorkerEvent, NativeSourceWorkerExit,
+    PreparedNativeSource, prepare_native_session_sources, prepare_native_source,
 };
 
 /// A nonzero source-stream generation selected by an off-render controller.
@@ -2127,7 +2130,20 @@ mod tests {
                 observers: Vec::new(),
             })
         };
-        let make_source_set = || {
+        let mapping = |node, left_channel, right_channel| SourceGraphTrackMapping {
+            node,
+            source_index: 0,
+            left_channel,
+            right_channel,
+        };
+        let normal_mappings = || {
+            vec![
+                mapping(inputs[0].clone(), 0, 1),
+                mapping(inputs[1].clone(), 3, 2),
+                mapping(inputs[2].clone(), 0, 2),
+            ]
+        };
+        let make_source_set = |mappings| {
             let config = PcmSourceRingConfig {
                 channel_count: 4,
                 quantum_frames: QuantumFrames(2),
@@ -2152,26 +2168,7 @@ mod tests {
             prepare_graph_source_set(
                 envelope,
                 vec![SourceGraphSource::new(consumer, resources, 0, 0)],
-                vec![
-                    SourceGraphTrackMapping {
-                        node: inputs[0].clone(),
-                        source_index: 0,
-                        left_channel: 0,
-                        right_channel: 1,
-                    },
-                    SourceGraphTrackMapping {
-                        node: inputs[1].clone(),
-                        source_index: 0,
-                        left_channel: 3,
-                        right_channel: 2,
-                    },
-                    SourceGraphTrackMapping {
-                        node: inputs[2].clone(),
-                        source_index: 0,
-                        left_channel: 0,
-                        right_channel: 2,
-                    },
-                ],
+                mappings,
             )
             .expect("source set")
         };
@@ -2183,7 +2180,54 @@ mod tests {
             )],
             observers: Vec::new(),
         };
-        let mut sequential = match make_plan().bind_with_source_set(bindings(), make_source_set()) {
+        let assert_transactional_rejection = |source_set, graph_bindings| match make_plan()
+            .bind_with_source_set(graph_bindings, source_set)
+        {
+            Ok(_) => panic!("invalid source claims unexpectedly bound"),
+            Err(failure) => {
+                assert_eq!(failure.code, "source.graph.binding_mismatch");
+                assert!(!failure.source_set.claims().is_empty());
+            }
+        };
+        assert_transactional_rejection(
+            make_source_set(vec![
+                mapping(inputs[0].clone(), 0, 1),
+                mapping(inputs[1].clone(), 3, 2),
+            ]),
+            bindings(),
+        );
+        assert_transactional_rejection(
+            make_source_set(vec![
+                mapping(inputs[0].clone(), 0, 1),
+                mapping(inputs[1].clone(), 3, 2),
+                mapping(inputs[2].clone(), 0, 2),
+                mapping(track("unexpected"), 0, 1),
+            ]),
+            bindings(),
+        );
+        assert_transactional_rejection(
+            make_source_set(vec![
+                mapping(inputs[0].clone(), 0, 1),
+                mapping(inputs[0].clone(), 3, 2),
+                mapping(inputs[1].clone(), 3, 2),
+                mapping(inputs[2].clone(), 0, 2),
+            ]),
+            bindings(),
+        );
+        assert_transactional_rejection(
+            make_source_set(normal_mappings()),
+            GraphRuntimeBindings {
+                envelope,
+                nodes: vec![
+                    miso_engine_graph::GraphNodeBinding::new(output.clone(), Box::new(Noop)),
+                    miso_engine_graph::GraphNodeBinding::new(inputs[0].clone(), Box::new(Noop)),
+                ],
+                observers: Vec::new(),
+            },
+        );
+        let mut sequential = match make_plan()
+            .bind_with_source_set(bindings(), make_source_set(normal_mappings()))
+        {
             Ok(plan) => plan,
             Err(failure) => panic!("sequential bind failed: {}", failure.code),
         };
@@ -2194,7 +2238,7 @@ mod tests {
                 scheduler: NativeSchedulerConfigV1::new(NonZeroUsize::new(1).expect("lane"), false),
                 maximum_retained_bytes: 1 << 20,
             },
-            make_source_set(),
+            make_source_set(normal_mappings()),
         ) {
             Ok(plan) => plan.into_plan(),
             Err(failure) => panic!("native bind failed: {}", failure.code),
