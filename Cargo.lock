@@ -493,6 +493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-source-fixture"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-source",
+ "sha2",
+]
+
+[[package]]
 name = "miso-engine-target-smoke"
 version = "0.1.0"
 dependencies = [

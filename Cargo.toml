@@ -37,6 +37,7 @@ members = [
     "tools/miso-engine-builtins-bench",
     "tools/miso-engine-builtins-fixture",
     "tools/miso-engine-rack-bench",
+    "tools/miso-engine-source-fixture",
 ]
 resolver = "3"
 
