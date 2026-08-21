@@ -105,6 +105,15 @@ comparison found no passing direct/scaled/transposed/flush recurrence. Issue 045
 parametric EQ recurrence derivation and runtime proof**, is research-only and requires f64 mapping
 equivalence before retained-f32 testing. Issues 015, 017 and 026 depend on Issue 045.
 
+Issue 013, **Launch feed-forward peak compressor**, closes the bounded launch product at its
+descriptor/scalar/W4/W8/registry/graph boundary. Issue 046, **Launch compressor qualification,
+realtime audit, and benchmark**, owns only the deferred checked corpus/oracle matrices, exact
+10,000 and million-sample rows, expanded cohort/determinism evidence, 100,000-render audit,
+target/instruction proof, zero-launch preflight, sole eventual one-warmup/two-round descriptive
+benchmark and audition/listening handoff. It permits one Terra attempt plus one Sol correction;
+its timed invocation count starts at zero. Issue 046 gates only release qualification Issue 026
+and does not block other effect implementations.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.

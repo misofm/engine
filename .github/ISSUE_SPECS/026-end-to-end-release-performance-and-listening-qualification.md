@@ -47,6 +47,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Native effect runtime contract and conformance
 - Launch parametric EQ recurrence derivation and runtime proof
 - Launch feed-forward peak compressor
+- Launch compressor qualification, realtime audit, and benchmark
 - Gate/expander
 - De-esser
 - True-peak limiter

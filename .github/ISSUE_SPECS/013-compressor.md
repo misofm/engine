@@ -223,7 +223,8 @@ Focused candidate evidence (no benchmark or timed command):
 
 Expanded corpus, 10,000/randomized and million-sample matrices, realtime audit, target/object
 qualification, benchmark, and completed listening were not run or claimed; transfer them to the
-planned stateless Issue 046 qualification successor. `timed_benchmark_invocations = 0`.
+stateless Issue 046, **Launch compressor qualification, realtime audit, and benchmark**.
+`timed_benchmark_invocations = 0`.
 
 ## Final Sol product-closure evidence
 
@@ -244,4 +245,7 @@ evidence:
 - `cargo test --locked -p miso-engine-effect-compiler --test native_session` — PASS, 4 tests.
 
 This closes the launch-product contract only. The explicitly deferred qualification matrix remains
-owned by planned stateless Issue 046. `timed_benchmark_invocations = 0`.
+owned by Issue 046, **Launch compressor qualification, realtime audit, and benchmark**. That
+successor alone owns the expanded corpus/oracle, 10,000 and million-sample matrices, cohort/
+determinism expansion, 100,000-render audit, target/instruction proof, benchmark and audition/
+listening handoff; these do not reopen Issue 013. `timed_benchmark_invocations = 0`.
