@@ -451,3 +451,22 @@ The realtime unsafe allowlist now names only the standalone builtin audit execut
 path in addition to the previously accepted audit tools; it does not relax production-crate
 restrictions. These checks do not convert the pending sealed-artifact proof or human listening
 preregistrations into completed acceptance evidence.
+
+## Final machine-verifiable Terra evidence (2026-08-21; partial)
+
+Graph attachment now validates the exact expected prepared builtin processor, tail, observer, and
+consumer-derived node/handle sets before moving ownership. A forged artifact with its tail set
+removed is rejected before attachment with `builtin.prepared.tail_set`; the canonical graph test
+suite still passes. This is the machine proof for exact-set attachment, not permission to forge
+the opaque processor implementations themselves.
+
+Benchmark preflight builds but does not execute `miso-engine-builtins-bench`, validates the fixed
+input fixture manifest and runner/validator, and emits the artifact/input hashes. This run reported
+`workload_launches=0`, binary SHA-256
+`5f17c3e8a016e2470fba258939c95cc9e0f89cd09e6076c19e34451aedc337fe`, and input-manifest
+SHA-256 `9d98381d7b9ba8c4737fcc6128158f67d0fe3004770a5a9559e2025f3a393a71`.
+
+PASS: graph compiler unit suite (10 tests, including forged-artifact rejection), focused
+warning-denied Clippy, and zero-launch benchmark preflight. Human listening is still only
+preregistered, so the issue cannot honestly be declared complete; benchmark invocation count
+remains **0**.

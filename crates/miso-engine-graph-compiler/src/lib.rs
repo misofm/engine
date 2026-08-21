@@ -93,6 +93,14 @@ impl GraphCompiler {
                 )]),
             });
         }
+        let builtin_diagnostics = validate_builtin_artifact(&builtins);
+        if !builtin_diagnostics.is_empty() {
+            return Err(GraphBuiltinsCompileFailure {
+                effects,
+                builtins,
+                diagnostics: GraphDiagnosticSet::sorted(builtin_diagnostics),
+            });
+        }
         let builtin_tails: BTreeMap<_, _> = builtins
             .tails
             .iter()
@@ -578,6 +586,81 @@ impl GraphCompiler {
                 dot,
             },
         })
+    }
+}
+
+fn validate_builtin_artifact(builtins: &PreparedBuiltinsSession) -> Vec<GraphDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let tracks: BTreeSet<_> = builtins
+        .session
+        .normalized_model()
+        .tracks
+        .iter()
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    let expected_processors: BTreeSet<_> = tracks
+        .iter()
+        .flat_map(|track_id| {
+            [
+                TrackStage::PostInputBuiltins,
+                TrackStage::PostFader,
+                TrackStage::PostMatrix,
+            ]
+            .map(|stage| track_node(track_id, stage))
+        })
+        .collect();
+    let actual_processors: BTreeSet<_> = builtins
+        .processors
+        .iter()
+        .map(|binding| binding.node.clone())
+        .collect();
+    if actual_processors != expected_processors
+        || builtins.processors.len() != expected_processors.len()
+    {
+        diagnostics.push(diag(
+            "builtin.prepared.processor_set",
+            "$.builtins.processors",
+        ));
+    }
+    let actual_tails: BTreeSet<_> = builtins.tails.iter().map(|(id, _)| id.clone()).collect();
+    if actual_tails != tracks || builtins.tails.len() != tracks.len() {
+        diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
+    }
+    let expected_observers: BTreeSet<_> = builtins
+        .meter_consumers
+        .iter()
+        .map(|consumer| {
+            (
+                track_node(&consumer.track_id, meter_stage(consumer.tap)),
+                consumer.handle.0.get(),
+            )
+        })
+        .collect();
+    let actual_observers: BTreeSet<_> = builtins
+        .observers
+        .iter()
+        .map(|observer| (observer.node.clone(), observer.handle))
+        .collect();
+    if actual_observers != expected_observers
+        || builtins.observers.len() != expected_observers.len()
+    {
+        diagnostics.push(diag(
+            "builtin.prepared.observer_set",
+            "$.builtins.observers",
+        ));
+    }
+    diagnostics
+}
+
+fn meter_stage(tap: miso_engine_builtins::MeterTap) -> TrackStage {
+    match tap {
+        miso_engine_builtins::MeterTap::Input => TrackStage::Input,
+        miso_engine_builtins::MeterTap::PostInputBuiltins => TrackStage::PostInputBuiltins,
+        miso_engine_builtins::MeterTap::PostSimd1 => TrackStage::PostSimd1,
+        miso_engine_builtins::MeterTap::PostDynamic => TrackStage::PostDynamic,
+        miso_engine_builtins::MeterTap::PostSimd2PreFader => TrackStage::PostSimd2PreFader,
+        miso_engine_builtins::MeterTap::PostFader => TrackStage::PostFader,
+        miso_engine_builtins::MeterTap::PostMatrix => TrackStage::PostMatrix,
     }
 }
 
@@ -1829,6 +1912,61 @@ mod tests {
             .expect("input builtins node")
             .tail;
         assert_eq!(tail, TailSamples::Infinite);
+    }
+
+    #[test]
+    fn forged_builtin_tail_set_is_rejected_before_graph_attachment() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let mut builtins = prepare_session_builtins(
+            &compiled,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("builtins");
+        builtins.tails.clear();
+        let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 78,
+            effects: EffectPreparedSession {
+                session: compiled,
+                entries: Vec::new(),
+            },
+            builtins,
+            caps: integration_caps(),
+        }) else {
+            panic!("forged builtin artifact must reject");
+        };
+        assert_eq!(
+            failure
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            vec!["builtin.prepared.tail_set"]
+        );
     }
 
     #[test]
