@@ -134,3 +134,37 @@ API/resource statement; attempt count; Terra/final Sol PASS/FAIL; and
 
 **Terra attempt 1 verdict: FAIL.** The exact W8/scalar continuation mismatch must be classified
 before any bounded correction; this attempt does not claim the remaining acceptance gates.
+
+## Sol attempt 2 evidence — PASS
+
+- Candidate base: `ffc1c53`. The reported bits `918470466` (`0x36bebf42`) versus `918595474`
+  (`0x36c0a792`) were a test-oracle indexing defect, not a production bank-state, automation or
+  restore defect. A public-API diagnostic showed all eight bank/scalar outputs and payloads equal
+  at the active snapshot boundary, transactional restore preserving every payload, and the first
+  continuation frame matching every corresponding lane. The helper re-enumerated each one-track
+  scalar slice as packed lane zero, so outer track one was incorrectly compared with W8 lane zero
+  and mislabeled as track zero.
+- The bounded correction is confined to the gate/expander test module. It indexes the packed W8
+  frame by the actual outer track and completes only the frozen signed-zero and injected-recovery
+  assertions. Production code, public APIs, descriptor/metadata bytes, state/resource layouts,
+  core kernels, registry, graph and PDC are unchanged.
+- `cargo test --locked -p miso-engine-gate-expander --lib`: PASS, 11/11. Both reset kinds are
+  word-exact for scalar and an executed x86 W8 bank; active post-latency scalar and W8 restore
+  continue exactly against uninterrupted instances; delayed `-0` left and `+0` right retain their
+  bits at gain identity; and one injected nonfinite track-three left-lane gain recovers to delayed
+  dry/Open/K/+0 with exact scalar/W8 PCM, payload and `ProcessReport` parity while the other
+  tracks and right lanes remain unchanged.
+- Focused dependency and integration gates PASS: locked checks for core, gate/expander,
+  effect-compiler and graph-compiler; the two focused core gate-gain tests; all four native-session
+  tests; the width-correct launch gate/expander graph fixture; package format; and warning-denied
+  all-target/all-feature Clippy for those four crates.
+- Workspace, realtime, effect-runtime, rack and graph policy checks PASS. The workspace,
+  realtime and effect-runtime mutation suites and the rack mutation suite also PASS.
+- Final candidate seal PASS: `cargo fmt --check --all`; locked workspace all-target/all-feature
+  check and tests; warning-denied workspace all-target/all-feature Clippy; and warning-denied
+  locked workspace rustdoc without dependencies. `git diff --check` also PASS.
+- No Issue-047 corpus/fixture expansion, audit main, cross-target, object inspection, benchmark,
+  timing or listening command ran. `timed_benchmark_invocations=0`.
+
+**Final Sol verdict: PASS.** All four Issue-048 effect-local proofs and the unchanged-product seal
+are satisfied within the second and final authorized attempt.

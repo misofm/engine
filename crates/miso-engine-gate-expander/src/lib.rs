@@ -1570,15 +1570,13 @@ mod tests {
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn assert_w8_matches_scalars(packed: &[f32], scalars: &[Vec<f32>], context: &str) {
-        for (track, scalar) in scalars.iter().enumerate() {
-            for (frame, expected) in scalar.iter().enumerate() {
-                assert_eq!(
-                    packed[frame * 8 + track].to_bits(),
-                    expected.to_bits(),
-                    "{context} track {track}, frame {frame}"
-                );
-            }
+    fn assert_w8_track_matches_scalar(packed: &[f32], scalar: &[f32], track: usize, context: &str) {
+        for (frame, expected) in scalar.iter().enumerate() {
+            assert_eq!(
+                packed[frame * 8 + track].to_bits(),
+                expected.to_bits(),
+                "{context} track {track}, frame {frame}"
+            );
         }
     }
 
@@ -2286,8 +2284,8 @@ mod tests {
         });
         let defaults: [([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]); 8] =
             core::array::from_fn(|track| {
-            initial_defaults(&bank_values[track]).expect("bank defaults")
-        });
+                initial_defaults(&bank_values[track]).expect("bank defaults")
+            });
         let mut bank = w8_prepared(&bank_values);
         let left = packed_w8(
             &(0..8)
@@ -2318,33 +2316,33 @@ mod tests {
         let before: [(Vec<u8>, Vec<u8>); 8] =
             core::array::from_fn(|track| snapshot_bank(&bank, track as u32));
         bank.reset(ResetKind::DiscontinuityKeepParameters);
-        for track in 0..8 {
+        for (track, (before, defaults)) in before.iter().zip(&defaults).enumerate() {
             let state = snapshot_bank(&bank, track as u32);
             assert_discontinuity_payload(
-                &before[track].0,
+                &before.0,
                 &state.0,
-                &defaults[track].0,
-                rounded_samples(defaults[track].0[5], 48_000).expect("hold") as u32,
+                &defaults.0,
+                rounded_samples(defaults.0[5], 48_000).expect("hold") as u32,
             );
             assert_discontinuity_payload(
-                &before[track].1,
+                &before.1,
                 &state.1,
-                &defaults[track].1,
-                rounded_samples(defaults[track].1[5], 48_000).expect("hold") as u32,
+                &defaults.1,
+                rounded_samples(defaults.1[5], 48_000).expect("hold") as u32,
             );
         }
         bank.reset(ResetKind::FullToDefaults);
-        for track in 0..8 {
+        for (track, defaults) in defaults.iter().enumerate() {
             let state = snapshot_bank(&bank, track as u32);
             assert_full_reset_payload(
                 &state.0,
-                &defaults[track].0,
-                rounded_samples(defaults[track].0[5], 48_000).expect("hold") as u32,
+                &defaults.0,
+                rounded_samples(defaults.0[5], 48_000).expect("hold") as u32,
             );
             assert_full_reset_payload(
                 &state.1,
-                &defaults[track].1,
-                rounded_samples(defaults[track].1[5], 48_000).expect("hold") as u32,
+                &defaults.1,
+                rounded_samples(defaults.1[5], 48_000).expect("hold") as u32,
             );
         }
     }
@@ -2661,8 +2659,13 @@ mod tests {
                     original_report.reports[track], report,
                     "W8 scalar report {track}"
                 );
-                assert_w8_matches_scalars(&original_bank_left, &[left], "W8 scalar left");
-                assert_w8_matches_scalars(&original_bank_right, &[right], "W8 scalar right");
+                assert_w8_track_matches_scalar(&original_bank_left, &left, track, "W8 scalar left");
+                assert_w8_track_matches_scalar(
+                    &original_bank_right,
+                    &right,
+                    track,
+                    "W8 scalar right",
+                );
                 assert_eq!(
                     snapshot_bank(&bank, track as u32),
                     snapshot_bank(&restored_bank, track as u32),
@@ -2676,5 +2679,252 @@ mod tests {
             }
             bank_first += frames as u64;
         }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn signed_zero_identity_is_bit_exact_for_scalar_and_executed_w8() {
+        let factory = GateExpanderFactory;
+        let mut values = initial_values();
+        set_parameter(&mut values, 5, 0.0, 0.0);
+        set_parameter(&mut values, 7, 10.0, 10.0);
+        let mut connected_request = request(&values);
+        connected_request.ports.sidechain = PreparedSidechainPort::Connected {
+            id: port_id("sidechain-in"),
+            required: false,
+        };
+        let mut scalar = factory
+            .prepare(connected_request)
+            .expect("connected scalar");
+        let mut scalar_left = vec![0.0; 481];
+        let mut scalar_right = vec![0.0; 481];
+        scalar_left[0] = -0.0;
+        let sidechain_left = vec![1.0; 481];
+        let sidechain_right = vec![1.0; 481];
+        let mut total = ProcessReport::default();
+        for offset in (0..481).step_by(128) {
+            let end = (offset + 128).min(481);
+            let report = scalar.process(
+                EffectProcessBlock::new(
+                    &mut scalar_left[offset..end],
+                    &mut scalar_right[offset..end],
+                    Some((&sidechain_left[offset..end], &sidechain_right[offset..end])),
+                    offset as u64,
+                    &[],
+                    128,
+                )
+                .expect("signed-zero scalar block"),
+            );
+            add_report(&mut total, report);
+        }
+        assert_eq!(total, ProcessReport::default());
+        assert_eq!(scalar_left[480].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(scalar_right[480].to_bits(), 0.0_f32.to_bits());
+        let scalar_state = snapshot(scalar.as_ref());
+        assert_eq!(read_f32(&scalar_state.0, 2).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(read_f32(&scalar_state.1, 2).to_bits(), 0.0_f32.to_bits());
+
+        let bank_values = [initial_values(); 8];
+        let mut bank = w8_prepared(&bank_values);
+        let mut tracks_left = vec![vec![0.0; 481]; 8];
+        let mut tracks_right = vec![vec![0.0; 481]; 8];
+        for track in 0..8 {
+            if track % 2 == 0 {
+                tracks_left[track][0] = -0.0;
+            } else {
+                tracks_right[track][0] = -0.0;
+            }
+        }
+        let mut bank_left = packed_w8(&tracks_left);
+        let mut bank_right = packed_w8(&tracks_right);
+        for offset in (0..481).step_by(128) {
+            let end = (offset + 128).min(481);
+            let report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left[offset * 8..end * 8],
+                    &mut bank_right[offset * 8..end * 8],
+                    None,
+                    (end - offset) as u32,
+                    BankWidth::Eight,
+                    offset as u64,
+                    &[],
+                    &[0; 9],
+                    128,
+                )
+                .expect("signed-zero W8 block"),
+            );
+            assert_eq!(report, BankProcessReport::empty(BankWidth::Eight));
+        }
+        for track in 0..8 {
+            let expected_left = if track % 2 == 0 { -0.0_f32 } else { 0.0 };
+            let expected_right = if track % 2 == 0 { 0.0 } else { -0.0_f32 };
+            assert_eq!(
+                bank_left[480 * 8 + track].to_bits(),
+                expected_left.to_bits(),
+                "W8 left zero sign {track}"
+            );
+            assert_eq!(
+                bank_right[480 * 8 + track].to_bits(),
+                expected_right.to_bits(),
+                "W8 right zero sign {track}"
+            );
+            let state = snapshot_bank(&bank, track as u32);
+            assert_eq!(read_f32(&state.0, 2).to_bits(), 0.0_f32.to_bits());
+            assert_eq!(read_f32(&state.1, 2).to_bits(), 0.0_f32.to_bits());
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn injected_lane_recovery_has_scalar_w8_output_state_and_report_parity() {
+        const FAULT_TRACK: usize = 3;
+        let bank_values = core::array::from_fn(|track| {
+            let mut values = active_values();
+            set_parameter(&mut values, 0, -20.0 - track as f32, -22.0 - track as f32);
+            values
+        });
+        let mut bank = w8_prepared(&bank_values);
+        let mut scalars = bank_values
+            .iter()
+            .map(|values| scalar_prepared(values))
+            .collect::<Vec<_>>();
+        let mut first_sample = 0_u64;
+        for _ in 0..5 {
+            let source_left = (0..8)
+                .map(|track| vec![0.001 + track as f32 * 0.00001; 128])
+                .collect::<Vec<_>>();
+            let source_right = (0..8)
+                .map(|track| vec![0.002 + track as f32 * 0.00001; 128])
+                .collect::<Vec<_>>();
+            let mut bank_left = packed_w8(&source_left);
+            let mut bank_right = packed_w8(&source_right);
+            let bank_report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    128,
+                    BankWidth::Eight,
+                    first_sample,
+                    &[],
+                    &[0; 9],
+                    128,
+                )
+                .expect("recovery warm W8 block"),
+            );
+            assert_eq!(bank_report, BankProcessReport::empty(BankWidth::Eight));
+            for track in 0..8 {
+                let mut left = source_left[track].clone();
+                let mut right = source_right[track].clone();
+                let report = scalars[track].process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, first_sample, &[], 128)
+                        .expect("recovery warm scalar block"),
+                );
+                assert_eq!(report, ProcessReport::default());
+                assert_w8_track_matches_scalar(&bank_left, &left, track, "recovery warm left");
+                assert_w8_track_matches_scalar(&bank_right, &right, track, "recovery warm right");
+                assert_eq!(
+                    snapshot_bank(&bank, track as u32),
+                    snapshot(&scalars[track]),
+                    "recovery warm state {track}"
+                );
+            }
+            first_sample += 128;
+        }
+
+        let saved_fault = snapshot(&scalars[FAULT_TRACK]);
+        let mut control = scalar_prepared(&bank_values[FAULT_TRACK]);
+        let sizes = control.metadata.state_sizes;
+        control
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &saved_fault.0, &saved_fault.1, sizes)
+                    .expect("control state"),
+            )
+            .expect("control restore");
+        bank.left[FAULT_TRACK].gain_reduction_db = f32::NAN;
+        scalars[FAULT_TRACK].left.gain_reduction_db = f32::NAN;
+
+        let source_left = (0..8)
+            .map(|track| vec![0.001 + track as f32 * 0.00001])
+            .collect::<Vec<_>>();
+        let source_right = (0..8)
+            .map(|track| vec![0.002 + track as f32 * 0.00001])
+            .collect::<Vec<_>>();
+        let mut bank_left = packed_w8(&source_left);
+        let mut bank_right = packed_w8(&source_right);
+        let bank_report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                1,
+                BankWidth::Eight,
+                first_sample,
+                &[],
+                &[0; 9],
+                128,
+            )
+            .expect("injected W8 frame"),
+        );
+        for track in 0..8 {
+            let mut left = source_left[track].clone();
+            let mut right = source_right[track].clone();
+            let report = scalars[track].process(
+                EffectProcessBlock::new(&mut left, &mut right, None, first_sample, &[], 128)
+                    .expect("injected scalar frame"),
+            );
+            assert_eq!(
+                bank_report.reports[track], report,
+                "recovery report {track}"
+            );
+            assert_w8_track_matches_scalar(&bank_left, &left, track, "recovery left");
+            assert_w8_track_matches_scalar(&bank_right, &right, track, "recovery right");
+            assert_eq!(
+                snapshot_bank(&bank, track as u32),
+                snapshot(&scalars[track]),
+                "recovery state {track}"
+            );
+            if track == FAULT_TRACK {
+                assert_eq!(report.recovered_left_samples, 1);
+                assert_eq!(report.recovered_right_samples, 0);
+            } else {
+                assert_eq!(report, ProcessReport::default());
+            }
+        }
+        assert_eq!(
+            bank_left[FAULT_TRACK].to_bits(),
+            source_left[FAULT_TRACK][0].to_bits(),
+            "recovery emits delayed dry"
+        );
+        let recovered = snapshot_bank(&bank, FAULT_TRACK as u32);
+        assert_eq!(read_f32(&recovered.0, 2).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(read_u32(&recovered.0, 3), PHASE_OPEN);
+        assert_eq!(read_u32(&recovered.0, 4), 0);
+
+        let mut control_left = source_left[FAULT_TRACK].clone();
+        let mut control_right = source_right[FAULT_TRACK].clone();
+        let control_report = control.process(
+            EffectProcessBlock::new(
+                &mut control_left,
+                &mut control_right,
+                None,
+                first_sample,
+                &[],
+                128,
+            )
+            .expect("uninterrupted control frame"),
+        );
+        assert_eq!(control_report, ProcessReport::default());
+        assert!(control_left[0].abs() < source_left[FAULT_TRACK][0].abs());
+        assert_eq!(
+            bank_right[FAULT_TRACK].to_bits(),
+            control_right[0].to_bits()
+        );
+        assert_eq!(
+            recovered.1,
+            snapshot(&control).1,
+            "right lane is unaffected"
+        );
     }
 }
