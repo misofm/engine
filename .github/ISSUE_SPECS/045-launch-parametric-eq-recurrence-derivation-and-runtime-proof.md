@@ -62,7 +62,7 @@ Stopped dependencies contribute evidence only, not PASS.
 
 ## Sol implementation brief
 
-**READY FOR THE ONE AUTHORIZED SOL-ATTEMPT-2 COMPLETE RUN, RESEARCH ONLY.** The tracked brief is
+**FINAL FAIL / STOPPED — NO CANDIDATE SELECTED.** The tracked brief is
 `.github/ISSUE_SPECS/BRIEFS/045-launch-parametric-eq-recurrence-derivation-and-runtime-proof.md`.
 
 ## Hazards/decisions
@@ -195,3 +195,45 @@ Only the `cargo test` line is the one complete matrix invocation. Do not retry i
 failure, interrupted process, missing completion marker or post-run evidence problem: any such
 outcome is final Issue-045 STOP. Current counts remain `matrix_invocations=1` and
 `timed_benchmark_invocations=0`.
+
+## Final Sol disposition — FAIL / STOPPED (attempt 2 exhausted)
+
+The one authorized final comparison ran exactly once on clean checkpoint `58f72f3`, wrote and
+validated its create-new transcript, emitted `issue-045 complete=true`, and exited normally. It
+selected no candidate. This is a completed harness run with a numerical FAIL, not another capture
+defect; no rerun, candidate repair, tolerance/domain change or production implementation is
+permitted in Issue 045.
+
+Phase 1 reconfirmed the derivation result under equation version `49303435534f4c32` and frozen
+configuration hash `3b705a8bb9609ff7`:
+
+- L1: 1,488 rows, zero mapping failures/rejections, 1,953 impulse failures, worst mapping error
+  `1.77635683940025046e-15`, worst impulse error `1.56703382908629507e-12`, hash
+  `8396889ab57a56cf`; it did not advance.
+- D2: 1,488 rows, zero mapping/impulse/rejection failures, worst mapping error
+  `1.77635683940025046e-15`, worst impulse error `1.67157965315372124e-13`, hash
+  `9261230f10194128`; it advanced alone.
+- B3: 1,488 rows, four mapping failures, 11,893 impulse failures and 261 row rejections; first
+  rejection was row 35, `b3_nonpositive_cholesky`; worst mapping/impulse errors were
+  `1.26654242649237858e-12` / `3.14479735655237569e-12`, hash `8d765a2280489cd7`.
+
+D2 then failed the unchanged retained gates:
+
+- Phase 2: 1,488 analytic rows, 192,646 analytic failures; 1,104 searches, 252 search failures;
+  first failure `analytic_response` at row 0 with recorded f32 bits `1065383075`; minimum retained
+  stability margin `5.96046447753906250e-8`; worst analytic error
+  `1.24859137194012728e1 dB`; hash `4928b5f0c05dc966`.
+- Phase 3: all 48 finite-window impulses completed with five DFT failures, worst DFT error
+  `9.67922075432487361 dB`, zero recovery/invalid values and 32,877 canonicalizations; impulse hash
+  `b9cca66d162a049e`.
+- Phase 4: all 48 million-sample sequences completed with zero recovery/invalid values, maximum
+  output/state `2.42295475006103516e1`, minimum nonzero `1.17603679345782764e-38`, and million hash
+  `edda648b187874dd`. Stability alone does not repair the phase-2/3 response failures.
+
+Final record: `passing_candidates=0`, `selected=none`. Persisted artifact SHA-256 values are:
+
+- transcript: `2535b8987966e63c965b0a5377fbd1718d41a01bb3db49c793719fdd936223ba`;
+- captured stdout: `c515310f7ab0ed7a088b79e9a471583c0fe4ede4c1629986247a929bc45b7de9`.
+
+Final counters: `matrix_invocations=2`; `timed_benchmark_invocations=0`. Issue 045 has no overall
+PASS and freezes no production scalar/W4/W8 recurrence.

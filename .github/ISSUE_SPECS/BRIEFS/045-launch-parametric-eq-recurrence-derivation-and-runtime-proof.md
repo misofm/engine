@@ -2,8 +2,8 @@
 
 ## Decision and attempt budget
 
-**READY FOR THE ONE AUTHORIZED SOL-ATTEMPT-2 COMPLETE RUN, RESEARCH ONLY.** There are exactly two
-total attempts: one Terra
+**FINAL FAIL / STOPPED — NO CANDIDATE SELECTED.** Both authorized attempts are exhausted. There
+were exactly two total attempts: one Terra
 implementation/review of this proof and, only if needed, one bounded Sol correction to a derivation
 or harness defect. Each attempt may invoke the complete matrix exactly once. A second failure
 stops; a Sol correction may not add a candidate family, change a row/probe/domain/tolerance or
