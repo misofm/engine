@@ -1265,4 +1265,237 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn one_second_impulse_dfts_match_rbj_at_all_rates_and_quanta() {
+        for rate in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+        ] {
+            let mut cutoffs = vec![
+                10.0,
+                20.0,
+                100.0,
+                1_000.0,
+                (20_000.0_f64).min(0.1 * f64::from(rate)),
+                0.45 * f64::from(rate),
+            ];
+            cutoffs.sort_by(f64::total_cmp);
+            cutoffs.dedup_by(|left, right| *left == *right);
+            for (high_pass, kind) in [
+                (true, ReferenceFilterKind::HighPass),
+                (false, ReferenceFilterKind::LowPass),
+            ] {
+                for cutoff in &cutoffs {
+                    for quantum in [1, 127, 128, 255, 1_024] {
+                        let mut filter = TptSvf::design(rate, *cutoff as f32, high_pass)
+                            .expect("valid matrix cutoff");
+                        let mut report = BuiltinProcessReport::default();
+                        let mut recovered = 0;
+                        let mut impulse = vec![0.0_f32; rate as usize];
+                        for block_start in (0..impulse.len()).step_by(quantum) {
+                            let block_end = (block_start + quantum).min(impulse.len());
+                            for (index, sample) in
+                                impulse[block_start..block_end].iter_mut().enumerate()
+                            {
+                                *sample = filter.process(
+                                    if block_start + index == 0 { 1.0 } else { 0.0 },
+                                    &mut recovered,
+                                    &mut report,
+                                );
+                            }
+                        }
+                        assert!(impulse.iter().all(|sample| sample.is_finite()));
+                        for frequency in coherent_probes(rate, *cutoff) {
+                            let reference = rbj_butterworth_magnitude_db(
+                                f64::from(rate),
+                                *cutoff,
+                                kind,
+                                frequency,
+                            )
+                            .expect("reference");
+                            let actual =
+                                impulse_dft_magnitude_db(&impulse, f64::from(rate), frequency);
+                            if reference >= -120.0 {
+                                assert!(
+                                    (actual - reference).abs() <= 0.05,
+                                    "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
+                                );
+                            } else {
+                                assert!(
+                                    actual <= -115.0,
+                                    "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coherent_sustained_sines_meet_fundamental_and_residual_gates() {
+        for rate in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+        ] {
+            let mut cutoffs = vec![
+                10.0,
+                20.0,
+                100.0,
+                1_000.0,
+                (20_000.0_f64).min(0.1 * f64::from(rate)),
+                0.45 * f64::from(rate),
+            ];
+            cutoffs.sort_by(f64::total_cmp);
+            cutoffs.dedup_by(|left, right| *left == *right);
+            for (high_pass, kind) in [
+                (true, ReferenceFilterKind::HighPass),
+                (false, ReferenceFilterKind::LowPass),
+            ] {
+                for cutoff in &cutoffs {
+                    for frequency in coherent_probes(rate, *cutoff) {
+                        let mut production = TptSvf::design(rate, *cutoff as f32, high_pass)
+                            .expect("valid matrix cutoff");
+                        let mut reference =
+                            ReferenceBiquad::rbj_butterworth(f64::from(rate), *cutoff, kind)
+                                .expect("reference");
+                        let measurement =
+                            sustained_measurement(&mut production, &mut reference, rate, frequency);
+                        if measurement.reference_gain_db >= -90.0 {
+                            assert!(
+                                (measurement.production_gain_db - measurement.reference_gain_db)
+                                    .abs()
+                                    <= 0.05,
+                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, production={}, reference={}",
+                                measurement.production_gain_db,
+                                measurement.reference_gain_db
+                            );
+                            assert!(
+                                measurement.residual_db <= -100.0,
+                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, residual={}",
+                                measurement.residual_db
+                            );
+                        } else {
+                            assert!(
+                                measurement.total_output_db <= -88.0,
+                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, output={}",
+                                measurement.total_output_db
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct SustainedMeasurement {
+        production_gain_db: f64,
+        reference_gain_db: f64,
+        residual_db: f64,
+        total_output_db: f64,
+    }
+
+    fn sustained_measurement(
+        production: &mut TptSvf,
+        reference: &mut ReferenceBiquad,
+        rate: u32,
+        frequency: f64,
+    ) -> SustainedMeasurement {
+        let settle = rate as usize / 2;
+        let frames = rate as usize / 4;
+        let mut report = BuiltinProcessReport::default();
+        let mut recovered = 0;
+        let mut production_sum = 0.0_f64;
+        let mut production_sine = 0.0_f64;
+        let mut production_cosine = 0.0_f64;
+        let mut reference_sine = 0.0_f64;
+        let mut reference_cosine = 0.0_f64;
+        let mut input_energy = 0.0_f64;
+        let mut output_energy = 0.0_f64;
+        let mut measured_outputs = Vec::with_capacity(frames);
+        let rate_f64 = f64::from(rate);
+        for index in 0..settle + frames {
+            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
+            let input = (0.5 * phase.sin()) as f32;
+            let output = production.process(input, &mut recovered, &mut report);
+            let reference_output = reference.process(f64::from(input));
+            if index >= settle {
+                let sine = phase.sin();
+                let cosine = phase.cos();
+                let output = f64::from(output);
+                measured_outputs.push(output);
+                production_sum += output;
+                production_sine += output * sine;
+                production_cosine += output * cosine;
+                reference_sine += reference_output * sine;
+                reference_cosine += reference_output * cosine;
+                input_energy += f64::from(input) * f64::from(input);
+                output_energy += output * output;
+            }
+        }
+        let frames_f64 = frames as f64;
+        let input_rms = (input_energy / frames_f64).sqrt();
+        let production_dc = production_sum / frames_f64;
+        let production_sine_coefficient = 2.0 * production_sine / frames_f64;
+        let production_cosine_coefficient = 2.0 * production_cosine / frames_f64;
+        let production_amplitude = production_sine_coefficient.hypot(production_cosine_coefficient);
+        let reference_amplitude =
+            (2.0 * reference_sine / frames_f64).hypot(2.0 * reference_cosine / frames_f64);
+        let mut residual_energy = 0.0_f64;
+        for (offset, output) in measured_outputs.into_iter().enumerate() {
+            let index = settle + offset;
+            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
+            let fitted = production_dc
+                + production_sine_coefficient * phase.sin()
+                + production_cosine_coefficient * phase.cos();
+            residual_energy += (output - fitted).powi(2);
+        }
+        let residual_rms = (residual_energy / frames_f64).sqrt();
+        let output_rms = (output_energy / frames_f64).sqrt();
+        SustainedMeasurement {
+            production_gain_db: 20.0 * (production_amplitude / 0.5).log10(),
+            reference_gain_db: 20.0 * (reference_amplitude / 0.5).log10(),
+            residual_db: 20.0 * (residual_rms / input_rms).log10(),
+            total_output_db: 20.0 * (output_rms / input_rms).log10(),
+        }
+    }
+
+    fn coherent_probes(rate: u32, cutoff: f64) -> Vec<f64> {
+        let nyquist = 0.5 * f64::from(rate);
+        let mut probes = [
+            0.25 * cutoff,
+            cutoff,
+            4.0 * cutoff,
+            0.2 * f64::from(rate),
+            0.45 * f64::from(rate),
+        ]
+        .into_iter()
+        .map(|probe| probe.clamp(4.0, nyquist - 4.0))
+        .map(|probe| (probe / 4.0).round() * 4.0)
+        .collect::<Vec<_>>();
+        probes.sort_by(f64::total_cmp);
+        probes.dedup_by(|left, right| *left == *right);
+        probes
+    }
+
+    fn impulse_dft_magnitude_db(samples: &[f32], rate: f64, frequency: f64) -> f64 {
+        let phase = -core::f64::consts::TAU * frequency / rate;
+        let (step_real, step_imaginary) = (phase.cos(), phase.sin());
+        let (mut unit_real, mut unit_imaginary) = (1.0_f64, 0.0_f64);
+        let (mut real, mut imaginary) = (0.0_f64, 0.0_f64);
+        for sample in samples {
+            let sample = f64::from(*sample);
+            real += sample * unit_real;
+            imaginary += sample * unit_imaginary;
+            (unit_real, unit_imaginary) = (
+                unit_real * step_real - unit_imaginary * step_imaginary,
+                unit_real * step_imaginary + unit_imaginary * step_real,
+            );
+        }
+        let magnitude = real.hypot(imaginary);
+        if magnitude == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * magnitude.log10()
+        }
+    }
 }

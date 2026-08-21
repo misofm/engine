@@ -205,3 +205,11 @@ This is not issue completion: the full one-second impulse DFT, coherent sustaine
 manifest fixtures, public API/resource/meter corrections, allocation/realtime audits, listening,
 cross-target workspace evidence, and authorized benchmark remain outstanding. Benchmark count is
 still **0**.
+
+**New failing gate, 2026-08-21:** the rescope's coherent sustained-sine fixture was added with
+amplitude `0.5`, `Fs/2` settling, `Fs/4` measurement, f64 least-squares DC/sine/cosine fit, and
+the frozen deep-stop branch. It currently fails the non-fundamental residual ceiling at 88,200 Hz,
+10-Hz HPF, 4-Hz coherent probe: the measured production residual is approximately `-94.24404 dB`
+relative to input RMS, above the required `-100 dB`. The fixture remains enabled and unchanged;
+no threshold was relaxed and the benchmark count remains zero. This requires Sol review before
+any implementation/tolerance change.
