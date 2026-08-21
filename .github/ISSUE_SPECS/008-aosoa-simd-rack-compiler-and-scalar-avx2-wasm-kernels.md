@@ -37,6 +37,15 @@ Placing arbitrary third-party Wasm in a SIMD bank, fixed global eight-track assu
 
 Wasm SIMD vectors are v128/4 f32 lanes; core spec: https://webassembly.github.io/spec/core/. AVX2/FMA need runtime detection: https://doc.rust-lang.org/std/arch/macro.is_x86_feature_detected.html.
 
+Issue 007's rescoped HPF/LPF contract is an input: each enabled filter/lane has three `f32`
+prepared coefficients and two `f32` trapezoidal/TPT state words. Four/eight-track adapters
+transpose them into `f32x4`/`f32x8` vectors and preserve the exact scalar operation graph. Base
+scalar, Wasm SIMD, NEON, and AVX2 do not fuse; AVX2+FMA is separate. No backend may substitute
+TDF-II, `f64`, double-single, compensated, or shared L/R state. Given identical coefficient bits,
+finite-normal input, and no sanitation, base non-FMA scalar and SIMD are bit-identical on the same
+target; cross-target and FMA paths also pass issue 007's response gates and the declared samplewise
+tolerance. A future precision mode belongs to issue 031 and would require a new cohort/ABI decision.
+
 ## Acceptance gates with objective measurements
 
 Track-count fixtures 1–3, 4, 5–7, 8 and 9+ plus 100 randomized cohort/tail layouts preserve independent L/R state and agree with scalar within the frozen per-effect tolerance; AVX2-without-FMA and AVX2+FMA dispatch are both tested; disassembly/Wasm inspection proves the intended vector instructions; on a pinned canonical eight-track bank each SIMD backend is statistically no slower than scalar and must show a positive speedup or produce a profile-backed Sol-approved rescope before acceptance; 0 render alloc/free; no compiled track ceiling.

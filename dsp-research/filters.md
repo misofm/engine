@@ -2,11 +2,11 @@
 
 ## Scope and engineering question
 
-Adopt normalized RBJ biquad forms for launch HPF, LPF, and parametric EQ; use transposed direct form II state per dual-mono lane. This note does not select an effect UX or analog-model mode.
+Adopt the normalized RBJ response for launch HPF, LPF, and parametric EQ. Launch HPF/LPF use a two-integrator trapezoidal/TPT state-variable realization per dual-mono lane; parametric-EQ realization remains owned by its issue.
 
 ## Algorithm and equations
 
-For normalized coefficients, `y[n] = b0*x[n] + z1`, `z1 = b1*x[n] - a1*y[n] + z2`, and `z2 = b2*x[n] - a2*y[n]`. Coefficients derive from `w0 = 2*pi*f0/Fs`, `alpha = sin(w0)/(2Q)` where the selected RBJ filter form applies [RBJ-COOKBOOK].
+For launch HPF/LPF, `g=tan(pi*f0/Fs)`, `k=1/Q`, `a1=1/(1+g*(g+k))`, `a2=g*a1`, and `a3=g*a2`. For states `s1,s2`: `v3=x-s2`, `v1=a1*s1+a2*v3`, `v2=s2+a2*s1+a3*v3`, `s1'=2*v1-s1`, and `s2'=2*v2-s2`; lowpass is `v2`, highpass is `x-k*v1-v2` [SIMPER-SVF] [ZAVALISHIN-TPT]. At `Q=1/sqrt(2)` its bilinear Butterworth response is independently checked against RBJ [RBJ-COOKBOOK].
 
 ## Coefficients and update rules
 
@@ -14,7 +14,7 @@ Validate/clamp parameter values off render, calculate normalized coefficients of
 
 ## Numerical and stability limits
 
-Require finite `Fs > 0`, `0 < f0 < 0.5*Fs`, and finite positive Q. Reject instead of silently accepting a denominator that is zero or non-finite. Fixture tests bound output and assert no non-finite state.
+Require finite `Fs > 0`, the owning issue's explicit cutoff domain, and finite positive Q. Reject invalid or unstable cast state-transition coefficients. Relative dB error is used only above a declared reference-magnitude floor; below it use absolute stopband/noise gates. Fixtures bound output and state.
 
 ## Latency and tail
 
@@ -30,7 +30,7 @@ L/R have separate state and independently automatable coefficients. A linked con
 
 ## Adopted V2 decisions
 
-Each prepared instance owns fixed coefficient/ramp/state storage. Render performs only bounded arithmetic over supplied frames and no allocation, lock, I/O, or logging.
+Each prepared instance owns fixed coefficient/ramp/state storage. Issue-007 production coefficients, state, audio, and intermediates are `f32`; its independent oracle is `f64`. Render remains bounded and allocation/lock/I/O/log free.
 
 ## Denormal, signed-zero and NaN policy
 
@@ -46,15 +46,15 @@ Use impulse, DC, sine, swept-sine, stepped-frequency/Q/gain, near-Nyquist, silen
 
 ## Objective tests and tolerances
 
-Compare impulse and sine responses to the independent `f64` model using declared tolerance; assert zero reported latency, finite output/state, scalar repeat byte identity, and corrupt-manifest rejection.
+Compare analytic state-space, impulse DFT, and coherent sustained-sine response to the independent `f64` model with distinct relative-response, residual-noise, and absolute-stopband gates; also assert zero latency, finite state, scalar repeat identity, and manifest integrity.
 
 ## Rejected alternatives and tradeoffs
 
-Test-only `f64` code re-derives the normalized equations and owns separate state types. CI rejects imports or dependencies from the production filter kernel into the reference crate.
+`f32` TDF-II was rejected for issue-007 HPF/LPF after sustained high-rate stopband tests exposed state-rounding error hidden by coefficient and impulse-only checks. Test-only `f64` owns separate equations/state. Wider production state requires a separate issue and portable SIMD/resource evidence.
 
 ## Known gaps and follow-up
 
-Vectorize independent lanes only after scalar semantics pass. AVX2/FMA dispatch is separate; base Wasm uses multiply then add, and all backends compare to scalar with the declared tolerance.
+Vectorize only after scalar semantics pass. AVX2/FMA dispatch is separate; base Wasm/NEON/AVX2 preserve the non-fused `f32` graph. Higher-precision production is deferred to issue 031.
 
 ## Benchmark plan
 
@@ -66,4 +66,4 @@ Record blinded ABX or randomized A/B of matched filter moves using `listening/TE
 
 ## 17. Decision record
 
-Fact: normalized biquad coefficient families are documented [RBJ-COOKBOOK]. Adoption: bounded transposed DF-II per dual-mono lane. Measurable reason: compact fixed state and reference impulse agreement. Open question: whether a future high-order mode warrants state-space interpolation.
+Fact: RBJ documents the response family, and trapezoidal/TPT sources derive an equivalent two-state realization with limited-precision motivation [RBJ-COOKBOOK] [SIMPER-SVF] [ZAVALISHIN-TPT]. Adoption: issue-007 HPF/LPF use `f32` TPT per lane. Measurable reason: all-rate analytic, impulse, coherent-sine, residual, and stopband gates; TDF-II failed sustained high-rate evidence. Wider production precision remains issue 031.

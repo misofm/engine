@@ -38,7 +38,7 @@ Dual mono never aliases L and R state. Matrix changes must smooth and remain fin
 
 ## Acceptance gates with objective measurements
 
-Polarity/trim/fader impulses match analytic gain within 1e-6; conventional pan/balance adapters match their documented matrix and pan law within 1e-6; HPF/LPF magnitude matches the independent `f64` design within 0.05 dB where defined and remains stable at every required rate; matrix ramp has no NaN/Inf and obeys its frozen per-sample slew bound; L-only input never changes R absent an explicit non-diagonal matrix; render allocation count is 0.
+Polarity/trim/fader impulses match analytic gain within 1e-6; conventional pan/balance adapters match their documented matrix and pan law within 1e-6; HPF/LPF analytic, impulse, and sustained-signal responses pass the realization-aware gates frozen below at every required rate; matrix ramp has no NaN/Inf and obeys its frozen per-sample slew bound; L-only input never changes R absent an explicit non-diagonal matrix; render allocation count is 0.
 
 ## Target matrix
 
@@ -150,3 +150,43 @@ conformance, full mutation/allocation audits, the one-million-call/render/swap a
 listening records, and final target evidence remain missing. The exactly-once benchmark was not
 invoked; benchmark invocation count remains **0**. Stop this workflow and restart from a revised
 Sol brief rather than attempting `f64`/double-single state or weakening/relabeling the failed gate.
+
+## Sol rescope and workflow reset (2026-08-21)
+
+**READY FOR A NEW TERRA ATTEMPT 1.** The failed two-attempt workflow above is closed. The
+authoritative replacement brief is `target/issue7-rescoped-sol-brief.md`; the earlier brief is
+historical evidence and is superseded. The new workflow retains every unfinished non-filter gate
+and adversarial-review defect. Benchmark invocation count remains **0**.
+
+The replacement freezes three linked decisions. First, production HPF/LPF uses the two-integrator
+trapezoidal/TPT state-variable realization of the same bilinear second-order Butterworth response
+(`Q=1/sqrt(2)`). Design is `f64` off render, then coefficients, both state words, audio, and every
+render intermediate are `f32`. Base scalar/Wasm/NEON/AVX2 follows one non-fused operation graph;
+FMA is separately dispatched by issue 008. There is no compensated or hidden wider state.
+
+Second, analytic state-space and one-second impulse-DFT responses agree with an independent `f64`
+RBJ oracle within `0.005 dB` and `0.05 dB` respectively where reference magnitude is at least
+`-120 dB`. Sustained coherent amplitude-`0.5` sines settle for `Fs/2` frames and measure `Fs/4`
+frames. Where reference gain is at least `-90 dB`, fitted fundamental magnitude agrees within
+`0.05 dB` and non-fundamental residual is at most `-100 dB` relative to input RMS. Below `-90 dB`,
+production is judged by an absolute `-88 dB` gain ceiling, not an ill-conditioned relative dB
+comparison. DC, cutoff, monotonicity, impulse-tail, finite-state, reset, and isolation gates remain.
+
+Third, `f64` state/arithmetic is test-only oracle precision, not production or a V1 quality mode.
+Production `f64`, double-single, or compensated state is deferred to issue 031.
+
+Enabled cutoff is exactly `10 Hz <= f < Fs/2`; `0` is disabled. The all-rate filter matrix tests
+each section alone at `10`, `20`, `100`, `1000`, `min(20000,0.1*Fs)`, and `0.45*Fs` Hz
+(deduplicated), plus the 100-Hz HPF/1-kHz LPF cascade. Probe targets are `0.25*f`, `f`, `4*f`,
+`0.2*Fs`, and `0.45*Fs`, clipped inside Nyquist, snapped to the nearest 4-Hz coherent bin, and
+deduplicated; analytic preparation also probes exact cutoff and `0.49*Fs`.
+
+Issue 008 consumes three `f32` coefficient vectors and two independent `f32` state vectors per
+enabled filter/lane. It may transpose across tracks but may not revert to TDF-II, widen state,
+share L/R state, or contract the base graph. No precision cohort is introduced this sprint.
+
+The restart also corrects complete parameter metadata; rejecting safe blocks; fader/mute entry
+sanitization; signed-zero identity; pairwise state recovery with per-call and lifetime counters;
+render-reachable panics; full resource/largest-allocation accounting; exact lane/field diagnostics;
+and exact prepared track/tail/observer-node set validation. All prior missing fixture, target,
+mutation, realtime, allocation, listening, and benchmark evidence remains required.
