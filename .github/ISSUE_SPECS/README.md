@@ -114,6 +114,13 @@ benchmark and audition/listening handoff. It permits one Terra attempt plus one 
 its timed invocation count starts at zero. Issue 046 gates only release qualification Issue 026
 and does not block other effect implementations.
 
+Issue 014, **Launch hysteretic peak gate/expander**, is likewise a bounded product vertical using
+the accepted dynamics/runtime/bank/graph seams. Issue 047, **Launch gate/expander qualification,
+realtime audit, and benchmark**, owns its expanded corpus/sequences, cohort/determinism evidence,
+100,000-render audit, target/instruction proof, sole eventual descriptive benchmark and audition/
+listening handoff. It permits one Terra attempt plus one Sol correction, starts with zero timed
+invocations, gates only Issue 026 and does not block other effect implementations.
+
 ## Shared definition
 
 Engine V2 is a greenfield, Rust, agent-first mixing/mastering engine.  It must not inspect/copy V1.  The render thread exclusively owns a prepared plan whose topology/capacities are immutable and whose preallocated DSP state is mutated during rendering.  The render path performs no allocation/free, lock, I/O, network, logging, syscall, structural plan mutation, or data-dependent unbounded work; displaced plans are reclaimed off-thread.  There is no compiled track limit.  Audio is planar `f32`; dual-mono channels remain independent unless an explicit contract links them.  Output is PCM.
