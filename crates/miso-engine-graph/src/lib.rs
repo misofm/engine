@@ -686,8 +686,11 @@ mod tests {
     use super::*;
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_effect_contract::{
-        EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
-        PortId, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+        EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode, LinkModeSet,
+        NativeEffectFactory, ParameterChannel, PortDescriptorV1, PortId, PortLayout, PortRole,
+        PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+        ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+        StatePayloadSizes,
     };
 
     struct Noop;
@@ -716,6 +719,85 @@ mod tests {
                 block.right[0] = self.right;
                 self.emitted = true;
             }
+            Ok(())
+        }
+    }
+
+    const SUM_ID: EffectId = match EffectId::new("sidechain-sum") {
+        Ok(value) => value,
+        Err(_) => panic!("ID"),
+    };
+    const SUM_MAIN_IN: PortId = match PortId::new("main-in") {
+        Ok(value) => value,
+        Err(_) => panic!("ID"),
+    };
+    const SUM_MAIN_OUT: PortId = match PortId::new("main-out") {
+        Ok(value) => value,
+        Err(_) => panic!("ID"),
+    };
+    const SUM_SIDECHAIN: PortId = match PortId::new("sidechain-in") {
+        Ok(value) => value,
+        Err(_) => panic!("ID"),
+    };
+    static SUM_PORTS: [PortDescriptorV1; 3] = [
+        PortDescriptorV1 {
+            id: SUM_MAIN_IN,
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptorV1 {
+            id: SUM_MAIN_OUT,
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptorV1 {
+            id: SUM_SIDECHAIN,
+            role: PortRole::SidechainInput,
+            required: false,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+    static SUM_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        id: SUM_ID,
+        display_name: "Sidechain sum fixture",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &[],
+        ports: &SUM_PORTS,
+        qualities: &[],
+    };
+
+    struct SidechainSum {
+        metadata: PreparedEffectMetadata,
+    }
+    impl PreparedNativeEffect for SidechainSum {
+        fn metadata(&self) -> PreparedEffectMetadata {
+            self.metadata
+        }
+        fn reset(&mut self, _kind: ResetKind) {}
+        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+            let (side_left, side_right) = block.sidechain.expect("fixture sidechain");
+            for frame in 0..block.left.len() {
+                block.left[frame] += side_left[frame];
+                block.right[frame] += side_right[frame];
+            }
+            ProcessReport::default()
+        }
+        fn snapshot_state_payload(
+            &self,
+            _output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _state_layout_version: u32,
+            _input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
             Ok(())
         }
     }
@@ -1085,6 +1167,244 @@ mod tests {
         )
         .expect("render");
         assert_eq!(samples, [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 30.0, 0.0]);
+    }
+
+    fn sidechain_pdc_plan(delay_main: bool) -> PreparedRenderPlan {
+        let main_input = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("main-path").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let sidechain_input = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("sidechain-path").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let effect_id = EffectNodeId {
+            track_id: StableGraphId::parse("main-path").expect("ID"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse("sum").expect("ID"),
+        };
+        let effect_node = GraphNodeId::Effect(effect_id.clone());
+        let route_id = StableGraphId::parse("to-main").expect("ID");
+        let route_node = GraphNodeId::Route {
+            route_id: route_id.clone(),
+        };
+        let output_node = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let main_edge_id = GraphEdgeId::TrackMain {
+            target: effect_node.clone(),
+        };
+        let sidechain_edge_id = GraphEdgeId::EffectSidechain {
+            effect: effect_id.clone(),
+            port: SUM_SIDECHAIN.as_str().to_owned(),
+        };
+        let main_edge = GraphEdge {
+            id: main_edge_id.clone(),
+            source: GraphPortId {
+                node: main_input.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: effect_node.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.sidechain.main".to_owned(),
+        };
+        let sidechain_edge = GraphEdge {
+            id: sidechain_edge_id.clone(),
+            source: GraphPortId {
+                node: sidechain_input.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: effect_node.clone(),
+                kind: GraphPortKind::SidechainInput,
+                effect_port: Some(SUM_SIDECHAIN.as_str().to_owned()),
+            },
+            path: "$.sidechain.aux".to_owned(),
+        };
+        let route_source = GraphEdge {
+            id: GraphEdgeId::RouteSource {
+                route_id: route_id.clone(),
+            },
+            source: GraphPortId {
+                node: effect_node.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: route_node.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.sidechain.route".to_owned(),
+        };
+        let route_destination = GraphEdge {
+            id: GraphEdgeId::RouteDestination {
+                route_id: route_id.clone(),
+            },
+            source: GraphPortId {
+                node: route_node.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output_node.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.sidechain.output".to_owned(),
+        };
+        let schedule = vec![
+            main_input.clone(),
+            sidechain_input.clone(),
+            effect_node.clone(),
+            route_node.clone(),
+            output_node.clone(),
+        ];
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let metadata = PreparedEffectMetadata {
+            descriptor: &SUM_DESCRIPTOR,
+            sample_rate: 48_000,
+            quantum: 4,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::Connected {
+                    id: SUM_SIDECHAIN,
+                    required: false,
+                },
+            },
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity: 0,
+        };
+        let delayed_edge = if delay_main {
+            main_edge_id
+        } else {
+            sidechain_edge_id
+        };
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: if delay_main { 91 } else { 92 },
+            spec: GraphSpec {
+                nodes: schedule
+                    .iter()
+                    .cloned()
+                    .map(|id| GraphNode {
+                        id,
+                        latency: LatencySamples(0),
+                        tail: TailSamples::Finite(0),
+                    })
+                    .collect(),
+                ports: Vec::new(),
+                edges: vec![main_edge, sidechain_edge, route_source, route_destination],
+            },
+            sequential_schedule: schedule,
+            dependency_levels: Vec::new(),
+            route_timings: Vec::new(),
+            inserted_delays: vec![InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(delayed_edge.clone()),
+                },
+                edge_id: delayed_edge,
+                samples: LatencySamples(2),
+            }],
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: vec![
+                main_input.clone(),
+                sidechain_input.clone(),
+                output_node.clone(),
+            ],
+            routes: vec![PreparedRoute {
+                node: route_node,
+                transform: RouteTransform {
+                    gain: 1.0,
+                    ll: 1.0,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+            }],
+            effects: vec![GraphPreparedEffect {
+                id: effect_id,
+                metadata,
+                processor: Box::new(SidechainSum { metadata }),
+            }],
+        });
+        let (main_left, main_right, side_left, side_right) = if delay_main {
+            (
+                [1.0, 0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 10.0, 0.0],
+            )
+        } else {
+            (
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 10.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0],
+            )
+        };
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes: vec![
+                GraphNodeBinding::new(
+                    main_input,
+                    Box::new(FixedSource {
+                        left: main_left,
+                        right: main_right,
+                    }),
+                ),
+                GraphNodeBinding::new(
+                    sidechain_input,
+                    Box::new(FixedSource {
+                        left: side_left,
+                        right: side_right,
+                    }),
+                ),
+                GraphNodeBinding::new(output_node, Box::new(Noop)),
+            ],
+        };
+        match graph.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => panic!("bindings"),
+        }
+    }
+
+    #[test]
+    fn faster_main_and_faster_sidechain_align_on_their_typed_ports() {
+        for delay_main in [true, false] {
+            let mut plan = sidechain_pdc_plan(delay_main);
+            let mut samples = [0.0_f32; 8];
+            let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output,
+                },
+                miso_engine_core::realtime::RenderTime { absolute_sample: 0 },
+            )
+            .expect("render");
+            assert_eq!(samples, [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 20.0, 0.0]);
+        }
     }
 
     fn effect_pdc_plan(rate: u32, quantum: u32, bypass: bool) -> PreparedRenderPlan {
