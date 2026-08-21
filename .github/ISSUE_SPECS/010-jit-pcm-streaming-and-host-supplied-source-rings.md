@@ -200,3 +200,49 @@ SRC, broad parser catalog or generic qualification tool. Split any such need int
 - Source+graph compile logs passed for Android ARM64, iOS ARM64, Wasm scalar, and Wasm `simd128`.
   The native parser/worker modules are cfg-excluded on Wasm; no device/browser runtime claim is
   made. No timed benchmark, timing threshold, codec, SRC, protocol PCM, or host runtime was added.
+
+## Sol adversarial review (2026-08-21)
+
+**Status: FAIL — do not close Issue 010. Benchmark invocation count remains 0.**
+
+The focused source, fixture, and graph tests pass (31 tests total), and the functional source audit
+completes 100,000 reads with zero reported forbidden render operations. Those passing tests do not
+cover the complete frozen contract:
+
+1. **Format/conversion gate: FAIL (evidence incomplete).** The generated corpus decodes all six
+   encodings and covers RIFF/RF64, classic/extensible, multichannel order, signed zero, sanitation,
+   and odd padding. Every valid corpus decode nevertheless selects the full region from frame zero;
+   the required valid region/subregion case is absent. `corruption_rejects` checks only `is_err()`
+   for four mutations instead of recording the exact diagnostic matrix required by the gate.
+2. **Resolution/rate gate: FAIL.** The resolver test proves one 48-kHz success and one 44.1/48-kHz
+   mismatch. It does not prove matching preparation at all four launch rates or the required
+   launch-versus-extended mismatch matrix.
+3. **Ring/seek gate: FAIL.** Deterministic FIFO/full/empty/EOF and one queued-seek example pass, but
+   there is no frozen-seed randomized seek race with adversarial delayed old chunks.
+4. **Shared-source fan-out gate: FAIL (evidence incomplete).** One four-channel source produces the
+   expected sequential and single-thread native-fallback PCM for three repeated/crossed mappings.
+   No focused test exercises missing, extra, duplicate, or ordinary-binding-overlap source claims
+   and verifies transactional ownership return.
+5. **100,000-render worker-delay gate: FAIL.** `miso-engine-source-audit` omits one same-thread host
+   submission to create the unavailable block; it neither starts nor delays a native worker. It
+   therefore proves the ring callback audit, not the frozen injected-worker-delay gate.
+6. **Duration-independent resource gate: FAIL.** The audit calls
+   `PcmSourceRing::resource_report(config)` twice with the same config and labels the results
+   one-minute and multi-hour. It prepares neither a one-minute file nor a sparse multi-hour file,
+   records no actual engine allocation-layout multiset, and reports descriptive RSS as `null`.
+7. **Target/policy gate: PASS on the recorded Terra evidence.** The locked quality/policy and
+   Android, iOS, Wasm scalar/SIMD, native-worker Linux, and Wasm no-atomic claims are present; the
+   focused native suites also pass in this review.
+
+There are also two production-contract gaps that prevent a bounded evidence-only correction.
+`PcmSourceProducer`/`PcmSourceConsumer` do not expose the frozen frame capacity, and native decoder
+sanitation telemetry is not propagated through the producer/source-set telemetry seam. More
+materially, `NativeSessionPreparedSources::into_parts` separates workers from the graph source set;
+binding the source set into a render plan does not give plan retirement ownership of worker
+stop/join as frozen by the brief. Exact resource reporting also explicitly omits the native
+`sync_channel` implementation bytes and does not charge the retained source-set entry, mapping,
+claim, driver, or worker-vector allocations, so the combined cap is not yet exact. Correct the
+lifetime/API and accounting contracts first, then add only the missing representative cases above
+and rerun the same untimed gates. No Sol implementation correction was attempted at this checkpoint
+because those production changes plus four independent missing evidence matrices are not one
+bounded correction.
