@@ -9,10 +9,15 @@ publish.workspace = true
 name = "miso_engine_graph_audit"
 path = "src/main.rs"
 
+[[bin]]
+name = "miso_engine_parametric_eq_audit"
+path = "src/parametric_eq_main.rs"
+
 [dependencies]
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-effect-contract.workspace = true
 miso-engine-graph.workspace = true
+miso-engine-parametric-eq.workspace = true
 
 [lints]
 workspace = true

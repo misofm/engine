@@ -147,6 +147,32 @@ design maxima; fixture and graph hashes; automation/reset/restore/isolation resu
 instruction/target reports; Terra and final Sol PASS/FAIL; and explicit
 `timed_benchmark_invocations=0`.
 
+## Terra attempt 1 — non-numerical audit and target checkpoint (2026-08-21)
+
+**CHECKPOINT PASS, with an external formatting blocker.**
+`miso_engine_parametric_eq_audit` prepares one active endpoint-conditioned dual-mono EQ and
+executes exactly 100,000 prepared 128-frame blocks while the realtime audit is armed. It freezes
+the output addresses, requires finite/recovery-free reports, proves zero allocation/deallocation,
+lock, log, I/O and syscall counters, then drops the prepared effect only after leaving the render
+scope. Its emitted record reports `destruction_off_render=true` and zero forbidden operations.
+
+`scripts/check-parametric-eq-targets.sh` compiles the core/EQ boundary for native scalar,
+Android/iOS AArch64, Wasm scalar and `+simd128`; it inspects the named endpoint-conditioned delta
+symbols for scalar, AVX2/no-FMA, AVX2+FMA and NEON/Wasm. The base and AVX2+FMA V1 paths contain no
+fused contractions; the AVX2 path is eight-lane and the NEON/Wasm paths are four-lane.
+
+PASS:
+
+- `cargo run --locked -p miso-engine-graph-audit --bin miso_engine_parametric_eq_audit -- --blocks 100000`
+- `cargo test --locked -p miso-engine-graph-audit`
+- `cargo clippy --locked -p miso-engine-graph-audit --all-targets -- -D warnings`
+- `bash scripts/check-parametric-eq-targets.sh`
+
+`cargo fmt --check` is currently blocked only by a concurrent numerical-test edit at
+`crates/miso-engine-parametric-eq/src/lib.rs:2338`; this checkpoint intentionally did not modify,
+format or otherwise touch that protected file. No numerical test, benchmark, timing command or
+broad fixture framework was added. `timed_benchmark_invocations=0`.
+
 ## Terra attempt 1 — endpoint-conditioned homogeneous-bank checkpoint (2026-08-21)
 
 **CHECKPOINT PASS; bank/architecture only.** The obsolete core direct-form-I bank surface has been
