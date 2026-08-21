@@ -131,3 +131,16 @@ Accepted scalar checkpoint and candidate identities; exact W4/W8 resource rows; 
 and unavailable-fallback results; scalar/bank PCM/state/report and recovery/isolation rows; frozen
 alias ratios; ten-track bank/tail/latency/tail/PDC/cap report; focused/final/policy outputs; attempt
 count; strict Terra/final Sol verdict; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — product-bank checkpoint (FAIL)
+
+- Product-bank code compiles, including W4/W8 binding, request validation-before-fallback and the
+  width-specific retained rows (5,504 / 11,008 bytes).
+- Focused `cargo test --locked -p miso-engine-soft-clip --lib` result: **FAIL**, 6 passed / 7
+  total. `tests::available_w8_bank_matches_scalar_state_reports_and_lane_isolation` fails at
+  `crates/miso-engine-soft-clip/src/lib.rs:1791`: the injected W8 interpolation-history fault does
+  not set `recovered[0]`. This is likely an intermediate-visibility contract issue in the direct
+  recovery probe; it was not repaired in this attempt.
+- Remaining core/Clippy/final-policy gates were not run after the semantic failure. No alias,
+  registry, graph, qualification, audit, target, or timing work was started.
+- `timed_benchmark_invocations=0`. Terra verdict: **FAIL**; stop for Sol review.

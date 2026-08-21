@@ -531,6 +531,7 @@ dependencies = [
 name = "miso-engine-soft-clip"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
 ]

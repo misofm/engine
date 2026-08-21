@@ -1,12 +1,14 @@
 //! Fixed-two-times cubic soft clipper with a private scalar oversampling lane.
 #![allow(missing_docs)]
 
+use miso_engine_core::{PreparedSoftClipBankKernelV1, SoftClipBankKernelError};
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectMetadata,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata, sanitize_sample,
@@ -339,6 +341,95 @@ pub struct PreparedSoftClip {
     right: Lane,
 }
 
+/// Width-specialized effect-owned bytes: state plus the six retained f32 defaults per track.
+fn bank_effect_bytes(width: usize) -> Option<u64> {
+    let state = (LANE_STATE_BYTES as u64).checked_mul(2)?;
+    let per_track = state.checked_add(24)?;
+    (width as u64).checked_mul(per_track)
+}
+
+/// Sample-major state for one audio channel of a homogeneous soft-clip cohort.
+#[derive(Clone, Debug)]
+struct BankLane<const W: usize> {
+    high_cursor: [u32; W],
+    dry_cursor: [u32; W],
+    ramps: [[Ramp; PARAMETER_COUNT]; W],
+    interpolation: [[f32; W]; HISTORY],
+    decimation: [[f32; W]; HISTORY],
+    dry: [[f32; W]; DRY_HISTORY],
+}
+
+impl<const W: usize> BankLane<W> {
+    fn new(defaults: &[[f32; PARAMETER_COUNT]; W]) -> Self {
+        Self {
+            high_cursor: [0; W],
+            dry_cursor: [0; W],
+            ramps: (*defaults).map(|values| values.map(Ramp::fixed)),
+            interpolation: [[0.0; W]; HISTORY],
+            decimation: [[0.0; W]; HISTORY],
+            dry: [[0.0; W]; DRY_HISTORY],
+        }
+    }
+
+    fn lane(&self, track: usize) -> Lane {
+        Lane {
+            high_cursor: self.high_cursor[track],
+            dry_cursor: self.dry_cursor[track],
+            ramps: self.ramps[track],
+            interp: core::array::from_fn(|word| self.interpolation[word][track]),
+            decim: core::array::from_fn(|word| self.decimation[word][track]),
+            dry: core::array::from_fn(|word| self.dry[word][track]),
+        }
+    }
+
+    fn set_lane(&mut self, track: usize, lane: Lane) {
+        self.high_cursor[track] = lane.high_cursor;
+        self.dry_cursor[track] = lane.dry_cursor;
+        self.ramps[track] = lane.ramps;
+        for word in 0..HISTORY {
+            self.interpolation[word][track] = lane.interp[word];
+            self.decimation[word][track] = lane.decim[word];
+        }
+        for word in 0..DRY_HISTORY {
+            self.dry[word][track] = lane.dry[word];
+        }
+    }
+
+    fn reset_full(&mut self, track: usize, defaults: [f32; PARAMETER_COUNT]) {
+        self.set_lane(
+            track,
+            Lane::new(defaults).expect("prepared bank defaults remain state-valid"),
+        );
+    }
+
+    fn reset_discontinuity(&mut self, track: usize) {
+        let mut lane = self.lane(track);
+        lane.discontinuity_reset();
+        self.set_lane(track, lane);
+    }
+
+    fn recover(&mut self, track: usize) {
+        let mut lane = self.lane(track);
+        lane.recover();
+        self.set_lane(track, lane);
+    }
+
+    fn delayed_dry(&self, track: usize) -> f32 {
+        self.dry[(self.dry_cursor[track] as usize + 1) % DRY_HISTORY][track]
+    }
+}
+
+/// A fixed-width homogeneous cohort with independent dual-mono tracks and AoSoA FIR histories.
+struct PreparedSoftClipBank<const W: usize> {
+    metadata: PreparedBankMetadata,
+    effect_metadata: PreparedEffectMetadata,
+    kernel: PreparedSoftClipBankKernelV1,
+    left_defaults: [[f32; PARAMETER_COUNT]; W],
+    right_defaults: [[f32; PARAMETER_COUNT]; W],
+    left: BankLane<W>,
+    right: BankLane<W>,
+}
+
 impl NativeEffectFactory for SoftClipFactory {
     fn descriptor(&self) -> &'static EffectDescriptorV1 {
         &SOFT_CLIP_DESCRIPTOR_V1
@@ -367,10 +458,76 @@ impl NativeEffectFactory for SoftClipFactory {
 
     fn bind_homogeneous_bank(
         &self,
-        _request: PrepareEffectBankRequest<'_>,
+        request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        Ok(None)
+        if !request.has_matching_backend_width()
+            || request.requests.len() != request.width.lanes() as usize
+        {
+            return Err(EffectPrepareError {
+                code: "effect.bank.requests",
+            });
+        }
+        match request.width {
+            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
+            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
+        }
     }
+}
+
+fn prepare_homogeneous_bank<const W: usize>(
+    factory: &SoftClipFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    let first = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(factory.descriptor(), first)?;
+    let (first_left, first_right) = initial_defaults(first.initial_values)?;
+    let mut left_defaults = [first_left; W];
+    let mut right_defaults = [first_right; W];
+    let mut same_program = true;
+    for (track, member) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), member)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
+        }
+        let (left, right) = initial_defaults(member.initial_values)?;
+        left_defaults[track] = left;
+        right_defaults[track] = right;
+    }
+    if !same_program {
+        return Ok(None);
+    }
+    if bank_effect_bytes(W) != Some(W as u64 * 1_376) {
+        return Err(EffectPrepareError {
+            code: "effect.resource.limit",
+        });
+    }
+    let kernel = match PreparedSoftClipBankKernelV1::try_new(request.backend) {
+        Ok(kernel) => kernel,
+        Err(SoftClipBankKernelError::BackendUnavailable) => return Ok(None),
+        Err(_) => {
+            return Err(EffectPrepareError {
+                code: "effect.bank.backend",
+            });
+        }
+    };
+    Ok(Some(Box::new(PreparedSoftClipBank::<W> {
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+        effect_metadata: metadata,
+        kernel,
+        left_defaults,
+        right_defaults,
+        left: BankLane::new(&left_defaults),
+        right: BankLane::new(&right_defaults),
+    })))
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
@@ -397,8 +554,8 @@ impl PreparedNativeEffect for PreparedSoftClip {
             block.automation,
             self.metadata,
             block.first_sample,
-            &mut self.left,
-            &mut self.right,
+            &mut self.left.ramps,
+            &mut self.right.ramps,
             &mut report,
         );
         for index in 0..block.frames() {
@@ -462,6 +619,261 @@ impl PreparedNativeEffect for PreparedSoftClip {
     }
 }
 
+impl<const W: usize> PreparedNativeEffectBank for PreparedSoftClipBank<W> {
+    fn metadata(&self) -> PreparedBankMetadata {
+        self.metadata.clone()
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        for track in 0..W {
+            match kind {
+                ResetKind::FullToDefaults => {
+                    self.left.reset_full(track, self.left_defaults[track]);
+                    self.right.reset_full(track, self.right_defaults[track]);
+                }
+                ResetKind::DiscontinuityKeepParameters => {
+                    self.left.reset_discontinuity(track);
+                    self.right.reset_discontinuity(track);
+                }
+            }
+        }
+    }
+
+    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        let mut report = BankProcessReport::empty(self.metadata.width);
+        if !bank_block_matches(&block, self.metadata.width, self.effect_metadata.quantum)
+            || W != self.metadata.width.lanes() as usize
+        {
+            return report;
+        }
+        for track in 0..W {
+            let start = block.automation_offsets[track] as usize;
+            let end = block.automation_offsets[track + 1] as usize;
+            apply_automation(
+                &block.automation[start..end],
+                self.effect_metadata,
+                block.first_sample,
+                &mut self.left.ramps[track],
+                &mut self.right.ramps[track],
+                &mut report.reports[track],
+            );
+        }
+        for frame in 0..block.frames as usize {
+            let start = frame * W;
+            let mut left_input = [0.0_f32; W];
+            let mut right_input = [0.0_f32; W];
+            for track in 0..W {
+                left_input[track] = sanitize(
+                    block.left[start + track],
+                    &mut report.reports[track].sanitized_main_samples,
+                );
+                right_input[track] = sanitize(
+                    block.right[start + track],
+                    &mut report.reports[track].sanitized_main_samples,
+                );
+            }
+            let (left_output, left_recovered) = process_bank_channel(
+                &mut self.left,
+                left_input,
+                self.effect_metadata.bypass,
+                self.kernel,
+            );
+            let (right_output, right_recovered) = process_bank_channel(
+                &mut self.right,
+                right_input,
+                self.effect_metadata.bypass,
+                self.kernel,
+            );
+            for track in 0..W {
+                block.left[start + track] = left_output[track];
+                block.right[start + track] = right_output[track];
+                if left_recovered[track] {
+                    report.reports[track].recovered_left_samples = report.reports[track]
+                        .recovered_left_samples
+                        .saturating_add(1);
+                }
+                if right_recovered[track] {
+                    report.reports[track].recovered_right_samples = report.reports[track]
+                        .recovered_right_samples
+                        .saturating_add(1);
+                }
+            }
+        }
+        report
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = bank_track_index::<W>(track_index)?;
+        validate_state_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        write_lane(output.left, &self.left.lane(track));
+        write_lane(output.right, &self.right.lane(track));
+        Ok(())
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = bank_track_index::<W>(track_index)?;
+        if state_layout_version != 1 {
+            return Err(state_error("effect.state.version"));
+        }
+        validate_state_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.effect_metadata.state_sizes,
+        )?;
+        let left = read_lane(input.left)?;
+        let right = read_lane(input.right)?;
+        self.left.set_lane(track, left);
+        self.right.set_lane(track, right);
+        Ok(())
+    }
+}
+
+fn bank_track_index<const W: usize>(track_index: u32) -> Result<usize, StatePayloadError> {
+    let track = usize::try_from(track_index).map_err(|_| state_error("effect.bank.track"))?;
+    if track >= W {
+        return Err(state_error("effect.bank.track"));
+    }
+    Ok(track)
+}
+
+fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quantum: u32) -> bool {
+    let lanes = width.lanes() as usize;
+    let Some(length) = (block.frames as usize).checked_mul(lanes) else {
+        return false;
+    };
+    block.width == width
+        && block.frames != 0
+        && block.frames <= quantum
+        && block.left.len() == length
+        && block.right.len() == length
+        && block.sidechain.is_none()
+        && block
+            .first_sample
+            .checked_add(block.frames as u64)
+            .is_some()
+        && block.automation_offsets.len() == lanes + 1
+        && block.automation_offsets.first() == Some(&0)
+        && block.automation_offsets.last().copied() == Some(block.automation.len() as u32)
+        && !block
+            .automation_offsets
+            .windows(2)
+            .any(|pair| pair[0] > pair[1])
+}
+
+fn process_bank_channel<const W: usize>(
+    lane: &mut BankLane<W>,
+    input: [f32; W],
+    bypass: bool,
+    kernel: PreparedSoftClipBankKernelV1,
+) -> ([f32; W], [bool; W]) {
+    let mut delayed = [0.0_f32; W];
+    let mut first_phase = [0.0_f32; W];
+    let mut failed = [false; W];
+    for track in 0..W {
+        delayed[track] = lane.delayed_dry(track);
+        for ramp in &mut lane.ramps[track] {
+            if ramp.advance().is_none() {
+                failed[track] = true;
+                break;
+            }
+        }
+        if failed[track] {
+            continue;
+        }
+        let dry_index = lane.dry_cursor[track] as usize;
+        lane.dry[dry_index][track] = input[track];
+        delayed[track] = lane.dry[(dry_index + 1) % DRY_HISTORY][track];
+        lane.dry_cursor[track] = ((dry_index + 1) % DRY_HISTORY) as u32;
+        let Some(doubled) = checked(2.0_f32 * lane.ramps[track][0].current) else {
+            failed[track] = true;
+            continue;
+        };
+        let Some(value) = checked(doubled * input[track]) else {
+            failed[track] = true;
+            continue;
+        };
+        first_phase[track] = value;
+    }
+    let phase_one = {
+        let BankLane {
+            high_cursor,
+            interpolation,
+            decimation,
+            ..
+        } = lane;
+        kernel.process_phase(
+            &mut first_phase,
+            &H,
+            high_cursor,
+            interpolation.as_flattened_mut(),
+            decimation.as_flattened_mut(),
+        )
+    };
+    let mut zero_phase = [0.0_f32; W];
+    let phase_two = {
+        let BankLane {
+            high_cursor,
+            interpolation,
+            decimation,
+            ..
+        } = lane;
+        kernel.process_phase(
+            &mut zero_phase,
+            &H,
+            high_cursor,
+            interpolation.as_flattened_mut(),
+            decimation.as_flattened_mut(),
+        )
+    };
+    if phase_one.is_err() || phase_two.is_err() {
+        failed.fill(true);
+    }
+    let mut output = [0.0_f32; W];
+    for track in 0..W {
+        if !failed[track] {
+            let mix = lane.ramps[track][2].current;
+            let gain = lane.ramps[track][1].current;
+            let wet = checked(first_phase[track]);
+            let rendered = wet.and_then(|wet| {
+                if bypass
+                    || (mix.to_bits() == 0.0_f32.to_bits() && gain.to_bits() == 1.0_f32.to_bits())
+                {
+                    Some(delayed[track])
+                } else {
+                    let a = checked(1.0_f32 - mix)?;
+                    let b = checked(a * delayed[track])?;
+                    let c = checked(mix * wet)?;
+                    let e = checked(b + c)?;
+                    checked(gain * e)
+                }
+            });
+            if let Some(value) = rendered {
+                output[track] = value;
+                continue;
+            }
+            failed[track] = true;
+        }
+        output[track] = delayed[track];
+        lane.recover(track);
+    }
+    (output, failed)
+}
+
 fn initial_defaults(
     values: &[InitialParameterValue],
 ) -> Result<([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]), EffectPrepareError> {
@@ -504,8 +916,8 @@ fn apply_automation(
     spans: &[PreparedAutomationSpan],
     metadata: PreparedEffectMetadata,
     first_sample: u64,
-    left: &mut Lane,
-    right: &mut Lane,
+    left: &mut [Ramp; PARAMETER_COUNT],
+    right: &mut [Ramp; PARAMETER_COUNT],
     report: &mut ProcessReport,
 ) {
     let mut pending = [[None; PARAMETER_COUNT]; 2];
@@ -552,12 +964,12 @@ fn apply_automation(
         pending[0].into_iter().zip(pending[1]).enumerate()
     {
         if let Some(target) = left_target {
-            left.ramps[parameter].target = target;
-            left.ramps[parameter].remaining = RAMP_SAMPLES;
+            left[parameter].target = target;
+            left[parameter].remaining = RAMP_SAMPLES;
         }
         if let Some(target) = right_target {
-            right.ramps[parameter].target = target;
-            right.ramps[parameter].remaining = RAMP_SAMPLES;
+            right[parameter].target = target;
+            right[parameter].remaining = RAMP_SAMPLES;
         }
     }
 }
@@ -780,9 +1192,11 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::{ReferenceSoftClip, reference_halfband_63};
     use miso_engine_effect_contract::{
-        EffectProcessBlock, LinkMode, PrepareEffectLimits, PreparedNativeEffect, PreparedPortsV1,
+        BankWidth, EffectBankProcessBlock, EffectProcessBlock, LinkMode, PrepareEffectBankRequest,
+        PrepareEffectLimits, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1,
         StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
     };
 
@@ -843,6 +1257,35 @@ mod tests {
             )
             .expect("snapshot");
         (left, right)
+    }
+
+    fn snapshot_bank(effect: &dyn PreparedNativeEffectBank, track: u32) -> (Vec<u8>, Vec<u8>) {
+        let sizes = effect.metadata().program_key.state_sizes;
+        let mut left = vec![0; sizes.left_bytes as usize];
+        let mut right = vec![0; sizes.right_bytes as usize];
+        effect
+            .snapshot_track_state_payload(
+                track,
+                StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("sizes"),
+            )
+            .expect("snapshot");
+        (left, right)
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn bank_request<'a>(
+        width: BankWidth,
+        backend: KernelBackendV1,
+        requests: &'a [PrepareEffectRequest<'a>],
+    ) -> PrepareEffectBankRequest<'a> {
+        PrepareEffectBankRequest {
+            backend,
+            width,
+            requests,
+        }
     }
 
     #[test]
@@ -1106,5 +1549,270 @@ mod tests {
         assert_eq!(concrete.left.high_cursor, 0);
         concrete.reset(ResetKind::FullToDefaults);
         assert_eq!(concrete.left.ramps[0].current, 1.0);
+    }
+
+    #[test]
+    fn bank_binding_validates_before_unavailable_fallback_and_counts_exact_bytes() {
+        assert_eq!(bank_effect_bytes(4), Some(5_504));
+        assert_eq!(bank_effect_bytes(8), Some(11_008));
+        let values: [[InitialParameterValue; PARAMETER_COUNT * 2]; 8] =
+            core::array::from_fn(|_| initial_values());
+        let requests = values.each_ref().map(|values| request(values));
+
+        assert!(matches!(
+            SoftClipFactory.bind_homogeneous_bank(bank_request(
+                BankWidth::Four,
+                KernelBackendV1::X86Avx2,
+                &requests,
+            )),
+            Err(EffectPrepareError {
+                code: "effect.bank.requests"
+            })
+        ));
+
+        let mut malformed = requests;
+        malformed[3].limits.maximum_total_state_bytes = 1_351;
+        assert!(matches!(
+            SoftClipFactory.bind_homogeneous_bank(bank_request(
+                BankWidth::Four,
+                KernelBackendV1::WasmSimd128,
+                &malformed[..4],
+            )),
+            Err(EffectPrepareError {
+                code: "effect.resource.limit"
+            })
+        ));
+
+        assert!(matches!(
+            SoftClipFactory.bind_homogeneous_bank(bank_request(
+                BankWidth::Four,
+                KernelBackendV1::WasmSimd128,
+                &requests[..4],
+            )),
+            Ok(None)
+        ));
+
+        let mut incompatible = requests;
+        incompatible[2].sample_rate = 44_100;
+        assert!(matches!(
+            SoftClipFactory.bind_homogeneous_bank(bank_request(
+                BankWidth::Four,
+                KernelBackendV1::WasmSimd128,
+                &incompatible[..4],
+            )),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn available_w8_bank_matches_scalar_state_reports_and_lane_isolation() {
+        let Ok(kernel) = PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2) else {
+            return;
+        };
+        let values: [[InitialParameterValue; PARAMETER_COUNT * 2]; 8] =
+            core::array::from_fn(|track| {
+                let mut values = initial_values();
+                values[0].value = -12.0 + track as f32 * 4.0;
+                values[1].value = 18.0 - track as f32 * 3.0;
+                values[2].value = -6.0 + track as f32 * 2.0;
+                values[3].value = 6.0 - track as f32;
+                values[4].value = if track == 6 { 0.0 } else { 1.0 };
+                values[5].value = if track == 5 { 0.0 } else { 1.0 };
+                values
+            });
+        let requests = values.each_ref().map(|values| request(values));
+        let mut bank = SoftClipFactory
+            .bind_homogeneous_bank(bank_request(
+                BankWidth::Eight,
+                KernelBackendV1::X86Avx2,
+                &requests,
+            ))
+            .expect("binding")
+            .expect("available AVX2 bank");
+        let mut scalars = values
+            .iter()
+            .map(|values| prepare(values))
+            .collect::<Vec<_>>();
+        let first_automation = PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Left,
+            parameter_index: 0,
+            start_sample: 0,
+            end_sample: 0,
+            start_value: 12.0,
+            end_value: 12.0,
+        };
+        let second_automation = PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Right,
+            parameter_index: 2,
+            start_sample: 0,
+            end_sample: 0,
+            start_value: 0.25,
+            end_value: 0.25,
+        };
+        let automation = [first_automation, second_automation];
+        let offsets = [0, 1, 1, 1, 2, 2, 2, 2, 2];
+        let mut bank_left = vec![0.0_f32; 8 * 64];
+        let mut bank_right = vec![0.0_f32; 8 * 64];
+        for frame in 0..64 {
+            for track in 0..8 {
+                let index = frame * 8 + track;
+                bank_left[index] = ((frame * 13 + track * 7) as f32 * 0.03125).sin() * 0.6;
+                bank_right[index] = -((frame * 11 + track * 3) as f32 * 0.027).cos() * 0.45;
+            }
+        }
+        bank_left[10 * 8 + 5] = f32::NAN;
+        let mut expected_left = bank_left.clone();
+        let mut expected_right = bank_right.clone();
+        let mut expected_reports = [ProcessReport::default(); 8];
+        for track in 0..8 {
+            let mut left = (0..64)
+                .map(|frame| expected_left[frame * 8 + track])
+                .collect::<Vec<_>>();
+            let mut right = (0..64)
+                .map(|frame| expected_right[frame * 8 + track])
+                .collect::<Vec<_>>();
+            let spans = if track == 0 {
+                &automation[..1]
+            } else if track == 3 {
+                &automation[1..]
+            } else {
+                &[]
+            };
+            expected_reports[track] =
+                process(scalars[track].as_mut(), &mut left, &mut right, 0, spans);
+            for frame in 0..64 {
+                expected_left[frame * 8 + track] = left[frame];
+                expected_right[frame * 8 + track] = right[frame];
+            }
+        }
+        let report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                64,
+                BankWidth::Eight,
+                0,
+                &automation,
+                &offsets,
+                128,
+            )
+            .expect("bank block"),
+        );
+        assert_eq!(bits(&bank_left), bits(&expected_left));
+        assert_eq!(bits(&bank_right), bits(&expected_right));
+        assert_eq!(report.reports, expected_reports);
+        for track in 0..8 {
+            assert_eq!(
+                snapshot_bank(bank.as_ref(), track as u32),
+                snapshot(scalars[track].as_ref())
+            );
+        }
+
+        let saved_bank = (0..8)
+            .map(|track| snapshot_bank(bank.as_ref(), track))
+            .collect::<Vec<_>>();
+        let saved_scalar = scalars
+            .iter()
+            .map(|effect| snapshot(effect.as_ref()))
+            .collect::<Vec<_>>();
+        let mut bank_next_left = (0..(8 * 16))
+            .map(|index| (index as f32 * 0.037).sin() * 0.3)
+            .collect::<Vec<_>>();
+        let mut bank_next_right = (0..(8 * 16))
+            .map(|index| -(index as f32 * 0.019).cos() * 0.2)
+            .collect::<Vec<_>>();
+        let mut expected_next_left = bank_next_left.clone();
+        let mut expected_next_right = bank_next_right.clone();
+        for track in 0..8 {
+            let mut left = (0..16)
+                .map(|frame| expected_next_left[frame * 8 + track])
+                .collect::<Vec<_>>();
+            let mut right = (0..16)
+                .map(|frame| expected_next_right[frame * 8 + track])
+                .collect::<Vec<_>>();
+            process(scalars[track].as_mut(), &mut left, &mut right, 64, &[]);
+            for frame in 0..16 {
+                expected_next_left[frame * 8 + track] = left[frame];
+                expected_next_right[frame * 8 + track] = right[frame];
+            }
+        }
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_next_left,
+                &mut bank_next_right,
+                None,
+                16,
+                BankWidth::Eight,
+                64,
+                &[],
+                &[0; 9],
+                128,
+            )
+            .expect("next block"),
+        );
+        assert_eq!(bits(&bank_next_left), bits(&expected_next_left));
+        assert_eq!(bits(&bank_next_right), bits(&expected_next_right));
+
+        for track in 0..8 {
+            bank.restore_track_state_payload(
+                track,
+                1,
+                StatePayloadInput::new(
+                    &[],
+                    &saved_bank[track as usize].0,
+                    &saved_bank[track as usize].1,
+                    bank.metadata().program_key.state_sizes,
+                )
+                .expect("bank state"),
+            )
+            .expect("bank restore");
+            let state_sizes = scalars[track as usize].metadata().state_sizes;
+            scalars[track as usize]
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(
+                        &[],
+                        &saved_scalar[track as usize].0,
+                        &saved_scalar[track as usize].1,
+                        state_sizes,
+                    )
+                    .expect("scalar state"),
+                )
+                .expect("scalar restore");
+        }
+        let mut recovered_lane = BankLane::<8>::new(&[[1.0; PARAMETER_COUNT]; 8]);
+        recovered_lane.interpolation[61][0] = f32::NAN;
+        recovered_lane.dry[1][0] = -0.25;
+        let (output, recovered) =
+            process_bank_channel(&mut recovered_lane, [0.0; 8], false, kernel);
+        assert!(recovered[0]);
+        assert!(recovered[1..].iter().all(|value| !value));
+        assert_eq!(output[0].to_bits(), (-0.25_f32).to_bits());
+        assert_eq!(recovered_lane.high_cursor[0], 0);
+        assert_ne!(recovered_lane.high_cursor[1], 0);
+
+        bank.reset(ResetKind::DiscontinuityKeepParameters);
+        for scalar in &mut scalars {
+            scalar.reset(ResetKind::DiscontinuityKeepParameters);
+        }
+        for track in 0..8 {
+            assert_eq!(
+                snapshot_bank(bank.as_ref(), track as u32),
+                snapshot(scalars[track].as_ref())
+            );
+        }
+        bank.reset(ResetKind::FullToDefaults);
+        for scalar in &mut scalars {
+            scalar.reset(ResetKind::FullToDefaults);
+        }
+        for track in 0..8 {
+            assert_eq!(
+                snapshot_bank(bank.as_ref(), track as u32),
+                snapshot(scalars[track].as_ref())
+            );
+        }
     }
 }

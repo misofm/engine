@@ -10,6 +10,7 @@ name = "miso_engine_soft_clip"
 path = "src/lib.rs"
 
 [dependencies]
+miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 
 [dev-dependencies]
