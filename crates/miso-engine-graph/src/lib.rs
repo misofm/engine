@@ -3173,6 +3173,63 @@ mod tests {
         assert_eq!(failure.bindings.nodes.len(), 3);
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn native_startup_handshake_failure_returns_every_bind_input_transactionally() {
+        use miso_engine_native_scheduler::SchedulerTestProtocolInjectionV1;
+
+        let (graph, bindings) = native_parallel_sum_plan(48_000);
+        let expected_nodes: Vec<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let config = NativeGraphBindConfigV1 {
+            render_mode: NativeGraphRenderModeV1::DependencyWaves,
+            scheduler: NativeSchedulerConfigV1::new(
+                core::num::NonZeroUsize::new(4).expect("four lanes"),
+                true,
+            )
+            .with_test_protocol_injection(
+                SchedulerTestProtocolInjectionV1::StartupHandshakeFailure,
+            ),
+            maximum_retained_bytes: 1 << 20,
+        };
+        let failure = match graph.bind_native(bindings, config) {
+            Ok(_) => panic!("injected startup handshake failure unexpectedly published a plan"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.scheduler.worker_start");
+        assert_eq!(failure.plan.plan_id, 48_000);
+        assert_eq!(failure.config, config);
+        assert_eq!(failure.bindings.envelope, failure.plan.envelope);
+        assert!(failure.bindings.observers.is_empty());
+        assert_eq!(
+            failure
+                .bindings
+                .nodes
+                .iter()
+                .map(|binding| binding.node.clone())
+                .collect::<Vec<_>>(),
+            expected_nodes
+        );
+
+        let recovered_config = NativeGraphBindConfigV1 {
+            render_mode: NativeGraphRenderModeV1::DependencyWaves,
+            scheduler: NativeSchedulerConfigV1::new(
+                core::num::NonZeroUsize::new(4).expect("four lanes"),
+                true,
+            ),
+            maximum_retained_bytes: 1 << 20,
+        };
+        let recovered = failure
+            .plan
+            .bind_native(failure.bindings, recovered_config)
+            .unwrap_or_else(|retry| panic!("returned inputs were not reusable: {}", retry.code));
+        assert_eq!(recovered.metadata.selection, SchedulerSelectionV1::Parallel);
+        assert_eq!(recovered.metadata.resources.scheduler.worker_count, 3);
+    }
+
     #[test]
     fn executor_applies_exact_pdc_then_fixed_pairwise_reduction() {
         let input_a = GraphNodeId::TrackStage {

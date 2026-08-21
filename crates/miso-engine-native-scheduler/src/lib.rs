@@ -1239,6 +1239,18 @@ mod tests {
                     .all(|pair| pair[0].end_unit == pair[1].first_unit)
             );
             assert!(ranges.iter().all(|range| range.end_unit > range.first_unit));
+            assert_eq!(ranges.len(), count.min(4));
+            let minimum_width = ranges
+                .iter()
+                .map(|range| range.end_unit - range.first_unit)
+                .min()
+                .expect("one partition");
+            let maximum_width = ranges
+                .iter()
+                .map(|range| range.end_unit - range.first_unit)
+                .max()
+                .expect("one partition");
+            assert!(maximum_width - minimum_width <= 1, "track count {count}");
         }
     }
 

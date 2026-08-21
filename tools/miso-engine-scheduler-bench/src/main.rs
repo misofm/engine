@@ -399,3 +399,22 @@ fn prepared_graph(
     let metadata = bound.prepared.metadata;
     (bound.prepared.into_plan(), metadata)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_workload_prepares_every_mode_without_rendering_audio() {
+        for mode in MODES {
+            let (plan, metadata) = prepared_graph(mode);
+            assert_eq!(plan.envelope().sample_rate.0, 48_000);
+            assert_eq!(plan.envelope().quantum.0, QUANTUM as u32);
+            assert!(metadata.resources.scheduler.wave_count > 1);
+            assert!(metadata.resources.scheduler.unit_count > 1);
+            assert!(metadata.resources.scheduler.partition_count > 1);
+            assert!(metadata.resources.total_retained_bytes > 0);
+            drop(plan);
+        }
+    }
+}

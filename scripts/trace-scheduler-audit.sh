@@ -4,7 +4,7 @@ set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
 binary="$workspace_dir/target/release/miso_engine_scheduler_audit"
-trace_root="$workspace_dir/target/issue039/scheduler-audit-strace"
+trace_root="${MISO_ENGINE_SCHEDULER_TRACE_ROOT:-$workspace_dir/target/issue039/scheduler-audit-strace}"
 trace_prefix="$trace_root/trace"
 
 fail() {
@@ -86,8 +86,8 @@ mapfile -t prepared_worker_tids < <(
     fail "expected six prepared worker TIDs before the prepared marker, found ${#prepared_worker_tids[@]}"
 active_worker_tids=("${prepared_worker_tids[@]:3:3}")
 
-for worker_tid in "${active_worker_tids[@]}"; do
-    [[ -f "$trace_prefix.$worker_tid" ]] || fail "missing active worker trace for TID $worker_tid"
+for worker_tid in "${prepared_worker_tids[@]}"; do
+    [[ -f "$trace_prefix.$worker_tid" ]] || fail "missing prepared worker trace for TID $worker_tid"
 done
 
 unexpected_coordinator=$(awk -v armed_line="$armed_line" -v disarmed_line="$disarmed_line" \
@@ -114,10 +114,10 @@ syscalls_in_interval() {
     ' "$1"
 }
 
-for worker_tid in "${active_worker_tids[@]}"; do
+for worker_tid in "${prepared_worker_tids[@]}"; do
     worker_syscalls=$(syscalls_in_interval "$trace_prefix.$worker_tid")
     [[ -z "$worker_syscalls" ]] || {
-        printf 'unexpected active-worker syscall(s) while armed (TID %s):\n%s\n' \
+        printf 'unexpected prepared-worker syscall(s) while armed (TID %s):\n%s\n' \
             "$worker_tid" "$worker_syscalls" >&2
         exit 1
     }
@@ -141,9 +141,10 @@ jq -e '
 ' "$trace_root/audit.json" >/dev/null
 
 worker_tid_json=$(IFS=,; printf '%s' "${active_worker_tids[*]}")
+prepared_worker_tid_json=$(IFS=,; printf '%s' "${prepared_worker_tids[*]}")
 printf \
-    '{"schema_version":1,"kind":"issue039_scheduler_syscall_trace","coordinator_trace":"%s","active_worker_tids":[%s],"armed_coordinator_syscalls":0,"armed_worker_syscalls":[0,0,0],"markers":{"prepared":1,"armed":1,"disarmed":1,"retired":1}}\n' \
-    "$coordinator_trace" "$worker_tid_json" >"$trace_root/validator.json"
+    '{"schema_version":2,"kind":"issue039_scheduler_syscall_trace","coordinator_trace":"%s","prepared_worker_tids":[%s],"active_worker_tids":[%s],"armed_coordinator_syscalls":0,"armed_prepared_worker_syscalls":[0,0,0,0,0,0],"markers":{"prepared":1,"armed":1,"disarmed":1,"retired":1}}\n' \
+    "$coordinator_trace" "$prepared_worker_tid_json" "$worker_tid_json" >"$trace_root/validator.json"
 
 sha256sum "${trace_files[@]}" >"$trace_root/trace-manifest.sha256"
 trace_sha256=$(sha256sum "$trace_root/trace-manifest.sha256" | awk '{ print $1 }')
@@ -154,10 +155,12 @@ jq -n \
     --arg audit_sha256 "$audit_sha256" \
     --arg validator_sha256 "$validator_sha256" \
     --argjson trace_file_count "${#trace_files[@]}" \
+    --argjson prepared_worker_tids "[$prepared_worker_tid_json]" \
     --argjson active_worker_tids "[$worker_tid_json]" \
-    '{schema_version: 1, kind: "issue039_scheduler_audit_trace_evidence",
+    '{schema_version: 2, kind: "issue039_scheduler_audit_trace_evidence",
       trace_manifest_sha256: $trace_sha256, audit_json_sha256: $audit_sha256,
       validator_json_sha256: $validator_sha256, trace_file_count: $trace_file_count,
+      prepared_worker_tids: $prepared_worker_tids,
       active_worker_tids: $active_worker_tids}' >"$trace_root/evidence.json"
 
 printf 'issue-039 q128 all-thread scheduler syscall trace: PASS (%s)\n' "$trace_root"
