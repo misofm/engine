@@ -114,3 +114,23 @@ continuation boundary and equality results; signed-zero output bits; injected re
 output/state/report identities; W8 execution proof; focused/full/policy outputs; unchanged public
 API/resource statement; attempt count; Terra/final Sol PASS/FAIL; and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — FAIL
+
+- Candidate base: `cfdc76f`; this attempt made no production, public API, descriptor, resource,
+  core, registry, graph, PDC, corpus, audit, target/object, benchmark, timing, or listening
+  change.
+- `cargo fmt --check --package miso-engine-gate-expander`: PASS after the mechanical Rustfmt
+  rewrite requested during the attempt.
+- `cargo test --locked -p miso-engine-gate-expander --lib`: FAIL. Eight tests passed and one
+  failed: `tests::active_snapshot_restore_continues_against_uninterrupted_scalar_and_w8` at
+  `crates/miso-engine-gate-expander/src/lib.rs:1576`, `W8 scalar left track 0, frame 0`, with
+  output bits `918470466` versus `918595474`.
+- Focused all-target Clippy was not run after the semantic test failure. No repair was applied.
+- The reset and active-continuation probes executed an available x86 W8 path. Signed-zero and
+  injected lane-local recovery probes were not completed before the mandatory stop at the active
+  continuation failure; they are not claimed as evidence.
+- `timed_benchmark_invocations=0`.
+
+**Terra attempt 1 verdict: FAIL.** The exact W8/scalar continuation mismatch must be classified
+before any bounded correction; this attempt does not claim the remaining acceptance gates.

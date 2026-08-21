@@ -1362,6 +1362,255 @@ mod tests {
             .saturating_add(report.recovered_right_samples);
     }
 
+    fn set_parameter(
+        values: &mut [InitialParameterValue; PARAMETER_COUNT * 2],
+        parameter: usize,
+        left: f32,
+        right: f32,
+    ) {
+        values[parameter * 2].value = left;
+        values[parameter * 2 + 1].value = right;
+    }
+
+    fn active_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        let mut values = initial_values();
+        set_parameter(&mut values, 0, -20.0, -20.0);
+        set_parameter(&mut values, 1, 20.0, 20.0);
+        set_parameter(&mut values, 2, 48.0, 48.0);
+        set_parameter(&mut values, 3, 6.0, 6.0);
+        set_parameter(&mut values, 4, 1.0, 1.0);
+        set_parameter(&mut values, 5, 0.0, 0.0);
+        set_parameter(&mut values, 6, 5.0, 5.0);
+        set_parameter(&mut values, 7, 10.0, 10.0);
+        values
+    }
+
+    fn assert_bits_eq(actual: &[f32], expected: &[f32], context: &str) {
+        assert_eq!(actual.len(), expected.len(), "{context} length");
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{context} sample {index}"
+            );
+        }
+    }
+
+    fn assert_cleared_runtime(payload: &[u8], hold_samples: u32) {
+        assert_eq!(read_u32(payload, 0), 0, "cursor");
+        assert_eq!(read_f32(payload, 2).to_bits(), 0.0_f32.to_bits(), "gain");
+        assert_eq!(read_u32(payload, 3), PHASE_OPEN, "phase");
+        assert_eq!(read_u32(payload, 4), hold_samples, "hold");
+        for word in STATE_HEADER_WORDS..payload.len() / 4 {
+            assert_eq!(
+                read_f32(payload, word).to_bits(),
+                0.0_f32.to_bits(),
+                "ring {word}"
+            );
+        }
+    }
+
+    fn assert_discontinuity_payload(
+        before: &[u8],
+        after: &[u8],
+        prepared: &[f32; PARAMETER_COUNT],
+        hold_samples: u32,
+    ) {
+        assert_cleared_runtime(after, hold_samples);
+        assert_eq!(
+            read_f32(after, 1).to_bits(),
+            prepared[7].to_bits(),
+            "lookahead"
+        );
+        assert_eq!(
+            read_f32(after, 5).to_bits(),
+            prepared[4].to_bits(),
+            "attack"
+        );
+        assert_eq!(
+            read_f32(after, 6).to_bits(),
+            prepared[5].to_bits(),
+            "hold ms"
+        );
+        assert_eq!(
+            read_f32(after, 7).to_bits(),
+            prepared[6].to_bits(),
+            "release"
+        );
+        for index in 0..RAMP_COUNT {
+            let word = 8 + index * 3;
+            assert_eq!(
+                read_f32(after, word).to_bits(),
+                read_f32(before, word + 1).to_bits(),
+                "ramp {index} current snaps to target"
+            );
+            assert_eq!(
+                read_f32(after, word + 1).to_bits(),
+                read_f32(before, word + 1).to_bits(),
+                "ramp {index} target retained"
+            );
+            assert_eq!(read_u32(after, word + 2), 0, "ramp {index} remaining");
+        }
+    }
+
+    fn assert_full_reset_payload(
+        payload: &[u8],
+        prepared: &[f32; PARAMETER_COUNT],
+        hold_samples: u32,
+    ) {
+        assert_cleared_runtime(payload, hold_samples);
+        assert_eq!(
+            read_f32(payload, 1).to_bits(),
+            prepared[7].to_bits(),
+            "lookahead"
+        );
+        assert_eq!(
+            read_f32(payload, 5).to_bits(),
+            prepared[4].to_bits(),
+            "attack"
+        );
+        assert_eq!(
+            read_f32(payload, 6).to_bits(),
+            prepared[5].to_bits(),
+            "hold ms"
+        );
+        assert_eq!(
+            read_f32(payload, 7).to_bits(),
+            prepared[6].to_bits(),
+            "release"
+        );
+        for (index, value) in prepared[..RAMP_COUNT].iter().enumerate() {
+            let word = 8 + index * 3;
+            assert_eq!(
+                read_f32(payload, word).to_bits(),
+                value.to_bits(),
+                "ramp {index}"
+            );
+            assert_eq!(
+                read_f32(payload, word + 1).to_bits(),
+                value.to_bits(),
+                "ramp {index} target"
+            );
+            assert_eq!(read_u32(payload, word + 2), 0, "ramp {index} remaining");
+        }
+    }
+
+    fn scalar_prepared(values: &[InitialParameterValue]) -> PreparedGateExpander {
+        let request = request(values);
+        let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR_V1, request)
+            .expect("prepared metadata");
+        let (left_defaults, right_defaults) = initial_defaults(values).expect("initial values");
+        let ring_length = metadata.latency.0 as usize + 1;
+        PreparedGateExpander {
+            metadata,
+            left_defaults,
+            right_defaults,
+            left: Lane::new(&left_defaults, ring_length, metadata.sample_rate).expect("left lane"),
+            right: Lane::new(&right_defaults, ring_length, metadata.sample_rate)
+                .expect("right lane"),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn w8_prepared(
+        values: &[[InitialParameterValue; PARAMETER_COUNT * 2]; 8],
+    ) -> PreparedGateExpanderBank<8> {
+        let first = request(&values[0]);
+        let effect_metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR_V1, first)
+            .expect("prepared metadata");
+        let left_defaults = core::array::from_fn(|track| {
+            initial_defaults(&values[track]).expect("left defaults").0
+        });
+        let right_defaults = core::array::from_fn(|track| {
+            initial_defaults(&values[track]).expect("right defaults").1
+        });
+        let ring_length = effect_metadata.latency.0 as usize + 1;
+        let kernel = PreparedGateGainKernelV1::try_new(KernelBackendV1::X86Avx2)
+            .expect("Issue 048 requires an executed available W8 backend");
+        PreparedGateExpanderBank {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Eight,
+                program_key: effect_metadata.program_key(),
+            },
+            effect_metadata,
+            kernel,
+            left_defaults,
+            right_defaults,
+            left: core::array::from_fn(|track| {
+                Lane::new(
+                    &left_defaults[track],
+                    ring_length,
+                    effect_metadata.sample_rate,
+                )
+                .expect("left lane")
+            }),
+            right: core::array::from_fn(|track| {
+                Lane::new(
+                    &right_defaults[track],
+                    ring_length,
+                    effect_metadata.sample_rate,
+                )
+                .expect("right lane")
+            }),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn packed_w8(samples: &[Vec<f32>]) -> Vec<f32> {
+        assert_eq!(samples.len(), 8, "W8 tracks");
+        let frames = samples[0].len();
+        assert!(samples.iter().all(|track| track.len() == frames));
+        let mut packed = vec![0.0; frames * 8];
+        for frame in 0..frames {
+            for track in 0..8 {
+                packed[frame * 8 + track] = samples[track][frame];
+            }
+        }
+        packed
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn assert_w8_matches_scalars(packed: &[f32], scalars: &[Vec<f32>], context: &str) {
+        for (track, scalar) in scalars.iter().enumerate() {
+            for (frame, expected) in scalar.iter().enumerate() {
+                assert_eq!(
+                    packed[frame * 8 + track].to_bits(),
+                    expected.to_bits(),
+                    "{context} track {track}, frame {frame}"
+                );
+            }
+        }
+    }
+
+    fn retarget_spans(first_sample: u64) -> [PreparedAutomationSpan; 8] {
+        let targets = [(-64.0, -60.0), (16.0, 12.0), (64.0, 48.0), (12.0, 8.0)];
+        core::array::from_fn(|index| {
+            let parameter_index = index / 2;
+            let left = index % 2 == 0;
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: if left {
+                    ParameterChannel::Left
+                } else {
+                    ParameterChannel::Right
+                },
+                parameter_index: parameter_index as u32,
+                start_sample: first_sample,
+                end_sample: first_sample,
+                start_value: if left {
+                    targets[parameter_index].0
+                } else {
+                    targets[parameter_index].1
+                },
+                end_value: if left {
+                    targets[parameter_index].0
+                } else {
+                    targets[parameter_index].1
+                },
+            }
+        })
+    }
+
     #[test]
     fn descriptor_and_exact_resources_are_frozen() {
         validate_descriptor_v1(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
@@ -1982,5 +2231,450 @@ mod tests {
                 .expect("connected requests validate")
                 .is_none()
         );
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn reset_kinds_are_word_exact_for_scalar_and_executed_w8() {
+        let mut scalar_values = initial_values();
+        set_parameter(&mut scalar_values, 4, 2.0, 3.0);
+        set_parameter(&mut scalar_values, 5, 17.0, 19.0);
+        set_parameter(&mut scalar_values, 6, 11.0, 13.0);
+        set_parameter(&mut scalar_values, 7, 10.0, 5.0);
+        let (scalar_left_defaults, scalar_right_defaults) =
+            initial_defaults(&scalar_values).expect("defaults");
+        let mut scalar = scalar_prepared(&scalar_values);
+        let mut left = vec![0.25; 128];
+        let mut right = vec![-0.5; 128];
+        scalar.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &retarget_spans(0), 128)
+                .expect("scalar seed block"),
+        );
+        let scalar_before = snapshot(&scalar);
+        scalar.reset(ResetKind::DiscontinuityKeepParameters);
+        let scalar_discontinuity = snapshot(&scalar);
+        assert_discontinuity_payload(
+            &scalar_before.0,
+            &scalar_discontinuity.0,
+            &scalar_left_defaults,
+            rounded_samples(scalar_left_defaults[5], 48_000).expect("hold") as u32,
+        );
+        assert_discontinuity_payload(
+            &scalar_before.1,
+            &scalar_discontinuity.1,
+            &scalar_right_defaults,
+            rounded_samples(scalar_right_defaults[5], 48_000).expect("hold") as u32,
+        );
+        scalar.reset(ResetKind::FullToDefaults);
+        let scalar_full = snapshot(&scalar);
+        assert_full_reset_payload(
+            &scalar_full.0,
+            &scalar_left_defaults,
+            rounded_samples(scalar_left_defaults[5], 48_000).expect("hold") as u32,
+        );
+        assert_full_reset_payload(
+            &scalar_full.1,
+            &scalar_right_defaults,
+            rounded_samples(scalar_right_defaults[5], 48_000).expect("hold") as u32,
+        );
+
+        let bank_values = core::array::from_fn(|track| {
+            let mut values = scalar_values;
+            set_parameter(&mut values, 4, 1.0 + track as f32, 2.0 + track as f32);
+            set_parameter(&mut values, 5, 10.0 + track as f32, 20.0 + track as f32);
+            values
+        });
+        let defaults: [([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]); 8] =
+            core::array::from_fn(|track| {
+            initial_defaults(&bank_values[track]).expect("bank defaults")
+        });
+        let mut bank = w8_prepared(&bank_values);
+        let left = packed_w8(
+            &(0..8)
+                .map(|track| vec![0.125 + track as f32 * 0.03125; 128])
+                .collect::<Vec<_>>(),
+        );
+        let right = packed_w8(
+            &(0..8)
+                .map(|track| vec![-0.25 - track as f32 * 0.03125; 128])
+                .collect::<Vec<_>>(),
+        );
+        let mut left = left;
+        let mut right = right;
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                128,
+                BankWidth::Eight,
+                0,
+                &retarget_spans(0),
+                &[0, 8, 8, 8, 8, 8, 8, 8, 8],
+                128,
+            )
+            .expect("bank seed block"),
+        );
+        let before: [(Vec<u8>, Vec<u8>); 8] =
+            core::array::from_fn(|track| snapshot_bank(&bank, track as u32));
+        bank.reset(ResetKind::DiscontinuityKeepParameters);
+        for track in 0..8 {
+            let state = snapshot_bank(&bank, track as u32);
+            assert_discontinuity_payload(
+                &before[track].0,
+                &state.0,
+                &defaults[track].0,
+                rounded_samples(defaults[track].0[5], 48_000).expect("hold") as u32,
+            );
+            assert_discontinuity_payload(
+                &before[track].1,
+                &state.1,
+                &defaults[track].1,
+                rounded_samples(defaults[track].1[5], 48_000).expect("hold") as u32,
+            );
+        }
+        bank.reset(ResetKind::FullToDefaults);
+        for track in 0..8 {
+            let state = snapshot_bank(&bank, track as u32);
+            assert_full_reset_payload(
+                &state.0,
+                &defaults[track].0,
+                rounded_samples(defaults[track].0[5], 48_000).expect("hold") as u32,
+            );
+            assert_full_reset_payload(
+                &state.1,
+                &defaults[track].1,
+                rounded_samples(defaults[track].1[5], 48_000).expect("hold") as u32,
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn active_snapshot_restore_continues_against_uninterrupted_scalar_and_w8() {
+        let factory = GateExpanderFactory;
+        let values = active_values();
+        let mut uninterrupted = factory.prepare(request(&values)).expect("scalar prepare");
+        let mut first_sample = 0_u64;
+        for _ in 0..5 {
+            let mut left = vec![0.001; 128];
+            let mut right = vec![0.002; 128];
+            uninterrupted.process(
+                EffectProcessBlock::new(&mut left, &mut right, None, first_sample, &[], 128)
+                    .expect("warm block"),
+            );
+            first_sample += 128;
+        }
+        let active_spans = [
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 0,
+                start_sample: first_sample,
+                end_sample: first_sample,
+                start_value: -40.0,
+                end_value: -40.0,
+            },
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Right,
+                parameter_index: 1,
+                start_sample: first_sample,
+                end_sample: first_sample,
+                start_value: 8.0,
+                end_value: 8.0,
+            },
+        ];
+        let mut left = vec![0.001; 17];
+        let mut right = vec![0.002; 17];
+        uninterrupted.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                first_sample,
+                &active_spans,
+                128,
+            )
+            .expect("active scalar block"),
+        );
+        first_sample += 17;
+        let scalar_state = snapshot(uninterrupted.as_ref());
+        assert_ne!(read_f32(&scalar_state.0, 2).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(read_u32(&scalar_state.0, 10), 47);
+        assert_eq!(read_u32(&scalar_state.1, 13), 47);
+        let mut restored = factory.prepare(request(&values)).expect("restored scalar");
+        let sizes = restored.metadata().state_sizes;
+        restored
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&[], &scalar_state.0, &scalar_state.1, sizes)
+                    .expect("scalar state"),
+            )
+            .expect("scalar restore");
+        for frames in [1_usize, 63, 64, 128] {
+            let mut left = (0..frames)
+                .map(|index| 0.001 + ((first_sample + index as u64) % 7) as f32 * 0.00001)
+                .collect::<Vec<_>>();
+            let mut right = (0..frames)
+                .map(|index| 0.002 + ((first_sample + index as u64) % 5) as f32 * 0.00002)
+                .collect::<Vec<_>>();
+            let mut restored_left = left.clone();
+            let mut restored_right = right.clone();
+            let report = uninterrupted.process(
+                EffectProcessBlock::new(&mut left, &mut right, None, first_sample, &[], 128)
+                    .expect("uninterrupted scalar partition"),
+            );
+            let restored_report = restored.process(
+                EffectProcessBlock::new(
+                    &mut restored_left,
+                    &mut restored_right,
+                    None,
+                    first_sample,
+                    &[],
+                    128,
+                )
+                .expect("restored scalar partition"),
+            );
+            assert_eq!(report, restored_report, "scalar report after {frames}");
+            assert_bits_eq(&left, &restored_left, "scalar left continuation");
+            assert_bits_eq(&right, &restored_right, "scalar right continuation");
+            assert_eq!(
+                snapshot(uninterrupted.as_ref()),
+                snapshot(restored.as_ref())
+            );
+            first_sample += frames as u64;
+        }
+
+        let bank_values = core::array::from_fn(|track| {
+            let mut values = active_values();
+            set_parameter(&mut values, 0, -20.0 - track as f32, -22.0 - track as f32);
+            values
+        });
+        let mut bank = w8_prepared(&bank_values);
+        let mut scalar_peers = bank_values
+            .iter()
+            .map(|values| scalar_prepared(values))
+            .collect::<Vec<_>>();
+        let mut bank_first = 0_u64;
+        for _ in 0..5 {
+            let scalar_left = (0..8)
+                .map(|track| vec![0.001 + track as f32 * 0.00001; 128])
+                .collect::<Vec<_>>();
+            let scalar_right = (0..8)
+                .map(|track| vec![0.002 + track as f32 * 0.00001; 128])
+                .collect::<Vec<_>>();
+            let mut bank_left = packed_w8(&scalar_left);
+            let mut bank_right = packed_w8(&scalar_right);
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut bank_left,
+                    &mut bank_right,
+                    None,
+                    128,
+                    BankWidth::Eight,
+                    bank_first,
+                    &[],
+                    &[0; 9],
+                    128,
+                )
+                .expect("W8 warm block"),
+            );
+            for track in 0..8 {
+                scalar_peers[track].process(
+                    EffectProcessBlock::new(
+                        &mut scalar_left[track].clone(),
+                        &mut scalar_right[track].clone(),
+                        None,
+                        bank_first,
+                        &[],
+                        128,
+                    )
+                    .expect("scalar peer warm block"),
+                );
+            }
+            bank_first += 128;
+        }
+        let bank_spans = (0..8)
+            .map(|track| PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 0,
+                start_sample: bank_first,
+                end_sample: bank_first,
+                start_value: -40.0 - track as f32,
+                end_value: -40.0 - track as f32,
+            })
+            .collect::<Vec<_>>();
+        let bank_offsets = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let scalar_left = (0..8)
+            .map(|track| vec![0.001 + track as f32 * 0.00001; 17])
+            .collect::<Vec<_>>();
+        let scalar_right = (0..8)
+            .map(|track| vec![0.002 + track as f32 * 0.00001; 17])
+            .collect::<Vec<_>>();
+        let mut bank_left = packed_w8(&scalar_left);
+        let mut bank_right = packed_w8(&scalar_right);
+        let bank_report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                17,
+                BankWidth::Eight,
+                bank_first,
+                &bank_spans,
+                &bank_offsets,
+                128,
+            )
+            .expect("active W8 block"),
+        );
+        for track in 0..8 {
+            let mut left = scalar_left[track].clone();
+            let mut right = scalar_right[track].clone();
+            let report = scalar_peers[track].process(
+                EffectProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    bank_first,
+                    &bank_spans[track..=track],
+                    128,
+                )
+                .expect("active scalar peer"),
+            );
+            assert_eq!(
+                bank_report.reports[track], report,
+                "W8 active report {track}"
+            );
+        }
+        bank_first += 17;
+        let saved_bank: [(Vec<u8>, Vec<u8>); 8] =
+            core::array::from_fn(|track| snapshot_bank(&bank, track as u32));
+        let saved_scalars = scalar_peers
+            .iter()
+            .map(|effect| snapshot(effect))
+            .collect::<Vec<_>>();
+        assert!(saved_bank.iter().all(|state| read_u32(&state.0, 10) == 47));
+        let mut restored_bank = w8_prepared(&bank_values);
+        let mut restored_scalars = bank_values
+            .iter()
+            .map(|values| scalar_prepared(values))
+            .collect::<Vec<_>>();
+        for track in 0..8 {
+            let sizes = restored_bank.effect_metadata.state_sizes;
+            restored_bank
+                .restore_track_state_payload(
+                    track as u32,
+                    1,
+                    StatePayloadInput::new(&[], &saved_bank[track].0, &saved_bank[track].1, sizes)
+                        .expect("W8 state"),
+                )
+                .expect("W8 restore");
+            restored_scalars[track]
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(
+                        &[],
+                        &saved_scalars[track].0,
+                        &saved_scalars[track].1,
+                        sizes,
+                    )
+                    .expect("scalar state"),
+                )
+                .expect("scalar restore");
+        }
+        for frames in [1_usize, 63, 64, 128] {
+            let original_left = (0..8)
+                .map(|track| {
+                    (0..frames)
+                        .map(|index| {
+                            0.001
+                                + track as f32 * 0.00001
+                                + ((bank_first + index as u64) % 7) as f32 * 0.000001
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let original_right = (0..8)
+                .map(|track| {
+                    (0..frames)
+                        .map(|index| {
+                            0.002
+                                + track as f32 * 0.00001
+                                + ((bank_first + index as u64) % 5) as f32 * 0.000002
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut original_bank_left = packed_w8(&original_left);
+            let mut original_bank_right = packed_w8(&original_right);
+            let mut restored_bank_left = original_bank_left.clone();
+            let mut restored_bank_right = original_bank_right.clone();
+            let original_report = bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut original_bank_left,
+                    &mut original_bank_right,
+                    None,
+                    frames as u32,
+                    BankWidth::Eight,
+                    bank_first,
+                    &[],
+                    &[0; 9],
+                    128,
+                )
+                .expect("uninterrupted W8 partition"),
+            );
+            let restored_report = restored_bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut restored_bank_left,
+                    &mut restored_bank_right,
+                    None,
+                    frames as u32,
+                    BankWidth::Eight,
+                    bank_first,
+                    &[],
+                    &[0; 9],
+                    128,
+                )
+                .expect("restored W8 partition"),
+            );
+            assert_eq!(original_report, restored_report, "W8 report after {frames}");
+            assert_bits_eq(
+                &original_bank_left,
+                &restored_bank_left,
+                "W8 left continuation",
+            );
+            assert_bits_eq(
+                &original_bank_right,
+                &restored_bank_right,
+                "W8 right continuation",
+            );
+            for track in 0..8 {
+                let mut left = original_left[track].clone();
+                let mut right = original_right[track].clone();
+                let report = restored_scalars[track].process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, bank_first, &[], 128)
+                        .expect("restored scalar continuation"),
+                );
+                assert_eq!(
+                    original_report.reports[track], report,
+                    "W8 scalar report {track}"
+                );
+                assert_w8_matches_scalars(&original_bank_left, &[left], "W8 scalar left");
+                assert_w8_matches_scalars(&original_bank_right, &[right], "W8 scalar right");
+                assert_eq!(
+                    snapshot_bank(&bank, track as u32),
+                    snapshot_bank(&restored_bank, track as u32),
+                    "W8 restored payload {track}"
+                );
+                assert_eq!(
+                    snapshot_bank(&bank, track as u32),
+                    snapshot(&restored_scalars[track]),
+                    "W8 scalar payload {track}"
+                );
+            }
+            bank_first += frames as u64;
+        }
     }
 }
