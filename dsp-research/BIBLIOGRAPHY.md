@@ -12,6 +12,7 @@ All links were selected as bounded primary, official, author-hosted, or publishe
 - `[SMITH-SASP]` Julius O. Smith, [Spectral Audio Signal Processing](https://www.dsprelated.com/freebooks/sasp/), online text.
 - `[VAIDYANATHAN-MULTIRATE]` P. P. Vaidyanathan, [Multirate Systems and Filter Banks](https://authors.library.caltech.edu/records/rmhds-22q28), Prentice Hall, 1993.
 - `[ORFANIDIS-ISP]` Sophocles J. Orfanidis, *Introduction to Signal Processing*, Prentice Hall, 1996.
+- `[DEKKER-EXTENDED]` T. J. Dekker, “A Floating-Point Technique for Extending the Available Precision,” *Numerische Mathematik* 18, 224–242 (1971), [DOI 10.1007/BF01397083](https://doi.org/10.1007/BF01397083).
 - `[SIMPER-SVF]` Andrew Simper, Cytomic, [Linear Trapezoidal State Variable Filter](https://cytomic.com/files/dsp/SvfLinearTrapezoidalSin.pdf), 2014, revised 2016; author technical derivation and limited-precision coefficient discussion.
 - `[ZAVALISHIN-TPT]` Vadim Zavalishin, Native Instruments, [The Art of VA Filter Design](https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.0.pdf), revision 2.1.0, 2018; topology-preserving bilinear transform and state-variable-filter derivation.
 - `[BILBAO-ADAA]` S. Bilbao, S. Esqueda, J. Parker, and V. Välimäki, [Antiderivative Antialiasing for Memoryless Nonlinearities](https://aaltodoc.aalto.fi/bitstreams/87839e85-c165-4bd9-aeed-7c96ff64026a/download), IEEE Signal Processing Letters, 2017, DOI [10.1109/LSP.2017.2675541](https://doi.org/10.1109/LSP.2017.2675541).
