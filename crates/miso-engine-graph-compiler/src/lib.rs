@@ -4,7 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use miso_engine_builtins::BuiltinTail;
-use miso_engine_builtins_compiler::{MeterConsumer, PreparedBuiltinsSession};
+use miso_engine_builtins_compiler::{
+    PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
+    PreparedBuiltinsSession,
+};
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use miso_engine_effect_contract::{LatencySamples, PreparedSidechainPort, TailSamples};
@@ -41,13 +44,6 @@ pub struct GraphBuiltinsCompileRequest {
     pub builtins: PreparedBuiltinsSession,
     pub caps: GraphCompileCaps,
 }
-pub struct PreparedGraphBuiltinsArtifact {
-    graph: PreparedGraphPlan,
-    builtin_processors: Vec<miso_engine_graph::GraphNodeBinding>,
-    builtin_observers: Vec<miso_engine_graph::GraphNodeObserverBinding>,
-    pub report: GraphCompileReport,
-    meter_consumers: Vec<MeterConsumer>,
-}
 /// The one-way, sealed builtin attachment result.
 ///
 /// ```compile_fail
@@ -59,20 +55,37 @@ pub struct PreparedGraphBuiltinsArtifact {
 /// ```
 ///
 /// ```compile_fail
+/// fn mutate(mut artifact: miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     artifact.graph = panic!("private provenance field");
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn extract(artifact: miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact { graph, .. } = artifact;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn clone_back(artifact: miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let _ = artifact.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn back_convert(artifact: miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let _: miso_engine_graph::PreparedGraphPlan = artifact.into();
+/// }
+/// ```
+///
+/// ```compile_fail
 /// fn generic_internal_attachment(plan: miso_engine_graph::PreparedGraphPlan) {
 ///     let _ = plan.attach_internal_bindings(Vec::new(), Vec::new());
 /// }
 /// ```
-pub struct PreparedGraphBuiltinsBound {
-    pub plan: miso_engine_core::realtime::PreparedRenderPlan,
-    pub meter_consumers: Vec<MeterConsumer>,
-}
-/// A rejected external binding retains the sealed artifact and caller-owned bindings unchanged.
-pub struct GraphBuiltinsBindFailure {
-    pub artifact: PreparedGraphBuiltinsArtifact,
-    pub bindings: miso_engine_graph::GraphRuntimeBindings,
-    pub code: &'static str,
-}
+pub type PreparedGraphBuiltinsArtifact = PreparedBuiltinsGraphArtifact<GraphCompileReport>;
+pub type PreparedGraphBuiltinsBound = PreparedBuiltinsGraphBound;
+pub type GraphBuiltinsBindFailure = PreparedBuiltinsGraphBindFailure<GraphCompileReport>;
 pub struct GraphBuiltinsCompileFailure {
     pub effects: EffectPreparedSession,
     pub builtins: PreparedBuiltinsSession,
@@ -150,14 +163,7 @@ impl GraphCompiler {
                 });
             }
         };
-        let parts = builtins.into_graph_parts();
-        Ok(PreparedGraphBuiltinsArtifact {
-            graph: compiled.graph,
-            builtin_processors: parts.processors,
-            builtin_observers: parts.observers,
-            report: compiled.report,
-            meter_consumers: parts.meter_consumers,
-        })
+        Ok(builtins.into_graph_artifact(compiled.graph, compiled.report))
     }
     // The frozen transactional API returns the complete prepared-effect input by value on
     // failure. Boxing it would change that ownership contract solely to optimize a cold path.
@@ -599,95 +605,6 @@ impl GraphCompiler {
                 sha256,
                 dot,
             },
-        })
-    }
-}
-
-impl PreparedGraphBuiltinsArtifact {
-    /// Envelope required by the still-unbound graph.
-    #[must_use]
-    pub const fn envelope(&self) -> RenderEnvelope {
-        self.graph.envelope
-    }
-
-    /// The ordinary external nodes required in addition to compiler-owned builtin processors.
-    pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
-        let builtin_nodes: BTreeSet<_> = self
-            .builtin_processors
-            .iter()
-            .map(|binding| &binding.node)
-            .collect();
-        self.graph
-            .required_bindings
-            .iter()
-            .filter(move |node| !builtin_nodes.contains(node))
-    }
-
-    /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
-    ///
-    /// Ordinary callers provide only the external graph nodes. They cannot supply, replace, or
-    /// mark any node as compiler-owned builtin state.
-    #[allow(clippy::result_large_err)]
-    pub fn into_bound(
-        mut self,
-        mut bindings: miso_engine_graph::GraphRuntimeBindings,
-    ) -> Result<PreparedGraphBuiltinsBound, GraphBuiltinsBindFailure> {
-        let builtin_nodes: BTreeSet<_> = self
-            .builtin_processors
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let expected: BTreeSet<_> = self
-            .graph
-            .required_bindings
-            .iter()
-            .filter(|node| !builtin_nodes.contains(*node))
-            .cloned()
-            .collect();
-        let supplied: BTreeSet<_> = bindings
-            .nodes
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let duplicate_nodes = supplied.len() != bindings.nodes.len();
-        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
-        let mut observer_pairs = BTreeSet::new();
-        let valid_observers = bindings
-            .observers
-            .iter()
-            .chain(self.builtin_observers.iter())
-            .all(|observer| {
-                matches!(observer.node, GraphNodeId::TrackStage { .. })
-                    && observer_pairs.insert((observer.node.clone(), observer.handle))
-            });
-        if bindings.envelope != self.graph.envelope
-            || duplicate_nodes
-            || overlaps_builtin
-            || supplied != expected
-            || !valid_observers
-        {
-            let code = if !valid_observers {
-                "graph.plan.observer"
-            } else if bindings.envelope != self.graph.envelope {
-                "graph.plan.envelope_mismatch"
-            } else {
-                "graph.plan.binding"
-            };
-            return Err(GraphBuiltinsBindFailure {
-                artifact: self,
-                bindings,
-                code,
-            });
-        }
-        bindings.nodes.append(&mut self.builtin_processors);
-        bindings.observers.append(&mut self.builtin_observers);
-        let plan = match self.graph.bind(bindings) {
-            Ok(plan) => plan,
-            Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
-        };
-        Ok(PreparedGraphBuiltinsBound {
-            plan,
-            meter_consumers: self.meter_consumers,
         })
     }
 }
@@ -1771,8 +1688,11 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+    use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
     use miso_engine_builtins_compiler::{
-        BuiltinCompileCaps, PreparedBuiltinsCorruption, prepare_session_builtins,
+        BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
+        PreparedBuiltinsCorruptionCase, prepare_session_builtins,
     };
     use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
     use miso_engine_effect_compiler::EffectPreparedSession;
@@ -1913,6 +1833,7 @@ mod tests {
             &[],
             BuiltinCompileCaps {
                 maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
                 maximum_total_meter_items: u64::MAX,
                 maximum_total_meter_bytes: u64::MAX,
                 maximum_single_allocation_bytes: u64::MAX,
@@ -1935,7 +1856,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.external_binding_nodes().count(), 2);
         let tail = artifact
-            .report
+            .report()
             .nodes
             .iter()
             .find(|node| node.id == track_node("vocal", TrackStage::PostInputBuiltins))
@@ -1948,39 +1869,101 @@ mod tests {
     fn each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment() {
         let cases = [
             (
-                PreparedBuiltinsCorruption::SessionIdentity,
+                PreparedBuiltinsCorruptionCase::SessionHash,
                 "builtin.session.mismatch",
             ),
             (
-                PreparedBuiltinsCorruption::Tracks,
+                PreparedBuiltinsCorruptionCase::SessionRate,
+                "builtin.session.mismatch",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::SessionQuantum,
+                "builtin.session.mismatch",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::TrackMissing,
                 "builtin.prepared.track_set",
             ),
             (
-                PreparedBuiltinsCorruption::Processors,
+                PreparedBuiltinsCorruptionCase::TrackExtra,
+                "builtin.prepared.track_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::TrackDuplicate,
+                "builtin.prepared.track_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ProcessorMissing,
                 "builtin.prepared.processor_set",
             ),
             (
-                PreparedBuiltinsCorruption::Tails,
+                PreparedBuiltinsCorruptionCase::ProcessorExtra,
+                "builtin.prepared.processor_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ProcessorChangedStage,
+                "builtin.prepared.processor_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::TailMissing,
                 "builtin.prepared.tail_set",
             ),
             (
-                PreparedBuiltinsCorruption::Requests,
+                PreparedBuiltinsCorruptionCase::TailExtra,
+                "builtin.prepared.tail_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::TailChanged,
+                "builtin.prepared.tail_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::RequestMissing,
                 "builtin.prepared.request_set",
             ),
             (
-                PreparedBuiltinsCorruption::Observers,
+                PreparedBuiltinsCorruptionCase::RequestExtra,
+                "builtin.prepared.request_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::RequestDuplicate,
+                "builtin.prepared.request_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ObserverMissing,
                 "builtin.prepared.observer_set",
             ),
             (
-                PreparedBuiltinsCorruption::Consumers,
+                PreparedBuiltinsCorruptionCase::ObserverExtra,
+                "builtin.prepared.observer_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ObserverChangedNode,
+                "builtin.prepared.observer_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ConsumerMissing,
                 "builtin.prepared.consumer_set",
             ),
             (
-                PreparedBuiltinsCorruption::Resources,
+                PreparedBuiltinsCorruptionCase::ConsumerExtra,
+                "builtin.prepared.consumer_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ConsumerChangedMetadata,
+                "builtin.prepared.consumer_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ConsumerDuplicateHandle,
+                "builtin.prepared.consumer_set",
+            ),
+            (
+                PreparedBuiltinsCorruptionCase::ResourceReport,
                 "builtin.prepared.resource_report",
             ),
         ];
+        let mut categories = BTreeSet::new();
         for (corruption, expected) in cases {
+            categories.insert(corruption.category());
             let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
             model.tracks[0].dynamic.effects.clear();
             model.automation.clear();
@@ -1998,9 +1981,35 @@ mod tests {
             .expect("compiled");
             let mut builtins = prepare_session_builtins(
                 &compiled,
-                &[],
+                &[
+                    MeterRequest {
+                        handle: MeterHandle(NonZeroU64::new(10).expect("constant")),
+                        track_id: "vocal".to_owned(),
+                        tap: MeterTap::Input,
+                        config: MeterConfig {
+                            period_frames: NonZeroU32::new(16).expect("constant"),
+                            peak_hold_frames: 0,
+                            peak_decay_db_per_second: 0.0,
+                            queue_capacity: NonZeroUsize::new(4).expect("constant"),
+                            reset_generation: 10,
+                        },
+                    },
+                    MeterRequest {
+                        handle: MeterHandle(NonZeroU64::new(11).expect("constant")),
+                        track_id: "vocal".to_owned(),
+                        tap: MeterTap::PostMatrix,
+                        config: MeterConfig {
+                            period_frames: NonZeroU32::new(32).expect("constant"),
+                            peak_hold_frames: 4,
+                            peak_decay_db_per_second: 12.0,
+                            queue_capacity: NonZeroUsize::new(4).expect("constant"),
+                            reset_generation: 11,
+                        },
+                    },
+                ],
                 BuiltinCompileCaps {
                     maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
                     maximum_total_meter_items: u64::MAX,
                     maximum_total_meter_bytes: u64::MAX,
                     maximum_single_allocation_bytes: u64::MAX,
@@ -2035,8 +2044,21 @@ mod tests {
             // Rejection is transactional: the compiler returns both inputs rather than consuming
             // either one into graph bindings.
             assert_eq!(failure.effects.entries.len(), 0);
-            assert_eq!(failure.builtins.processor_count(), 3);
+            assert!(failure.builtins.processor_count() <= 3);
         }
+        assert_eq!(
+            categories,
+            BTreeSet::from([
+                PreparedBuiltinsCorruption::SessionIdentity,
+                PreparedBuiltinsCorruption::Tracks,
+                PreparedBuiltinsCorruption::Processors,
+                PreparedBuiltinsCorruption::Tails,
+                PreparedBuiltinsCorruption::Requests,
+                PreparedBuiltinsCorruption::Observers,
+                PreparedBuiltinsCorruption::Consumers,
+                PreparedBuiltinsCorruption::Resources,
+            ])
+        );
     }
 
     #[test]

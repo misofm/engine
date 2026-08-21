@@ -219,6 +219,49 @@ graph `acf7cb6f9f932a05ecba7447f399c265f02897cbe18a5cf9b785d4b801e4e957`;
 graph compiler `4263f592b241089b689564e207a16456c8f674f8c5b4d0acc1fa69c8a8ff9da4`.
 `timed_benchmark_invocations=0`; no benchmark artifact was created.
 
+## Sol attempt 2 final verdict (2026-08-21) — FAIL
+
+Attempt 1 did not satisfy the frozen contract. Its 10,000-case test cycled only eight
+meter/resource cases and omitted session parameters, explicit meter handles, matrix targets,
+smoothing boundaries, quanta, malformed blocks, sample-time behavior, complete cap boundaries and
+arithmetic overflow. The phase-two allocator test compared only total/largest for one
+`1 track x 7 meters` point, not allocation count or the ordered `(size, align)` multiset over the
+frozen 3x3 grid. `PreparedBuiltinsSession::into_graph_parts` was also public and returned the
+provenance-bearing processor/observer vectors that the compile-fail contract explicitly forbids
+external callers from extracting.
+
+The single bounded Sol correction removed that extraction API by moving graph attachment into an
+opaque builtins-compiler-owned wrapper; added construction/mutation/extraction/clone/
+back-conversion/generic-attachment compile-fail cases; made meter handles explicit and rejected
+duplicate handles; expanded all eight corruption categories with missing/extra/changed and
+identity subcases; made the retained report and independent allocator probe compare exact ordered
+`(size, align, count)` classes; corrected the shared `Arc` SPSC header layout; added the full
+`{1,4,65537} tracks x {0,1,7} meters` grid; and exercised equal/one-byte-below state, total,
+meter, item and largest-allocation caps with zero phase-two allocations on rejection.
+
+Those bounded corrections pass `cargo fmt --check`; `cargo test -p miso-engine-builtins --lib
+descriptor`; `cargo test -p miso-engine-builtins-compiler --features test-support --test
+allocation_tracker`; `cargo test -p miso-engine-graph-compiler --lib
+each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment`; `cargo test -p
+miso-engine-graph-compiler --doc`; and `cargo check --workspace`.
+
+The corrected composite compiler matrix then exposed a frozen contract contradiction. At 88,200
+Hz, the LPF cutoff `f32::from_bits((44_100.0_f32).to_bits() - 1)` is finite, at least 10 Hz and
+strictly below Nyquist, so `BuiltinParameterDomain::DisabledOrRateBoundedHertz` accepts it as the
+required public domain mandates. `BuiltinChain::new`, however, returns
+`BuiltinParameterError::FilterCoefficients`: the retained all-`f32` coefficient cast reaches the
+strict Jury boundary near Nyquist. Exact red gate:
+
+`cargo test -p miso-engine-builtins-compiler --lib deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases -- --nocapture`
+
+The failure is deterministic at `case=46, class=46` and reports
+`builtin.filter.coefficients` at `$.tracks[id=vocal].builtins`. Narrowing the descriptor would
+violate the frozen `0 or [10, Fs/2)` domain; accepting the value requires changing the retained
+coefficient/DSP preparation, which this brief explicitly prohibits and names as a stop condition.
+No gate was weakened. The two-attempt budget is exhausted, issue 034 remains open, and a new
+rescope/rebrief is required before issue 008 or 035. `timed_benchmark_invocations=0`; no timed
+workload or benchmark artifact was created.
+
 ## Required evidence
 
 Descriptor table dump; external compile-fail transcript; eight-category corruption results;

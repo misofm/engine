@@ -400,11 +400,19 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
     ];
     let requests: Vec<_> = (0..8)
         .flat_map(|track| {
-            taps.into_iter().map(move |tap| MeterRequest {
-                track_id: format!("benchmark-track-{track}"),
-                tap,
-                config,
-            })
+            taps.into_iter()
+                .enumerate()
+                .map(move |(tap_index, tap)| MeterRequest {
+                    handle: MeterHandle(
+                        core::num::NonZeroU64::new(
+                            u64::try_from(track * taps.len() + tap_index).expect("bounded") + 1,
+                        )
+                        .expect("nonzero"),
+                    ),
+                    track_id: format!("benchmark-track-{track}"),
+                    tap,
+                    config,
+                })
         })
         .collect();
     prepare_session_builtins(
@@ -412,6 +420,7 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
         &requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
             maximum_total_meter_items: u64::MAX,
             maximum_total_meter_bytes: u64::MAX,
             maximum_single_allocation_bytes: u64::MAX,

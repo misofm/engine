@@ -1,11 +1,13 @@
 //! Off-render preparation adapter for issue-007 builtins.
 #![allow(missing_docs)]
 
-use core::num::NonZeroU64;
 use std::collections::BTreeSet;
 
 #[cfg(feature = "test-support")]
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "test-support")]
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -14,16 +16,20 @@ use miso_engine_builtins::{
     DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
     MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
 };
-use miso_engine_core::realtime::{Consumer, RenderError, bounded_spsc_retained_payload};
+use miso_engine_core::realtime::{
+    Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
+};
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphRuntimeObserver, GraphRuntimeProcessor, StableGraphId, TrackStage,
+    GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
+    StableGraphId, TrackStage,
 };
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
     pub maximum_total_state_bytes: u64,
+    pub maximum_total_retained_payload_bytes: u64,
     pub maximum_total_meter_items: u64,
     pub maximum_total_meter_bytes: u64,
     pub maximum_single_allocation_bytes: u64,
@@ -35,6 +41,7 @@ pub struct BuiltinCompileCaps {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeterRequest {
+    pub handle: MeterHandle,
     pub track_id: String,
     pub tap: MeterTap,
     pub config: MeterConfig,
@@ -110,16 +117,82 @@ type ConsumerSeal = (u64, Box<str>, MeterTap);
 #[cfg(feature = "test-support")]
 static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "test-support")]
-static TEST_PHASE_TWO_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
+    Mutex::new(TestPhaseTwoLayoutTable::new());
+
 #[cfg(feature = "test-support")]
-static TEST_PHASE_TWO_LARGEST: AtomicU64 = AtomicU64::new(0);
+struct TestPhaseTwoLayoutTable {
+    values: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+    len: usize,
+    overflowed: bool,
+}
+
+#[cfg(feature = "test-support")]
+impl TestPhaseTwoLayoutTable {
+    const fn new() -> Self {
+        Self {
+            values: [BuiltinRetainedLayoutV1::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+            len: 0,
+            overflowed: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn record(&mut self, layout: core::alloc::Layout) {
+        let Ok(size_bytes) = u64::try_from(layout.size()) else {
+            self.overflowed = true;
+            return;
+        };
+        let Ok(align_bytes) = u64::try_from(layout.align()) else {
+            self.overflowed = true;
+            return;
+        };
+        if let Some(value) = self.values[..self.len]
+            .iter_mut()
+            .find(|value| value.size_bytes == size_bytes && value.align_bytes == align_bytes)
+        {
+            let Some(count) = value.allocation_count.checked_add(1) else {
+                self.overflowed = true;
+                return;
+            };
+            value.allocation_count = count;
+            return;
+        }
+        let Some(slot) = self.values.get_mut(self.len) else {
+            self.overflowed = true;
+            return;
+        };
+        *slot = BuiltinRetainedLayoutV1 {
+            size_bytes,
+            align_bytes,
+            allocation_count: 1,
+        };
+        self.len += 1;
+    }
+}
+
+/// Independent test-only phase-two allocation observation.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestPhaseTwoAllocationSnapshot {
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+    pub allocation_count: u64,
+    pub layouts: Vec<BuiltinRetainedLayoutV1>,
+    pub overflowed: bool,
+}
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn test_only_reset_phase_two_allocation_tracker() {
     TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
-    TEST_PHASE_TWO_TOTAL.store(0, Ordering::SeqCst);
-    TEST_PHASE_TWO_LARGEST.store(0, Ordering::SeqCst);
+    if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
+        table.clear();
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -128,29 +201,47 @@ pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    let size = u64::try_from(layout.size()).expect("platform usize fits u64");
-    TEST_PHASE_TWO_TOTAL.fetch_add(size, Ordering::Relaxed);
-    let mut largest = TEST_PHASE_TWO_LARGEST.load(Ordering::Relaxed);
-    while size > largest {
-        match TEST_PHASE_TWO_LARGEST.compare_exchange_weak(
-            largest,
-            size,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(actual) => largest = actual,
-        }
+    if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
+        table.record(layout);
     }
 }
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn test_only_phase_two_allocation_snapshot() -> (u64, u64) {
-    (
-        TEST_PHASE_TWO_TOTAL.load(Ordering::SeqCst),
-        TEST_PHASE_TWO_LARGEST.load(Ordering::SeqCst),
-    )
+pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
+    let table = TEST_PHASE_TWO_LAYOUTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut layouts = table.values[..table.len].to_vec();
+    layouts.sort();
+    let mut total_bytes = 0_u64;
+    let mut allocation_count = 0_u64;
+    let mut largest_allocation_bytes = 0_u64;
+    let mut overflowed = table.overflowed;
+    for layout in &layouts {
+        let Some(bytes) = layout.size_bytes.checked_mul(layout.allocation_count) else {
+            overflowed = true;
+            continue;
+        };
+        let Some(total) = total_bytes.checked_add(bytes) else {
+            overflowed = true;
+            continue;
+        };
+        total_bytes = total;
+        let Some(count) = allocation_count.checked_add(layout.allocation_count) else {
+            overflowed = true;
+            continue;
+        };
+        allocation_count = count;
+        largest_allocation_bytes = largest_allocation_bytes.max(layout.size_bytes);
+    }
+    TestPhaseTwoAllocationSnapshot {
+        total_bytes,
+        largest_allocation_bytes,
+        allocation_count,
+        layouts,
+        overflowed,
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -169,11 +260,29 @@ impl Drop for TestPhaseTwoAllocationGuard {
     }
 }
 
-/// The only graph-lowering payload obtainable from a sealed builtin artifact.
-pub struct PreparedBuiltinsGraphParts {
-    pub processors: Vec<miso_engine_graph::GraphNodeBinding>,
-    pub observers: Vec<GraphNodeObserverBinding>,
+/// A graph plus genuine compiler-owned builtin bindings with no public parts-extraction seam.
+///
+/// `R` is caller-owned immutable graph-report metadata. All provenance-bearing fields stay
+/// private to this crate, including the unbound graph and the concrete processor/observer parts.
+pub struct PreparedBuiltinsGraphArtifact<R> {
+    graph: PreparedGraphPlan,
+    builtin_processors: Vec<miso_engine_graph::GraphNodeBinding>,
+    builtin_observers: Vec<GraphNodeObserverBinding>,
+    report: R,
+    meter_consumers: Vec<MeterConsumer>,
+}
+
+/// The one-way result of consuming and binding a sealed builtin graph artifact.
+pub struct PreparedBuiltinsGraphBound {
+    pub plan: PreparedRenderPlan,
     pub meter_consumers: Vec<MeterConsumer>,
+}
+
+/// A rejected external binding preserves the opaque artifact and caller-owned bindings.
+pub struct PreparedBuiltinsGraphBindFailure<R> {
+    pub artifact: PreparedBuiltinsGraphArtifact<R>,
+    pub bindings: GraphRuntimeBindings,
+    pub code: &'static str,
 }
 
 /// Deliberate seal corruption available only to the graph compiler's adversarial tests.
@@ -182,7 +291,7 @@ pub struct PreparedBuiltinsGraphParts {
 /// field independently reachable lets the graph boundary prove that it rejects the exact
 /// corrupted tuple before it consumes either prepared input.
 #[cfg(feature = "test-support")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[doc(hidden)]
 pub enum PreparedBuiltinsCorruption {
     /// The prepared session identity does not match the graph session.
@@ -203,7 +312,90 @@ pub enum PreparedBuiltinsCorruption {
     Resources,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Frozen corruption subcases within the eight seal categories.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum PreparedBuiltinsCorruptionCase {
+    SessionHash,
+    SessionRate,
+    SessionQuantum,
+    TrackMissing,
+    TrackExtra,
+    TrackDuplicate,
+    ProcessorMissing,
+    ProcessorExtra,
+    ProcessorChangedStage,
+    TailMissing,
+    TailExtra,
+    TailChanged,
+    RequestMissing,
+    RequestExtra,
+    RequestDuplicate,
+    ObserverMissing,
+    ObserverExtra,
+    ObserverChangedNode,
+    ConsumerMissing,
+    ConsumerExtra,
+    ConsumerChangedMetadata,
+    ConsumerDuplicateHandle,
+    ResourceReport,
+}
+
+#[cfg(feature = "test-support")]
+impl PreparedBuiltinsCorruptionCase {
+    #[must_use]
+    pub const fn category(self) -> PreparedBuiltinsCorruption {
+        match self {
+            Self::SessionHash | Self::SessionRate | Self::SessionQuantum => {
+                PreparedBuiltinsCorruption::SessionIdentity
+            }
+            Self::TrackMissing | Self::TrackExtra | Self::TrackDuplicate => {
+                PreparedBuiltinsCorruption::Tracks
+            }
+            Self::ProcessorMissing | Self::ProcessorExtra | Self::ProcessorChangedStage => {
+                PreparedBuiltinsCorruption::Processors
+            }
+            Self::TailMissing | Self::TailExtra | Self::TailChanged => {
+                PreparedBuiltinsCorruption::Tails
+            }
+            Self::RequestMissing | Self::RequestExtra | Self::RequestDuplicate => {
+                PreparedBuiltinsCorruption::Requests
+            }
+            Self::ObserverMissing | Self::ObserverExtra | Self::ObserverChangedNode => {
+                PreparedBuiltinsCorruption::Observers
+            }
+            Self::ConsumerMissing
+            | Self::ConsumerExtra
+            | Self::ConsumerChangedMetadata
+            | Self::ConsumerDuplicateHandle => PreparedBuiltinsCorruption::Consumers,
+            Self::ResourceReport => PreparedBuiltinsCorruption::Resources,
+        }
+    }
+}
+
+/// The stable-ID grammar admits at most 127 distinct string allocation sizes. The remaining
+/// entries cover every fixed processor, vector, endpoint and queue layout class without imposing
+/// any limit on track, meter or allocation counts.
+pub const BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY: usize = 160;
+
+/// One exact `(size, alignment)` class in the retained allocation multiset.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct BuiltinRetainedLayoutV1 {
+    pub size_bytes: u64,
+    pub align_bytes: u64,
+    pub allocation_count: u64,
+}
+
+impl BuiltinRetainedLayoutV1 {
+    const ZERO: Self = Self {
+        size_bytes: 0,
+        align_bytes: 0,
+        allocation_count: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinResourceEstimate {
     /// Exact engine-owned processor, seal and binding payload bytes retained by this artifact.
     pub engine_owned_processor_payload_bytes: u64,
@@ -216,6 +408,34 @@ pub struct BuiltinResourceEstimate {
     pub maximum_single_allocation_bytes: u64,
     /// Count of retained engine-owned payload allocations represented by this report.
     pub retained_allocation_count: u64,
+    /// Number of populated entries in [`Self::retained_layouts`].
+    pub retained_layout_class_count: u16,
+    /// Exact ordered multiset classes for all retained allocation requests.
+    pub retained_layouts: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+}
+
+impl Default for BuiltinResourceEstimate {
+    fn default() -> Self {
+        Self {
+            engine_owned_processor_payload_bytes: 0,
+            engine_owned_meter_payload_bytes: 0,
+            engine_owned_retained_payload_bytes: 0,
+            meter_items: 0,
+            maximum_single_allocation_bytes: 0,
+            retained_allocation_count: 0,
+            retained_layout_class_count: 0,
+            retained_layouts: [BuiltinRetainedLayoutV1::ZERO;
+                BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+        }
+    }
+}
+
+impl BuiltinResourceEstimate {
+    /// Populated exact retained layout classes in deterministic `(size, align)` order.
+    #[must_use]
+    pub fn retained_layouts(&self) -> &[BuiltinRetainedLayoutV1] {
+        &self.retained_layouts[..usize::from(self.retained_layout_class_count)]
+    }
 }
 
 /// Versioned public name for the exact engine-owned retained-payload report.
@@ -224,20 +444,77 @@ pub struct BuiltinResourceEstimate {
 /// accidentally read one report while the compiler validates another.
 pub type BuiltinResourceReportV1 = BuiltinResourceEstimate;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct ResourceAccumulator {
     total: u64,
     largest: u64,
     allocations: u64,
+    layout_class_count: u16,
+    layouts: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+}
+
+impl Default for ResourceAccumulator {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            largest: 0,
+            allocations: 0,
+            layout_class_count: 0,
+            layouts: [BuiltinRetainedLayoutV1::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+        }
+    }
 }
 
 impl ResourceAccumulator {
     fn add_layout(&mut self, layout: core::alloc::Layout) -> Option<()> {
-        let bytes = u64::try_from(layout.size()).ok()?;
-        self.total = self.total.checked_add(bytes)?;
-        self.largest = self.largest.max(bytes);
-        self.allocations = self.allocations.checked_add(1)?;
+        let size_bytes = u64::try_from(layout.size()).ok()?;
+        let align_bytes = u64::try_from(layout.align()).ok()?;
+        self.add_layout_count(size_bytes, align_bytes, 1)?;
         Some(())
+    }
+
+    fn add_layout_count(
+        &mut self,
+        size_bytes: u64,
+        align_bytes: u64,
+        allocation_count: u64,
+    ) -> Option<()> {
+        let retained_bytes = size_bytes.checked_mul(allocation_count)?;
+        self.total = self.total.checked_add(retained_bytes)?;
+        self.largest = self.largest.max(size_bytes);
+        self.allocations = self.allocations.checked_add(allocation_count)?;
+        let populated = usize::from(self.layout_class_count);
+        if let Some(layout) = self.layouts[..populated]
+            .iter_mut()
+            .find(|layout| layout.size_bytes == size_bytes && layout.align_bytes == align_bytes)
+        {
+            layout.allocation_count = layout.allocation_count.checked_add(allocation_count)?;
+            return Some(());
+        }
+        let slot = self.layouts.get_mut(populated)?;
+        *slot = BuiltinRetainedLayoutV1 {
+            size_bytes,
+            align_bytes,
+            allocation_count,
+        };
+        self.layout_class_count = self.layout_class_count.checked_add(1)?;
+        Some(())
+    }
+
+    fn merge(&mut self, other: Self) -> Option<()> {
+        for layout in &other.layouts[..usize::from(other.layout_class_count)] {
+            self.add_layout_count(
+                layout.size_bytes,
+                layout.align_bytes,
+                layout.allocation_count,
+            )?;
+        }
+        Some(())
+    }
+
+    fn sorted_layouts(mut self) -> Self {
+        self.layouts[..usize::from(self.layout_class_count)].sort();
+        self
     }
 
     fn add_bytes(&mut self, bytes: usize) -> Option<()> {
@@ -354,46 +631,120 @@ impl PreparedBuiltinsSession {
         BuiltinDiagnosticSet::sorted(diagnostics)
     }
 
-    /// Consume a validated sealed artifact into the graph's private bindings.
-    pub fn into_graph_parts(self) -> PreparedBuiltinsGraphParts {
-        PreparedBuiltinsGraphParts {
-            processors: self.processors,
-            observers: self.observers,
+    /// Seal an already session-validated graph around these genuine compiler-owned bindings.
+    ///
+    /// This is deliberately a one-way conversion: callers may carry and bind the resulting
+    /// artifact, but cannot extract, replace, or clone its provenance-bearing parts.
+    pub fn into_graph_artifact<R>(
+        self,
+        graph: PreparedGraphPlan,
+        report: R,
+    ) -> PreparedBuiltinsGraphArtifact<R> {
+        PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: self.processors,
+            builtin_observers: self.observers,
+            report,
             meter_consumers: self.meter_consumers,
         }
     }
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
-    pub fn test_only_corrupt_for_compiler_test(&mut self, corruption: PreparedBuiltinsCorruption) {
+    pub fn test_only_corrupt_for_compiler_test(
+        &mut self,
+        corruption: PreparedBuiltinsCorruptionCase,
+    ) {
         match corruption {
-            PreparedBuiltinsCorruption::SessionIdentity => {
+            PreparedBuiltinsCorruptionCase::SessionHash => self.seal.session_sha256[0] ^= 1,
+            PreparedBuiltinsCorruptionCase::SessionRate => {
                 self.seal.sample_rate = self.seal.sample_rate.checked_add(1).unwrap_or(0);
             }
-            PreparedBuiltinsCorruption::Tracks => self.seal.tracks.clear(),
-            PreparedBuiltinsCorruption::Processors => self.seal.processors.clear(),
-            PreparedBuiltinsCorruption::Tails => self.tails.clear(),
-            PreparedBuiltinsCorruption::Requests => self.seal.requests.push(MeterRequestSeal {
-                handle: u64::MAX,
-                track_id: "forged-request".into(),
-                tap: MeterTap::Input,
-                reset_generation: 0,
-                period_frames: 1,
-                peak_hold_frames: 0,
-                peak_decay_bits: 0,
-                queue_capacity: 1,
-            }),
-            PreparedBuiltinsCorruption::Observers => {
+            PreparedBuiltinsCorruptionCase::SessionQuantum => {
+                self.seal.quantum = self.seal.quantum.checked_add(1).unwrap_or(0);
+            }
+            PreparedBuiltinsCorruptionCase::TrackMissing => self.seal.tracks.clear(),
+            PreparedBuiltinsCorruptionCase::TrackExtra => {
+                self.seal.tracks.push("forged-track".into());
+            }
+            PreparedBuiltinsCorruptionCase::TrackDuplicate => {
+                if let Some(track) = self.seal.tracks.first().cloned() {
+                    self.seal.tracks.push(track);
+                }
+            }
+            PreparedBuiltinsCorruptionCase::ProcessorMissing => {
+                self.processors.pop();
+            }
+            PreparedBuiltinsCorruptionCase::ProcessorExtra => self
+                .seal
+                .processors
+                .push(("forged-processor".into(), TrackStage::PostMatrix)),
+            PreparedBuiltinsCorruptionCase::ProcessorChangedStage => {
+                if let Some((_, stage)) = self.seal.processors.first_mut() {
+                    *stage = TrackStage::Input;
+                }
+            }
+            PreparedBuiltinsCorruptionCase::TailMissing => {
+                self.tails.pop();
+            }
+            PreparedBuiltinsCorruptionCase::TailExtra => self
+                .seal
+                .tails
+                .push(("forged-tail".into(), BuiltinTail::FiniteZero)),
+            PreparedBuiltinsCorruptionCase::TailChanged => {
+                if let Some((_, tail)) = self.tails.first_mut() {
+                    *tail = match *tail {
+                        BuiltinTail::FiniteZero => BuiltinTail::Infinite,
+                        BuiltinTail::Infinite => BuiltinTail::FiniteZero,
+                    };
+                }
+            }
+            PreparedBuiltinsCorruptionCase::RequestMissing => {
+                self.requests.pop();
+            }
+            PreparedBuiltinsCorruptionCase::RequestExtra => {
+                self.seal.requests.push(forged_request_seal());
+            }
+            PreparedBuiltinsCorruptionCase::RequestDuplicate => {
+                if let Some(request) = self.requests.first().cloned() {
+                    self.requests.push(request);
+                }
+            }
+            PreparedBuiltinsCorruptionCase::ObserverMissing => {
+                self.observers.pop();
+            }
+            PreparedBuiltinsCorruptionCase::ObserverExtra => {
                 self.seal
                     .observers
                     .push(("forged-observer".into(), TrackStage::Input, u64::MAX))
             }
-            PreparedBuiltinsCorruption::Consumers => {
+            PreparedBuiltinsCorruptionCase::ObserverChangedNode => {
+                if let Some(observer) = self.observers.first_mut() {
+                    observer.node = GraphNodeId::Output {
+                        output_id: StableGraphId::parse("forged-output").expect("stable test ID"),
+                    };
+                }
+            }
+            PreparedBuiltinsCorruptionCase::ConsumerMissing => {
+                self.meter_consumers.pop();
+            }
+            PreparedBuiltinsCorruptionCase::ConsumerExtra => {
                 self.seal
                     .consumers
                     .push((u64::MAX, "forged-consumer".into(), MeterTap::Input))
             }
-            PreparedBuiltinsCorruption::Resources => {
+            PreparedBuiltinsCorruptionCase::ConsumerChangedMetadata => {
+                if let Some(consumer) = self.meter_consumers.first_mut() {
+                    consumer.track_id = "forged-consumer".into();
+                    consumer.tap = MeterTap::PostMatrix;
+                }
+            }
+            PreparedBuiltinsCorruptionCase::ConsumerDuplicateHandle => {
+                if self.meter_consumers.len() >= 2 {
+                    self.meter_consumers[1].handle = self.meter_consumers[0].handle;
+                }
+            }
+            PreparedBuiltinsCorruptionCase::ResourceReport => {
                 self.resources.engine_owned_retained_payload_bytes = self
                     .resources
                     .engine_owned_retained_payload_bytes
@@ -401,6 +752,112 @@ impl PreparedBuiltinsSession {
                     .unwrap_or(0);
             }
         }
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn forged_request_seal() -> MeterRequestSeal {
+    MeterRequestSeal {
+        handle: u64::MAX,
+        track_id: "forged-request".into(),
+        tap: MeterTap::Input,
+        reset_generation: 0,
+        period_frames: 1,
+        peak_hold_frames: 0,
+        peak_decay_bits: 0,
+        queue_capacity: 1,
+    }
+}
+
+impl<R> PreparedBuiltinsGraphArtifact<R> {
+    /// Immutable caller-owned graph report.
+    #[must_use]
+    pub const fn report(&self) -> &R {
+        &self.report
+    }
+
+    /// Envelope required by the still-unbound graph.
+    #[must_use]
+    pub const fn envelope(&self) -> RenderEnvelope {
+        self.graph.envelope
+    }
+
+    /// Ordinary external nodes required in addition to compiler-owned builtin processors.
+    pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| &binding.node)
+            .collect();
+        self.graph
+            .required_bindings
+            .iter()
+            .filter(move |node| !builtin_nodes.contains(node))
+    }
+
+    /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphBindFailure<R>> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let expected: BTreeSet<_> = self
+            .graph
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_nodes.contains(*node))
+            .cloned()
+            .collect();
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let duplicate_nodes = supplied.len() != bindings.nodes.len();
+        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
+        let mut observer_pairs = BTreeSet::new();
+        let valid_observers = bindings
+            .observers
+            .iter()
+            .chain(self.builtin_observers.iter())
+            .all(|observer| {
+                matches!(observer.node, GraphNodeId::TrackStage { .. })
+                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+            });
+        if bindings.envelope != self.graph.envelope
+            || duplicate_nodes
+            || overlaps_builtin
+            || supplied != expected
+            || !valid_observers
+        {
+            let code = if !valid_observers {
+                "graph.plan.observer"
+            } else if bindings.envelope != self.graph.envelope {
+                "graph.plan.envelope_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err(PreparedBuiltinsGraphBindFailure {
+                artifact: self,
+                bindings,
+                code,
+            });
+        }
+        bindings.nodes.append(&mut self.builtin_processors);
+        bindings.observers.append(&mut self.builtin_observers);
+        let plan = match self.graph.bind(bindings) {
+            Ok(plan) => plan,
+            Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
+        };
+        Ok(PreparedBuiltinsGraphBound {
+            plan,
+            meter_consumers: self.meter_consumers,
+        })
     }
 }
 
@@ -413,19 +870,21 @@ fn session_identity(session: &CompiledSession) -> [u8; 32] {
 }
 
 fn processor_seal(tracks: &[Box<str>]) -> Vec<(Box<str>, TrackStage)> {
-    let mut values: Vec<_> = tracks
-        .iter()
-        .flat_map(|track| {
-            [
-                TrackStage::PostInputBuiltins,
-                TrackStage::PostFader,
-                TrackStage::PostMatrix,
-            ]
-            .into_iter()
-            .map(move |stage| (track.clone(), stage))
-        })
-        .collect();
-    values.sort();
+    let capacity = tracks
+        .len()
+        .checked_mul(3)
+        .expect("session preparation preflighted processor count");
+    let mut values = Vec::with_capacity(capacity);
+    for track in tracks {
+        for stage in [
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ] {
+            values.push((track.clone(), stage));
+        }
+    }
+    values.sort_unstable();
     values
 }
 
@@ -454,7 +913,7 @@ fn expected_tails(session: &CompiledSession) -> Result<Vec<(Box<str>, BuiltinTai
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
         values.push((track.id.as_str().into(), chain.tail()));
     }
-    values.sort_by(|left, right| left.0.cmp(&right.0));
+    values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(values)
 }
 
@@ -462,27 +921,22 @@ fn actual_meter_seals(
     observers: &[GraphNodeObserverBinding],
     consumers: &[MeterConsumer],
 ) -> (Vec<ObserverSeal>, Vec<ConsumerSeal>) {
-    let mut observer_values: Vec<_> = observers
-        .iter()
-        .filter_map(|observer| match &observer.node {
-            GraphNodeId::TrackStage { track_id, stage } => {
-                Some((Box::<str>::from(track_id.as_str()), *stage, observer.handle))
-            }
-            _ => None,
-        })
-        .collect();
-    observer_values.sort();
-    let mut consumer_values: Vec<_> = consumers
-        .iter()
-        .map(|consumer| {
-            (
-                consumer.handle.0.get(),
-                Box::<str>::from(&*consumer.track_id),
-                consumer.tap,
-            )
-        })
-        .collect();
-    consumer_values.sort();
+    let mut observer_values = Vec::with_capacity(observers.len());
+    for observer in observers {
+        if let GraphNodeId::TrackStage { track_id, stage } = &observer.node {
+            observer_values.push((Box::<str>::from(track_id.as_str()), *stage, observer.handle));
+        }
+    }
+    observer_values.sort_unstable();
+    let mut consumer_values = Vec::with_capacity(consumers.len());
+    for consumer in consumers {
+        consumer_values.push((
+            consumer.handle.0.get(),
+            Box::<str>::from(&*consumer.track_id),
+            consumer.tap,
+        ));
+    }
+    consumer_values.sort_unstable();
     (observer_values, consumer_values)
 }
 
@@ -494,6 +948,7 @@ pub fn prepare_session_builtins(
     let mut diagnostics = Vec::new();
     if [
         caps.maximum_total_state_bytes,
+        caps.maximum_total_retained_payload_bytes,
         caps.maximum_total_meter_items,
         caps.maximum_total_meter_bytes,
         caps.maximum_single_allocation_bytes,
@@ -504,11 +959,22 @@ pub fn prepare_session_builtins(
     {
         diagnostics.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
     }
-    if u64::try_from(requests.len()).map_or(true, |count| count > caps.maximum_meter_streams) {
-        diagnostics.push(diag("builtin.resource.limit", "$.meter_requests"));
+    match u64::try_from(requests.len()) {
+        Ok(count) if count > caps.maximum_meter_streams => {
+            diagnostics.push(diag("builtin.resource.limit", "$.meter_requests"));
+        }
+        Err(_) => diagnostics.push(diag(
+            "builtin.resource.arithmetic_overflow",
+            "$.meter_requests",
+        )),
+        Ok(_) => {}
     }
     let mut request_keys = BTreeSet::new();
+    let mut request_handles = BTreeSet::new();
     for request in requests {
+        if !request_handles.insert(request.handle) {
+            diagnostics.push(diag("builtin.meter.duplicate_handle", &meter_path(request)));
+        }
         let key = (request.track_id.clone(), request.tap);
         if !request_keys.insert(key) {
             diagnostics.push(diag("builtin.meter.duplicate", &meter_path(request)));
@@ -555,6 +1021,8 @@ pub fn prepare_session_builtins(
     if let Some(plan) = resource_plan {
         let report = plan.report;
         if report.engine_owned_processor_payload_bytes > caps.maximum_total_state_bytes
+            || report.engine_owned_retained_payload_bytes
+                > caps.maximum_total_retained_payload_bytes
             || report.meter_items > caps.maximum_total_meter_items
             || report.engine_owned_meter_payload_bytes > caps.maximum_total_meter_bytes
             || report.maximum_single_allocation_bytes > caps.maximum_single_allocation_bytes
@@ -599,16 +1067,8 @@ pub fn prepare_session_builtins(
     let mut observers = Vec::with_capacity(requests.len());
     let mut meter_consumers = Vec::with_capacity(requests.len());
     let mut request_seals = Vec::with_capacity(requests.len());
-    for (index, request) in requests.iter().enumerate() {
-        let handle = MeterHandle(
-            NonZeroU64::new(
-                u64::try_from(index)
-                    .expect("usize fits u64")
-                    .checked_add(1)
-                    .expect("request count bounded"),
-            )
-            .expect("one-based"),
-        );
+    for request in requests {
+        let handle = request.handle;
         let PreparedMeter {
             accumulator,
             consumer,
@@ -638,8 +1098,8 @@ pub fn prepare_session_builtins(
             queue_capacity: request.config.queue_capacity.get(),
         });
     }
-    tails.sort_by(|left, right| left.0.cmp(&right.0));
-    request_seals.sort();
+    tails.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    request_seals.sort_unstable();
     let tracks: Vec<Box<str>> = session
         .normalized_model()
         .tracks
@@ -720,8 +1180,21 @@ fn resource_plan(
             )
             .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?;
         meter
-            .add_bytes(queue.ring_header_bytes)
-            .and_then(|_| meter.add_bytes(queue.slot_payload_bytes))
+            .add_layout(
+                core::alloc::Layout::from_size_align(
+                    queue.ring_header_bytes,
+                    queue.ring_header_align,
+                )
+                .map_err(|_| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?,
+            )
+            .and_then(|_| {
+                core::alloc::Layout::from_size_align(
+                    queue.slot_payload_bytes,
+                    queue.slot_payload_align,
+                )
+                .ok()
+                .and_then(|layout| meter.add_layout(layout))
+            })
             .and_then(|_| meter.add_layout(core::alloc::Layout::new::<MeterObserver>()))
             .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", &meter_path(request)))?;
         let bytes = request.track_id.len();
@@ -747,6 +1220,14 @@ fn resource_plan(
                 "$.builtin_compile_caps",
             )
         })?;
+    let mut retained = processor;
+    retained.merge(meter).ok_or_else(|| {
+        diag(
+            "builtin.resource.arithmetic_overflow",
+            "$.builtin_compile_caps",
+        )
+    })?;
+    let retained = retained.sorted_layouts();
     Ok(BuiltinResourcePlan {
         report: BuiltinResourceEstimate {
             engine_owned_processor_payload_bytes: processor.total,
@@ -755,6 +1236,8 @@ fn resource_plan(
             meter_items,
             maximum_single_allocation_bytes: processor.largest.max(meter.largest),
             retained_allocation_count: allocations,
+            retained_layout_class_count: retained.layout_class_count,
+            retained_layouts: retained.layouts,
         },
     })
 }
@@ -1014,7 +1497,7 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::num::{NonZeroU32, NonZeroUsize};
+    use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 
     fn session() -> CompiledSession {
@@ -1035,6 +1518,7 @@ mod tests {
     fn caps() -> BuiltinCompileCaps {
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
             maximum_total_meter_items: u64::MAX,
             maximum_total_meter_bytes: u64::MAX,
             maximum_single_allocation_bytes: u64::MAX,
@@ -1043,6 +1527,9 @@ mod tests {
             maximum_peak_hold_frames: u32::MAX,
             maximum_smoothing_samples: u32::MAX,
         }
+    }
+    fn handle(value: u64) -> MeterHandle {
+        MeterHandle(NonZeroU64::new(value).expect("nonzero test meter handle"))
     }
     #[test]
     fn prepares_three_sections_and_each_named_meter_tap() {
@@ -1063,7 +1550,9 @@ mod tests {
             MeterTap::PostMatrix,
         ]
         .into_iter()
-        .map(|tap| MeterRequest {
+        .enumerate()
+        .map(|(index, tap)| MeterRequest {
+            handle: handle(u64::try_from(index).expect("bounded") + 1),
             track_id: "vocal".to_owned(),
             tap,
             config,
@@ -1101,11 +1590,13 @@ mod tests {
             &session(),
             &[
                 MeterRequest {
+                    handle: handle(1),
                     track_id: "missing".to_owned(),
                     tap: MeterTap::Input,
                     config,
                 },
                 MeterRequest {
+                    handle: handle(1),
                     track_id: "missing".to_owned(),
                     tap: MeterTap::Input,
                     config,
@@ -1118,7 +1609,11 @@ mod tests {
         };
         assert_eq!(
             error.0.iter().map(|item| item.code).collect::<Vec<_>>(),
-            vec!["builtin.meter.duplicate", "builtin.meter.unknown_track"]
+            vec![
+                "builtin.meter.duplicate",
+                "builtin.meter.duplicate_handle",
+                "builtin.meter.unknown_track"
+            ]
         );
     }
 
@@ -1132,6 +1627,7 @@ mod tests {
             reset_generation: 0,
         };
         let requests = [MeterRequest {
+            handle: handle(1),
             track_id: "vocal".to_owned(),
             tap: MeterTap::PostMatrix,
             config,
@@ -1161,6 +1657,7 @@ mod tests {
             reset_generation: 0,
         };
         let requests = [MeterRequest {
+            handle: handle(1),
             track_id: "vocal".to_owned(),
             tap: MeterTap::PostMatrix,
             config,
@@ -1188,13 +1685,19 @@ mod tests {
         }
     }
 
-    /// Frozen issue-034 compiler-mutation seed. This exercises preparation requests and caps,
-    /// never the scalar DSP render path or a timed workload.
+    /// Frozen issue-034 compiler-mutation seed. This exercises complete preparation requests and
+    /// their prepared block/target contract, never a timed workload.
     const BUILTIN_COMPILER_MUTATION_SEED: u64 = 0x34_007_c10_u64;
+    const BUILTIN_COMPILER_MUTATION_CLASSES: usize = 49;
 
     #[test]
     fn deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases() {
-        let accepted = session();
+        let mut base_model =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("parse baseline mutation session");
+        base_model.tracks[0].dynamic.effects.clear();
+        base_model.automation.clear();
+        base_model.limits.memory_bytes = u64::MAX;
         let base_config = MeterConfig {
             period_frames: NonZeroU32::new(16).expect("constant"),
             peak_hold_frames: 0,
@@ -1203,17 +1706,33 @@ mod tests {
             reset_generation: 0,
         };
         let baseline_request = MeterRequest {
+            handle: handle(1),
             track_id: "vocal".to_owned(),
             tap: MeterTap::Input,
             config: base_config,
         };
-        let baseline = prepare_session_builtins(&accepted, &[baseline_request], caps())
+        let accepted = compile_session(
+            &base_model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile baseline mutation session");
+        let baseline = prepare_session_builtins(&accepted, &[baseline_request.clone()], caps())
             .expect("baseline preparation");
         let report = baseline.resource_report();
         let mut state = BUILTIN_COMPILER_MUTATION_SEED;
         let mut transcript_hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut seen_taps = BTreeSet::new();
-        let mut classes = [false; 8];
+        let mut seen_rates = BTreeSet::new();
+        let mut seen_quanta = BTreeSet::new();
+        let mut seen_smoothing = BTreeSet::new();
+        let mut classes = [false; BUILTIN_COMPILER_MUTATION_CLASSES];
         let mut completed = 0_u32;
         for case in 0_u32..10_000 {
             // xorshift64* is intentionally local and fixed; case descriptions are mixed into a
@@ -1222,7 +1741,10 @@ mod tests {
             state ^= state << 25;
             state ^= state >> 27;
             let value = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
-            let tap = [
+            let class =
+                usize::try_from(case).expect("u32 fits usize") % BUILTIN_COMPILER_MUTATION_CLASSES;
+            classes[class] = true;
+            let taps = [
                 MeterTap::Input,
                 MeterTap::PostInputBuiltins,
                 MeterTap::PostSimd1,
@@ -1230,80 +1752,463 @@ mod tests {
                 MeterTap::PostSimd2PreFader,
                 MeterTap::PostFader,
                 MeterTap::PostMatrix,
-            ][usize::try_from(value % 7).expect("bounded tap index")];
+            ];
+            let tap = taps[usize::try_from(case % 7).expect("bounded tap index")];
             seen_taps.insert(tap);
-            let class = usize::try_from(case % 8).expect("bounded mutation class");
-            classes[class] = true;
-            let mut request = MeterRequest {
+            let rate = [44_100, 48_000, 88_200, 96_000]
+                [usize::try_from(case % 4).expect("bounded rate index")];
+            let quantum = [1, 127, 128, 255, 1_024]
+                [usize::try_from(case % 5).expect("bounded quantum index")];
+            let smoothing = [0, 1, 2, 127, 128, u32::MAX]
+                [usize::try_from(case % 6).expect("bounded smoothing index")];
+            seen_rates.insert(rate);
+            seen_quanta.insert(quantum);
+            seen_smoothing.insert(smoothing);
+
+            if class == 0 {
+                let invalid = include_str!("../../../fixtures/session/v1/canonical.toml").replacen(
+                    "polarity_invert = false",
+                    "polarity_invert = 0.5",
+                    1,
+                );
+                let diagnostics = parse_session_toml(&invalid)
+                    .expect_err("numeric boolean encoding must reject before preparation");
+                let observed: Vec<_> = diagnostics
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.path.to_string()))
+                    .collect();
+                assert_eq!(
+                    observed,
+                    vec![(
+                        "schema.wrong_type",
+                        "$.tracks[0].builtins.left.polarity_invert".to_owned()
+                    )]
+                );
+                for byte in
+                    format!("case={case};class={class};invalid_boolean={observed:?};seed={value}")
+                        .bytes()
+                {
+                    transcript_hash ^= u64::from(byte);
+                    transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+                }
+                completed = completed.checked_add(1).expect("fixed case count");
+                continue;
+            }
+
+            let mut model = base_model.clone();
+            model.sample_rate_hz = rate;
+            model.sources[0].sample_rate_hz = rate;
+            model.quantum_frames = quantum;
+            model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: smoothing,
+            };
+            let mut requests = vec![MeterRequest {
+                handle: handle(1),
                 track_id: "vocal".to_owned(),
                 tap,
-                config: MeterConfig {
-                    period_frames: NonZeroU32::new(match class {
-                        0 => 1,
-                        1 => 127,
-                        2 => 128,
-                        _ => 16,
-                    })
-                    .expect("positive period"),
-                    peak_hold_frames: match class {
-                        3 => u32::MAX,
-                        _ => {
-                            u32::try_from(value & u64::from(u32::MAX)).expect("masked to u32") % 128
-                        }
-                    },
-                    peak_decay_db_per_second: if class == 4 { f32::NAN } else { 0.0 },
-                    queue_capacity: NonZeroUsize::new(match class {
-                        5 => 1,
-                        _ => 4,
-                    })
-                    .expect("positive queue"),
-                    reset_generation: value,
-                },
-            };
-            let mut requests = vec![request.clone()];
-            if class == 5 {
-                requests.push(request.clone());
-            } else if class == 6 {
-                request.track_id = "unknown-track".to_owned();
-                requests[0] = request;
-            }
+                config: base_config,
+            }];
             let mut mutation_caps = caps();
-            if class == 7 {
-                mutation_caps.maximum_total_state_bytes = report
-                    .engine_owned_processor_payload_bytes
-                    .checked_sub(1)
-                    .expect("nonzero baseline state report");
-            }
-            let result = prepare_session_builtins(&accepted, &requests, mutation_caps);
-            match result {
-                Ok(prepared) => {
-                    assert!(
-                        prepared
-                            .resource_report()
-                            .engine_owned_retained_payload_bytes
-                            > 0
-                    );
-                    transcript_hash ^= 0x51;
+            let mut expected = Vec::new();
+            let mut expected_session = Vec::new();
+            let mut target = Matrix2x2::IDENTITY;
+            let mut block_probe = 0_u8;
+            match class {
+                1 => model.tracks[0].builtins.left.polarity_invert = value & 1 != 0,
+                2 => model.tracks[0].builtins.left.trim_db = -144.0,
+                3 => model.tracks[0].builtins.right.trim_db = 24.0,
+                4 => {
+                    model.tracks[0].builtins.left.trim_db = f32::NAN;
+                    expected_session.push((
+                        "numeric.non_finite",
+                        "$.tracks[0].builtins.left.trim_db".to_owned(),
+                    ));
                 }
-                Err(diagnostics) => {
-                    assert!(diagnostics.0.windows(2).all(|pair| pair[0] < pair[1]));
-                    for diagnostic in diagnostics.0 {
-                        for byte in diagnostic.code.bytes().chain(diagnostic.path.bytes()) {
-                            transcript_hash ^= u64::from(byte);
-                            transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
-                        }
+                5 => {
+                    model.tracks[0].fader.right_db = 24.001;
+                    expected.push(diag(
+                        "builtin.gain.domain",
+                        "$.tracks[id=vocal].fader.right_db",
+                    ));
+                }
+                6 => model.tracks[0].builtins.left.hpf_hz = 0.0,
+                7 => model.tracks[0].builtins.left.hpf_hz = 10.0,
+                8 => {
+                    model.tracks[0].builtins.left.hpf_hz = rate as f32 / 2.0;
+                    model.tracks[0].builtins.left.lpf_hz = 0.0;
+                    expected.push(diag(
+                        "builtin.filter.cutoff",
+                        "$.tracks[id=vocal].builtins.left.hpf_hz",
+                    ));
+                }
+                9 => {
+                    model.tracks[0].builtins.left.hpf_hz = 1_000.0;
+                    model.tracks[0].builtins.left.lpf_hz = 100.0;
+                    expected.push(diag(
+                        "builtin.filter.order",
+                        "$.tracks[id=vocal].builtins.left.lpf_hz",
+                    ));
+                }
+                10 => {
+                    if let MatrixOrPan::Matrix { ll, .. } = &mut model.tracks[0].matrix_or_pan {
+                        *ll = -1.0;
+                    }
+                }
+                11 => {
+                    if let MatrixOrPan::Matrix { rr, .. } = &mut model.tracks[0].matrix_or_pan {
+                        *rr = 1.001;
+                    }
+                    expected.push(diag(
+                        "builtin.matrix.coefficient",
+                        "$.tracks[id=vocal].matrix_or_pan.rr",
+                    ));
+                }
+                12 => {
+                    requests.push(MeterRequest {
+                        handle: handle(1),
+                        track_id: "vocal".to_owned(),
+                        tap: if tap == MeterTap::Input {
+                            MeterTap::PostMatrix
+                        } else {
+                            MeterTap::Input
+                        },
+                        config: base_config,
+                    });
+                    expected.push(diag(
+                        "builtin.meter.duplicate_handle",
+                        &meter_path(&requests[1]),
+                    ));
+                }
+                13 => {
+                    requests.push(MeterRequest {
+                        handle: handle(2),
+                        ..requests[0].clone()
+                    });
+                    expected.push(diag("builtin.meter.duplicate", &meter_path(&requests[1])));
+                }
+                14 => {
+                    requests[0].track_id = "unknown-track".to_owned();
+                    expected.push(diag(
+                        "builtin.meter.unknown_track",
+                        &meter_path(&requests[0]),
+                    ));
+                }
+                15 => requests[0].config.period_frames = NonZeroU32::new(1).expect("constant"),
+                16 => {
+                    requests[0].config.period_frames = NonZeroU32::new(u32::MAX).expect("constant")
+                }
+                17 => {
+                    requests[0].config.period_frames = NonZeroU32::new(128).expect("constant");
+                    mutation_caps.maximum_period_frames = 127;
+                    expected.push(diag("builtin.resource.limit", &meter_path(&requests[0])));
+                }
+                18 => requests[0].config.peak_hold_frames = u32::MAX,
+                19 => {
+                    requests[0].config.peak_hold_frames = 128;
+                    mutation_caps.maximum_peak_hold_frames = 127;
+                    expected.push(diag("builtin.resource.limit", &meter_path(&requests[0])));
+                }
+                20 => requests[0].config.peak_decay_db_per_second = 120.0,
+                21 => {
+                    requests[0].config.peak_decay_db_per_second = f32::NAN;
+                    expected.push(diag("builtin.meter.config", &meter_path(&requests[0])));
+                }
+                22 => requests[0].config.reset_generation = u64::MAX,
+                23 => {
+                    requests[0].config.queue_capacity =
+                        NonZeroUsize::new(usize::MAX).expect("constant");
+                    expected.push(diag(
+                        "builtin.resource.arithmetic_overflow",
+                        &meter_path(&requests[0]),
+                    ));
+                }
+                24 => {
+                    target = Matrix2x2 {
+                        ll: -1.0,
+                        lr: 1.0,
+                        rl: 1.0,
+                        rr: -1.0,
+                    }
+                }
+                25 => target.ll = f32::NAN,
+                26 => target.lr = f32::INFINITY,
+                27 => target.rr = 1.001,
+                28 => block_probe = 1,
+                29 => block_probe = 2,
+                30 => block_probe = 3,
+                31 => block_probe = 4,
+                32 => {
+                    mutation_caps.maximum_total_state_bytes =
+                        report.engine_owned_processor_payload_bytes
+                }
+                33 => {
+                    mutation_caps.maximum_total_state_bytes = report
+                        .engine_owned_processor_payload_bytes
+                        .checked_sub(1)
+                        .expect("nonzero");
+                    expected.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+                }
+                34 => {
+                    mutation_caps.maximum_total_retained_payload_bytes =
+                        report.engine_owned_retained_payload_bytes
+                }
+                35 => {
+                    mutation_caps.maximum_total_retained_payload_bytes = report
+                        .engine_owned_retained_payload_bytes
+                        .checked_sub(1)
+                        .expect("nonzero");
+                    expected.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+                }
+                36 => {
+                    mutation_caps.maximum_total_meter_bytes =
+                        report.engine_owned_meter_payload_bytes
+                }
+                37 => {
+                    mutation_caps.maximum_total_meter_bytes = report
+                        .engine_owned_meter_payload_bytes
+                        .checked_sub(1)
+                        .expect("nonzero");
+                    expected.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+                }
+                38 => {
+                    mutation_caps.maximum_single_allocation_bytes =
+                        report.maximum_single_allocation_bytes
+                }
+                39 => {
+                    mutation_caps.maximum_single_allocation_bytes = report
+                        .maximum_single_allocation_bytes
+                        .checked_sub(1)
+                        .expect("nonzero");
+                    expected.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+                }
+                40 => mutation_caps.maximum_total_meter_items = report.meter_items,
+                41 => {
+                    mutation_caps.maximum_total_meter_items =
+                        report.meter_items.checked_sub(1).expect("nonzero");
+                    expected.push(diag("builtin.resource.limit", "$.builtin_compile_caps"));
+                }
+                42 => mutation_caps.maximum_meter_streams = 1,
+                43 => {
+                    requests.push(MeterRequest {
+                        handle: handle(2),
+                        track_id: "vocal".to_owned(),
+                        tap: if tap == MeterTap::Input {
+                            MeterTap::PostMatrix
+                        } else {
+                            MeterTap::Input
+                        },
+                        config: base_config,
+                    });
+                    mutation_caps.maximum_meter_streams = 1;
+                    expected.push(diag("builtin.resource.limit", "$.meter_requests"));
+                }
+                44 => {
+                    let limited = if smoothing == 0 { 0 } else { smoothing - 1 };
+                    mutation_caps.maximum_smoothing_samples = limited;
+                    if smoothing > 0 {
+                        expected.push(diag(
+                            "builtin.matrix.smoothing",
+                            "$.tracks[id=vocal].matrix_or_pan.smoothing_samples",
+                        ));
+                    }
+                }
+                45 => {
+                    let coefficient = (u32::try_from(value >> 32).expect("masked") as f32
+                        / u32::MAX as f32)
+                        * 2.0
+                        - 1.0;
+                    if let MatrixOrPan::Matrix { lr, rl, .. } = &mut model.tracks[0].matrix_or_pan {
+                        *lr = coefficient;
+                        *rl = -coefficient;
+                    }
+                }
+                46 => {
+                    let nyquist = rate as f32 / 2.0;
+                    model.tracks[0].builtins.left.lpf_hz = f32::from_bits(nyquist.to_bits() - 1);
+                }
+                47 => target.rl = f32::NEG_INFINITY,
+                48 => {
+                    model.tracks[0].builtins.right.lpf_hz = f32::NAN;
+                    expected_session.push((
+                        "numeric.non_finite",
+                        "$.tracks[0].builtins.right.lpf_hz".to_owned(),
+                    ));
+                }
+                _ => unreachable!("frozen class range"),
+            }
+
+            let compiled_result = compile_session(
+                &model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            );
+            if !expected_session.is_empty() {
+                let Err(diagnostics) = compiled_result else {
+                    panic!("invalid complete session must reject: case={case}, class={class}");
+                };
+                let observed: Vec<_> = diagnostics
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.path.to_string()))
+                    .collect();
+                assert_eq!(observed, expected_session, "case={case}, class={class}");
+                for byte in format!(
+                    "case={case};class={class};seed={value};rate={rate};quantum={quantum};tap={tap:?};smoothing={smoothing};session={observed:?}"
+                )
+                .bytes()
+                {
+                    transcript_hash ^= u64::from(byte);
+                    transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+                }
+                completed = completed.checked_add(1).expect("fixed case count");
+                continue;
+            }
+            let compiled = compiled_result
+                .expect("complete generated session compiles before builtin preparation");
+            let expected = BuiltinDiagnosticSet::sorted(expected);
+            let result = prepare_session_builtins(&compiled, &requests, mutation_caps);
+            if !expected.0.is_empty() {
+                let Err(observed) = result else {
+                    panic!("frozen invalid class must reject: case={case}, class={class}");
+                };
+                assert_eq!(observed, expected, "case={case}, class={class}");
+            } else {
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        panic!(
+                            "frozen valid preparation class failed: case={case}, class={class}, error={error:?}"
+                        )
+                    }
+                };
+                let accepted_report = prepared.resource_report();
+                assert!(
+                    accepted_report.engine_owned_processor_payload_bytes
+                        <= mutation_caps.maximum_total_state_bytes
+                );
+                assert!(
+                    accepted_report.engine_owned_retained_payload_bytes
+                        <= mutation_caps.maximum_total_retained_payload_bytes
+                );
+                assert!(
+                    accepted_report.engine_owned_meter_payload_bytes
+                        <= mutation_caps.maximum_total_meter_bytes
+                );
+                assert!(
+                    accepted_report.maximum_single_allocation_bytes
+                        <= mutation_caps.maximum_single_allocation_bytes
+                );
+                assert_eq!(
+                    accepted_report
+                        .retained_layouts()
+                        .iter()
+                        .try_fold(0_u64, |total, layout| {
+                            total.checked_add(
+                                layout.size_bytes.checked_mul(layout.allocation_count)?,
+                            )
+                        }),
+                    Some(accepted_report.engine_owned_retained_payload_bytes)
+                );
+
+                let parameters = track_parameters(&model.tracks[0], u32::MAX)
+                    .expect("accepted class parameters");
+                let mut chain = BuiltinChain::new(rate, parameters).expect("accepted chain");
+                let target_result = chain.set_matrix_target(target);
+                if matches!(class, 25 | 26 | 27 | 47) {
+                    assert_eq!(target_result, Err(BuiltinParameterError::MatrixCoefficient));
+                } else {
+                    target_result.expect("valid target");
+                }
+                let frames = usize::try_from(quantum).expect("supported quantum fits usize");
+                match block_probe {
+                    1 => {
+                        let mut left = Vec::<f32>::new();
+                        let mut right = Vec::<f32>::new();
+                        assert!(matches!(
+                            DualMonoBlock::new(&mut left, &mut right, 0),
+                            Err(BuiltinParameterError::EmptyBlock)
+                        ));
+                    }
+                    2 => {
+                        let mut left = vec![0.0_f32; frames];
+                        let mut right = vec![0.0_f32; frames.checked_sub(1).expect("nonzero")];
+                        assert!(matches!(
+                            DualMonoBlock::new(&mut left, &mut right, 0),
+                            Err(BuiltinParameterError::LaneLength)
+                        ));
+                    }
+                    3 => {
+                        let mut left = [0.0_f32];
+                        let mut right = [0.0_f32];
+                        assert!(matches!(
+                            DualMonoBlock::new(&mut left, &mut right, u64::MAX),
+                            Err(BuiltinParameterError::SampleTimeOverflow)
+                        ));
+                    }
+                    4 => {
+                        let PreparedMeter {
+                            mut accumulator, ..
+                        } = MeterAccumulator::prepare(handle(99), base_config, rate)
+                            .expect("valid discontinuity meter");
+                        accumulator.observe(&[0.0], &[0.0], 0).expect("first block");
+                        accumulator
+                            .observe(&[0.0], &[0.0], 100)
+                            .expect("discontinuous block is bounded and accepted");
+                    }
+                    _ => {
+                        let mut left = vec![0.0_f32; frames];
+                        let mut right = vec![0.0_f32; frames];
+                        let block = DualMonoBlock::new(&mut left, &mut right, u64::from(case))
+                            .expect("valid generated block");
+                        chain
+                            .process_dual_mono(block)
+                            .expect("valid generated render");
                     }
                 }
             }
-            transcript_hash ^= u64::from(case);
-            transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+
+            let description = format!(
+                "case={case};class={class};seed={value};rate={rate};quantum={quantum};tap={tap:?};smoothing={smoothing};handle={};period={};hold={};decay={:08x};reset={};queue={};caps={mutation_caps:?};expected={:?};target={:08x},{:08x},{:08x},{:08x};block={block_probe}",
+                requests[0].handle.0,
+                requests[0].config.period_frames,
+                requests[0].config.peak_hold_frames,
+                requests[0].config.peak_decay_db_per_second.to_bits(),
+                requests[0].config.reset_generation,
+                requests[0].config.queue_capacity,
+                expected.0,
+                target.ll.to_bits(),
+                target.lr.to_bits(),
+                target.rl.to_bits(),
+                target.rr.to_bits(),
+            );
+            for byte in description.bytes() {
+                transcript_hash ^= u64::from(byte);
+                transcript_hash = transcript_hash.wrapping_mul(0x100_0000_01b3);
+            }
             completed = completed.checked_add(1).expect("fixed case count");
         }
         assert_eq!(completed, 10_000);
         assert_eq!(seen_taps.len(), 7);
+        assert_eq!(seen_rates, BTreeSet::from([44_100, 48_000, 88_200, 96_000]));
+        assert_eq!(seen_quanta, BTreeSet::from([1, 127, 128, 255, 1_024]));
+        assert_eq!(
+            seen_smoothing,
+            BTreeSet::from([0, 1, 2, 127, 128, u32::MAX])
+        );
         assert!(classes.into_iter().all(core::convert::identity));
         assert_eq!(
-            transcript_hash, 565_235_985_001_749_527,
+            transcript_hash, 0,
             "updated only through a deliberate frozen-case change"
         );
     }

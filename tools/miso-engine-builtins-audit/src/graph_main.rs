@@ -6,14 +6,14 @@
 
 #![allow(unsafe_code)]
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{Arc, Mutex, mpsc},
     thread::ThreadId,
 };
 
-use miso_engine_builtins::{MeterConfig, MeterTap};
+use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
 };
@@ -389,7 +389,17 @@ fn prepare_graph_plan(
         MeterTap::PostMatrix,
     ]
     .into_iter()
-    .map(|tap| MeterRequest {
+    .enumerate()
+    .map(|(index, tap)| MeterRequest {
+        handle: MeterHandle(
+            NonZeroU64::new(
+                plan_id
+                    .checked_mul(100)
+                    .and_then(|value| value.checked_add(u64::try_from(index).expect("bounded") + 1))
+                    .expect("bounded plan meter handle"),
+            )
+            .expect("nonzero"),
+        ),
         track_id: "vocal".to_owned(),
         tap,
         config,
@@ -400,6 +410,7 @@ fn prepare_graph_plan(
         &requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
             maximum_total_meter_items: u64::MAX,
             maximum_total_meter_bytes: u64::MAX,
             maximum_single_allocation_bytes: u64::MAX,

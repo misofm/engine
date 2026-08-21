@@ -1356,24 +1356,159 @@ mod tests {
     }
     #[test]
     fn parameter_descriptors_have_complete_stable_contracts() {
+        let descriptors = BUILTIN_PARAMETER_DESCRIPTORS_V1;
         assert_eq!(
-            BUILTIN_PARAMETER_DESCRIPTORS_V1.map(|descriptor| descriptor.id),
+            descriptors.map(|descriptor| descriptor.id),
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
-        let hpf = BUILTIN_PARAMETER_DESCRIPTORS_V1[2];
-        assert_eq!(hpf.scope, BuiltinParameterScope::PerLane);
-        assert_eq!(hpf.mapping, BuiltinParameterMapping::Hertz);
-        assert_eq!(hpf.disabled_value, Some(0.0));
-        assert!(hpf.domain.contains(0.0, 44_100));
-        assert!(hpf.domain.contains(10.0, 44_100));
-        assert!(hpf.domain.contains(22_049.0, 44_100));
-        assert!(!hpf.domain.contains(22_050.0, 44_100));
-        assert!(!hpf.domain.contains(f32::INFINITY, 44_100));
-        let matrix = BUILTIN_PARAMETER_DESCRIPTORS_V1[6];
-        assert_eq!(matrix.scope, BuiltinParameterScope::MatrixShared);
-        assert_eq!(matrix.mapping, BuiltinParameterMapping::Linear);
-        assert_eq!(matrix.smoothing, BuiltinSmoothingPolicy::LinearNUpdates);
-        assert_eq!(matrix.reset, BuiltinParameterReset::KeepTargetResetCurrent);
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.name),
+            [
+                "polarity_invert",
+                "trim_db",
+                "hpf_hz",
+                "lpf_hz",
+                "fader_db",
+                "mute",
+                "matrix_ll",
+                "matrix_lr",
+                "matrix_rl",
+                "matrix_rr",
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.scope),
+            [
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::PerLane,
+                BuiltinParameterScope::MatrixShared,
+                BuiltinParameterScope::MatrixShared,
+                BuiltinParameterScope::MatrixShared,
+                BuiltinParameterScope::MatrixShared,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.mapping),
+            [
+                BuiltinParameterMapping::Boolean,
+                BuiltinParameterMapping::DecibelAmplitude,
+                BuiltinParameterMapping::Hertz,
+                BuiltinParameterMapping::Hertz,
+                BuiltinParameterMapping::DecibelAmplitude,
+                BuiltinParameterMapping::Boolean,
+                BuiltinParameterMapping::Linear,
+                BuiltinParameterMapping::Linear,
+                BuiltinParameterMapping::Linear,
+                BuiltinParameterMapping::Linear,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.default.to_bits()),
+            [0, 0, 0, 0, 0, 0, 1.0_f32.to_bits(), 0, 0, 1.0_f32.to_bits()]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.update_rate),
+            [
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::PreparedOnly,
+                BuiltinParameterUpdateRate::BlockTarget,
+                BuiltinParameterUpdateRate::BlockTarget,
+                BuiltinParameterUpdateRate::BlockTarget,
+                BuiltinParameterUpdateRate::BlockTarget,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.smoothing),
+            [
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::None,
+                BuiltinSmoothingPolicy::LinearNUpdates,
+                BuiltinSmoothingPolicy::LinearNUpdates,
+                BuiltinSmoothingPolicy::LinearNUpdates,
+                BuiltinSmoothingPolicy::LinearNUpdates,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.reset),
+            [
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::RestorePreparedValue,
+                BuiltinParameterReset::KeepTargetResetCurrent,
+                BuiltinParameterReset::KeepTargetResetCurrent,
+                BuiltinParameterReset::KeepTargetResetCurrent,
+                BuiltinParameterReset::KeepTargetResetCurrent,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.disabled_value),
+            [
+                None,
+                None,
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]
+        );
+        assert_eq!(
+            descriptors.map(|descriptor| descriptor.domain),
+            [
+                BuiltinParameterDomain::BooleanExact,
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -144.0,
+                    maximum: 24.0,
+                },
+                BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+                    disabled: 0.0,
+                    minimum_hz: 10.0,
+                },
+                BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+                    disabled: 0.0,
+                    minimum_hz: 10.0,
+                },
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -144.0,
+                    maximum: 24.0,
+                },
+                BuiltinParameterDomain::BooleanExact,
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -1.0,
+                    maximum: 1.0,
+                },
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -1.0,
+                    maximum: 1.0,
+                },
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -1.0,
+                    maximum: 1.0,
+                },
+                BuiltinParameterDomain::FiniteInclusive {
+                    minimum: -1.0,
+                    maximum: 1.0,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1389,21 +1524,39 @@ mod tests {
                 BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
                 BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
             ] {
+                let nyquist = rate as f32 / 2.0;
+                let just_below_nyquist = f32::from_bits(nyquist.to_bits() - 1);
+                assert!(descriptor.domain.contains(0.0, rate));
                 assert!(!descriptor.domain.contains(9.999, rate));
                 assert!(descriptor.domain.contains(10.0, rate));
-                assert!(descriptor.domain.contains(rate as f32 / 2.0 - 0.5, rate));
-                assert!(!descriptor.domain.contains(rate as f32 / 2.0, rate));
+                assert!(descriptor.domain.contains(just_below_nyquist, rate));
+                assert!(!descriptor.domain.contains(nyquist, rate));
             }
         }
-        let boolean = BUILTIN_PARAMETER_DESCRIPTORS_V1[0];
-        assert!(boolean.domain.contains(0.0, 48_000));
-        assert!(boolean.domain.contains(1.0, 48_000));
-        assert!(!boolean.domain.contains(-0.0, 48_000));
-        assert!(!boolean.domain.contains(0.5, 48_000));
-        let decibels = BUILTIN_PARAMETER_DESCRIPTORS_V1[1];
-        assert!(decibels.domain.contains(-144.0, 48_000));
-        assert!(decibels.domain.contains(24.0, 48_000));
-        assert!(!decibels.domain.contains(24.001, 48_000));
+        for boolean in [
+            BUILTIN_PARAMETER_DESCRIPTORS_V1[0],
+            BUILTIN_PARAMETER_DESCRIPTORS_V1[5],
+        ] {
+            assert!(boolean.domain.contains(0.0, 48_000));
+            assert!(boolean.domain.contains(1.0, 48_000));
+            assert!(!boolean.domain.contains(-0.0, 48_000));
+            assert!(!boolean.domain.contains(0.5, 48_000));
+        }
+        for decibels in [
+            BUILTIN_PARAMETER_DESCRIPTORS_V1[1],
+            BUILTIN_PARAMETER_DESCRIPTORS_V1[4],
+        ] {
+            assert!(decibels.domain.contains(-144.0, 48_000));
+            assert!(decibels.domain.contains(24.0, 48_000));
+            assert!(!decibels.domain.contains(-144.001, 48_000));
+            assert!(!decibels.domain.contains(24.001, 48_000));
+        }
+        for matrix in &BUILTIN_PARAMETER_DESCRIPTORS_V1[6..] {
+            assert!(matrix.domain.contains(-1.0, 48_000));
+            assert!(matrix.domain.contains(1.0, 48_000));
+            assert!(!matrix.domain.contains(-1.001, 48_000));
+            assert!(!matrix.domain.contains(1.001, 48_000));
+        }
     }
     #[test]
     fn blocks_reject_before_processing_and_reports_are_per_call() {

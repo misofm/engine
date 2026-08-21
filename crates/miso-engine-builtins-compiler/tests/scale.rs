@@ -21,6 +21,7 @@ fn session_caps() -> CompileCaps {
 fn builtin_caps() -> BuiltinCompileCaps {
     BuiltinCompileCaps {
         maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
         maximum_total_meter_items: u64::MAX,
         maximum_total_meter_bytes: u64::MAX,
         maximum_single_allocation_bytes: u64::MAX,

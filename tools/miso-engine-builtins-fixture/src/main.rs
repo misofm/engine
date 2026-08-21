@@ -129,7 +129,12 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         MeterTap::PostMatrix,
     ]
     .into_iter()
-    .map(|tap| MeterRequest {
+    .enumerate()
+    .map(|(index, tap)| MeterRequest {
+        handle: MeterHandle(
+            core::num::NonZeroU64::new(u64::try_from(index).expect("bounded") + 1)
+                .expect("nonzero"),
+        ),
         track_id: "vocal".to_owned(),
         tap,
         config,
@@ -140,6 +145,7 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         &requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
             maximum_total_meter_items: u64::MAX,
             maximum_total_meter_bytes: u64::MAX,
             maximum_single_allocation_bytes: u64::MAX,
@@ -679,16 +685,19 @@ fn diagnostics() -> String {
     let config = meter_config(2, 1, 3);
     let duplicate = [
         MeterRequest {
+            handle: MeterHandle(core::num::NonZeroU64::new(1).expect("constant")),
             track_id: "vocal".to_owned(),
             tap: MeterTap::Input,
             config,
         },
         MeterRequest {
+            handle: MeterHandle(core::num::NonZeroU64::new(1).expect("constant")),
             track_id: "vocal".to_owned(),
             tap: MeterTap::Input,
             config,
         },
         MeterRequest {
+            handle: MeterHandle(core::num::NonZeroU64::new(3).expect("constant")),
             track_id: "missing".to_owned(),
             tap: MeterTap::PostFader,
             config,
@@ -912,7 +921,12 @@ fn resources() -> String {
             ][..meters]
                 .iter()
                 .copied()
-                .map(|tap| MeterRequest {
+                .enumerate()
+                .map(|(index, tap)| MeterRequest {
+                    handle: MeterHandle(
+                        core::num::NonZeroU64::new(u64::try_from(index).expect("bounded") + 1)
+                            .expect("nonzero"),
+                    ),
                     track_id: if tracks == 1 { "vocal" } else { "track-0" }.to_owned(),
                     tap,
                     config,
@@ -987,6 +1001,7 @@ fn fixture_session_tracks(count: usize) -> miso_engine_session::CompiledSession 
 fn unlimited_builtin_caps() -> BuiltinCompileCaps {
     BuiltinCompileCaps {
         maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
         maximum_total_meter_items: u64::MAX,
         maximum_total_meter_bytes: u64::MAX,
         maximum_single_allocation_bytes: u64::MAX,

@@ -36,8 +36,12 @@ pub struct SpscRetainedPayload {
     pub slot_count: usize,
     /// Engine-owned ring header layout size.
     pub ring_header_bytes: usize,
+    /// Engine-owned ring header layout alignment.
+    pub ring_header_align: usize,
     /// Engine-owned backing slot layout size including element alignment padding.
     pub slot_payload_bytes: usize,
+    /// Engine-owned backing slot layout alignment.
+    pub slot_payload_align: usize,
 }
 
 impl SpscRetainedPayload {
@@ -89,14 +93,12 @@ struct Ring<T> {
 
 // `bounded_spsc_internal` retains this ring behind an `Arc`.  The resource helper exposes the
 // complete engine-owned allocation layout, including the two atomic reference counts rather than
-// pretending that the shared-owner header is allocator-private metadata.
+// pretending that the shared-owner header is allocator-private metadata. This mirrors the
+// standard library's `ArcInner<T>` payload boundary: strong count, weak count, then `T`.
 #[repr(C)]
 struct SharedRingAllocation<T> {
     strong: AtomicUsize,
     weak: AtomicUsize,
-    // The native shared owner carries one additional machine-word control slot.  Account for it
-    // in the retained layout instead of treating `Arc` bookkeeping as free engine memory.
-    control: AtomicUsize,
     ring: Ring<T>,
 }
 
@@ -110,10 +112,13 @@ pub fn bounded_spsc_retained_payload<T>(
         .ok_or(SpscError::CapacityOverflow)?;
     let slot_payload = Layout::array::<UnsafeCell<MaybeUninit<T>>>(slot_count)
         .map_err(|_| SpscError::CapacityOverflow)?;
+    let ring_header = Layout::new::<SharedRingAllocation<T>>();
     Ok(SpscRetainedPayload {
         slot_count,
-        ring_header_bytes: Layout::new::<SharedRingAllocation<T>>().size(),
+        ring_header_bytes: ring_header.size(),
+        ring_header_align: ring_header.align(),
         slot_payload_bytes: slot_payload.size(),
+        slot_payload_align: slot_payload.align(),
     })
 }
 // SAFETY: the only shared operations are atomics and slot access governed by SPSC cursor order.
