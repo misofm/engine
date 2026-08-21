@@ -278,6 +278,22 @@ impl AoSoaScratch {
         }
         Ok(())
     }
+    /// Borrow the gathered main AoSoA planes for a fixed-stage bank processor.
+    ///
+    /// This is intentionally narrower than the effect-bank API: callers cannot reach
+    /// sidechain storage or change the prepared width/quantum contract.
+    pub fn builtin_planes_mut(
+        &mut self,
+        frames: u32,
+    ) -> Result<(&mut [f32], &mut [f32]), RackError> {
+        self.checked(
+            frames,
+            self.width.lanes() as usize,
+            self.width.lanes() as usize,
+        )?;
+        let length = frames as usize * self.width.lanes() as usize;
+        Ok((&mut self.left[..length], &mut self.right[..length]))
+    }
     pub fn process(
         &mut self,
         bank: &mut dyn PreparedNativeEffectBank,

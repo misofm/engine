@@ -13,6 +13,8 @@ miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-builtins.workspace = true
+miso-engine-rack.workspace = true
+miso-engine-effect-contract.workspace = true
 sha2.workspace = true
 
 [features]

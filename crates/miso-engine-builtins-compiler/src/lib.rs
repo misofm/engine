@@ -15,19 +15,21 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters,
-    DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
-    MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
-    validate_builtin_filter_cutoff_v1,
+    BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, BuiltinParameters, BuiltinTail,
+    ChannelParameters, DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
+    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
+    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
 };
 use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
+    DependencyLevel, GraphBindingBlock, GraphNodeId, GraphNodeObserverBinding,
+    GraphObservationBlock, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
     GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
     StableGraphId, TrackStage,
 };
+use miso_engine_rack::{AoSoaScratch, KernelDispatch};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,11 +81,60 @@ pub struct MeterConsumer {
 pub struct PreparedBuiltinsSession {
     seal: BuiltinSessionSeal,
     processors: Vec<miso_engine_graph::GraphNodeBinding>,
+    bank_inputs: Vec<(Box<str>, InputBuiltins)>,
     observers: Vec<GraphNodeObserverBinding>,
     meter_consumers: Vec<MeterConsumer>,
     tails: Vec<(Box<str>, BuiltinTail)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
+}
+
+/// Sealed production representation of one full post-input builtin bank.
+///
+/// It owns the real TPT adapter and is only materialized by the builtin/graph preparation seam.
+pub struct PreparedBuiltinInputBankV1 {
+    backend: miso_engine_core::KernelBackendV1,
+    width: miso_engine_effect_contract::BankWidth,
+    members: Box<[GraphNodeId]>,
+    active: Box<[bool]>,
+    processor: BuiltinBankProcessor,
+    scratch: AoSoaScratch,
+}
+
+struct BuiltinBankProcessor {
+    bank: BuiltinInputBankV1,
+    process_calls: u64,
+    tpt_kernel_calls: u64,
+}
+
+impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        self.bank
+            .process(left, right, frames, first_sample)
+            .map_err(render_error)?;
+        self.process_calls = self.process_calls.saturating_add(1);
+        self.tpt_kernel_calls = self
+            .tpt_kernel_calls
+            .saturating_add(u64::from(frames).saturating_mul(2));
+        Ok(())
+    }
+}
+
+impl PreparedBuiltinInputBankV1 {
+    fn into_graph_bank(self) -> GraphPreparedBuiltinBank {
+        let _ = (self.backend, self.width, self.active);
+        GraphPreparedBuiltinBank {
+            members: self.members,
+            processor: Box::new(self.processor),
+            scratch: self.scratch,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -653,6 +704,103 @@ impl PreparedBuiltinsSession {
         }
     }
 
+    /// Materialize full post-input builtin banks using the already-selected host dispatch.
+    /// Incomplete groups deliberately retain their original scalar bindings.
+    pub fn into_graph_artifact_with_banks<R>(
+        mut self,
+        graph: PreparedGraphPlan,
+        report: R,
+        dispatch: KernelDispatch,
+        levels: &[DependencyLevel],
+    ) -> PreparedBuiltinsGraphArtifact<R> {
+        let Some(width) = dispatch.bank_width() else {
+            return self.into_graph_artifact(graph, report);
+        };
+        let level_by_node: std::collections::BTreeMap<_, _> = levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .nodes
+                    .iter()
+                    .cloned()
+                    .map(move |node| (node, level.level))
+            })
+            .collect();
+        self.bank_inputs.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut selected = std::collections::BTreeSet::new();
+        let mut banks = Vec::new();
+        for inputs in self.bank_inputs.chunks_mut(width.lanes() as usize) {
+            if inputs.len() != width.lanes() as usize {
+                continue;
+            }
+            let members: Vec<_> = inputs
+                .iter()
+                .map(|(track, _)| GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(track).expect("prepared stable ID"),
+                    stage: TrackStage::PostInputBuiltins,
+                })
+                .collect();
+            let Some(first_level) = level_by_node.get(&members[0]).copied() else {
+                continue;
+            };
+            if members
+                .iter()
+                .any(|member| level_by_node.get(member).copied() != Some(first_level))
+            {
+                continue;
+            }
+            let active = vec![true; inputs.len()];
+            let sample_rate = self.seal.sample_rate;
+            let bank_inputs = inputs
+                .iter_mut()
+                .map(|(_, input)| {
+                    core::mem::replace(
+                        input,
+                        BuiltinChain::new(sample_rate, BuiltinParameters::default())
+                            .expect("default builtin parameters")
+                            .into_input_builtins(),
+                    )
+                })
+                .collect();
+            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, bank_inputs, &active)
+                .expect("selected backend and exact bank width are preparation-validated");
+            selected.extend(members.iter().cloned());
+            banks.push(PreparedBuiltinInputBankV1 {
+                backend: dispatch.backend(),
+                width,
+                members: members.into_boxed_slice(),
+                active: active.into_boxed_slice(),
+                processor: BuiltinBankProcessor {
+                    bank,
+                    process_calls: 0,
+                    tpt_kernel_calls: 0,
+                },
+                scratch: AoSoaScratch::new(width, self.seal.quantum)
+                    .expect("prepared nonzero graph quantum"),
+            });
+        }
+        if selected.is_empty() {
+            return self.into_graph_artifact(graph, report);
+        }
+        self.processors
+            .retain(|binding| !selected.contains(&binding.node));
+        let graph = graph
+            .with_builtin_banks(
+                banks
+                    .into_iter()
+                    .map(PreparedBuiltinInputBankV1::into_graph_bank)
+                    .collect(),
+            )
+            .expect("validated fixed builtin member shape");
+        PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: self.processors,
+            builtin_observers: self.observers,
+            report,
+            meter_consumers: self.meter_consumers,
+        }
+    }
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_only_corrupt_for_compiler_test(
@@ -786,6 +934,12 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         self.graph.envelope
     }
 
+    /// Number of sealed production post-input builtin banks retained by this artifact.
+    #[must_use]
+    pub const fn prepared_builtin_bank_count(&self) -> usize {
+        self.graph.prepared_builtin_bank_count()
+    }
+
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
     pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
         let builtin_nodes: BTreeSet<_> = self
@@ -793,10 +947,11 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .iter()
             .map(|binding| &binding.node)
             .collect();
+        let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().collect();
         self.graph
             .required_bindings
             .iter()
-            .filter(move |node| !builtin_nodes.contains(node))
+            .filter(move |node| !builtin_nodes.contains(node) && !bank_nodes.contains(node))
     }
 
     /// Consume the sealed wrapper and attach its private builtin bindings exactly once.
@@ -810,11 +965,12 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             .iter()
             .map(|binding| binding.node.clone())
             .collect();
+        let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().collect();
         let expected: BTreeSet<_> = self
             .graph
             .required_bindings
             .iter()
-            .filter(|node| !builtin_nodes.contains(*node))
+            .filter(|node| !builtin_nodes.contains(*node) && !bank_nodes.contains(*node))
             .cloned()
             .collect();
         let supplied: BTreeSet<_> = bindings
@@ -1045,6 +1201,7 @@ pub fn prepare_session_builtins(
         .checked_mul(3)
         .expect("preflighted processor count");
     let mut processors = Vec::with_capacity(processor_count);
+    let mut bank_inputs = Vec::with_capacity(track_count);
     let mut tails = Vec::with_capacity(track_count);
     for track in &session.normalized_model().tracks {
         let parameters = track_parameters(track, caps.maximum_smoothing_samples)
@@ -1053,7 +1210,14 @@ pub fn prepare_session_builtins(
             .expect("preflighted coefficients");
         let tail = chain.tail();
         let (input, fader, matrix) = chain.into_sections();
+        // The bank candidate is prepared independently from the scalar fallback.  The selected
+        // full-bank artifact consumes this copy and removes the corresponding scalar binding;
+        // the scalar input remains the transactional fallback until that point.
+        let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
+            .expect("preflighted bank coefficients")
+            .into_input_builtins();
         tails.push((Box::<str>::from(track.id.as_str()), tail));
+        bank_inputs.push((Box::<str>::from(track.id.as_str()), bank_input));
         let graph_id = StableGraphId::parse(track.id.as_str()).expect("preflighted stable ID");
         processors.push(miso_engine_graph::GraphNodeBinding::new(
             stage_node(graph_id.clone(), TrackStage::PostInputBuiltins),
@@ -1126,6 +1290,7 @@ pub fn prepare_session_builtins(
             resources,
         },
         processors,
+        bank_inputs,
         observers,
         meter_consumers,
         tails,
@@ -1146,6 +1311,7 @@ fn resource_plan(
     let mut processor = ResourceAccumulator::default();
     let mut meter = ResourceAccumulator::default();
     add_vector_layout::<miso_engine_graph::GraphNodeBinding>(&mut processor, processor_count)?;
+    add_vector_layout::<(Box<str>, InputBuiltins)>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, processor_count)?;
@@ -1153,8 +1319,9 @@ fn resource_plan(
     for track in &session.normalized_model().tracks {
         let bytes = track.id.as_str().len();
         // The three graph IDs are independently cloned into their stage bindings, alongside the
-        // retained tail, compact track seal, processor seal, and the seal's cloned tail ID.
-        for _ in 0..9 {
+        // retained tail, compact track seal, processor seal, the seal's cloned tail ID, and
+        // the independently retained bank-input candidate ID.
+        for _ in 0..10 {
             processor
                 .add_bytes(bytes)
                 .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
@@ -2293,7 +2460,7 @@ mod tests {
         );
         assert!(classes.into_iter().all(core::convert::identity));
         assert_eq!(
-            transcript_hash, 17_626_955_350_904_343_931,
+            transcript_hash, 3_412_855_810_376_736_927,
             "updated only through a deliberate frozen-case change"
         );
     }

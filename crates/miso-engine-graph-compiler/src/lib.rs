@@ -178,7 +178,14 @@ impl GraphCompiler {
                 });
             }
         };
-        Ok(builtins.into_graph_artifact(compiled.graph, compiled.report))
+        let dispatch = compiled.report.rack_cohorts.dispatch;
+        let levels = compiled.report.dependency_levels.clone();
+        Ok(builtins.into_graph_artifact_with_banks(
+            compiled.graph,
+            compiled.report,
+            dispatch,
+            &levels,
+        ))
     }
     // The frozen transactional API returns the complete prepared-effect input by value on
     // failure. Boxing it would change that ownership contract solely to optimize a cold path.
@@ -606,6 +613,7 @@ impl GraphCompiler {
             routes: route_transforms.clone(),
             effects: effect_nodes,
             banks,
+            builtin_banks: Vec::new(),
             observers: Vec::new(),
         });
         Ok(PreparedGraphArtifact {
@@ -2617,6 +2625,117 @@ mod tests {
             .expect("input builtins node")
             .tail;
         assert_eq!(tail, TailSamples::Infinite);
+    }
+
+    #[test]
+    fn production_builtin_banks_replace_full_post_input_groups_and_render() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..8)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index}")).expect("id");
+                track.simd1.effects.clear();
+                track.dynamic.effects.clear();
+                track.simd2.effects.clear();
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("builtin-route-{index}")).expect("route id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let builtins = prepare_session_builtins(
+            &compiled,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("builtins");
+        let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 78,
+            effects: EffectPreparedSession {
+                session: compiled,
+                entries: Vec::new(),
+            },
+            builtins,
+            caps: integration_caps(),
+        }) {
+            Ok(artifact) => artifact,
+            Err(_) => panic!("graph"),
+        };
+        let expected_banks = KernelDispatch::select(target_capabilities())
+            .bank_width()
+            .map_or(0, |width| 8 / width.lanes() as usize);
+        assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+        let envelope = artifact.envelope();
+        let nodes = artifact
+            .external_binding_nodes()
+            .cloned()
+            .map(|node| {
+                let processor = match node {
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    } => asymmetric_input_binding(&node),
+                    _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
+                };
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let bound = match artifact.into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        }) {
+            Ok(bound) => bound,
+            Err(_) => panic!("sealed builtin bank bind"),
+        };
+        let mut plan = bound.plan;
+        let frames = envelope.quantum.0 as usize;
+        let mut pcm = vec![0.0; frames * 2];
+        plan.render(
+            RenderIo {
+                input: None,
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime { absolute_sample: 0 },
+        )
+        .expect("production builtin-bank render");
+        assert!(pcm.iter().any(|sample| *sample != 0.0));
     }
 
     #[test]

@@ -327,6 +327,7 @@ pub struct PreparedGraphPlan {
     routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
     banks: Vec<GraphPreparedEffectBank>,
+    builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
     _not_sync: Cell<()>,
 }
@@ -341,11 +342,61 @@ pub struct GraphPreparedEffectBank {
     pub processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
     pub scratch: miso_engine_rack::AoSoaScratch,
 }
+/// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
+/// fixed graph stage and therefore has no automation or sidechain surface.
+pub struct GraphPreparedBuiltinBank {
+    pub members: Box<[GraphNodeId]>,
+    pub processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
+    pub scratch: miso_engine_rack::AoSoaScratch,
+}
+/// Render contract for an already-prepared builtin bank.
+pub trait GraphPreparedBuiltinBankProcessor: Send {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError>;
+}
 impl PreparedGraphPlan {
     /// Number of prepared homogeneous banks retained for off-render-selected execution.
     #[must_use]
     pub const fn prepared_bank_count(&self) -> usize {
         self.banks.len()
+    }
+    /// Number of retained production post-input builtin banks.
+    #[must_use]
+    pub const fn prepared_builtin_bank_count(&self) -> usize {
+        self.builtin_banks.len()
+    }
+    /// Compiler-owned node members replaced by fixed post-input builtin banks.
+    pub fn builtin_bank_members(&self) -> impl Iterator<Item = &GraphNodeId> {
+        self.builtin_banks
+            .iter()
+            .flat_map(|bank| bank.members.iter())
+    }
+    /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
+    /// for deciding eligibility; this validates only the immutable graph shape.
+    pub fn with_builtin_banks(mut self, banks: Vec<GraphPreparedBuiltinBank>) -> Result<Self, ()> {
+        let mut seen = BTreeSet::new();
+        for bank in &banks {
+            if bank.members.len() != bank.scratch.width().lanes() as usize
+                || bank.members.iter().any(|node| {
+                    !matches!(
+                        node,
+                        GraphNodeId::TrackStage {
+                            stage: TrackStage::PostInputBuiltins,
+                            ..
+                        }
+                    ) || !seen.insert(node.clone())
+                })
+            {
+                return Err(());
+            }
+        }
+        self.builtin_banks = banks;
+        Ok(self)
     }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
         Self {
@@ -362,6 +413,7 @@ impl PreparedGraphPlan {
             routes: parts.routes,
             effects: parts.effects,
             banks: parts.banks,
+            builtin_banks: parts.builtin_banks,
             observers: parts.observers,
             _not_sync: Cell::new(()),
         }
@@ -375,7 +427,13 @@ impl PreparedGraphPlan {
             .iter()
             .map(|binding| binding.node.clone())
             .collect();
-        let required: BTreeSet<_> = self.required_bindings.iter().cloned().collect();
+        let builtin_bank_members: BTreeSet<_> = self.builtin_bank_members().cloned().collect();
+        let required: BTreeSet<_> = self
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_bank_members.contains(*node))
+            .cloned()
+            .collect();
         let duplicate_binding = supplied.len() != bindings.nodes.len();
         let valid_observers = self
             .observers
@@ -416,6 +474,7 @@ impl PreparedGraphPlan {
             self.routes,
             self.effects,
             self.banks,
+            self.builtin_banks,
             {
                 let mut observers = self.observers;
                 observers.append(&mut bindings.observers);
@@ -451,6 +510,7 @@ pub struct PreparedGraphPlanParts {
     pub routes: Vec<PreparedRoute>,
     pub effects: Vec<GraphPreparedEffect>,
     pub banks: Vec<GraphPreparedEffectBank>,
+    pub builtin_banks: Vec<GraphPreparedBuiltinBank>,
     pub observers: Vec<GraphNodeObserverBinding>,
 }
 pub struct GraphRuntimeBindings {
@@ -536,6 +596,7 @@ enum RuntimeNodeKind {
     Bound(Box<dyn GraphRuntimeProcessor>),
     Effect(GraphPreparedEffect),
     BankMember(usize),
+    BuiltinBankMember(usize),
     Route(RouteTransform),
     Reduction,
 }
@@ -552,11 +613,18 @@ struct GraphExecutor {
     reduction_scratch: Box<[f32]>,
     banks: Vec<RuntimeBank>,
     bank_rendered: Box<[bool]>,
+    builtin_banks: Vec<RuntimeBuiltinBank>,
+    builtin_bank_rendered: Box<[bool]>,
     sanitized_samples: u64,
 }
 struct RuntimeBank {
     members: Box<[usize]>,
     processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
+    scratch: miso_engine_rack::AoSoaScratch,
+}
+struct RuntimeBuiltinBank {
+    members: Box<[usize]>,
+    processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
     scratch: miso_engine_rack::AoSoaScratch,
 }
 impl GraphExecutor {
@@ -569,6 +637,7 @@ impl GraphExecutor {
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
         banks: Vec<GraphPreparedEffectBank>,
+        builtin_banks: Vec<GraphPreparedBuiltinBank>,
         observer_bindings: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         frames: usize,
@@ -603,6 +672,12 @@ impl GraphExecutor {
                 next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
             }
         }
+        for bank in &builtin_banks {
+            for member in &bank.members {
+                runtime_buffers.insert(member.clone(), next_buffer);
+                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
+            }
+        }
         let delays: BTreeMap<_, _> = inserted_delays
             .into_iter()
             .map(|delay| (delay.edge_id, delay.samples.0))
@@ -623,6 +698,16 @@ impl GraphExecutor {
                     .iter()
                     .cloned()
                     .map(move |member| (GraphNodeId::Effect(member), index))
+            })
+            .collect();
+        let builtin_bank_by_node: BTreeMap<_, _> = builtin_banks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, bank)| {
+                bank.members
+                    .iter()
+                    .cloned()
+                    .map(move |member| (member, index))
             })
             .collect();
         let mut bindings: BTreeMap<_, _> = bindings
@@ -671,7 +756,9 @@ impl GraphExecutor {
                 })
                 .collect();
             maximum_inputs = maximum_inputs.max(incoming.len());
-            let kind = if let Some(processor) = bindings.remove(node_id) {
+            let kind = if let Some(bank) = builtin_bank_by_node.get(node_id) {
+                RuntimeNodeKind::BuiltinBankMember(*bank)
+            } else if let Some(processor) = bindings.remove(node_id) {
                 RuntimeNodeKind::Bound(processor)
             } else if let Some(bank) = bank_by_node.get(node_id) {
                 RuntimeNodeKind::BankMember(*bank)
@@ -727,6 +814,18 @@ impl GraphExecutor {
                 scratch: bank.scratch,
             })
             .collect::<Vec<_>>();
+        let runtime_builtin_banks = builtin_banks
+            .into_iter()
+            .map(|bank| RuntimeBuiltinBank {
+                members: bank
+                    .members
+                    .iter()
+                    .map(|member| node_indices[member])
+                    .collect(),
+                processor: bank.processor,
+                scratch: bank.scratch,
+            })
+            .collect::<Vec<_>>();
         Self {
             nodes,
             buffers: (0..buffer_count)
@@ -736,6 +835,8 @@ impl GraphExecutor {
             reduction_scratch: vec![0.0; maximum_inputs].into_boxed_slice(),
             bank_rendered: vec![false; runtime_banks.len()].into_boxed_slice(),
             banks: runtime_banks,
+            builtin_bank_rendered: vec![false; runtime_builtin_banks.len()].into_boxed_slice(),
+            builtin_banks: runtime_builtin_banks,
             sanitized_samples: 0,
         }
     }
@@ -837,6 +938,48 @@ impl GraphExecutor {
         }
         Ok(())
     }
+
+    fn render_builtin_bank(
+        &mut self,
+        bank_index: usize,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        let lanes = self.builtin_banks[bank_index].members.len();
+        for lane in 0..lanes {
+            let node_index = self.builtin_banks[bank_index].members[lane];
+            self.prepare_inputs(node_index);
+            self.reduce_main_inputs(node_index);
+            let output_buffer = self.nodes[node_index].output_buffer;
+            self.builtin_banks[bank_index]
+                .scratch
+                .gather_lane(
+                    lane,
+                    &self.buffers[output_buffer].left,
+                    &self.buffers[output_buffer].right,
+                    self.buffers[output_buffer].left.len() as u32,
+                )
+                .map_err(|_| RenderError::InvalidEnvelope)?;
+        }
+        let frames = self.buffers
+            [self.nodes[self.builtin_banks[bank_index].members[0]].output_buffer]
+            .left
+            .len() as u32;
+        let bank = &mut self.builtin_banks[bank_index];
+        let (left, right) = bank
+            .scratch
+            .builtin_planes_mut(frames)
+            .map_err(|_| RenderError::InvalidEnvelope)?;
+        bank.processor.process(left, right, frames, first_sample)?;
+        for lane in 0..lanes as usize {
+            let node_index = bank.members[lane];
+            let output_buffer = self.nodes[node_index].output_buffer;
+            let buffer = &mut self.buffers[output_buffer];
+            bank.scratch
+                .scatter_lane(lane, &mut buffer.left, &mut buffer.right, frames)
+                .map_err(|_| RenderError::InvalidEnvelope)?;
+        }
+        Ok(())
+    }
 }
 impl PreparedPlanExecutor for GraphExecutor {
     fn render(
@@ -847,15 +990,25 @@ impl PreparedPlanExecutor for GraphExecutor {
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
         self.bank_rendered.fill(false);
+        self.builtin_bank_rendered.fill(false);
         for node_index in 0..self.nodes.len() {
             let bank = match self.nodes[node_index].kind {
                 RuntimeNodeKind::BankMember(index) => Some(index),
+                _ => None,
+            };
+            let builtin_bank = match self.nodes[node_index].kind {
+                RuntimeNodeKind::BuiltinBankMember(index) => Some(index),
                 _ => None,
             };
             if let Some(bank) = bank {
                 if !self.bank_rendered[bank] {
                     self.render_bank(bank, time.absolute_sample)?;
                     self.bank_rendered[bank] = true;
+                }
+            } else if let Some(bank) = builtin_bank {
+                if !self.builtin_bank_rendered[bank] {
+                    self.render_builtin_bank(bank, time.absolute_sample)?;
+                    self.builtin_bank_rendered[bank] = true;
                 }
             } else {
                 self.prepare_inputs(node_index);
@@ -866,7 +1019,9 @@ impl PreparedPlanExecutor for GraphExecutor {
                 let output_buffer = current.output_buffer;
                 let rendered = &mut self.buffers[output_buffer];
                 match &mut current.kind {
-                    RuntimeNodeKind::Identity | RuntimeNodeKind::Reduction => {}
+                    RuntimeNodeKind::Identity
+                    | RuntimeNodeKind::Reduction
+                    | RuntimeNodeKind::BuiltinBankMember(_) => {}
                     RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
                         left: &mut rendered.left,
                         right: &mut rendered.right,
@@ -1134,6 +1289,7 @@ mod tests {
                 routes: Vec::new(),
                 effects: Vec::new(),
                 banks: Vec::new(),
+                builtin_banks: Vec::new(),
                 observers: Vec::new(),
             }),
             GraphRuntimeBindings {
@@ -1377,6 +1533,7 @@ mod tests {
             ],
             effects: Vec::new(),
             banks: Vec::new(),
+            builtin_banks: Vec::new(),
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
@@ -1596,6 +1753,7 @@ mod tests {
                 processor: Box::new(SidechainSum { metadata }),
             }],
             banks: Vec::new(),
+            builtin_banks: Vec::new(),
             observers: Vec::new(),
         });
         let (main_left, main_right, side_left, side_right) = if delay_main {
@@ -1849,6 +2007,7 @@ mod tests {
                 processor,
             }],
             banks: Vec::new(),
+            builtin_banks: Vec::new(),
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
