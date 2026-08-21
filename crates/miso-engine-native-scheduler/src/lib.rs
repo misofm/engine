@@ -20,6 +20,66 @@ pub struct NativeSchedulerConfigV1 {
     /// normal production builds.
     #[cfg(feature = "test-support")]
     test_completion_acceptance_spins: [u16; 3],
+    /// Test-only bounded ownership-protocol fault selected before the prepared scheduler is
+    /// published. This field is absent from normal production builds.
+    #[cfg(feature = "test-support")]
+    test_protocol_injection: SchedulerTestProtocolInjectionV1,
+}
+
+/// Test-only scheduler ownership-protocol fault injection.
+///
+/// Every variant preserves the real move-only command/completion parcel transport. It is compiled
+/// out of normal production builds and has no product retry or recovery behavior.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum SchedulerTestProtocolInjectionV1 {
+    /// No injected protocol fault.
+    None,
+    /// Withhold one worker-ready acknowledgement so preparation cannot publish the scheduler.
+    StartupHandshakeFailure,
+    /// Report one command publication as capacity-full before it moves its parcel.
+    CommandQueueFull {
+        /// Zero-based auxiliary worker selected at the real command publication boundary.
+        worker_id: usize,
+    },
+    /// Return one real completion with a stale generation token while preserving its parcel.
+    StaleGeneration {
+        /// Zero-based auxiliary worker selected at completion publication.
+        worker_id: usize,
+    },
+    /// Return one real completion with another worker's partition token while preserving its
+    /// unique parcel, so coordinator validation observes a duplicate completion identity.
+    DuplicateCompletion {
+        /// Zero-based auxiliary worker selected at completion publication.
+        worker_id: usize,
+    },
+}
+
+#[cfg(feature = "test-support")]
+impl SchedulerTestProtocolInjectionV1 {
+    const fn command_queue_is_full_for(self, worker_id: usize) -> bool {
+        matches!(self, Self::CommandQueueFull { worker_id: target } if target == worker_id)
+    }
+
+    const fn completion_tokens(
+        self,
+        worker_id: usize,
+        generation: u64,
+        partition_id: usize,
+    ) -> (u64, usize) {
+        match self {
+            Self::StaleGeneration { worker_id: target } if target == worker_id => {
+                (generation.wrapping_add(1), partition_id)
+            }
+            Self::DuplicateCompletion { worker_id: target }
+                if target == worker_id && partition_id > 1 =>
+            {
+                (generation, partition_id - 1)
+            }
+            _ => (generation, partition_id),
+        }
+    }
 }
 
 impl NativeSchedulerConfigV1 {
@@ -31,6 +91,8 @@ impl NativeSchedulerConfigV1 {
             enabled,
             #[cfg(feature = "test-support")]
             test_completion_acceptance_spins: [0; 3],
+            #[cfg(feature = "test-support")]
+            test_protocol_injection: SchedulerTestProtocolInjectionV1::None,
         }
     }
 
@@ -44,6 +106,18 @@ impl NativeSchedulerConfigV1 {
     #[must_use]
     pub const fn with_test_completion_acceptance_spins(mut self, spins: [u16; 3]) -> Self {
         self.test_completion_acceptance_spins = spins;
+        self
+    }
+
+    /// Configure one bounded test-only fault at the real scheduler protocol boundary.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_test_protocol_injection(
+        mut self,
+        injection: SchedulerTestProtocolInjectionV1,
+    ) -> Self {
+        self.test_protocol_injection = injection;
         self
     }
 }
@@ -426,6 +500,8 @@ fn select_scheduler(
 
 #[cfg(not(target_arch = "wasm32"))]
 mod platform {
+    #[cfg(feature = "test-support")]
+    use super::SchedulerTestProtocolInjectionV1;
     use super::{
         NativeSchedulerConfigV1, NativeSchedulerJobV1, RenderWaveV1, SchedulerDispatchErrorV1,
         SchedulerDispatchReportV1, SchedulerJobFailureV1, SchedulerPrepareErrorV1,
@@ -443,6 +519,8 @@ mod platform {
         wave_id: u64,
         partition_id: usize,
         parcel: J,
+        #[cfg(feature = "test-support")]
+        protocol_injection: SchedulerTestProtocolInjectionV1,
     }
 
     struct WorkerCompletion<J: NativeSchedulerJobV1> {
@@ -473,6 +551,8 @@ mod platform {
         retained_queue_bytes: usize,
         #[cfg(feature = "test-support")]
         completion_acceptance_spins: [u16; 3],
+        #[cfg(feature = "test-support")]
+        protocol_injection: SchedulerTestProtocolInjectionV1,
     }
 
     impl<J: NativeSchedulerJobV1> PlatformScheduler<J> {
@@ -488,6 +568,8 @@ mod platform {
                     retained_queue_bytes: 0,
                     #[cfg(feature = "test-support")]
                     completion_acceptance_spins: config.test_completion_acceptance_spins,
+                    #[cfg(feature = "test-support")]
+                    protocol_injection: config.test_protocol_injection,
                 });
             }
             let worker_count = config.render_lanes.get() - 1;
@@ -520,6 +602,10 @@ mod platform {
                 .ok_or(SchedulerPrepareErrorV1::ResourceOverflow)?;
             let mut workers = Vec::with_capacity(worker_count);
             for worker_id in 0..worker_count {
+                #[cfg(feature = "test-support")]
+                let startup_handshake_failure = worker_id == 0
+                    && config.test_protocol_injection
+                        == SchedulerTestProtocolInjectionV1::StartupHandshakeFailure;
                 let worker_id_u64 = u64::try_from(worker_id)
                     .map_err(|_| SchedulerPrepareErrorV1::ResourceOverflow)?;
                 let command_generation = QueueGeneration(generation * 2 + worker_id_u64);
@@ -546,6 +632,10 @@ mod platform {
                     .spawn(move || {
                         miso_engine_core::realtime::audit::warm_up();
                         miso_engine_core::realtime::audit::reset();
+                        #[cfg(feature = "test-support")]
+                        if startup_handshake_failure {
+                            return;
+                        }
                         if ready_sender.send(()).is_ok() {
                             worker_loop(worker_commands, worker_completions);
                         }
@@ -574,6 +664,8 @@ mod platform {
                 retained_queue_bytes,
                 #[cfg(feature = "test-support")]
                 completion_acceptance_spins: config.test_completion_acceptance_spins,
+                #[cfg(feature = "test-support")]
+                protocol_injection: config.test_protocol_injection,
             })
         }
 
@@ -598,6 +690,27 @@ mod platform {
             #[cfg(feature = "test-support")]
             let completion_acceptance_spins = self.completion_acceptance_spins;
             for partition_index in 1..wave.partition_count() {
+                #[cfg(feature = "test-support")]
+                if self
+                    .protocol_injection
+                    .command_queue_is_full_for(partition_index - 1)
+                {
+                    let recovered = recover_issued(
+                        &mut self.workers,
+                        wave,
+                        issued,
+                        generation,
+                        wave_id,
+                        &mut report,
+                        completion_acceptance_spins,
+                    );
+                    if let Some(worker_id) = recovered.mismatch {
+                        return Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id });
+                    }
+                    return Err(SchedulerDispatchErrorV1::CommandQueueFull {
+                        worker_id: partition_index - 1,
+                    });
+                }
                 let Some(parcel) = wave.partitions[partition_index].parcel.take() else {
                     let recovered = recover_issued(
                         &mut self.workers,
@@ -621,6 +734,8 @@ mod platform {
                     wave_id,
                     partition_id: partition_index,
                     parcel,
+                    #[cfg(feature = "test-support")]
+                    protocol_injection: self.protocol_injection,
                 });
                 if let Err(full) = self.workers[partition_index - 1].commands.try_push(command) {
                     let WorkerMessage::Run(command) = full.value else {
@@ -870,10 +985,20 @@ mod platform {
                     let result = miso_engine_core::realtime::audit::in_render_scope(|| {
                         command.parcel.execute()
                     });
+                    #[cfg(feature = "test-support")]
+                    let (completion_generation, completion_partition_id) =
+                        command.protocol_injection.completion_tokens(
+                            command.partition_id.saturating_sub(1),
+                            command.generation,
+                            command.partition_id,
+                        );
+                    #[cfg(not(feature = "test-support"))]
+                    let (completion_generation, completion_partition_id) =
+                        (command.generation, command.partition_id);
                     let completion = WorkerCompletion {
-                        generation: command.generation,
+                        generation: completion_generation,
                         wave_id: command.wave_id,
-                        partition_id: command.partition_id,
+                        partition_id: completion_partition_id,
                         result,
                         audit: miso_engine_core::realtime::audit::snapshot(),
                         parcel: command.parcel,
@@ -968,6 +1093,8 @@ mod platform {
 mod tests {
     use super::*;
     use core::num::NonZeroUsize;
+    #[cfg(feature = "test-support")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct Job {
@@ -1086,5 +1213,229 @@ mod tests {
         assert_eq!(scheduler.copy_worker_audit_snapshots(&mut audits), 3);
         assert!(audits.into_iter().all(|snapshot| snapshot.total() == 0));
         scheduler.stop_and_join();
+    }
+
+    #[cfg(feature = "test-support")]
+    struct ProtocolAudit {
+        executions: [AtomicUsize; 4],
+        drops: [AtomicUsize; 4],
+    }
+
+    #[cfg(feature = "test-support")]
+    impl ProtocolAudit {
+        fn new() -> Self {
+            Self {
+                executions: std::array::from_fn(|_| AtomicUsize::new(0)),
+                drops: std::array::from_fn(|_| AtomicUsize::new(0)),
+            }
+        }
+
+        fn assert_counts(&self, expected_executions: [usize; 4], expected_drops: [usize; 4]) {
+            assert_eq!(
+                self.executions
+                    .each_ref()
+                    .map(|count| count.load(Ordering::SeqCst)),
+                expected_executions
+            );
+            assert_eq!(
+                self.drops
+                    .each_ref()
+                    .map(|count| count.load(Ordering::SeqCst)),
+                expected_drops
+            );
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    struct ProtocolJob {
+        partition_id: usize,
+        audit: Arc<ProtocolAudit>,
+        fail: bool,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Drop for ProtocolJob {
+        fn drop(&mut self) {
+            self.audit.drops[self.partition_id].fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    impl NativeSchedulerJobV1 for ProtocolJob {
+        type Error = usize;
+
+        fn execute(&mut self) -> Result<(), Self::Error> {
+            self.audit.executions[self.partition_id].fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(self.partition_id)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn protocol_wave(audit: Arc<ProtocolAudit>, failures: [bool; 4]) -> RenderWaveV1<ProtocolJob> {
+        let ranges = partition_stable_units_v1(
+            NonZeroUsize::new(4).expect("units"),
+            NonZeroUsize::new(4).expect("lanes"),
+        );
+        let partitions = ranges
+            .iter()
+            .map(|range| {
+                RenderPartitionV1::new(
+                    *range,
+                    ProtocolJob {
+                        partition_id: range.partition_id,
+                        audit: Arc::clone(&audit),
+                        fail: failures[range.partition_id],
+                    },
+                )
+            })
+            .collect();
+        RenderWaveV1::new(19, partitions).expect("canonical protocol wave")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn protocol_scheduler(
+        injection: SchedulerTestProtocolInjectionV1,
+    ) -> NativeSchedulerV1<ProtocolJob> {
+        NativeSchedulerV1::prepare(
+            NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true)
+                .with_test_protocol_injection(injection),
+            4,
+            41,
+        )
+        .expect("parallel protocol scheduler")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_startup_handshake_failure_never_publishes_a_scheduler() {
+        let config = NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true)
+            .with_test_protocol_injection(
+                SchedulerTestProtocolInjectionV1::StartupHandshakeFailure,
+            );
+        let original = config;
+        assert!(matches!(
+            NativeSchedulerV1::<ProtocolJob>::prepare(config, 4, 41),
+            Err(SchedulerPrepareErrorV1::WorkerStart)
+        ));
+        assert_eq!(
+            config, original,
+            "prepare must not mutate its configuration"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_command_queue_full_preserves_unmoved_parcels() {
+        let audit = Arc::new(ProtocolAudit::new());
+        let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
+        let mut scheduler =
+            protocol_scheduler(SchedulerTestProtocolInjectionV1::CommandQueueFull { worker_id: 0 });
+
+        assert!(matches!(
+            scheduler.render_wave(&mut wave),
+            Err(SchedulerDispatchErrorV1::CommandQueueFull { worker_id: 0 })
+        ));
+        assert!(wave.all_recovered());
+        audit.assert_counts([0; 4], [0; 4]);
+
+        drop(scheduler);
+        drop(wave);
+        audit.assert_counts([0; 4], [1; 4]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_stale_generation_recovers_each_parcel_once() {
+        let audit = Arc::new(ProtocolAudit::new());
+        let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
+        let mut scheduler =
+            protocol_scheduler(SchedulerTestProtocolInjectionV1::StaleGeneration { worker_id: 1 });
+
+        assert!(matches!(
+            scheduler.render_wave(&mut wave),
+            Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id: 1 })
+        ));
+        assert!(wave.all_recovered());
+        audit.assert_counts([1; 4], [0; 4]);
+
+        drop(scheduler);
+        drop(wave);
+        audit.assert_counts([1; 4], [1; 4]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_duplicate_completion_recovers_each_parcel_once() {
+        let audit = Arc::new(ProtocolAudit::new());
+        let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
+        let mut scheduler =
+            protocol_scheduler(SchedulerTestProtocolInjectionV1::DuplicateCompletion {
+                worker_id: 2,
+            });
+
+        assert!(matches!(
+            scheduler.render_wave(&mut wave),
+            Err(SchedulerDispatchErrorV1::CompletionMismatch { worker_id: 2 })
+        ));
+        assert!(wave.all_recovered());
+        audit.assert_counts([1; 4], [0; 4]);
+
+        drop(scheduler);
+        drop(wave);
+        audit.assert_counts([1; 4], [1; 4]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_returns_worker_errors_in_stable_partition_order() {
+        let audit = Arc::new(ProtocolAudit::new());
+        let mut wave = protocol_wave(Arc::clone(&audit), [false, true, true, false]);
+        let mut scheduler = protocol_scheduler(SchedulerTestProtocolInjectionV1::None);
+
+        match scheduler.render_wave(&mut wave) {
+            Err(SchedulerDispatchErrorV1::Job(error)) => {
+                assert_eq!(error.partition_id, 1);
+                assert_eq!(error.error, 1);
+            }
+            _ => panic!("first worker error was not selected in partition order"),
+        }
+        assert!(wave.all_recovered());
+        audit.assert_counts([1; 4], [0; 4]);
+
+        drop(scheduler);
+        drop(wave);
+        audit.assert_counts([1; 4], [1; 4]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_protocol_exactly_once_drops_hold_for_either_owner_endpoint_order() {
+        for scheduler_drops_first in [false, true] {
+            let audit = Arc::new(ProtocolAudit::new());
+            let mut wave = protocol_wave(Arc::clone(&audit), [false; 4]);
+            let mut scheduler = protocol_scheduler(SchedulerTestProtocolInjectionV1::None);
+
+            let report = scheduler
+                .render_wave(&mut wave)
+                .expect("completed protocol wave");
+            assert_eq!(report.coordinator_jobs, 1);
+            assert_eq!(report.worker_commands, 3);
+            assert_eq!(report.worker_completions, 3);
+            assert!(wave.all_recovered());
+            audit.assert_counts([1; 4], [0; 4]);
+
+            if scheduler_drops_first {
+                drop(scheduler);
+                drop(wave);
+            } else {
+                drop(wave);
+                drop(scheduler);
+            }
+            audit.assert_counts([1; 4], [1; 4]);
+        }
     }
 }
