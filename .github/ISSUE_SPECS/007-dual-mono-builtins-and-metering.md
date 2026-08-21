@@ -47,3 +47,19 @@ Scalar core on all targets. Issue 008 adds and qualifies the 4/8-lane bank adapt
 ## Required evidence
 
 Impulse and sweep fixtures, meter comparison data, allocation audit, benchmark, and listening record for matrix/filter changes.
+
+## Sol implementation brief (2026-08-21)
+
+**READY for Terra attempt 1.** The normative implementation-grade brief is
+`target/issue7-sol-brief.md`. It freezes the three distinct builtin graph sections, RBJ
+second-order Butterworth HPF/LPF scalar reference semantics, explicit matrix/pan equations and
+N-update smoothing, lane-isolated reset/sanitization, transparent observers at all seven accepted
+track boundaries, interval peak/RMS/energy and held-peak meter state, transactional preparation,
+resource/no-allocation gates, target/fixture/listening evidence, and one exactly-once benchmark
+invocation containing two descriptive internal rounds.
+
+The brief does not change the accepted V1 TOML schema, issue-006 graph topology/PDC/reduction
+contract, issue-011 effect contract, or issue-008 SIMD ownership. “Loudness-ready” is explicitly
+bounded to timestamped per-lane energy observations and loss accounting; BS.1770 K-weighting,
+gating, LUFS/LKFS, true peak, and certification are not issue-007 claims. No implementation or
+benchmark was performed during briefing, and no V1/legacy source was inspected.
