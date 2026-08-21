@@ -123,3 +123,45 @@ are an exactly two-item SPSC exchange, and the public worker-token compile-fail 
   command was run.
 
 `timed_benchmark_invocations=0`.
+
+## Sol correction attempt 2 final verdict (2026-08-21)
+
+**Status: PASS for the Issue 043 product boundary; one unrelated full-workspace test failure is
+preserved below.** Sol reviewed candidate `e265ffb` and applied one bounded source-only correction.
+No `Arc`, `Rc`, raw pointer, custom refcount, new `unsafe`, lock, render atomic, allocation, stop
+send or join was introduced. The capacity-one stop SPSC remains owned by the source-set retirement
+token and consumed by the worker; the exactly two-item event SPSC still holds ready plus one
+snapshot-or-terminal event. Graph source-entry drop takes and drops the retirement worker before
+its consumer/planes, so stop, terminal publication and join complete off render before retained
+source storage is destroyed.
+
+The correction fixes two acceptance defects found adversarially:
+
+- `NativeWaveDecoder::decode_quantum_into_planar` reports a cumulative saturating sanitation
+  count. The worker had added consecutive cumulative reports and therefore overcounted a two-block
+  sequence (`2`, then `3`) as `5`. It now takes the monotonic maximum, and a two-quantum F32 test
+  proves consumer, controller snapshot and terminal values are exactly `3`. Existing F64,
+  stale-generation discard, saturation, seek, disarm and host-zero tests remain green.
+- The source report had treated each queue's header-plus-slot total as one allocation when
+  computing the largest request. Command, event and stop queues now report their exact total,
+  actual largest allocation and maximum alignment separately from the audited SPSC retained
+  payload. The combined largest-request cap uses the actual maximum. The fixed capacities remain
+  command=`caps.control_queue_items`, event=`2`, stop=`1`; exact total and exact largest caps accept,
+  while either cap one byte below rejects before publication.
+
+Focused and changed-boundary evidence is PASS: `cargo test -p miso-engine-source --locked` (29
+unit tests plus one compile-fail doctest), source all-target warning-denied Clippy, workspace check,
+format, warning-denied Clippy and rustdoc, workspace/realtime policies and their mutation tests,
+graph policy, Android ARM64 and iOS ARM64 source+graph checks, Wasm scalar and `simd128`
+source+graph checks, and Wasm object inspection with no atomic opcode (5 objects). Static review
+found none of `Arc`, `Rc`, `unsafe`, atomics or locks on the changed native source path.
+
+The single requested post-`b68abf5` `cargo test --workspace --locked` run passed Issue 042 and all
+Issue 043 source tests reached in focused evidence, but failed an unchanged scheduler-fixture test:
+`q128_preparation_matrix_is_exact_for_100_runs_and_generated_track_counts` reported transcript
+`3615656561314613090` instead of frozen `14752737557138656094` at
+`tools/miso-engine-scheduler-fixture/src/lib.rs:858`. That crate and test are outside Issue 043 and
+were not modified or retried. This independently recorded external failure is not converted into
+an Issue 043 failure and is not weakened. No Issue 041 qualification work was run.
+
+No benchmark or timing command was run; `timed_benchmark_invocations=0`.

@@ -103,17 +103,29 @@ pub struct NativeSourceResourceReport {
     pub worker_control_queue_items: u64,
     /// Exact SPSC worker-command queue header and slot payload bytes.
     pub worker_control_queue_bytes: u64,
+    /// Largest worker-command queue allocation request.
+    pub worker_control_queue_largest_allocation_bytes: u64,
+    /// Maximum required alignment among worker-command queue allocations.
+    pub worker_control_queue_alignment_bytes: u64,
     /// Exact SPSC worker-event queue header and slot payload bytes.
     pub worker_event_queue_bytes: u64,
     /// Exact worker event queue item capacity: ready plus one snapshot-or-terminal slot.
     pub worker_event_queue_items: u64,
+    /// Largest worker-event queue allocation request.
+    pub worker_event_queue_largest_allocation_bytes: u64,
+    /// Maximum required alignment among worker-event queue allocations.
+    pub worker_event_queue_alignment_bytes: u64,
     /// Exact capacity-one SPSC worker-stop queue header and slot payload bytes.
     pub worker_stop_queue_bytes: u64,
     /// Exact worker stop queue item capacity.
     pub worker_stop_queue_items: u64,
+    /// Largest worker-stop queue allocation request.
+    pub worker_stop_queue_largest_allocation_bytes: u64,
+    /// Maximum required alignment among worker-stop queue allocations.
+    pub worker_stop_queue_alignment_bytes: u64,
     /// Exact source ring plus fixed decoder/staging allocation total.
     pub total_engine_owned_bytes: u64,
-    /// Largest exact allocation among ring, decoder scratch, and planar staging.
+    /// Largest exact allocation among ring, decoder, staging, and native worker queues.
     pub largest_allocation_bytes: u64,
 }
 
@@ -766,25 +778,26 @@ fn source_resource_report(
     if decoder_read_scratch_bytes > caps.max_worker_read_scratch_bytes {
         return Err(NativeSourcePrepareError::ResourceLimit);
     }
-    let worker_control_queue_bytes = exact_queue_bytes::<WorkerCommand>(caps.control_queue_items)?;
-    let worker_event_queue_bytes =
-        exact_queue_bytes::<NativeSourceWorkerEvent>(NonZeroUsize::new(2).expect("two events"))?;
-    let worker_stop_queue_bytes = exact_queue_bytes::<()>(NonZeroUsize::new(1).expect("one stop"))?;
+    let worker_control_queue = exact_queue_resources::<WorkerCommand>(caps.control_queue_items)?;
+    let worker_event_queue = exact_queue_resources::<NativeSourceWorkerEvent>(
+        NonZeroUsize::new(2).expect("two events"),
+    )?;
+    let worker_stop_queue = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))?;
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
         .checked_add(decoder_read_scratch_bytes)
         .and_then(|total| total.checked_add(worker_planar_staging_bytes))
-        .and_then(|total| total.checked_add(worker_control_queue_bytes))
-        .and_then(|total| total.checked_add(worker_event_queue_bytes))
-        .and_then(|total| total.checked_add(worker_stop_queue_bytes))
+        .and_then(|total| total.checked_add(worker_control_queue.total_bytes))
+        .and_then(|total| total.checked_add(worker_event_queue.total_bytes))
+        .and_then(|total| total.checked_add(worker_stop_queue.total_bytes))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let largest_allocation_bytes = ring
         .largest_allocation_bytes
         .max(decoder_read_scratch_bytes)
         .max(worker_planar_staging_bytes)
-        .max(worker_control_queue_bytes)
-        .max(worker_event_queue_bytes)
-        .max(worker_stop_queue_bytes);
+        .max(worker_control_queue.largest_allocation_bytes)
+        .max(worker_event_queue.largest_allocation_bytes)
+        .max(worker_stop_queue.largest_allocation_bytes);
     if total_engine_owned_bytes > caps.max_total_engine_owned_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
@@ -796,11 +809,18 @@ fn source_resource_report(
         worker_planar_staging_bytes,
         worker_control_queue_items: u64::try_from(caps.control_queue_items.get())
             .expect("usize fits u64"),
-        worker_control_queue_bytes,
-        worker_event_queue_bytes,
+        worker_control_queue_bytes: worker_control_queue.total_bytes,
+        worker_control_queue_largest_allocation_bytes: worker_control_queue
+            .largest_allocation_bytes,
+        worker_control_queue_alignment_bytes: worker_control_queue.alignment_bytes,
+        worker_event_queue_bytes: worker_event_queue.total_bytes,
         worker_event_queue_items: 2,
-        worker_stop_queue_bytes,
+        worker_event_queue_largest_allocation_bytes: worker_event_queue.largest_allocation_bytes,
+        worker_event_queue_alignment_bytes: worker_event_queue.alignment_bytes,
+        worker_stop_queue_bytes: worker_stop_queue.total_bytes,
         worker_stop_queue_items: 1,
+        worker_stop_queue_largest_allocation_bytes: worker_stop_queue.largest_allocation_bytes,
+        worker_stop_queue_alignment_bytes: worker_stop_queue.alignment_bytes,
         total_engine_owned_bytes,
         largest_allocation_bytes,
     })
@@ -811,17 +831,31 @@ fn retained_array_bytes<T>(count: usize) -> Option<u64> {
     u64::try_from(layout.size()).ok()
 }
 
-fn exact_queue_bytes<T: Send + 'static>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactQueueResources {
+    total_bytes: u64,
+    largest_allocation_bytes: u64,
+    alignment_bytes: u64,
+}
+
+fn exact_queue_resources<T: Send + 'static>(
     capacity: NonZeroUsize,
-) -> Result<u64, NativeSourcePrepareError> {
+) -> Result<ExactQueueResources, NativeSourcePrepareError> {
     let payload = bounded_spsc_retained_payload::<T>(capacity)
         .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
-    u64::try_from(
+    let total_bytes = u64::try_from(
         payload
             .total_bytes()
             .ok_or(NativeSourcePrepareError::ResourceLimit)?,
     )
-    .map_err(|_| NativeSourcePrepareError::ResourceLimit)
+    .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    Ok(ExactQueueResources {
+        total_bytes,
+        largest_allocation_bytes: u64::try_from(payload.largest_allocation_bytes())
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        alignment_bytes: u64::try_from(payload.ring_header_align.max(payload.slot_payload_align))
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+    })
 }
 
 fn validate_region(
@@ -929,7 +963,9 @@ fn run_worker<R: Read + Seek>(
             Ok(report) => report,
             Err(error) => break NativeSourceWorkerExit::DecodeFailed(error),
         };
-        sanitation = sanitation.saturating_add(decoded.sanitized_sample_count);
+        // The decoder report is already cumulative across decodes and seeks. Preserve that
+        // watermark directly; adding successive reports would double-count earlier blocks.
+        sanitation = sanitation.max(decoded.sanitized_sample_count);
         pending = Some(PendingBlock {
             generation,
             start_frame,
@@ -1291,6 +1327,143 @@ mod tests {
             }
         ));
         assert_eq!(controller.native_decoder_sanitized_samples(), 2);
+    }
+
+    #[test]
+    fn multiblock_native_watermark_does_not_readd_the_cumulative_decoder_report() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 8,
+        };
+        let mut native_resolver = resolver(
+            &[
+                f32::INFINITY,
+                0.25,
+                f32::from_bits(1),
+                -0.25,
+                f32::NAN,
+                0.5,
+                -0.5,
+                0.0,
+            ],
+            b"exact-identity",
+        );
+        let (mut controller, mut worker, mut consumer, _) =
+            prepare_native_source_parts(&mut native_resolver, request(region), caps())
+                .expect("prepare");
+        controller.wait_for_event().expect("ready");
+        let _ = read_one(&mut consumer);
+        assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 2);
+        let _ = read_one(&mut consumer);
+        assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 3);
+        assert_eq!(
+            controller
+                .snapshot_native_decoder_sanitized_samples()
+                .expect("cumulative snapshot"),
+            3
+        );
+        assert_eq!(
+            worker.stop_and_join().expect("stop"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                native_decoder_sanitized_samples: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn native_queue_layout_and_per_source_caps_use_exact_requests() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut initial_resolver = resolver(&[0.0; 4], b"exact-identity");
+        let initial = prepare_native_source(&mut initial_resolver, request(region), caps())
+            .expect("initial preparation");
+        let report = initial.resource_report();
+        let control = exact_queue_resources::<WorkerCommand>(caps().control_queue_items)
+            .expect("control queue layout");
+        let events = exact_queue_resources::<NativeSourceWorkerEvent>(
+            NonZeroUsize::new(2).expect("two events"),
+        )
+        .expect("event queue layout");
+        let stop = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))
+            .expect("stop queue layout");
+        assert_eq!(report.worker_control_queue_bytes, control.total_bytes);
+        assert_eq!(
+            report.worker_control_queue_largest_allocation_bytes,
+            control.largest_allocation_bytes
+        );
+        assert_eq!(
+            report.worker_control_queue_alignment_bytes,
+            control.alignment_bytes
+        );
+        assert_eq!(report.worker_event_queue_bytes, events.total_bytes);
+        assert_eq!(
+            report.worker_event_queue_largest_allocation_bytes,
+            events.largest_allocation_bytes
+        );
+        assert_eq!(
+            report.worker_event_queue_alignment_bytes,
+            events.alignment_bytes
+        );
+        assert_eq!(report.worker_stop_queue_bytes, stop.total_bytes);
+        assert_eq!(
+            report.worker_stop_queue_largest_allocation_bytes,
+            stop.largest_allocation_bytes
+        );
+        assert_eq!(
+            report.worker_stop_queue_alignment_bytes,
+            stop.alignment_bytes
+        );
+        let exact_largest = report
+            .ring
+            .largest_allocation_bytes
+            .max(report.decoder_read_scratch_bytes)
+            .max(report.worker_planar_staging_bytes)
+            .max(control.largest_allocation_bytes)
+            .max(events.largest_allocation_bytes)
+            .max(stop.largest_allocation_bytes);
+        assert_eq!(report.largest_allocation_bytes, exact_largest);
+        drop(initial);
+
+        let mut exact_caps = caps();
+        exact_caps.max_total_engine_owned_bytes = report.total_engine_owned_bytes;
+        exact_caps.max_largest_allocation_bytes = report.largest_allocation_bytes;
+        let mut exact_resolver = resolver(&[0.0; 4], b"exact-identity");
+        let exact = prepare_native_source(&mut exact_resolver, request(region), exact_caps)
+            .expect("exact per-source caps");
+        assert_eq!(exact.resource_report(), report);
+        drop(exact);
+
+        let mut total_short_caps = exact_caps;
+        total_short_caps.max_total_engine_owned_bytes = report
+            .total_engine_owned_bytes
+            .checked_sub(1)
+            .expect("nonzero source total");
+        let mut total_short_resolver = resolver(&[0.0; 4], b"exact-identity");
+        assert!(matches!(
+            prepare_native_source(&mut total_short_resolver, request(region), total_short_caps),
+            Err(NativeSourcePrepareError::ResourceLimit)
+        ));
+
+        let mut largest_short_caps = exact_caps;
+        largest_short_caps.max_largest_allocation_bytes = report
+            .largest_allocation_bytes
+            .checked_sub(1)
+            .expect("nonzero largest allocation");
+        let mut largest_short_resolver = resolver(&[0.0; 4], b"exact-identity");
+        assert!(matches!(
+            prepare_native_source(
+                &mut largest_short_resolver,
+                request(region),
+                largest_short_caps
+            ),
+            Err(NativeSourcePrepareError::ResourceLimit)
+        ));
     }
 
     #[test]
