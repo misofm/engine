@@ -590,6 +590,19 @@ impl GraphExecutor {
                 buffer
             });
         }
+        // Liveness coloring is valid for the scalar schedule, where equal-colored effect outputs
+        // are consumed before the next producer reuses that storage. A homogeneous bank makes all
+        // of its member outputs live together from gather through scatter, so retain distinct
+        // runtime buffers for those original graph nodes. This is an execution-only allocation:
+        // the immutable graph's canonical assignment, reductions, PDC and schedule stay intact.
+        let mut runtime_buffers = assigned_buffers.clone();
+        for bank in &banks {
+            for member in &bank.members {
+                let node = GraphNodeId::Effect(member.clone());
+                runtime_buffers.insert(node, next_buffer);
+                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
+            }
+        }
         let delays: BTreeMap<_, _> = inserted_delays
             .into_iter()
             .map(|delay| (delay.edge_id, delay.samples.0))
@@ -646,7 +659,7 @@ impl GraphExecutor {
                 .expect("validated schedule node")
                 .into_iter()
                 .map(|edge| RuntimeEdge {
-                    source_buffer: usize::try_from(assigned_buffers[&edge.source.node])
+                    source_buffer: usize::try_from(runtime_buffers[&edge.source.node])
                         .expect("validated buffer index"),
                     sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
                     delay: delays
@@ -674,7 +687,7 @@ impl GraphExecutor {
             } else {
                 RuntimeNodeKind::Identity
             };
-            let output_buffer = assigned_buffers[node_id];
+            let output_buffer = runtime_buffers[node_id];
             maximum_buffer = maximum_buffer.max(output_buffer);
             nodes.push(RuntimeNode {
                 incoming,

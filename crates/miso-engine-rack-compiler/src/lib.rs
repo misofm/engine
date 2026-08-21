@@ -102,13 +102,48 @@ pub fn compile_rack_cohorts_v1(
 mod tests {
     use super::*;
     use miso_engine_core::{KernelBackendV1, TargetCapabilities};
+    use miso_engine_effect_contract::{
+        EffectId, EffectProgramKeyV1, EffectQuality, LatencySamples, LinkMode, PreparedPortsV1,
+        PreparedSidechainPort, StatePayloadSizes, TailSamples,
+    };
     use miso_engine_rack::{RackLocationV1, RoutingClassV1};
-    fn signature(_slots: usize) -> RackProgramSignatureV1 {
+    fn key(index: usize) -> EffectProgramKeyV1 {
+        let effect_id = match index {
+            0 => EffectId::new("fixture.a"),
+            1 => EffectId::new("fixture.b"),
+            _ => EffectId::new("fixture.c"),
+        }
+        .expect("static id");
+        EffectProgramKeyV1 {
+            effect_id,
+            contract_major: 1,
+            state_layout_version: 1,
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::None,
+            },
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity: 0,
+        }
+    }
+
+    fn signature(slots: usize) -> RackProgramSignatureV1 {
         RackProgramSignatureV1::new(
             RackLocationV1::Simd1,
             48_000,
             128,
-            Vec::new(),
+            (0..slots).map(key).collect(),
             RoutingClassV1::MainOnly,
         )
         .unwrap_or_else(|_| unreachable!())
@@ -145,5 +180,100 @@ mod tests {
             assert_eq!(compiled.banks.len(), count / 4);
             assert_eq!(compiled.scalar_tails.len(), count % 4);
         }
+    }
+
+    #[test]
+    fn four_and_eight_lane_partitions_never_pad_a_tail_or_cap_tracks() {
+        for (dispatch, width) in [
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(
+                    true, false, false, false,
+                )),
+                4_usize,
+            ),
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(
+                    false, false, true, false,
+                )),
+                8_usize,
+            ),
+        ] {
+            for count in [1_usize, 2, 3, 4, 5, 7, 8, 9, 17] {
+                let tracks = (0..count)
+                    .map(|index| RackTrackInputV1 {
+                        track_id: format!("t{index:03}").into(),
+                        signature: signature(0),
+                    })
+                    .collect();
+                let compiled = compile_rack_cohorts_v1(tracks, dispatch).expect("compile");
+                assert_eq!(compiled.banks.len(), count / width, "count={count}");
+                assert_eq!(compiled.scalar_tails.len(), count % width, "count={count}");
+                assert!(
+                    compiled
+                        .banks
+                        .iter()
+                        .all(|bank| bank.members.len() == width)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_slots_become_identity_masks_and_routing_never_crosses_cohorts() {
+        let dispatch =
+            KernelDispatch::select(TargetCapabilities::from_detected(true, false, false, false));
+        let full = signature(3);
+        let missing_middle = RackProgramSignatureV1::new(
+            RackLocationV1::Simd1,
+            48_000,
+            128,
+            vec![key(0), key(2)],
+            RoutingClassV1::MainOnly,
+        )
+        .expect("signature");
+        let connected = RackProgramSignatureV1::new(
+            RackLocationV1::Simd1,
+            48_000,
+            128,
+            Vec::new(),
+            RoutingClassV1::SidechainConnected,
+        )
+        .expect("signature");
+        let compiled = compile_rack_cohorts_v1(
+            vec![
+                RackTrackInputV1 {
+                    track_id: "a".into(),
+                    signature: full.clone(),
+                },
+                RackTrackInputV1 {
+                    track_id: "b".into(),
+                    signature: full.clone(),
+                },
+                RackTrackInputV1 {
+                    track_id: "c".into(),
+                    signature: missing_middle,
+                },
+                RackTrackInputV1 {
+                    track_id: "sidechain".into(),
+                    signature: connected,
+                },
+            ],
+            dispatch,
+        )
+        .expect("compile");
+        assert_eq!(compiled.banks.len(), 0);
+        assert_eq!(compiled.scalar_tails.len(), 4);
+        assert_eq!(
+            compiled.scalar_tails[2].active_slots.as_ref(),
+            &[true, false, true]
+        );
+        assert_eq!(
+            compiled
+                .scalar_tails
+                .iter()
+                .map(|member| member.track_id.as_ref())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "sidechain"]
+        );
     }
 }

@@ -1868,19 +1868,28 @@ mod tests {
     };
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::{
+        TargetCapabilities,
         realtime::{PlanarBufferMut, RenderIo, RenderTime},
         target_capabilities,
     };
     use miso_engine_effect_compiler::{
         EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects,
     };
-    use miso_engine_effect_contract::NativeEffectRegistry;
+    use miso_engine_effect_contract::{
+        EffectPrepareError, NativeEffectFactory, NativeEffectRegistry, PrepareEffectBankRequest,
+        PrepareEffectRequest, PreparedNativeEffect, PreparedNativeEffectBank,
+    };
     use miso_engine_graph::{
-        GraphBindingBlock, GraphNodeBinding, GraphRuntimeBindings, GraphRuntimeProcessor,
+        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
+        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
     };
     use miso_engine_session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
         StableId, compile_session, parse_session_toml,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
@@ -1905,6 +1914,108 @@ mod tests {
             block.right.fill(0.0);
             block.left[0] = 1.0;
             block.right[0] = -1.0;
+            Ok(())
+        }
+    }
+
+    struct AsymmetricTrackImpulseBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for AsymmetricTrackImpulseBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(0.0);
+            block.right.fill(0.0);
+            block.left[0] = self.left;
+            block.right[0] = self.right;
+            Ok(())
+        }
+    }
+
+    fn asymmetric_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("bank")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("bank fixture track id");
+        Box::new(AsymmetricTrackImpulseBinding {
+            left: 0.125 * (index + 1) as f32,
+            right: -0.0625 * (12 - index) as f32,
+        })
+    }
+
+    /// A deterministic factory failure used to prove the bank binder leaves its already prepared
+    /// scalar ownership intact for the caller's transactional failure path.
+    struct BankBindErrorFactory;
+    impl NativeEffectFactory for BankBindErrorFactory {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+            DualAccumulatorDelayFactory::correct().descriptor()
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            DualAccumulatorDelayFactory::correct().prepare(request)
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            _request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            Err(EffectPrepareError {
+                code: "fixture.bank.bind_failure",
+            })
+        }
+    }
+
+    struct ScalarOnlyFactory;
+    impl NativeEffectFactory for ScalarOnlyFactory {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+            DualAccumulatorDelayFactory::correct().descriptor()
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            DualAccumulatorDelayFactory::correct().prepare(request)
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            _request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            Ok(None)
+        }
+    }
+
+    struct OrderedPostBankObserver {
+        expected_order: u64,
+        order: Arc<AtomicU64>,
+        observed_post_bank_audio: Arc<AtomicBool>,
+    }
+    impl GraphRuntimeObserver for OrderedPostBankObserver {
+        fn observe(
+            &mut self,
+            block: GraphObservationBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            assert_eq!(
+                self.order.fetch_add(1, Ordering::SeqCst),
+                self.expected_order,
+                "observers run in stable handle order"
+            );
+            self.observed_post_bank_audio.store(
+                block.left.iter().any(|sample| *sample != 0.0)
+                    && block.right.iter().any(|sample| *sample != 0.0),
+                Ordering::SeqCst,
+            );
             Ok(())
         }
     }
@@ -1994,12 +2105,12 @@ mod tests {
     }
 
     #[test]
-    fn homogeneous_eight_track_bank_binds_and_executes_without_changing_graph_identity() {
+    fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
         let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
-        model.tracks = (0..8)
+        model.tracks = (0..12)
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("id");
@@ -2067,10 +2178,306 @@ mod tests {
         .unwrap_or_else(|_| panic!("graph"));
         let expected = KernelDispatch::select(target_capabilities())
             .bank_width()
-            .map_or(0, |width| 8 / width.lanes() as usize);
+            .map_or(0, |width| 12 / width.lanes() as usize);
         assert_eq!(artifact.graph.prepared_bank_count(), expected);
         let canonical = artifact.report.canonical_debug_bytes.clone();
         assert_eq!(canonical, artifact.report.canonical_debug_bytes);
+        let bank_delays = artifact.report.inserted_delays.clone();
+        let bank_tails: Vec<_> = artifact
+            .report
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.tail))
+            .collect();
+        let envelope = artifact.graph.envelope;
+        let nodes = artifact
+            .graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor = asymmetric_input_binding(&node);
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let observer_order = Arc::new(AtomicU64::new(0));
+        let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
+        let observed_stage = track_node("bank0", TrackStage::PostSimd1);
+        let mut plan = artifact
+            .graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                // Reverse input order proves executor sorting by stable handle. The stage is only
+                // reached after the bank's gather/process/scatter completion.
+                observers: vec![
+                    GraphNodeObserverBinding::new(
+                        observed_stage.clone(),
+                        2,
+                        Box::new(OrderedPostBankObserver {
+                            expected_order: 1,
+                            order: Arc::clone(&observer_order),
+                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                        }),
+                    ),
+                    GraphNodeObserverBinding::new(
+                        observed_stage,
+                        1,
+                        Box::new(OrderedPostBankObserver {
+                            expected_order: 0,
+                            order: Arc::clone(&observer_order),
+                            observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                        }),
+                    ),
+                ],
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        let frames = envelope.quantum.0 as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        plan.render(
+            RenderIo {
+                input: None,
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime { absolute_sample: 0 },
+        )
+        .expect("render full bank/tail graph");
+        assert!(pcm.iter().any(|sample| *sample != 0.0));
+        assert_eq!(observer_order.load(Ordering::SeqCst), 2);
+        assert!(observed_post_bank_audio.load(Ordering::SeqCst));
+
+        let scalar_registry =
+            NativeEffectRegistry::new(
+                [Box::new(ScalarOnlyFactory) as Box<dyn NativeEffectFactory>],
+            )
+            .expect("scalar registry");
+        let scalar_effects = prepare_native_session_effects(
+            &session,
+            &scalar_registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("scalar effects");
+        let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 999,
+            effects: scalar_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
+        assert_eq!(scalar_artifact.report.canonical_debug_bytes, canonical);
+        assert_eq!(scalar_artifact.report.inserted_delays, bank_delays);
+        assert_eq!(
+            scalar_artifact
+                .report
+                .nodes
+                .iter()
+                .map(|node| (node.id.clone(), node.tail))
+                .collect::<Vec<_>>(),
+            bank_tails
+        );
+        let scalar_envelope = scalar_artifact.graph.envelope;
+        let scalar_nodes = scalar_artifact
+            .graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor = asymmetric_input_binding(&node);
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let mut scalar_plan = scalar_artifact
+            .graph
+            .bind(GraphRuntimeBindings {
+                envelope: scalar_envelope,
+                nodes: scalar_nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("scalar bind: {}", failure.code));
+        let mut scalar_pcm = vec![0.0_f32; frames * 2];
+        scalar_plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
+                        .expect("scalar output"),
+                },
+                RenderTime { absolute_sample: 0 },
+            )
+            .expect("scalar render");
+        let worst = pcm
+            .iter()
+            .zip(&scalar_pcm)
+            .enumerate()
+            .max_by(|(_, (bank_a, scalar_a)), (_, (bank_b, scalar_b))| {
+                (*bank_a - *scalar_a)
+                    .abs()
+                    .total_cmp(&(*bank_b - *scalar_b).abs())
+            })
+            .expect("pcm");
+        assert!(
+            (worst.1.0 - worst.1.1).abs() <= 1.0e-6 + 2.0e-5 * worst.1.1.abs(),
+            "worst output mismatch at {}: bank={} scalar={}",
+            worst.0,
+            worst.1.0,
+            worst.1.1
+        );
+
+        // Host dispatch is deliberately detected only while preparing the normal artifact above.
+        // These two direct, off-render binding probes exercise both legal factory widths on every
+        // development host without pretending that a four-lane runtime was executed on x86.
+        for dispatch in [
+            KernelDispatch::select(TargetCapabilities::from_detected(true, false, false, false)),
+            KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, false)),
+        ] {
+            let rebound = prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 20,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("reprepare effects");
+            let ids = rebound
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        (
+                            entry.track_id.clone(),
+                            rack_id(entry.rack),
+                            entry.effect_id.clone(),
+                        ),
+                        EffectNodeId {
+                            track_id: gid(&entry.track_id),
+                            rack: rack_id(entry.rack),
+                            effect_id: gid(&entry.effect_id),
+                        },
+                    )
+                })
+                .collect();
+            let banks =
+                bind_rack_banks(&rebound, &ids, &artifact.report.dependency_levels, dispatch)
+                    .expect("off-render factory bind");
+            assert_eq!(
+                banks.len(),
+                12 / dispatch.bank_width().expect("vector backend").lanes() as usize
+            );
+            assert!(banks.iter().all(|bank| {
+                bank.members.len()
+                    == dispatch.bank_width().expect("vector backend").lanes() as usize
+            }));
+        }
+
+        let ids_for = |prepared: &EffectPreparedSession| {
+            prepared
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        (
+                            entry.track_id.clone(),
+                            rack_id(entry.rack),
+                            entry.effect_id.clone(),
+                        ),
+                        EffectNodeId {
+                            track_id: gid(&entry.track_id),
+                            rack: rack_id(entry.rack),
+                            effect_id: gid(&entry.effect_id),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let eight =
+            KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, false));
+        let mut connected_fallback = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("reprepare connected fallback");
+        connected_fallback.entries[0].metadata.ports.sidechain = PreparedSidechainPort::Connected {
+            id: miso_engine_effect_contract::PortId::new("sidechain").expect("static port"),
+            required: false,
+        };
+        let connected_ids = ids_for(&connected_fallback);
+        let connected_banks = bind_rack_banks(
+            &connected_fallback,
+            &connected_ids,
+            &artifact.report.dependency_levels,
+            eight,
+        )
+        .expect("connected sidechain is scalar fallback, not failure");
+        assert!(connected_banks.iter().all(|bank| {
+            bank.members
+                .iter()
+                .all(|member| member.track_id.as_str() != "bank0")
+        }));
+
+        let same_wave = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("reprepare same-wave fallback");
+        let same_wave_ids = ids_for(&same_wave);
+        let first = GraphNodeId::Effect(
+            same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone(),
+        );
+        let mut incompatible_levels = artifact.report.dependency_levels.clone();
+        for level in &mut incompatible_levels {
+            level.nodes.retain(|node| node != &first);
+        }
+        assert!(
+            bind_rack_banks(&same_wave, &same_wave_ids, &incompatible_levels, eight)
+                .expect("same-wave incompatibility is scalar fallback")
+                .is_empty()
+        );
+
+        let rejecting_registry = NativeEffectRegistry::new([
+            Box::new(BankBindErrorFactory) as Box<dyn NativeEffectFactory>
+        ])
+        .expect("registry");
+        let rejected = prepare_native_session_effects(
+            &session,
+            &rejecting_registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("prepare scalar ownership");
+        let rejected_ids = ids_for(&rejected);
+        let error = match bind_rack_banks(
+            &rejected,
+            &rejected_ids,
+            &artifact.report.dependency_levels,
+            eight,
+        ) {
+            Ok(_) => panic!("factory failure must reject transactionally"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "fixture.bank.bind_failure");
+        assert_eq!(
+            rejected.entries.len(),
+            12,
+            "factory failure retained every scalar input"
+        );
     }
 
     #[test]

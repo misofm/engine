@@ -1,0 +1,14 @@
+schema = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+tracks = 12
+input_layout = "track-major-planar-f32le:left,right"
+expected_layout = "planar-f32le:left,right"
+effect = "conformance.delay"
+effect_latency_samples = 3
+simd_rack = "simd1"
+compatible_tracks = ["rack00", "rack01", "rack02", "rack03", "rack04", "rack05", "rack06", "rack07"]
+identity_missing_middle_slot_tracks = ["rack08", "rack09"]
+scalar_tail_tracks = ["rack10", "rack11"]
+scalar_only_sidechain_track = "sidechain-fallback"
+notes = "The checked expected PCM is produced by the frozen scalar dual-mono delay operation: each lane has a separate three-sample state and gain. The graph vertical sums twelve independently routed tracks; the sidechain declaration is a compiler fallback case, not a bank member."
