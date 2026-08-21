@@ -1,0 +1,10 @@
+schema = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+observations_per_round = 1000
+input = "deterministic-asymmetric-dual-mono-continuous-state-v1"
+workloads = [
+  "scalar_eight_tracks: eight separate post-input builtin TPT chains",
+  "host_selected_eight_track_bank: one production x86 eight-lane builtin bank",
+  "mixed_twelve_track_graph: one full bank, two explicit identity/missing positions, two scalar tails, two incompatible scalar fallbacks",
+]

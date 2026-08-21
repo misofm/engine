@@ -137,3 +137,22 @@ Issue-037 candidate identity; workload reachability proof; synthetic validator/m
 negative logs; preflight record with `workload_launches=0`; sealed hashes; explicit root Sol
 authorization; raw/accepted/disposition size and SHA-256; six-record aggregate summary; exact
 invocation/warmup/round counts; environment metadata; and Terra plus final Sol PASS/FAIL verdicts.
+
+## Terra attempt 1 implementation record (2026-08-21)
+
+Candidate started from Issue-037 PASS commit `4680eeb`; the shared mainline advanced to
+`372d984` while this tooling-only attempt was prepared. `miso-engine-rack-bench` now prepares:
+
+- eight independent real post-input builtin TPT chains;
+- one prepared host-selected production eight-lane `BuiltinInputBankV1`; and
+- a sealed 12-track production `GraphCompiler::compile_with_builtins` plan with a retained full
+  builtin bank and scalar graph paths.
+
+The no-argument runner owns one warmup and two measured process launches, retains untouched raw
+stdout, validates six exact schema-v2 records, copies an exactly byte-identical accepted artifact,
+and writes a checksummed PASS/FAIL disposition. Single and aggregate jq validators reject unknown
+or missing keys, type/shape/hash/audit/metadata drift, duplicates and round/workload cardinality
+errors. The preflight passed fixture hashing, all bounded per-key deletion/type mutations, runner
+argument/source checks, release build and `workload_launches=0`. No benchmark binary or timing
+runner invocation was performed by Terra; the timed invocation count remains **0** pending root
+Sol authorization and review.
