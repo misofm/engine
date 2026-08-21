@@ -32,7 +32,7 @@ Network server, delivery codecs, a broad unstable C++ API, host UI, or freeing c
 - Versioned TOML schema and transactional session compiler
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- Issue-007 builtin qualification tooling, audits, and benchmark
+- Builtin direct and graph realtime audit and target qualification
 - Production SIMD builtin bank graph retention and reachability qualification
 - Exact lock-free native source sanitation telemetry handoff
 - Native effect runtime contract and conformance

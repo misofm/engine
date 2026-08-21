@@ -1,5 +1,22 @@
 # 035 Issue-007 builtin qualification tooling, audits, and benchmark
 
+## Final status — 2026-08-21
+
+**STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the bounded Sol correction were
+consumed at fixture-contract checkpoint `0edc51c6ff60aa8f4a31df73cf73bc2b52e4436e`.
+That checkpoint is accepted technical input only; it does not prove independent corpus provenance,
+realtime audits, targets or benchmark qualification. No benchmark/workload ran:
+`workload_invocations=0`, `timed_benchmark_invocations=0`.
+
+Remaining work moves without hidden state through this exact chain:
+
+1. **Complete independent builtin corpus and corruption proof**;
+2. **Builtin direct and graph realtime audit and target qualification**; then
+3. **Builtin benchmark preflight and exactly-once qualification**.
+
+Real human listening in Issue 033 remains after the final machine-qualified candidate. Nothing in
+this rescope relabels Issue 035 PASS or authorizes its former benchmark command.
+
 ## Outcome
 
 Produce the complete independent expected-output corpus, exact direct/graph realtime audits,
@@ -359,7 +376,7 @@ meter-JSONL coverage-hole mutation was accepted. Sol's bounded correction reduce
 read-only V1 fixture-contract boundary and made all 24 format-class delete/alter/add/coverage-hole
 mutations reject. The checker now parses a strictly sorted safe manifest, verifies exact payload
 bytes, rejects unlisted files, classifies the frozen required path set, and keeps `--write` limited
-to an explicit empty scratch root while `--check` is read-only.
+to its explicit scratch boundary while `--check` is read-only.
 
 Focused evidence PASS: all three `miso-engine-builtins-fixture` tests, package formatting,
 warning-denied all-target Clippy, and `git diff --check`. This is a recoverable tooling checkpoint,
@@ -367,3 +384,8 @@ not Issue-035 completion: independent expected-output provenance, the full check
 and graph audits, target/workspace qualification, schema-v2 benchmark readiness, final Sol review,
 and any authorized benchmark remain unrun/incomplete. No benchmark or workload was invoked;
 `timed_benchmark_invocations=0` and `workload_invocations=0`.
+
+The broad remainder is intentionally not continued in this exhausted issue. Issue 056 owns only
+the complete independent corpus; Issue 057 owns direct/graph audits and targets; Issue 058 owns
+benchmark schema/preflight and any sole exactly-once run. Each successor has a fresh two-attempt
+budget and a half-day-closable boundary.

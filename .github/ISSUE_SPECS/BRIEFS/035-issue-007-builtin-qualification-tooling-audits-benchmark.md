@@ -2,27 +2,20 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1 ONLY AFTER ISSUE 036 PASSES.** This issue has at most two total
-implementation attempts: Terra attempt 1 and one bounded Sol correction/review attempt. A second
-failure stops and requires a new stateless rescope. Never inspect V1/legacy, relax a retained DSP
-threshold, tune expected bytes to an observed defect, or fabricate human listening.
+**STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the bounded Sol correction ended at
+accepted fixture-contract checkpoint `0edc51c`; the two-attempt budget is consumed. The remaining
+chain is Issue 056 corpus, Issue 057 audits/targets and Issue 058 benchmark qualification. Never
+inspect V1/legacy, relax a retained DSP threshold, tune expected bytes to an observed defect, or
+fabricate human listening.
 
 Issue 036's final candidate is the only input. Production coefficients, incremental non-fused
 all-`f32` TPT operation order, scalar chain, matrix/pan behavior and meter math are frozen and out
 of implementation scope. A discovered DSP defect fails this issue and creates a separate
 corrective issue.
 
-Issue 035 is the sole owner of the builtin timed benchmark authorization. Invocation count is
-**0**. All work through the final adversarial nonbenchmark review must keep
-`workload_launches=0`. Only root Sol may later authorize exactly:
-
-```text
-bash scripts/run-builtins-benchmark.sh
-```
-
-That one external invocation executes two internal rounds. Failure, interruption or validator
-rejection consumes the authorization; there is no retry. Issue 033, not this issue, owns real
-human listening after the accepted machine artifact is sealed.
+Issue 035 authorizes no benchmark and finished with `workload_launches=0` and
+`timed_benchmark_invocations=0`. Issue 058 alone may later own the exact runner after Issues 056 and
+057 pass. Issue 033 owns real human listening after Issue 058 seals the machine artifact.
 
 ## Frozen response grid and thresholds
 

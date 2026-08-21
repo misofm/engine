@@ -33,7 +33,7 @@ Wasm filesystem streaming, hardcoding 128 frames, relying on Rust std threads, t
 - Transport-neutral binary control protocol
 - Exact lock-free native source sanitation telemetry handoff
 - Production SIMD builtin bank graph retention and reachability qualification
-- Issue-007 builtin qualification tooling, audits, and benchmark
+- Builtin direct and graph realtime audit and target qualification
 
 ## Hazards/decisions
 
