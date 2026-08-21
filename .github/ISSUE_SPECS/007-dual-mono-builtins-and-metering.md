@@ -213,3 +213,56 @@ the frozen deep-stop branch. It currently fails the non-fundamental residual cei
 relative to input RMS, above the required `-100 dB`. The fixture remains enabled and unchanged;
 no threshold was relaxed and the benchmark count remains zero. This requires Sol review before
 any implementation/tolerance change.
+
+## Sol adversarial review / correction attempt 2 after rescope (2026-08-21)
+
+**ATTEMPT 2: BLOCKED BEFORE PRODUCTION CORRECTION; REBRIEF REQUIRED.**
+
+The failure is caused by the exact frozen `f32` operation graph, not coefficient design, the
+independent oracle, the least-squares measurement, subnormal handling, or state recovery. The
+88,200-Hz/10-Hz-HPF/4-Hz case reproduces `-94.2440363 dB` in both debug and release. Its cast
+coefficients are `a1=0.9994964`, `a2=0.00035601028`, `a3=1.2680718e-7`, and
+`k=1.4142135`; all state and output remains finite and normal, with zero recovery and zero
+sanitization events. Sol also solved the full three-column DC/sine/cosine normal equations rather
+than relying on the coherent-basis shortcut and obtained the same residual.
+
+Controlled simulations using those exact coefficient and input bits isolate intermediate
+rounding from stored-state quantization:
+
+- the frozen production graph gives `-94.2440363 dB`;
+- `f64` state and intermediates followed by an `f32` output cast give `-153.5180902 dB`;
+- storing both candidate states as `f32` every sample while evaluating intermediates in `f64`
+  gives `-126.2688260 dB`;
+- quantizing only `s1` or only `s2` gives `-126.7174910 dB` and `-126.6437414 dB` respectively;
+- an experimental, algebraically equivalent all-`f32` incremental state update gives
+  `-126.1933635 dB` for this case.
+
+The last result is diagnostic evidence, not an approved implementation. In the frozen graph,
+`v2 = s2 + p3 + p4` first rounds the small integrator increment into the much larger state, then
+`n2 = 2*v2 - s2` cannot recover the discarded bits; the corresponding `a1*s1`/`n1` path has the
+same subtract-near-equals sensitivity. An incremental recurrence avoids that particular loss, but
+it changes the explicitly frozen production operation order and issue 008's scalar/SIMD
+bit-identity input contract. Retaining wider intermediates would also violate the explicit
+all-`f32` decision. Therefore no production edit is legal under the current brief, and neither
+the `-100 dB` gate nor production precision was changed.
+
+A replacement brief must freeze and justify a numerically conditioned all-`f32` state-update
+graph, including every prepared coefficient, multiply/add order, cast and non-FMA rounding point;
+derive its cast-coefficient state transition and Jury checks; amend issue 008's matching SIMD
+graph; and rerun all three response families over the complete matrix before any non-DSP gate.
+The incremental diagnostic above is only one candidate and is not accepted based on one passing
+case.
+
+The filter-gate audit also found omissions that the next attempt must not treat as passes: runtime
+preparation does not perform the brief's analytic cutoff-response rejection; the analytic test
+does not yet prove the explicit DC/Nyquist limits or monotonicity and does not use the complete
+snapped probe matrix; the analytic, one-second impulse, and coherent sustained tests omit the
+required 100-Hz-HPF/1-kHz-LPF cascade; and the impulse test does not record final-4096-frame
+energy, reset/repeatability, L/R isolation, or explicit bit-identical block partitions. The known
+parameter metadata, safe-block API, fader/mute sanitization, signed-zero matrix, per-call/lifetime
+recovery, render-panic, resource accounting, diagnostic-path, prepared-artifact, fixture,
+realtime, target, and listening deficiencies also remain outstanding. They were not continued
+past the failed DSP gate.
+
+The temporary diagnostic code was not retained. The failing acceptance test remains enabled.
+The exactly-once benchmark was not invoked; benchmark invocation count remains **0**.
