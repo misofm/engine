@@ -5,16 +5,19 @@
 
 use core::f64::consts::PI;
 
-use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
+use miso_engine_core::{
+    DeltaBankKernelError, PreparedDeltaBankKernelV1, SampleRateHz, is_launch_sample_rate,
+};
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
-    EffectQuality as Quality, InitialParameterValue, LatencySamples, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata, sanitize_sample,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
+    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata, sanitize_sample,
 };
 
 /// Fixed cascade length in V1.
@@ -866,23 +869,21 @@ struct PreparedParametricEq {
     right: Lane,
 }
 
-// The previous DF-I bank is intentionally compiled out while the selected delta bank layout is
-// implemented in a later checkpoint. The factory returns `Ok(None)` below, so no bank can reach
-// this retained legacy implementation.
-#[cfg(any())]
+/// Section-major transposed endpoint-conditioned delta words plus a compact derived mask.
 #[derive(Clone, Copy)]
 struct BankCoefficients {
-    b0: [f32; 8],
-    b1: [f32; 8],
-    b2: [f32; 8],
-    a1: [f32; 8],
-    a2: [f32; 8],
-    identity_mask: [u32; 8],
+    a: [f32; 8],
+    n0: [f32; 8],
+    d0: [f32; 8],
+    n1: [f32; 8],
+    d1: [f32; 8],
+    n2: [f32; 8],
+    d2: [f32; 8],
+    identity_mask: [u8; 8],
 }
 
-#[cfg(any())]
 #[derive(Clone, Copy)]
-struct BankBiquadState {
+struct BankDeltaState {
     x1: [f32; 8],
     x2: [f32; 8],
     y1: [f32; 8],
@@ -890,30 +891,30 @@ struct BankBiquadState {
 }
 
 /// Coefficients and histories are section-major/track-minor; smoothers remain track-major.
-#[cfg(any())]
 #[derive(Clone, Copy)]
 struct BankChannel {
     coefficients: [BankCoefficients; EQ_SECTION_COUNT_V1],
-    state: [BankBiquadState; EQ_SECTION_COUNT_V1],
+    state: [BankDeltaState; EQ_SECTION_COUNT_V1],
     frequency: [[NumericRamp; EQ_SECTION_COUNT_V1]; 8],
     gain: [[NumericRamp; EQ_SECTION_COUNT_V1]; 8],
     q: [[NumericRamp; EQ_SECTION_COUNT_V1]; 8],
     slope: [[NumericRamp; EQ_SECTION_COUNT_V1]; 8],
 }
 
-#[cfg(any())]
 impl BankChannel {
     fn from_configs(configs: &[[BandConfiguration; EQ_SECTION_COUNT_V1]; 8]) -> Self {
         let mut channel = Self {
             coefficients: [BankCoefficients {
-                b0: [1.0; 8],
-                b1: [0.0; 8],
-                b2: [0.0; 8],
-                a1: [0.0; 8],
-                a2: [0.0; 8],
-                identity_mask: [u32::MAX; 8],
+                a: [1.0; 8],
+                n0: [1.0; 8],
+                d0: [1.0; 8],
+                n1: [0.0; 8],
+                d1: [0.0; 8],
+                n2: [0.0; 8],
+                d2: [0.0; 8],
+                identity_mask: [u8::MAX; 8],
             }; EQ_SECTION_COUNT_V1],
-            state: [BankBiquadState {
+            state: [BankDeltaState {
                 x1: [0.0; 8],
                 x2: [0.0; 8],
                 y1: [0.0; 8],
@@ -938,12 +939,14 @@ impl BankChannel {
 
     fn set_coefficients(&mut self, section: usize, track: usize, coefficients: EqCoefficientsV1) {
         let slot = &mut self.coefficients[section];
-        slot.b0[track] = coefficients.b0;
-        slot.b1[track] = coefficients.b1;
-        slot.b2[track] = coefficients.b2;
-        slot.a1[track] = coefficients.a1;
-        slot.a2[track] = coefficients.a2;
-        slot.identity_mask[track] = if coefficients.identity { u32::MAX } else { 0 };
+        slot.a[track] = coefficients.a;
+        slot.n0[track] = coefficients.n0;
+        slot.d0[track] = coefficients.d0;
+        slot.n1[track] = coefficients.n1;
+        slot.d1[track] = coefficients.d1;
+        slot.n2[track] = coefficients.n2;
+        slot.d2[track] = coefficients.d2;
+        slot.identity_mask[track] = if coefficients.identity { u8::MAX } else { 0 };
     }
 
     fn lane(&self, track: usize) -> Lane {
@@ -955,12 +958,14 @@ impl BankChannel {
                 y2: self.state[section].y2[track],
             }),
             coefficients: core::array::from_fn(|section| EqCoefficientsV1 {
-                b0: self.coefficients[section].b0[track],
-                b1: self.coefficients[section].b1[track],
-                b2: self.coefficients[section].b2[track],
-                a1: self.coefficients[section].a1[track],
-                a2: self.coefficients[section].a2[track],
-                identity: self.coefficients[section].identity_mask[track] == u32::MAX,
+                a: self.coefficients[section].a[track],
+                n0: self.coefficients[section].n0[track],
+                d0: self.coefficients[section].d0[track],
+                n1: self.coefficients[section].n1[track],
+                d1: self.coefficients[section].d1[track],
+                n2: self.coefficients[section].n2[track],
+                d2: self.coefficients[section].d2[track],
+                identity: self.coefficients[section].identity_mask[track] == u8::MAX,
             }),
             frequency: self.frequency[track],
             gain: self.gain[track],
@@ -984,11 +989,10 @@ impl BankChannel {
     }
 }
 
-#[cfg(any())]
 struct PreparedParametricEqBank {
     metadata: PreparedBankMetadata,
     effect_metadata: PreparedEffectMetadata,
-    kernel: PreparedBiquadBankKernelV1,
+    kernel: PreparedDeltaBankKernelV1,
     left_config: [[BandConfiguration; EQ_SECTION_COUNT_V1]; 8],
     right_config: [[BandConfiguration; EQ_SECTION_COUNT_V1]; 8],
     left: BankChannel,
@@ -1018,8 +1022,51 @@ impl NativeEffectFactory for ParametricEqFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        let _ = request;
-        Ok(None)
+        if !request.has_matching_backend_width()
+            || request.requests.len() != request.width.lanes() as usize
+        {
+            return Ok(None);
+        }
+        let kernel = match PreparedDeltaBankKernelV1::try_new(request.backend) {
+            Ok(kernel) => kernel,
+            Err(DeltaBankKernelError::BackendUnavailable) => return Ok(None),
+            Err(_) => return Ok(None),
+        };
+        let first = request
+            .requests
+            .first()
+            .copied()
+            .ok_or(EffectPrepareError {
+                code: "effect.bank.requests",
+            })?;
+        let metadata = expected_prepared_metadata(self.descriptor(), first)?;
+        let (first_left, first_right) =
+            configurations(first.initial_values, SampleRateHz(first.sample_rate))?;
+        let mut left_config = [first_left; 8];
+        let mut right_config = [first_right; 8];
+        for (track, item) in request.requests.iter().copied().enumerate() {
+            let candidate = expected_prepared_metadata(self.descriptor(), item)?;
+            if candidate.program_key() != metadata.program_key() {
+                return Ok(None);
+            }
+            let (left, right) =
+                configurations(item.initial_values, SampleRateHz(item.sample_rate))?;
+            left_config[track] = left;
+            right_config[track] = right;
+        }
+        let prepared = PreparedParametricEqBank {
+            metadata: PreparedBankMetadata {
+                width: request.width,
+                program_key: metadata.program_key(),
+            },
+            effect_metadata: metadata,
+            kernel,
+            left_config,
+            right_config,
+            left: BankChannel::from_configs(&left_config),
+            right: BankChannel::from_configs(&right_config),
+        };
+        Ok(Some(Box::new(prepared)))
     }
 }
 
@@ -1180,7 +1227,6 @@ impl PreparedNativeEffect for PreparedParametricEq {
     }
 }
 
-#[cfg(any())]
 impl PreparedNativeEffectBank for PreparedParametricEqBank {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
@@ -1250,6 +1296,7 @@ impl PreparedNativeEffectBank for PreparedParametricEqBank {
                 &mut left,
                 lanes,
                 sample_rate,
+                self.effect_metadata.bypass,
                 &mut failed_left,
                 &mut recovered_left,
                 &mut report.reports,
@@ -1262,6 +1309,7 @@ impl PreparedNativeEffectBank for PreparedParametricEqBank {
                 &mut right,
                 lanes,
                 sample_rate,
+                self.effect_metadata.bypass,
                 &mut failed_right,
                 &mut recovered_right,
                 &mut report.reports,
@@ -1323,7 +1371,6 @@ impl PreparedNativeEffectBank for PreparedParametricEqBank {
     }
 }
 
-#[cfg(any())]
 fn bank_track_index(track_index: u32, width: BankWidth) -> Result<usize, StatePayloadError> {
     let track = track_index as usize;
     if track >= width.lanes() as usize {
@@ -1334,7 +1381,6 @@ fn bank_track_index(track_index: u32, width: BankWidth) -> Result<usize, StatePa
     Ok(track)
 }
 
-#[cfg(any())]
 fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quantum: u32) -> bool {
     let lanes = width.lanes() as usize;
     let Some(length) = (block.frames as usize).checked_mul(lanes) else {
@@ -1359,7 +1405,6 @@ fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quan
             .any(|pair| pair[0] > pair[1])
 }
 
-#[cfg(any())]
 fn apply_bank_automation(
     spans: &[PreparedAutomationSpan],
     metadata: PreparedEffectMetadata,
@@ -1409,7 +1454,6 @@ fn apply_bank_automation(
     }
 }
 
-#[cfg(any())]
 fn set_bank_target(
     left: &mut BankChannel,
     right: &mut BankChannel,
@@ -1430,15 +1474,15 @@ fn set_bank_target(
     }
 }
 
-#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 fn process_bank_channel(
     channel: &mut BankChannel,
     configs: &[[BandConfiguration; EQ_SECTION_COUNT_V1]; 8],
-    kernel: PreparedBiquadBankKernelV1,
+    kernel: PreparedDeltaBankKernelV1,
     values: &mut [f32; 8],
     lanes: usize,
     sample_rate: SampleRateHz,
+    bypass: bool,
     failed: &mut [bool; 8],
     recovered: &mut [bool; 8],
     reports: &mut [ProcessReport; 8],
@@ -1476,21 +1520,42 @@ fn process_bank_channel(
                 }
             }
         }
+        if bypass {
+            let state = &mut channel.state[section];
+            for (track, value) in values.iter().copied().enumerate().take(lanes) {
+                let prior_x1 = state.x1[track];
+                state.x2[track] = prior_x1;
+                state.x1[track] = value;
+                state.y2[track] = prior_x1;
+                state.y1[track] = value;
+            }
+            continue;
+        }
         let coefficients = &channel.coefficients[section];
         let state = &mut channel.state[section];
+        let mut identity_mask = [0_u32; 8];
+        for (output, input) in identity_mask
+            .iter_mut()
+            .zip(coefficients.identity_mask.iter())
+            .take(lanes)
+        {
+            *output = if *input == u8::MAX { u32::MAX } else { 0 };
+        }
         if kernel
-            .process_biquad(
+            .process_delta(
                 &mut values[..lanes],
-                &coefficients.b0[..lanes],
-                &coefficients.b1[..lanes],
-                &coefficients.b2[..lanes],
-                &coefficients.a1[..lanes],
-                &coefficients.a2[..lanes],
+                &coefficients.a[..lanes],
+                &coefficients.n0[..lanes],
+                &coefficients.d0[..lanes],
+                &coefficients.n1[..lanes],
+                &coefficients.d1[..lanes],
+                &coefficients.n2[..lanes],
+                &coefficients.d2[..lanes],
                 &mut state.x1[..lanes],
                 &mut state.x2[..lanes],
                 &mut state.y1[..lanes],
                 &mut state.y2[..lanes],
-                &coefficients.identity_mask[..lanes],
+                &identity_mask[..lanes],
             )
             .is_err()
         {
@@ -1510,8 +1575,7 @@ fn process_bank_channel(
     }
 }
 
-#[cfg(any())]
-fn state_invalid(state: &BankBiquadState, track: usize) -> bool {
+fn state_invalid(state: &BankDeltaState, track: usize) -> bool {
     ![
         state.x1[track],
         state.x2[track],
@@ -1522,7 +1586,6 @@ fn state_invalid(state: &BankBiquadState, track: usize) -> bool {
     .all(valid)
 }
 
-#[cfg(any())]
 fn reset_bank_section(channel: &mut BankChannel, section: usize, track: usize) {
     channel.state[section].x1[track] = 0.0;
     channel.state[section].x2[track] = 0.0;
@@ -1530,7 +1593,6 @@ fn reset_bank_section(channel: &mut BankChannel, section: usize, track: usize) {
     channel.state[section].y2[track] = 0.0;
 }
 
-#[cfg(any())]
 fn count_bank_recovery(
     recovered: &mut [bool; 8],
     reports: &mut [ProcessReport; 8],
@@ -1549,13 +1611,12 @@ fn count_bank_recovery(
     *counter = counter.saturating_add(1);
 }
 
-#[cfg(any())]
 fn bank_discontinuity_reset(
     channel: &mut BankChannel,
     configs: &[[BandConfiguration; EQ_SECTION_COUNT_V1]; 8],
     sample_rate: SampleRateHz,
 ) {
-    channel.state = [BankBiquadState {
+    channel.state = [BankDeltaState {
         x1: [0.0; 8],
         x2: [0.0; 8],
         y1: [0.0; 8],
@@ -1978,7 +2039,7 @@ fn read_u32_word(input: &[u8], band: usize, word: usize) -> Result<u32, StatePay
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_core::{KernelBackendV1, PreparedBiquadBankKernelV1};
+    use miso_engine_core::{KernelBackendV1, PreparedDeltaBankKernelV1};
     use miso_engine_dsp_reference::{
         ReferenceParametricEqCoefficients, ReferenceParametricEqKind, ReferenceParametricEqSection,
     };
@@ -2155,15 +2216,8 @@ mod tests {
         .expect("bank snapshot");
         (left, right)
     }
-    fn assert_bank_sample(backend: KernelBackendV1, candidate: f32, reference: f32) {
-        if backend == KernelBackendV1::X86Avx2Fma {
-            assert!(
-                (candidate - reference).abs() <= 1e-6 + 2e-5 * reference.abs(),
-                "candidate={candidate:?}, reference={reference:?}"
-            );
-        } else {
-            assert_eq!(candidate.to_bits(), reference.to_bits());
-        }
+    fn assert_bank_sample(candidate: f32, reference: f32) {
+        assert_eq!(candidate.to_bits(), reference.to_bits());
     }
     fn reference_kind(kind: EqBandKindV1) -> ReferenceParametricEqKind {
         match kind {
@@ -2692,7 +2746,7 @@ mod tests {
             .expect("valid bank request")
         else {
             assert!(
-                PreparedBiquadBankKernelV1::try_new(backend).is_err(),
+                PreparedDeltaBankKernelV1::try_new(backend).is_err(),
                 "only an unavailable architecture may decline this otherwise homogeneous request"
             );
             return;
@@ -2773,13 +2827,11 @@ mod tests {
             assert_eq!(bank_report.reports[track], scalar_reports[track]);
             for frame in 0..frames {
                 let index = frame * lanes + track;
-                assert_bank_sample(backend, bank_left[index], scalar_left[track][frame]);
-                assert_bank_sample(backend, bank_right[index], scalar_right[track][frame]);
+                assert_bank_sample(bank_left[index], scalar_left[track][frame]);
+                assert_bank_sample(bank_right[index], scalar_right[track][frame]);
             }
             let bank_state = snapshot_bank(bank.as_ref(), track as u32);
-            if backend != KernelBackendV1::X86Avx2Fma {
-                assert_eq!(bank_state, snapshot(scalar[track].as_ref()));
-            }
+            assert_eq!(bank_state, snapshot(scalar[track].as_ref()));
         }
         let saved = snapshot_bank(bank.as_ref(), 0);
         let sizes = bank.metadata().program_key.state_sizes;
@@ -2792,12 +2844,10 @@ mod tests {
         assert_eq!(snapshot_bank(bank.as_ref(), 0), saved);
     }
     #[test]
-    #[ignore = "Issue 42 endpoint-conditioned homogeneous bank is deferred"]
     fn four_lane_bank_matches_scalar_when_its_target_is_available() {
         bank_matches_scalar(BankWidth::Four);
     }
     #[test]
-    #[ignore = "Issue 42 endpoint-conditioned homogeneous bank is deferred"]
     fn eight_lane_bank_matches_scalar_with_active_ramps_and_state_round_trip() {
         bank_matches_scalar(BankWidth::Eight);
     }
@@ -2827,7 +2877,7 @@ mod tests {
                 .is_none()
         );
         let unavailable =
-            if PreparedBiquadBankKernelV1::try_new(KernelBackendV1::WasmSimd128).is_err() {
+            if PreparedDeltaBankKernelV1::try_new(KernelBackendV1::WasmSimd128).is_err() {
                 KernelBackendV1::WasmSimd128
             } else {
                 KernelBackendV1::X86Avx2
@@ -2839,7 +2889,7 @@ mod tests {
             _ => unreachable!("unknown backend cannot be requested by this frozen test"),
         };
         let unavailable_requests = vec![request; unavailable_width.lanes() as usize];
-        assert!(PreparedBiquadBankKernelV1::try_new(unavailable).is_err());
+        assert!(PreparedDeltaBankKernelV1::try_new(unavailable).is_err());
         assert!(
             factory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -2852,7 +2902,6 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "Issue 42 endpoint-conditioned homogeneous bank is deferred"]
     fn bank_lane_and_track_changes_do_not_leak_when_the_backend_is_available() {
         let width = BankWidth::Eight;
         let backend = bank_backend(width);

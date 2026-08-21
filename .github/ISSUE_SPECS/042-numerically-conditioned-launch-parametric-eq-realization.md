@@ -147,6 +147,36 @@ design maxima; fixture and graph hashes; automation/reset/restore/isolation resu
 instruction/target reports; Terra and final Sol PASS/FAIL; and explicit
 `timed_benchmark_invocations=0`.
 
+## Terra attempt 1 — endpoint-conditioned homogeneous-bank checkpoint (2026-08-21)
+
+**CHECKPOINT PASS; bank/architecture only.** The obsolete core direct-form-I bank surface has been
+replaced by `PreparedDeltaBankKernelV1` and `DeltaBankKernelError`. Its prepared scalar, Wasm4,
+NEON4, AVX2x8 and separately gated AVX2+FMA entry points accept exactly
+`(a,n0,d0,n1,d1,n2,d2,x1,x2,y1,y2,identity_mask)` and execute the frozen delta temporary graph.
+The AVX2+FMA path deliberately contains zero contractions and is bit-identical to scalar/base
+AVX2 in the locally executable differential test. The prepared token validates every lane slice
+and exact identity mask before dispatch; no feature detection is render-reachable.
+
+`ParametricEqFactory::bind_homogeneous_bank` is re-enabled for exact four/eight-lane prepared
+backends, returns `Ok(None)` for legal unsupported or malformed requests, and transposes seven
+coefficient words and four histories section-major across tracks/channels. Its stored identity
+mask is compact one-byte-per-lane and expands only into the core entry mask at invocation. The
+factory retains scalar payload encoding, per-track ramps/reports/recovery/reset, all-or-none
+snapshot/restore and whole-bypass direct-history warming. The formerly deferred four/eight bank
+differential, active-ramp/state, and lane/track isolation tests are re-enabled. Malformed shapes
+and unavailable backends remain asserted as legal `Ok(None)` fallback.
+
+Commands — all PASS:
+
+- `cargo fmt --check`
+- `cargo test -p miso-engine-core` — 22 tests plus doc test
+- `cargo test -p miso-engine-parametric-eq` — 16 tests, none ignored
+- `cargo clippy -p miso-engine-core --all-targets -- -D warnings`
+- `cargo clippy -p miso-engine-parametric-eq --all-targets -- -D warnings`
+
+No graph integration, checked fixture, realtime audit, target/instruction script or benchmark was
+run. `timed_benchmark_invocations=0`.
+
 ## Terra attempt 1 — preimplementation comparison evidence (2026-08-21)
 
 This attempt added the mandatory candidate probe only at the independent
