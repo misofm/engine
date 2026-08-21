@@ -212,8 +212,9 @@ pub enum BuiltinParameterDomain {
     BooleanExact,
     /// A finite inclusive numeric range.
     FiniteInclusive { minimum: f32, maximum: f32 },
-    /// Zero disables a filter; enabled cutoffs are `[minimum_hz, sample_rate / 2)`.
-    DisabledOrRateBoundedHertz { disabled: f32, minimum_hz: f32 },
+    /// Version 1 cutoff contract: exact zero disables; enabled values are bounded by the
+    /// representable maximum recorded for the prepared launch sample rate.
+    DisabledOrRateKeyedHertzV1 { disabled: f32, minimum_hz: f32 },
 }
 
 impl BuiltinParameterDomain {
@@ -227,16 +228,56 @@ impl BuiltinParameterDomain {
             Self::FiniteInclusive { minimum, maximum } => {
                 value.is_finite() && value >= minimum && value <= maximum
             }
-            Self::DisabledOrRateBoundedHertz {
+            Self::DisabledOrRateKeyedHertzV1 {
                 disabled,
                 minimum_hz,
             } => {
-                value == disabled
-                    || (value.is_finite()
-                        && value >= minimum_hz
-                        && f64::from(value) < f64::from(sample_rate) / 2.0)
+                validate_builtin_filter_cutoff_v1(value, sample_rate, disabled, minimum_hz).is_ok()
             }
         }
+    }
+}
+
+/// The exact, inclusive cutoff maximum for one launch rate under the retained `f32` TPT state.
+///
+/// These are greatest contiguous shared HPF/LPF maxima.  The immediate successor of each value
+/// is deliberately outside the public prepared domain.
+#[must_use]
+pub const fn builtin_filter_cutoff_maximum_hz_v1(sample_rate: u32) -> Option<f32> {
+    match sample_rate {
+        44_100 => Some(f32::from_bits(0x46ac_42f7)),
+        48_000 => Some(f32::from_bits(0x46bb_7ede)),
+        88_200 => Some(f32::from_bits(0x472c_42f7)),
+        96_000 => Some(f32::from_bits(0x473b_7ede)),
+        _ => None,
+    }
+}
+
+/// Validate the V1 public/preparation cutoff contract without entering coefficient preparation.
+///
+/// Session compilation rejects unsupported rates before builtins preparation. For the retained
+/// direct TPT compatibility checks at extended research rates, the helper keeps their previous
+/// finite open-Nyquist mathematical domain; it does not expand the launch descriptor contract.
+pub fn validate_builtin_filter_cutoff_v1(
+    value: f32,
+    sample_rate: u32,
+    disabled: f32,
+    minimum_hz: f32,
+) -> Result<(), BuiltinParameterError> {
+    if value.to_bits() == disabled.to_bits() {
+        return Ok(());
+    }
+    match builtin_filter_cutoff_maximum_hz_v1(sample_rate) {
+        Some(maximum_hz) if value.is_finite() && value >= minimum_hz && value <= maximum_hz => {
+            Ok(())
+        }
+        None if value.is_finite()
+            && value >= minimum_hz
+            && f64::from(value) < f64::from(sample_rate) * 0.5 =>
+        {
+            Ok(())
+        }
+        _ => Err(BuiltinParameterError::FilterCutoff),
     }
 }
 
@@ -292,7 +333,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "hpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
-        domain: BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
@@ -307,7 +348,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "lpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
-        domain: BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
@@ -434,9 +475,6 @@ impl TptSvf {
     fn design(rate: u32, cutoff: f32, high_pass: bool) -> Result<Self, BuiltinParameterError> {
         if cutoff == 0.0 {
             return Ok(Self::identity());
-        }
-        if !cutoff.is_finite() || cutoff < 10.0 || f64::from(cutoff) >= f64::from(rate) / 2.0 {
-            return Err(BuiltinParameterError::FilterCutoff);
         }
         let g = (core::f64::consts::PI * f64::from(cutoff) / f64::from(rate)).tan();
         let k64 = core::f64::consts::SQRT_2;
@@ -726,6 +764,8 @@ fn prepare_sections(
         {
             return Err(BuiltinParameterError::GainDomain);
         }
+        validate_builtin_filter_cutoff_v1(lane.hpf_hz, sample_rate, 0.0, 10.0)?;
+        validate_builtin_filter_cutoff_v1(lane.lpf_hz, sample_rate, 0.0, 10.0)?;
         if lane.hpf_hz > 0.0 && lane.lpf_hz > 0.0 && lane.hpf_hz >= lane.lpf_hz {
             return Err(BuiltinParameterError::FilterOrder);
         }
@@ -1478,11 +1518,11 @@ mod tests {
                     minimum: -144.0,
                     maximum: 24.0,
                 },
-                BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+                BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
                     disabled: 0.0,
                     minimum_hz: 10.0,
                 },
-                BuiltinParameterDomain::DisabledOrRateBoundedHertz {
+                BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
                     disabled: 0.0,
                     minimum_hz: 10.0,
                 },
@@ -1524,12 +1564,18 @@ mod tests {
                 BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
                 BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
             ] {
+                let maximum = builtin_filter_cutoff_maximum_hz_v1(rate)
+                    .expect("launch rate has an exact cutoff maximum");
+                let successor = f32::from_bits(maximum.to_bits() + 1);
                 let nyquist = rate as f32 / 2.0;
-                let just_below_nyquist = f32::from_bits(nyquist.to_bits() - 1);
+                let just_below_maximum = f32::from_bits(maximum.to_bits() - 1);
                 assert!(descriptor.domain.contains(0.0, rate));
+                assert!(!descriptor.domain.contains(-0.0, rate));
                 assert!(!descriptor.domain.contains(9.999, rate));
                 assert!(descriptor.domain.contains(10.0, rate));
-                assert!(descriptor.domain.contains(just_below_nyquist, rate));
+                assert!(descriptor.domain.contains(just_below_maximum, rate));
+                assert!(descriptor.domain.contains(maximum, rate));
+                assert!(!descriptor.domain.contains(successor, rate));
                 assert!(!descriptor.domain.contains(nyquist, rate));
             }
         }
@@ -1556,6 +1602,103 @@ mod tests {
             assert!(matrix.domain.contains(1.0, 48_000));
             assert!(!matrix.domain.contains(-1.001, 48_000));
             assert!(!matrix.domain.contains(1.001, 48_000));
+        }
+    }
+
+    fn parameters_with_cutoff(cutoff: f32, high_pass: bool) -> BuiltinParameters {
+        let mut parameters = BuiltinParameters::default();
+        if high_pass {
+            parameters.left.hpf_hz = cutoff;
+        } else {
+            parameters.left.lpf_hz = cutoff;
+        }
+        parameters
+    }
+
+    #[test]
+    fn representable_cutoff_domain_is_shared_by_descriptors_and_preparation() {
+        for (rate, maximum_bits) in [
+            (44_100, 0x46ac_42f7),
+            (48_000, 0x46bb_7ede),
+            (88_200, 0x472c_42f7),
+            (96_000, 0x473b_7ede),
+        ] {
+            let maximum =
+                builtin_filter_cutoff_maximum_hz_v1(rate).expect("launch rate has maximum");
+            assert_eq!(maximum.to_bits(), maximum_bits, "rate={rate}");
+            let successor = f32::from_bits(maximum_bits + 1);
+            let nyquist = rate as f32 * 0.5;
+            let nyquist_predecessor = f32::from_bits(nyquist.to_bits() - 1);
+            for (descriptor, high_pass) in [
+                (BUILTIN_PARAMETER_DESCRIPTORS_V1[2], true),
+                (BUILTIN_PARAMETER_DESCRIPTORS_V1[3], false),
+            ] {
+                for (cutoff, expected) in [
+                    (0.0, true),
+                    (10.0, true),
+                    (f32::from_bits(maximum_bits - 1), true),
+                    (maximum, true),
+                    (successor, false),
+                    (nyquist_predecessor, false),
+                    (nyquist, false),
+                    (9.999, false),
+                    (f32::NAN, false),
+                    (f32::INFINITY, false),
+                    (f32::NEG_INFINITY, false),
+                ] {
+                    assert_eq!(
+                        descriptor.domain.contains(cutoff, rate),
+                        expected,
+                        "descriptor rate={rate}, high_pass={high_pass}, cutoff={:08x}",
+                        cutoff.to_bits()
+                    );
+                    assert_eq!(
+                        BuiltinChain::new(rate, parameters_with_cutoff(cutoff, high_pass)).is_ok(),
+                        expected,
+                        "preparation rate={rate}, high_pass={high_pass}, cutoff={:08x}",
+                        cutoff.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn representable_cutoff_seam_is_contiguous_for_both_tpt_sections() {
+        for (rate, maximum_bits) in [
+            (44_100, 0x46ac_42f7),
+            (48_000, 0x46bb_7ede),
+            (88_200, 0x472c_42f7),
+            (96_000, 0x473b_7ede),
+        ] {
+            let start_bits = (0.45_f32 * rate as f32).to_bits();
+            for high_pass in [true, false] {
+                for bits in start_bits..=maximum_bits {
+                    let cutoff = f32::from_bits(bits);
+                    assert!(
+                        validate_builtin_filter_cutoff_v1(cutoff, rate, 0.0, 10.0).is_ok(),
+                        "domain rate={rate}, high_pass={high_pass}, cutoff={bits:08x}"
+                    );
+                    TptSvf::design(rate, cutoff, high_pass).unwrap_or_else(|error| {
+                        panic!(
+                            "TPT rate={rate}, high_pass={high_pass}, cutoff={bits:08x}, error={error:?}"
+                        )
+                    });
+                }
+                let successor = f32::from_bits(maximum_bits + 1);
+                assert_eq!(
+                    validate_builtin_filter_cutoff_v1(successor, rate, 0.0, 10.0),
+                    Err(BuiltinParameterError::FilterCutoff),
+                    "successor rate={rate}, high_pass={high_pass}"
+                );
+                assert!(
+                    matches!(
+                        BuiltinChain::new(rate, parameters_with_cutoff(successor, high_pass)),
+                        Err(BuiltinParameterError::FilterCutoff)
+                    ),
+                    "successor preparation rate={rate}, high_pass={high_pass}"
+                );
+            }
         }
     }
     #[test]

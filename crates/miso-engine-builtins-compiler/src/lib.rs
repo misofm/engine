@@ -6,6 +6,9 @@ use std::collections::BTreeSet;
 #[cfg(feature = "test-support")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(test)]
+use miso_engine_builtins::builtin_filter_cutoff_maximum_hz_v1;
+
 #[cfg(feature = "test-support")]
 use std::sync::Mutex;
 
@@ -15,6 +18,7 @@ use miso_engine_builtins::{
     BuiltinChain, BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters,
     DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
     MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
+    validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
@@ -1463,9 +1467,7 @@ fn filter_order_path(track: &Track, track_path: &str) -> String {
 }
 
 fn invalid_cutoff(value: f32, sample_rate: u32) -> bool {
-    !value.is_finite()
-        || value < 0.0
-        || (value > 0.0 && (value < 10.0 || value >= sample_rate as f32 * 0.5))
+    validate_builtin_filter_cutoff_v1(value, sample_rate, 0.0, 10.0).is_err()
 }
 
 fn matrix_path(track: &Track, track_path: &str) -> String {
@@ -1723,8 +1725,9 @@ mod tests {
             },
         )
         .expect("compile baseline mutation session");
-        let baseline = prepare_session_builtins(&accepted, &[baseline_request.clone()], caps())
-            .expect("baseline preparation");
+        let baseline =
+            prepare_session_builtins(&accepted, std::slice::from_ref(&baseline_request), caps())
+                .expect("baseline preparation");
         let report = baseline.resource_report();
         let mut state = BUILTIN_COMPILER_MUTATION_SEED;
         let mut transcript_hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -2028,8 +2031,30 @@ mod tests {
                     }
                 }
                 46 => {
-                    let nyquist = rate as f32 / 2.0;
-                    model.tracks[0].builtins.left.lpf_hz = f32::from_bits(nyquist.to_bits() - 1);
+                    let maximum = builtin_filter_cutoff_maximum_hz_v1(rate)
+                        .expect("matrix only uses launch rates");
+                    let successor = f32::from_bits(maximum.to_bits() + 1);
+                    model.tracks[0].builtins.left.hpf_hz = 0.0;
+                    model.tracks[0].builtins.left.lpf_hz = 0.0;
+                    match case % 4 {
+                        0 => model.tracks[0].builtins.left.hpf_hz = maximum,
+                        1 => model.tracks[0].builtins.left.lpf_hz = maximum,
+                        2 => {
+                            model.tracks[0].builtins.left.hpf_hz = successor;
+                            expected.push(diag(
+                                "builtin.filter.cutoff",
+                                "$.tracks[id=vocal].builtins.left.hpf_hz",
+                            ));
+                        }
+                        3 => {
+                            model.tracks[0].builtins.left.lpf_hz = successor;
+                            expected.push(diag(
+                                "builtin.filter.cutoff",
+                                "$.tracks[id=vocal].builtins.left.lpf_hz",
+                            ));
+                        }
+                        _ => unreachable!("case remainder is bounded"),
+                    }
                 }
                 47 => target.rl = f32::NEG_INFINITY,
                 48 => {
@@ -2208,7 +2233,7 @@ mod tests {
         );
         assert!(classes.into_iter().all(core::convert::identity));
         assert_eq!(
-            transcript_hash, 0,
+            transcript_hash, 17_626_955_350_904_343_931,
             "updated only through a deliberate frozen-case change"
         );
     }

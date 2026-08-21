@@ -126,3 +126,37 @@ Native scalar test; compile checks for `aarch64-linux-android`, `aarch64-apple-i
 Exact descriptor dump and boundary bits; exhaustive seam result; final matrix seed/count/hash and
 diagnostic summary; inherited opacity/corruption/resource logs; target/workspace/policy logs;
 candidate hashes; explicit `timed_benchmark_invocations=0`; and a Sol PASS/FAIL verdict.
+
+## Terra attempt 1 evidence (2026-08-21)
+
+Candidate input was `00a59db`. `BuiltinParameterDomain` now uses
+`DisabledOrRateKeyedHertzV1`; `builtin_filter_cutoff_maximum_hz_v1` exposes the frozen launch
+table, and `validate_builtin_filter_cutoff_v1` is shared by descriptor containment, `BuiltinChain`
+preparation, and compiler diagnostic-path selection. The exact descriptor/preparation maxima are
+44,100: `0x46ac42f7`, 48,000: `0x46bb7ede`, 88,200: `0x472c42f7`, and 96,000:
+`0x473b7ede`. Their immediate ordered-`f32` successors reject as `builtin.filter.cutoff` before
+coefficient preparation, at the exact HPF or LPF parameter path. Exact positive zero remains the
+only disabled encoding.
+
+`representable_cutoff_domain_is_shared_by_descriptors_and_preparation` covers zero, 10 Hz,
+maximum-minus-one ULP, maximum, successor, Nyquist predecessor, Nyquist, below-10 nonzero, NaN
+and infinities for both sections at every launch rate. The deterministic
+`representable_cutoff_seam_is_contiguous_for_both_tpt_sections` scan enumerates every ordered
+positive `f32` from `0.45 * Fs` through the maximum for each HPF and LPF; all prepare under the
+retained coefficients, and each listed successor is the first shared-domain exclusion. It passed
+in 1.68 s as a correctness test, not a timed benchmark.
+
+The composite matrix retained seed `0x000000034007c10`, all 49 classes and exactly 10,000 cases.
+It now exercises isolated HPF/LPF maximum acceptance and successor rejection; its frozen
+transcript hash is `17626955350904343931`. The inherited descriptor, TPT response, allocation,
+seal-opacity, compile-fail, workspace, locked-workspace, warning, documentation, policy,
+fresh-process determinism (100/100), and target matrix gates all passed. No TPT coefficient,
+recurrence, Jury/response threshold, render operation, resource formula, fixture/audit, SIMD,
+listening, or benchmark change was made.
+
+Source-file candidate SHA-256 values before the root checkpoint are
+`db8cd8cadd59f2626d77254149b80fa37b2f3a2447e1ea0afaeba60d2288f000`
+(`crates/miso-engine-builtins/src/lib.rs`) and
+`3cc6917b586eee6d6f10d40ae722a4d575bbdf60d9c1c8e22caefdf62942602c`
+(`crates/miso-engine-builtins-compiler/src/lib.rs`). `timed_benchmark_invocations=0`; no benchmark
+command or artifact was created. **Terra verdict: PASS; Sol review pending.**
