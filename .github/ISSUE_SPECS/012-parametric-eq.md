@@ -38,7 +38,7 @@ Use RBJ equations and document numerical handling: https://webaudio.github.io/Au
 
 ## Acceptance gates with objective measurements
 
-Magnitude response matches the independent `f64` design within 0.05 dB where defined and cutoff/center frequency within 0.1% at all required rates; extreme legal parameters stay finite for one million samples; scalar/4/8-lane residual tolerance is frozen in the Sol brief before production code; parameter automation is continuous under the documented smoothing bound; 0 render alloc.
+Magnitude response matches the independent `f64` design within 0.05 dB where defined and cutoff/center frequency within 0.1% at all four launch rates; extreme legal parameters stay finite for one million samples; scalar/4/8-lane residual tolerance is frozen in the Sol brief before production code; parameter automation is continuous under the documented smoothing bound; 0 render alloc.
 
 ## Target matrix
 

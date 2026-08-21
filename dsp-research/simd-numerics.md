@@ -42,7 +42,7 @@ Every backend performs the same finite-input/state policy. Fixtures inject NaN/i
 
 ## Fixtures
 
-Run deterministic scalar/SIMD full-bank and tail fixtures with impulse, random seeded finite blocks, automation, asymmetric dual-mono, subnormal, and non-finite cases at required rates.
+Run deterministic scalar/SIMD full-bank and tail fixtures with impulse, random seeded finite blocks, automation, asymmetric dual-mono, subnormal, and non-finite cases at launch rates.
 
 ## Objective tests and tolerances
 

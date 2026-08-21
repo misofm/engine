@@ -42,7 +42,7 @@ Sanitize non-finite input to zero and reset non-finite state deterministically. 
 
 ## Fixtures
 
-Use impulse, DC, sine, swept-sine, stepped-frequency/Q/gain, near-Nyquist, silence/subnormal, non-finite input, asymmetric L/R, and abrupt-bypass fixtures at every required rate.
+Use impulse, DC, sine, swept-sine, stepped-frequency/Q/gain, near-Nyquist, silence/subnormal, non-finite input, asymmetric L/R, and abrupt-bypass fixtures at every launch rate.
 
 ## Objective tests and tolerances
 

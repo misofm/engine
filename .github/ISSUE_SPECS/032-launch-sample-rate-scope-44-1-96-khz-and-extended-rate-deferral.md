@@ -264,3 +264,72 @@ Focused core/session/protocol/effect-contract/effect-compiler/conformance tests 
 one-million protocol mutation test. The complete nonbenchmark workspace, documentation, policy,
 audit, fixture-byte, and cross-target matrix remains to be rerun after this correction checkpoint.
 Benchmark invocation count: **0**.
+
+## Sol correction/review attempt-2 final evidence (2026-08-21)
+
+**PASS.** All eight Issue-032 acceptance gates pass after the bounded correction above. The exact
+core public authority remains the two typed four-element arrays and two `const` predicates; the
+predicates now inspect the arrays instead of owning duplicate literal matches. A production-code
+inventory finds no `SUPPORTED_SAMPLE_RATES`, `REQUIRED_SAMPLE_RATES`, combined eight-rate literal,
+or second literal launch/extended predicate. The remaining literal arrays are exact truth-table or
+rejection tests, byte-frozen fixture data, and annotated historical evidence.
+
+The rate truth table covers launch `44,100/48,000/88,200/96,000`, extended
+`176,400/192,000/352,800/384,000`, and unrelated `0/32,000/192,001`. Launch rates prepare and
+render, parse, compile, canonical-round-trip, initialize `SessionStore`, and commit as final
+transaction candidates. Every other tested engine rate rejects parse, direct typed compilation,
+canonicalization, typed control, and complete BTLV control with the exact frozen diagnostic and no
+model/artifact/plan publication. Typed and BTLV traces preserve revision, canonical snapshot,
+authoritative model, and reliable-event occupancy; their final-validation index is one for the
+one-edit transactions. The temporary extended-to-launch two-edit transaction still commits under
+final-candidate atomic semantics.
+
+The descriptor matrix passes four launch rows for each declared quality and all 16 ordered subsets
+of the four optional extended rows. Missing launch rows, duplicates, unordered rows, and 192,001 Hz
+reject. Effect conformance reports `launch_gates` separately from
+`extended_compatibility_probes`; the correct mock prepared 8 enabled/bypass launch configurations
+and 8 extended configurations with 920 process calls in each tier. An extended-only preparation
+fault is visible in the informational tier while launch `passed()` remains true.
+
+Native nonbenchmark results are PASS for `cargo fmt --all -- --check`, warning-denied workspace
+check/Clippy, full workspace all-target tests, warning-denied rustdoc, feature-tree/metadata, and
+native-host smoke. The previously failing builtin coherent-sine recurrence and its Clippy gate now
+pass. Workspace/session/protocol/realtime/builtins/graph/effect/conformance/research policy and
+mutation scripts pass; graph fresh-process determinism is 100/100. The protocol caller-buffer
+audit passes, the SPSC Loom model passes, and realtime and native-effect syscall/allocation traces
+pass 1,000,000 blocks. The conformance-only effect runner reports zero launch and extended probe
+failures.
+
+Cross-target nonbenchmark results are PASS for x86 scalar, AVX2 without FMA, and AVX2+FMA probes;
+browser Wasm scalar and `simd128` release builds; Wasm local-queue atomic-opcode inspection (4
+objects, zero atomic opcodes); scalar/SIMD protocol golden and checksum-only corpus parity; Android
+AArch64; and iOS AArch64. No production crate gained a conformance dependency.
+
+The before/after SHA-256 set is identical: `MANIFEST.tsv`
+`96dc9645a6569c521bfa55c6bf34b37daec2967b79f8453660ad78f38c3b4712`; multitone
+`e568846f24e13626292d14ec2f9f5058eb3ab83f48ce6e7510a698983cb9c10f`; PRNG
+`69968e143ce9b3920825d3c3a308eb7f6d042ebd44c5cbeea836118184241795`; rate impulses in
+44,100/48,000/88,200/96,000/176,400/192,000/352,800/384,000 order
+`00a62e2ae9e23c2358720d71743e6db9fc8fc0f2c1acb0661b3cb37d3de6c7b3`,
+`5d12d9e580059267433123ceca504d55275d86ad4370a155ee2653946cf8cca3`,
+`695980d4b8791bc98aabfa17f7f143b0fa1ea49e657396b4a20e8f2d1a1c45a1`,
+`6a8d67adf695c26e6784707f1deb83ea8436cf3fed887add21c0c41bfb023802`,
+`2fe35d91bae131e862e6082a6127a8125309414958f6068ddd1dc7f3a8023b84`,
+`3278523d486662e3dfc2dd2e22caaafb56a4aa36d343cac5f2258c6d03b99b74`,
+`15e655f2ceb2ce5586de44e73a63802eca1536047e1204f46c5931e6dc26d0bc`, and
+`4000e2f7b53f4d6ab35b65fba76143a8840c299290f617c154e0b38bd263d09f`; sine
+`365ab5caba17423c18c13d3864d41a530ae5997bdb147f8151ff2523cfdfadfb`.
+
+The final documentation/issue inventory makes every higher-rate occurrence either explicitly
+extended/informational or an adjacent annotated historical measurement. Hosts reject unsupported
+actual rates without fallback, and issue 026 qualifies dry/console/mastering paths only at the
+four launch rates. Root independently ran `git diff --check` on the current shared pending tree:
+PASS, exit 0, no output. Benchmark workload invocation count: **0**; conformance-only and
+checksum-only runner modes executed no timing workload.
+
+Unrelated concurrent state was not modified or claimed: after checkpoint `cdd15eb`, another task
+added `tools/miso-engine-builtins-audit`, whose then-unformatted import made a later global format
+rerun fail; every Issue-032-modified Rust source passes scoped `rustfmt --check`. An extra fuzz-job
+preflight outside Issue 032 also found that the pre-existing `fuzz/Cargo.toml` effect-package
+dependency is absent from `fuzz/Cargo.lock`; `--locked` rejected before compilation and changed no
+file. Neither unrelated condition changes the Issue-032 acceptance result.

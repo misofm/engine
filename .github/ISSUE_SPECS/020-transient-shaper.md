@@ -38,7 +38,7 @@ Transient processing must document how attack and sustain paths are separated an
 
 ## Acceptance gates with objective measurements
 
-Impulse and decaying-envelope gain match the independent design within 0.1 dB and timing within the greater of one sample or 2%; behavior is invariant across required rates and tested quanta within the frozen scalar tolerance; null setting preserves signal within 1e-6; no NaN/Inf after one million samples; 0 render alloc.
+Impulse and decaying-envelope gain match the independent design within 0.1 dB and timing within the greater of one sample or 2%; behavior is invariant across all four launch rates and tested quanta within the frozen scalar tolerance; null setting preserves signal within 1e-6; no NaN/Inf after one million samples; 0 render alloc.
 
 ## Target matrix
 

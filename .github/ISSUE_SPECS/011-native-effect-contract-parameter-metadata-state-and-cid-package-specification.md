@@ -38,7 +38,7 @@ Prepared latency and tail are immutable and bypass preserves latency. Linked det
 
 ## Acceptance gates with objective measurements
 
-All descriptors reject non-finite/invalid domains, duplicate or zero parameter IDs, invalid ports, unsupported rate/quality/link combinations and inconsistent resource declarations. Native session preparation is transactional and yields immutable metadata consumed by issue 006. Across every required rate, declared quality and link mode, conformance detects allocation/free/lock/I/O/log/syscall activity, panic, unbounded span work, lane-state aliasing, malformed state payloads, undeclared/changing latency or tail, latency-changing bypass, invalid automation, and NaN/subnormal propagation. Enabled and bypass impulses land at the exact declared integer sample; one million 128-frame calls report zero forbidden operations.
+All descriptors reject non-finite/invalid domains, duplicate or zero parameter IDs, invalid ports, unsupported rate/quality/link combinations and inconsistent resource declarations. Native session preparation is transactional and yields immutable metadata consumed by issue 006. Across all four launch-required rates, declared quality and link mode, conformance detects allocation/free/lock/I/O/log/syscall activity, panic, unbounded span work, lane-state aliasing, malformed state payloads, undeclared/changing latency or tail, latency-changing bypass, invalid automation, and NaN/subnormal propagation; optional extended-rate probes are reported separately as informational compatibility evidence. Enabled and bypass impulses land at the exact declared integer sample; one million 128-frame calls report zero forbidden operations.
 
 ## Target matrix
 
