@@ -160,17 +160,21 @@ required full locked workspace test gate is not: `miso-engine-parametric-eq` fai
 `production_coefficients_and_analytic_response_match_the_independent_f64_oracle` at `LowShelf`,
 44,100 Hz, 10 Hz, probe 0 (`-23.457245778509655` versus
 `-23.999999996345114`). This is outside Issue 040's source/graph boundary and was not modified.
+The retained report also counts the native telemetry payload while that telemetry is held in
+`std::sync::Arc`; its opaque standard-library control-block allocation is not defensibly an exact
+reported byte layout. This is an Issue 040 accounting blocker for the bounded Sol correction.
 
 - Public ownership surface: `prepare_native_source` now returns opaque `PreparedNativeSource`;
   its only graph conversion transfers the consumer and crate-private uncloneable join owner into
   `SourceGraphSource`. A `compile_fail` doctest proves `NativeSourceWorker` is not public.
   Source-set/retired-plan lifecycle tests prove the worker remains alive until off-render source
   set or retired-plan destruction; controllers receive `Stopped` afterward.
-- Source reports enumerate ring, fixed decoder/staging, worker command/event queues, shared
-  telemetry payload, graph source entries/mappings/claims/driver/planes/stable-ID payloads, and
-  controller records. PCM remains separately session charged. The focused retained-layout grid
-  covers 1, 4 and 65,537 count arithmetic without duration-sized PCM; exact combined cap accepts
-  and one-byte-short rejects before publication.
+- Source reports enumerate ring, fixed decoder/staging, worker command/event queues, telemetry
+  payload, graph source entries/mappings/claims/driver/planes/stable-ID payloads, and controller
+  records. PCM remains separately session charged. The focused retained-layout grid covers 1, 4
+  and 65,537 count arithmetic without duration-sized PCM; exact combined cap accepts and one-byte-
+  short rejects before publication. This remains insufficient for a PASS until the opaque `Arc`
+  control-block allocation is replaced or accounted without inventing a standard-library layout.
 - Product tests pass for producer/consumer frozen shapes, native sanitation and host zero
   sanitation, all four matching launch rates, 192 kHz mismatch rejection, delayed-old-generation
   seek discard, four-channel/three-track sequential plus native-fallback fan-out, and transactional
