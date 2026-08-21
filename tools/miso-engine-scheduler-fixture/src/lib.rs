@@ -66,6 +66,12 @@ mod native {
         pub value_bits: u32,
     }
 
+    /// Read-only handle for the fixture's preallocated observer transcript after render disarms.
+    #[derive(Clone)]
+    pub struct Q128ObserverTranscript {
+        transcript: Arc<Transcript>,
+    }
+
     struct Transcript {
         next: AtomicUsize,
         fields: Box<[AtomicU64]>,
@@ -115,6 +121,38 @@ mod native {
 
         fn count(&self) -> usize {
             self.next.load(Ordering::Relaxed)
+        }
+
+        fn stable_hash(&self) -> u64 {
+            let capacity = self.fields.len() / 5;
+            let count = self.next.load(Ordering::Relaxed).min(capacity);
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            for index in 0..count {
+                let base = index * 5;
+                for value in self.fields[base..base + 5]
+                    .iter()
+                    .map(|field| field.load(Ordering::Relaxed))
+                {
+                    for byte in value.to_le_bytes() {
+                        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+            hash
+        }
+    }
+
+    impl Q128ObserverTranscript {
+        /// Number of records written into fixed transcript storage.
+        #[must_use]
+        pub fn record_count(&self) -> usize {
+            self.transcript.count()
+        }
+
+        /// Address-free stable hash of the completed observer transcript.
+        #[must_use]
+        pub fn stable_hash(&self) -> u64 {
+            self.transcript.stable_hash()
         }
     }
 
@@ -204,6 +242,14 @@ mod native {
         #[must_use]
         pub fn observer_record_count(&self) -> usize {
             self.transcript.count()
+        }
+
+        /// Clone a read-only transcript handle before moving this fixture plan into an exchange.
+        #[must_use]
+        pub fn observer_transcript(&self) -> Q128ObserverTranscript {
+            Q128ObserverTranscript {
+                transcript: Arc::clone(&self.transcript),
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-//! Fixed 10,000-callback audit of the production native dependency-wave graph.
+//! Fixed 10,000-callback audit of the shared Issue-039 q128 native graph fixture.
 
 #![allow(unsafe_code)]
 
@@ -8,25 +8,18 @@ use std::{
     sync::mpsc,
 };
 
-use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanarBufferMut, RenderIo, RenderTime, SwapOutcome,
     audit::{self, AuditSnapshot, ForbiddenOperation, record_allocator_violation},
     plan_exchange,
 };
-use miso_engine_effect_compiler::EffectPreparedSession;
-use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
-    NativeGraphBindConfigV1, NativeGraphRenderModeV1, NativeSchedulerConfigV1,
-    SchedulerSelectionV1, TrackStage,
-};
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
-use miso_engine_session::{
-    CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml,
+use miso_engine_graph::SchedulerSelectionV1;
+use miso_engine_scheduler_fixture::{
+    PreparedQ128Fixture, Q128_QUANTUM_FRAMES, Q128RenderMode, prepare_q128_fixture,
 };
 
 const CALLBACKS: u64 = 10_000;
-const QUANTUM: usize = 128;
+const OBSERVERS_PER_CALLBACK: usize = 2;
 
 struct AuditedAllocator;
 
@@ -69,39 +62,30 @@ unsafe impl GlobalAlloc for AuditedAllocator {
     }
 }
 
-struct Source {
-    left: f32,
-    right: f32,
-}
-
-impl GraphRuntimeProcessor for Source {
-    fn process(
-        &mut self,
-        block: GraphBindingBlock<'_>,
-    ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        block.left.fill(self.left);
-        block.right.fill(self.right);
-        Ok(())
-    }
-}
-
-struct Identity;
-
-impl GraphRuntimeProcessor for Identity {
-    fn process(
-        &mut self,
-        _block: GraphBindingBlock<'_>,
-    ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        Ok(())
-    }
-}
-
 fn main() {
     assert_eq!(std::env::args_os().count(), 1, "audit accepts no arguments");
-    let initial = prepared_graph(9_001);
-    let replacement = prepared_graph(9_002);
+
+    let initial = q128_fixture(39_901);
+    let replacement = q128_fixture(39_902);
+    assert_eq!(initial.metadata, replacement.metadata);
+    assert_eq!(initial.report.sha256, replacement.report.sha256);
+    assert!(initial.pdc_samples > 0);
+    assert!(initial.prepared_builtin_bank_count > 0);
+    assert!(initial.scalar_builtin_tail_count > 0);
+    assert_eq!(initial.metadata.selection, SchedulerSelectionV1::Parallel);
+    assert_eq!(initial.metadata.resources.scheduler.selected_lanes, 4);
+    assert_eq!(initial.metadata.resources.scheduler.worker_count, 3);
+
+    let fixture_id = miso_engine_scheduler_fixture::Q128_FIXTURE_ID;
+    let pdc_samples = replacement.pdc_samples;
+    let preparation_hash = replacement.metadata.test_preparation_transcript.hash;
+    let replacement_observers = replacement.observer_transcript();
+    assert_eq!(replacement_observers.record_count(), 0);
+
+    // This marker is emitted after both worker sets are prepared and before any render scope.
+    eprintln!("MISO_039_PHASE_PREPARED");
     let (mut publisher, mut owner, retirer) = plan_exchange(
-        initial,
+        initial.plan,
         PlanExchangeConfig {
             publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
@@ -109,28 +93,36 @@ fn main() {
     )
     .expect("plan exchange");
     publisher
-        .publish(replacement)
+        .publish(replacement.plan)
         .unwrap_or_else(|_| panic!("replacement publication"));
 
-    let mut output = vec![0.0_f32; QUANTUM * 2];
+    let mut output = vec![0.0_f32; Q128_QUANTUM_FRAMES * 2];
     let output_address = output.as_ptr() as usize;
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut output_hash = 0xcbf2_9ce4_8422_2325_u64;
     audit::warm_up();
     audit::reset();
+
+    // The armed interval is delimited outside `RealtimePlanOwner::render` and worker dispatch.
+    eprintln!("MISO_039_PHASE_ARMED");
     for block in 0..CALLBACKS {
         let report = owner
             .render(
                 RenderIo {
                     input: None,
-                    output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM)
-                        .expect("fixed output"),
+                    output: PlanarBufferMut::try_new(
+                        &mut output,
+                        2,
+                        Q128_QUANTUM_FRAMES,
+                        Q128_QUANTUM_FRAMES,
+                    )
+                    .expect("fixed q128 output"),
                 },
                 RenderTime {
-                    absolute_sample: block * QUANTUM as u64,
+                    absolute_sample: block * Q128_QUANTUM_FRAMES as u64,
                 },
             )
-            .expect("native graph render");
-        assert_eq!(report.render.plan_id, 9_002);
+            .expect("q128 native graph render");
+        assert_eq!(report.render.plan_id, 39_902);
         assert_eq!(
             report.swap,
             if block == 0 {
@@ -140,15 +132,23 @@ fn main() {
             }
         );
         for sample in &output {
-            hash = (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
+            output_hash =
+                (output_hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+    // All coordinator/worker audit reads occur only after every render scope returned.
+    eprintln!("MISO_039_PHASE_DISARMED");
     assert_eq!(output.as_ptr() as usize, output_address);
     let coordinator = audit::snapshot();
     assert_eq!(coordinator.total(), 0);
     let mut workers = [AuditSnapshot::default(); 3];
     assert_eq!(owner.copy_worker_audit_snapshots(&mut workers), 3);
     assert!(workers.iter().all(|snapshot| snapshot.total() == 0));
+    assert_eq!(
+        replacement_observers.record_count(),
+        CALLBACKS as usize * OBSERVERS_PER_CALLBACK
+    );
+    let observer_hash = replacement_observers.stable_hash();
 
     drop(publisher);
     let (sender, receiver) = mpsc::sync_channel(0);
@@ -157,6 +157,8 @@ fn main() {
         let retired = retirer.try_reclaim().expect("one displaced plan");
         drop(retired);
         drop(owner);
+        // The active replacement and its scheduler are destroyed off the render thread.
+        eprintln!("MISO_039_PHASE_RETIRED");
         sender
             .send(std::thread::current().id())
             .expect("retirement result");
@@ -165,17 +167,25 @@ fn main() {
     assert_eq!(retirement.join().expect("retirement join"), ());
     println!(
         concat!(
-            "{{\"schema_version\":1,\"kind\":\"native_scheduler_realtime_audit\",",
-            "\"callbacks\":{},\"quantum_frames\":{},\"render_lanes\":4,",
-            "\"worker_count\":3,\"plan_swaps\":1,\"retired_on_thread\":\"{:?}\",",
-            "\"output_address\":{},\"output_hash\":{},",
-            "\"coordinator_forbidden_total\":{},\"worker_forbidden_totals\":[{},{},{}]}}"
+            "{{\"schema_version\":2,\"kind\":\"native_scheduler_realtime_audit\",",
+            "\"fixture_id\":\"{}\",\"callbacks\":{},\"sample_rate_hz\":48000,",
+            "\"quantum_frames\":{},\"render_lanes\":4,\"worker_count\":3,",
+            "\"plan_swaps\":1,\"pdc_samples\":{},\"preparation_hash\":{},",
+            "\"observer_records\":{},\"observer_hash\":{},",
+            "\"retired_on_thread\":\"{:?}\",\"output_address\":{},",
+            "\"output_hash\":{},\"coordinator_forbidden_total\":{},",
+            "\"worker_forbidden_totals\":[{},{},{}]}}"
         ),
+        fixture_id,
         CALLBACKS,
-        QUANTUM,
+        Q128_QUANTUM_FRAMES,
+        pdc_samples,
+        preparation_hash,
+        replacement_observers.record_count(),
+        observer_hash,
         retirement_thread_id,
         output_address,
-        hash,
+        output_hash,
         coordinator.total(),
         workers[0].total(),
         workers[1].total(),
@@ -183,128 +193,13 @@ fn main() {
     );
 }
 
-fn prepared_graph(plan_id: u64) -> miso_engine_core::realtime::PreparedRenderPlan {
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
-        .expect("canonical session");
-    let base_track = model.tracks[0].clone();
-    let base_route = model.routes[0].clone();
-    model.automation.clear();
-    model.tracks = (0..8)
-        .map(|index| {
-            let mut track = base_track.clone();
-            track.id = StableId::parse(&format!("sched{index}")).expect("track ID");
-            track.simd1.effects.clear();
-            track.dynamic.effects.clear();
-            track.simd2.effects.clear();
-            track
-        })
-        .collect();
-    model.routes = model
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| {
-            let mut route = base_route.clone();
-            route.id = StableId::parse(&format!("scheduler-route-{index}")).expect("route ID");
-            route.source = RouteSource::Track {
-                track_id: track.id.clone(),
-                tap: SendTap::PostMatrix,
-            };
-            route
-        })
-        .collect();
-    let session = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("compiled audit session");
-    let builtins = prepare_session_builtins(
-        &session,
-        &[],
-        BuiltinCompileCaps {
-            maximum_total_state_bytes: u64::MAX,
-            maximum_total_retained_payload_bytes: u64::MAX,
-            maximum_total_meter_items: u64::MAX,
-            maximum_total_meter_bytes: u64::MAX,
-            maximum_single_allocation_bytes: u64::MAX,
-            maximum_meter_streams: u64::MAX,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        },
-    )
-    .expect("prepared audit builtins");
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+fn q128_fixture(plan_id: u64) -> PreparedQ128Fixture {
+    prepare_q128_fixture(
+        48_000,
+        4,
+        Q128RenderMode::DependencyWaves,
         plan_id,
-        effects: EffectPreparedSession {
-            session,
-            entries: Vec::new(),
-        },
-        builtins,
-        caps: miso_engine_graph::GraphCompileCaps {
-            maximum_nodes: 10_000,
-            maximum_edges: 10_000,
-            maximum_schedule_items: 10_000,
-            maximum_dependency_levels: 10_000,
-            maximum_audio_buffer_samples: 10_000_000,
-            maximum_delay_samples_per_edge: 1_000_000,
-            maximum_total_delay_samples: 10_000_000,
-            maximum_graph_bytes: 100_000_000,
-            maximum_plan_bytes: 200_000_000,
-            maximum_single_allocation_bytes: 100_000_000,
-            maximum_finite_tail_samples: 10_000_000,
-        },
-    })
-    .unwrap_or_else(|_| panic!("compiled audit graph"));
-    assert!(artifact.prepared_builtin_bank_count() >= 1);
-    let envelope = artifact.envelope();
-    assert_eq!(envelope.quantum.0 as usize, QUANTUM);
-    let nodes = artifact
-        .external_binding_nodes()
-        .cloned()
-        .enumerate()
-        .map(|(index, node)| {
-            let processor: Box<dyn GraphRuntimeProcessor> = match node {
-                GraphNodeId::TrackStage {
-                    stage: TrackStage::Input,
-                    ..
-                } => Box::new(Source {
-                    left: index as f32 * 0.01 + 0.1,
-                    right: index as f32 * -0.02 - 0.2,
-                }),
-                _ => Box::new(Identity),
-            };
-            GraphNodeBinding::new(node, processor)
-        })
-        .collect();
-    let bound = artifact
-        .into_bound_native(
-            GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            },
-            NativeGraphBindConfigV1 {
-                render_mode: NativeGraphRenderModeV1::DependencyWaves,
-                scheduler: NativeSchedulerConfigV1::new(
-                    NonZeroUsize::new(4).expect("four lanes"),
-                    true,
-                ),
-                maximum_retained_bytes: 1 << 29,
-            },
-        )
-        .unwrap_or_else(|failure| panic!("native audit bind: {}", failure.code));
-    assert_eq!(
-        bound.prepared.metadata.selection,
-        SchedulerSelectionV1::Parallel
-    );
-    assert_eq!(bound.prepared.metadata.resources.scheduler.worker_count, 3);
-    bound.prepared.into_plan()
+        CALLBACKS as usize * OBSERVERS_PER_CALLBACK,
+    )
+    .unwrap_or_else(|error| panic!("q128 audit preparation failed: {error}"))
 }
