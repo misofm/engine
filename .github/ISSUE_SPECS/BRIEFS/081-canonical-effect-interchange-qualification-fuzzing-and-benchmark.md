@@ -2,9 +2,9 @@
 
 ## Decision
 
-**SOL XHIGH NONBENCHMARK PASS / CONDITIONAL GO FOR EXACTLY ONE ZERO-WORKLOAD PREFLIGHT; BENCHMARK
-RUNNER NOT AUTHORIZED.** Accepted descriptor/package/CID/state/migration bytes, APIs, product
-source, fixtures and C ABI remain read-only.
+**SOL XHIGH TERMINAL BENCHMARK FAIL / STOP; SOLE RUNNER INVOCATION CONSUMED; NO RETRY OR OVERALL
+PASS.** Accepted descriptor/package/CID/state/migration bytes, APIs, product source, fixtures and C
+ABI remain valid and read-only; the failure is confined to the qualification benchmark tool.
 
 At briefing, all real counters were zero. Qualification later recorded target invocation 1 on
 candidate `709b3d2ccc6d`: native and Android/iOS completed; scalar Wasm reached object creation and
@@ -33,8 +33,8 @@ retained-session repeat was exactly
 and exited `0` with only expected ignored/manual rows. Doctests exited `0` with eight compile-fail
 doctests.
 
-Final counters are reference `1`, mutation `1`, migration `1`, cross-target `2`, and benchmark
-preflight/runner/workload/timed all `0`. `Cargo.lock` is
+Counters at the nonbenchmark seal were reference `1`, mutation `1`, migration `1`, cross-target `2`,
+and benchmark preflight/runner/workload/timed all `0`. `Cargo.lock` is
 `4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`; `fuzz/Cargo.lock` is
 `af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`; accepted baseline is
 `6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5`; qualification/target/
@@ -44,13 +44,53 @@ reference/benchmark-runner/preflight scripts are respectively `bde208b34413dd4e7
 `4aca5153928bfee583cf5ea403483b63f848e4fb6a83045800424bc855a80429` and
 `3957a02b8e5d45efd3e3637c60fc04157180c555fb46b0aa0eee4157afa3029c`.
 
-Root must exact-path commit only this spec and brief, confirm the post-doc clean HEAD/tree, then
-create and independently verify the required atomic/no-clobber ignored 18-key
-`target/issue081/nonbenchmark.seal.json` bound to that post-doc candidate, the schema's accepted/
-Cargo/qualification/target hashes, `reference_processes=100`, `mutation_trials=30000`,
-`migration_rows=48`, `target_rows=5` and all four benchmark invocation counters at `0`. Only then is
-exactly one no-argument, zero-workload preflight authorized. The seal is not created by this brief,
-and benchmark runner/main/workload/timing remain unauthorized.
+## Terminal runner verdict
+
+On clean candidate `466b05cbf2bb61e0367d25aa6ca6a0da7643e83f`, tree
+`2e1c5c12515e7b16d8a36846130cfe4cde42ad55`, the sole zero-workload preflight exited `0` and
+produced a valid 833-byte nonbenchmark seal (`6d08e2089e806dc366f5c1171398c241f8dfdc520f97808c4e2f6c7f6b83363c`),
+827,232-byte binary (`fad8e39ecd9efa6908b51e7e98c25984f9d97f88b32971581c9a880228758b4c`)
+and 1,577-byte preflight seal (`da3c537c16d55b1e71b8aa9f8e4d011796b243e4c6c7969020097098a75035a3`).
+Sol XHigh verified the complete seal and authorized one runner invocation.
+
+That invocation exited `1`, stdout was empty, and no accepted JSONL or prelaunch disposition was
+created. Preserved artifacts are empty raw SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, 361-byte stderr SHA-256
+`442f071fb23e57a9cb4616c6df7683bee669d8114eacce43b16af812e86d1a93`, and 817-byte terminal
+disposition SHA-256 `8c833293bb3e9f2e981e0be1d379819786d92706627b3fa3fbc64e93b188a5de`.
+The disposition is `FAIL/workload_failed`, with runner/workload/timed/warmup/round counters
+`1/1/0/0/0` and exact candidate/binary/seal/raw/stderr identities.
+
+Terminal real counters are reference `1`, mutation `1`, migration `1`, cross-target `2`, benchmark
+preflight `1`, runner `1`, workload `1` and timed `0`.
+
+The sole stderr phase is `workload_started`; main then panics at line 450 with descriptor-wire
+`Semantic`, offset `0`, unavailable index and required `0`. `MIGRATION_Q1..Q3` each advertise only
+48 kHz, while the accepted descriptor validator requires all four launch rates for every quality.
+The validator correctly rejects the benchmark-only fixture during the frozen untimed migration
+pass, before warmup or timing. Compile-only and fake lifecycle gates did not execute this real-main
+fixture. The frozen migration digest was unreachable. This is not a product failure.
+
+Do not rerun or directly invoke the Issue 081 runner/binary, repeat preflight, tune, repair records,
+or remove/overwrite terminal artifacts. Issue 081 remains STOP with no overall PASS.
+
+## Successor recommendation
+
+Open **083 Repair effect-interchange benchmark migration fixture and reauthorize one descriptive
+run** at
+`.github/ISSUE_SPECS/083-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`.
+Its exact dependencies are **Canonical effect interchange qualification, fuzzing, and benchmark**,
+**Prepared effect state envelope and transactional current-layout restore**, **Effect state
+migration registry and bounded chains**, and **Close canonical effect descriptor wire, identity,
+and C inspection ABI**.
+
+Issue 083 must preserve Issue 081 evidence and accepted product bytes, repair only the benchmark
+fixture to complete sorted four-rate D1/D2/D3 descriptors, add a focused nontimed executable
+descriptor/final-envelope regression, independently rebind the migration digest across every
+authority, and use a successor-specific no-clobber artifact namespace. Proportional compile/lint/
+fake/static gates and a new zero-launch preflight precede any new Sol authorization. Existing real
+100-process/mutation/migration/target/broad matrices are not rerun. Any later descriptive launch is
+an Issue 083 attempt, never an Issue 081 retry.
 
 ## Smallest closable vertical
 

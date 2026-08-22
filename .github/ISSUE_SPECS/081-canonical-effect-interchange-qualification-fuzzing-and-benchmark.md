@@ -4,9 +4,9 @@
 
 Qualify the accepted descriptor, package/CID, state and migration products as one portable
 interchange boundary without changing their bytes, APIs or product implementation. **SOL XHIGH
-NONBENCHMARK PASS / READY FOR EXACTLY ONE ZERO-WORKLOAD PREFLIGHT AFTER THE CONDITIONAL SEAL BELOW;
-BENCHMARK RUNNER NOT AUTHORIZED.** This is a qualification/tooling issue, not another product
-feature.
+TERMINAL BENCHMARK FAIL / STOP; SOLE RUNNER INVOCATION CONSUMED; NO RETRY OR OVERALL PASS.** The
+nonbenchmark qualification remains valid, but Issue 081 cannot close successfully. This is a
+qualification/tooling failure, not a product failure.
 
 Use one coherent Sol High implementation attempt and at most one bounded Sol High correction, each
 adversarially reviewed by Sol XHigh. A second failed implementation pass stops and requires a
@@ -80,18 +80,98 @@ Final nonbenchmark counters are `reference_process_invocations=1`,
 `mutation_campaign_invocations=1`, `migration_matrix_invocations=1`,
 `cross_target_invocations=2`, `benchmark_preflight_invocations=0`,
 `benchmark_runner_invocations=0`, `benchmark_workload_invocations=0` and
-`timed_benchmark_invocations=0`. No benchmark binary, preflight seal, raw/accepted benchmark JSONL,
-stderr or benchmark disposition exists under `target/issue081/`.
+`timed_benchmark_invocations=0`. Those were the final counters before benchmark preflight.
 
-**SOL XHIGH PREFLIGHT GO is conditional.** Root must first commit only this spec and its tracked
-brief, confirm the resulting post-documentation HEAD/tree and clean index/worktree, then create and
-independently validate the required atomic/no-clobber `target/issue081/nonbenchmark.seal.json` with
-the exact 18-key schema, the post-documentation candidate identity, the schema's accepted/Cargo/
-qualification/target identities above, `reference_processes=100`, `mutation_trials=30000`,
-`migration_rows=48`, `target_rows=5` and all four benchmark invocation counters at `0`. That ignored
-seal is not authored or claimed here. After it exists and matches, root may invoke the no-argument
-zero-workload preflight exactly once. This verdict does not authorize the benchmark runner,
-benchmark main, workload or timing.
+## Terminal benchmark attempt evidence
+
+Root committed the documentation evidence and created the required candidate-bound nonbenchmark
+seal on clean commit `466b05cbf2bb61e0367d25aa6ca6a0da7643e83f`, tree
+`2e1c5c12515e7b16d8a36846130cfe4cde42ad55`. The sole zero-workload preflight invocation exited
+`0`; its output reported workload/timing counts `0`. The retained preflight artifacts are regular,
+one-link files:
+
+- nonbenchmark seal: 833 bytes, SHA-256
+  `6d08e2089e806dc366f5c1171398c241f8dfdc520f97808c4e2f6c7f6b83363c`;
+- sealed executable: 827,232 bytes, SHA-256
+  `fad8e39ecd9efa6908b51e7e98c25984f9d97f88b32971581c9a880228758b4c`; and
+- 22-key preflight seal: 1,577 bytes, SHA-256
+  `da3c537c16d55b1e71b8aa9f8e4d011796b243e4c6c7969020097098a75035a3`.
+
+Sol XHigh independently recomputed every transitive candidate/tool/source/fixture/lock/validator/
+lifecycle/preflight/runner hash in that seal and confirmed the four frozen output identities,
+`runner_invocations=0`, `workload_invocations=0`, `timed_benchmark_invocations=0`, planned warmup
+`1`, rounds `2` and records `8`. No raw, accepted, stderr, disposition or prelaunch artifact existed.
+Sol XHigh therefore authorized exactly one invocation of
+`bash scripts/run-effect-interchange-benchmark.sh`, with no retry or alternate/direct invocation.
+
+That sole authorized runner invocation exited `1` with zero command stdout. Its terminal artifacts
+are preserved unchanged:
+
+- raw JSONL: regular, one link, 0 bytes, SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+- stderr: regular, one link, 361 bytes, SHA-256
+  `442f071fb23e57a9cb4616c6df7683bee669d8114eacce43b16af812e86d1a93`;
+- disposition: regular, one link, 817 bytes, SHA-256
+  `8c833293bb3e9f2e981e0be1d379819786d92706627b3fa3fbc64e93b188a5de`;
+- accepted JSONL: absent; and
+- prelaunch disposition: absent.
+
+The disposition is an exact terminal `FAIL` with reason `workload_failed`, candidate/binary/
+preflight/raw/stderr identities matching the retained files, and counters
+`benchmark_runner_invocations=1`, `benchmark_workload_invocations=1`,
+`timed_benchmark_invocations=0`, `warmup_passes_completed=0`,
+`measured_rounds_completed=0`. Stderr contains only the `workload_started` phase followed by a panic
+at `tools/miso-engine-effect-interchange-bench/src/main.rs:450` while obtaining descriptor wire
+requirements: `EffectDescriptorWireDiagnosticV1 { code: Semantic, byte_offset: 0,
+record_index: 4294967295, required_bytes: 0 }`.
+
+Terminal real counters are `reference_process_invocations=1`,
+`mutation_campaign_invocations=1`, `migration_matrix_invocations=1`,
+`cross_target_invocations=2`, `benchmark_preflight_invocations=1`,
+`benchmark_runner_invocations=1`, `benchmark_workload_invocations=1` and
+`timed_benchmark_invocations=0`.
+
+The exact cause is benchmark-tool-local and deterministic. `MIGRATION_Q1`, `MIGRATION_Q2` and
+`MIGRATION_Q3` each contain only `migration_quality(48_000, layout)`. The accepted
+`validate_descriptor_v1` contract requires every advertised quality to contain all four launch
+rates `44_100`, `48_000`, `88_200` and `96_000`; `effect_descriptor_wire_v1_required_size` maps that
+semantic rejection to the observed offset-0/unavailable-index diagnostic. The first three frozen
+untimed workloads completed in memory, but the program emits no stdout records until after both
+measured rounds. Migration descriptor construction therefore panicked during the frozen untimed
+correctness pass, before `warmup_complete` or `timed_started`, exactly explaining empty raw output
+and the terminal counters. The product descriptor validator behaved correctly. The benchmark-only
+fixture was invalid, and its frozen migration digest was unreachable in this binary.
+
+Compile-only qualification and the hermetic fake lifecycle could not expose this invalid real-main
+fixture; the zero-launch preflight deliberately built but did not execute it. Issue 081's rule is
+unambiguous: any failure after the runner launches is final evidence. Do not delete or overwrite
+these artifacts, rerun preflight/runner/binary, repair a record manually, or claim an Issue 081
+benchmark PASS.
+
+## Required successor/rescope recommendation
+
+Create a new stateless issue, not an Issue 081 retry:
+
+- number/title: **083 Repair effect-interchange benchmark migration fixture and reauthorize one
+  descriptive run**;
+- local path:
+  `.github/ISSUE_SPECS/083-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`;
+- dependencies by exact title: **Canonical effect interchange qualification, fuzzing, and
+  benchmark**; **Prepared effect state envelope and transactional current-layout restore**;
+  **Effect state migration registry and bounded chains**; and **Close canonical effect descriptor
+  wire, identity, and C inspection ABI**.
+
+The successor's smallest slice is benchmark-tool repair only. Preserve every Issue 081 terminal
+artifact and all accepted product/reference/fixture bytes. Give D1/D2/D3 complete sorted four-rate
+quality tables for their respective layouts; add a focused nontimed executable regression that
+validates all three descriptors and the exact two-step final envelope before any one-shot
+authorization; independently recompute and bind the migration digest across tool/checker/preflight/
+runner/lifecycle; and use a successor-specific no-clobber artifact namespace so Issue 081 evidence
+cannot be overwritten. Run only proportional compile/lint/fake/static gates, then a new zero-launch
+preflight and Sol XHigh review. A later descriptive invocation belongs solely to Issue 083 and
+requires new explicit authorization; it is never described as an Issue 081 retry. Do not rerun the
+100-process, 30,000-mutation, 48-row, target or broad nonbenchmark matrices merely to repair this
+qualification tool.
 
 Remote Issue 81 was read-only verified open with the exact title and no comments on 2026-08-22.
 Its original body has the correct outcome but leaves the matrices and benchmark lifecycle
