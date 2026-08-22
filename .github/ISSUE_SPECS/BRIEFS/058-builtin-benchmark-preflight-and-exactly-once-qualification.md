@@ -243,3 +243,20 @@ actual preflight, public runner, benchmark binary, workload, timing, audit, trac
 were not invoked. Exact final counters: `runner_invocations=0`, `workload_invocations=0`,
 `timed_benchmark_invocations=0`. Terra made no implementation correction; one bounded Sol
 correction/review remains.
+
+## Sol attempt 2 nonexecuting checkpoint — 2026-08-22
+
+**PASS TO PREFLIGHT; NO PUBLIC RUNNER OR TIMED COMMAND IS AUTHORIZED YET.** Clean candidate
+`3f4fd34f81e7e2205503887c03ad27f3aad69c8a` passed the frozen package/workspace, fixture,
+validator, scratch runner/preflight lifecycle, warning-denied Clippy/rustdoc, policy/mutation,
+identity and static no-workload gates. Candidate source SHA-256 is
+`34e40ddcce0b51b53aa58629894332a0ee045e4bf4ea5a5a7ca0fffbb59c4a62`; candidate lock remains
+`da662dd70c21ae844f551e5f2ed6ef97c52982fc9f8b86d19c1776e57e0a576f`, with the frozen permitted
+lock diff unchanged. The accepted Issue-068 source manifest reconstructs exactly, all 50 corpus
+files and ten benchmark inputs validate read-only, and no Issue-035 artifact existed.
+
+Actual preflight, benchmark main, public runner, workload, timing, audit, trace and target workloads
+were not invoked. Counters remain `runner_invocations=0`, `workload_invocations=0`, and
+`timed_benchmark_invocations=0`. After this evidence is committed cleanly, root may authorize one
+no-workload preflight; its seal and zero counters require a separate Sol check before the sole
+runner command can be authorized.

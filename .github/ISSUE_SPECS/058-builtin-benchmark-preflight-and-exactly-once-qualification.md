@@ -140,3 +140,40 @@ the actual preflight, public runner, benchmark binary, workload, timing, audit, 
 gates were not invoked. Final Terra attempt-1 counters are exactly `runner_invocations=0`,
 `workload_invocations=0`, and `timed_benchmark_invocations=0`. One bounded Sol correction/review
 remains; no benchmark authorization follows from this attempt.
+
+## Sol attempt 2 nonexecuting verdict — 2026-08-22
+
+**PASS TO PREFLIGHT; THE PUBLIC RUNNER AND TIMED COMMAND REMAIN UNAUTHORIZED.** Sol reviewed clean
+candidate `3f4fd34f81e7e2205503887c03ad27f3aad69c8a` requirement by requirement. The correction now
+uses each checked TOML and referenced PCM as workload authority (including signed zero), alternates
+matrix targets by global operation, prepares identical capacity-one/reset-generation-seven real
+seven-tap meter plans, hashes complete measured PCM/meter/drop and address-free preparation
+projections, binds the frozen manifest and all ten per-pair input hashes, reports truthful partial
+lifecycle progress, and seals a post-gate-clean candidate without executing its binary.
+
+Identity evidence is exact: candidate source-manifest SHA-256
+`34e40ddcce0b51b53aa58629894332a0ee045e4bf4ea5a5a7ca0fffbb59c4a62`; accepted Issue-068
+reconstruction `0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19`;
+candidate lock `da662dd70c21ae844f551e5f2ed6ef97c52982fc9f8b86d19c1776e57e0a576f`;
+frozen lock diff `5ebc70f8a35208d50ff4d9afd92602462180b345125263a0a4916aa3bb08940e`;
+manifest `bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`;
+graph PCM `508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`;
+and graph meter `958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`.
+The checked manifest contains exactly ten benchmark inputs and `target/issue35` contained no file
+or symlink before this review.
+
+Nonexecuting gates passed: `cargo fmt --all -- --check`; shell/JQ syntax through the complete
+synthetic suite; `bash scripts/test-builtins-benchmark.sh` with scratch-only runner and preflight
+stubs; read-only `bash scripts/check-builtins-fixtures.sh` over all 50 files; locked benchmark
+package check/tests (8/8); the exact compiler allocation-layout test; warning-denied package
+Clippy/rustdoc; locked all-target/all-feature workspace check and tests; warning-denied workspace
+Clippy/rustdoc; workspace, realtime, builtins, graph and rack policy checks; workspace, realtime,
+builtins and rack mutation suites; static no-stale-identity/no-artifact/no-workload scans; and
+`git diff --check`. Test harnesses compiled audit/benchmark targets but no audit main, benchmark
+main, trace, target workload, public runner, or actual preflight was invoked.
+
+Preflight may now be run once on this evidence commit after root confirms it is clean and has no
+Issue-035 artifacts. Sol must inspect the resulting binary/seal identities and zero counters before
+separately authorizing the sole public runner command. Current counters remain exactly
+`runner_invocations=0`, `workload_invocations=0`, and `timed_benchmark_invocations=0`; there is no
+machine-qualification, listening, capacity, threshold, or performance claim yet.
