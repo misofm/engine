@@ -131,3 +131,94 @@ Terra did not inspect or repair that gate after the failure. Consequently the Wa
 inspection, post-run candidate/source/lock/corpus re-seal, checked-corpus validation, full exact-
 closure test/Clippy/rustdoc/format/policy/static gates, and final PASS verdict remain unrun.
 `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Sol attempt 2 final evidence — PASS (2026-08-22)
+
+Final clean candidate: `e649b6211e4c1ce7b26f6c4b3978ae59f4344564`; accepted Issue-070
+dependency: `f952f20`; stopped Issue-069 technical input: `5ce93c0`. The first Terra failure was a
+selector defect, not duplicate production code. Source contains exactly one `#[inline(never)]`
+`process_tpt_wasm_simd128_inner` definition and one safe-wrapper call. `wasm-objdump -d` names the
+inner once in its address-prefixed `func[index] <symbol>:` definition header and again at that call
+reference. The prior raw-substring count therefore returned two, and its unanchored AWK stop did
+not delimit an address-prefixed next function.
+
+The bounded Sol correction changed only `scripts/check-builtins-target-instructions.sh`: it counts
+exact address-plus-`func[index]` definition headers containing the frozen inner name, requires
+exactly one, begins extraction only at that definition header and stops at the next function
+header. Shell syntax, a synthetic definition-plus-call transcript and static one-definition/
+one-wrapper checks passed before the correction was committed. No production source, DSP,
+fixture, target feature, object, tolerance or API changed.
+
+On that clean candidate, Sol invoked the complete candidate-bound script exactly once and without
+retry:
+
+```sh
+scripts/check-builtins-target-instructions.sh
+```
+
+The before/after candidate remained `e649b6211e4c1ce7b26f6c4b3978ae59f4344564`; before/after
+source-manifest SHA-256 was
+`0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19`; before/after Cargo.lock
+SHA-256 was `96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`;
+unique scratch basename was `miso-engine-issue068.VHP1R6`. Tools were Rust
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`, Cargo `1.97.1 (c980f4866 2026-06-30)`, GNU objdump
+2.42 and wasm-objdump 1.0.34. Frozen corpus identities remained manifest
+`bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`, graph PCM
+`508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19` and graph meters
+`958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`.
+
+The executed 16-row selection table was exact (`w/a/x/f` are injected Wasm-SIMD, AArch64-NEON,
+x86-AVX2 and x86-FMA booleans):
+
+| w/a/x/f | Backend | Width |
+| --- | --- | --- |
+| 0/0/0/0 | Scalar | none |
+| 0/0/0/1 | Scalar | none |
+| 0/0/1/0 | X86Avx2 | 8 |
+| 0/0/1/1 | X86Avx2Fma | 8 |
+| 0/1/0/0 | Aarch64Neon | 4 |
+| 0/1/0/1 | Aarch64Neon | 4 |
+| 0/1/1/0 | X86Avx2 | 8 |
+| 0/1/1/1 | X86Avx2Fma | 8 |
+| 1/0/0/0 | WasmSimd128 | 4 |
+| 1/0/0/1 | WasmSimd128 | 4 |
+| 1/0/1/0 | X86Avx2 | 8 |
+| 1/0/1/1 | X86Avx2Fma | 8 |
+| 1/1/0/0 | Aarch64Neon | 4 |
+| 1/1/0/1 | Aarch64Neon | 4 |
+| 1/1/1/0 | X86Avx2 | 8 |
+| 1/1/1/1 | X86Avx2Fma | 8 |
+
+The native host prepared and executed mandatory AVX2 non-FMA and AVX2+FMA paths. Four-rate
+scalar/bank rows passed: 44,100 Hz `b1dc6cb4340e2587`, 48,000 Hz `880b5d4b2bc6cce7`,
+88,200 Hz `be67b6b958f1df14`, and 96,000 Hz `c4d6558079359c99`. Named object/symbol SHA-256
+rows were:
+
+| Leg | Object | Exact symbol body |
+| --- | --- | --- |
+| native scalar | `8a7e572d2e4a3916d43780c457eecbe2fd6aa508160d1ff736d8a303627eea35` | `cdaa8c53a4fcf9691e3b3a0800fef37645a3e1de833e45d59af0b4fdfbce1c3e` |
+| native AVX2 | `2fe1d9ce9e82f57d9ba865da4c131ee6a57d9a93ac63e433116c10a7df85b724` | `54f2866f18bdd66de2fabb15e6d373f65b2627735bffd1e5952789f6063998e5` |
+| native AVX2+FMA | `192b768ddfdcf6760a31cb7946a7b3f05cc4d5c1037b9af73f939e19a80b6a08` | `4a2842e9b30760f71ebb9d60266b0b412e5ec11ec754aabd7977632e857f7d5d` |
+| AArch64 NEON | `187539957f7c2dacf3e160c9ce76fdaf5c7b9444fddcf07a0f6baf3975d7e878` | `4991b3367690f5606a0cb7ab67202bc7d82e184bfa087bf830db55bd44b3e75f` |
+| Wasm scalar | `4cf54a3aa66bb86bb8b0bb4cabfa3aa63b76ca4ea646eaceec628eada05d7a7b` | `989140ce295edbfeae6d24e4f79e54757d6d5836f62452bd49f85492255684cb` |
+| Wasm simd128 | `c27a56e0ecb1c6afb4bc9d9f176dceefb1942dffdf3b729b94d28ec77a79ea7e` | `e5ad164b7a3bb8ce0743afafc65b19d8406964243a0274a8f8ece7c8f104834e` |
+
+The scalar body had no packed AVX/FMA; AVX2 used eight-lane `vmulps/vaddps/vsubps` without fusion;
+AVX2+FMA had exactly the frozen `vfmsub/vfmadd/vfnmadd` sites; NEON used four-lane
+`fmul/fadd/fsub` without fusion; Wasm scalar had no SIMD/relaxed opcode; the unique Wasm SIMD TPT
+body had `f32x4.mul/add/sub` and no relaxed SIMD. Release closure builds passed for native scalar,
+Android AArch64, iOS AArch64, Wasm scalar and Wasm simd128. Cross-target evidence remains
+compile/object-only and makes no device/browser runtime claim.
+
+The final nonbenchmark seal passed: read-only checked corpus (50 files); format; locked offline
+all-target/all-feature check and tests for the exact five-package closure (107 tests);
+warning-denied all-target/all-feature Clippy and rustdoc for that closure; workspace, realtime,
+rack and builtin policy checks plus every corresponding mutation suite; shell syntax; candidate,
+lockfile and corpus reseal; diff/static no-artifact and no-workload scans. The worktree remained
+clean through qualification.
+
+Sol verdict: **PASS**. Issue 068 qualifies the builtin candidate for the frozen native/AArch64/Wasm
+selection, build and named-instruction contract and unblocks its exact downstream consumers.
+`sol_complete_candidate_script_invocations=1`; `cumulative_candidate_script_invocations=4`;
+`workload_invocations=0`;
+`timed_benchmark_invocations=0`; `benchmark_invocations=0`.
