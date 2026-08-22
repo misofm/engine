@@ -93,8 +93,10 @@ qualification**, follows 037, replaces the placeholder byte-fold workload and al
 authorize one warmup plus two measured rounds. Issue 038 completed its one authorized invocation
 without retry; its evidence remains descriptive rather than an optimization claim.
 
-Issues 009, 022, 024, 031 and 026 wait for 037 because their completed product contracts require
-the retained production builtin-SIMD graph. Issue 038 is a dependency only of release
+Issues 009, 022, 024 and 026 wait for 037 because their completed product contracts require
+the retained production builtin-SIMD graph. Issue 031 is a bounded evaluation-only comparison
+after accepted Issues 036, 037 and 068; it may close with no adoption and gates no launch consumer.
+Issue 038 is a dependency only of release
 qualification issue 026; it does not block scheduler issue 009, streaming issue 010, effects or
 deployment feature work. Issue 042 and Issues 013, 014, 021 and 053 continue to consume Issue 008's
 preserved generic architecture/effect-bank slice without treating its stopped issue as PASS.

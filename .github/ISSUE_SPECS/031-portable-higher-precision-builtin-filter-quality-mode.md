@@ -1,42 +1,134 @@
 # 031 Portable higher-precision builtin filter quality mode
 
-## Outcome
+## Status and outcome
 
-Determine whether Engine V2 should offer an explicit production higher-precision HPF/LPF mode,
-and add it only if measured audio benefit justifies its portable state, ABI, memory, and CPU cost.
+**READY — evaluation/adoption decision only.** Determine whether one portable retained-`f64`
+variant produces a preregistered material numerical improvement over the accepted launch `f32`
+HPF/LPF recurrence at acceptable static storage/SIMD cost. If it qualifies, close this issue with a
+selection record and create a separate stateless implementation successor. If it does not qualify,
+close **NO ADOPTION** with launch `f32` unchanged.
 
-## Context
+This issue permits exactly two total attempts: one Terra execution/review and, only for a bounded
+harness/oracle defect, one Sol correction and one complete rerun. A genuine candidate failure is a
+valid no-adoption result, not permission to tune it. `matrix_invocations=0` and
+`timed_benchmark_invocations=0` at briefing.
 
-Issue 007 uses a conditioned two-state `f32` trapezoidal/TPT realization for launch Butterworth
-HPF/LPF. Its independent `f64` implementation is an oracle, not production. Issue 008 banks lanes
-as Wasm/NEON `f32x4` and AVX2 `f32x8`. This issue is stateless and does not assume wider precision
-is better or required. Never inspect, copy, benchmark, or inherit V1/legacy work.
+## Accepted baseline and context
 
-## Scope
+The baseline is the Issue-036 accepted launch domain and conditioned two-state TPT realization:
+coefficients `(c1,a2,a3,k)` and states `(s1,s2)` are retained as `f32`; scalar, base W4/W8 and the
+separately gated AVX2+FMA backend preserve the Issue-037 operation contract. Issue 068 accepted the
+native/AArch64/Wasm backend-selection and instruction matrix. Issue 070 is upstream qualification
+context, not a direct dependency of this numerical decision. Stopped Issues 007 and 008 are
+historical technical input only and are not PASS dependencies.
 
-Compare scalar `f64`, paired-`f32`/double-single or compensated state, and accepted `f32` TPT.
-Decide whether one candidate becomes an explicit prepared quality mode. Define session/control
-metadata, cohort signature, reset/state serialization, target lowering, resources, and fallback.
+There is no current builtin-quality field in session metadata or the builtin bank signature.
+Therefore this issue must not add one. A selected candidate is only eligible for a successor that
+separately freezes public metadata, prepared layout, serialization, resources, scalar/W4/W8
+lowering, target evidence and migration behavior.
+
+Never inspect, copy, benchmark against or inherit V1/legacy work.
+
+## Frozen candidate
+
+Compare the accepted baseline with exactly one candidate, `RetainedF64IncrementalV1`:
+
+- accept only the unchanged Issue-036 `f32` cutoff/rate domain;
+- compute and retain `(c1,a2,a3,k)` as `f64` from that exact cutoff value and retain `(s1,s2)` as
+  `f64`;
+- promote each normalized finite `f32` input once, execute the exact accepted incremental TPT
+  temporary order in nonfused `f64`, select low/high output, then round once to `f32`;
+- use no FMA, extended accumulator, per-row tuning, hidden scalar correction or changed transfer;
+- canonicalize committed state whose magnitude is below `f32::MIN_POSITIVE` and the final `f32`
+  output if subnormal or negative zero; preserve accepted input sanitation and lane-local invalid
+  recovery semantics; and
+- project W4 as two `f64x2` vectors and W8 as two `f64x4` vectors. This is a static feasibility
+  projection only; no target kernel is implemented here.
+
+The semantic payload is six retained words per section: 48 bytes for the candidate versus 24
+bytes for the baseline; serialized mutable state is 16 versus 8 bytes. Selection requires no new
+semantic words, scratch, latency or tail, and at most two vector operations for each accepted
+nonfused vector operation. Paired-`f32`, double-single, compensated and other wider candidates are
+not evaluated; adding another family would require a new issue and derivation.
+
+## One bounded comparison
+
+The complete matrix uses only launch rates `44_100,48_000,88_200,96_000`. For both HPF and LPF,
+each rate uses eight exact cutoffs: `10`, `20`, `100`, `1_000`, `min(20_000,0.1*Fs)`, `0.45*Fs`,
+the immediate `f32` predecessor of the Issue-036 maximum and that exact maximum. This is 64 filter
+configurations. Each uses the accepted probe construction
+`{0.25*f,f,4*f,0.2*Fs,0.45*Fs}`, clamped to `[4,Nyquist-4]`, rounded to the nearest 4 Hz and
+deduplicated, yielding exactly 296 sustained/DFT probe rows.
+
+For baseline, candidate and an algebraically independent `f64` RBJ/direct-form oracle, execute:
+
+1. analytic transfer/cutoff comparison for all 296 rows;
+2. one-second zero-state impulse renders and finite-window rectangular DFTs for all 64
+   configurations, comparing like-duration DFTs rather than an infinite analytic response;
+3. accepted sustained `0.5`-amplitude coherent sine measurement (`Fs/2` settle, `Fs/4` measure)
+   for all 296 rows; and
+4. 65,536-sample `+0.5` DC, `-0.5` DC and SplitMix64 bipolar-noise sequences for all 64
+   configurations, seed `0x0000000000000310`, plus one compact signed-zero/subnormal/nonfinite
+   lane-isolation sequence for each rate/filter kind.
+
+Partition the time-domain rows by `1,127,128,255,1024` and require each realization to reproduce
+its own sample/state/report bits across partitions. The independent oracle receives the exact
+finite `f32` input promoted to `f64`; it must not call production builtins or reuse the candidate
+recurrence.
+
+## Adoption gates
+
+The candidate qualifies only if every gate passes:
+
+1. Its unrounded transfer matches the independent RBJ transfer within `1e-12` absolute per
+   normalized coefficient; analytic magnitude/cutoff error is `<=1e-9 dB` where the reference is
+   `>=-120 dB`.
+2. Every finite-window impulse DFT differs from the same-window oracle by `<=0.005 dB` where the
+   oracle is `>=-120 dB`; legal sequences remain finite and bounded with zero invalid recovery.
+3. The baseline demonstrates a material precision limit: at least eight sustained/DC/noise rows,
+   spanning all four rates and both filter kinds, have oracle-normalized residual worse than
+   `-120 dB`.
+4. On every such row the candidate improves residual by `>=6 dB`, improves the global worst row
+   by `>=12 dB`, and its global worst residual is `<=-126 dB`. No matrix row may regress by more
+   than `0.25 dB` residual or `0.0001 dB` gain.
+5. Reset, sanitation, recovery, signed-zero and lane-isolation reports match the accepted semantic
+   actions; repeated runs and all five partitions produce identical hashes.
+6. The exact 2x retained-byte and vector-operation ceilings above hold, with zero added scratch,
+   latency or tail. No wall time, cycles or benchmark result participates in selection.
+
+If all gates pass, record **SELECTED FOR SEPARATE IMPLEMENTATION**; that is not production
+acceptance. If any numerical, materiality, portability or cost gate fails, record **NO ADOPTION**.
+If the oracle/harness cannot be corrected within the two-attempt budget, record **STOPPED** without
+an adoption decision.
+
+## Deliverables and evidence
+
+- one V2 reference-only candidate/oracle harness and one canonical complete-matrix transcript;
+- candidate/baseline/oracle equations, case counts, first failures, worst rows, recovery and
+  canonicalization counts, exact payload/resource projection and deterministic per-phase hashes;
+- source/grid/equation/seed/transcript SHA-256 identities and before/after proof that production,
+  session, runtime and graph sources are unchanged; and
+- Terra/Sol verdict, `matrix_invocations` and `timed_benchmark_invocations=0`.
 
 ## Explicit non-goals
 
-Silently widening launch mode, changing response/cutoff semantics, treating the oracle as
-production, requiring nonexistent Wasm `f64x4` or AVX2 `f64x8`, or weakening issue-007 gates.
+Production DSP/core/session/metadata/resource changes; adding a quality mode; changing the launch
+domain, coefficient family, baseline recurrence, FMA sites, latency, tail or recovery policy;
+additional candidate families; target builds or object inspection already accepted by Issue 068;
+listening; benchmarking/timing; performance claims; or a production implementation successor
+before this decision is recorded.
 
 ## Dependencies by exact issue title
 
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime
-- Dual-mono builtins and metering
+- Representable TPT cutoff domain and builtin contract acceptance
 - Production SIMD builtin bank graph retention and reachability qualification
+- Builtin native, AArch64, and Wasm runtime-selection and instruction qualification
 
-## Required evidence and acceptance
+## Terra execution surface
 
-Freeze equations, rounding, state representation/conversion, and scalar/Wasm/NEON/AVX2/FMA
-lowering. Preregister a falsifiable adoption threshold, then collect all-rate/all-cutoff analytic,
-impulse, coherent-sine, residual-noise, DC, stopband, fault, listening, memory, and cycles/frame
-evidence against issue 007 and an independent oracle. An adopted mode is explicit in immutable
-metadata and cohort signature, never auto-selected; it preserves zero latency, tail/reset/sanitize
-semantics, dual-mono isolation, deterministic scalar repetition, bounded SIMD differential error,
-zero render allocation/free, and no track ceiling. If benefit is not repeatable or portable cost is
-disproportionate, close with launch `f32` unchanged.
+Terra may change only a new Issue-031 module/test inside `miso-engine-dsp-reference`, its module
+declaration, this issue's evidence and one concise decision line in `dsp-research/filters.md` after
+the run. No Cargo dependency is expected. Compile/no-run, format, focused reference tests and
+warning-denied focused Clippy must pass before the one complete matrix invocation is authorized.
