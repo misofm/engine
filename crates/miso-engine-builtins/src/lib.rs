@@ -3109,6 +3109,229 @@ mod tests {
         ]
     }
 
+    // This record and its injection helper are deliberately test-module private.  They qualify
+    // the retained scalar prepared-chain layout without introducing a production/test-support
+    // surface or a general state interchange format.
+    #[derive(Debug, Eq, PartialEq)]
+    struct PreparedChainSnapshotV1 {
+        filter_state_bits: [u32; 8],
+        matrix_current_bits: [u32; 4],
+        matrix_target_bits: [u32; 4],
+        remaining_updates: u32,
+        lifetime_recoveries: [u64; 2],
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy)]
+    enum PreparedChainFilterSectionV1 {
+        LeftHpf,
+        LeftLpf,
+        RightHpf,
+        RightLpf,
+    }
+
+    fn matrix_bits(matrix: Matrix2x2) -> [u32; 4] {
+        [
+            matrix.ll.to_bits(),
+            matrix.lr.to_bits(),
+            matrix.rl.to_bits(),
+            matrix.rr.to_bits(),
+        ]
+    }
+
+    fn prepared_chain_snapshot_v1(chain: &BuiltinChain) -> PreparedChainSnapshotV1 {
+        let (left, right) = chain.input.lifetime_recovered_state();
+        PreparedChainSnapshotV1 {
+            filter_state_bits: input_state_bits(&chain.input),
+            matrix_current_bits: matrix_bits(chain.matrix.current),
+            matrix_target_bits: matrix_bits(chain.matrix.target),
+            remaining_updates: chain.matrix.remaining_updates,
+            lifetime_recoveries: [left, right],
+        }
+    }
+
+    fn inject_prepared_chain_filter_state_v1(
+        chain: &mut BuiltinChain,
+        section: PreparedChainFilterSectionV1,
+        s1_bits: u32,
+        s2_bits: u32,
+    ) {
+        let filter = match section {
+            PreparedChainFilterSectionV1::LeftHpf => &mut chain.input.left.hpf,
+            PreparedChainFilterSectionV1::LeftLpf => &mut chain.input.left.lpf,
+            PreparedChainFilterSectionV1::RightHpf => &mut chain.input.right.hpf,
+            PreparedChainFilterSectionV1::RightLpf => &mut chain.input.right.lpf,
+        };
+        filter.s1 = f32::from_bits(s1_bits);
+        filter.s2 = f32::from_bits(s2_bits);
+    }
+
+    fn issue069_process_call(
+        chain: &mut BuiltinChain,
+        first_sample: u64,
+        first_left: Option<f32>,
+        first_right: Option<f32>,
+    ) -> BuiltinProcessReport {
+        let mut left = [0.25_f32; 128];
+        let mut right = [-0.5_f32; 128];
+        if let Some(value) = first_left {
+            left[0] = value;
+        }
+        if let Some(value) = first_right {
+            right[0] = value;
+        }
+        chain
+            .process_dual_mono(
+                DualMonoBlock::new(&mut left, &mut right, first_sample).expect("fixed block"),
+            )
+            .expect("prepared chain call")
+    }
+
+    #[test]
+    fn issue069_prepared_chain_snapshot_reset_and_recovery_script_is_exact() {
+        let mut chain = BuiltinChain::new(
+            48_000,
+            BuiltinParameters {
+                left: ChannelParameters {
+                    hpf_hz: 100.0,
+                    lpf_hz: 1_000.0,
+                    ..ChannelParameters::default()
+                },
+                right: ChannelParameters {
+                    hpf_hz: 200.0,
+                    lpf_hz: 2_000.0,
+                    ..ChannelParameters::default()
+                },
+                matrix: Matrix2x2::IDENTITY,
+                smoothing_samples: 257,
+            },
+        )
+        .expect("prepare exact chain");
+
+        assert_eq!(
+            prepared_chain_snapshot_v1(&chain),
+            PreparedChainSnapshotV1 {
+                filter_state_bits: [0; 8],
+                matrix_current_bits: matrix_bits(Matrix2x2::IDENTITY),
+                matrix_target_bits: matrix_bits(Matrix2x2::IDENTITY),
+                remaining_updates: 0,
+                lifetime_recoveries: [0, 0],
+            }
+        );
+
+        let swap = Matrix2x2 {
+            ll: 0.0,
+            lr: 1.0,
+            rl: 1.0,
+            rr: 0.0,
+        };
+        chain.set_matrix_target(swap).expect("call one target");
+        assert_eq!(
+            issue069_process_call(&mut chain, 0, None, None),
+            BuiltinProcessReport::default()
+        );
+        let after_call_one = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(after_call_one.matrix_target_bits, matrix_bits(swap));
+        assert_eq!(after_call_one.remaining_updates, 129);
+
+        let second_target = Matrix2x2 {
+            ll: 0.9,
+            lr: 0.1,
+            rl: -0.1,
+            rr: 0.9,
+        };
+        chain
+            .set_matrix_target(second_target)
+            .expect("call two retarget");
+        assert_eq!(chain.matrix.remaining_updates, 257);
+        assert_eq!(
+            issue069_process_call(&mut chain, 128, None, None),
+            BuiltinProcessReport::default()
+        );
+        assert_eq!(prepared_chain_snapshot_v1(&chain).remaining_updates, 129);
+
+        let before_rejected_target = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(
+            chain.set_matrix_target(Matrix2x2 {
+                ll: f32::NAN,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            }),
+            Err(BuiltinParameterError::MatrixCoefficient)
+        );
+        assert_eq!(
+            prepared_chain_snapshot_v1(&chain),
+            before_rejected_target,
+            "a rejected target is transactional"
+        );
+        assert_eq!(
+            issue069_process_call(&mut chain, 256, Some(f32::NAN), Some(f32::INFINITY)),
+            BuiltinProcessReport {
+                sanitized_input: 2,
+                sanitized_output: 0,
+                recovered_left_state: 0,
+                recovered_right_state: 0,
+            }
+        );
+
+        inject_prepared_chain_filter_state_v1(
+            &mut chain,
+            PreparedChainFilterSectionV1::LeftHpf,
+            f32::NAN.to_bits(),
+            0.0_f32.to_bits(),
+        );
+        inject_prepared_chain_filter_state_v1(
+            &mut chain,
+            PreparedChainFilterSectionV1::RightLpf,
+            f32::INFINITY.to_bits(),
+            0.0_f32.to_bits(),
+        );
+        assert_eq!(
+            issue069_process_call(&mut chain, 384, None, None),
+            BuiltinProcessReport {
+                sanitized_input: 0,
+                sanitized_output: 0,
+                recovered_left_state: 1,
+                recovered_right_state: 1,
+            }
+        );
+        let after_recovery = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(after_recovery.lifetime_recoveries, [1, 1]);
+        assert!(after_recovery.filter_state_bits.into_iter().all(|bits| {
+            let value = f32::from_bits(bits);
+            value.is_finite() && !value.is_subnormal()
+        }));
+
+        chain.reset(BuiltinResetKind::DiscontinuityKeepTargets);
+        let after_discontinuity = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(after_discontinuity.filter_state_bits, [0; 8]);
+        assert_eq!(
+            after_discontinuity.matrix_current_bits,
+            after_discontinuity.matrix_target_bits
+        );
+        assert_eq!(after_discontinuity.remaining_updates, 0);
+        assert_eq!(after_discontinuity.lifetime_recoveries, [1, 1]);
+        assert_eq!(
+            issue069_process_call(&mut chain, 512, None, None),
+            BuiltinProcessReport::default()
+        );
+
+        chain.reset(BuiltinResetKind::FullToPrepared);
+        let after_full = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(after_full.filter_state_bits, [0; 8]);
+        assert_eq!(
+            after_full.matrix_current_bits,
+            after_full.matrix_target_bits
+        );
+        assert_eq!(after_full.remaining_updates, 0);
+        assert_eq!(after_full.lifetime_recoveries, [1, 1]);
+        assert_eq!(
+            issue069_process_call(&mut chain, 640, None, None),
+            BuiltinProcessReport::default()
+        );
+    }
+
     fn assert_reference_coefficients(production: &TptSvf, reference: ReferenceRetainedTptF32) {
         assert_eq!(
             [

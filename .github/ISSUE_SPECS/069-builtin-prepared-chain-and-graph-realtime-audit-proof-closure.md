@@ -149,3 +149,27 @@ fixture manifest and four payload hashes; unchanged three Issue-064 hashes; both
 records; state/report/meter/result rows; A/B/C and destruction-owner rows; nine counter/probe rows;
 all-thread raw/validator hashes; commands/results; strict Terra/Sol verdicts;
 `workload_invocations=0`; and `timed_benchmark_invocations=0`.
+
+## Terra attempt 1, tranche 1 evidence — FAIL
+
+Candidate technical input: `431cdc3`. The internal `#[cfg(test)]` builtin proof is implemented in
+`miso-engine-builtins`: its private V1 record is exactly eight filter-state words, eight matrix
+words, `remaining_updates`, and two lifetime recovery counters. Its six-call script passes atomic
+nonfinite-target rejection, input sanitation, lane/filter-local injected recovery, and both reset
+modes without adding a Cargo feature, exported item, or normal-build symbol.
+
+The required graph half is structurally blocked by the current production preparation contract.
+The attempted accepted-Issue-067 topology bound fourteen real requests (two capacity-one meter
+sets at each of the seven taps), but `prepare_session_builtins` rejected every second request with
+`builtin.meter.duplicate` at `$.meters[track_id=vocal,tap=<Tap>]`. The existing request identity
+therefore permits only one meter consumer per `(track_id, tap)`, so it cannot prove the frozen
+success/full two-set outcome without a separately scoped change to preparation semantics. The
+unbinding graph-test scaffold was removed; no production duplicate-meter behavior was changed and
+no substitute observer or fabricated tap proof was used.
+
+Focused builtin command: `cargo test --locked -p miso-engine-builtins --lib
+issue069_prepared_chain_snapshot_reset_and_recovery_script_is_exact` — PASS (1 passed, 0 failed).
+Graph work stopped at the exact duplicate-meter diagnostic; no graph replacement test, audit,
+fixture author, lifecycle/trace, workload, timing, or benchmark command ran.
+
+`workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
