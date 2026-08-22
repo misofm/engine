@@ -2,11 +2,11 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Implement one cohesive control-plane product: canonical package
-bytes, verified exact-byte CIDv1 and deterministic selection over that verified table. Existing
-package/CID code is provisional technical input. Permit Terra once and one bounded Sol correction;
-the second failure stops. Accepted Issue 082 is present at merge
-`fb054bae41777585d12a48e71c99a2cfa9c3e3e4`. Benchmark and timed invocation counts remain zero.
+**SOL PASS / COMPLETE / READY TO CLOSE.** The allocation-boundary correction at `f295734`, Terra
+checkpoints `6af336c`, `d375db3`, `05cfabd` and `ae02d2a`, and the bounded three-path Sol correction
+produced clean candidate `40fbcff97f82210b81db112c42dc162cf156a6b1` on
+`codex/batch-feature-078`. The full locked nonbenchmark workspace/policy seal passed. Workload,
+benchmark, timed, audit, browser and general-target invocation counts are each zero.
 
 ## Frozen implementation order
 
@@ -64,3 +64,20 @@ runtime/compiler seam, or pulling Issue-081 qualification machinery into this pr
 Accepted Issue 078 unblocks **Third-party WASM package and effect ABI conformance kit**. Broad
 interchange fuzzing, 100-process/multitarget evidence, allocation audit and the sole later benchmark
 remain in **Canonical effect interchange qualification, fuzzing, and benchmark** after Issue 080.
+
+## Final Sol verdict
+
+**PASS.** The three-path correction sealed partial-table diagnostic priority, all five one-below
+encode canaries, full Python diagnostic identity/overflow/artifact-limit behavior and exhaustive
+ASCII CID prefix/alphabet rejection without changing frozen package bytes. The independent packages
+are 2,547 and 1,327 bytes with SHA-256 values
+`af7b5d38afd3191c33d9d40d95d933ff9b83fe949cb95c3d80bd7bbf916daa52` and
+`6a5934e1222a8601c0aca2194da10f00cc5357596b6355f6c5d64baf748f532c`; manifest SHA-256 is
+`74cb06877960c1675e24742b65df373254ce71341522e2196038053c9d571bf3`.
+
+Executed evidence passed exact 96/72 package layout and canonicalization, checked diagnostics and
+atomicity, exactly-one nested Issue-082 allocation with zero native/retained package allocation,
+strict 36/59-byte CID coding, deterministic selection plus rehash, independent Python vectors,
+native and scalar-Wasm checks, full locked workspace check/tests, warning-denied Clippy/rustdoc,
+formatting, policies/mutations and static/diff/artifact scans. Issue 078 is complete and ready to
+close; Issues 027 and 081 are unblocked.

@@ -232,6 +232,49 @@ native tests, scalar `wasm32-unknown-unknown` compile/object checks, format, wor
 and mutations, static dependency/unsafe/artifact scans, then one proportional locked nonbenchmark
 workspace seal. No benchmark or timed command is authorized.
 
+## Final Sol evidence — 2026-08-22
+
+**PASS / COMPLETE / READY TO CLOSE.** The allocation-boundary briefing correction at `f295734`
+permitted exactly one accepted Issue-082 validation-and-identity pass, bounded by the 4,194,304-byte
+descriptor cap, while retaining the allocation-free package-native contract. Terra completed the
+product in coherent checkpoints `6af336c` (canonical package wire), `d375db3` (CID), `05cfabd`
+(verified selection) and `ae02d2a` (qualification). Sol's single bounded correction produced clean
+candidate `40fbcff97f82210b81db112c42dc162cf156a6b1` on `codex/batch-feature-078`; it changed only
+`src/package.rs`, `src/cid.rs` and `scripts/effect-package-v1-reference.py` (241 insertions, 107
+deletions). The correction made partial-table prefix limit/reserved priority executable, proved
+encode canaries for every one-below configured limit, froze complete independent diagnostic
+identities including overflow and the 128 MiB artifact cap, and exhaustively rejected every invalid
+ASCII CID prefix/alphabet value and position.
+
+The two independent vectors remain exact. Comprehensive A is 2,547 package bytes with package
+SHA-256 `af7b5d38afd3191c33d9d40d95d933ff9b83fe949cb95c3d80bd7bbf916daa52` and CID text
+`bafkreifppnotrl6tdeodhwoubwk5sm77tob75fe4xfod3af5po7zc3nkki`. Comprehensive B is 1,327
+package bytes with package SHA-256
+`6a5934e1222a8601c0aca2194da10f00cc5357596b6355f6c5d64baf748f532c` and CID text
+`bafkreidkle2ocirkqya4blfcdfg2cdyazrjvowllmnk7nrowjoxxjd2tfq`. The sorted fixture manifest
+SHA-256 is `74cb06877960c1675e24742b65df373254ce71341522e2196038053c9d571bf3`.
+
+Executed evidence proves the 96-byte header and 72-byte artifact prefix; exact canonical grammar,
+ordering, zero padding, contiguous content and per-content hashes; checked limits/host fit and
+32-byte diagnostic phases; borrowed private-construction verified values; 36-byte CIDv1 binary and
+59-byte lowercase base32; deterministic feature-subset precedence and selected-content rehash; and
+atomic required-size/encode failure behavior. Allocation instrumentation observed exactly one
+nested Issue-082 pass for each publication operation, zero package-native allocations, and no
+surviving allocation. Current production descriptors, independent Python encode/verify/re-encode,
+native execution and scalar-Wasm compile/object/no-SIMD evidence all passed.
+
+The clean candidate passed `cargo fmt --all -- --check`; locked workspace all-target/all-feature
+check and tests; warning-denied locked workspace all-target/all-feature Clippy and rustdoc; the
+effect-package reference/native/scalar-Wasm check; workspace, realtime and effect-runtime policies
+plus applicable mutation suites; and dependency, allocation/unsafe, render-reachability,
+generated-artifact and diff scans. Final counters are `workload_invocations=0`,
+`benchmark_invocations=0`, `timed_invocations=0`, `audit_invocations=0`,
+`browser_invocations=0`, and `general_target_invocations=0`.
+
+Issue 078 is complete and ready for evidence commit/push, GitHub synchronization and closure. It
+directly unblocks **Third-party WASM package and effect ABI conformance kit** (Issue 027) and
+**Canonical effect interchange qualification, fuzzing, and benchmark** (Issue 081).
+
 ## Allowed files and non-goals
 
 Allowed implementation surface is `crates/miso-engine-effect-package/src/{package,cid,diagnostic,
