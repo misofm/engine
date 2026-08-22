@@ -1,0 +1,14 @@
+{
+  "descriptor_identity_hex": "752552864ed6796526d1859f83795bb3facea6cc91bc1fa5e3e796ee67284ff1",
+  "descriptor_wire_bytes": 653,
+  "descriptor_wire_sha256": "cff6a313be6b04a8932343928a0ab69c296fadcdca88922032b217c20a81aea9",
+  "header_bytes": 224,
+  "initial_count": 3,
+  "initial_record_bytes": 16,
+  "initial_start": 248,
+  "payload_start": 296,
+  "schema": "miso.effect-state.expected.v1",
+  "state_bytes": 309,
+  "state_digest_hex": "858e6db10df1b69626736bf2d5f29634866269599d0428710c95e2103dfc837f",
+  "state_sha256": "b38a9abad3da50b0c38bd02b9de19b641e79f9a8f48099fbb67d1ec3d481cf48"
+}

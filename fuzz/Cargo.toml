@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 miso-engine-session = { path = "../crates/miso-engine-session" }
 miso-engine-protocol = { path = "../crates/miso-engine-protocol" }
+miso-engine-effect-contract = { path = "../crates/miso-engine-effect-contract" }
 miso-engine-effect-package = { path = "../crates/miso-engine-effect-package" }
 
 [[bin]]

@@ -120,6 +120,32 @@ static ALTERNATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     ..DESCRIPTOR
 };
 
+const fn overflow_quality(sample_rate: u32) -> QualityDescriptorV1 {
+    QualityDescriptorV1 {
+        quality: EffectQuality::Normal,
+        sample_rate,
+        latency: LatencySamples(9),
+        tail: TailSamples::Finite(17),
+        maximum_state: STATE_SIZES,
+        scratch_fixed_bytes: 1,
+        scratch_bytes_per_frame: u64::MAX,
+    }
+}
+
+static OVERFLOW_QUALITIES: [QualityDescriptorV1; 4] = [
+    overflow_quality(44_100),
+    overflow_quality(48_000),
+    overflow_quality(88_200),
+    overflow_quality(96_000),
+];
+
+static OVERFLOW_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    id: effect_id("test.state-overflow"),
+    display_name: "State overflow test",
+    qualities: &OVERFLOW_QUALITIES,
+    ..DESCRIPTOR
+};
+
 static INITIAL: [InitialParameterValue; 3] = [
     InitialParameterValue {
         parameter_index: 0,
@@ -214,6 +240,210 @@ fn get_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn fixture_hex(value: &str) -> Vec<u8> {
+    let digits: Vec<_> = value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    assert_eq!(digits.len() % 2, 0);
+    digits
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16).unwrap() as u8;
+            let low = (pair[1] as char).to_digit(16).unwrap() as u8;
+            (high << 4) | low
+        })
+        .collect()
+}
+
+#[test]
+fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() {
+    let descriptor_fixture = fixture_hex(include_str!(
+        "../../../fixtures/effect-state/v1/canonical.descriptor.wire.hex"
+    ));
+    let identity_fixture = fixture_hex(include_str!(
+        "../../../fixtures/effect-state/v1/canonical.descriptor.identity.hex"
+    ));
+    let state_fixture = include_bytes!("../../../fixtures/effect-state/v1/canonical.state.bin");
+    let state_hex_fixture = fixture_hex(include_str!(
+        "../../../fixtures/effect-state/v1/canonical.state.hex"
+    ));
+    let digest_fixture = fixture_hex(include_str!(
+        "../../../fixtures/effect-state/v1/canonical.state.digest.hex"
+    ));
+    let rust_wire = descriptor_wire(&DESCRIPTOR);
+    assert_eq!(rust_wire, descriptor_fixture);
+    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
+    assert_eq!(bound.identity().as_bytes(), identity_fixture.as_slice());
+    assert_eq!(&state_fixture[24..56], identity_fixture.as_slice());
+    assert_eq!(state_fixture.as_slice(), state_hex_fixture);
+    assert_eq!(&state_fixture[56..88], digest_fixture);
+
+    let verified =
+        verify_effect_state_v1(bound, state_fixture, EffectStateLimitsV1::default()).unwrap();
+    validate_effect_state_current_layout_v1(verified).unwrap();
+    validate_effect_state_replay_v1(verified, replay()).unwrap();
+    assert_eq!(
+        verified.payloads(),
+        (&b"com"[..], &b"left!"[..], &b"right"[..])
+    );
+    assert_eq!(verified.initial_values().collect::<Vec<_>>(), INITIAL);
+
+    let requirements =
+        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
+    assert_eq!(requirements.envelope_bytes, state_fixture.len() as u64);
+    let mut encoded = vec![0xa5; requirements.envelope_bytes as usize];
+    encode_effect_state_v1(
+        bound,
+        replay(),
+        b"com",
+        b"left!",
+        b"right",
+        EffectStateLimitsV1::default(),
+        &mut encoded,
+    )
+    .unwrap();
+    assert_eq!(encoded, state_fixture);
+}
+
+#[test]
+fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
+    let descriptor_fixture = fixture_hex(include_str!(
+        "../../../fixtures/effect-state/v1/canonical.descriptor.wire.hex"
+    ));
+    let state = include_bytes!("../../../fixtures/effect-state/v1/canonical.state.bin");
+    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
+    let initial_start = 248;
+    let mut cases: Vec<(&str, Vec<u8>, EffectStateDiagnosticV1)> = Vec::new();
+    cases.push((
+        "truncated-header",
+        state[..223].to_vec(),
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Header,
+            0,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            223,
+        ),
+    ));
+    for (name, mutate, expected) in [
+        (
+            "magic",
+            (0_usize, 1_u8),
+            (
+                EffectStateDiagnosticCodeV1::Header,
+                0,
+                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                0_u64,
+            ),
+        ),
+        (
+            "reserved-flags",
+            (12, 1),
+            (
+                EffectStateDiagnosticCodeV1::Reserved,
+                0,
+                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                12,
+            ),
+        ),
+        (
+            "initial-reserved",
+            (initial_start + 12, 1),
+            (
+                EffectStateDiagnosticCodeV1::Reserved,
+                0,
+                0,
+                (initial_start + 12) as u64,
+            ),
+        ),
+        (
+            "digest",
+            (56, state[56] ^ 1),
+            (
+                EffectStateDiagnosticCodeV1::Digest,
+                0,
+                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                56,
+            ),
+        ),
+    ] {
+        let mut bytes = state.to_vec();
+        bytes[mutate.0] = mutate.1;
+        cases.push((
+            name,
+            bytes,
+            EffectStateDiagnosticV1::new(expected.0, expected.1, expected.2, expected.3),
+        ));
+    }
+    let mut length = state.to_vec();
+    length[16..24].copy_from_slice(&((state.len() + 1) as u64).to_le_bytes());
+    cases.push((
+        "total-length",
+        length,
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Length,
+            0,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            16,
+        ),
+    ));
+    let mut quality = state.to_vec();
+    put_u32(&mut quality, 104, 99);
+    cases.push((
+        "quality-enum",
+        quality,
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Enum,
+            0,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            104,
+        ),
+    ));
+    let mut text = state.to_vec();
+    text[224] = b'T';
+    cases.push((
+        "effect-text",
+        text,
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Text,
+            0,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            124,
+        ),
+    ));
+    let mut order = state.to_vec();
+    put_u32(&mut order, initial_start + 16 + 4, 3);
+    cases.push((
+        "initial-order",
+        order,
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Order,
+            0,
+            2,
+            (initial_start + 32) as u64,
+        ),
+    ));
+    let mut identity = state.to_vec();
+    identity[24] ^= 1;
+    refresh_digest(&mut identity);
+    cases.push((
+        "descriptor-identity",
+        identity,
+        EffectStateDiagnosticV1::new(
+            EffectStateDiagnosticCodeV1::Descriptor,
+            3 << 16,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        ),
+    ));
+
+    for (name, bytes, expected) in cases {
+        let actual =
+            verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+        assert_eq!(actual, expected, "{name}");
+    }
+}
+
 #[test]
 fn diagnostic_layout_and_default_limits_are_frozen() {
     assert_eq!(core::mem::size_of::<EffectStateDiagnosticV1>(), 32);
@@ -241,6 +471,34 @@ fn diagnostic_layout_and_default_limits_are_frozen() {
             maximum_payload_bytes: 134_217_728,
             maximum_initial_values: 4_096,
         }
+    );
+}
+
+#[test]
+fn checked_scratch_arithmetic_reports_exact_overflow_before_layout() {
+    let wire = descriptor_wire(&OVERFLOW_DESCRIPTOR);
+    let bound = bind_effect_descriptor_wire_v1(&OVERFLOW_DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let replay = EffectStateReplayViewV1 {
+        effect_id: OVERFLOW_DESCRIPTOR.id,
+        request: replay().request,
+    };
+    let error =
+        effect_state_v1_requirements(bound, replay, EffectStateLimitsV1::default()).unwrap_err();
+    assert_eq!(
+        (
+            error.code,
+            error.detail,
+            error.item_index,
+            error.byte_offset,
+            error.required_bytes,
+        ),
+        (
+            EffectStateDiagnosticCodeV1::Overflow,
+            0,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            176,
+            0,
+        )
     );
 }
 
@@ -421,6 +679,387 @@ fn borrowed_verification_enforces_each_caller_cap() {
             EffectStateDiagnosticCodeV1::Limit
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_verify_diagnostic(
+    name: &str,
+    bound: BoundEffectDescriptorWireV1<'_>,
+    bytes: &[u8],
+    code: EffectStateDiagnosticCodeV1,
+    detail: u32,
+    item_index: u32,
+    byte_offset: u64,
+    required_bytes: u64,
+) {
+    let actual = verify_effect_state_v1(bound, bytes, EffectStateLimitsV1::default()).unwrap_err();
+    assert_eq!(
+        (
+            actual.code,
+            actual.detail,
+            actual.item_index,
+            actual.byte_offset,
+            actual.required_bytes,
+        ),
+        (code, detail, item_index, byte_offset, required_bytes),
+        "{name}"
+    );
+}
+
+fn assert_replay_metadata(
+    name: &str,
+    bound: BoundEffectDescriptorWireV1<'_>,
+    bytes: &mut [u8],
+    detail: u32,
+) {
+    refresh_digest(bytes);
+    let verified = verify_effect_state_v1(bound, bytes, EffectStateLimitsV1::default()).unwrap();
+    let actual = validate_effect_state_replay_v1(verified, replay()).unwrap_err();
+    assert_eq!(
+        (
+            actual.code,
+            actual.detail,
+            actual.item_index,
+            actual.byte_offset,
+            actual.required_bytes,
+        ),
+        (
+            EffectStateDiagnosticCodeV1::Metadata,
+            detail,
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            0,
+        ),
+        "{name}"
+    );
+}
+
+#[test]
+fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
+    let (wire, original) = encoded_state();
+    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let unavailable = EFFECT_STATE_V1_UNAVAILABLE_INDEX;
+
+    for (name, offset, size, value, code, diagnostic_offset) in [
+        (
+            "version",
+            8,
+            2,
+            2_u64,
+            EffectStateDiagnosticCodeV1::Header,
+            8,
+        ),
+        (
+            "header-bytes",
+            10,
+            2,
+            223,
+            EffectStateDiagnosticCodeV1::Header,
+            10,
+        ),
+        ("flags", 12, 4, 1, EffectStateDiagnosticCodeV1::Reserved, 12),
+        (
+            "total",
+            16,
+            8,
+            original.len() as u64 + 1,
+            EffectStateDiagnosticCodeV1::Length,
+            16,
+        ),
+        (
+            "layout-zero",
+            92,
+            4,
+            0,
+            EffectStateDiagnosticCodeV1::Header,
+            92,
+        ),
+        (
+            "reserved-tail",
+            148,
+            4,
+            1,
+            EffectStateDiagnosticCodeV1::Reserved,
+            148,
+        ),
+        (
+            "reserved-state",
+            172,
+            4,
+            1,
+            EffectStateDiagnosticCodeV1::Reserved,
+            172,
+        ),
+        (
+            "reserved-request",
+            212,
+            4,
+            1,
+            EffectStateDiagnosticCodeV1::Reserved,
+            212,
+        ),
+        (
+            "initial-table-bytes",
+            188,
+            4,
+            47,
+            EffectStateDiagnosticCodeV1::Length,
+            188,
+        ),
+        (
+            "payload-total",
+            216,
+            8,
+            12,
+            EffectStateDiagnosticCodeV1::Length,
+            216,
+        ),
+    ] {
+        let mut bytes = original.clone();
+        match size {
+            2 => bytes[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+            4 => bytes[offset..offset + 4].copy_from_slice(&(value as u32).to_le_bytes()),
+            8 => bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes()),
+            _ => unreachable!(),
+        }
+        assert_verify_diagnostic(
+            name,
+            bound,
+            &bytes,
+            code,
+            0,
+            unavailable,
+            diagnostic_offset,
+            0,
+        );
+    }
+
+    for (name, offset, value, diagnostic_offset) in [
+        ("quality-enum", 104, 0, 104),
+        ("bypass-enum", 108, 2, 108),
+        ("link-enum", 112, 0, 112),
+        ("sidechain-kind-enum", 116, 3, 116),
+        ("sidechain-required-enum", 120, 2, 120),
+        ("tail-kind-enum", 144, 3, 144),
+    ] {
+        let mut bytes = original.clone();
+        put_u32(&mut bytes, offset, value);
+        assert_verify_diagnostic(
+            name,
+            bound,
+            &bytes,
+            EffectStateDiagnosticCodeV1::Enum,
+            0,
+            unavailable,
+            diagnostic_offset,
+            0,
+        );
+    }
+
+    for (name, mutate, detail) in [
+        ("contract-major", (88_usize, 2_u64, 2_usize), 2),
+        ("contract-minor", (90, 8, 2), 2),
+        ("layout", (92, 4, 4), 3),
+        ("sample-rate", (96, 44_100, 4), 4),
+        ("quantum", (100, 9, 4), 5),
+        ("quality", (104, 1, 4), 6),
+        ("bypass", (108, 0, 4), 7),
+        ("link", (112, 3, 4), 8),
+        ("sidechain-kind", (116, 1, 4), 9),
+        ("sidechain-required", (120, 1, 4), 9),
+        ("latency", (136, 10, 8), 10),
+        ("finite-tail", (152, 18, 8), 11),
+        ("scratch", (176, 28, 8), 13),
+        ("automation", (184, 24, 4), 14),
+        ("request-state", (192, 65, 8), 15),
+        ("request-scratch", (200, 129, 8), 15),
+        ("request-automation", (208, 24, 4), 15),
+    ] {
+        let mut bytes = original.clone();
+        match mutate.2 {
+            2 => bytes[mutate.0..mutate.0 + 2].copy_from_slice(&(mutate.1 as u16).to_le_bytes()),
+            4 => put_u32(&mut bytes, mutate.0, mutate.1 as u32),
+            8 => bytes[mutate.0..mutate.0 + 8].copy_from_slice(&mutate.1.to_le_bytes()),
+            _ => unreachable!(),
+        }
+        assert_replay_metadata(name, bound, &mut bytes, detail);
+    }
+
+    let mut descriptor_identity = original.clone();
+    descriptor_identity[24] ^= 1;
+    refresh_digest(&mut descriptor_identity);
+    assert_verify_diagnostic(
+        "descriptor-identity",
+        bound,
+        &descriptor_identity,
+        EffectStateDiagnosticCodeV1::Descriptor,
+        3 << 16,
+        unavailable,
+        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        0,
+    );
+    let mut digest = original.clone();
+    digest[56] ^= 1;
+    assert_verify_diagnostic(
+        "digest",
+        bound,
+        &digest,
+        EffectStateDiagnosticCodeV1::Digest,
+        0,
+        unavailable,
+        56,
+        0,
+    );
+
+    let mut effect_length = original.clone();
+    put_u32(&mut effect_length, 124, 11);
+    assert_verify_diagnostic(
+        "effect-id-bytes",
+        bound,
+        &effect_length,
+        EffectStateDiagnosticCodeV1::Text,
+        0,
+        unavailable,
+        128,
+        0,
+    );
+    let mut sidechain_length = original.clone();
+    put_u32(&mut sidechain_length, 128, 7);
+    sidechain_length[241] = 0;
+    assert_replay_metadata("sidechain-id-bytes", bound, &mut sidechain_length, 9);
+    let mut initial_count = original.clone();
+    put_u32(&mut initial_count, 132, 4);
+    assert_verify_diagnostic(
+        "initial-count",
+        bound,
+        &initial_count,
+        EffectStateDiagnosticCodeV1::Length,
+        0,
+        unavailable,
+        188,
+        0,
+    );
+
+    for (name, offset) in [
+        ("common-bytes", 160),
+        ("left-bytes", 164),
+        ("right-bytes", 168),
+    ] {
+        let mut bytes = original.clone();
+        let value = get_u32(&bytes, offset) + 1;
+        put_u32(&mut bytes, offset, value);
+        assert_verify_diagnostic(
+            name,
+            bound,
+            &bytes,
+            EffectStateDiagnosticCodeV1::Length,
+            0,
+            unavailable,
+            216,
+            0,
+        );
+    }
+    let mut partition_sizes = original.clone();
+    put_u32(&mut partition_sizes, 160, 4);
+    put_u32(&mut partition_sizes, 168, 4);
+    assert_replay_metadata("state-size-partition", bound, &mut partition_sizes, 12);
+
+    let mut padding = original.clone();
+    padding[242] = 1;
+    assert_verify_diagnostic(
+        "padding",
+        bound,
+        &padding,
+        EffectStateDiagnosticCodeV1::Length,
+        0,
+        unavailable,
+        242,
+        0,
+    );
+    for (name, byte, expected_offset) in [("effect-text", 224, 124), ("sidechain-text", 234, 128)] {
+        let mut bytes = original.clone();
+        bytes[byte] = b'A';
+        assert_verify_diagnostic(
+            name,
+            bound,
+            &bytes,
+            EffectStateDiagnosticCodeV1::Text,
+            0,
+            unavailable,
+            expected_offset,
+            0,
+        );
+    }
+    let mut order = original.clone();
+    put_u32(&mut order, 248 + 16 + 4, ParameterChannel::Both as u32);
+    assert_verify_diagnostic(
+        "initial-order",
+        bound,
+        &order,
+        EffectStateDiagnosticCodeV1::Order,
+        0,
+        2,
+        280,
+        0,
+    );
+    let mut initial_enum = original.clone();
+    put_u32(&mut initial_enum, 248 + 4, 0);
+    assert_verify_diagnostic(
+        "initial-channel",
+        bound,
+        &initial_enum,
+        EffectStateDiagnosticCodeV1::Enum,
+        0,
+        0,
+        252,
+        0,
+    );
+    let mut initial_value = original.clone();
+    put_u32(&mut initial_value, 248 + 8, f32::NAN.to_bits());
+    assert_verify_diagnostic(
+        "initial-value",
+        bound,
+        &initial_value,
+        EffectStateDiagnosticCodeV1::InitialValues,
+        0,
+        0,
+        256,
+        0,
+    );
+    let mut payload = original.clone();
+    payload[296] ^= 1;
+    assert_verify_diagnostic(
+        "payload-digest",
+        bound,
+        &payload,
+        EffectStateDiagnosticCodeV1::Digest,
+        0,
+        unavailable,
+        56,
+        0,
+    );
+    assert_verify_diagnostic(
+        "truncation",
+        bound,
+        &original[..original.len() - 1],
+        EffectStateDiagnosticCodeV1::Length,
+        0,
+        unavailable,
+        16,
+        0,
+    );
+    let mut trailing = original.clone();
+    trailing.push(0);
+    assert_verify_diagnostic(
+        "trailing",
+        bound,
+        &trailing,
+        EffectStateDiagnosticCodeV1::Length,
+        0,
+        unavailable,
+        16,
+        0,
+    );
 }
 
 #[test]

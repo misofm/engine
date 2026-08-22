@@ -10,10 +10,12 @@ expected_compiler=$'miso-engine-compressor\nmiso-engine-core\nmiso-engine-delay\
 [[ "$(dependencies crates/miso-engine-effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi
 package_references="$(
-    rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools 2>/dev/null |
+    rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools fuzz 2>/dev/null |
         rg -v '^crates/miso-engine-effect-package/' |
         rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/prepare[.]rs|tests/(scalar|bank)_state[.]rs):' || true
 )"
+package_references="$(printf '%s\n' "$package_references" |
+    rg -v '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' || true)"
 if [[ -n "$package_references" ]]; then
     printf '%s\n' "$package_references" >&2
     fail 'effect-package reference escaped the issue-079 compiler state boundary'

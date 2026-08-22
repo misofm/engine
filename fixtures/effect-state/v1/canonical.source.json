@@ -1,0 +1,155 @@
+{
+  "descriptor": {
+    "contract_major": 1,
+    "contract_minor": 7,
+    "display_name": "State test",
+    "effect_id": "test.state",
+    "name": "effect-state-v1",
+    "parameters": [
+      {
+        "automatable": true,
+        "automation_rate": 2,
+        "channel_policy": 1,
+        "default_bits": "00000000",
+        "display_name": "Shared",
+        "display_unit": "linear",
+        "domain": 1,
+        "enum_choices": [],
+        "id": 1,
+        "mapping": 1,
+        "maximum_bits": "3f800000",
+        "minimum_bits": "bf800000",
+        "readable": true,
+        "smoothing": 1,
+        "smoothing_samples": 0,
+        "unit": 5
+      },
+      {
+        "automatable": true,
+        "automation_rate": 2,
+        "channel_policy": 2,
+        "default_bits": "00000000",
+        "display_name": "Per lane",
+        "display_unit": "linear",
+        "domain": 1,
+        "enum_choices": [],
+        "id": 2,
+        "mapping": 1,
+        "maximum_bits": "40000000",
+        "minimum_bits": "c0000000",
+        "readable": true,
+        "smoothing": 1,
+        "smoothing_samples": 0,
+        "unit": 5
+      }
+    ],
+    "ports": [
+      {
+        "id": "main-in",
+        "layout": 1,
+        "required": true,
+        "role": 1
+      },
+      {
+        "id": "main-out",
+        "layout": 1,
+        "required": true,
+        "role": 2
+      },
+      {
+        "id": "detector",
+        "layout": 1,
+        "required": false,
+        "role": 3
+      }
+    ],
+    "qualities": [
+      {
+        "common_state_bytes": 3,
+        "latency_samples": 9,
+        "left_state_bytes": 5,
+        "quality": 2,
+        "right_state_bytes": 5,
+        "sample_rate": 44100,
+        "scratch_bytes_per_frame": 2,
+        "scratch_fixed_bytes": 11,
+        "tail_kind": 1,
+        "tail_samples": 17
+      },
+      {
+        "common_state_bytes": 3,
+        "latency_samples": 9,
+        "left_state_bytes": 5,
+        "quality": 2,
+        "right_state_bytes": 5,
+        "sample_rate": 48000,
+        "scratch_bytes_per_frame": 2,
+        "scratch_fixed_bytes": 11,
+        "tail_kind": 1,
+        "tail_samples": 17
+      },
+      {
+        "common_state_bytes": 3,
+        "latency_samples": 9,
+        "left_state_bytes": 5,
+        "quality": 2,
+        "right_state_bytes": 5,
+        "sample_rate": 88200,
+        "scratch_bytes_per_frame": 2,
+        "scratch_fixed_bytes": 11,
+        "tail_kind": 1,
+        "tail_samples": 17
+      },
+      {
+        "common_state_bytes": 3,
+        "latency_samples": 9,
+        "left_state_bytes": 5,
+        "quality": 2,
+        "right_state_bytes": 5,
+        "sample_rate": 96000,
+        "scratch_bytes_per_frame": 2,
+        "scratch_fixed_bytes": 11,
+        "tail_kind": 1,
+        "tail_samples": 17
+      }
+    ],
+    "state_layout_version": 3,
+    "supported_link_mode_bits": 7
+  },
+  "payload": {
+    "common_hex": "636f6d",
+    "left_hex": "6c65667421",
+    "right_hex": "7269676874"
+  },
+  "replay": {
+    "bypass": true,
+    "initial_values": [
+      {
+        "channel": 3,
+        "parameter_index": 0,
+        "value_bits": "3e800000"
+      },
+      {
+        "channel": 1,
+        "parameter_index": 1,
+        "value_bits": "bf000000"
+      },
+      {
+        "channel": 2,
+        "parameter_index": 1,
+        "value_bits": "3fc00000"
+      }
+    ],
+    "link_mode": 2,
+    "maximum_automation_spans_per_block": 23,
+    "maximum_scratch_bytes": 128,
+    "maximum_total_state_bytes": 64,
+    "quality": 2,
+    "quantum": 8,
+    "sample_rate": 48000,
+    "sidechain_id": "detector",
+    "sidechain_kind": 2,
+    "sidechain_required": false
+  },
+  "schema": "miso.effect-state.source.v1"
+}

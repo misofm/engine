@@ -158,6 +158,7 @@ name = "miso-engine-session-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "miso-engine-effect-contract",
  "miso-engine-effect-package",
  "miso-engine-protocol",
  "miso-engine-session",

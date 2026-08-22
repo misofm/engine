@@ -688,7 +688,8 @@ fn malformed_replay_is_rejected_before_initial_scratch() {
     let controls = Arc::new(Controls::default());
     let descriptor_wire = wire(&DESCRIPTOR);
     let preparation = preparation(48_000);
-    let mut envelope = snapshot(&controls, &descriptor_wire, &preparation);
+    let canonical = snapshot(&controls, &descriptor_wire, &preparation);
+    let mut envelope = canonical.clone();
     envelope[224] = b'u';
     refresh_digest(&mut envelope);
     let capability = bound(&controls, &descriptor_wire);
@@ -709,6 +710,27 @@ fn malformed_replay_is_rejected_before_initial_scratch() {
     assert_eq!(
         (error.code, error.detail),
         (EffectStateDiagnosticCodeV1::Metadata, 1)
+    );
+    assert!(initial.iter().all(|value| value.parameter_index == 88));
+    assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
+
+    let mut wrong_sizes = canonical;
+    put_u32(&mut wrong_sizes, 160, 2);
+    put_u32(&mut wrong_sizes, 168, 1);
+    refresh_digest(&mut wrong_sizes);
+    let capability = bound(&controls, &descriptor_wire);
+    let before = controls.prepare_calls.load(Ordering::SeqCst);
+    let error = restore_scalar_effect_state_v1(
+        capability,
+        &wrong_sizes,
+        EffectStateLimitsV1::default(),
+        admission(&preparation),
+        &mut initial,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (error.code, error.detail),
+        (EffectStateDiagnosticCodeV1::Metadata, 12)
     );
     assert!(initial.iter().all(|value| value.parameter_index == 88));
     assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
