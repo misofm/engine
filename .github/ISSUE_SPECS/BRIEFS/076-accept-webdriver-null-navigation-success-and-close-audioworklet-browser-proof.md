@@ -2,11 +2,11 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Consume stopped Issue-075 checkpoint `a0c46af`, its unchanged fixture
-and preserved failed seal as technical input only. Use one Terra attempt plus one bounded Sol
-correction. Correct only the command-specific WebDriver null-success handling, reseal on a clean
-candidate, and execute the unchanged representative browser proof at most once after explicit Sol
-authorization. Issue-076 browser/workload/benchmark/timed counters begin at zero.
+**FINAL SOL FAIL / STOPPED / RESCOPED; NO OVERALL PASS.** Checkpoint `1875c97` preserves the
+command-aware response correction and green nonbrowser evidence. Its sole seal, SHA-256
+`fcaf7688feee1bd3ba07f6b0ddf18c5ca8f4b9188827f990c0a3497b0fc6d638`, omitted explicit hashes for
+the runner, test, seal and run scripts required by the brief. No browser ran; all invocation counters
+remain zero. Do not reseal or continue Issue 076. Deferred Issue 077 owns that exact evidence defect.
 
 ## Literal implementation surface
 

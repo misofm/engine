@@ -9,13 +9,10 @@ gates; this issue changes no engine or AudioWorklet architecture.
 
 ## Status, technical input and attempt budget
 
-**SOL-BRIEFED / READY FOR TERRA ATTEMPT 1.** Stopped Issue-075 checkpoint `a0c46af`, its fixture,
-2,744-byte seal with SHA-256
-`5f30451e45ba2d81e8ec665a726f0ca423268100ee3f812aab9ba16b7addf0c7`, and its failed invocation are
-technical input, not an accepted dependency. Permit exactly one Terra attempt and one bounded Sol
-correction. A second failure stops. At briefing,
-`browser_correctness_invocations=0`, `workload_invocations=0`, `benchmark_invocations=0`, and
-`timed_invocations=0` for Issue 076.
+**FINAL SOL FAIL / STOPPED / RESCOPED; NO OVERALL PASS.** Checkpoint `1875c97` preserves the
+command-aware WebDriver response correction and its green nonbrowser gates as technical input only.
+The sole no-browser seal authorization was consumed, so Issue 076 cannot reseal or run a browser.
+Issue 077 owns the omitted explicit runner identities and later browser proof.
 
 ## Frozen correction
 
@@ -66,3 +63,25 @@ Workload/benchmark/timed counters remain zero.
 ## Primary reference
 
 - [W3C WebDriver — Navigate To](https://www.w3.org/TR/webdriver2/#navigate-to)
+
+## Final Sol evidence and disposition
+
+On clean candidate `1875c97`, the exact two-file correction, response mutations, focused Rust tests,
+Clippy/rustdoc, policies, scalar/simd128 artifacts, object/opcode checks and independent raw-Wasm
+oracle passed. The sole authorized no-browser seal was written to
+`/tmp/issue-076-browser-seal.json`: 2,744 bytes, SHA-256
+`fcaf7688feee1bd3ba07f6b0ddf18c5ca8f4b9188827f990c0a3497b0fc6d638`, with all counters zero.
+
+Final review found that the seal explicitly hashes product/source, fixture, artifact, browser and
+driver identities but omits the four runner/tool identities frozen above:
+
+- `scripts/web-audioworklet-browser-correctness.py`
+- `scripts/test-web-audioworklet.sh`
+- `scripts/seal-web-audioworklet-browser-correctness.sh`
+- `scripts/run-web-audioworklet-browser-correctness.sh`
+
+The candidate commit indirectly binds tracked bytes but does not satisfy the separately frozen
+explicit runner-hash evidence. No browser was authorized or run, and no product/audio result exists.
+Final counters are `browser_correctness_invocations=0`, `workload_invocations=0`,
+`benchmark_invocations=0`, and `timed_invocations=0`. Issue 077 consumes this checkpoint as technical
+input, not as an accepted dependency.

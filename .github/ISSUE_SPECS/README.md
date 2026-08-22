@@ -82,18 +82,21 @@ stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical
 not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, stopped
 after its sole browser invocation rejected WebDriver Navigate To's valid null success before product
 execution; checkpoint `a0c46af`, its fixture and seal remain technical input only. Issue 076,
-**Accept WebDriver null navigation success and close AudioWorklet browser proof**, owns only that
-runner correction, a fresh reseal and one new no-retry execution of the unchanged representative
-browser gate. Issue 074, **Browser AudioWorklet qualification and deployment matrix**, follows
-accepted Issue 076 and owns the separable demo, browser/device matrix, long-run, memory/GC, bundle
-and descriptive performance breadth; it gates only Issue 026. Issues 074 and 076 each permit one
-Terra attempt plus one Sol correction and prohibit benchmark/timing work.
+**Accept WebDriver null navigation success and close AudioWorklet browser proof**, then stopped when
+its no-browser seal omitted four explicitly required runner identities; checkpoint `1875c97` and its
+seal remain technical input. Deferred Issue 077, **Bind AudioWorklet browser proof runner
+identities**, owns only those hashes/mutations, a fresh reseal and one later no-retry browser proof.
+Issue 074, **Browser AudioWorklet qualification and deployment matrix**, follows accepted Issue 077
+and owns the separable demo, browser/device matrix, long-run, memory/GC, bundle and descriptive
+performance breadth; it gates only Issue 026. Issue 077 is not started: after three consecutive
+AudioWorklet stops, orchestration moves to another dependency-ready feature. Issues 074 and 077 each
+permit one Terra attempt plus one Sol correction and prohibit benchmark/timing work.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
 058 technical input -> 072. Issue 008 needs 036's accepted preparation/metadata and
-sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 076 wait
+sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 077 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 072 seals that candidate and its accepted benchmark; issue 026 waits for both
 072 and 033. This ordering forbids synthetic trials, audible-quality
@@ -110,7 +113,7 @@ qualification**, follows 037, replaces the placeholder byte-fold workload and al
 authorize one warmup plus two measured rounds. Issue 038 completed its one authorized invocation
 without retry; its evidence remains descriptive rather than an optimization claim.
 
-Issues 009, 022, 076 and 026 wait for 037 because their completed product contracts require
+Issues 009, 022, 077 and 026 wait for 037 because their completed product contracts require
 the retained production builtin-SIMD graph. Issue 031 is a bounded evaluation-only comparison
 after accepted Issues 036, 037 and 068; it may close with no adoption and gates no launch consumer.
 Issue 038 is a dependency only of release
@@ -136,7 +139,7 @@ ownership and accounting closure**, then stopped after two attempts: its plan-ow
 shape, representative correctness and non-`Arc` accounting checkpoint remain accepted technical
 input, but its opaque telemetry `Arc` prevents exact retained accounting and therefore overall PASS.
 Issue 043, **Exact lock-free native source sanitation telemetry handoff**, owns the remaining safe
-move/SPSC/block-stamped correction and gates Issues 022, 023 and 076. Issue 041, **Issue-010 source streaming
+move/SPSC/block-stamped correction and gates Issues 022, 023 and 077. Issue 041, **Issue-010 source streaming
 qualification tooling and adversarial evidence**, follows 043 and owns the expanded diagnostic
 corpus, frozen seek races, real worker-delay audit and duration-independent allocation-layout/RSS
 proof. Issue 041 is nonblocking for hosts/features and gates only release qualification Issue 026.
