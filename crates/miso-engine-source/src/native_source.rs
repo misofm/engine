@@ -506,7 +506,10 @@ impl NativeWorkerAuditGate {
         self.released = true;
         loop {
             match self.resumed.try_pop() {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.released = false;
+                    return Ok(());
+                }
                 Err(QueueEmpty { .. }) => thread::yield_now(),
             }
         }
@@ -1877,17 +1880,22 @@ mod tests {
                 frame: SourceFrame(12),
             })
             .expect("single seek");
+        controller
+            .hold_worker_for_audit()
+            .expect("hold after first seek block");
         let (while_held, held_report) = read_one(&mut consumer);
         assert_eq!(while_held, [4.0, 5.0, 6.0, 7.0]);
         assert_eq!(held_report.active_generation, SourceGeneration(1));
-        gate.release_and_wait().expect("exact seek block submitted");
+        gate.release_and_wait().expect("first seek block submitted");
+        gate.wait_until_held().expect("worker held a second time");
 
         let (first, first_report) = read_one(&mut consumer);
         assert_eq!(first, [12.0, 13.0, 14.0, 15.0]);
         assert_eq!(first_report.active_generation, SourceGeneration(2));
         assert_eq!(first_report.copied_frames, 4);
         assert!(!first_report.end_of_region);
-        sync_worker(&mut controller);
+        gate.release_and_wait()
+            .expect("second seek block submitted");
         let (second, second_report) = read_one(&mut consumer);
         assert_eq!(second, [16.0, 17.0, 18.0, 19.0]);
         assert_eq!(second_report.copied_frames, 4);
