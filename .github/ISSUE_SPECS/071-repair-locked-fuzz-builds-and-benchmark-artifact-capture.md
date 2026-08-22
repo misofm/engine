@@ -130,3 +130,29 @@ Final changed-path/static seal and `git diff --check` passed. Terra verdict: **P
 `historical_unrecorded_benchmark_pipeline_invocations=1`;
 `issue071_fuzz_run_invocations=0`; `issue071_benchmark_workload_invocations=0`;
 `issue071_timed_benchmark_invocations=0`; `issue071_ci_rerun_requests=0`.
+
+## Sol final verification — PASS (2026-08-22)
+
+Sol adversarially verified repair commit `81c10130ed06b03fe3879966e486f5106dc51c60`, Terra evidence
+commit `b6db0360648ad0ebd5481d0f099d25cfcc6d23d2`, and the unchanged Issue-071 files at committed
+candidate `265109f300f58e005ac7a68a56298d167c5ae809`. The exact Issue-071 range changes only
+the four authorized workflow, fuzz-lock and evidence paths, and `git diff --check` passes. Frozen
+pre-change workflow and fuzz-lock hashes reproduce as
+`8f85718ec907dcabd808a8d9b5a1a0d8d4b6152a1ed60c8f8ced967b61fcab0a` and
+`0be0fbe18be5635a5bc40d12395dd50a4ea358ed822722c426a9559443a0873b`; current workflow,
+fuzz-lock and immutable root-lock hashes are respectively
+`8f69e862876d0bdda977c96be46f945d1826199bde9a096abcc4206b7ab064b7`,
+`bf56130a8ea92bae516074ee60c40eb7740c04fe91b78a16b95f6a014d12e9f6`, and
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`.
+
+Static verification found exactly three benchmark `tee target/` pipelines and exactly three
+corresponding ordered `pipefail`, `mkdir -p target`, and nonempty regular-file guards. The
+generated version-4 fuzz lock contains the effect-contract/effect-package closure and the fuzz
+package's three unchanged path dependencies. Without regenerating the lock, pinned Rust/Cargo
+1.97.1 `metadata --locked --no-deps` and `check --locked --bins` both passed. Terra's accepted
+scratch-only producer matrix supplies the bounded pipeline behavioral proof; Sol launched no CI,
+fuzz target or benchmark.
+
+Final Sol verdict: **PASS**. `historical_unrecorded_benchmark_pipeline_invocations=1`;
+`issue071_fuzz_run_invocations=0`; `issue071_benchmark_workload_invocations=0`;
+`issue071_timed_benchmark_invocations=0`; `issue071_ci_rerun_requests=0`.

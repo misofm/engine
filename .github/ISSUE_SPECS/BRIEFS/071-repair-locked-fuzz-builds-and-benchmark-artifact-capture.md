@@ -125,3 +125,11 @@ The root lock, fuzz manifest, and toolchain remained frozen; exact-path/diff che
 `historical_unrecorded_benchmark_pipeline_invocations=1`;
 `issue071_fuzz_run_invocations=0`; `issue071_benchmark_workload_invocations=0`;
 `issue071_timed_benchmark_invocations=0`; `issue071_ci_rerun_requests=0`.
+
+## Final Sol status
+
+**PASS at committed candidate `265109f300f58e005ac7a68a56298d167c5ae809`.** Sol reproduced the
+exact path/hash/static guard proofs and pinned Rust/Cargo 1.97.1 locked metadata/check gates without
+regenerating the lock. The accepted Terra scratch-only pipeline matrix remains the behavioral
+proof. No Issue-071 fuzz, benchmark, timing or CI invocation occurred; all frozen zero counters
+remain unchanged.
