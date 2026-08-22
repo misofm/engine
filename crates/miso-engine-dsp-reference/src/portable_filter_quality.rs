@@ -510,6 +510,24 @@ fn assert_partition_identity(
     expected
 }
 
+fn legal_render_is_valid(kind: RealizationKind, rendered: &Rendered) -> bool {
+    let state_is_finite = match kind {
+        RealizationKind::Baseline => rendered
+            .state
+            .into_iter()
+            .all(|word| f32::from_bits(word as u32).is_finite()),
+        RealizationKind::Candidate | RealizationKind::Oracle => rendered
+            .state
+            .into_iter()
+            .all(|word| f64::from_bits(word).is_finite()),
+    };
+    rendered.samples.iter().all(|sample| sample.is_finite())
+        && state_is_finite
+        && rendered.report.sanitized_inputs == 0
+        && rendered.report.sanitized_outputs == 0
+        && rendered.report.invalid_recoveries == 0
+}
+
 fn impulse(rate: u32) -> Vec<f32> {
     let mut input = vec![0.0; rate as usize];
     input[0] = 1.0;
@@ -627,6 +645,7 @@ struct Summary {
     impulse_failures: usize,
     regression_failures: usize,
     semantic_failures: usize,
+    semantic_recoveries: u64,
     limited_rows: usize,
     limited_rate_mask: u8,
     limited_kind_mask: u8,
@@ -662,6 +681,7 @@ impl Summary {
             impulse_failures: 0,
             regression_failures: 0,
             semantic_failures: 0,
+            semantic_recoveries: 0,
             limited_rows: 0,
             limited_rate_mask: 0,
             limited_kind_mask: 0,
@@ -778,6 +798,7 @@ impl Summary {
             && self.impulse_failures == 0
             && self.regression_failures == 0
             && self.semantic_failures == 0
+            && self.semantic_recoveries == 8
             && self.baseline_report.invalid_recoveries == 0
             && self.candidate_report.invalid_recoveries == 0
     }
@@ -876,38 +897,45 @@ fn run_impulses(configurations: &[Configuration], summary: &mut Summary) {
         let candidate =
             assert_partition_identity(RealizationKind::Candidate, configuration, &input);
         let oracle = assert_partition_identity(RealizationKind::Oracle, configuration, &input);
+        let representative = ProbeRow {
+            configuration,
+            frequency: f64::from(configuration.cutoff),
+        };
+        for (kind, rendered) in [
+            (RealizationKind::Baseline, &baseline),
+            (RealizationKind::Candidate, &candidate),
+            (RealizationKind::Oracle, &oracle),
+        ] {
+            if !legal_render_is_valid(kind, rendered) {
+                summary.impulse_failures += 1;
+                summary.fail("impulse_legal_render", representative);
+            }
+        }
         mix_input(&mut summary.hash, &input);
         for frequency in probes(configuration) {
             let expected = dft_db(&oracle.samples, configuration.rate, frequency);
             if expected >= -120.0 {
-                for (phase, actual) in [
-                    (
-                        "baseline_impulse",
-                        dft_db(&baseline.samples, configuration.rate, frequency),
-                    ),
-                    (
-                        "candidate_impulse",
-                        dft_db(&candidate.samples, configuration.rate, frequency),
-                    ),
-                ] {
-                    let error = (actual - expected).abs();
-                    let row = ProbeRow {
-                        configuration,
-                        frequency,
-                    };
-                    Summary::observe_worst(
-                        &mut summary.worst_impulse_error_db,
-                        &mut summary.worst_impulse_row,
-                        error,
-                        phase,
-                        row,
-                    );
-                    if !error.is_finite() || error > 0.005 {
-                        summary.impulse_failures += 1;
-                        summary.fail(phase, row);
-                    }
-                    mix_hash(&mut summary.hash, error.to_bits());
+                let baseline_error =
+                    (dft_db(&baseline.samples, configuration.rate, frequency) - expected).abs();
+                let candidate_error =
+                    (dft_db(&candidate.samples, configuration.rate, frequency) - expected).abs();
+                let row = ProbeRow {
+                    configuration,
+                    frequency,
+                };
+                Summary::observe_worst(
+                    &mut summary.worst_impulse_error_db,
+                    &mut summary.worst_impulse_row,
+                    candidate_error,
+                    "candidate_impulse",
+                    row,
+                );
+                if !candidate_error.is_finite() || candidate_error > 0.005 {
+                    summary.impulse_failures += 1;
+                    summary.fail("candidate_impulse", row);
                 }
+                mix_hash(&mut summary.hash, baseline_error.to_bits());
+                mix_hash(&mut summary.hash, candidate_error.to_bits());
             }
         }
         for hash in [baseline.hash, candidate.hash, oracle.hash] {
@@ -928,6 +956,16 @@ fn observe_time_domain(
     let baseline = assert_partition_identity(RealizationKind::Baseline, row.configuration, input);
     let candidate = assert_partition_identity(RealizationKind::Candidate, row.configuration, input);
     let oracle = assert_partition_identity(RealizationKind::Oracle, row.configuration, input);
+    for (kind, rendered) in [
+        (RealizationKind::Baseline, &baseline),
+        (RealizationKind::Candidate, &candidate),
+        (RealizationKind::Oracle, &oracle),
+    ] {
+        if !legal_render_is_valid(kind, rendered) {
+            summary.regression_failures += 1;
+            summary.fail("legal_sequence", row);
+        }
+    }
     mix_input(&mut summary.hash, input);
     let baseline_samples = &baseline.samples[measured_offset..];
     let candidate_samples = &candidate.samples[measured_offset..];
@@ -1004,6 +1042,8 @@ fn run_semantics(summary: &mut Summary) {
                 assert_partition_identity(RealizationKind::Candidate, configuration, &control);
             if baseline.report.sanitized_inputs != 4
                 || candidate.report.sanitized_inputs != 4
+                || baseline.report.sanitized_outputs != 0
+                || candidate.report.sanitized_outputs != 0
                 || baseline.report.invalid_recoveries != 0
                 || candidate.report.invalid_recoveries != 0
                 || baseline.state != baseline_control.state
@@ -1030,6 +1070,36 @@ fn run_semantics(summary: &mut Summary) {
                     },
                 );
             }
+            let mut recovered = RetainedF64IncrementalV1::design(configuration);
+            recovered.s1 = f64::NAN;
+            let recovered_output = recovered.process(0.25);
+            let mut recovery_control = RetainedF64IncrementalV1::design(configuration);
+            let recovery_control_output = recovery_control.process(0.25);
+            let mut reset = RetainedF64IncrementalV1::design(configuration);
+            let _ = reset.process(0.25);
+            reset.reset();
+            let reset_state = reset.state_bits();
+            let reset_output = reset.process(-0.25);
+            let mut reset_control = RetainedF64IncrementalV1::design(configuration);
+            let reset_control_output = reset_control.process(-0.25);
+            if recovered_output.to_bits() != recovery_control_output.to_bits()
+                || recovered.state_bits() != recovery_control.state_bits()
+                || recovered.report.invalid_recoveries != 1
+                || recovered.report.sanitized_inputs != 0
+                || recovered.report.sanitized_outputs != 0
+                || reset_state != [0, 0]
+                || reset_output.to_bits() != reset_control_output.to_bits()
+                || reset.state_bits() != reset_control.state_bits()
+            {
+                summary.semantic_failures += 1;
+                summary.fail(
+                    "recovery_reset",
+                    ProbeRow {
+                        configuration,
+                        frequency: 0.0,
+                    },
+                );
+            }
             mix_input(&mut summary.hash, &inputs);
             mix_input(&mut summary.hash, &control);
             for hash in [
@@ -1040,6 +1110,21 @@ fn run_semantics(summary: &mut Summary) {
             ] {
                 mix_hash(&mut summary.hash, hash);
             }
+            for word in [
+                u64::from(recovered_output.to_bits()),
+                recovered.state_bits()[0],
+                recovered.state_bits()[1],
+                u64::from(reset_output.to_bits()),
+                reset.state_bits()[0],
+                reset.state_bits()[1],
+            ] {
+                mix_hash(&mut summary.hash, word);
+            }
+            recovered.report.mix_into(&mut summary.hash);
+            reset.report.mix_into(&mut summary.hash);
+            summary.semantic_recoveries = summary
+                .semantic_recoveries
+                .saturating_add(recovered.report.invalid_recoveries);
             summary.baseline_report.accumulate(baseline.report);
             summary.candidate_report.accumulate(candidate.report);
             summary.semantic_rows += 1;
@@ -1136,7 +1221,7 @@ fn summary_record(summary: &Summary) -> String {
         )
     });
     format!(
-        "issue-031 result analytic_rows={} impulse_configurations={} sustained_rows={} sequence_rows={} semantic_rows={} transfer_failures={} analytic_failures={} impulse_failures={} regression_failures={} semantic_failures={} limited_rows={} limited_rate_mask={:x} limited_kind_mask={:x} worst_transfer={:.17e} worst_transfer_row={:?} worst_analytic_db={:.17e} worst_analytic_row={:?} worst_impulse_db={:.17e} worst_impulse_row={:?} baseline_worst_residual_db={:.17e} baseline_worst_row={:?} candidate_on_baseline_worst_db={:.17e} candidate_worst_residual_db={:.17e} candidate_worst_row={:?} global_improvement_db={:.17e} minimum_limited_improvement_db={:.17e} baseline_sanitized_inputs={} baseline_sanitized_outputs={} baseline_state_canonicalizations={} baseline_invalid_recoveries={} candidate_sanitized_inputs={} candidate_sanitized_outputs={} candidate_state_canonicalizations={} candidate_invalid_recoveries={} hash={:016x} first_failure={first_failure:?} pass={}",
+        "issue-031 result analytic_rows={} impulse_configurations={} sustained_rows={} sequence_rows={} semantic_rows={} transfer_failures={} analytic_failures={} impulse_failures={} regression_failures={} semantic_failures={} semantic_recoveries={} limited_rows={} limited_rate_mask={:x} limited_kind_mask={:x} worst_transfer={:.17e} worst_transfer_row={:?} worst_analytic_db={:.17e} worst_analytic_row={:?} worst_impulse_db={:.17e} worst_impulse_row={:?} baseline_worst_residual_db={:.17e} baseline_worst_row={:?} candidate_on_baseline_worst_db={:.17e} candidate_worst_residual_db={:.17e} candidate_worst_row={:?} global_improvement_db={:.17e} minimum_limited_improvement_db={:.17e} baseline_sanitized_inputs={} baseline_sanitized_outputs={} baseline_state_canonicalizations={} baseline_invalid_recoveries={} candidate_sanitized_inputs={} candidate_sanitized_outputs={} candidate_state_canonicalizations={} candidate_invalid_recoveries={} hash={:016x} first_failure={first_failure:?} pass={}",
         summary.analytic_rows,
         summary.impulse_configurations,
         summary.sustained_rows,
@@ -1147,6 +1232,7 @@ fn summary_record(summary: &Summary) -> String {
         summary.impulse_failures,
         summary.regression_failures,
         summary.semantic_failures,
+        summary.semantic_recoveries,
         summary.limited_rows,
         summary.limited_rate_mask,
         summary.limited_kind_mask,
@@ -1183,7 +1269,7 @@ fn complete_comparison() {
     assert_eq!(rows.len(), 296);
     let mut transcript = Transcript::create();
     transcript.record(format!(
-        "issue-031 begin attempt=1 equation_version={EQUATION_VERSION:016x} configurations={} probes={} grid_hash={:016x} seed={NOISE_SEED:016x}",
+        "issue-031 begin attempt=2 matrix_invocations=1 timed_benchmark_invocations=0 equation_version={EQUATION_VERSION:016x} configurations={} probes={} grid_hash={:016x} seed={NOISE_SEED:016x}",
         configurations.len(),
         rows.len(),
         grid_hash(&configurations, &rows),
@@ -1343,6 +1429,7 @@ fn issue031_transcript_schema_has_stable_required_fields() {
     summary.sustained_rows = 296;
     summary.sequence_rows = 192;
     summary.semantic_rows = 8;
+    summary.semantic_recoveries = 8;
     let record = summary_record(&summary);
     for field in [
         "analytic_rows=296",
@@ -1350,6 +1437,7 @@ fn issue031_transcript_schema_has_stable_required_fields() {
         "sustained_rows=296",
         "sequence_rows=192",
         "semantic_rows=8",
+        "semantic_recoveries=8",
         "limited_rate_mask=0",
         "limited_kind_mask=0",
         "hash=",

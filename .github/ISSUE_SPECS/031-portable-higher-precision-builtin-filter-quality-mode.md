@@ -132,3 +132,27 @@ Terra may change only a new Issue-031 module/test inside `miso-engine-dsp-refere
 declaration, this issue's evidence and one concise decision line in `dsp-research/filters.md` after
 the run. No Cargo dependency is expected. Compile/no-run, format, focused reference tests and
 warning-denied focused Clippy must pass before the one complete matrix invocation is authorized.
+
+## Sol pre-matrix correction checkpoint (2026-08-22)
+
+Sol attempt 2 found and corrected one bounded decision-harness defect class without changing the
+candidate, oracle, grid, thresholds or arithmetic. The candidate-only `0.005 dB` impulse gate had
+also rejected the accepted baseline; baseline impulse error is now retained in the deterministic
+hash but cannot veto the candidate gate. Legal impulse/sustained/DC/noise renders now explicitly
+reject nonfinite output/state, unexpected input/output sanitation or invalid recovery. Each of the
+eight rate/filter semantic rows now proves one injected candidate-state recovery, exact reset
+continuation and unchanged control instance, and the transcript requires exactly eight recoveries.
+The canonical begin record identifies `attempt=2`, `matrix_invocations=1` and
+`timed_benchmark_invocations=0` for the still-unrun authorized comparison.
+
+Non-matrix evidence on the unchanged correction:
+
+- `cargo fmt --all -- --check`: PASS;
+- focused Issue-031 tests: PASS, 5 passed;
+- full `miso-engine-dsp-reference` library tests: PASS, 12 passed and the three complete matrices
+  remained ignored; and
+- warning-denied package all-target Clippy: PASS.
+
+The complete Issue-031 comparison was not invoked. Counts remain `matrix_invocations=0` and
+`timed_benchmark_invocations=0`. This is a green correction checkpoint, not final numerical
+evidence and not authorization to run from a dirty candidate.
