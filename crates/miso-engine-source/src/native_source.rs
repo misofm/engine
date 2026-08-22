@@ -1870,8 +1870,6 @@ mod tests {
             .hold_worker_for_audit()
             .expect("hold after next submission");
         let (initial, initial_report) = read_one(&mut consumer);
-        assert_eq!(initial, [0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(initial_report.active_generation, SourceGeneration(1));
         gate.wait_until_held().expect("worker held");
 
         controller
@@ -1884,19 +1882,22 @@ mod tests {
             .hold_worker_for_audit()
             .expect("hold after first seek block");
         let (while_held, held_report) = read_one(&mut consumer);
-        assert_eq!(while_held, [4.0, 5.0, 6.0, 7.0]);
-        assert_eq!(held_report.active_generation, SourceGeneration(1));
         gate.release_and_wait().expect("first seek block submitted");
         gate.wait_until_held().expect("worker held a second time");
 
         let (first, first_report) = read_one(&mut consumer);
+        gate.release_and_wait()
+            .expect("second seek block submitted");
+        let (second, second_report) = read_one(&mut consumer);
+
+        assert_eq!(initial, [0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(initial_report.active_generation, SourceGeneration(1));
+        assert_eq!(while_held, [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(held_report.active_generation, SourceGeneration(1));
         assert_eq!(first, [12.0, 13.0, 14.0, 15.0]);
         assert_eq!(first_report.active_generation, SourceGeneration(2));
         assert_eq!(first_report.copied_frames, 4);
         assert!(!first_report.end_of_region);
-        gate.release_and_wait()
-            .expect("second seek block submitted");
-        let (second, second_report) = read_one(&mut consumer);
         assert_eq!(second, [16.0, 17.0, 18.0, 19.0]);
         assert_eq!(second_report.copied_frames, 4);
         assert!(second_report.end_of_region);
@@ -1906,6 +1907,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm() {
         let mut samples: Vec<f32> = (0_u16..28).map(f32::from).collect();
@@ -1914,15 +1916,20 @@ mod tests {
         let mut native_resolver = resolver(&samples, b"exact-identity");
         let mut seek_caps = caps();
         seek_caps.control_queue_items = NonZeroUsize::new(4).expect("four commands");
-        let (mut controller, mut worker, mut consumer, _) = prepare_native_source_parts(
-            &mut native_resolver,
-            request(NativeWaveRegion {
-                start_frame: SourceFrame(0),
-                length_frames: 28,
-            }),
-            seek_caps,
-        )
-        .expect("prepare");
+        let mut seek_request = request(NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 28,
+        });
+        seek_request.ring_config.frame_capacity = 4;
+        let (prepared, mut gate) =
+            prepare_native_source_with_audit_gate(&mut native_resolver, seek_request, seek_caps)
+                .expect("prepare");
+        let PreparedNativeSource {
+            mut controller,
+            mut consumer,
+            mut worker,
+            ..
+        } = prepared;
         assert!(matches!(
             controller.wait_for_event().expect("ready"),
             NativeSourceWorkerEvent::SourceReady { .. }
@@ -1954,28 +1961,33 @@ mod tests {
         assert!(controller.events.try_pop().is_err());
         controller.try_wake().expect("worker remains live");
         sync_worker(&mut controller);
+        controller
+            .hold_worker_for_audit()
+            .expect("hold after latest first block");
+        sync_worker(&mut controller);
 
         let (while_pending, pending_report) = read_one(&mut consumer);
+
+        gate.wait_until_held()
+            .expect("latest exact-frame block submitted");
+        let (latest, latest_report) = read_one(&mut consumer);
+
+        gate.release_and_wait()
+            .expect("latest contiguous block submitted");
+        let (contiguous, end_report) = read_one(&mut consumer);
+
         assert_eq!(while_pending, [0.0; 4]);
         assert_eq!(pending_report.active_generation, SourceGeneration(2));
         assert_eq!(pending_report.copied_frames, 0);
-
-        sync_worker(&mut controller);
-        sync_worker(&mut controller);
-        sync_worker(&mut controller);
-        let (latest, latest_report) = read_one(&mut consumer);
         assert_eq!(latest, [0.0, 21.0, 22.0, 23.0]);
         assert_eq!(latest_report.active_generation, SourceGeneration(4));
         assert_eq!(latest_report.copied_frames, 4);
         assert!(!latest_report.end_of_region);
-
-        sync_worker(&mut controller);
-        let (contiguous, end_report) = read_one(&mut consumer);
         assert_eq!(contiguous, [24.0, 25.0, 26.0, 27.0]);
         assert_eq!(end_report.active_generation, SourceGeneration(4));
         assert_eq!(end_report.copied_frames, 4);
         assert!(end_report.end_of_region);
-        assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 1);
         assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 1);
         assert_eq!(
             controller
@@ -1993,6 +2005,71 @@ mod tests {
                 native_decoder_sanitized_samples: 1
             }
         ));
+    }
+
+    #[test]
+    fn seek_continuation_pcm_reads_are_preceded_by_audit_acknowledgements() {
+        let source = include_str!("native_source.rs");
+        let cases = [
+            (
+                "fn single_worker_seek_resumes_contiguously_at_the_exact_frame()",
+                ["let (first,", "let (second,"],
+            ),
+            (
+                "fn worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm()",
+                ["let (latest,", "let (contiguous,"],
+            ),
+        ];
+        for (function, reads) in cases {
+            let start = source.find(function).expect("seek continuation test");
+            let tail = &source[start..];
+            let end = tail.find("\n    #[test]\n").unwrap_or(tail.len());
+            let body = &tail[..end];
+            for read in reads {
+                let read_offset = body.find(read).expect("nonzero PCM read");
+                let prefix = &body[..read_offset];
+                let previous_end = prefix.rfind(';').expect("preceding statement");
+                let previous_start = prefix[..previous_end]
+                    .rfind(';')
+                    .map_or(0, |offset| offset + 1);
+                let preceding = &prefix[previous_start..=previous_end];
+                assert!(preceding.contains("gate."));
+                assert!(!preceding.contains("sync_worker"));
+                assert!(!preceding.contains("snapshot_native_decoder"));
+            }
+        }
+        let held_reads = [
+            (
+                "fn single_worker_seek_resumes_contiguously_at_the_exact_frame()",
+                "let (initial,",
+            ),
+            (
+                "fn single_worker_seek_resumes_contiguously_at_the_exact_frame()",
+                "let (while_held,",
+            ),
+            (
+                "fn single_worker_seek_resumes_contiguously_at_the_exact_frame()",
+                "let (first,",
+            ),
+            (
+                "fn worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm()",
+                "let (while_pending,",
+            ),
+            (
+                "fn worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm()",
+                "let (latest,",
+            ),
+        ];
+        for (function, read) in held_reads {
+            let start = source.find(function).expect("seek continuation test");
+            let body = &source[start..];
+            let read_offset = body.find(read).expect("read while hold may become active");
+            let after_read = &body[read_offset..];
+            let release = after_read
+                .find("gate.release_and_wait()")
+                .expect("held worker release");
+            assert!(!after_read[..release].contains("assert"));
+        }
     }
 
     #[test]
