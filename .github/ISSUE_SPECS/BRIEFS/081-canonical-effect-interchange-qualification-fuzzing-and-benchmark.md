@@ -42,8 +42,9 @@ prelaunch defect may consume the one bounded correction.
    workspace suffixes and unrelated bank lanes. Reuse the complete accepted Issue-080 failures.
 5. Complete native C/Rust layout/record agreement for the six descriptor ABI records without adding
    a C symbol. Add isolated allocation rows for descriptor temporaries, one-pass package deltas,
-   allocation-free postverify/state/bank execution, bounded registry/resolution and scalar's sole
-   mock destination `Box`. Every row returns to its exact live-byte baseline after drop.
+   allocation-free postverify/state/bank execution, bounded registry/resolution and scalar's exact
+   required owned replay-initial slice plus sole mock destination `Box`. Every row returns to its
+   exact live-byte baseline after drop.
 6. Add one target script for native x86-64 execution plus Android/iOS AArch64 compile-only and Wasm
    scalar/SIMD compile/object-only rows. Missing tools/targets HOLD. Add static dependency, unsafe,
    baseline, render-reachability and generated-artifact checks plus minimum policy mutations.

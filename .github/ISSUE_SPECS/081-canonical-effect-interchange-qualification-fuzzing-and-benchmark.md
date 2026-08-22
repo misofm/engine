@@ -173,8 +173,9 @@ deallocations, allocated/deallocated bytes, peak live bytes and surviving bytes 
 5. migration registry construction and resolution: allocations are control-plane, bounded by the
    exact entry/chain/replay caps, measured and fully released on drop; and
 6. bank migration/restore with prebuilt capability and caller workspaces: zero framework
-   allocations/deallocations. Scalar success may retain only the mock factory's one destination
-   `Box`; after dropping it, live bytes return to baseline.
+   allocations/deallocations. Scalar success may retain exactly the required owned replay-initial
+   slice plus the mock factory's one destination `Box`; dropping both returns live bytes to the
+   exact baseline.
 
 Native absolute counts/bytes are descriptive evidence, not portable constants. The zero/delta and
 no-survivor contracts are gates. One-byte/count-below inputs, guard pages where supported, prefix/
