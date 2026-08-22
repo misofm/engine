@@ -94,3 +94,22 @@ allows one bounded correction only.
 
 Only complete terminal evidence permits `SOL XHIGH PASS / COMPLETE / READY TO CLOSE`. Root owns
 commits, remote synchronization and closure. Results remain descriptive only.
+
+## Sol High checkpoint-1 handoff
+
+Sol High completed the five-script successor tranche on base
+`d46e5a96d3f294c601674f5d2b0205d0a96a4ac2` / tree
+`186db283e386c11edc2e705a8164da5e6b7f9627`. Runner/preflight/lifecycle/checker/mutation SHA-256
+values are respectively `a014ae7fa90ab140b2d7529564a19a9c5d3d7105da1bb00541943f1c26df2089`,
+`20faec32e735e9f314d21729cb7737e202b8a9637d600491308ac98fee4a3893`,
+`5de8eceebfb1ae1265c6a0ab0adc7eacefa4104ef1856cb89cd7084f96b71675`,
+`9b6d808604f919f226a24de1bcf99e3e2e90395839e143beb07a62c9d824855a` and
+`2dce3f5b8189dbf8667d2d5c25aa6bd53408722336228e019f3c5496b8eabde1`.
+
+Shell syntax, static checking, 37 static rejection mutations, the hermetic lifecycle, read-only
+20-record validator check, locked package compilation and format check passed. Exact Issue-072 and
+stale Issue-109 evidence remains unchanged, all seven Issue-109 future artifacts and the entire
+Issue-110 namespace remain absent, and real preflight/runner/workload/timed counters remain
+`0/0/0/0`. The bounded review correction additionally proves exact sole-member Issue-109 namespace
+membership and rejects an arbitrary extra member before launch/build. This is a focused review
+handoff only; no execution authority or overall PASS is claimed.
