@@ -7,8 +7,8 @@ prove transactional restore into a separately prepared unpublished destination.
 
 ## Status and attempt budget
 
-Stateless successor after Issue 029. Permit one Terra attempt and one bounded Sol correction; a
-second failure stops. Workload/benchmark/timed counts remain zero.
+Stateless successor after accepted Issue 082. Permit one Terra attempt and one bounded Sol
+correction; a second failure stops. Workload/benchmark/timed counts remain zero.
 
 ## Scope and gates
 
@@ -32,6 +32,6 @@ broad fuzz/targets, benchmark or timing.
 
 ## Dependencies by exact issue title
 
-- Canonical effect descriptor wire and identity
+- Close canonical effect descriptor wire, identity, and C inspection ABI
 - Native effect runtime contract and conformance
 - Versioned TOML schema and transactional session compiler

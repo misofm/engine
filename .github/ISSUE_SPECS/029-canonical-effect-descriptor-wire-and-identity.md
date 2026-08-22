@@ -9,14 +9,12 @@ and broad qualification are stateless successors rather than hidden work in this
 
 ## Status and attempt budget
 
-**TERRA ATTEMPT 1 STOPPED PRE-EDIT / SOL BRIEF CORRECTION READY.** Dependencies 002, 004 and 011
-are accepted. Terra correctly found that the accepted descriptor and its nested text/tables are
-`'static`, so arbitrary borrowed wire cannot be reconstructed as `EffectDescriptorV1` and passed to
-the unchanged Issue-011 validator without an illegal lifetime extension or leak. No implementation
-was edited. This bounded Sol correction freezes the lifetime-correct validation architecture below
-and authorizes one corrected implementation pass. This constructor-reachability amendment is the
-final clarification round; any further contract, API or testability blocker is a final STOP/rescope.
-Workload, benchmark and timed invocation counts remain zero.
+**FINAL FAIL / STOPPED / RESCOPED.** Dependencies 002, 004 and 011 are accepted. The pre-edit
+lifetime stop and corrected implementation pass exhausted this issue's two-attempt budget. The
+focused-green partial wire/diagnostic checkpoint `64900f2` is technical input only and is not an
+accepted descriptor-wire product or PASS dependency. Issue 082, **Close canonical effect descriptor
+wire, identity, and C inspection ABI**, owns the corrected validation taxonomy and remaining product
+closure. Workload, benchmark and timed invocation counts are all zero.
 
 The provisional `miso-engine-effect-package` descriptor stub is unaccepted input. Preserve the
 semantic effect contract and compiler exactly: no runtime trait, descriptor meaning, registry,
@@ -257,3 +255,10 @@ new wire tests plus four existing package tests passed; focused all-target Clipp
 denied passed; format check passed. No C FFI/header, checked fixtures, Python reference, cross-target
 or broad workspace work began. `workload_invocations=0`, `benchmark_invocations=0` and
 `timed_invocations=0`.
+
+## Successor record
+
+Issue 082, **Close canonical effect descriptor wire, identity, and C inspection ABI**, consumes
+checkpoint `64900f2` only as focused-green technical input. It distinguishes safely constructible
+typed semantic parity from constructor-sealed and closed-enum raw-wire diagnostics, then completes
+the original C inspection, independent-reference, golden-vector and nonbenchmark product seal.
