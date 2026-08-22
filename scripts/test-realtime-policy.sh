@@ -12,6 +12,7 @@ create_fixture() {
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
         "$root/crates/miso-engine-core/src/arch" \
         "$root/crates/miso-engine-capi/src" \
+        "$root/hosts/miso-engine-host-web/src" \
         "$root/tools/miso-engine-capi-audit/src" \
         "$root/tools/miso-engine-realtime-audit/src" \
         "$root/tools/miso-engine-protocol-audit/src" \
@@ -43,6 +44,10 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
         >"$root/crates/miso-engine-capi/src/ffi.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe fn web_boundary() {}' \
+        >"$root/hosts/miso-engine-host-web/src/ffi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for CapiAudit {}' \
@@ -101,5 +106,9 @@ expect_failure unsafe-outside-capi-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-capi/src/lib.rs"'
 expect_failure unsafe-in-second-capi-ffi-path \
     'mkdir -p "$root/crates/miso-engine-capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-capi/src/ffi/other.rs"'
+expect_failure unsafe-outside-web-ffi \
+    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
+expect_failure unsafe-in-second-web-ffi-path \
+    'mkdir -p "$root/hosts/miso-engine-host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/src/ffi/other.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

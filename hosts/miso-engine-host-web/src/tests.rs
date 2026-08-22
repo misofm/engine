@@ -1,4 +1,4 @@
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 use miso_engine_session::{canonical_session_toml, parse_session_toml};
 
@@ -80,6 +80,149 @@ fn frozen_layouts_and_values_are_exact() {
         ],
         [1, 2, 3, 4, 5]
     );
+    assert_eq!(offset_of!(WebPrepareConfigV1, struct_size), 0);
+    assert_eq!(offset_of!(WebPrepareConfigV1, quantum_frames), 12);
+    assert_eq!(offset_of!(WebPrepareConfigV1, maximum_tracks), 40);
+    assert_eq!(offset_of!(WebPrepareConfigV1, maximum_meter_bytes), 152);
+    assert_eq!(offset_of!(WebPrepareConfigV1, reserved), 160);
+    assert_eq!(offset_of!(WebStatusV1, state), 8);
+    assert_eq!(offset_of!(WebStatusV1, next_absolute_sample), 32);
+    assert_eq!(offset_of!(WebStatusV1, reserved), 48);
+    assert_eq!(offset_of!(WebResourceReportV1, config_bytes), 32);
+    assert_eq!(
+        offset_of!(WebResourceReportV1, largest_named_allocation_bytes),
+        184
+    );
+    assert_eq!(offset_of!(WebResourceReportV1, reserved), 192);
+}
+
+#[test]
+fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
+    assert_eq!(miso_engine_web_v1_abi_version(), ABI_VERSION);
+    assert_eq!(miso_engine_web_v1_config_bytes(), PREPARE_CONFIG_BYTES);
+    assert_eq!(miso_engine_web_v1_prepare(0), RESULT_INVALID_ARGUMENT);
+    assert_eq!(miso_engine_web_v1_dispose(0), RESULT_OK);
+
+    let handle = miso_engine_web_v1_config_new();
+    assert_ne!(handle, 0);
+    assert_eq!(miso_engine_web_v1_config_new(), 0);
+    let mut overflow = WebPrepareConfigV1::launch_defaults(48_000, 256);
+    overflow.maximum_source_channels = u32::MAX;
+    assert_eq!(crate::ffi::test_configure(handle, overflow), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        crate::ffi::test_status(handle).expect("status").state,
+        STATE_CONFIG
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+    let handle = miso_engine_web_v1_config_new();
+    let config = WebPrepareConfigV1::launch_defaults(48_000, 128);
+    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
+    assert_eq!(
+        miso_engine_web_v1_buffer_capacity(handle, BUFFER_OUTPUT_PCM),
+        2 * 128 * 4
+    );
+    assert_ne!(
+        crate::ffi::test_buffer_address(handle, BUFFER_DIAGNOSTIC),
+        0
+    );
+    assert_eq!(
+        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, b"no="),
+        RESULT_OK
+    );
+    assert_eq!(
+        miso_engine_web_v1_compile(handle, 3),
+        RESULT_PREPARE_REJECTED
+    );
+    assert_eq!(
+        crate::ffi::test_status(handle).expect("status").state,
+        STATE_FAILED
+    );
+    assert_ne!(
+        crate::ffi::test_buffer_address(handle, BUFFER_DIAGNOSTIC),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_INVALID_ARGUMENT);
+}
+
+#[test]
+fn raw_ffi_uses_stable_staging_and_exact_render_time_without_growth() {
+    let quantum = 64_u32;
+    let toml = one_track_session(quantum);
+    let handle = miso_engine_web_v1_config_new();
+    assert_ne!(handle, 0);
+    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum);
+    config.source_ring_frames = quantum;
+    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
+    let status_address = crate::ffi::test_status_address(handle);
+    let resource_address = crate::ffi::test_resource_address(handle);
+    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
+    let addresses = [
+        BUFFER_SESSION_TOML,
+        BUFFER_SOURCE_ID,
+        BUFFER_SOURCE_PCM,
+        BUFFER_DIAGNOSTIC,
+        BUFFER_OUTPUT_PCM,
+    ]
+    .map(|kind| crate::ffi::test_buffer_address(handle, kind));
+    assert!(addresses.into_iter().all(|address| address != 0));
+    assert_eq!(
+        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, toml.as_bytes()),
+        RESULT_OK
+    );
+    assert_eq!(
+        miso_engine_web_v1_compile(handle, toml.len() as u32),
+        RESULT_OK
+    );
+    assert_eq!(status_address, crate::ffi::test_status_address(handle));
+    assert_eq!(resource_address, crate::ffi::test_resource_address(handle));
+    assert_eq!(
+        crate::ffi::test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+        RESULT_OK
+    );
+    assert_eq!(crate::ffi::test_fill_source_pcm(handle, 0.25), RESULT_OK);
+    assert_eq!(
+        miso_engine_web_v1_source_submit(handle, 14, 1, 0, 2, quantum, 0),
+        RESULT_OK
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_submit(handle, 14, 1, u64::from(quantum), 2, quantum, 1),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(miso_engine_web_v1_render(handle, 1), RESULT_RENDER_REJECTED);
+    assert_eq!(miso_engine_web_v1_render(handle, 0), RESULT_OK);
+    assert_eq!(
+        miso_engine_web_v1_source_submit(handle, 14, 1, u64::from(quantum), 2, quantum, 1),
+        RESULT_OK
+    );
+    assert_eq!(miso_engine_web_v1_source_seek(handle, 14, 2, 0), RESULT_OK);
+    assert_eq!(
+        miso_engine_web_v1_render(handle, u64::from(quantum)),
+        RESULT_OK
+    );
+    let after = [
+        BUFFER_SESSION_TOML,
+        BUFFER_SOURCE_ID,
+        BUFFER_SOURCE_PCM,
+        BUFFER_DIAGNOSTIC,
+        BUFFER_OUTPUT_PCM,
+    ]
+    .map(|kind| crate::ffi::test_buffer_address(handle, kind));
+    assert_eq!(addresses, after);
+    let status = crate::ffi::test_status(handle).expect("status");
+    assert_eq!(status.rendered_quanta, 2);
+    assert_eq!(status.next_absolute_sample, u64::from(quantum) * 2);
+    let resources = crate::ffi::test_resources(handle).expect("resources");
+    assert!(resources.bridge_retained_bytes <= config.maximum_host_retained_bytes);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_INVALID_ARGUMENT);
+    let replacement = miso_engine_web_v1_config_new();
+    assert_ne!(replacement, 0);
+    assert_ne!(replacement, handle);
+    assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
 }
 
 #[test]

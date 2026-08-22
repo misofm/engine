@@ -3,7 +3,10 @@
 //! This module deliberately contains no raw pointer handling or JavaScript integration. It owns
 //! the complete immutable session and render plan that the later AudioWorklet boundary will drive.
 
-use core::{alloc::Layout, mem::size_of};
+use core::{
+    alloc::Layout,
+    mem::{MaybeUninit, size_of},
+};
 
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_core::{
@@ -275,7 +278,14 @@ struct PreparedBuffers {
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
     output_pcm: Box<[f32]>,
+    plane_references: Box<[MaybeUninit<&'static [f32]>]>,
 }
+
+type FfiSourceStaging<'a> = (
+    &'a mut [f32],
+    &'a mut [MaybeUninit<&'static [f32]>],
+    &'a mut [u8],
+);
 
 struct ControlSource {
     id_offset: usize,
@@ -364,6 +374,11 @@ impl AudioWorkletEngineHost {
         &self.config
     }
 
+    /// Mutably borrow configuration storage before preparation.
+    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfigV1> {
+        (self.status.state == STATE_CONFIG).then_some(&mut self.config)
+    }
+
     /// Read fixed status without allocation.
     #[must_use]
     pub const fn status(&self) -> &WebStatusV1 {
@@ -421,6 +436,20 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn output_pcm(&self) -> Option<&[f32]> {
         self.buffers.as_ref().map(|value| &*value.output_pcm)
+    }
+
+    pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
+        self.buffers.as_mut().map(|value| &mut *value.diagnostic)
+    }
+
+    pub(crate) fn ffi_source_staging_mut(&mut self) -> Option<FfiSourceStaging<'_>> {
+        self.buffers.as_mut().map(|value| {
+            (
+                &mut *value.source_pcm,
+                &mut *value.plane_references,
+                &mut *value.source_id,
+            )
+        })
     }
 
     /// Parse, compile and atomically publish one immutable session and plan.
@@ -560,6 +589,14 @@ impl AudioWorkletEngineHost {
         }
     }
 
+    pub(crate) fn reject_render_time(&mut self) -> u32 {
+        self.record(RESULT_RENDER_REJECTED)
+    }
+
+    pub(crate) fn record_boundary_result(&mut self, code: u32) -> u32 {
+        self.record(code)
+    }
+
     /// Mark an observed browser output-shape mismatch as sticky reprepare-required.
     pub fn reject_output_quantum(&mut self, actual_frames: u32) -> u32 {
         if self.status.state != STATE_READY {
@@ -652,11 +689,17 @@ fn prepare_buffers(
     let output_pcm_bytes = u64::from(config.quantum_frames)
         .checked_mul(8)
         .ok_or(RESULT_PREPARE_REJECTED)?;
+    let plane_reference_bytes = u64::from(config.maximum_source_channels)
+        .checked_mul(size_of::<&[f32]>() as u64)
+        .ok_or(RESULT_PREPARE_REJECTED)?;
     let host_shell_bytes =
         u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| RESULT_PREPARE_REJECTED)?;
     let fixed_metadata = host_shell_bytes
         .checked_sub(u64::from(PREPARE_CONFIG_BYTES) + u64::from(STATUS_BYTES))
         .ok_or(RESULT_INTERNAL)?;
+    let bridge_metadata = fixed_metadata
+        .checked_add(plane_reference_bytes)
+        .ok_or(RESULT_PREPARE_REJECTED)?;
     let rows = [
         u64::from(PREPARE_CONFIG_BYTES),
         u64::from(STATUS_BYTES),
@@ -665,10 +708,15 @@ fn prepare_buffers(
         u64::from(config.source_id_bytes),
         source_pcm_bytes,
         output_pcm_bytes,
-        fixed_metadata,
+        bridge_metadata,
     ];
     let retained = checked_sum(rows)?;
-    let largest = rows.into_iter().max().unwrap_or(0).max(host_shell_bytes);
+    let largest = rows
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        .max(host_shell_bytes)
+        .max(plane_reference_bytes);
     if retained > config.maximum_host_retained_bytes
         || largest > config.maximum_named_allocation_bytes
     {
@@ -680,6 +728,7 @@ fn prepare_buffers(
         source_id: boxed_zero_u8(config.source_id_bytes)?,
         source_pcm: boxed_zero_f32(source_samples)?,
         output_pcm: boxed_zero_f32(u64::from(config.quantum_frames) * 2)?,
+        plane_references: boxed_uninit_planes(config.maximum_source_channels)?,
     };
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = config.sample_rate_hz;
@@ -689,7 +738,7 @@ fn prepare_buffers(
     report.source_id_bytes = u64::from(config.source_id_bytes);
     report.source_pcm_staging_bytes = source_pcm_bytes;
     report.output_pcm_bytes = output_pcm_bytes;
-    report.bridge_metadata_bytes = fixed_metadata;
+    report.bridge_metadata_bytes = bridge_metadata;
     report.bridge_retained_bytes = retained;
     report.largest_bridge_allocation_bytes = largest;
     report.largest_named_allocation_bytes = largest;
@@ -1178,11 +1227,25 @@ fn boxed_zero_f32(samples: u64) -> Result<Box<[f32]>, u32> {
     Ok(value.into_boxed_slice())
 }
 
+fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>]>, u32> {
+    let count = usize::try_from(channels).map_err(|_| RESULT_PREPARE_REJECTED)?;
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| RESULT_PREPARE_REJECTED)?;
+    value.resize_with(count, MaybeUninit::uninit);
+    Ok(value.into_boxed_slice())
+}
+
 /// Return portable bootstrap values for a Web embedding host.
 #[must_use]
 pub fn web_target_smoke() -> TargetSmoke {
     miso_engine_target_smoke::target_smoke()
 }
+
+mod ffi;
+
+pub use ffi::*;
 
 #[cfg(test)]
 mod tests;
