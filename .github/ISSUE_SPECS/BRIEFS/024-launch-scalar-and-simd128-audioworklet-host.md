@@ -76,6 +76,11 @@ synchronous staging copy/submission, return the original typed plane views and t
 in every ACK/error—including validation failure and engine `BACKPRESSURE`—so caller ownership is
 restored for reuse or retry before the pending call settles.
 
+`submitSource`/`seekSource` resolve the complete `MisoAckV1`
+`{tag: "miso.ack.v1", requestId, result, planes?}`, never a payload or numeric result alone. Source
+ACKs include the returned typed plane views. Nonzero engine results remain resolved typed ACKs;
+transport/schema/processor failures reject with the complete address-free error record.
+
 `process()` has cached exact-quantum `Float32Array` views. Default/not-ready/fatal/mismatch output is
 positive zero. Render failure stores only a fixed numeric sticky status inside preallocated state;
 the message handler later reports it. Do not call `postMessage`, allocate typed arrays, take
@@ -97,6 +102,10 @@ module, config and TOML to `processorOptions`; instantiate synchronously in the 
 constructor and complete config/prepare/TOML/compile there. Reacquire all views after each
 allocation-capable call; only post-compile views may be cached. Selection and readiness are
 immutable, address-free and returned in `miso.ready.v1`.
+Ready and status responses also report JS-layer `memoryBytes` from
+`instance.exports.memory.buffer.byteLength`, sampled only after compile or in the status handler and
+required to equal the pinned post-compile value. This adds no Wasm export or Rust status/resource
+field; `process()` checks buffer identity only and never encodes or posts the value.
 After explicit quiescent disposal, destroy plan/source/session ownership in reverse preparation order
 and make later `process()` return `false`.
 

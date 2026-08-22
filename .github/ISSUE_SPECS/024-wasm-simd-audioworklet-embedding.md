@@ -152,6 +152,7 @@ createMisoAudioWorkletHost(options: {
 ```
 
 The resolved host exposes immutable `node`, `backend: "scalar" | "simd128"`, exact `resources`,
+`memoryBytes`,
 `submitSource(request): Promise<MisoAckV1>`, `seekSource(request): Promise<MisoAckV1>`,
 `status(): Promise<MisoStatusV1>`, and idempotent `dispose(): Promise<void>`. A source request is
 exactly `{requestId, sourceId, generation, startFrame, sampleRateHz, planes, frames, endOfRegion}`;
@@ -164,6 +165,12 @@ non-increasing request IDs before transfer. Message tags are `miso.source.v1`, `
 unknown tags/fields reject, and errors are sticky/address-free. There is no generic session mutation
 or PCM on a protocol/network transport.
 
+`miso.ready.v1` and `miso.status.v1` each contain address-free `memoryBytes`, sampled as
+`instance.exports.memory.buffer.byteLength` after successful compile or in the status message
+handler. It must equal the pinned post-compile value. This is JS-layer evidence, not a field in
+`WebStatusV1`/`WebResourceReportV1`, and it adds no Wasm export. `process()` compares buffer identity
+but does not read, encode or post `memoryBytes`.
+
 Only nonshared `ArrayBuffer`-backed planes are accepted; `SharedArrayBuffer` rejects. Build a unique
 transfer list by underlying buffer so multiple planar views over one buffer do not duplicate a
 transferable. Preserve each view's exact type/offset/length. Once `postMessage` succeeds the worklet
@@ -173,6 +180,13 @@ restores caller ownership for reuse or retry. The one pending slot covers submit
 dispose. ACK/error, `messageerror`, `processorerror` and disposal each settle and clear it exactly
 once; a concurrent call rejects locally with typed `BACKPRESSURE`. Repeated dispose after the first
 settled disposal resolves without another message or Wasm call.
+
+`submitSource` and `seekSource` resolve with the complete frozen `MisoAckV1` object, never a nested
+payload or numeric result alone. It is exactly
+`{tag: "miso.ack.v1", requestId, result, planes?}`; `planes` is present only for a source request and
+contains the returned original typed views. Typed engine rejection remains a resolved ACK with a
+nonzero `result`; transport/schema/processor failure rejects the Promise with the complete
+address-free `miso.error.v1` record.
 
 Selection occurs in the main realm before `addModule`: validate the canonical minimal simd128 probe,
 then compile the simd artifact; either failure selects scalar. The selected compiled
