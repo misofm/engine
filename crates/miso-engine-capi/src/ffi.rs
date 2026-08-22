@@ -4,13 +4,16 @@
 
 use crate::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, CAPABILITIES_SIZE, Capabilities, CompileLimits,
-    EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, Plan, PlanResourceReport,
-    PlanarOutput, RESULT_ABI_MISMATCH, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
+    EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, HandleHeader, Plan,
+    PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
+    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
+    RESULT_OK, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
 };
 use core::ffi::c_void;
 use core::ptr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use crate::runtime::{compile_children, limits_are_valid};
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RESULT_INTERNAL)
@@ -20,13 +23,79 @@ fn catch_destroy(operation: impl FnOnce()) {
     let _contained = catch_unwind(AssertUnwindSafe(operation));
 }
 
+fn set_engine_error(engine: &Engine, value: &[u8]) {
+    let value = core::str::from_utf8(value).unwrap_or("capi.internal.utf8");
+    let mut bytes = engine.last_error.borrow_mut();
+    let mut len = value.len().min(bytes.len());
+    while !value.is_char_boundary(len) {
+        len -= 1;
+    }
+    bytes[..len].copy_from_slice(&value.as_bytes()[..len]);
+    engine.last_error_len.set(len);
+}
+
+fn clear_engine_error(engine: &Engine) {
+    engine.last_error_len.set(0);
+}
+
+unsafe fn validate_bytes_out<'a>(out: *mut BytesOut) -> Result<&'a mut BytesOut, u32> {
+    if out.is_null() {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    // SAFETY: The caller promises readable and writable storage for one ABI bytes-out value.
+    let out = unsafe { &mut *out };
+    if out.struct_size != BYTES_OUT_SIZE
+        || out.reserved0 != 0
+        || (out.data.is_null() && out.capacity_bytes != 0)
+    {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    Ok(out)
+}
+
+unsafe fn write_bytes(out: *mut BytesOut, value: &[u8]) -> u32 {
+    // SAFETY: This helper inherits the entrypoint's bytes-output pointer contract.
+    let out = match unsafe { validate_bytes_out(out) } {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let required = match u64::try_from(value.len()) {
+        Ok(value) => value,
+        Err(_) => return RESULT_INTERNAL,
+    };
+    out.required_bytes = required;
+    if out.capacity_bytes < required {
+        return RESULT_BUFFER_TOO_SMALL;
+    }
+    if required == 0 {
+        return RESULT_OK;
+    }
+    if out.data.is_null() {
+        return RESULT_BUFFER_TOO_SMALL;
+    }
+    // SAFETY: Capacity was checked against the complete byte count; the caller promises writable
+    // nonoverlapping output storage and no pointer is retained.
+    unsafe { ptr::copy_nonoverlapping(value.as_ptr(), out.data, value.len()) };
+    RESULT_OK
+}
+
+unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64) -> Result<&'a [u8], u32> {
+    if data.is_null() {
+        return Err(RESULT_INVALID_ARGUMENT);
+    }
+    let bytes = usize::try_from(bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
+    // SAFETY: The caller promises `data` is readable for the declared byte count for this call.
+    Ok(unsafe { core::slice::from_raw_parts(data, bytes) })
+}
+
 unsafe fn engine_kind(engine: *const Engine) -> u32 {
     if engine.is_null() {
         return RESULT_INVALID_ARGUMENT;
     }
-    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
-    // returned by this library. All live handle representations begin with the frozen header.
-    if unsafe { &*engine }.has_valid_kind() {
+    // SAFETY: The ABI contract requires a live library handle. Every opaque representation is
+    // `repr(C)` with `HandleHeader` as its first field, so this borrows only the shared prefix and
+    // never creates a reference to the wrong concrete handle representation.
+    if unsafe { &*engine.cast::<HandleHeader>() }.is_engine() {
         RESULT_OK
     } else {
         RESULT_WRONG_HANDLE
@@ -37,9 +106,8 @@ unsafe fn session_kind(session: *const Session) -> u32 {
     if session.is_null() {
         return RESULT_INVALID_ARGUMENT;
     }
-    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
-    // returned by this library. All live handle representations begin with the frozen header.
-    if unsafe { &*session }.has_valid_kind() {
+    // SAFETY: See `engine_kind`; only the common `HandleHeader` prefix is borrowed.
+    if unsafe { &*session.cast::<HandleHeader>() }.is_session() {
         RESULT_OK
     } else {
         RESULT_WRONG_HANDLE
@@ -50,9 +118,8 @@ unsafe fn plan_kind(plan: *const Plan) -> u32 {
     if plan.is_null() {
         return RESULT_INVALID_ARGUMENT;
     }
-    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
-    // returned by this library. All live handle representations begin with the frozen header.
-    if unsafe { &*plan }.has_valid_kind() {
+    // SAFETY: See `engine_kind`; only the common `HandleHeader` prefix is borrowed.
+    if unsafe { &*plan.cast::<HandleHeader>() }.is_plan() {
         RESULT_OK
     } else {
         RESULT_WRONG_HANDLE
@@ -155,7 +222,7 @@ pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
     });
 }
 
-/// Session compilation is declared in checkpoint 1 and implemented in checkpoint 2.
+/// Transactionally compile one strict session and publish independent child handles together.
 ///
 /// # Safety
 ///
@@ -164,7 +231,7 @@ pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
 pub unsafe extern "C" fn miso_engine_v2_compile_session(
     engine: *mut Engine,
     toml: *const u8,
-    _toml_bytes: u64,
+    toml_bytes: u64,
     limits: *const CompileLimits,
     diagnostics: *mut BytesOut,
     out_session: *mut *mut Session,
@@ -188,11 +255,85 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
         if toml.is_null() || limits.is_null() || diagnostics.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The caller promises `limits` identifies a readable fixed ABI value.
+        let limits = unsafe { *limits };
+        if !limits_are_valid(limits) {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `diagnostics` is nonnull and promised readable/writable for this call.
+        if let Err(code) = unsafe { validate_bytes_out(diagnostics) } {
+            return code;
+        }
+        if toml_bytes > limits.maximum_toml_bytes {
+            let value = b"capi.toml.limit\t$\n";
+            // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
+            set_engine_error(unsafe { &*engine }, value);
+            // SAFETY: The bytes-output contract was validated above.
+            let written = unsafe { write_bytes(diagnostics, value) };
+            return if written == RESULT_OK {
+                RESULT_COMPILE_REJECTED
+            } else {
+                written
+            };
+        }
+        // SAFETY: The caller promises the TOML region is readable for `toml_bytes`.
+        let toml = match unsafe { borrowed_bytes(toml, toml_bytes) } {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+        let toml = match core::str::from_utf8(toml) {
+            Ok(value) => value,
+            Err(_) => {
+                let value = b"capi.toml.utf8\t$\n";
+                // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
+                set_engine_error(unsafe { &*engine }, value);
+                // SAFETY: The bytes-output contract was validated above.
+                let written = unsafe { write_bytes(diagnostics, value) };
+                return if written == RESULT_OK {
+                    RESULT_COMPILE_REJECTED
+                } else {
+                    written
+                };
+            }
+        };
+        let children = match compile_children(toml, limits) {
+            Ok(value) => value,
+            Err(mut failure) => {
+                let maximum =
+                    usize::try_from(limits.maximum_diagnostic_bytes).unwrap_or(usize::MAX);
+                if failure.diagnostics.len() > maximum {
+                    failure.diagnostics.clear();
+                }
+                // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
+                set_engine_error(unsafe { &*engine }, &failure.diagnostics);
+                // SAFETY: The bytes-output contract was validated above.
+                let written = unsafe { write_bytes(diagnostics, &failure.diagnostics) };
+                return if written == RESULT_OK {
+                    RESULT_COMPILE_REJECTED
+                } else {
+                    written
+                };
+            }
+        };
+        // SAFETY: The bytes-output contract was validated above; success has no diagnostics.
+        let written = unsafe { write_bytes(diagnostics, &[]) };
+        if written != RESULT_OK {
+            return written;
+        }
+        let session = Box::new(Session::new(children.session, children.session_error));
+        let plan = Box::new(Plan::new(children.plan, children.plan_error));
+        // SAFETY: Both output locations were validated and cleared before compilation. Ownership
+        // transfers only after both independent boxes exist, so publication is atomic.
+        unsafe {
+            out_session.write(Box::into_raw(session));
+            out_plan.write(Box::into_raw(plan));
+            clear_engine_error(&*engine);
+        }
+        RESULT_OK
     })
 }
 
-/// Host-fed source submission is declared in checkpoint 1 and implemented in checkpoint 2.
+/// Submit one borrowed planar source chunk atomically into its prepared host ring.
 ///
 /// # Safety
 ///
@@ -201,7 +342,7 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
 pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
     session: *mut Session,
     source_id: *const u8,
-    _source_id_bytes: u64,
+    source_id_bytes: u64,
     chunk: *const SourceChunk,
     out_report: *mut SubmitReport,
 ) -> u32 {
@@ -214,11 +355,76 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
         if source_id.is_null() || chunk.is_null() || out_report.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The caller promises readable input/output ABI structs for this call.
+        let chunk = unsafe { &*chunk };
+        // SAFETY: The caller promises readable input/output ABI structs for this call.
+        let report = unsafe { &mut *out_report };
+        if chunk.struct_size != crate::SOURCE_CHUNK_SIZE
+            || chunk.reserved0 != 0
+            || chunk.end_of_region > 1
+            || report.struct_size != crate::SUBMIT_REPORT_SIZE
+            || report.reserved0 != 0
+            || chunk.plane_count == 0
+            || chunk.plane_count > 255
+            || chunk.planes.is_null()
+        {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id = match unsafe { borrowed_bytes(source_id, source_id_bytes) } {
+            Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
+            _ => return RESULT_INVALID_ARGUMENT,
+        };
+        let plane_count = chunk.plane_count as usize;
+        // SAFETY: The caller promises an array of `plane_count` readable plane pointers.
+        let plane_pointers = unsafe { core::slice::from_raw_parts(chunk.planes, plane_count) };
+        let frames = chunk.frames as usize;
+        let mut planes: [&[f32]; 255] = [&[]; 255];
+        for (index, plane) in plane_pointers.iter().enumerate() {
+            if plane.is_null() {
+                return RESULT_INVALID_ARGUMENT;
+            }
+            // SAFETY: Each nonnull caller plane is readable for exactly `frames` samples and is
+            // borrowed only until the underlying source submission copies it.
+            planes[index] = unsafe { core::slice::from_raw_parts(*plane, frames) };
+        }
+        // SAFETY: `session` passed the live-kind check and this operation requires its exclusive
+        // serial producer owner under the ABI contract.
+        let session = unsafe { &mut *session };
+        match session.state.submit(
+            source_id,
+            crate::runtime::SourceSubmission {
+                generation: chunk.generation,
+                start_frame: chunk.start_frame,
+                sample_rate_hz: chunk.sample_rate_hz,
+                planes: &planes[..plane_count],
+                frames: chunk.frames,
+                end_of_region: chunk.end_of_region == 1,
+            },
+        ) {
+            Ok(value) => {
+                report.accepted_frames = u64::from(value.accepted_frames);
+                report.cumulative_written_frames = value.cumulative_written_frames;
+                report.active_generation = value.active_generation.0;
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(code) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(if code == RESULT_BACKPRESSURE {
+                        b"source.backpressure"
+                    } else {
+                        b"source.submit.rejected"
+                    });
+                code
+            }
+        }
     })
 }
 
-/// Typed source seek is declared in checkpoint 1 and implemented in checkpoint 2.
+/// Queue one generation-tagged source seek for the next render block.
 ///
 /// # Safety
 ///
@@ -227,9 +433,9 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
 pub unsafe extern "C" fn miso_engine_v2_source_seek(
     session: *mut Session,
     source_id: *const u8,
-    _source_id_bytes: u64,
-    _generation: u64,
-    _source_frame: u64,
+    source_id_bytes: u64,
+    generation: u64,
+    source_frame: u64,
 ) -> u32 {
     catch_result(|| {
         // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
@@ -240,11 +446,35 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
         if source_id.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id = match unsafe { borrowed_bytes(source_id, source_id_bytes) } {
+            Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
+            _ => return RESULT_INVALID_ARGUMENT,
+        };
+        // SAFETY: `session` passed the live-kind check and the ABI requires exclusive serial
+        // source-control ownership for seek.
+        let session = unsafe { &mut *session };
+        match session.state.seek(source_id, generation, source_frame) {
+            Ok(()) => {
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(code) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(if code == RESULT_BACKPRESSURE {
+                        b"source.seek.backpressure"
+                    } else {
+                        b"source.seek.rejected"
+                    });
+                code
+            }
+        }
     })
 }
 
-/// Binary control submission is declared in checkpoint 1 and implemented in checkpoint 2.
+/// Binary control submission remains unsupported until checkpoint 3.
 ///
 /// # Safety
 ///
@@ -293,7 +523,7 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
     })
 }
 
-/// Resource reporting is declared in checkpoint 1 and implemented in checkpoint 2.
+/// Copy the frozen address-free resource projection for a prepared plan.
 ///
 /// # Safety
 ///
@@ -312,7 +542,17 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
         if out.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The caller promises readable/writable storage for one report. The size check
+        // precedes the complete fixed-size write.
+        if unsafe { (*out).struct_size } != crate::PLAN_RESOURCE_REPORT_SIZE {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `plan` passed the live-kind check and is borrowed immutably for the copy.
+        let plan = unsafe { &*plan };
+        // SAFETY: Exact struct size establishes writable ABI V1 report storage.
+        unsafe { out.write(plan.state.resources) };
+        plan.last_error.borrow_mut().clear();
+        RESULT_OK
     })
 }
 
@@ -340,16 +580,32 @@ pub unsafe extern "C" fn miso_engine_v2_last_error(
         if !recognized {
             return RESULT_WRONG_HANDLE;
         }
-        // SAFETY: The caller promises `out` identifies readable/writable BytesOut storage.
-        let out = unsafe { &mut *out };
-        if out.struct_size != BYTES_OUT_SIZE || out.reserved0 != 0 {
-            return RESULT_INVALID_ARGUMENT;
+        // SAFETY: The pointer is a recognized live handle with the common header representation.
+        let is_engine = unsafe { engine_kind(live_handle.cast::<Engine>()) } == RESULT_OK;
+        if is_engine {
+            // SAFETY: The recognized header identifies a live engine handle.
+            let engine = unsafe { &*live_handle.cast::<Engine>() };
+            let bytes = engine.last_error.borrow();
+            let len = engine.last_error_len.get().min(bytes.len());
+            // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
+            unsafe { write_bytes(out, &bytes[..len]) }
+        } else {
+            // SAFETY: The pointer is a recognized live handle with the common header representation.
+            let is_session = unsafe { session_kind(live_handle.cast::<Session>()) } == RESULT_OK;
+            if is_session {
+                // SAFETY: The recognized header identifies a live session handle.
+                let session = unsafe { &*live_handle.cast::<Session>() };
+                let bytes = session.last_error.borrow();
+                // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
+                unsafe { write_bytes(out, bytes.as_slice()) }
+            } else {
+                // SAFETY: The recognized header identifies the remaining live plan handle.
+                let plan = unsafe { &*live_handle.cast::<Plan>() };
+                let bytes = plan.last_error.borrow();
+                // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
+                unsafe { write_bytes(out, bytes.as_slice()) }
+            }
         }
-        if out.data.is_null() && out.capacity_bytes != 0 {
-            return RESULT_INVALID_ARGUMENT;
-        }
-        out.required_bytes = 0;
-        RESULT_OK
     })
 }
 
@@ -364,10 +620,11 @@ pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
         if session.is_null() {
             return;
         }
-        // No session handle can be published before checkpoint 2. Observe the kind without
-        // reconstructing ownership so wrong-kind live handles are never freed.
-        // SAFETY: The caller supplies a live handle pointer under the C ABI contract.
-        let _kind = unsafe { session_kind(session) };
+        // SAFETY: Only the matching live kind may be reconstructed and destroyed.
+        if unsafe { session_kind(session) } == RESULT_OK {
+            // SAFETY: The ABI contract guarantees unique live ownership and quiescent destroy.
+            drop(unsafe { Box::from_raw(session) });
+        }
     });
 }
 
@@ -382,10 +639,11 @@ pub unsafe extern "C" fn miso_engine_v2_plan_destroy(plan: *mut Plan) {
         if plan.is_null() {
             return;
         }
-        // No plan handle can be published before checkpoint 2. Observe the kind without
-        // reconstructing ownership so wrong-kind live handles are never freed.
-        // SAFETY: The caller supplies a live handle pointer under the C ABI contract.
-        let _kind = unsafe { plan_kind(plan) };
+        // SAFETY: Only the matching live kind may be reconstructed and destroyed.
+        if unsafe { plan_kind(plan) } == RESULT_OK {
+            // SAFETY: The ABI contract guarantees unique live ownership and quiescent destroy.
+            drop(unsafe { Box::from_raw(plan) });
+        }
     });
 }
 
@@ -437,6 +695,36 @@ mod tests {
         EngineConfig {
             struct_size: crate::ENGINE_CONFIG_SIZE,
             abi_version: ABI_VERSION,
+            reserved: [0; 4],
+        }
+    }
+
+    fn limits() -> CompileLimits {
+        CompileLimits {
+            struct_size: crate::COMPILE_LIMITS_SIZE,
+            source_ring_frames: 1_024,
+            maximum_automation_spans_per_block: 128,
+            reserved0: 0,
+            maximum_toml_bytes: 1_000_000,
+            maximum_diagnostic_bytes: 4_096,
+            maximum_tracks: 100,
+            maximum_sources: 100,
+            maximum_routes: 100,
+            maximum_effects: 100,
+            maximum_graph_session_plus_plan_bytes: 100_000_000,
+            maximum_source_total_bytes: 10_000_000,
+            maximum_source_overhead_bytes: 10_000_000,
+            maximum_effect_state_bytes: 100_000_000,
+            maximum_effect_scratch_bytes: 100_000_000,
+            maximum_builtin_retained_bytes: 100_000_000,
+            maximum_capi_retained_bytes: 10_000_000,
+            maximum_named_allocation_bytes: 100_000_000,
+            maximum_meter_streams: 1,
+            maximum_meter_items: 1,
+            maximum_meter_bytes: 1,
+            maximum_control_frame_bytes: 4_096,
+            maximum_replay_bytes: 8_192,
+            maximum_replay_entries: 16,
             reserved: [0; 4],
         }
     }
@@ -517,6 +805,248 @@ mod tests {
         };
         assert_eq!(last_error(engine.cast(), &mut output), RESULT_OK);
         assert_eq!(output.required_bytes, 0);
+        destroy(engine);
+    }
+
+    #[test]
+    fn compile_publishes_both_children_and_source_control_is_region_checked() {
+        const TOML: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: u64::MAX,
+        };
+        let mut session = ptr::dangling_mut::<Session>();
+        let mut plan = ptr::dangling_mut::<Plan>();
+        // SAFETY: Every pointer names a complete local ABI value or the immutable fixture bytes.
+        let result = unsafe {
+            miso_engine_v2_compile_session(
+                engine,
+                TOML.as_ptr(),
+                TOML.len() as u64,
+                &limits(),
+                &mut diagnostics,
+                &mut session,
+                &mut plan,
+            )
+        };
+        assert_eq!(result, RESULT_OK);
+        assert_eq!(diagnostics.required_bytes, 0);
+        assert!(!session.is_null());
+        assert!(!plan.is_null());
+
+        let mut resources = PlanResourceReport {
+            struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
+            abi_version: 0,
+            sample_rate_hz: 0,
+            quantum_frames: 0,
+            source_count: 0,
+            track_count: 0,
+            latency_samples: 0,
+            tail_kind: 0,
+            tail_samples: 0,
+            graph_session_plus_plan_bytes: 0,
+            graph_incremental_plan_bytes: 0,
+            graph_metadata_bytes: 0,
+            graph_delay_bytes: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            source_pcm_payload_bytes: 0,
+            source_overhead_bytes: 0,
+            source_total_bytes: 0,
+            effect_scalar_state_bytes: 0,
+            effect_scalar_scratch_bytes: 0,
+            builtin_processor_payload_bytes: 0,
+            builtin_meter_payload_bytes: 0,
+            builtin_retained_payload_bytes: 0,
+            capi_retained_bytes: 0,
+            largest_named_allocation_bytes: 0,
+            reserved: [u64::MAX; 4],
+        };
+        assert_eq!(
+            // SAFETY: The plan is live and `resources` is writable storage of the exact size.
+            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            RESULT_OK
+        );
+        assert_eq!(resources.sample_rate_hz, 48_000);
+        assert_eq!(resources.quantum_frames, 128);
+        assert_eq!(resources.source_count, 1);
+        assert_eq!(resources.track_count, 9);
+        assert_eq!(resources.reserved, [0; 4]);
+
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let planes = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: planes.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut submitted = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        assert_eq!(
+            // SAFETY: All borrowed chunk planes and ABI structs remain live for the complete call.
+            unsafe {
+                miso_engine_v2_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &chunk,
+                    &mut submitted,
+                )
+            },
+            RESULT_OK
+        );
+        assert_eq!(submitted.accepted_frames, 128);
+        assert_eq!(
+            seek(session, b"fixture-source".as_ptr(), 14, 2, 48_001),
+            RESULT_INVALID_ARGUMENT
+        );
+        let mut source_error = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        assert_eq!(
+            last_error(session.cast(), &mut source_error),
+            RESULT_BUFFER_TOO_SMALL
+        );
+        let mut source_error_storage = vec![0_u8; source_error.required_bytes as usize];
+        source_error.data = source_error_storage.as_mut_ptr();
+        source_error.capacity_bytes = source_error_storage.len() as u64;
+        assert_eq!(last_error(session.cast(), &mut source_error), RESULT_OK);
+        assert_eq!(&source_error_storage, b"source.seek.rejected");
+        assert_eq!(
+            seek(session, b"fixture-source".as_ptr(), 14, 2, 48_000),
+            RESULT_OK
+        );
+        source_error.data = ptr::null_mut();
+        source_error.capacity_bytes = 0;
+        assert_eq!(last_error(session.cast(), &mut source_error), RESULT_OK);
+        assert_eq!(source_error.required_bytes, 0);
+
+        // SAFETY: Each independently owned child and engine is destroyed exactly once, quiescent.
+        unsafe {
+            miso_engine_v2_session_destroy(session);
+            miso_engine_v2_plan_destroy(plan);
+        }
+        destroy(engine);
+    }
+
+    #[test]
+    fn compile_diagnostics_query_is_atomic_and_handle_local() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let invalid_utf8 = [0xff_u8];
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        let mut session = ptr::dangling_mut::<Session>();
+        let mut plan = ptr::dangling_mut::<Plan>();
+        assert_eq!(
+            // SAFETY: The input byte and all ABI values are valid for the duration of the call.
+            unsafe {
+                miso_engine_v2_compile_session(
+                    engine,
+                    invalid_utf8.as_ptr(),
+                    1,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            },
+            RESULT_BUFFER_TOO_SMALL
+        );
+        assert!(session.is_null());
+        assert!(plan.is_null());
+        assert!(diagnostics.required_bytes > 0);
+
+        let mut undersized = vec![0xa5; diagnostics.required_bytes as usize - 1];
+        diagnostics.data = undersized.as_mut_ptr();
+        diagnostics.capacity_bytes = undersized.len() as u64;
+        session = ptr::dangling_mut();
+        plan = ptr::dangling_mut();
+        assert_eq!(
+            // SAFETY: The intentionally undersized output remains valid for its declared capacity.
+            unsafe {
+                miso_engine_v2_compile_session(
+                    engine,
+                    invalid_utf8.as_ptr(),
+                    1,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            },
+            RESULT_BUFFER_TOO_SMALL
+        );
+        assert!(session.is_null());
+        assert!(plan.is_null());
+        assert!(undersized.iter().all(|byte| *byte == 0xa5));
+
+        let mut storage = vec![0xa5; diagnostics.required_bytes as usize];
+        diagnostics.data = storage.as_mut_ptr();
+        diagnostics.capacity_bytes = storage.len() as u64;
+        session = ptr::dangling_mut();
+        plan = ptr::dangling_mut();
+        assert_eq!(
+            // SAFETY: The retry output can hold the complete diagnostic and outputs are writable.
+            unsafe {
+                miso_engine_v2_compile_session(
+                    engine,
+                    invalid_utf8.as_ptr(),
+                    1,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            },
+            RESULT_COMPILE_REJECTED
+        );
+        assert!(session.is_null());
+        assert!(plan.is_null());
+        assert_eq!(&storage, b"capi.toml.utf8\t$\n");
+
+        let mut error_query = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        assert_eq!(
+            last_error(engine.cast(), &mut error_query),
+            RESULT_BUFFER_TOO_SMALL
+        );
+        assert_eq!(error_query.required_bytes, diagnostics.required_bytes);
         destroy(engine);
     }
 }

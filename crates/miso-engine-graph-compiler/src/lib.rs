@@ -107,6 +107,10 @@ pub struct GraphCompileReport {
     pub reductions: Vec<ReductionRecord>,
     pub route_transforms: Vec<PreparedRoute>,
     pub buffer_assignments: Vec<BufferAssignment>,
+    /// Arrival of the sole session output after checked latency and PDC propagation.
+    pub output_latency: LatencySamples,
+    /// Propagated extent of the sole session output after latency and declared tails.
+    pub output_tail: TailSamples,
     pub estimate: GraphResourceEstimate,
     pub canonical_debug_bytes: Vec<u8>,
     pub sha256: String,
@@ -679,6 +683,8 @@ impl GraphCompiler {
                 reductions,
                 route_transforms,
                 buffer_assignments: buffers,
+                output_latency: timing.output_latency,
+                output_tail: timing.output_tail,
                 estimate,
                 canonical_debug_bytes: debug,
                 sha256,
@@ -950,6 +956,8 @@ struct TimingResult {
     delays: Vec<InsertedDelay>,
     total_delay: u64,
     delay_count: u64,
+    output_latency: LatencySamples,
+    output_tail: TailSamples,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1232,11 +1240,25 @@ fn timings(
     }
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
     delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+    let output = schedule
+        .iter()
+        .find(|node| matches!(node, GraphNodeId::Output { .. }))
+        .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
+    let output_latency = LatencySamples(
+        *arrivals
+            .get(output)
+            .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?,
+    );
+    let output_tail = *extents
+        .get(output)
+        .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
     Ok(TimingResult {
         routes,
         delays,
         total_delay,
         delay_count,
+        output_latency,
+        output_tail,
     })
 }
 fn shifted_tail(value: TailSamples, add: u64) -> Result<TailSamples, GraphDiagnostic> {
@@ -2798,6 +2820,20 @@ mod tests {
     }
 
     #[test]
+    fn direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change() {
+        let first = compile_fixture(700);
+        let second = compile_fixture(701);
+        assert_eq!(first.report.output_latency, LatencySamples(0));
+        assert_eq!(first.report.output_tail, TailSamples::Finite(0));
+        assert_eq!(
+            first.report.canonical_debug_bytes,
+            second.report.canonical_debug_bytes
+        );
+        assert_eq!(first.report.sha256, second.report.sha256);
+        assert_eq!(first.report.dot, second.report.dot);
+    }
+
+    #[test]
     fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
         let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
@@ -2876,6 +2912,8 @@ mod tests {
         let canonical = artifact.report.canonical_debug_bytes.clone();
         assert_eq!(canonical, artifact.report.canonical_debug_bytes);
         let bank_delays = artifact.report.inserted_delays.clone();
+        let bank_output_latency = artifact.report.output_latency;
+        let bank_output_tail = artifact.report.output_tail;
         let bank_tails: Vec<_> = artifact
             .report
             .nodes
@@ -2962,6 +3000,8 @@ mod tests {
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
         assert_eq!(scalar_artifact.report.canonical_debug_bytes, canonical);
         assert_eq!(scalar_artifact.report.inserted_delays, bank_delays);
+        assert_eq!(scalar_artifact.report.output_latency, bank_output_latency);
+        assert_eq!(scalar_artifact.report.output_tail, bank_output_tail);
         assert_eq!(
             scalar_artifact
                 .report
@@ -4252,6 +4292,15 @@ mod tests {
             artifact.report.canonical_debug_bytes,
             scalar_artifact.report.canonical_debug_bytes
         );
+        assert_eq!(artifact.report.output_latency, LatencySamples(486));
+        assert_eq!(
+            artifact.report.output_latency,
+            scalar_artifact.report.output_latency
+        );
+        assert_eq!(
+            artifact.report.output_tail,
+            scalar_artifact.report.output_tail
+        );
         assert!(artifact.report.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(486)
                 && route.compensation_delay == LatencySamples(0)
@@ -4261,6 +4310,8 @@ mod tests {
         let expected_route_timings = artifact.report.route_timings.clone();
         let expected_delays = artifact.report.inserted_delays.clone();
         let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let expected_output_latency = artifact.report.output_latency;
+        let expected_output_tail = artifact.report.output_tail;
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
@@ -4392,6 +4443,11 @@ mod tests {
         );
         assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
         assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
+        assert_eq!(
+            bypass_artifact.report.output_latency,
+            expected_output_latency
+        );
+        assert_eq!(bypass_artifact.report.output_tail, expected_output_tail);
         assert_eq!(
             bypass_artifact.report.canonical_debug_bytes,
             expected_canonical_bytes
@@ -5596,6 +5652,8 @@ mod tests {
         assert_eq!(artifact.report.estimate.effect_bank_metadata_bytes, 0);
         assert_eq!(artifact.report.estimate.effects, 10);
         assert_eq!(artifact.report.estimate.declared_effect_bytes, 7_682_040);
+        assert_eq!(artifact.report.output_latency, LatencySamples(0));
+        assert_eq!(artifact.report.output_tail, TailSamples::Infinite);
         let effect_nodes = artifact
             .report
             .nodes
@@ -5865,6 +5923,7 @@ mod tests {
         })
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.external_binding_nodes().count(), 2);
+        assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
         let tail = artifact
             .report()
             .nodes
@@ -6580,6 +6639,71 @@ mod tests {
             .err()
             .expect("latency plus tail exceeds cap");
         assert_eq!(error.code, "graph.tail.limit");
+    }
+
+    #[test]
+    fn timing_reports_the_checked_sole_output_arrival_and_extent() {
+        let early = node("early");
+        let late = node("late");
+        let output = GraphNodeId::Output {
+            output_id: gid("main"),
+        };
+        let nodes = [
+            GraphNode {
+                id: early.clone(),
+                latency: LatencySamples(3),
+                tail: TailSamples::Finite(5),
+            },
+            GraphNode {
+                id: late.clone(),
+                latency: LatencySamples(7),
+                tail: TailSamples::Finite(1),
+            },
+            GraphNode {
+                id: output.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            },
+        ];
+        let edges = [
+            GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: gid("early-main"),
+                },
+                source: port(early, GraphPortKind::MainOutput),
+                destination: port(output.clone(), GraphPortKind::MainInput),
+                path: "$.routes[id=early-main]".to_owned(),
+            },
+            GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: gid("late-main"),
+                },
+                source: port(late, GraphPortKind::MainOutput),
+                destination: port(output, GraphPortKind::MainInput),
+                path: "$.routes[id=late-main]".to_owned(),
+            },
+        ];
+        let (schedule, _) = topo(&nodes, &edges).expect("acyclic output graph");
+        let latencies = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.latency))
+            .collect();
+        let tails = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.tail))
+            .collect();
+        let timing = timings(&schedule, &edges, &latencies, &tails, &caps(100))
+            .expect("checked output timing");
+        assert_eq!(timing.output_latency, LatencySamples(7));
+        assert_eq!(timing.output_tail, TailSamples::Finite(12));
+        assert_eq!(timing.delays.len(), 1);
+
+        let mut infinite_tails = tails;
+        infinite_tails.insert(node("late"), TailSamples::Infinite);
+        let infinite = timings(&schedule, &edges, &latencies, &infinite_tails, &caps(100))
+            .expect("infinite output tail");
+        assert_eq!(infinite.output_latency, LatencySamples(7));
+        assert_eq!(infinite.output_tail, TailSamples::Infinite);
     }
 
     #[test]

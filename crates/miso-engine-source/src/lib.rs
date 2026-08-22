@@ -567,6 +567,18 @@ impl PcmSourceRing {
         Self::prepare_at_source_frame(config, SourceFrame(0))
     }
 
+    /// Allocate a host-fed ring whose first accepted chunk begins at `initial_frame`.
+    ///
+    /// Shape validation, allocation, ownership, and resource accounting are identical to
+    /// [`Self::prepare`]; only the initial absolute source position differs.
+    pub fn prepare_host_region(
+        config: PcmSourceRingConfig,
+        initial_frame: SourceFrame,
+    ) -> Result<(PcmSourceProducer, PcmSourceConsumer, SourceResourceReport), PcmSourceRingError>
+    {
+        Self::prepare_at_source_frame(config, initial_frame)
+    }
+
     pub(crate) fn prepare_at_source_frame(
         config: PcmSourceRingConfig,
         initial_frame: SourceFrame,
@@ -1769,6 +1781,48 @@ mod tests {
             PcmSourceRing::prepare(config(2, 4, 6)),
             Err(PcmSourceRingError::CapacityNotQuantumMultiple)
         ));
+    }
+
+    #[test]
+    fn host_region_preparation_preserves_resources_and_absolute_ownership() {
+        let config = config(1, 4, 8);
+        let (_, _, zero_report) =
+            PcmSourceRing::prepare_host_region(config, SourceFrame(0)).expect("zero origin");
+        let (_, _, one_report) =
+            PcmSourceRing::prepare_host_region(config, SourceFrame(1)).expect("one origin");
+        let (producer, mut consumer, session_report) =
+            PcmSourceRing::prepare_host_region(config, SourceFrame(48_123))
+                .expect("session origin");
+        assert_eq!(zero_report, PcmSourceRing::resource_report(config).unwrap());
+        assert_eq!(one_report, zero_report);
+        assert_eq!(session_report, zero_report);
+
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let samples = [1.0, 2.0, 3.0, 4.0];
+        let planes = [&samples[..]];
+        assert!(matches!(
+            host.submit(chunk(1, 0, &planes, 4, false)),
+            Err(HostChunkError::NonContiguous {
+                expected: SourceFrame(48_123),
+                actual: SourceFrame(0),
+            })
+        ));
+        assert_eq!(host.telemetry().cumulative_written_frames, 0);
+        host.submit(chunk(1, 48_123, &planes, 4, false))
+            .expect("first absolute chunk after rejection");
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(72_001),
+        })
+        .expect("newer seek");
+        let sought = [9.0, 8.0, 7.0, 6.0];
+        host.submit(chunk(2, 72_001, &[&sought], 4, true))
+            .expect("post-seek chunk");
+        let mut output = [0.0; 4];
+        let mut planes = [&mut output[..]];
+        let report = consumer.read_block(&mut planes).expect("consumer retained");
+        assert_eq!(report.active_generation, SourceGeneration(2));
+        assert_eq!(output, sought);
     }
 
     #[test]

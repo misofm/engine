@@ -1,6 +1,8 @@
 //! Fixed-width representations shared by the C header and FFI implementation.
 
-use core::marker::PhantomData;
+use core::{cell::RefCell, marker::PhantomData};
+
+use crate::runtime::{FixedBytes, PlanState, SessionState};
 
 /// Frozen ABI V1 version (`major << 16 | minor`).
 pub const ABI_VERSION: u32 = 0x0001_0000;
@@ -109,8 +111,8 @@ pub struct CompileLimits {
     pub maximum_builtin_retained_bytes: u64,
     /// Maximum retained C-wrapper bytes.
     pub maximum_capi_retained_bytes: u64,
-    /// Maximum single allocation bytes.
-    pub maximum_single_allocation_bytes: u64,
+    /// Maximum named allocation bytes.
+    pub maximum_named_allocation_bytes: u64,
     /// Maximum meter stream count.
     pub maximum_meter_streams: u64,
     /// Maximum meter item count.
@@ -121,6 +123,8 @@ pub struct CompileLimits {
     pub maximum_control_frame_bytes: u64,
     /// Maximum binary control replay bytes.
     pub maximum_replay_bytes: u64,
+    /// Maximum retained capability-command replay records.
+    pub maximum_replay_entries: u64,
     /// Must be zero in ABI V1.
     pub reserved: [u64; 4],
 }
@@ -275,8 +279,8 @@ pub struct PlanResourceReport {
     pub builtin_retained_payload_bytes: u64,
     /// C-wrapper retained bytes.
     pub capi_retained_bytes: u64,
-    /// Largest single allocation bytes.
-    pub largest_allocation_bytes: u64,
+    /// Largest named allocation bytes.
+    pub largest_named_allocation_bytes: u64,
     /// Zero in ABI V1 output.
     pub reserved: [u64; 4],
 }
@@ -284,7 +288,7 @@ pub struct PlanResourceReport {
 /// Frozen size of [`EngineConfig`] on the pinned 64-bit ABI.
 pub const ENGINE_CONFIG_SIZE: u32 = 40;
 /// Frozen size of [`CompileLimits`] on the pinned 64-bit ABI.
-pub const COMPILE_LIMITS_SIZE: u32 = 200;
+pub const COMPILE_LIMITS_SIZE: u32 = 208;
 /// Frozen size of [`BytesOut`] on the pinned 64-bit ABI.
 pub const BYTES_OUT_SIZE: u32 = 32;
 /// Frozen size of [`SourceChunk`] on the pinned 64-bit ABI.
@@ -305,7 +309,7 @@ const HANDLE_KIND_PLAN: u32 = 3;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct HandleHeader {
+pub(crate) struct HandleHeader {
     cookie: u64,
     kind: u32,
     abi_version: u32,
@@ -323,12 +327,26 @@ impl HandleHeader {
     pub(crate) const fn is_kind(self, kind: u32) -> bool {
         self.cookie == HANDLE_COOKIE && self.kind == kind && self.abi_version == ABI_VERSION
     }
+
+    pub(crate) const fn is_engine(self) -> bool {
+        self.is_kind(HANDLE_KIND_ENGINE)
+    }
+
+    pub(crate) const fn is_session(self) -> bool {
+        self.is_kind(HANDLE_KIND_SESSION)
+    }
+
+    pub(crate) const fn is_plan(self) -> bool {
+        self.is_kind(HANDLE_KIND_PLAN)
+    }
 }
 
 /// Opaque engine handle. C consumers only observe pointers to this type.
 #[repr(C)]
 pub struct Engine {
     header: HandleHeader,
+    pub(crate) last_error: RefCell<[u8; 256]>,
+    pub(crate) last_error_len: core::cell::Cell<usize>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
@@ -336,12 +354,10 @@ impl Engine {
     pub(crate) const fn new() -> Self {
         Self {
             header: HandleHeader::new(HANDLE_KIND_ENGINE),
+            last_error: RefCell::new([0; 256]),
+            last_error_len: core::cell::Cell::new(0),
             not_sync: PhantomData,
         }
-    }
-
-    pub(crate) const fn has_valid_kind(&self) -> bool {
-        self.header.is_kind(HANDLE_KIND_ENGINE)
     }
 }
 
@@ -349,12 +365,19 @@ impl Engine {
 #[repr(C)]
 pub struct Session {
     header: HandleHeader,
+    pub(crate) state: SessionState,
+    pub(crate) last_error: RefCell<FixedBytes>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
 impl Session {
-    pub(crate) const fn has_valid_kind(&self) -> bool {
-        self.header.is_kind(HANDLE_KIND_SESSION)
+    pub(crate) fn new(state: SessionState, last_error: FixedBytes) -> Self {
+        Self {
+            header: HandleHeader::new(HANDLE_KIND_SESSION),
+            state,
+            last_error: RefCell::new(last_error),
+            not_sync: PhantomData,
+        }
     }
 }
 
@@ -362,12 +385,19 @@ impl Session {
 #[repr(C)]
 pub struct Plan {
     header: HandleHeader,
+    pub(crate) state: PlanState,
+    pub(crate) last_error: RefCell<FixedBytes>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
 impl Plan {
-    pub(crate) const fn has_valid_kind(&self) -> bool {
-        self.header.is_kind(HANDLE_KIND_PLAN)
+    pub(crate) fn new(state: PlanState, last_error: FixedBytes) -> Self {
+        Self {
+            header: HandleHeader::new(HANDLE_KIND_PLAN),
+            state,
+            last_error: RefCell::new(last_error),
+            not_sync: PhantomData,
+        }
     }
 }
 
@@ -400,7 +430,8 @@ mod tests {
         assert_eq!(align_of::<PlanResourceReport>(), 8);
 
         assert_eq!(offset_of!(CompileLimits, maximum_toml_bytes), 16);
-        assert_eq!(offset_of!(CompileLimits, reserved), 168);
+        assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
+        assert_eq!(offset_of!(CompileLimits, reserved), 176);
         assert_eq!(offset_of!(BytesOut, data), 8);
         assert_eq!(offset_of!(BytesOut, required_bytes), 24);
         assert_eq!(offset_of!(SourceChunk, planes), 24);

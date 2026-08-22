@@ -37,7 +37,7 @@ extern "C" {
 #define MISO_ENGINE_V2_FEATURE_MASK UINT64_C(31)
 
 #define MISO_ENGINE_V2_ENGINE_CONFIG_SIZE UINT32_C(40)
-#define MISO_ENGINE_V2_COMPILE_LIMITS_SIZE UINT32_C(200)
+#define MISO_ENGINE_V2_COMPILE_LIMITS_SIZE UINT32_C(208)
 #define MISO_ENGINE_V2_BYTES_OUT_SIZE UINT32_C(32)
 #define MISO_ENGINE_V2_SOURCE_CHUNK_SIZE UINT32_C(48)
 #define MISO_ENGINE_V2_SUBMIT_REPORT_SIZE UINT32_C(32)
@@ -73,12 +73,13 @@ typedef struct miso_engine_v2_compile_limits {
     uint64_t maximum_effect_scratch_bytes;
     uint64_t maximum_builtin_retained_bytes;
     uint64_t maximum_capi_retained_bytes;
-    uint64_t maximum_single_allocation_bytes;
+    uint64_t maximum_named_allocation_bytes;
     uint64_t maximum_meter_streams;
     uint64_t maximum_meter_items;
     uint64_t maximum_meter_bytes;
     uint64_t maximum_control_frame_bytes;
     uint64_t maximum_replay_bytes;
+    uint64_t maximum_replay_entries;
     uint64_t reserved[4];
 } miso_engine_v2_compile_limits;
 
@@ -156,7 +157,7 @@ typedef struct miso_engine_v2_plan_resource_report {
     uint64_t builtin_meter_payload_bytes;
     uint64_t builtin_retained_payload_bytes;
     uint64_t capi_retained_bytes;
-    uint64_t largest_allocation_bytes;
+    uint64_t largest_named_allocation_bytes;
     uint64_t reserved[4];
 } miso_engine_v2_plan_resource_report;
 

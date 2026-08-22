@@ -41,7 +41,8 @@ ABI_ASSERT(_Alignof(miso_engine_v2_capabilities) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v2_plan_resource_report) == 8);
 
 ABI_ASSERT(offsetof(miso_engine_v2_compile_limits, maximum_toml_bytes) == 16);
-ABI_ASSERT(offsetof(miso_engine_v2_compile_limits, reserved) == 168);
+ABI_ASSERT(offsetof(miso_engine_v2_compile_limits, maximum_replay_entries) == 168);
+ABI_ASSERT(offsetof(miso_engine_v2_compile_limits, reserved) == 176);
 ABI_ASSERT(offsetof(miso_engine_v2_bytes_out, data) == 8);
 ABI_ASSERT(offsetof(miso_engine_v2_bytes_out, required_bytes) == 24);
 ABI_ASSERT(offsetof(miso_engine_v2_source_chunk, planes) == 24);
