@@ -2,13 +2,15 @@
 
 ## Decision
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1 / REAL EXECUTION NOT AUTHORIZED.** Sol High
-implements one focused pass; Sol XHigh briefs and verifies. One bounded HOLD correction is the
-maximum second pass. A second HOLD is terminal STOP.
+**OPEN / STRICT SOL XHIGH FOCUSED PASS / WAITING FOR EXTERNAL FACILITATOR INPUT.** Sol High
+completed one focused pass and its sole bounded correction; Sol XHigh adversarially verified both.
+The exact-path checkpoint is authorized. No preparation seal, preflight, render, playback,
+listening action or persistent Issue-111 artifact is authorized.
 
-The finish line is **AGENT PREPARATION COMPLETE / READY FOR REAL FACILITATOR**, never human
-listening completion. Initial Issue-111 preflight/preparation/playback/session/trial/response/reveal/
-result counters are `0/0/0/0/0/0/0/0`.
+The eventual finish line is agent preparation for a real facilitator, never human listening
+completion, but it has not been reached. No permissioned 48 kHz stereo source, provenance record
+or private seed was supplied. Initial and current Issue-111 preflight/preparation/playback/session/
+trial/response/reveal/result counters are `0/0/0/0/0/0/0/0`.
 
 ## Frozen input and sole defect
 
@@ -63,3 +65,32 @@ or unrelated edit is STOP.
 Run only validator format/link tests, hermetic fake lifecycle, static checker/mutations, shell/
 Python syntax, frozen identity and docs/diff sanity. A focused PASS authorizes a checkpoint only;
 preflight and preparation each require later independent authorization.
+
+## Focused checkpoint verdict (2026-08-22)
+
+The successor scripts are frozen at commit `ac5cd0d`, tree `c4781fdc`:
+
+| Path | SHA-256 |
+| --- | --- |
+| `scripts/check-builtins-listening-111.py` | `07e22c32daf33aece1d26fe69c1e3a70d1f3b6a60c9b7f751db1817b87d28b7a` |
+| `scripts/check-builtins-listening-111.sh` | `350eb43361caa38e5a24c8489049bb00aab11813335b0821221f307edb08c137` |
+| `scripts/test-builtins-listening-111-policy.sh` | `5b43417da6db58ea31b0d09b64842e3b5f7a381631340d4be8a162a558147179` |
+| `scripts/test-builtins-listening-111.sh` | `13d7e7457bf5054c024ca1a77d9b3fb683adb67869c0c2285aa03761c5b9d23c` |
+| `scripts/preflight-builtins-listening-111.sh` | `541e4821ac7eae07440591f1579bc088c5943bae97a6625acf452c943f9dcef3` |
+| `scripts/prepare-builtins-listening-111.sh` | `57eb87fd4ed23f3cf4476350cc9d123a95391761eaaba77e828bba2ffd2ae165` |
+
+Pass 1 received a bounded HOLD for non-exclusive creation of persistent preparation stderr. Pass 2
+added create-once mode-0600 stderr handling, held descriptor/path identity checks and hermetic
+regular-file, symlink and hardlink collision evidence with sentinel preservation and zero renderer
+launch. Sol XHigh returned **STRICT SOL XHIGH FOCUSED PASS**.
+
+Reported focused gates passed: syntax for the five shell scripts; the validator self-test with 21
+inherited count rows plus 14 linked-authority rejection classes; the checker; 12 policy mutations;
+the hermetic lifecycle; and conflict, whitespace, Python-cache and target scans. `target/issue33`
+and `target/issue111` were absent, and every real counter remained zero.
+
+This is checkpoint authorization only. Issue 111 remains **OPEN / WAITING FOR EXTERNAL FACILITATOR
+INPUT** because no permissioned 48 kHz stereo source, provenance record or private seed was
+supplied. There is no preparation seal, preflight, render, playback, listening authorization or
+Issue-111 artifact, and this record does not claim agent preparation complete or readiness for a
+real facilitator.
