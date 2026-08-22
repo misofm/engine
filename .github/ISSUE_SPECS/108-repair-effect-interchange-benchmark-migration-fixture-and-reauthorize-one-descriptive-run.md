@@ -7,25 +7,78 @@ real migration fixture without timing, bind its newly reachable canonical output
 successor-only no-clobber lifecycle, and create a fresh authorization barrier for at most one
 descriptive run.
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH ATTEMPT 1.** Sol High implements one coherent attempt;
-Sol XHigh adversarially verifies it. At most one bounded Sol High correction is permitted before
-preflight. A second failed implementation/review pass, any failed real preflight, or any failure
-after the successor runner launches is STOP/rescope, never a weakened gate or retry.
+**SOL XHIGH PASS / COMPLETE / READY TO CLOSE.** Sol High attempt 1 and its bounded corrections,
+the sole zero-workload preflight, and the sole descriptive runner all passed their exact gates.
+Both one-shot authorities are consumed. No retry, direct or alternate binary invocation, tuning,
+threshold, comparison, or additional benchmark activity is authorized.
 
 At briefing, Issue-108 counters are
 `benchmark_preflight_invocations=0`, `benchmark_runner_invocations=0`,
 `benchmark_workload_invocations=0`, and `timed_benchmark_invocations=0`. A focused correctness test
 is not a benchmark invocation and emits no timing record. Remote issues 083 and 107 were read-only
-verified occupied and open on 2026-08-22; remote issue 108 does not exist. Root must create issue
-108 with the H1 title in the docs checkpoint before implementation. This local brief does not
-claim remote creation or synchronization.
+verified occupied and open on 2026-08-22; remote issue 108 did not yet exist at briefing. Root was
+required to create issue 108 with the H1 title before implementation. This final local record does
+not claim remote creation or synchronization; root must verify both after the evidence commit.
 
 Attempt-1 focused implementation derives the reachable four-rate D1→D2→D3 final-envelope SHA-256
 as `5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777`. The shared untimed Rust
 regression validates the exact 283-byte envelope and eleven-byte payload and confirms the digest is
 different from the unreachable Issue-081 value. Issue-108 preflight/runner/workload/timed counters
-remain `0/0/0/0`; no real benchmark authority has been invoked. This is checkpoint evidence only,
-pending Sol XHigh review, not an overall PASS or run authorization.
+were `0/0/0/0` at the focused checkpoint. Sol XHigh passed that checkpoint before either real
+authority was invoked; the final consumed-authority evidence follows.
+
+## Final terminal evidence — 2026-08-22
+
+The immutable benchmark candidate was clean tracked HEAD
+`c4963191310fd39c12e8edf06cae73af1e650622`, tree
+`fd58c39418c6ed1d76cdbb6c8a014025b62d0abe`. The sole preflight and sole separately authorized
+runner both exited zero. Runner stdout contained exactly the accepted-artifact path and no other
+line. Final Issue-108 counters are preflight/runner/workload/timed `1/1/1/1`, with one warmup, two
+measured rounds, eight records and no retry or alternate/direct invocation.
+
+All seven files in `target/issue108` are regular one-link files. The prelaunch disposition remains
+absent:
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `repair.seal.json` | 2,350 | `5e791427d6849a415da7ee7f259d8a7ee14f861af1ef0cb163ad441c1ef18ea1` |
+| `miso_engine_effect_interchange_bench` | 837,192 | `bf1ffe9599377c3a1b965eecfb88ea612f14c25e245cd4c198d926bceedfc4e6` |
+| `benchmark-preflight.seal.json` | 1,857 | `f3a5448eec9aa5ba696924bc45b34cc243e72b92e15fb047eb39605366c328bc` |
+| `benchmark.raw.jsonl` | 11,112 | `eb39e3972b50aab45f4d253e20e51d0332eb844af9a7efcb8d86bda95f0776c5` |
+| `benchmark.accepted.jsonl` | 11,112 | `eb39e3972b50aab45f4d253e20e51d0332eb844af9a7efcb8d86bda95f0776c5` |
+| `benchmark.stderr.log` | 226 | `43331d34c536bcdab2f1825f0fae67adfaade37bfde1bfc0b0f379149c5329ad` |
+| `benchmark.disposition.json` | 881 | `ae026c1536316b077858b3ea7d1c8ecc2bc0fbbbc3b3a6a7c2511f7377f74375` |
+
+Raw and accepted bytes are identical but their inodes are distinct. Stderr contains exactly, in
+order, `workload_started`, `warmup_complete`, `timed_started`, `round_1_complete`, and
+`round_2_complete` phase lines with the required prefix. The closed disposition is `PASS` /
+`complete`, binds the candidate, binary, preflight, raw, accepted and stderr identities above, and
+reports runner/workload/timed `1/1/1`, warmup `1`, rounds `2`.
+
+The accepted file contains exactly eight closed-schema, address/PID/path-free records ordered as
+descriptor/package/state/migration for round 1 and then the same order for round 2. Every record
+has `issue=108`, `observation_count=256`, unit `ns_per_operation`, the exact candidate/tool/input
+identities, a positive integral and ordered timing summary, and a total bounded by 256 times its
+minimum and maximum. Output hashes are respectively
+`865a0a5a01ba157bea7f3279ad68cc17db0296655998a9b5307cf759c38656f1`,
+`02e944154ccdc0315b96a7f493a11f6c60f70993750fb26ed766bc3273685d0f`,
+`b38a9abad3da50b0c38bd02b9de19b641e79f9a8f48099fbb67d1ec3d481cf48`, and
+`5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777` in both rounds. Ordered
+`total_ns` values are `547946`, `1389054`, `425687`, `718892`, `544929`, `1381496`, `420847`,
+and `725071`.
+
+Shared metadata is honest and stable across all records: release profile; Rust 1.97.1; LLVM 22.1.6;
+`x86_64-unknown-linux-gnu`; `AMD Ryzen 7 9700X 8-Core Processor`; 16 logical and 8 physical cores;
+Linux kernel `6.8.0-138-generic`; governor `powersave`; background load `0.12,0.13,0.10`;
+`std::time::Instant`; and nearest-rank percentiles. `metadata_incomplete=true` is explained solely
+by empty `power_mode`, and `missing_metadata` is exactly `["power_mode"]`.
+
+Independent Sol XHigh read-only audit reconstructed the clean candidate without invoking Git,
+rehashed every current authority and all 36 accepted-manifest members, validated both seals and
+every record/key/type/order/timing/identity relation, and reconfirmed the six immutable Issue-081
+files plus its two required absences. The numbers are descriptive only and create no performance
+claim or release threshold. Issue 108 is locally complete and ready for root's evidence commit,
+single batch push, GitHub synchronization and closure; none of that remote work is claimed here.
 
 ## Dependencies by exact issue title
 
