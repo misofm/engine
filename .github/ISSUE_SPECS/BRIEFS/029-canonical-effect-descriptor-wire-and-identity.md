@@ -53,3 +53,19 @@ contract, API or testability blocker triggers STOP/rescope. Benchmark/timed invo
 Issue 078 owns canonical packages/artifacts/CID/selection; 079 owns current-layout state envelope and
 transactional restore; 080 owns migration registry/chains; 081 owns joined qualification, fuzz,
 100-process/multitarget evidence and the sole future rough benchmark.
+
+## Terra corrected-pass verdict
+
+**FINAL STOP / RESCOPE REQUIRED.** The corrected package-local Rust implementation reached a
+focused-green partial checkpoint, but the required safe invalid-static differential matrix is not
+constructible for `PortLayout`. The accepted enum has only `DualMonoPlanar`, so the unchanged
+validator's invalid-layout comparison cannot fail for any safely constructed `PortDescriptorV1`.
+Raw wire can carry and reject an unknown layout, but no corresponding safe static descriptor can be
+passed to `validate_descriptor_v1`; unsafe construction and an effect-contract seam are forbidden.
+The constructor-reachability amendment covers EffectId, PortId and LinkModeSet, not this closed enum.
+
+Preserve the unaccepted focused-green `diagnostic.rs`/`wire.rs` partial implementation as evidence.
+The initial lifetime STOP plus this final corrected-pass STOP exhaust the issue's clarification/pass
+budget. Package check, 8 new wire tests plus 4 existing tests, focused warnings-denied Clippy and
+format check passed. C, fixtures, Python, targets and broad gates did not begin. Workload, benchmark
+and timed invocation counts are all zero.

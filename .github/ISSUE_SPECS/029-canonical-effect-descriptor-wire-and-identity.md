@@ -231,3 +231,29 @@ matrix; benchmark or listening. Issues 078–081 own those separable outcomes.
 
 - [FIPS 180-4, Secure Hash Standard](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)
 - [WebAssembly core specification](https://webassembly.github.io/spec/core/)
+
+## Terra corrected-pass STOP evidence
+
+**FINAL STOP / RESCOPE REQUIRED.** Terra's corrected implementation pass produced a focused-green,
+package-local partial checkpoint in `diagnostic.rs` and `wire.rs`: the static encoder calls the
+unchanged Issue-011 validator; the implementation has the frozen header/table shapes, checked
+caller-buffer behavior, borrowed package-local parsing and semantic validation, canonical port
+ordering, identity hashing and focused diagnostic/canary/parity tests. This partial implementation
+is not accepted as Issue-029 completion.
+
+The final clarification still requires an invalid safe static descriptor fixture for port layout.
+That fixture cannot exist. `PortLayout` is a closed accepted `#[repr(u32)]` enum with only
+`DualMonoPlanar` (`miso-engine-effect-contract/src/lib.rs:133`), while the unchanged validator's
+port rules compare that typed value only with `DualMonoPlanar` (lines 446, 453 and 460). An unknown
+layout can be represented only as raw wire and rejected in the wire enum phase; it cannot be placed
+in a safe `PortDescriptorV1` for an exact `validate_descriptor_v1` differential call. Unsafe enum
+construction or an effect-contract test/public seam would violate the frozen scope. Unlike
+EffectId, PortId and LinkModeSet, the final clarification did not authorize constructor-sealed
+raw-wire-only treatment for `PortLayout` while continuing to require invalid static layout parity.
+
+The initial pre-edit lifetime STOP and this final corrected-pass testability STOP exhaust the
+authorized clarification/pass budget. Focused evidence before STOP: package check passed; all eight
+new wire tests plus four existing package tests passed; focused all-target Clippy with warnings
+denied passed; format check passed. No C FFI/header, checked fixtures, Python reference, cross-target
+or broad workspace work began. `workload_invocations=0`, `benchmark_invocations=0` and
+`timed_invocations=0`.
