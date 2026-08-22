@@ -3,10 +3,12 @@
 ## Outcome and status
 
 Ship one canonical, bounded current-layout state envelope for an accepted native effect and restore
-it only into an unpublished destination. **READY FOR TERRA ATTEMPT 1.** Accepted Issues 082, 011 and
-004 supply descriptor identity, runtime factory and transactional compiler seams. Permit one Terra
-attempt and one bounded Sol correction; a second failure stops. Workload, benchmark, timed, audit,
-browser and general-target invocation counts remain zero.
+it only into an unpublished destination. **COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** Accepted
+Issues 082, 011 and 004 supply descriptor identity, runtime factory and transactional compiler
+seams. Per the user override, Sol High implemented and Sol XHigh briefed and adversarially verified.
+Workload, benchmark, timed, audit, browser and general-target invocation counts remain zero. Remote
+closure is intentionally reserved for root after the single eventual bulk `main` merge/push/CI and
+GitHub evidence synchronization; this local record does not claim either action.
 
 Existing `effect-package/src/state.rs`, `tests/state_vectors.rs` and `fuzz/effect_state.rs` are
 provisional technical input and may be replaced. `effect-package/src/compile.rs` is obsolete to this
@@ -252,6 +254,54 @@ Non-goals: migration/registry (Issue 080); package/CID; runtime trait, descripto
 session schema changes beyond the narrow Issue-082 static-descriptor binding helper; whole-bank
 reconstruction; live render/plan mutation; trust/signatures; broad fuzz, target/process matrices;
 benchmark, timing or listening.
+
+## Implementation evidence and Sol decision
+
+The clean product/reference candidate was local commit
+`7bb0e0ea8d57674f6e5cbb5cdb6a74470fe9ecfa` (tree
+`15074afdf345b8c3b302bda459de1b5083852d95`). Its coherent local checkpoints are:
+
+- `c91fdb0`: package-owned V1 wire, bounded verification, identity binding and diagnostics;
+- `77e9bc1`: scalar snapshot/transactional restore and admission;
+- `d4377cd`: by-value unpublished bank capability, member snapshot/restore and compatibility; and
+- `7bb0e0e`: independent reference vector, exact documentation, compile-only fuzz update and
+  product qualification.
+
+The independent Python-standard-library vector is exactly 309 state bytes: a 224-byte header,
+three 16-byte initial records and payload beginning at byte 296. Its accepted descriptor wire is
+653 bytes with SHA-256 `cff6a313be6b04a8932343928a0ab69c296fadcdca88922032b217c20a81aea9`;
+the descriptor identity is
+`752552864ed6796526d1859f83795bb3facea6cc91bc1fa5e3e796ee67284ff1`; the envelope digest is
+`858e6db10df1b69626736bf2d5f29634866269599d0428710c95e2103dfc837f`; the complete state file
+SHA-256 is `b38a9abad3da50b0c38bd02b9de19b641e79f9a8f48099fbb67d1ec3d481cf48`; and
+`MANIFEST.sha256` has SHA-256
+`3cee39d0fd213989d81f92675085b2d90d11bf6ff1f4b4a4323b158fce8b7220`. The manifest covers all
+eight listed fixture members (nine fixture files including the manifest). Rust binds the independent
+descriptor and re-encodes all 309 bytes exactly; the malformed-vector oracle is nonvacuous and
+covers every frozen header/diagnostic class.
+
+One locked broad nonbenchmark seal ran once against that exact candidate. It registered 541
+workspace tests: 535 passed, six pre-existing ignored/manual tests remained ignored and zero failed;
+all eight doctests passed. The remaining ordered formatting, checks, strict Clippy, rustdoc,
+reference/manifest, fuzz compile-only, scalar-Wasm, static scan and policy/mutation gates passed.
+The seal counted 11 policy commands and syntax-checked all 76 repository shell scripts. Pre/post
+branch, HEAD, tree, worktree and index observations were identical, as were these four
+seal-sensitive files:
+
+| File | SHA-256 |
+|---|---|
+| `Cargo.lock` | `8db695d722dc2055faaac82ffebb8741bf948117fc733834de9e157ff4e31e6c` |
+| `fuzz/Cargo.lock` | `af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5` |
+| `fixtures/effect-state/v1/MANIFEST.sha256` | `3cee39d0fd213989d81f92675085b2d90d11bf6ff1f4b4a4323b158fce8b7220` |
+| `scripts/effect-state-v1-reference.py` | `9dc95018daa5c993c16fc10ca5185ec17193bd69d6b71a199737b110ba7f0c0e` |
+
+Invocation accounting for the seal is explicit: benchmark 0, timed 0, workload 0, audit-main 0 and
+fuzz execution 0. The fuzz target was checked and linted only. No Issue 080 migration work or Issue
+081 broad fuzzing, allocation accounting, multitarget qualification or benchmark work entered this
+issue.
+
+**Sol XHigh verdict: PASS. Issue 079 is complete and ready to close after root performs the one
+eventual batch delivery, remote evidence synchronization and GitHub closure.**
 
 ## Dependencies by exact issue title
 

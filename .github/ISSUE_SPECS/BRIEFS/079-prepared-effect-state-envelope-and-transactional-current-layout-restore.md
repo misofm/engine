@@ -2,9 +2,11 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Deliver only the canonical current-layout envelope and transactional
-unpublished restore. One Terra implementation and one bounded Sol correction are allowed; the
-second failure stops. All workload/benchmark/timed/audit/browser/general-target counts stay zero.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** Deliver only the canonical current-layout envelope
+and transactional unpublished restore. Per the user override, Sol High implemented and Sol XHigh
+briefed and adversarially verified. All workload/benchmark/timed/audit/browser/general-target counts
+stay zero. Remote closure remains root work after the one eventual bulk `main` merge/push/CI and
+GitHub evidence synchronization; neither is claimed by this local record.
 
 ## Implementation order
 
@@ -71,6 +73,43 @@ trusting raw descriptor wire or program-key provenance; accepting caller-owned m
 using serialized request caps as current allocation policy; introducing a package/compiler cycle;
 persisting backend/siblings; retaining a hidden envelope copy; accepting an old layout; touching
 live state; weakening digest/diagnostic/canary gates; or importing Issue-080/081 breadth.
+
+## Completion evidence
+
+The accepted local checkpoints are `c91fdb0` (package wire/state), `77e9bc1` (scalar restore),
+`d4377cd` (bank restore) and `7bb0e0e` (reference/product qualification). The clean seal candidate
+was `7bb0e0ea8d57674f6e5cbb5cdb6a74470fe9ecfa`, tree
+`15074afdf345b8c3b302bda459de1b5083852d95`.
+
+The independent standard-library fixture is a 309-byte envelope with a 224-byte header, three
+16-byte initial records and payload at byte 296. Its 653-byte descriptor wire SHA-256 is
+`cff6a313be6b04a8932343928a0ab69c296fadcdca88922032b217c20a81aea9`, descriptor identity is
+`752552864ed6796526d1859f83795bb3facea6cc91bc1fa5e3e796ee67284ff1`, envelope digest is
+`858e6db10df1b69626736bf2d5f29634866269599d0428710c95e2103dfc837f`, state-file SHA-256 is
+`b38a9abad3da50b0c38bd02b9de19b641e79f9a8f48099fbb67d1ec3d481cf48`, and manifest SHA-256 is
+`3cee39d0fd213989d81f92675085b2d90d11bf6ff1f4b4a4323b158fce8b7220`. The manifest covers all
+eight listed members (nine fixture files including the manifest), and Rust binding/re-encoding
+matches all 309 independently authored bytes.
+
+The one locked broad nonbenchmark seal registered 541 workspace tests: 535 passed, six existing
+ignored/manual tests stayed ignored and zero failed; doctests passed 8/8. All remaining ordered
+format/check/strict-Clippy/rustdoc/reference+manifest/fuzz-compile-only/scalar-Wasm/static/policy
+gates passed, including 11 policy commands and syntax checks for all 76 shell scripts. Pre/post
+candidate observations and these four hashes were unchanged:
+
+- `Cargo.lock`: `8db695d722dc2055faaac82ffebb8741bf948117fc733834de9e157ff4e31e6c`;
+- `fuzz/Cargo.lock`: `af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`;
+- `fixtures/effect-state/v1/MANIFEST.sha256`:
+  `3cee39d0fd213989d81f92675085b2d90d11bf6ff1f4b4a4323b158fce8b7220`; and
+- `scripts/effect-state-v1-reference.py`:
+  `9dc95018daa5c993c16fc10ca5185ec17193bd69d6b71a199737b110ba7f0c0e`.
+
+Invocation counts were benchmark 0, timed 0, workload 0, audit-main 0 and fuzz execution 0; the
+fuzz target was compiled/linted only. Issue 080 migration and Issue 081 broad
+fuzz/allocation/multitarget/benchmark scope were not imported.
+
+**Sol XHigh verdict: PASS. Issue 079 is complete and ready to close after root's eventual single
+batch delivery, remote evidence synchronization and GitHub closure.**
 
 ## Downstream handoff
 
