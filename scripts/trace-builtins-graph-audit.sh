@@ -22,6 +22,9 @@ strace -ff -qq -ttt -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
 "$validator" "$trace_root" MISO_ISSUE069_GRAPH_RT_BEGIN MISO_ISSUE069_GRAPH_RT_END 4 \
   >"$trace_root/validator.json"
 jq -e '
+  .schema_version == 1 and .trace_files >= 2 and .intervals == 4 and .violations == 0
+' "$trace_root/validator.json" >/dev/null
+jq -e '
   .kind == "issue069_graph_realtime_lifecycle_audit" and
   .renders == 1000000 and .quantum_frames == 128 and .observers == 7 and
   .render_count_by_plan == {"A":1,"B":999999,"C":0} and
@@ -36,7 +39,14 @@ jq -e '
   .network_io == 0 and .syscalls == 0 and .panic_unwinds == 0 and
   .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
+expected_audit_hash=54103c89b557a72da9c79cd00a636ea64933240a4dcb27c27647fb960b013db4
+audit_hash=$(sha256sum "$trace_root/audit.json" | cut -d' ' -f1)
+[[ "$audit_hash" == "$expected_audit_hash" ]] || {
+  printf 'graph audit record hash differs: expected=%s actual=%s\n' \
+    "$expected_audit_hash" "$audit_hash" >&2
+  exit 1
+}
 raw_hash=$(for file in "$trace_root"/trace.*; do sha256sum "$file" | cut -d' ' -f1; done | sha256sum | cut -d' ' -f1)
 validator_hash=$(sha256sum "$trace_root/validator.json" | cut -d' ' -f1)
-printf 'issue-069 graph all-TID trace: PASS (raw=%s validator=%s)\n' \
-  "$raw_hash" "$validator_hash"
+printf 'issue-070 graph all-TID trace: PASS (audit=%s raw=%s validator=%s)\n' \
+  "$audit_hash" "$raw_hash" "$validator_hash"
