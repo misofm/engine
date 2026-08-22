@@ -18,6 +18,31 @@ validation policy, allocation, worker, decoder or state. Focused source tests pr
 origins, identical resource/shape reports, first-chunk contiguity, seek transition and unchanged
 rejection ownership. No other source visibility change is permitted.
 
+### Final preimplementation report correction
+
+**READY; THIS IS THE FINAL PERMITTED-SURFACE CORRECTION.** `timings` already computes the sole
+session output's final arrival and propagated finite/infinite extent, but `GraphCompileReport`
+currently discards both. Permit `miso-engine-graph-compiler` to add only `output_latency:
+LatencySamples` and `output_tail: TailSamples` to that report, copied from the existing checked
+`TimingResult`; no second timing walk or C-ABI reconstruction is allowed. Focused graph tests cover
+direct, PDC-merged, finite-tail, infinite-tail, bypass and bank/scalar-equal cases while proving
+canonical graph identity is unchanged.
+
+The C report's `effect_scalar_state_bytes` and `effect_scalar_scratch_bytes` are the checked sums of
+metadata-declared scalar-equivalent state/scratch for every declared effect instance, including
+instances executing as homogeneous bank members. They are contract rows, not an observation of an
+effect processor's private allocation layout. `largest_named_allocation_bytes` is therefore the max
+only of the named graph, source, builtin and C-wrapper largest-allocation rows; it explicitly excludes
+opaque effect processor internals. No effect-contract/report change is permitted.
+
+All C-wrapper control-frame scratch, error/diagnostic storage, source-ID/region records, canonical
+session bytes, capability-command replay payload and replay-entry metadata are allocated to their
+configured fixed capacities during successful session compilation, included in
+`capi_retained_bytes`, and never lazily grown. Compile rejects before publishing either child when
+that checked payload exceeds its cap. No `ProtocolController` or protocol-queue resource seam is
+required for Issue 022's capability-only command surface. Any further fundamental visibility or
+reporting gap after this correction is a STOP/rescope, not another briefing amendment.
+
 ## Outcome
 
 Ship the smallest useful stable native embedding boundary: compile one immutable strict-TOML
@@ -86,7 +111,7 @@ the relevant handle's prior diagnostic.
   set unchanged on rejection. It exposes no processor parts and changes no render behavior.
 - Limits include maximum TOML and diagnostics bytes; tracks, sources, routes and effects; graph
   session-plus-plan bytes; source total/overhead bytes; effect state/scratch; builtin retained
-  bytes; C-wrapper retained bytes; largest allocation; source-ring frames; meter streams/items/
+  bytes; C-wrapper retained bytes; named largest allocation; source-ring frames; meter streams/items/
   bytes; automation spans; and control-frame/replay bytes. Zero is invalid; configured counts are
   resource ceilings, not compiled track maxima. Checked overflow or any one-byte-below row rejects
   before either child handle publishes.
@@ -116,8 +141,9 @@ the relevant handle's prior diagnostic.
 - `plan_resources` is address-free and copies exact existing production rows: graph
   session-plus-plan/incremental/metadata/delay and bank payloads, source PCM/overhead/total, effect
   scalar state/scratch, builtin processor/meter/retained payloads, C-wrapper retained bytes, largest
-  allocation, quantum/rate, source/track count, latency and tail kind/value. It does not invent a
-  global allocation count or claim overlapping rows are additive.
+  named allocation, quantum/rate, source/track count, and the new graph-reported output latency and
+  tail kind/value. It does not invent a global allocation count, include opaque effect internals in
+  the named maximum, or claim overlapping rows are additive.
 
 ## Deliverables
 
@@ -131,8 +157,9 @@ addition and its focused tests in `miso-engine-builtins-compiler`, workspace man
 only by those direct dependencies, `tools/miso-engine-capi-audit`, `scripts/check-capi-abi.sh`,
 `scripts/test-capi-abi.sh`, the exact realtime unsafe-policy checker/mutation scripts, and concise
 Issue-022 evidence. It additionally permits only `crates/miso-engine-source/src/lib.rs` for the
-named host-region constructor and its colocated focused tests. Any other production API or source
-visibility change is a STOP.
+named host-region constructor and its colocated focused tests, plus
+`crates/miso-engine-graph-compiler/src/lib.rs` for the two final-output report fields and focused
+tests. Any other production API, resource-report, or visibility change is a STOP.
 
 ## Explicit non-goals
 
@@ -175,8 +202,10 @@ qualification without changing ABI V1.
    malformed frames and every other well-formed opcode produce the frozen typed response without
    mutation. Source submit/seek backpressure and retry are deterministic.
 5. Resource reports match exact production projections; equal and one-byte-below tests cover each
-   separately enforced graph/source/effect/builtin/C-wrapper row and largest-allocation cap,
-   transactionally with both child outputs null.
+   separately enforced graph/source/effect/builtin/C-wrapper row and named-largest-allocation cap,
+   transactionally with both child outputs null. Output latency/tail equals the final graph report;
+   effect scalar-equivalent rows include bank members; C-wrapper capacity is fully charged at
+   compile; and named largest-allocation semantics exclude opaque effect internals.
 6. A 100,000-call non-timed render audit on the C entrypoint reports zero allocations/frees, locks,
    I/O, logging, syscalls, feature detection and panic unwinds, with stable output pointers and no
    callback. Focused crate tests, format, warning-denied Clippy/rustdoc, locked workspace tests and

@@ -40,6 +40,15 @@ constructor. Adjacent review found no other required visibility seam: `SourceGra
 `prepare_graph_source_set`, mappings, reports, `into_host_chunk_provider`, submit and seek are
 already public.
 
+The final report seam is equally bounded. Extend private `TimingResult` and public
+`GraphCompileReport` with `output_latency: LatencySamples` and `output_tail: TailSamples`. After the
+existing single-output cardinality check and the existing timing loop, read the sole output node's
+already-computed `arrivals` and `extents`; copy those values into the report. Do not reconstruct them
+from route rows, walk the graph again, or change canonical debug/SHA/DOT identity. Focused tests
+cover a direct zero-latency/zero-tail output, unequal routes aligned by PDC, a finite effect tail, an
+infinite delay tail, latency-preserving bypass, and equal scalar/banked/builtin artifacts. The only
+permitted graph edit is `crates/miso-engine-graph-compiler/src/lib.rs` plus its colocated tests.
+
 Compilation is an off-render transaction:
 
 ```text
@@ -99,9 +108,10 @@ The V1 header freezes these field sequences; every unnamed `reserved` element is
   maximum_diagnostic_bytes, maximum_tracks, maximum_sources, maximum_routes, maximum_effects,
   maximum_graph_session_plus_plan_bytes, maximum_source_total_bytes,
   maximum_source_overhead_bytes, maximum_effect_state_bytes, maximum_effect_scratch_bytes,
-  maximum_builtin_retained_bytes, maximum_capi_retained_bytes, maximum_single_allocation_bytes,
+  maximum_builtin_retained_bytes, maximum_capi_retained_bytes,
+  maximum_named_allocation_bytes,
   maximum_meter_streams, maximum_meter_items, maximum_meter_bytes, maximum_control_frame_bytes,
-  maximum_replay_bytes, reserved[4]}`;
+  maximum_replay_bytes, maximum_replay_entries, reserved[4]}`;
 - `miso_engine_v2_bytes_out {u32 struct_size, u32 reserved0, u8 *data, u64 capacity_bytes,
   u64 required_bytes}`;
 - `miso_engine_v2_source_chunk {u32 struct_size, u32 sample_rate_hz, u64 generation,
@@ -121,9 +131,11 @@ The V1 header freezes these field sequences; every unnamed `reserved` element is
   effect_bank_metadata_bytes, builtin_bank_bytes, builtin_bank_scratch_bytes,
   source_pcm_payload_bytes, source_overhead_bytes, source_total_bytes, effect_scalar_state_bytes,
   effect_scalar_scratch_bytes, builtin_processor_payload_bytes, builtin_meter_payload_bytes,
-  builtin_retained_payload_bytes, capi_retained_bytes, largest_allocation_bytes, reserved[4]}`.
+  builtin_retained_payload_bytes, capi_retained_bytes, largest_named_allocation_bytes,
+  reserved[4]}`.
   `tail_samples` is zero when tail kind is infinite. Rows retain their production meanings and may
-  overlap; consumers must not sum them. No global allocation count is exposed.
+  overlap; consumers must not sum them. No global allocation count is exposed. The named largest
+  field excludes opaque effect processor internals.
 
 The exact prototypes are:
 
@@ -197,10 +209,37 @@ derive equal and one-byte-below caps from the corresponding production row rathe
 guessed literals. Do not expose addresses, Rust layout, capacity slack, allocator internals, or
 duration-dependent source size.
 
+`effect_scalar_state_bytes` is the checked sum of `metadata.state_sizes.total()` and
+`effect_scalar_scratch_bytes` is the checked sum of `metadata.scratch_bytes` for every declared
+prepared effect entry before graph ownership consumes it. This includes every bank member: the row
+describes its scalar-equivalent per-instance contract even when execution is banked. Aggregate equal
+and one-byte-below C caps are enforced after preparation and before graph/child publication. These
+rows do not assert the largest private allocation inside an opaque processor.
+
+`largest_named_allocation_bytes` is exactly the maximum of
+`GraphResourceEstimate::largest_allocation_bytes`, source-set/source-ring largest allocation,
+`BuiltinResourceEstimate::maximum_single_allocation_bytes`, and the C-wrapper largest allocation
+described below. `maximum_named_allocation_bytes` maps to those existing graph/source/builtin caps
+and the C-wrapper cap. No effect largest-allocation field is added, inferred or advertised.
+
+The session child preallocates its complete capability-command state before either child publishes:
+canonical session bytes; a sorted boxed source record array and contiguous source-ID bytes;
+per-handle fixed error/diagnostic bytes; request/decode and response/encode scratch each bounded by
+`maximum_control_frame_bytes`; a replay payload arena bounded by `maximum_replay_bytes`; and a fixed
+replay-entry record array bounded by `maximum_replay_entries`. The Issue-022 controller supports only
+capability command/replay and typed unsupported responses; it does not instantiate the full
+`ProtocolController` or protocol queues. Every retained request is represented by a checked
+`Layout::array` payload row; their checked sum is `capi_retained_bytes` and their max is the C-wrapper
+input to `largest_named_allocation_bytes`. Allocate them during compile, reject equal/one-below caps
+transactionally, and never lazily reserve/grow retained storage in submit, render or error paths.
+Transient off-render codec locals are not retained-resource rows. Issue 073 may consume the frozen
+reserved controller/replay storage but may not change ABI V1.
+
 The permitted source edit is only `crates/miso-engine-source/src/lib.rs` for
 `prepare_host_region` and its focused tests. `native_source.rs`, region parsing, producer/consumer
 semantics and resource formulas remain unchanged. Needing any second source visibility or behavior
-change is a briefing STOP.
+change is a briefing STOP. Likewise, no protocol/controller resource seam and no effect metadata or
+resource seam is permitted. Any further fundamental API/reporting gap is final STOP/rescope.
 
 ## Representative proof
 
