@@ -856,8 +856,8 @@ mod tests {
             "frozen q128 native wave/unit/partition transcript"
         );
         assert_eq!(
-            aggregate_hash, 0x322d_647c_66f7_c762,
-            "frozen exact-100 preparation matrix transcript after graph-owned source-set storage"
+            aggregate_hash, 0x4325_aad7_1bb5_e746,
+            "frozen exact-100 preparation matrix transcript after nine-category worker audit storage"
         );
         let reference = reference.expect("one twelve-track preparation");
         assert!(reference.prepared_builtin_bank_count > 0);
