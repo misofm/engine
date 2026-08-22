@@ -100,3 +100,43 @@ Sealed identities; validator/mutation/preflight transcripts; exact invocation/wa
 counts; raw/accepted/disposition hashes; environment metadata; strict verdicts and attempt count.
 On PASS set `machine_qualification=PASS`, `human_listening_status=pending` with Issue 033,
 `workload_invocations=1`, and `timed_benchmark_invocations=1`.
+
+## Terra attempt 1 finalization — 2026-08-22
+
+**FAIL; THE TIMED COMMAND REMAINS UNAUTHORIZED.** Terra adversarially reviewed clean committed
+candidate `f15a7aefc7379b585508673823bbdaf89c238cd2` and found that the green tooling gates do not
+implement the frozen Issue-035 workload:
+
+- the three direct render workloads synthesize phase/ramp input instead of consuming their checked
+  referenced PCM, including replacing the required signed-zero identity input; the graph-meter
+  source likewise synthesizes samples instead of consuming `pcm/graph-taps.f32le`; the workload
+  TOML is only hashed while record JSON is assembled, not used as the workload authority;
+- matrix targets use `batch + operation` parity, so the last operation of one batch and first of
+  the next receive the same target instead of alternating on every operation;
+- the success meter plan has queue capacity four while the otherwise-identical full plan has
+  capacity one, and both use reset generation 35 although the checked workload freezes generation
+  seven; the meter output hash omits the full plan's emitted snapshots and cumulative drop outcome;
+- direct-render output hashes cover only the final planar block rather than every measured block,
+  and the preparation hash covers only processor count plus retained bytes rather than the frozen
+  address-free processor/meter/resource projection; and
+- the validators accept an arbitrary stable 64-hex manifest/input hash instead of binding the
+  frozen manifest and per-pair input identities. The hermetic suite does not exercise its required
+  missing-tool case, and FAIL dispositions unconditionally claim one completed warmup and two
+  completed measured rounds even for partial workload failure/interruption.
+
+This is not one small bounded correction, so Terra made no implementation change. Nonexecuting
+evidence: `cargo fmt --all -- --check`, locked all-target package check, five package tests,
+warning-denied all-target Clippy and no-dependency rustdoc passed; both JQ programs parsed; shell
+syntax passed; the synthetic validator/stub-runner suite passed; workspace, realtime, builtins,
+graph and rack policies passed; all 50 manifest rows (including exactly ten benchmark inputs) were
+verified read-only; and the lock transition is limited to the five permitted dependencies in the
+`miso-engine-builtins-bench` stanza. Preimplementation lock SHA-256 remains
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`, frozen lock-diff SHA-256 is
+`5ebc70f8a35208d50ff4d9afd92602462180b345125263a0a4916aa3bb08940e`, and candidate lock SHA-256 is
+`da662dd70c21ae844f551e5f2ed6ef97c52982fc9f8b86d19c1776e57e0a576f`.
+
+The fixture executable was not run because this finalization explicitly prohibited `cargo run`;
+the actual preflight, public runner, benchmark binary, workload, timing, audit, trace and target
+gates were not invoked. Final Terra attempt-1 counters are exactly `runner_invocations=0`,
+`workload_invocations=0`, and `timed_benchmark_invocations=0`. One bounded Sol correction/review
+remains; no benchmark authorization follows from this attempt.

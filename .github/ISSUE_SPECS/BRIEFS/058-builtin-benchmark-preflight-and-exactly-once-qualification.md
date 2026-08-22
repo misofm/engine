@@ -221,3 +221,25 @@ PASS sets `machine_qualification=PASS`, `human_listening_status=pending` with ex
 **Issue-007 builtin filter and matrix human listening qualification**,
 `runner_invocations=1`, `workload_invocations=1`, and `timed_benchmark_invocations=1`. It does not
 claim human listening, launch readiness, capacity or performance superiority.
+
+## Terra attempt 1 verdict — 2026-08-22
+
+**FAIL; NO PREFLIGHT OR TIMED COMMAND AUTHORIZED.** On clean candidate
+`f15a7aefc7379b585508673823bbdaf89c238cd2`, Terra found multiple coupled frozen-workload defects,
+not one bounded correction: checked TOML/referenced PCM do not drive the direct or graph-meter
+inputs; matrix alternation is wrong at batch boundaries; meter plans differ in queue capacity and
+use reset generation 35 instead of seven; the full/drop snapshots/counters are absent from the
+meter hash; direct hashes cover only the final PCM block; the preparation projection is incomplete;
+validators do not bind the exact manifest/per-pair input hashes; the hermetic matrix omits the
+missing-tool case; and partial failures claim completed warmup/round counters.
+
+Format, locked package check/test (5/5), warning-denied Clippy/rustdoc, JQ and shell syntax,
+synthetic validator/stub-runner tests, five applicable policies, the read-only 50-row manifest
+identity check and the benchmark-stanza-only lock comparison passed. Lock identities are
+preimplementation `96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`,
+frozen diff `5ebc70f8a35208d50ff4d9afd92602462180b345125263a0a4916aa3bb08940e`, and candidate
+`da662dd70c21ae844f551e5f2ed6ef97c52982fc9f8b86d19c1776e57e0a576f`. The fixture executable,
+actual preflight, public runner, benchmark binary, workload, timing, audit, trace and target gates
+were not invoked. Exact final counters: `runner_invocations=0`, `workload_invocations=0`,
+`timed_benchmark_invocations=0`. Terra made no implementation correction; one bounded Sol
+correction/review remains.
