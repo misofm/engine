@@ -2,10 +2,16 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1; ZERO EXECUTION AUTHORIZATION.** Permit one Terra implementation and
-one bounded Sol correction. A second failure stops. Issue-072 counters start at
+**SOL XHIGH REBRIEF PASS / READY FOR SOL HIGH PASS 1; ZERO EXECUTION AUTHORIZATION.** Permit one
+Sol High implementation pass and, after one Sol XHigh HOLD only, one bounded Sol High correction.
+Sol XHigh adversarially verifies both; a second HOLD stops. Issue-072 counters start at
 `preflight_invocations=0`, `runner_invocations=0`, `workload_invocations=0`, and
 `timed_benchmark_invocations=0`. Issue 058's consumed `1/1/1` run remains immutable history.
+
+The refreshed clean input is `main` commit `c0eb5c5cb438e7a3b3cdaea30370812e09d8dffb`, tree
+`43c6fd994d798fa93576abcda9a9a2eda3198bfe`, and `Cargo.lock`
+`4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`.
+`target/issue72` is absent. This rebrief authorizes no preflight, main, runner, workload or timing.
 
 ## Smallest correction
 
@@ -34,6 +40,13 @@ capacity to hide the defect. The seven-consumer bound already belongs to this ex
 workload; direct iteration is sufficient. Product render order, first-sample positions, matrix
 retarget order, state continuity, full/drop behavior, and output-hash byte order remain unchanged.
 
+## Exact dependency
+
+- Builtin native, AArch64, and Wasm runtime-selection and instruction qualification
+
+Issue 068 is remotely closed and locally PASS. Stopped Issue 058 is immutable technical input and
+failure evidence, not a PASS dependency.
+
 ## Focused executable proof before any preflight
 
 Add a test-only one-operation path for each of the four render workloads. It must:
@@ -54,9 +67,15 @@ preflight, audit/trace executables, target scripts, or any timing path.
 ## Frozen identities and paths
 
 Measured records remain the exact Issue-035 schema and 20-row matrix. Preserve every immutable
-hash and workload contract from Issue 058. Preserve the failed `target/issue35` artifacts exactly:
-binary `242f6789...`, seal `85fcfcfb...`, empty raw/stderr `e3b0c442...`, absent accepted output,
-and disposition `e7221487...` with counters `1/1/1`, warmup zero, rounds zero.
+hash and workload contract from Issue 058. Preserve these regular one-link `target/issue35`
+artifacts exactly: binary 3,191,104 bytes /
+`242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944`; preflight seal 2,211
+bytes / `85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d`;
+empty raw and stderr files each
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`; and FAIL disposition
+974 bytes / `e722148752733cb16cbfa1534c7bc10d048cea31182ea58c8af4eb1627ee44ce`
+with counters `1/1/1`, warmup zero and rounds zero. Accepted output and prelaunch disposition remain
+absent. Never write, link, rename, truncate or delete beneath `target/issue35`.
 
 All new artifacts use `target/issue72`; preflight and disposition own `issue=72`, while benchmark
 records retain `issue=35`. The two fixed commands remain:
@@ -68,6 +87,38 @@ bash scripts/run-builtins-benchmark.sh
 
 Neither command is authorized during implementation. Each later authorization is exactly once,
 no retry. The runner continues to launch only the preflight-sealed binary directly.
+
+Persistent successor paths are exactly:
+
+- `target/issue72/nonbenchmark.seal.json`;
+- `target/issue72/miso_engine_builtins_bench`;
+- `target/issue72/builtins-benchmark.preflight.json`;
+- `target/issue72/builtins-benchmark.raw.jsonl`;
+- `target/issue72/builtins-benchmark.jsonl`;
+- `target/issue72/builtins-benchmark.validator.stderr`;
+- `target/issue72/builtins-benchmark.prelaunch.disposition.json`; and
+- `target/issue72/builtins-benchmark.disposition.json`.
+
+Each is regular, one-link, atomically published and never overwritten. A preexisting prelaunch or
+final disposition blocks the runner before scratch creation. Any runner call consumes its one-shot
+authority, including prelaunch failure.
+
+Current preimplementation hashes are benchmark source `3e68bf52e76e7a3ecb4b07c97056cce0e85aa6648ac7267a0dc79c89e84b1100`,
+preflight `76ff9959b96e20ae2fd21e46ce8f12359a6b77ca317ba90fc13e998761d1df40`,
+runner `7e429ca2df3c24494e9d3c9bcc03b4e0713851d34b8831eb449d1c5f41cccabc`, and
+lifecycle `cb26f6f05c963ff1b56d8a8ce3aeb82e4d6b1561d60f6bd5a58240d3ef9cf74d`.
+The postimplementation nonbenchmark seal binds their final hashes. Frozen record/aggregate
+validator hashes are `c3db1d9574360bdab0d9ac335615787446e5537439d6accdded4fdd0a4479467`
+and `6085e740f15d7902fca4443d761cfb8e29df7168ba12f632c7946db56a3e1b63`;
+neither validator nor `Cargo.lock` may change.
+
+The Issue-058 base commit `265109f300f58e005ac7a68a56298d167c5ae809`, pretransition lock
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`, lock-diff
+`5ebc70f8a35208d50ff4d9afd92602462180b345125263a0a4916aa3bb08940e`, and original Issue-072
+briefing lock `da662dd70c21ae844f551e5f2ed6ef97c52982fc9f8b86d19c1776e57e0a576f`
+remain historical provenance only. Remove the stale active comparison of current main against that
+old base/diff. Bind the exact clean current/postimplementation lock instead; Issue 072 permits no
+lock or dependency edit.
 
 ## Allowed implementation surface
 
@@ -87,19 +138,34 @@ audit, target, instruction, listening, or unrelated tooling change stops.
 1. Land the render-only/off-scope-evidence correction plus the focused armed-render test. Run only
    format, benchmark package tests/check and warning-denied package Clippy.
 2. Land Issue-072 artifact-path and hermetic lifecycle changes. Scratch tests cover argument,
-   missing tool, stale/mismatched seal, every preexisting/symlink artifact, successful zero-launch
-   preflight, drift/no-clobber, partial failure/interruption, validator failure and atomic accepted
-   publication without executing a real workload.
+   missing tool, stale/mismatched seal, every preexisting regular/symlink/hardlink artifact,
+   successful zero-launch preflight, drift/no-clobber, prelaunch disposition, partial
+   failure/interruption, phase-derived counters, validator failure and distinct-inode atomic
+   accepted publication without executing a real workload.
 3. On a clean candidate, run the remaining read-only fixture, locked workspace, rustdoc and
-   policy/mutation/static gates once. Sol records PASS TO PREFLIGHT or final FAIL.
-4. After the evidence commit, Sol may authorize the sole no-workload preflight. Validate its seal
-   before separately authorizing the sole runner. Any failure at either authorization is final.
+   policy/mutation/static gates once. Sol High pauses; Sol XHigh returns focused PASS or HOLD. One
+   HOLD permits only bounded pass 2, and a second HOLD is final STOP.
+4. Root commits the exact green implementation paths. On that clean candidate, root creates only a
+   no-clobber `target/issue72/nonbenchmark.seal.json`, binding branch/HEAD/tree, current lock, final
+   source/lifecycle hashes, frozen validators/inputs, Issue-058 artifacts, focused regression `1`
+   and counters `0/0/0/0`. Sol XHigh validates it before authorizing exactly one no-workload
+   preflight.
+5. The sole preflight builds but never executes the benchmark binary and may publish only the
+   binary and preflight seal. Sol XHigh then independently validates candidate and all transitive
+   identities, exact counters `1/0/0/0`, one-link/no-clobber state, Issue-058 preservation and
+   absent raw/accepted/stderr/dispositions. Only that separate GO may authorize exactly one runner.
+6. The runner alone may execute one untimed warmup and two measured rounds. Success requires 20
+   valid records, byte-identical distinct-inode raw/accepted files, five-kind/two-rate/two-round
+   order, zero audit violations, and total counters `1/1/1/1`. Any prelaunch or postlaunch failure
+   publishes the applicable disposition, preserves evidence and is terminal; no alternate,
+   direct, repeat or resumed invocation exists.
 
 ## PASS boundary
 
 PASS requires the exact 20 valid measured rows, byte-identical raw/accepted output, complete PASS
-disposition, zero render audit violations, Issue-072 invocation counters `1/1/1`, unchanged
+disposition, zero render audit violations, Issue-072 preflight/runner/workload/timed invocation
+counters `1/1/1/1`, unchanged
 Issue-058 artifacts, and no threshold or tuning claim. It unblocks exact title
 **Issue-007 builtin filter and matrix human listening qualification** and the release chain; it
-does not complete listening or release qualification.
-
+does not complete listening or release qualification. This rebrief is READY only for Sol High pass
+1; it grants no preflight or runner authority.

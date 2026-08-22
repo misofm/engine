@@ -76,9 +76,11 @@ follows 070 and owns the four-rate target matrix. Issue 058, **Builtin benchmark
 exactly-once qualification**, stopped after its only authorized run exposed an allocation and
 evidence-timing defect. Issue 072, **Separate builtin benchmark render timing from meter evidence
 collection**, consumes that checkpoint as technical input and alone owns the corrected
-one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064, 067–070 and 072 each
-permit one Terra attempt plus one Sol correction. Issue-072 preflight/runner/workload/timed
-invocation counts are currently zero.
+one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064 and 067–070 retain their
+recorded attempt ownership. The refreshed Issue-072 assignment permits one Sol High implementation
+pass plus one bounded Sol High correction, both adversarially reviewed by Sol XHigh; a second HOLD
+stops. Issue-072 preflight/runner/workload/timed invocation counts are `0/0/0/0`, and its docs-only
+rebrief authorizes no preflight or workload.
 
 Issue 022 is now the launch-sized **Stable C ABI and host-fed planar PCM render** product: immutable
 strict-session compilation, separate control/render ownership, bounded host source submission and
