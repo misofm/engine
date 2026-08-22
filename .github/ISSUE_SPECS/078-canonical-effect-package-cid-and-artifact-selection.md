@@ -100,11 +100,23 @@ the authoring slice. All length/count arithmetic uses checked `u64`, checked `us
 - `maximum_artifact_bytes: u64 = 134_217_728` (128 MiB).
 
 Every configured limit is an inclusive cap and a zero limit rejects any nonempty corresponding
-input. Exact-cap and one-byte/count-below tests are mandatory. `required_size`, encode, borrowed
-verify, artifact iteration/selection and CID binary/text operations retain no package-sized copy and
-perform no heap allocation; the encoder uses the caller output and repeated bounded scans rather
-than a hidden sorting buffer. The verified result borrows the original immutable package bytes.
-These APIs are control/offline only and must not become render-call-graph reachable.
+input. Exact-cap and one-byte/count-below tests are mandatory. Each public required-size, encode,
+borrowed-verify or package-CID operation performs exactly one accepted Issue-082
+validation-and-identity pass, using `effect_descriptor_identity_v1` or an internal call path with
+identical one-pass behavior, before it publishes success or output. That nested pass may use the
+accepted Issue-082 verifier's temporary heap under the exact 4,194,304-byte descriptor cap; all of
+those temporaries die before the public package operation returns. The package must not call the
+descriptor verifier and identity helper separately or otherwise validate the same descriptor twice.
+
+Everything native to the package layer—layout arithmetic, canonical repeated-scan sorting,
+table/content parsing, borrowed artifact iteration/selection and CID binary/text coding—performs no
+heap allocation. There is no retained allocation, package-sized copy or hidden artifact-sort
+`Vec`; the encoder uses only caller output and bounded repeated scans, and the verified result
+borrows the original immutable package bytes. Exact allocator-dependent byte counts for the
+accepted nested Issue-082 temporaries are explicitly deferred to **Canonical effect interchange
+qualification, fuzzing, and benchmark**; Issue 078 freezes their input cap and lifetime, not an
+unprovable allocator layout. These APIs are control/offline only and must not become
+render-call-graph reachable.
 
 ## Frozen Rust API and atomicity
 
@@ -136,6 +148,10 @@ preflight before touching output. Every invalid/overflow/short call leaves the e
 bit-identical; short output reports the exact required package bytes. Borrowed verify and selection
 return slices only into the immutable verified input. No package C ABI or header is added here; the
 accepted Issue-082 C API remains descriptor inspection only.
+
+For encode, the one descriptor validation/identity pass is part of the preflight and therefore
+precedes every output write. `effect_package_cid_v1` consumes the result of its one package verify;
+it must not trigger a second descriptor pass while hashing the already-verified exact package bytes.
 
 `EffectPackageDiagnosticV1` is a 32-byte `repr(C)` value with `u32 code`, `u32 detail`, `u32
 artifact_index`, zero `u32 reserved`, `u64 byte_offset` and `u64 required_bytes`. Unavailable index
@@ -207,8 +223,9 @@ Executed tests must prove:
 - CID official `hello` raw vector, binary/text round trip and exhaustive prefix/alphabet/padding/
   trailing-bit mutations;
 - the frozen selection matrix, selected-content rehash and borrowed slice identity;
-- current production descriptor packages verify, and no package/CID/selector path is render
-  reachable.
+- current production descriptor packages verify; allocation instrumentation distinguishes exactly
+  one permitted nested Issue-082 pass from zero package-native allocations and proves no allocation
+  survives return; and no package/CID/selector path is render reachable.
 
 Pass focused package tests/check/Clippy/rustdoc, independent-reference/manifest read-only checks,
 native tests, scalar `wasm32-unknown-unknown` compile/object checks, format, workspace/realtime policy
