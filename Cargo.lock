@@ -251,6 +251,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-capi-audit"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-capi",
+ "miso-engine-core",
+]
+
+[[package]]
 name = "miso-engine-compressor"
 version = "0.1.0"
 dependencies = [
