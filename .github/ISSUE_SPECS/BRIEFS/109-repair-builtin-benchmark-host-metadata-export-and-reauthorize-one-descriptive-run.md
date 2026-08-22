@@ -2,19 +2,21 @@
 
 ## Decision
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH PASS 1; ZERO EXECUTION AUTHORIZATION.** Sol High may
-make one focused implementation pass and, after one Sol XHigh HOLD only, one bounded correction.
-Sol XHigh briefs and adversarially verifies; a second HOLD stops. Initial Issue-109 preflight/
-runner/workload/timed counters are `0/0/0/0`, `target/issue109` is absent, and no preflight, runner,
-main, workload or timing invocation is authorized. Remote #109 was read-only verified available;
-root must create it with the exact spec title before implementation.
+**TERMINAL STOP / NO OVERALL PASS / ZERO EXECUTION.** Sol High landed the focused metadata-runner
+checkpoint at `5b2744f` and the one permitted lifecycle correction at
+`f6e8a6b5936f9d578e050a6b85242c4234a1a886`. Sol XHigh accepted both as technical checkpoints.
+During the first handoff, however, root created the sole exact-path repair seal while the lifecycle
+correction was still being applied. The seal binds lifecycle SHA-256
+`bbdb316775895e8d82e9d6d0696653466fb26cdf423502b23040ee748ff381ca` instead of the final
+`14dd9ec48921fefdba8a57afa827f27222dc881311929f55a44d0edc89c97ef4`; it is immutable stale
+evidence at `target/issue109/metadata-repair.seal.json`, regular nlink1, 2,538 bytes, SHA-256
+`1e8cec4904d8987ddca581e5b23870629d734127ad3f9e010f6a5c2d178b69c6`.
 
-Sol High pass 1 has a focused-green live checkpoint using only the five successor scripts and this
-tracked evidence. Hermetic complete/unavailable metadata cases, required and malformed discovery,
-ambient clearing, every-row projection rejection, phase/counter/no-clobber behavior, direct and
-tandem seal mutations, shell syntax and 33 static mutations pass. Real Issue-109 counters remain
-`0/0/0/0`, `target/issue109` remains absent and Issue-072 evidence remains byte-exact. This grants
-no seal, preflight or runner authorization and is pending Sol XHigh review.
+No-clobber forbids replacement or movement, the exact namespace forbids a second repair seal, and
+the issue's one-correction budget forbids another implementation pass. All seven future Issue-109
+outputs remain absent and preflight/runner/workload/timed counters remain `0/0/0/0`; no benchmark
+main or timing path executed. Preserve the entire Issue-109 namespace. Issue 110, **Complete builtin
+benchmark host metadata run from a fresh successor namespace**, owns stateless completion.
 
 ## Exact defect and immutable input
 
@@ -77,22 +79,22 @@ preflight, runner, workload or timing gate.
 Sol High pauses at a focused-green checkpoint for Sol XHigh review. One HOLD permits only a bounded
 correction; a second is STOP.
 
-## Successor seals and exactly-once barriers
+## Consumed Issue-109 seal barrier
 
 All new files live under `target/issue109`: `metadata-repair.seal.json`, sealed binary, preflight
 seal, raw, accepted, stderr, prelaunch disposition and final disposition. Each is regular, one-link,
 atomic and no-clobber. Either disposition consumes runner authority.
 
-After the clean implementation commit, root creates only the repair seal binding HEAD/tree, lock,
+The intended sequence required root to create only the repair seal after the final clean implementation commit, binding HEAD/tree, lock,
 unchanged tool/validators/fixtures, all five successor scripts, frozen Issue-072 evidence,
-metadata-regression count `1` and counters `0/0/0/0`. Sol XHigh must validate it before exactly one:
+metadata-regression count `1` and counters `0/0/0/0`. Sol XHigh would then have validated it before exactly one:
 
 `bash scripts/preflight-builtins-benchmark-109.sh`
 
-Preflight builds but does not execute the binary and publishes only binary/preflight seal with
+That preflight was never authorized or executed. It would have built but not executed the binary and published only binary/preflight seal with
 counters `1/0/0/0`, warmup `1`, rounds `2`, records `20`. Failure is final; never repeat it.
 
-Sol XHigh separately validates that preflight before exactly one:
+The separately reviewed runner command was also never authorized or executed:
 
 `bash scripts/run-builtins-benchmark-109.sh`
 
@@ -108,5 +110,6 @@ new `scripts/*-109.sh` paths named in the spec. `target/issue109` is ignored evi
 Rust, Cargo, validator, existing benchmark script, fixture, product, schema, timer, workload, rate,
 output-hash, Issue-072 artifact or unrelated policy change.
 
-PASS remains descriptive only and does not complete human listening or release readiness. Root owns
-the evidence commit, remote synchronization and closure after final Sol XHigh PASS.
+Issue 109 cannot attain PASS without violating its no-clobber, exact-path or pass-budget contract.
+Its status is terminal STOP; Issue 110 owns the fresh namespace. Root owns evidence commit and
+remote synchronization. No result here completes human listening or release readiness.

@@ -7,25 +7,32 @@ export, prove that repair without timing, and establish a successor-owned author
 at most one fresh descriptive run. Preserve the accepted Issue-072 render-only timer/audit boundary,
 binary record schema, inputs, workloads, rates, output hashes and all terminal artifacts.
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH PASS 1; ZERO PREFLIGHT OR WORKLOAD AUTHORIZATION.**
-Sol High implements one focused pass. If Sol XHigh returns one HOLD, Sol High may make one bounded
-correction; a second HOLD stops the issue. Sol XHigh remains briefer and adversarial verifier.
-At briefing, Issue-109 preflight/runner/workload/timed counters are `0/0/0/0`, `target/issue109` is
-absent, and no preflight, benchmark main, runner, workload or timing invocation is authorized.
+**TERMINAL STOP / NO OVERALL PASS / NO EXECUTION AUTHORIZATION.** Sol High completed the focused
+metadata-runner checkpoint at `5b2744f`, then the bounded lifecycle correction at
+`f6e8a6b5936f9d578e050a6b85242c4234a1a886`. Sol XHigh accepted the metadata semantics and the
+corrected fake lifecycle as technical checkpoints, not as completed Issue-109 authority.
 
-Sol High pass 1 has a focused-green live checkpoint. Five successor-only scripts implement fixed
-metadata discovery/export, complete projection validation, the zero-workload preflight/seal chain,
-static authority checks and hermetic lifecycle proof. The fake lifecycle covers complete and each
-optional-unavailable projection, required/malformed/sentinel/duplicate discovery failures, ambient
-spoof clearing, every-row projection mismatches, exact phases/counters, no-clobber and direct plus
-tandem authority replacement. Shell syntax, the checker, 33 policy mutations and lifecycle pass;
-real Issue-109 preflight/runner/workload/timed counters remain `0/0/0/0`, `target/issue109` remains
-absent, and all seven Issue-072 files retain the exact identities below. This is evidence pending
-Sol XHigh review, not a seal, preflight, runner or workload authorization.
+During the handoff after the first checkpoint, root created
+`target/issue109/metadata-repair.seal.json` while a necessary hermetic-lifecycle correction was
+still being applied concurrently. The seal therefore binds the pre-correction lifecycle and prior
+candidate instead of `f6e8a6b`: its lifecycle field is
+`bbdb316775895e8d82e9d6d0696653466fb26cdf423502b23040ee748ff381ca`, while the committed final
+lifecycle is `14dd9ec48921fefdba8a57afa827f27222dc881311929f55a44d0edc89c97ef4`. The seal is an immutable
+regular one-link file of 2,538 bytes with SHA-256
+`1e8cec4904d8987ddca581e5b23870629d734127ad3f9e010f6a5c2d178b69c6`.
 
-Remote issue 109 was read-only verified available on 2026-08-22. Root must create the matching
-GitHub issue with this exact H1 title before implementation and later owns synchronization and
-closure. This local brief claims no GitHub mutation.
+The Issue-109 contract permits one repair seal at that exact no-clobber path and only one bounded
+correction. Overwriting or moving the stale seal would destroy evidence; adding a second seal would
+violate the closed path/single-seal contract; another implementation revision would exceed the
+frozen pass budget. Issue 109 therefore stops terminally. Its preflight/runner/workload/timed
+counters remain exactly `0/0/0/0`: no Issue-109 preflight, benchmark main, runner, workload or timed
+interval executed. The sealed binary, preflight seal, raw, accepted, stderr, prelaunch disposition
+and final disposition are all absent. Preserve `target/issue109` byte-for-byte and never use its
+stale seal as authority. Issue 110, **Complete builtin benchmark host metadata run from a fresh
+successor namespace**, owns stateless completion under `target/issue110`.
+
+Remote issue 109 was read-only verified available on 2026-08-22. Root owns synchronization of this
+terminal STOP record. This local record claims no GitHub mutation.
 
 ## Terminal Issue-072 input
 
@@ -178,9 +185,9 @@ lock/fixtures, all 16 environment mappings, required build constants, `issue=109
 `target/issue109`, one launch site and initial counters `0/0/0/0`. Its synthetic mutation suite must
 make each invariant fail. These fakes and scans are nonbenchmark evidence.
 
-## Checkpoints and authorization barriers
+## Historical checkpoints and consumed authorization barrier
 
-### Checkpoint 1 — runner repair and fake proof
+### Checkpoint 1 — runner repair and fake proof (technical checkpoint only)
 
 Sol High adds only successor scripts and docs, runs shell syntax, the hermetic fake lifecycle,
 static checker/mutations, frozen validator self-tests or read-only validation, and text/diff/artifact
@@ -189,30 +196,29 @@ benchmark main, preflight, runner, workload or timing path is executed. No broad
 trace, listening or inherited Issue-072 gate is rerun. Sol XHigh must return focused PASS before
 root commits the exact paths.
 
-On that clean commit, root no-clobber creates only
+The intended contract was that, on that clean commit, root would no-clobber create only
 `target/issue109/metadata-repair.seal.json`. Its closed schema binds branch/HEAD/tree, current lock,
 unchanged tool/validators/fixtures, all five successor scripts, exact Issue-072 artifacts and
 absence, metadata-regression count `1`, and Issue-109 preflight/runner/workload/timed counters
 `0/0/0/0`. Sol XHigh independently validates it before any preflight authorization.
 
-### Checkpoint 2 — sole zero-workload preflight
+### Checkpoint 2 — sole zero-workload preflight (never authorized or executed)
 
-Only a strict Sol XHigh GO may authorize exactly one:
+The planned command was:
 
 `bash scripts/preflight-builtins-benchmark-109.sh`
 
-It accepts no arguments, validates the clean candidate and repair seal, executes only fake/static/
+It would have accepted no arguments, validated the clean candidate and repair seal, executed only fake/static/
 compile gates, builds but never executes the unchanged benchmark binary, and publishes only the
 binary and preflight seal. The seal binds every authority and planned warmup `1`, rounds `2`, records
 `20`, with counters `1/0/0/0`. Failure is STOP; no repeat or alternate preflight exists.
 
-Sol XHigh then independently validates every seal/hash, Issue-072 preservation, regular one-link
-state, exact target/issue109 membership and absent raw/accepted/stderr/dispositions. Only a separate
-strict GO may authorize exactly one:
+It was never authorized or executed because the stale repair seal consumed the only exact-path
+authority. The subsequently planned runner command was likewise never authorized or executed:
 
 `bash scripts/run-builtins-benchmark-109.sh`
 
-The runner gathers metadata once before launch, launches only the sealed binary once, and permits
+The planned runner would have gathered metadata once before launch, launched only the sealed binary once, and permitted
 one untimed warmup plus two measured rounds. Success requires 20 frozen-validator-valid records,
 exact metadata-projection equality, all render audit counts zero, byte-identical distinct-inode
 raw/accepted files, exact five-phase stderr and a PASS/complete disposition with counters
@@ -242,5 +248,6 @@ separately authorized runner; 20 exact records; raw/accepted/stderr/disposition 
 inode counts; phase-derived counters `1/1/1/1`; warmup `1`; rounds `2`; zero render violations; and
 an explicit descriptive-only/no-threshold statement.
 
-Only then may Issue 109 be marked `SOL XHIGH PASS / COMPLETE / READY TO CLOSE`. Root owns commit,
-GitHub synchronization and closure. Issue 109 does not close human listening or release readiness.
+Those PASS conditions were not reached and cannot be reached within Issue 109. Its final status is
+`TERMINAL STOP / NO OVERALL PASS`; Issue 110 owns completion without weakening any gate. Root owns
+commit and GitHub synchronization. Issue 109 does not close human listening or release readiness.

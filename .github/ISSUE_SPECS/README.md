@@ -79,8 +79,12 @@ collection**, consumed that checkpoint and accepted the corrected render-only ti
 stopped without overall PASS after its sole run exposed missing runner-side host/build metadata.
 Its terminal preflight/runner/workload/timed counts are `1/1/1/1` and its artifacts are immutable.
 Issue 109, **Repair builtin benchmark host metadata export and reauthorize one descriptive run**,
-owns only that runner metadata repair, a successor zero-workload preflight and at most one
-separately authorized descriptive run under `target/issue109`. Sol High implements; Sol XHigh
+accepted its runner-metadata semantics as technical input but stopped before preflight: its sole
+no-clobber repair seal was created against the pre-correction lifecycle during a concurrent
+handoff. Its counters remain `0/0/0/0` and `target/issue109` is immutable stale evidence. Issue 110,
+**Complete builtin benchmark host metadata run from a fresh successor namespace**, owns only
+successor-named routes of those accepted semantics, a fresh `target/issue110` zero-workload
+preflight and at most one separately authorized descriptive run. Sol High implements; Sol XHigh
 briefs and verifies. Issues 058–059, 061, 063–064 and 067–070 retain their recorded attempt
 ownership.
 
