@@ -11,7 +11,8 @@ realtime audits, targets or benchmark qualification. No benchmark/workload ran:
 Remaining work moves without hidden state through this exact chain:
 
 1. **Complete independent builtin corpus and corruption proof**;
-2. **Builtin direct and graph realtime audit and target qualification**; then
+2. **Builtin direct and graph realtime audit closure**, followed by **Builtin native, AArch64, and
+   Wasm runtime-selection and instruction qualification**; then
 3. **Builtin benchmark preflight and exactly-once qualification**.
 
 Real human listening in Issue 033 remains after the final machine-qualified candidate. Nothing in

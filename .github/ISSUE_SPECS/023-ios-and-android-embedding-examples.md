@@ -29,7 +29,7 @@ Shipping a mobile UI, forcing 384k hardware I/O, implicit SRC, callback allocati
 ## Dependencies by exact issue title
 
 - Stable C ABI and native PCM reference runner
-- Builtin direct and graph realtime audit and target qualification
+- Builtin native, AArch64, and Wasm runtime-selection and instruction qualification
 - Real-time memory, buffers, queues, and plan lifetime
 - Exact lock-free native source sanitation telemetry handoff
 

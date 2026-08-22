@@ -7,8 +7,8 @@ one exactly-once descriptive invocation, producing the machine-qualified candida
 
 ## Context
 
-This issue starts only after **Builtin direct and graph realtime audit and target qualification**
-passes. It consumes that exact candidate, corpus, audit and target evidence. It permits one Terra
+This issue starts only after **Builtin native, AArch64, and Wasm runtime-selection and instruction
+qualification** passes. It consumes that exact candidate, corpus, audit and target evidence. It permits one Terra
 attempt and one bounded Sol correction; a second failure stops. The engine's launch-rate scope is
 exactly 44,100, 48,000, 88,200 and 96,000 Hz. The frozen descriptive benchmark samples only its
 declared 48/96-kHz workloads and makes no claim about capacity at the other two launch rates.
@@ -42,7 +42,7 @@ workload matrices, listening execution, deployment work, or V1/legacy inspection
 
 ## Dependencies by exact issue title
 
-- Builtin direct and graph realtime audit and target qualification
+- Builtin native, AArch64, and Wasm runtime-selection and instruction qualification
 
 ## Acceptance gates with objective measurements
 
@@ -57,7 +57,7 @@ retry. Any launch or post-launch failure consumes authorization and is strict FA
 
 ## Target matrix
 
-One pinned native benchmark host recorded completely in schema metadata. Accepted Issue-057 target
+One pinned native benchmark host recorded completely in schema metadata. Accepted Issue-068 target
 evidence covers all four launch rates/targets and is not rerun here.
 
 ## Required evidence

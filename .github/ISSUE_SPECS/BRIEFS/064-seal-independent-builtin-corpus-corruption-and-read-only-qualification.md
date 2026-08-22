@@ -37,4 +37,4 @@ Run focused fixture/reference tests, checked-corpus validation, format, warning-
 Clippy and applicable nonbenchmark workspace/policy/diff/static scans on one clean commit. Record
 the final immutable corpus and manifest hashes. Stop for any expected-byte regeneration/change,
 production/audit/target/benchmark work or a second failure. PASS alone unblocks **Builtin direct
-and graph realtime audit and target qualification**.
+and graph realtime audit closure**.

@@ -4,7 +4,8 @@
 
 **STOPPED / RESCOPED — NO OVERALL PASS.** Terra attempt 1 and the bounded Sol correction ended at
 accepted fixture-contract checkpoint `0edc51c`; the two-attempt budget is consumed. The remaining
-chain is Issue 056 corpus, Issue 057 audits/targets and Issue 058 benchmark qualification. Never
+chain is Issue 056 corpus, Issue 057 realtime audits, Issue 068 target qualification and Issue 058
+benchmark qualification. Never
 inspect V1/legacy, relax a retained DSP threshold, tune expected bytes to an observed defect, or
 fabricate human listening.
 

@@ -94,5 +94,5 @@ total zero, and strict Terra/Sol verdicts.
 Stop for production changes, a second corpus, changed formats/rates/domains/tolerances, new
 functional cases, audit/target/object work, benchmark runner or workload execution, or work that
 cannot close within these two checkpoints. PASS hands one immutable corpus/candidate identity to
-**Builtin direct and graph realtime audit and target qualification**; it does not itself qualify
+**Builtin direct and graph realtime audit closure**; it does not itself qualify
 realtime behavior, targets, performance or listening.

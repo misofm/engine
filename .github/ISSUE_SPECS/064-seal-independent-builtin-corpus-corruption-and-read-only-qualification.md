@@ -122,6 +122,6 @@ Final nonbenchmark gates:
   diff checks: PASS.
 
 **FINAL SOL VERDICT: PASS.** This immutable corpus unblocks **Builtin direct and graph realtime
-audit and target qualification**. No authoring or expected-byte regeneration was rerun;
+audit closure**. No authoring or expected-byte regeneration was rerun;
 `workload_invocations=0`; `timed_benchmark_invocations=0`; benchmark runner, preflight, workload
 and timing invocations remain zero.
