@@ -92,8 +92,11 @@ ownership.
 Issue 022 is now the launch-sized **Stable C ABI and host-fed planar PCM render** product: immutable
 strict-session compilation, separate control/render ownership, bounded host source submission and
 caller-owned planar output. Issue 073, **Native PCM reference runner and C ABI qualification**,
-follows it and alone owns native WAV/RF64 runner breadth, complete Issue-005 provider/mutation
-integration and native platform qualification. Issue 023 consumes the host-fed product directly;
+follows it only after Issue 101, **Close native-source seek backpressure without worker
+termination**, closes the accepted-Issue-043 worker's provider-backpressure termination defect.
+Issue 101 changes no public/resource shape and defers the source audit's F2–F12. Issue 073 alone owns
+native WAV/RF64 runner breadth, complete Issue-005 provider/mutation integration and native platform
+qualification. Issue 023 consumes the host-fed product directly;
 Issues 025 and 026 wait for Issue 073. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
 not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, stopped
@@ -158,12 +161,14 @@ target/Wasm evidence only as technical input. Issue 040, **Issue-010 launch-crit
 ownership and accounting closure**, then stopped after two attempts: its plan-owned worker lifetime,
 shape, representative correctness and non-`Arc` accounting checkpoint remain accepted technical
 input, but its opaque telemetry `Arc` prevents exact retained accounting and therefore overall PASS.
-Issue 043, **Exact lock-free native source sanitation telemetry handoff**, owns the remaining safe
-move/SPSC/block-stamped correction and gates Issues 022, 023 and 077. Issue 041, **Issue-010 source streaming
+Issue 043, **Exact lock-free native source sanitation telemetry handoff**, accepted the remaining
+safe move/SPSC/block-stamped correction and gates Issues 022, 023 and 077. Issue 101, **Close
+native-source seek backpressure without worker termination**, consumes that accepted worker and
+precedes Issue 073. Issue 041, **Issue-010 source streaming
 qualification tooling and adversarial evidence**, follows 043 and owns the expanded diagnostic
 corpus, frozen seek races, real worker-delay audit and duration-independent allocation-layout/RSS
 proof. Issue 041 is nonblocking for hosts/features and gates only release qualification Issue 026.
-Issues 040, 041 and 043 forbid benchmarks; the timed invocation count remains zero.
+Issues 040, 041, 043 and 101 forbid benchmarks; the timed invocation count remains zero.
 
 Issue 012 stopped without overall PASS when its first independent-oracle gate disproved the frozen
 five-`f32`-coefficient direct-form-I numerical contract. Issue 042 then selected an endpoint-
