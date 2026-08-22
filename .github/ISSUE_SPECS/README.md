@@ -48,19 +48,22 @@ fixture-contract checkpoint `0edc51c`; it has no overall PASS and ran no benchma
 candidate exposed unresolved repeated cascade recovery. Issue 059, **Builtin cascade decay and
 recovery contract**, accepted the corrected recovery rule. Issue 060, **Complete independent
 builtin corpus after recovery acceptance**, then stopped after its partial `10f0235` checker
-checkpoint and interrupted typed-JSONL attempt without sealing the corpus. Independent Issues 061,
-**Complete builtin response cases and scalar PCM semantics**, 062, **Complete builtin graph-tap and
-PDC fixture semantics**, and 063, **Complete builtin meter, diagnostic, and resource corpus
-semantics**, close those three bounded surfaces. Issue 064, **Seal independent builtin corpus
-corruption and read-only qualification**, joins their exact outputs and owns the final 24/24 seal.
+checkpoint and interrupted typed-JSONL attempt without sealing the corpus. Issue 061, **Complete
+builtin response cases and scalar PCM semantics**, and Issue 063, **Complete builtin meter,
+diagnostic, and resource corpus semantics**, close two bounded surfaces. Issue 062, **Complete
+builtin graph-tap and PDC fixture semantics**, stopped after correcting its graph model at
+checkpoint `2bbed6a` because accepted benchmark-input TOMLs pin the displaced graph PCM hash.
+Issue 065, **Reconcile builtin graph fixture and dependent benchmark input identities**, owns that
+exact graph-payload/input-identity transaction. Issue 064, **Seal independent builtin corpus
+corruption and read-only qualification**, joins 061/063/065 and owns the final 24/24 seal.
 Issue 057, **Builtin direct and graph realtime audit and target qualification**, follows 064. Issue
 058, **Builtin benchmark preflight and exactly-once qualification**, follows 057 and alone owns the
-eventual one-invocation/two-round builtin benchmark. Issues 057–059 and 061–064 each permit one
-Terra attempt plus one Sol correction. The successor timed invocation count is currently zero.
+eventual one-invocation/two-round builtin benchmark. Issues 057–059, 061, and 063–065 each permit
+one Terra attempt plus one Sol correction. The successor timed invocation count is currently zero.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
-then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/062/063 -> 064 -> 057 ->
-058. Issue 008 needs 036's accepted preparation/metadata and
+then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
+065 -> 064 -> 057 -> 058. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
 for 057's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 058 seals that candidate and its accepted benchmark; issue 026 waits for both

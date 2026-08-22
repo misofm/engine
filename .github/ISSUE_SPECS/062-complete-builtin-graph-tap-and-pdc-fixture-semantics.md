@@ -83,3 +83,7 @@ and values; mutation results; strict Terra/Sol verdicts; `workload_invocations=0
 **FINAL: FAIL / STOPPED. No overall PASS.** The accepted benchmark-input dependency must be
 explicitly decoupled or repinned in a separately authorized bounded rescope before this graph
 fixture can be sealed. `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+**RESCOPED:** **Reconcile builtin graph fixture and dependent benchmark input identities** consumes
+checkpoint `2bbed6a` and alone owns the graph payload plus dependent benchmark-input identity
+transaction. This stopped issue remains historical technical evidence, not a dependency PASS.

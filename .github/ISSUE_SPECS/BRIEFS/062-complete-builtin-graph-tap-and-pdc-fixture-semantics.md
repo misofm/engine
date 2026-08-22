@@ -2,9 +2,10 @@
 
 ## Decision and budget
 
-**READY FOR TERRA ATTEMPT 1 after the Issue-060 rescope is committed.** One Terra attempt and one
-bounded Sol correction/review are available; a second failure stops. The stopped Issue-060 graph
-fixture is technical input only. Do not edit production DSP or begin realtime audit work.
+**STOPPED / RESCOPED after Terra attempt 1 and Sol correction 2.** There is no overall PASS and no
+attempt remains. Checkpoint `2bbed6a` is technical input for **Reconcile builtin graph fixture and
+dependent benchmark input identities**, which alone may reconcile the corrected graph payload
+with its accepted benchmark-input hashes. Do not resume this brief.
 
 ## Frozen fixture vertical
 

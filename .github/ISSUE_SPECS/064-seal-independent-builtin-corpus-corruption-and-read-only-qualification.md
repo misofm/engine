@@ -8,16 +8,16 @@ corpus through the exact 24/24 corruption matrix and final nonbenchmark policy g
 ## Context
 
 Stopped Issue 060 could not combine response/scalar PCM, graph/PDC, typed JSONL and final seal in
-one correction. Issues 061–063 independently close those semantic surfaces. This issue changes no
-expected DSP value; it validates their one joined corpus and becomes the sole corpus dependency of
-Issue 057.
+one correction. Issues 061 and 063 close response/scalar PCM and typed JSONL; stopped Issue 062's
+graph/PDC technical input is completed by Issue 065. This issue changes no expected DSP value; it
+validates their one joined corpus and becomes the sole corpus dependency of Issue 057.
 
 It permits exactly one Terra attempt and one bounded Sol correction/review. A second failure stops.
 Workload, timing and benchmark invocations are forbidden and remain zero.
 
 ## Scope
 
-Join the exact accepted Issue-061/062/063 payloads without regeneration or tuning. Execute the
+Join the exact accepted Issue-061/063/065 payloads without regeneration or tuning. Execute the
 frozen six-class, four-mutation corruption matrix; prove the supplied-root checker cannot reach
 generation/production-render/write APIs and leaves a valid tree byte-identical; then run the
 focused nonbenchmark repository/policy seal.
@@ -41,7 +41,7 @@ lifecycle, targets, instructions, benchmark runner/workload/timing, performance 
 ## Dependencies by exact issue title
 
 - Complete builtin response cases and scalar PCM semantics
-- Complete builtin graph-tap and PDC fixture semantics
+- Reconcile builtin graph fixture and dependent benchmark input identities
 - Complete builtin meter, diagnostic, and resource corpus semantics
 
 ## Acceptance gates with objective measurements
