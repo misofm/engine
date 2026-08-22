@@ -56,17 +56,20 @@ checkpoint `2bbed6a` because accepted benchmark-input TOMLs pin the displaced gr
 Issue 067, **Reconcile builtin graph fixture and dependent benchmark input identities**, owns that
 exact graph-payload/input-identity transaction. Issue 064, **Seal independent builtin corpus
 corruption and read-only qualification**, joins 061/063/067 and owns the final 24/24 seal.
-Issue 057, **Builtin direct and graph realtime audit closure**, follows 064 and owns only the exact
-48-kHz/q128 direct/graph million-call audit. Issue 068, **Builtin native, AArch64, and Wasm
-runtime-selection and instruction qualification**, follows 057 and owns the four-rate target
+Issue 057, **Builtin direct and graph realtime audit closure**, stopped after two attempts with
+checkpoint `376774f` retained only as nine-detector/direct technical input. Issue 069, **Builtin
+prepared-chain and graph realtime audit proof closure**, follows 064 and owns the feature-gated
+qualification seam, separate audit evidence and exact 48-kHz/q128 direct/graph million-call proof.
+Issue 068, **Builtin native, AArch64, and Wasm runtime-selection and instruction qualification**,
+follows 069 and owns the four-rate target
 matrix. Issue 058, **Builtin benchmark preflight and exactly-once qualification**, follows 068 and
-alone owns the eventual one-invocation/two-round builtin benchmark. Issues 057–059, 061, 063–064,
-067 and 068 each permit one Terra attempt plus one Sol correction. The successor timed invocation
+alone owns the eventual one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064,
+067–069 each permit one Terra attempt plus one Sol correction. The successor timed invocation
 count is currently zero.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
-067 -> 064 -> 057 -> 068 -> 058. Issue 008 needs 036's accepted preparation/metadata and
+067 -> 064 -> stopped 057 technical input -> 069 -> 068 -> 058. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 058 seals that candidate and its accepted benchmark; issue 026 waits for both

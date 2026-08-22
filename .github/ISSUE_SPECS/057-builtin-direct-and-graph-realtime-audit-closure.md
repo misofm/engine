@@ -173,3 +173,13 @@ Final verdict: **FAIL / STOP** after the allowed Terra attempt plus one bounded 
 review. `workload_invocations=0`; `timed_benchmark_invocations=0`; no benchmark, preflight,
 workload, timing, target or instruction command was invoked in either attempt. No production DSP,
 corpus, expected bytes or audit source changed in the Sol attempt.
+
+## Post-stop rescope
+
+Issue 057 is **STOPPED / RESCOPED** with no overall PASS. Checkpoint `376774f` remains technical
+input only: its nine detector categories, direct zero-counter million-call record and terminating
+probe suites may be reused, but none substitutes for the missing functional, lifecycle or
+all-thread evidence. The smallest successor is Issue 069, **Builtin prepared-chain and graph
+realtime audit proof closure**. It alone owns the nonproduction qualification seam, separate
+audit-only evidence fixtures, corrected direct/graph records and all-thread trace. Target and
+instruction qualification remains downstream and no benchmark or timed workload is authorized.
