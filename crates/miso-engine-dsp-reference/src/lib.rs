@@ -23,6 +23,8 @@ mod parametric_eq_candidates;
 mod parametric_eq_recurrence_proof;
 #[cfg(test)]
 mod parametric_eq_time_domain_candidates;
+#[cfg(test)]
+mod portable_filter_quality;
 
 pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
