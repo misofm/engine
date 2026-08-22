@@ -26,7 +26,7 @@ cp "$root/target/issue72/builtins-benchmark.raw.jsonl" "$template/base.jsonl"
 real_awk="$(command -v awk)"
 real_bash="$(command -v bash)"
 cat >"$template/bin/git" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 case "$*" in
   *'branch --show-current'*) printf '%s\n' codex/batch-benchmark-109 ;;
   *'rev-parse'*) printf '%s\n' "$MISO_TEST_CANDIDATE" ;;
@@ -39,7 +39,7 @@ case "$*" in
 esac
 EOF
 cat >"$template/bin/bash" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 case "${1:-}" in
   scripts/check-builtins-benchmark-109.sh|scripts/test-builtins-benchmark-109-policy.sh|scripts/test-builtins-benchmark-109.sh)
     exit 0 ;;
@@ -47,17 +47,17 @@ case "${1:-}" in
 esac
 EOF
 cat >"$template/bin/cargo" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$*" >>"$MISO_TEST_CASE_ROOT/cargo.log"
 if [[ " $* " == *' build '* ]]; then
   mkdir -p "$CARGO_TARGET_DIR/release"
-  printf '#!/usr/bin/env bash\nexit 91\n' >"$CARGO_TARGET_DIR/release/miso_engine_builtins_bench"
+  printf '#!/bin/bash\nexit 91\n' >"$CARGO_TARGET_DIR/release/miso_engine_builtins_bench"
   chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_builtins_bench"
   : >"$MISO_TEST_CASE_ROOT/cargo-built"
 fi
 EOF
 cat >"$template/bin/uname" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 case "${MISO_TEST_METADATA_MODE:-complete}:$1" in
   drift_authority:-m) printf '\n' >>"$MISO_TEST_DRIFT_BINARY"; printf 'x86_64\n' ;;
   missing_arch:-m|missing_os:-s|missing_kernel:-r) exit 1 ;;
@@ -72,7 +72,7 @@ case "${MISO_TEST_METADATA_MODE:-complete}:$1" in
 esac
 EOF
 cat >"$template/bin/getconf" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 [[ "$1" == _NPROCESSORS_ONLN ]] || exit 2
 case "${MISO_TEST_METADATA_MODE:-complete}" in
   missing_logical) exit 1 ;;
@@ -82,7 +82,7 @@ case "${MISO_TEST_METADATA_MODE:-complete}" in
 esac
 EOF
 cat >"$template/bin/rustc" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 mode=${MISO_TEST_METADATA_MODE:-complete}
 case "$1" in
   -V)
@@ -108,7 +108,7 @@ case "$1" in
 esac
 EOF
 cat >"$template/bin/lscpu" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 case "${MISO_TEST_METADATA_MODE:-complete}" in
   missing_physical) exit 1 ;;
   malformed_physical) printf '# comment\n0,0\nbad\n' ;;
@@ -116,7 +116,7 @@ case "${MISO_TEST_METADATA_MODE:-complete}" in
 esac
 EOF
 cat >"$template/bin/awk" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 mode=${MISO_TEST_METADATA_MODE:-complete}
 case "$*" in
   */proc/cpuinfo*)
@@ -142,7 +142,7 @@ case "$*" in
 esac
 EOF
 cat >"$template/target/issue109/miso_engine_builtins_bench" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 printf 'launch\n' >>"$MISO_TEST_LAUNCH_LOG"
 phase() { printf 'MISO_BUILTINS_BENCH_PHASE %s\n' "$1" >&2; }
@@ -258,7 +258,7 @@ run_case() {
     local binary_mode=${1:-success}
     [[ $# == 0 ]] || shift
     MISO_TEST_METADATA_MODE="$metadata_mode" MISO_TEST_BINARY_MODE="$binary_mode" \
-    MISO_TEST_CANDIDATE="$candidate" MISO_TEST_REAL_AWK="$real_awk" \
+    MISO_TEST_CANDIDATE="$candidate" MISO_TEST_REAL_AWK="$real_awk" MISO_TEST_REAL_BASH="$real_bash" \
     MISO_TEST_DRIFT_BINARY="$binary" \
     MISO_TEST_LAUNCH_LOG="$launch_log" MISO_TEST_BASE_RECORDS="$case_root/base.jsonl" \
     MISO_TEST_GENERATED="$generated" \
@@ -422,7 +422,7 @@ done
 
 run_preflight() {
   MISO_TEST_METADATA_MODE=${1:-complete} MISO_TEST_CANDIDATE="$candidate" \
-    MISO_TEST_CASE_ROOT="$case_root" MISO_TEST_REAL_BASH="$real_bash" \
+    MISO_TEST_CASE_ROOT="$case_root" MISO_TEST_REAL_BASH="$real_bash" MISO_TEST_REAL_AWK="$real_awk" \
     PATH="$case_root/bin:$PATH" "$real_bash" "$case_root/scripts/preflight-builtins-benchmark-109.sh" "${@:2}"
 }
 prepare_preflight_case() {
