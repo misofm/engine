@@ -7,6 +7,17 @@
 and one bounded Sol correction; a second failure stops and rescopes. No benchmark or timed workload
 is authorized.
 
+### Bounded preimplementation correction — host region origin
+
+**READY; TERRA MAY PROCEED.** Strict sessions permit nonzero `SourceRegion.start_sample`, and ABI
+chunk/seek positions are absolute source frames. The existing public `PcmSourceRing::prepare`
+hardcodes frame zero while the already-used `prepare_at_source_frame` ownership path is crate-private.
+Permit exactly one new public `PcmSourceRing::prepare_host_region(config, initial_frame)` constructor
+in `miso-engine-source`. It delegates unchanged to that existing private implementation; it adds no
+validation policy, allocation, worker, decoder or state. Focused source tests prove zero/nonzero
+origins, identical resource/shape reports, first-chunk contiguity, seek transition and unchanged
+rejection ownership. No other source visibility change is permitted.
+
 ## Outcome
 
 Ship the smallest useful stable native embedding boundary: compile one immutable strict-TOML
@@ -83,7 +94,11 @@ the relevant handle's prior diagnostic.
   absolute source frame, channel-plane pointers, valid frames, and final-block flag. It copies
   atomically into the preallocated ring, retains no caller pointer, rejects rate/channel/length/
   generation/order mismatches without accepting a prefix, and reports typed bounded backpressure.
-  Seek requires a strictly increasing nonzero generation and is visible only at the next block.
+  The session-control wrapper also enforces the compiled region `[start_sample,
+  start_sample+length_samples)` before touching the producer: chunks may not cross the end, the sole
+  final full/short block or zero marker must end exactly there, and seek targets may name any frame
+  from the start through the end (inclusive), matching native source semantics. Seek
+  requires a strictly increasing nonzero generation and is visible only at the next block.
 - Render accepts only the prepared quantum, exact next `absolute_sample` (initially zero), and one
   caller-owned contiguous planar region described by base pointer, sample capacity and plane stride.
   V1 requires two channels, stride at least quantum, and capacity at least stride plus quantum; the
@@ -115,7 +130,9 @@ The permitted implementation surface is `crates/miso-engine-capi`, the one seale
 addition and its focused tests in `miso-engine-builtins-compiler`, workspace manifests/lock required
 only by those direct dependencies, `tools/miso-engine-capi-audit`, `scripts/check-capi-abi.sh`,
 `scripts/test-capi-abi.sh`, the exact realtime unsafe-policy checker/mutation scripts, and concise
-Issue-022 evidence. Any other production API change is a STOP.
+Issue-022 evidence. It additionally permits only `crates/miso-engine-source/src/lib.rs` for the
+named host-region constructor and its colocated focused tests. Any other production API or source
+visibility change is a STOP.
 
 ## Explicit non-goals
 
@@ -144,7 +161,8 @@ qualification without changing ABI V1.
    caught before FFI return.
 2. Null, wrong live handle type, wrong struct size/version/reserved fields, invalid UTF-8/TOML,
    duplicate/unknown source IDs, malformed source planes, invalid output stride/capacity, short
-   buffers, wrong quantum/time,
+   buffers, wrong quantum/time, chunks crossing the compiled region, early/late final markers and
+   out-of-region seeks,
    unsupported rate, overflow and one-byte-below caps return exact codes with atomic ownership and
    state. Tests do not dereference forged or stale pointers.
 3. A representative one-track and ten-track host-fed session at each launch rate renders consecutive

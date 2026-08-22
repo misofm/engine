@@ -21,6 +21,25 @@ type. It must apply the identical builtin/observer prevalidation as `into_bound`
 genuine private bindings, delegate to the existing graph source-set bind, and return artifact,
 external bindings and source set on every rejection. Do not expose or clone sealed parts.
 
+One equally narrow source visibility correction is required. Add only:
+
+```rust
+pub fn prepare_host_region(
+    config: PcmSourceRingConfig,
+    initial_frame: SourceFrame,
+) -> Result<(PcmSourceProducer, PcmSourceConsumer, SourceResourceReport), PcmSourceRingError>
+```
+
+as an associated function on `PcmSourceRing`. Its body delegates directly to the existing
+`prepare_at_source_frame(config, initial_frame)` path; keep that shared implementation private and
+leave zero-origin `prepare` unchanged. Tests cover origins 0, 1 and a representative nonzero session
+start; identical shape/resource reports; first accepted absolute chunk; wrong-zero/noncontiguous
+rejection without prefix; a strictly newer nonzero seek; and producer/consumer ownership after
+rejection. Do not expose native workers, decoder providers, ring internals, consumers or the private
+constructor. Adjacent review found no other required visibility seam: `SourceGraphSource::new`,
+`prepare_graph_source_set`, mappings, reports, `into_host_chunk_provider`, submit and seek are
+already public.
+
 Compilation is an off-render transaction:
 
 ```text
@@ -33,6 +52,14 @@ Any failure drops all provisional Rust ownership and returns both output handles
 handle owns producers, source-ID lookup, canonical session bytes and bounded Issue-005 capability
 controller state. The render handle owns consumers/source set and the prepared plan. They do not
 borrow the engine or each other after successful publication.
+
+For every source, retain the compiled checked region start and end in the control handle. Initialize
+the ring at the start through `prepare_host_region`. Before calling the public host provider, reject
+any chunk whose checked `[start_frame,start_frame+frames)` is outside the region; accept the final
+full/short block or zero marker only when its end equals the compiled end. Reject seek targets
+outside `[region_start,region_end]` before advancing generation, preserving the native controller's
+inclusive end seek for a zero-frame final marker. Update wrapper-local expected position only
+after the underlying submit/seek succeeds, so backpressure and validation failures remain atomic.
 
 The session handle has exactly one serial producer/control owner. Source submit and source seek may
 execute concurrently with the render handle because they use the accepted disjoint SPSC endpoints;
@@ -169,6 +196,11 @@ row's existing overlap semantics and do not synthesize a total or global allocat
 derive equal and one-byte-below caps from the corresponding production row rather than duplicating
 guessed literals. Do not expose addresses, Rust layout, capacity slack, allocator internals, or
 duration-dependent source size.
+
+The permitted source edit is only `crates/miso-engine-source/src/lib.rs` for
+`prepare_host_region` and its focused tests. `native_source.rs`, region parsing, producer/consumer
+semantics and resource formulas remain unchanged. Needing any second source visibility or behavior
+change is a briefing STOP.
 
 ## Representative proof
 
