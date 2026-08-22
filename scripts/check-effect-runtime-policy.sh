@@ -16,6 +16,8 @@ package_references="$(
 )"
 package_references="$(printf '%s\n' "$package_references" |
     rg -v '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' || true)"
+package_references="$(printf '%s\n' "$package_references" |
+    rg -v '^tools/miso-engine-effect-interchange-bench/(Cargo.toml|src/main[.]rs):' || true)"
 if [[ -n "$package_references" ]]; then
     printf '%s\n' "$package_references" >&2
     fail 'effect-package reference escaped the issue-079/080 compiler state boundary'

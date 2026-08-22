@@ -20,9 +20,13 @@ descriptor wire and identity**, stopped after its focused-green `64900f2` techni
 because its typed differential-test taxonomy required an impossible closed-enum value. Issue 082,
 **Close canonical effect descriptor wire, identity, and C inspection ABI**, corrects that taxonomy
 and owns the remaining product closure. Issue 078 owns package/CID/artifact selection and gates issue
-027; Issues 079 and 080 own current-layout state then migration; Issue 081 joins their qualification
-and gates release issue 026. The extensibility order is 082 -> 078 -> 027 -> 028, while persistence
-is 082 -> 079 -> 080 and qualification joins 078 + 080 -> 081.
+027; Issues 079 and 080 own current-layout state then migration. Issue 081 completed its
+nonbenchmark qualification but stopped after its sole benchmark runner exposed an invalid
+benchmark-local migration descriptor, so it has no overall PASS. Issue 108, **Repair
+effect-interchange benchmark migration fixture and reauthorize one descriptive run**, owns only that
+tool-local repair, a new zero-launch preflight and at most one successor descriptive run; it gates
+release issue 026. The extensibility order is 082 -> 078 -> 027 -> 028, while persistence is
+082 -> 079 -> 080 and qualification joins 078 + 080 -> stopped 081 -> 108.
 
 The issue-006 three-attempt workflow remains recorded as failed at runner artifact promotion. A
 fresh Sol rescope accepted its launch-critical graph compiler/runtime/PDC outcome from complete

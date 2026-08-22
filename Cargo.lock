@@ -339,6 +339,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-effect-interchange-bench"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-effect-package",
+ "sha2",
+]
+
+[[package]]
 name = "miso-engine-effect-package"
 version = "0.1.0"
 dependencies = [

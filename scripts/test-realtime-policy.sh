@@ -12,6 +12,7 @@ create_fixture() {
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
         "$root/crates/miso-engine-core/src/arch" \
         "$root/crates/miso-engine-capi/src" \
+        "$root/crates/miso-engine-effect-compiler/tests" \
         "$root/crates/miso-engine-effect-package/src" \
         "$root/crates/miso-engine-effect-package/tests" \
         "$root/hosts/miso-engine-host-web/src" \
@@ -55,6 +56,11 @@ create_fixture() {
         'unsafe impl Send for PackageAllocationAudit {}' \
         'struct PackageAllocationAudit;' \
         >"$root/crates/miso-engine-effect-package/tests/package_allocation.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe impl Send for MigrationAllocationAudit {}' \
+        'struct MigrationAllocationAudit;' \
+        >"$root/crates/miso-engine-effect-compiler/tests/migration_terminal.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn web_boundary() {}' \
@@ -123,6 +129,8 @@ expect_failure unsafe-in-second-effect-package-ffi-path \
     'mkdir -p "$root/crates/miso-engine-effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-package/src/ffi/other.rs"'
 expect_failure unsafe-outside-package-allocation-audit \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-package/tests/other.rs"'
+expect_failure unsafe-outside-migration-allocation-audit \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-compiler/tests/other.rs"'
 expect_failure unsafe-outside-web-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \
