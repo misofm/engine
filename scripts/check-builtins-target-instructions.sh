@@ -78,7 +78,10 @@ CARGO_TARGET_DIR="$scratch/four-rate-tests" cargo test --locked -p miso-engine-b
     -- --exact --test-threads=1 --nocapture
 
 build_closure() {
-    local name=$1 target=$2 features=$3
+    local name target features
+    name=$1
+    target=$2
+    features=$3
     local -a target_args=()
     [[ -z "$target" ]] || target_args=(--target "$target")
     RUSTFLAGS="-C target-feature=$features" CARGO_TARGET_DIR="$scratch/$name" \
@@ -88,8 +91,10 @@ build_closure() {
 }
 
 exact_object() {
-    local directory=$1 target=$2 deps
+    local directory target deps
     local -a objects
+    directory=$1
+    target=$2
     deps="$directory/release/deps"
     [[ -z "$target" ]] || deps="$directory/$target/release/deps"
     mapfile -t objects < <(find "$deps" -maxdepth 1 -type f -name 'miso_engine_core-*.o' -print | LC_ALL=C sort)
@@ -98,14 +103,20 @@ exact_object() {
 }
 
 native_object() {
-    local name=$1 features=$2 target_dir="$scratch/$name"
+    local name features target_dir
+    name=$1
+    features=$2
+    target_dir="$scratch/$name"
     RUSTFLAGS="-C codegen-units=1 -C target-feature=$features" CARGO_TARGET_DIR="$target_dir" \
         cargo rustc --quiet --locked -p miso-engine-core --release --lib -- --emit=obj
     exact_object "$target_dir" ''
 }
 
 extract_native_symbol() {
-    local object=$1 suffix=$2 output=$3 count
+    local object suffix output count
+    object=$1
+    suffix=$2
+    output=$3
     objdump -Cd "$object" >"$output.all"
     count=$(rg -c "<miso_engine_core::arch::.*${suffix}.*>:" "$output.all" || true)
     [[ "$count" == 1 ]] || fail "expected exactly one $suffix symbol, found $count"
@@ -171,7 +182,10 @@ printf 'issue068 object leg=aarch64-neon object_sha256=%s symbol_sha256=%s resul
     "$(hash_file "${neon_assembly[0]}")" "$(hash_file "$scratch/neon.symbol")"
 
 wasm_object() {
-    local name=$1 features=$2 target_dir="$scratch/$name"
+    local name features target_dir
+    name=$1
+    features=$2
+    target_dir="$scratch/$name"
     RUSTFLAGS="-C codegen-units=1 -C target-feature=$features" CARGO_TARGET_DIR="$target_dir" \
         cargo rustc --quiet --locked -p miso-engine-core --target wasm32-unknown-unknown --release --lib -- --emit=obj
     exact_object "$target_dir" wasm32-unknown-unknown
