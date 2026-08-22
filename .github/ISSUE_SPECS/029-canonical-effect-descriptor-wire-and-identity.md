@@ -9,9 +9,13 @@ and broad qualification are stateless successors rather than hidden work in this
 
 ## Status and attempt budget
 
-**SOL-BRIEFED / READY FOR TERRA ATTEMPT 1.** Dependencies 002, 004 and 011 are accepted. Permit one
-Terra implementation attempt and one bounded Sol correction; a second failure stops. Workload,
-benchmark and timed invocation counts start at zero and remain zero.
+**TERRA ATTEMPT 1 STOPPED PRE-EDIT / SOL BRIEF CORRECTION READY.** Dependencies 002, 004 and 011
+are accepted. Terra correctly found that the accepted descriptor and its nested text/tables are
+`'static`, so arbitrary borrowed wire cannot be reconstructed as `EffectDescriptorV1` and passed to
+the unchanged Issue-011 validator without an illegal lifetime extension or leak. No implementation
+was edited. This bounded Sol correction freezes the lifetime-correct validation architecture below
+and authorizes one corrected implementation pass. Any further contract or architecture blocker is
+a final STOP/rescope. Workload, benchmark and timed invocation counts remain zero.
 
 The provisional `miso-engine-effect-package` descriptor stub is unaccepted input. Preserve the
 semantic effect contract and compiler exactly: no runtime trait, descriptor meaning, registry,
@@ -64,8 +68,8 @@ Wire enum numbers are exactly the accepted `#[repr(u32)]` values from Issue 011.
 DualMono `1`, Maximum `2`, Average `4`; DualMono is mandatory and all other bits reject. Legal
 `f32` values retain their exact IEEE-754 bits. Nonfinite and negative-zero values reject; positive
 zero is canonical. UTF-8 strings are nonempty, at most 255 bytes (effect/port IDs at most 127),
-contain no NUL, CR or Unicode General_Category `Cc` scalar, and receive no normalization. IDs retain
-the accepted lowercase-ASCII grammar.
+contain no scalar for which Rust `char::is_control()` is true, and receive no normalization. IDs
+retain the accepted lowercase-ASCII grammar.
 
 Parameters remain strictly increasing by numeric ID. Enum choices remain strictly increasing by
 numeric value. Qualities remain strictly increasing by `(quality, sample_rate)`. Ports are encoded
@@ -73,7 +77,22 @@ in canonical `(role_number, id_UTF8_bytes)` order regardless of their semantic s
 string pool has no deduplication and is the exact first-use concatenation: effect ID, display name,
 each parameter's display name/display unit/enum labels in parameter order, then port IDs in canonical
 port order. Each offset must equal that traversal cursor; overlap, gaps, aliases and unused bytes
-reject. The decoded view must satisfy `validate_descriptor_v1` without changing that function.
+reject.
+
+The two validation boundaries are deliberately different:
+
+- Size/encode accepts an actual `&'static EffectDescriptorV1` and must call the unchanged
+  `validate_descriptor_v1` before sizing, canonicalization or publication.
+- Verification of arbitrary caller bytes must not reconstruct an `EffectDescriptorV1`. The parser
+  builds a private effect-package-owned `BorrowedEffectDescriptorViewV1<'a>` (the name is
+  descriptive, not a new public contract type) and a private validator independently enforces every
+  frozen Issue-011 semantic rule plus this issue's stricter canonical-wire rules. The public
+  `VerifiedEffectDescriptorWireV1<'a>` may expose bounded borrowed wire accessors, but it is not an
+  effect-contract descriptor and cannot enter the runtime/compiler.
+
+The implementation must not use `unsafe` lifetime extension, `transmute`, `Box::leak`, interning,
+a global cache or any equivalent lifetime laundering. It must not change or add a public seam to
+`miso-engine-effect-contract`, its validator, runtime traits or compiler.
 
 ## Identity and bounded Rust API
 
@@ -126,7 +145,10 @@ Diagnostic numbers/strings are frozen: `0/ok`, `1/null`, `2/limit`, `3/buffer_to
 error is selected by phase order: arguments, limit/host fit, header/version, total/section lengths,
 reserved/flags, offsets/canonical order, enums, text, floats, semantic validation. Byte offset is the
 first offending byte and record index is the offending table index; unavailable values are
-`UINT32_MAX`. Rust and C expose the same record.
+`UINT32_MAX`. Within each phase Rust, C and Python use header/table traversal order, then increasing
+record index, then increasing field byte offset. When borrowed semantic validation returns multiple
+sorted errors, map them to their corresponding wire fields/records and select the earliest by that
+same order rather than by validator message order. Rust and C expose the same record.
 
 ## Product gates and evidence
 
@@ -142,6 +164,26 @@ first offending byte and record index is the offending table index; unavailable 
   port input order does not. Truncation, trailing data, bad counts/offsets/order, aliases/gaps,
   unknown enums/flags, reserved/padding, malformed text and illegal floats reject with exact frozen
   diagnostics.
+- Semantic validation parity is exhaustive and table-driven. Every launch-registry static
+  descriptor and both comprehensive static vectors are accepted by the unchanged Issue-011
+  validator and by encode/parse/private-borrowed validation. Compile-time static invalid descriptor
+  fixtures cover contract/state versions; effect, display and ID text; link bits and mandatory
+  DualMono; parameter zero/duplicate/order; finite/negative-zero/default/domain rules; continuous
+  bounds/mapping/log positivity; Boolean shape; enumeration length/order/value/label/duplicate and
+  default rules; automation/automatable/smoothing consistency; port ID/duplicate/role/required/
+  layout/main-pair/sidechain cardinality; quality order/rate/Normal/accepted-rate coverage; and equal
+  lane-state sizes. Rate fixtures cover launch rates 44100/48000/88200/96000 and accepted optional
+  extended rates 176400/192000/352800/384000. Text fixtures use exact `char::is_control()` semantics.
+  For every fixture, the private validator returns the exact same sorted, deduplicated
+  `(path, DescriptorDiagnosticCode)` set as `validate_descriptor_v1`.
+- Semantic parity must not invent rules absent from Issue 011: `contract_minor` is not constrained;
+  `readable` need not be true; the parameter list need not be nonempty; and no additional maximum
+  for common state, scratch bytes or scratch-per-frame is imposed beyond representability and the
+  accepted validator's existing rules.
+- Wire-only corruptions (header/length, offsets, gaps/aliases, padding/reserved, unknown enum/flags,
+  string-pool ownership and trailing bytes) remain a separate stricter matrix and may reject before
+  semantic validation with the frozen wire diagnostic. Differential fixtures are `static`/`const`;
+  tests must not manufacture `'static` data by leaking allocations.
 - Rust and C buffer canaries prove exact-size success and size-minus-one all-or-none behavior.
   A native C11 compile/link/run smoke agrees on records, identity and diagnostics.
 - Locked native tests/check/Clippy/rustdoc, `wasm32-unknown-unknown` compile, format, workspace and
@@ -160,6 +202,11 @@ Allowed crate implementation is only `miso-engine-effect-package`'s `wire.rs`, `
 smoke script and minimal workspace/realtime policy allowlist plus mutation updates for the local FFI
 boundary. `effect-contract` and `effect-compiler` production files are read-only accepted
 dependencies.
+
+STOP rather than implement if the static encoder cannot call the unchanged Issue-011 validator, if
+the private borrowed validator cannot prove the exhaustive exact diagnostic parity above, or if the
+solution requires lifetime laundering, a public effect-contract/runtime/compiler change, or any
+canonical-wire relaxation.
 
 No package/archive/artifact/CID encoding or selection; state envelope/restore/migration; third-party
 ABI; signatures/trust/repository; runtime trait change; graph/DSP work; fuzz/100-process/target
