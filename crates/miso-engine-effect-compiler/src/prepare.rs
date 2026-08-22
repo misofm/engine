@@ -101,7 +101,7 @@ impl core::fmt::Debug for WireBoundNativeEffectFactoryV1<'_> {
     }
 }
 
-impl WireBoundNativeEffectFactoryV1<'_> {
+impl<'wire> WireBoundNativeEffectFactoryV1<'wire> {
     #[must_use]
     pub fn factory(&self) -> &Arc<dyn NativeEffectFactory> {
         &self.factory
@@ -113,7 +113,7 @@ impl WireBoundNativeEffectFactoryV1<'_> {
     }
 
     #[must_use]
-    pub const fn bound_descriptor(&self) -> BoundEffectDescriptorWireV1<'_> {
+    pub const fn bound_descriptor(&self) -> BoundEffectDescriptorWireV1<'wire> {
         self.bound_descriptor
     }
 }
@@ -621,7 +621,7 @@ pub fn snapshot_scalar_effect_state_v1(
     )
 }
 
-fn admit_restored_state(
+pub(crate) fn admit_restored_state(
     state: VerifiedEffectStateV1<'_>,
     admission: EffectStateRestoreAdmissionV1,
 ) -> Result<(), EffectStateDiagnosticV1> {
