@@ -8,9 +8,10 @@ launders a lifetime.
 
 ## Status and attempt budget
 
-**SOL-BRIEFED / READY FOR TERRA ATTEMPT 1.** Permit one Terra implementation attempt and one bounded
-Sol correction; a second failure stops. Workload, benchmark and timed invocation counts are zero and
-remain zero.
+**SOL PASS / COMPLETE / READY TO CLOSE.** Terra attempt 1 plus the single bounded Sol correction
+completed the product contract at clean candidate
+`178753c1168e38da9c032e311cfb11a6ce9f4a66` on `codex/batch-feature-082`. Workload,
+benchmark, timed, audit and browser invocation counts are each exactly zero.
 
 Checkpoint `64900f2` is focused-green technical input, not an accepted dependency or PASS. Preserve
 its 96-byte header, 80/24/64/16-byte tables, canonical string/port ordering, exact diagnostic phase
@@ -69,6 +70,49 @@ No test or implementation may use invalid-enum construction, `unsafe` lifetime e
 Evidence records checkpoint/source/tool hashes, exact commands, vector sizes/hashes, C layout,
 diagnostic matrices and strict Terra/Sol verdicts. Any need for an effect-contract change, unsafe
 invalid typed value, wire/API/diagnostic relaxation or another testability exception is STOP/rescope.
+
+## Final Sol evidence — 2026-08-22
+
+**PASS.** Stopped Issue 029 checkpoint `64900f2` remains historical focused-green technical input,
+not an accepted dependency or retroactive PASS. Terra completed the product surface through
+`1291b0b`; Sol's bounded correction at `178753c` changed only these four qualification/reference
+paths (541 insertions, 11 deletions), with no wire, FFI, header or golden-byte change:
+
+- `crates/miso-engine-effect-package/src/wire.rs` (test module only);
+- `crates/miso-engine-effect-package/tests/descriptor_v1_qualification.rs`;
+- `crates/miso-engine-effect-package/tests/c/descriptor_smoke.c`;
+- `scripts/effect-descriptor-v1-reference.py`.
+
+The two checked vectors are exact: comprehensive A is 1,587 wire bytes with identity
+`7d2f1ee79aa5833c546ea06548cb29e13b37f4ab690e9024f1480d2fdfade298`; comprehensive B is
+712 wire bytes with identity
+`9bbf09878bca3228ad67687bc492bcc84894181884cf4e3ab387231fb318148f`. Their sorted six-row
+manifest SHA-256 is `43bf0eb6b69d0756e8e12323bd54704f1781537ba4c7e4a4b31f6aa578345010`.
+
+Executed evidence proves both validation domains without invalid typed construction or lifetime
+laundering: exhaustive safely representable validator/borrowed-verifier parity; constructor and
+raw-wire ID grammar boundaries; bounded missing/unknown link bits; closed enum, Boolean and flag
+diagnostics; canonical extended-rate and `char::is_control()` behavior; exact phase/tie-break field
+offsets; decode/re-encode byte identity; semantic-field identity changes; port permutation
+invariance; and deterministic malformed header/length/offset/order/alias-gap/reserved/text/float
+rows. Exact-size and one-short Rust/C canaries, all-or-none publication, required-count/null/capacity
+permutations and every C record field/reserved word passed. The C11 smoke linked the sole inspection
+symbol and matched the 96-byte wire header, 80/24/64/16-byte records, 64-byte summary and 16-byte
+diagnostic. The independent Python standard-library verifier, native C inspection and scalar Wasm
+export/object/no-SIMD checks all passed.
+
+The clean candidate passed the final nonbenchmark seal:
+
+- `cargo fmt --all -- --check`;
+- locked workspace all-target/all-feature check and tests;
+- warning-denied locked workspace all-target/all-feature Clippy and rustdoc;
+- `bash scripts/check-effect-descriptor-v1.sh`;
+- workspace, realtime and effect-runtime policy checks plus their mutation suites;
+- dependency, unsafe/lifetime-laundering, generated-artifact and `git diff --check` scans.
+
+Final counters: `workload_invocations=0`, `benchmark_invocations=0`, `timed_invocations=0`,
+`audit_invocations=0`, `browser_invocations=0`. Issue 082 is complete and ready for its evidence
+commit to be pushed, GitHub synchronization and closure.
 
 ## Allowed files and non-goals
 

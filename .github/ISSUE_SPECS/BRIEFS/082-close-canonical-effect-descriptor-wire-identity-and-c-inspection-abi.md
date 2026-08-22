@@ -2,10 +2,12 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Consume stopped Issue-029 checkpoint `64900f2` only as focused-green
-technical input. Complete the already-frozen descriptor wire/identity/C-inspection product without
-changing accepted effect contracts. Permit one Terra attempt and one bounded Sol correction;
-benchmark and timed invocations remain zero.
+**SOL PASS / COMPLETE / READY TO CLOSE.** Stopped Issue-029 checkpoint `64900f2` remains
+focused-green technical input only. Terra attempt 1 and the single bounded Sol correction completed
+the frozen descriptor wire/identity/C-inspection product without changing accepted effect contracts.
+Clean candidate `178753c1168e38da9c032e311cfb11a6ce9f4a66` on
+`codex/batch-feature-082` passed the full locked nonbenchmark workspace/policy seal; workload,
+benchmark, timed, audit and browser invocation counts are each zero.
 
 ## Literal implementation order
 
@@ -33,3 +35,16 @@ package/CID, state, migration or Issue-081 qualification work.
 Only accepted Issue 082 unblocks **Canonical effect package, CID, and artifact selection** and
 **Prepared effect state envelope and transactional current-layout restore**. Issues 081, 027 and 026
 remain transitively gated through their existing direct dependencies.
+
+## Final Sol verdict
+
+**PASS.** The bounded four-path Sol qualification correction proved exhaustive two-domain
+validation, independent Python decode/re-encode identity, complete C record/null/canary semantics,
+native C and scalar Wasm inspection, exact diagnostic ordering and semantic identity coverage. The
+checked vectors are 1,587 and 712 bytes with identities
+`7d2f1ee79aa5833c546ea06548cb29e13b37f4ab690e9024f1480d2fdfade298` and
+`9bbf09878bca3228ad67687bc492bcc84894181884cf4e3ab387231fb318148f`; manifest SHA-256 is
+`43bf0eb6b69d0756e8e12323bd54704f1781537ba4c7e4a4b31f6aa578345010`. Full locked workspace
+check/tests, warning-denied Clippy/rustdoc, formatting, descriptor native/Wasm/Python checks,
+workspace/realtime/effect-runtime policies and mutations, and static/diff/artifact scans passed.
+Issue 082 is complete and ready to close after commit/push and remote synchronization.
