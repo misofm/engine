@@ -3,16 +3,16 @@
 ## Outcome and status
 
 Add explicit deterministic old-layout migration to the accepted current-layout state envelope
-without changing effect runtime traits or permitting migration on render. **SOL XHIGH BRIEF PASS /
-READY FOR SOL HIGH ATTEMPT 1.** One coherent Sol High implementation attempt and one bounded Sol
-High correction are allowed; Sol XHigh adversarially reviews each. A second failed implementation
-pass stops and requires rescope/rebrief. Workload, benchmark, timed, audit, browser and fuzz
-execution counts remain exactly zero.
+without changing effect runtime traits or permitting migration on render. **COMPLETE / SOL XHIGH
+PASS / READY TO CLOSE.** Sol High attempt 1 reached the bounded product contract after its reviewed
+corrections; both focused checkpoints, closing qualification and the clean nonbenchmark workspace
+seal passed. Workload, benchmark, timed, audit-main, browser and fuzz execution counts remained
+exactly zero.
 
 Remote Issue 80 was read-only verified open with the exact title on 2026-08-22 and has no comments.
 Its short original body states the correct outcome but is not implementation-complete. Root must
-synchronize this corrected local decision record only at the eventual CI-conscious batch delivery;
-this checkpoint does not claim remote synchronization.
+synchronize this completed local decision record and close the issue only after the one eventual
+CI-conscious batch push; this local evidence checkpoint does not claim remote synchronization.
 
 ## Readiness correction and smallest closable product
 
@@ -202,8 +202,9 @@ Freeze these two terminal operations:
   workspaces, and returns the bank capability only after the selected member succeeds.
 
 State and both admission policies are copied into the resolved object and cannot be substituted at
-execution. Zero-step execution requires empty migration workspaces; scalar initial scratch remains
-the exact accepted Issue-079 requirement.
+execution. Zero-step execution has zero-length required first-envelope, second-envelope and
+migration-scratch prefixes; any supplied nonempty bytes are untouched oversized suffixes. Scalar
+initial scratch remains the exact accepted Issue-079 requirement.
 
 The resolved object privately captures the current selector and opaque static-descriptor/identity
 provenance plus a clone of the exact injected factory `Arc`. Selector/provenance and `Arc::ptr_eq`
@@ -326,6 +327,55 @@ workspace policies plus mutations, scalar-Wasm package compilation, script synta
 render-reachability scans. Root then runs one clean locked nonbenchmark workspace seal. No
 benchmark, timing, workload, audit-main, browser run or fuzz execution is authorized. Broad fuzz,
 allocation accounting, process/target matrices and the sole later benchmark remain Issue 081.
+
+## Final implementation and qualification evidence
+
+Sol High attempt 1 was preserved as three local checkpoints and adversarially accepted by Sol
+XHigh:
+
+- `27e787f`: package selector/configuration, compatible-edge provenance and compiler registry,
+  resolution, admission and exact workspace requirements;
+- `697e2eb`: transactional scalar and by-value bank terminal migration/restore, canonical
+  intermediates, exact diagnostics, failure disposal and portable continuation/isolation tests;
+  and
+- `352089e`: exact product documentation, zero-step prefix clarification, narrow migration checker,
+  runtime/render policy mutation and focused qualification.
+
+The qualified immutable candidate is
+`352089e65d25ae27017f447577ce4784437a7847`, tree
+`84995f7fb35469124827bb43146956cb098a9ae7`. Focused qualification passed 87/87 package/compiler
+all-target tests, including the Issue-079 package/scalar/bank regressions and migration suites;
+locked native checks; scalar-Wasm library checks; warning-denied Clippy and rustdoc; format; the
+exact migration checker; and dependency, workspace, realtime, effect-runtime, rack, graph,
+builtins, script, artifact and render-reachability gates and available mutations.
+
+The clean broad nonbenchmark seal passed on that same HEAD/tree. Its first workspace nonbenchmark
+test invocation printed only passing results, but the final process exit status was not retained;
+that invocation is recorded as **inconclusive evidence capture**, neither PASS nor failure. Root
+then deliberately reran the exact
+`CARGO_BUILD_JOBS=1 cargo test --workspace --all-features --locked --lib --bins --tests --examples`
+command with a retained session and observed exit status 0. Workspace doctests passed, including eight
+compile-fail doctests. The locked all-target/all-feature workspace check, warning-denied workspace
+Clippy, warning-denied rustdoc, format, diff, clean candidate identity, conflict,
+trailing-whitespace and artifact scans all passed. Twelve policy/checker scripts and syntax for all
+77 tracked shell scripts passed.
+
+The sealed hashes are:
+
+- `Cargo.lock`:
+  `8db695d722dc2055faaac82ffebb8741bf948117fc733834de9e157ff4e31e6c`;
+- `fuzz/Cargo.lock`:
+  `af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`;
+- `scripts/check-effect-state-migration-v1.sh`:
+  `0e72a952556e1968dae0317f47bd404a4250805893fa9a8bba1c7d1c0a15a669`; and
+- `docs/EFFECT_STATE_MIGRATION_V1.md`:
+  `c8c1f6ce6ef30ae0b2ab25df0b5519fecacc530328d2e40e54a26cbb0fd90b59`.
+
+Benchmark, timed, workload, audit-main, browser and fuzz execution counts were all exactly zero.
+No Issue-081 broad fuzzing, allocation accounting, target/process matrix or benchmark work entered
+this issue. The implementation is locally complete and **SOL XHIGH PASS / READY TO CLOSE**; the
+one eventual bulk main merge/push, remote evidence synchronization and remote issue closure remain
+root-owned work and are not claimed here.
 
 ## Allowed paths and non-goals
 

@@ -2,11 +2,12 @@
 
 ## Decision
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH ATTEMPT 1.** Implement only deterministic adjacent
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** The implemented product is deterministic adjacent
 payload migration between exact historical/target descriptor bindings, followed by the accepted
-Issue-079 unpublished scalar or bank-member restore. One Sol High attempt and one bounded Sol High
-correction are allowed; Sol XHigh reviews each. A second failed pass stops for rescope. Benchmark,
-timing, workload, audit, browser and fuzz execution counts remain zero.
+Issue-079 unpublished scalar or bank-member restore. Sol High attempt 1 and its bounded reviewed
+corrections passed both focused checkpoints, closing qualification and the clean nonbenchmark
+workspace seal. Benchmark, timing, workload, audit-main, browser and fuzz execution counts remained
+zero.
 
 ## Core correction
 
@@ -77,6 +78,9 @@ port, quality/rate, latency/tail, scratch, contract and effect-ID migration.
   exact. Target payload starts as `0xa5`; a failing step that changes it gets Step detail 2, while a
   success report whose three byte counts differ from the exact target sizes gets Step detail 3. It
   can never publish an envelope or destination.
+- Zero-step requirements have zero-length first-envelope, second-envelope and migration-scratch
+  prefixes. Supplied nonempty slices are untouched oversized suffixes, not additional required
+  workspace. Scalar initial scratch remains the exact Issue-079 requirement.
 - Current restore admission and derived target state/scratch/automation caps reject before a
   migration hook. Do not admit historical prepared sizes as current resources: check source
   rate/quantum/request caps, then derive and admit resources from the current target descriptor and
@@ -124,6 +128,37 @@ Closing qualification is exact docs, narrow policy/static mutations, focused pac
 Issue-079 regression tests, locked checks, warning-denied Clippy, rustdoc/fmt, scalar-Wasm package
 compile, dependency/realtime/workspace/script/artifact scans, then one clean locked nonbenchmark
 workspace seal. Invocation counters for benchmark/timing/workload/audit/browser/fuzz stay zero.
+
+## Final evidence and verdict
+
+Sol XHigh accepted the three local checkpoints: `27e787f` for package seams and registry/resolution,
+`697e2eb` for scalar/bank transactional execution, and `352089e` for docs, policy and focused
+qualification. The immutable qualified candidate is
+`352089e65d25ae27017f447577ce4784437a7847`, tree
+`84995f7fb35469124827bb43146956cb098a9ae7`.
+
+Focused qualification passed 87/87 package/compiler all-target tests, locked native and
+scalar-Wasm checks, warning-denied Clippy/rustdoc, format, exact migration policy, dependency/
+workspace/realtime/effect-runtime/rack/graph/builtins policies and available mutations, plus
+script/artifact/render-reachability scans. The broad seal's first nonbenchmark workspace test run
+printed only passes but lost its final exit status, so it is inconclusive evidence capture. Root
+reran
+`CARGO_BUILD_JOBS=1 cargo test --workspace --all-features --locked --lib --bins --tests --examples`
+with a retained session and observed exit 0; doctests passed, including eight compile-fail
+doctests. The all-target/all-feature workspace check, warning-denied
+workspace Clippy/rustdoc, format/diff/clean candidate and artifact scans, 12 policy/checker scripts,
+and syntax for 77 tracked shell scripts all passed.
+
+Sealed hashes are `Cargo.lock`
+`8db695d722dc2055faaac82ffebb8741bf948117fc733834de9e157ff4e31e6c`, `fuzz/Cargo.lock`
+`af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`, migration checker
+`0e72a952556e1968dae0317f47bd404a4250805893fa9a8bba1c7d1c0a15a669`, and migration doc
+`c8c1f6ce6ef30ae0b2ab25df0b5519fecacc530328d2e40e54a26cbb0fd90b59`.
+
+Benchmark, timed, workload, audit-main, browser and fuzz execution counts are exactly zero. No
+Issue-081 fuzz/allocation/matrix/benchmark scope entered Issue 080. **SOL XHIGH PASS / COMPLETE /
+READY TO CLOSE.** The eventual bulk main merge/push, remote evidence synchronization and remote
+issue closure remain root-owned work and are not claimed by this local brief.
 
 ## Stop conditions
 
