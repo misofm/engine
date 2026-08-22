@@ -19,6 +19,18 @@ cleanup() {
   rm -rf -- "$mutation_dir"
 }
 trap cleanup EXIT
+webdriver_runner="$repo_root/scripts/web-audioworklet-browser-correctness.py"
+python3 -B "$webdriver_runner" --self-test-webdriver-responses
+mutated_webdriver="$mutation_dir/web-audioworklet-browser-correctness.py"
+sed '/^    value = response\["value"\]$/a\
+    if value is None and method != "DELETE":\
+        raise RuntimeError("generic null rejection mutation")
+' "$webdriver_runner" >"$mutated_webdriver"
+if python3 -B "$mutated_webdriver" --self-test-webdriver-responses >/dev/null 2>&1; then
+  echo "generic WebDriver null-rejection mutation escaped response tests" >&2
+  exit 1
+fi
+echo "web AudioWorklet WebDriver null-response mutation passed"
 for mutation in \
   'new Array(1);' \
   'this.port.postMessage({});' \

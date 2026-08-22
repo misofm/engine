@@ -39,6 +39,14 @@ SOURCE_SEAL_PATHS = (
     "scripts/check-web-audioworklet.sh",
 )
 
+WEBDRIVER_COMMANDS = {
+    "status": ("GET", "object"),
+    "new-session": ("POST", "object"),
+    "navigate-to": ("POST", "null"),
+    "execute-async-script": ("POST", "object"),
+    "delete-session": ("DELETE", "null"),
+}
+
 
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -183,23 +191,132 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def request(method: str, url: str, payload: object | None = None) -> dict:
+def validate_webdriver_response(command: str, method: str, response: object) -> dict:
+    contract = WEBDRIVER_COMMANDS.get(command)
+    if contract is None:
+        raise RuntimeError(f"unknown WebDriver command: {command}")
+    expected_method, result_kind = contract
+    if method != expected_method:
+        raise RuntimeError(f"invalid method for WebDriver command {command}: {method}")
+    if not isinstance(response, dict) or set(response) != {"value"}:
+        raise RuntimeError(f"malformed WebDriver response for {command}")
+    value = response["value"]
+    if isinstance(value, dict) and isinstance(value.get("error"), str):
+        raise RuntimeError(f"WebDriver protocol error for {command}: {value['error']}")
+    if result_kind == "null":
+        if value is not None:
+            raise RuntimeError(f"WebDriver returned non-null success for {command}")
+    elif not isinstance(value, dict):
+        raise RuntimeError(f"WebDriver returned no typed value for {command}")
+    return response
+
+
+def request(command: str, method: str, url: str, payload: object | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode()
     headers = {} if data is None else {"Content-Type": "application/json"}
-    with urllib.request.urlopen(
-        urllib.request.Request(url, data=data, headers=headers, method=method)
-    ) as response:
-        value = json.loads(response.read())
-    if value.get("value") is None and method != "DELETE":
-        raise RuntimeError(f"WebDriver returned no value for {method} {url}")
-    return value
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=data, headers=headers, method=method)
+        ) as http_response:
+            if http_response.status != 200:
+                raise RuntimeError(
+                    f"unexpected WebDriver HTTP status for {command}: {http_response.status}"
+                )
+            response = json.loads(http_response.read())
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError(f"malformed WebDriver response for {command}") from error
+    return validate_webdriver_response(command, method, response)
+
+
+def self_test_webdriver_responses() -> None:
+    responses: dict[str, tuple[int, bytes]] = {
+        "/navigate": (200, b'{"value":null}'),
+        "/delete": (200, b'{"value":null}'),
+        "/status": (200, b'{"value":{"ready":true}}'),
+        "/new-session": (200, b'{"value":{"sessionId":"test","capabilities":{}}}'),
+        "/script": (200, b'{"value":{"ok":true,"value":{}}}'),
+        "/missing": (200, b"{}"),
+        "/malformed-envelope": (200, b"[]"),
+        "/extra-envelope-key": (200, b'{"value":{},"extra":true}'),
+        "/malformed-json": (200, b"not-json"),
+        "/protocol-error": (
+            200,
+            b'{"value":{"error":"unknown error","message":"failed","stacktrace":""}}',
+        ),
+        "/http-error": (
+            500,
+            b'{"value":{"error":"unknown error","message":"failed","stacktrace":""}}',
+        ),
+        "/typed-null": (200, b'{"value":null}'),
+        "/navigate-object": (200, b'{"value":{}}'),
+    }
+
+    class ResponseHandler(http.server.BaseHTTPRequestHandler):
+        def respond(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            status, body = responses[self.path]
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = respond
+        do_POST = respond
+        do_DELETE = respond
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ResponseHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def expect_rejected(command: str, method: str, path: str) -> None:
+        try:
+            request(command, method, f"{base}{path}")
+        except (RuntimeError, urllib.error.HTTPError):
+            return
+        raise AssertionError(f"WebDriver response unexpectedly accepted: {path}")
+
+    try:
+        if request("navigate-to", "POST", f"{base}/navigate") != {"value": None}:
+            raise AssertionError("navigation null success")
+        if request("delete-session", "DELETE", f"{base}/delete") != {"value": None}:
+            raise AssertionError("session deletion null success")
+        for command, method, path in (
+            ("status", "GET", "/status"),
+            ("new-session", "POST", "/new-session"),
+            ("execute-async-script", "POST", "/script"),
+        ):
+            request(command, method, f"{base}{path}")
+        for command, method, path in (
+            ("status", "GET", "/missing"),
+            ("status", "GET", "/malformed-envelope"),
+            ("status", "GET", "/extra-envelope-key"),
+            ("status", "GET", "/malformed-json"),
+            ("status", "GET", "/protocol-error"),
+            ("status", "GET", "/http-error"),
+            ("status", "GET", "/typed-null"),
+            ("new-session", "POST", "/typed-null"),
+            ("execute-async-script", "POST", "/typed-null"),
+            ("navigate-to", "POST", "/navigate-object"),
+        ):
+            expect_rejected(command, method, path)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def wait_for_driver(url: str) -> dict:
     failure: Exception | None = None
     for _attempt in range(200):
         try:
-            return request("GET", f"{url}/status")["value"]
+            return request("status", "GET", f"{url}/status")["value"]
         except (OSError, urllib.error.URLError, RuntimeError) as error:
             failure = error
             threading.Event().wait(0.025)
@@ -365,12 +482,12 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
                 }
             }
         }
-        created = request("POST", f"{driver_url}/session", capability)["value"]
+        created = request("new-session", "POST", f"{driver_url}/session", capability)["value"]
         session_id = created["sessionId"]
         capabilities = created["capabilities"]
         base = f"{driver_url}/session/{session_id}"
         fixture_url = f"http://127.0.0.1:{server.server_port}/fixture/index.html"
-        request("POST", f"{base}/url", {"url": fixture_url})
+        request("navigate-to", "POST", f"{base}/url", {"url": fixture_url})
         script = """
           const done = arguments[arguments.length - 1];
           import('/fixture/browser-correctness.js')
@@ -378,7 +495,12 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
             .then((value) => done({ok: true, value}),
                   () => done({ok: false, error: 'browser-correctness-failed'}));
         """
-        envelope = request("POST", f"{base}/execute/async", {"script": script, "args": []})["value"]
+        envelope = request(
+            "execute-async-script",
+            "POST",
+            f"{base}/execute/async",
+            {"script": script, "args": []},
+        )["value"]
         if envelope != {"ok": True, "value": envelope.get("value")}:
             raise RuntimeError("browser correctness module failed")
         result = envelope["value"]
@@ -413,7 +535,7 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
     finally:
         if session_id is not None:
             try:
-                request("DELETE", f"{driver_url}/session/{session_id}")
+                request("delete-session", "DELETE", f"{driver_url}/session/{session_id}")
             except Exception:
                 pass
         driver.terminate()
@@ -426,6 +548,7 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--self-test-webdriver-responses", action="store_true")
     parser.add_argument("--seal", action="store_true")
     parser.add_argument("--seal-input", type=pathlib.Path)
     parser.add_argument("--artifacts", type=pathlib.Path)
@@ -433,6 +556,10 @@ def main() -> int:
     parser.add_argument("--browser", type=pathlib.Path)
     parser.add_argument("--driver", type=pathlib.Path)
     args = parser.parse_args()
+    if args.self_test_webdriver_responses:
+        self_test_webdriver_responses()
+        print("web AudioWorklet WebDriver response tests passed")
+        return 0
     source, expected = load_inputs()
     if args.check:
         if args.artifacts is None:
