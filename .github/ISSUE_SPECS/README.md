@@ -77,8 +77,11 @@ strict-session compilation, separate control/render ownership, bounded host sour
 caller-owned planar output. Issue 073, **Native PCM reference runner and C ABI qualification**,
 follows it and alone owns native WAV/RF64 runner breadth, complete Issue-005 provider/mutation
 integration and native platform qualification. Issue 023 consumes the host-fed product directly;
-Issues 025 and 026 wait for Issue 073. Both issues permit one Terra attempt plus one Sol correction
-and prohibit benchmarks/timing.
+Issues 025 and 026 wait for Issue 073. Issue 024 is now the launch-sized **Launch scalar and
+simd128 AudioWorklet host** product; Issue 074, **Browser AudioWorklet qualification and deployment
+matrix**, owns the separable demo, browser/device matrix, long-run, memory/GC, bundle and descriptive
+performance breadth and gates only Issue 026. These host issues permit one Terra attempt plus one
+Sol correction; Issue 024 prohibits benchmarks/timing.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->

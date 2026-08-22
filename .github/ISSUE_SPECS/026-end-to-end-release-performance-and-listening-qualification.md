@@ -30,7 +30,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 
 - Native PCM reference runner and C ABI qualification
 - iOS and Android embedding examples
-- WASM SIMD AudioWorklet embedding
+- Browser AudioWorklet qualification and deployment matrix
 - Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral
 - DSP research corpus and conformance harness
 - Real-time memory, buffers, queues, and plan lifetime

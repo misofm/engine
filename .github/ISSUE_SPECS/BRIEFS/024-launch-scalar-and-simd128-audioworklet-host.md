@@ -1,0 +1,109 @@
+# Sol implementation brief — issue 024 launch scalar and simd128 AudioWorklet host
+
+## Decision
+
+**READY FOR TERRA ATTEMPT 1.** Implement one immutable host-fed strict session in one nonshared
+Wasm instance. Build scalar and base-`simd128` variants and choose exactly once before worklet
+construction. This is a two-attempt product issue: Terra plus one bounded Sol correction. Do not
+implement the old SAB path or the deferred Issue-074 qualification matrix.
+
+## Smallest vertical
+
+Extend `miso-engine-host-web` directly over the accepted public session, source, effect/builtin and
+graph APIs. Do not call or modify `miso-engine-capi`; its native ABI is only the accepted ownership,
+error and resource precedent. Preparation on the AudioWorklet global thread, while the context is
+suspended and outside `process()`, may parse and allocate. Once ready, topology, capacity, Wasm
+memory and cached output views are immutable.
+
+The prepared Rust object owns the strict session, bounded host source producers/consumers, sealed
+builtins/effects, graph and exclusive plan. The message handler serially accepts one transferred
+source/seek request at a time, copies into preallocated Wasm staging and ACKs it. `process()` sees no
+message payload, invokes one exact-time render and copies cached contiguous L/R views into the two
+browser planes. No plan publication/retirement or general command controller is in scope.
+
+Preparation binds `context.sampleRate`, caller-supplied explicit `quantumFrames` and strict TOML
+exactly. Do not claim a suspended main realm can discover the actual quantum:
+`context.renderQuantumSize` is comparison evidence only when exposed and nonzero. Before ready, the
+processor also compares `AudioWorkletGlobalScope.renderQuantumSize` only when exposed and nonzero.
+Every callback validates actual output-plane length against the prepared quantum; mismatch becomes
+sticky reprepare-required, but `process()` never parses, allocates or reprepares. Launch rates only.
+Test synthetic 64/128/256 plus the representative actual-browser path without treating 128 as
+normative.
+
+## Literal ABI and retained layout
+
+Implement the exact V1 export names, result values, `WebPrepareConfigV1` fields, buffer kinds and JS/
+TS message tags frozen in the issue. Keep JavaScript-visible pointers as Wasm32 `u32` offsets and
+timeline/generation values as Wasm `u64`/JavaScript `BigInt`. `config_new` allocates only a fixed
+config/error object. JavaScript fills the exported config layout; `prepare` validates it and creates
+all staging/storage. No pointer/view is cached before successful preparation.
+
+Retain exactly:
+
+```text
+config + fixed status/error
+session TOML bytes
+diagnostic bytes
+source-ID bytes
+source PCM bytes = maximum_source_channels * quantum * sizeof(f32)
+output PCM bytes = 2 * quantum * sizeof(f32)
+bridge metadata
+accepted session/source/effect/builtin/graph ownership
+```
+
+Every product/size/sum/max uses checked Wasm32 arithmetic. Report each bridge row, bridge retained
+sum/max and existing underlying production rows without summing overlapping reports or claiming a
+global allocation count. Apply host-retained and named-allocation caps before publishing; return all
+provisional ownership on rejection. `compile` publishes control/source ownership and plan or neither.
+
+Source IDs are exact UTF-8 session IDs. Submission uses staged planar PCM, exact rate, generation
+and absolute frame; accepts no more than one quantum per message; and inherits accepted region/final/
+backpressure semantics. Seek is absolute and generation-tagged. Update browser-local expected
+position only after product acceptance. One message may be in flight; any second client call rejects
+locally with `BACKPRESSURE` until ACK.
+
+`process()` has cached exact-quantum `Float32Array` views. Default/not-ready/fatal/mismatch output is
+positive zero. Render failure stores only a fixed numeric sticky status inside preallocated state;
+the message handler later reports it. Do not call `postMessage`, allocate typed arrays, take
+subarrays, format/log, feature-detect or grow memory in `process()`.
+
+Raw pointer/slice handling is confined to `hosts/miso-engine-host-web/src/ffi.rs`; add exactly that
+path to realtime-policy allowlisting and prove mutations elsewhere reject. Needing any new public
+session/source/graph/effect/core/CAPI API is an immediate STOP.
+
+## Artifact and loader contract
+
+The build script requires an empty output directory and emits exactly the five issue-named files.
+Both Wasm modules bind the same source and `Cargo.lock`. Scalar is built with `-simd128`; SIMD with
+`+simd128`, never relaxed SIMD. Neither uses shared memory/atomics/threads/WASI.
+
+The main ESM validates the canonical simd128 probe and compiles the SIMD module before
+`audioWorklet.addModule`. Validation or compilation failure selects scalar. Pass only that compiled
+module, config and TOML to `processorOptions`; instantiate synchronously in the processor
+constructor. Selection and readiness are immutable, address-free and returned in `miso.ready.v1`.
+After explicit quiescent disposal, destroy plan/source/session ownership in reverse preparation order
+and make later `process()` return `false`.
+
+## Implementation order and stop gates
+
+1. Add exact direct workspace dependencies and implement the safe preparation/ownership object plus
+   resource/state tests. Stop if any accepted public seam is insufficient.
+2. Add the single raw Wasm FFI module, layout tests and exact policy/mutation changes. Stop unless
+   scalar host tests and checked overflow/ownership rejection are green.
+3. Add build script and checked-in ESM/worklet/type declaration. Run static/hermetic loader and object
+   gates first; stop on any import, atomics, relaxed-SIMD or export mismatch.
+4. Add one small strict fixture and independent direct-V2 expected result, then run the single
+   representative Chromium correctness gate for forced scalar and supported simd128. No long run or
+   performance measurement.
+5. On a clean unchanged candidate run focused and locked workspace tests/check, warning-denied
+   Clippy/rustdoc, format, policies/mutations and no-artifact/no-timer scans. Record strict PASS/FAIL.
+
+Checkpoint each green stage before layering the next. Allowed files and all objective gates are
+exactly those in the issue. `browser_correctness_invocations` must name actual browser launches;
+`benchmark_or_timed_invocations` remains zero.
+
+## Deferred qualification
+
+Issue 074 alone owns checked-in demo/deployment breadth, multi-browser/mobile versions, million-
+quantum and ten-minute rows, GC/memory instrumentation, bundle size and descriptive performance. It
+consumes this API and artifacts without redesign.
