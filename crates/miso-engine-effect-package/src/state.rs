@@ -298,6 +298,53 @@ fn validate_replay(
     Ok(expected)
 }
 
+pub fn effect_state_expected_metadata_v1(
+    bound: BoundEffectDescriptorWireV1<'_>,
+    replay: EffectStateReplayViewV1<'_>,
+) -> Result<PreparedEffectMetadata, Diagnostic> {
+    validate_replay(bound, replay)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectStateDerivedResourcesV1 {
+    pub state_sizes: StatePayloadSizes,
+    pub scratch_bytes: u64,
+    pub automation_capacity: u32,
+}
+
+pub fn effect_state_derived_resources_v1(
+    bound: BoundEffectDescriptorWireV1<'_>,
+    request: PrepareEffectRequest<'_>,
+) -> Result<EffectStateDerivedResourcesV1, Diagnostic> {
+    if !is_launch_sample_rate(SampleRateHz(request.sample_rate)) {
+        return Err(metadata_mismatch(4));
+    }
+    if request.quantum == 0 {
+        return Err(metadata_mismatch(5));
+    }
+    let quality = bound
+        .descriptor()
+        .qualities
+        .iter()
+        .find(|quality| {
+            quality.quality == request.quality && quality.sample_rate == request.sample_rate
+        })
+        .ok_or_else(|| metadata_mismatch(6))?;
+    let state_bytes = quality.maximum_state.total().ok_or_else(|| overflow(216))?;
+    let scratch_bytes = quality
+        .scratch_bytes_per_frame
+        .checked_mul(u64::from(request.quantum))
+        .and_then(|bytes| quality.scratch_fixed_bytes.checked_add(bytes))
+        .ok_or_else(|| overflow(176))?;
+    checked_usize(state_bytes, 216)?;
+    checked_usize(scratch_bytes, 176)?;
+    Ok(EffectStateDerivedResourcesV1 {
+        state_sizes: quality.maximum_state,
+        scratch_bytes,
+        automation_capacity: request.limits.maximum_automation_spans_per_block,
+    })
+}
+
 pub fn validate_effect_state_metadata_v1(
     bound: BoundEffectDescriptorWireV1<'_>,
     replay: EffectStateReplayViewV1<'_>,

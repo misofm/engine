@@ -12,7 +12,7 @@ if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,sessi
 package_references="$(
     rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools 2>/dev/null |
         rg -v '^crates/miso-engine-effect-package/' |
-        rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/prepare[.]rs|tests/scalar_state[.]rs):' || true
+        rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/prepare[.]rs|tests/(scalar|bank)_state[.]rs):' || true
 )"
 if [[ -n "$package_references" ]]; then
     printf '%s\n' "$package_references" >&2
