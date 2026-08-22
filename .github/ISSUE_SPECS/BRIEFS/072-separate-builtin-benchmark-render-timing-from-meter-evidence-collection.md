@@ -2,8 +2,8 @@
 
 ## Decision and attempt budget
 
-**PASS-2 STRICT SOL XHIGH FOCUSED PASS / CHECKPOINT COMMIT AUTHORIZED; ZERO EXECUTION
-AUTHORIZATION.** The issue permitted one Sol High implementation pass and, after one Sol XHigh
+**SOL XHIGH FAIL / TERMINAL STOP / NOT COMPLETE; ALL ISSUE-072 AUTHORITIES ARE CONSUMED.** The
+issue permitted one Sol High implementation pass and, after one Sol XHigh
 HOLD, one bounded Sol High correction. Sol XHigh adversarially verified both; a second HOLD would
 have stopped the issue. Issue-072 counters remain
 `preflight_invocations=0`, `runner_invocations=0`, `workload_invocations=0`, and
@@ -16,15 +16,41 @@ The refreshed clean input is `main` commit `c0eb5c5cb438e7a3b3cdaea30370812e09d8
 
 Sol High pass 1 produced a focused-green live tranche. Sol XHigh returned one bounded HOLD because
 the runner validated the preflight seal's shape but did not independently bind every source, lock
-and input authority or the complete nonbenchmark seal. Sol High pass 2 now recomputes and compares
-all authorities before raw creation, with direct and tandem seal-replacement lifecycle mutations.
-The untimed audited regression covers every render workload at both frozen rates and both
-independently prepared/warmed round states; package, validator/lifecycle-fake, locked workspace,
-fixture and policy gates pass. Retained Issue-058 artifacts remain exact and `target/issue72`
-remains absent. Current Issue-072 preflight/runner/workload/timed counters are still `0/0/0/0`.
-Sol XHigh's pass-2 re-review returns **STRICT SOL XHIGH FOCUSED PASS** and authorizes root to commit
-the exact six-path checkpoint. The nonbenchmark seal has not been created, and no preflight,
-benchmark main, runner, workload or timing command is authorized.
+and input authority or the complete nonbenchmark seal. Sol High pass 2 recomputed and compared all
+authorities before raw creation, with direct and tandem seal-replacement lifecycle mutations. At
+the focused checkpoint, all untimed render, package, lifecycle, locked, fixture and policy gates
+passed; Issue-058 artifacts were exact, `target/issue72` was absent and counters were `0/0/0/0`.
+Sol XHigh returned a strict focused PASS and authorized only the exact checkpoint commit. That
+focused verdict was not overall PASS and did not authorize any later seal or execution by itself.
+
+## Terminal result and successor route
+
+Clean HEAD `9dc95a5fb4d8e65c582b84320c84b22f2d780eba`, tree
+`7e99e5fafa130e572d421156037b36f7f59232d7`, completed its sole preflight and runner with exit zero.
+Final preflight/runner/workload/timed counters are `1/1/1/1`, warmup `1`, rounds `2`, records `20`.
+Raw and accepted are byte-identical distinct-inode files. The exact matrix, identities, percentile
+relations and cross-round output hashes validate; all 16 render rows have zero errors and zero
+forbidden operations, while four preparation rows correctly use `not_applicable`. The five stderr
+phase lines and PASS/complete disposition are exact.
+
+Issue 072 nevertheless fails its complete-host-metadata gate. Every record has all 16 host/build
+fields null and lists all 16 in `missing_metadata`, including available architecture, core-count,
+OS, kernel, compiler, target and release-profile facts. `Metadata::collect` reads fixed
+`MISO_ENGINE_BENCH_*` variables, while the sealed runner exported only candidate commit and binary
+SHA-256. Honest null/list validation is not evidence that discovery was attempted. The runner
+authority is consumed, so there is no retry or overall PASS.
+
+Preserve these regular one-link Issue-072 artifacts exactly: nonbenchmark seal 2,109 bytes /
+`7c38b068ae16055df3cfe6b817943f5fbb1a639d85597560e223d631bc37885d`; binary 3,200,296 /
+`a7bafc459b69fb8bdfd7d9195e4ff8d1febf8602a57540498cb579d04a486912`; preflight seal 1,525 /
+`f4e624b88eddbea5eb09928b544d13093d9a68be278f8afb6b70076fc8dce6bf`; raw and accepted each
+40,136 / `c44433bc5391bafa8463b0cfabcb78cfc80882015ff808c591d40ae5a508819a`; stderr 211 /
+`7935bf62063c0e9d2bfaac91d02db6f448dbf0636fbf16d3c49660738f55b396`; disposition 1,252 /
+`b650449d6a8944f4b00fcd833e5f775c9601a9aeb580864624a4b2c978a0698e`; prelaunch absent.
+
+Successor issue 109, **Repair builtin benchmark host metadata export and reauthorize one descriptive
+run**, owns the runner-only repair and successor namespace. It is not an Issue-072 retry. No more
+Issue-072 preflight, runner, main, workload or timing invocation is authorized.
 
 ## Smallest correction
 
@@ -173,13 +199,13 @@ audit, target, instruction, listening, or unrelated tooling change stops.
    publishes the applicable disposition, preserves evidence and is terminal; no alternate,
    direct, repeat or resumed invocation exists.
 
-## PASS boundary
+## PASS boundary — not met
 
 PASS requires the exact 20 valid measured rows, byte-identical raw/accepted output, complete PASS
 disposition, zero render audit violations, Issue-072 preflight/runner/workload/timed invocation
 counters `1/1/1/1`, unchanged
 Issue-058 artifacts, and no threshold or tuning claim. It unblocks exact title
 **Issue-007 builtin filter and matrix human listening qualification** and the release chain; it
-does not complete listening or release qualification. This brief records only the pass-2 strict
-focused checkpoint PASS: checkpoint commit is authorized, while seal creation, preflight, benchmark
-main, runner, workload and timing remain unauthorized.
+does not complete listening or release qualification. The pass-2 focused implementation remains
+accepted technical input, but the consumed terminal run failed metadata completeness. Issue 072 is
+stopped, not complete, and grants no further authority.

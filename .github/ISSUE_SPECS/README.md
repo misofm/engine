@@ -75,12 +75,14 @@ Issue 068, **Builtin native, AArch64, and Wasm runtime-selection and instruction
 follows 070 and owns the four-rate target matrix. Issue 058, **Builtin benchmark preflight and
 exactly-once qualification**, stopped after its only authorized run exposed an allocation and
 evidence-timing defect. Issue 072, **Separate builtin benchmark render timing from meter evidence
-collection**, consumes that checkpoint as technical input and alone owns the corrected
-one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064 and 067–070 retain their
-recorded attempt ownership. The refreshed Issue-072 assignment permits one Sol High implementation
-pass plus one bounded Sol High correction, both adversarially reviewed by Sol XHigh; a second HOLD
-stops. Issue-072 preflight/runner/workload/timed invocation counts are `0/0/0/0`, and its docs-only
-rebrief authorizes no preflight or workload.
+collection**, consumed that checkpoint and accepted the corrected render-only timing boundary, then
+stopped without overall PASS after its sole run exposed missing runner-side host/build metadata.
+Its terminal preflight/runner/workload/timed counts are `1/1/1/1` and its artifacts are immutable.
+Issue 109, **Repair builtin benchmark host metadata export and reauthorize one descriptive run**,
+owns only that runner metadata repair, a successor zero-workload preflight and at most one
+separately authorized descriptive run under `target/issue109`. Sol High implements; Sol XHigh
+briefs and verifies. Issues 058–059, 061, 063–064 and 067–070 retain their recorded attempt
+ownership.
 
 Issue 022 is now the launch-sized **Stable C ABI and host-fed planar PCM render** product: immutable
 strict-session compilation, separate control/render ownership, bounded host source submission and
@@ -105,11 +107,11 @@ permit one Terra attempt plus one Sol correction and prohibit benchmark/timing w
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
-058 technical input -> 072. Issue 008 needs 036's accepted preparation/metadata and
+058 technical input -> stopped 072 technical input -> 109. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 077 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
-listening only after 072 seals that candidate and its accepted benchmark; issue 026 waits for both
-072 and 033. This ordering forbids synthetic trials, audible-quality
+listening only after 109 seals that candidate and its accepted benchmark; issue 026 waits for both
+109 and 033. This ordering forbids synthetic trials, audible-quality
 claims and release bypasses while allowing independent SIMD work after its true contract
 dependency is complete.
 

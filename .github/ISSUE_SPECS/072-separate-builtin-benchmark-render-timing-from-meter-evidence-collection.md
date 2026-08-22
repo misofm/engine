@@ -2,8 +2,7 @@
 
 ## Sol briefing checkpoint — 2026-08-22
 
-**PASS-2 STRICT SOL XHIGH FOCUSED PASS / CHECKPOINT COMMIT AUTHORIZED; ZERO EXECUTION
-AUTHORIZATION.**
+**SOL XHIGH FAIL / TERMINAL STOP / NOT COMPLETE; ALL ISSUE-072 AUTHORITIES ARE CONSUMED.**
 The authoritative brief is
 `BRIEFS/072-separate-builtin-benchmark-render-timing-from-meter-evidence-collection.md`. This
 stateless successor permits one Sol High implementation pass and, only after a Sol XHigh HOLD, one
@@ -22,17 +21,67 @@ workload or timing command.
 
 Sol High pass 1 implemented the render-only audit/timer boundary and successor lifecycle. Sol XHigh
 returned one bounded HOLD because the runner did not independently compare every preflight
-source/lock/input authority or validate the complete nonbenchmark seal. Sol High pass 2 corrects
-that boundary before raw creation and adds direct plus tandem replacement mutations with zero fake
-launches. The focused untimed audited regression passes for all four render workloads, both frozen
-rates and both independently prepared/warmed round states; the benchmark package's 9 tests, locked
-check, warning-denied Clippy/rustdoc, frozen validator/lifecycle fakes, fixture/policy gates and
-locked nonbenchmark workspace check/tests pass. The five retained Issue-058 files still have the
-exact sizes, one-link state and hashes below, both forbidden files remain absent, and
-`target/issue72` remains absent. Issue-072 preflight/runner/workload/timed counters remain
-`0/0/0/0`. Sol XHigh's pass-2 re-review returns **STRICT SOL XHIGH FOCUSED PASS** and authorizes
-root to commit the exact six-path checkpoint. The nonbenchmark seal has not been created, and no
-preflight, benchmark main, runner, workload or timing command is authorized.
+source/lock/input authority or validate the complete nonbenchmark seal. Sol High pass 2 corrected
+that boundary before raw creation and added direct plus tandem replacement mutations with zero fake
+launches. At the focused checkpoint, the untimed audited regression passed for all four render
+workloads, both frozen rates and both independently prepared/warmed round states; package, locked,
+warning-denied, validator/lifecycle, fixture and policy gates passed. The five retained Issue-058
+files were exact, `target/issue72` was absent and counters were `0/0/0/0`. Sol XHigh returned a
+strict focused PASS and authorized only the exact checkpoint commit. That focused verdict did not
+constitute overall PASS or authorize the later seal, preflight, main, runner, workload or timing.
+
+## Terminal runner evidence — 2026-08-22
+
+The focused product/timing correction remains valid, but Issue 072 has no overall PASS. The clean
+immutable candidate was HEAD `9dc95a5fb4d8e65c582b84320c84b22f2d780eba`, tree
+`7e99e5fafa130e572d421156037b36f7f59232d7`. Its sole zero-workload preflight and sole separately
+authorized runner both exited zero. Final Issue-072 preflight/runner/workload/timed counters are
+`1/1/1/1`, with one warmup, two measured rounds and 20 records. Runner stdout contained exactly the
+accepted-artifact path. Both one-shot authorities are consumed; no preflight, runner, direct binary,
+alternate invocation, retry, tuning or additional timing is authorized.
+
+All seven files in `target/issue72` are regular one-link files. The prelaunch disposition is absent:
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `nonbenchmark.seal.json` | 2,109 | `7c38b068ae16055df3cfe6b817943f5fbb1a639d85597560e223d631bc37885d` |
+| `miso_engine_builtins_bench` | 3,200,296 | `a7bafc459b69fb8bdfd7d9195e4ff8d1febf8602a57540498cb579d04a486912` |
+| `builtins-benchmark.preflight.json` | 1,525 | `f4e624b88eddbea5eb09928b544d13093d9a68be278f8afb6b70076fc8dce6bf` |
+| `builtins-benchmark.raw.jsonl` | 40,136 | `c44433bc5391bafa8463b0cfabcb78cfc80882015ff808c591d40ae5a508819a` |
+| `builtins-benchmark.jsonl` | 40,136 | `c44433bc5391bafa8463b0cfabcb78cfc80882015ff808c591d40ae5a508819a` |
+| `builtins-benchmark.validator.stderr` | 211 | `7935bf62063c0e9d2bfaac91d02db6f448dbf0636fbf16d3c49660738f55b396` |
+| `builtins-benchmark.disposition.json` | 1,252 | `b650449d6a8944f4b00fcd833e5f775c9601a9aeb580864624a4b2c978a0698e` |
+
+Raw and accepted bytes are identical and their inodes are distinct. Stderr contains exactly the
+five ordered `workload_started`, `warmup_complete`, `timed_started`, `round_1_complete` and
+`round_2_complete` phase lines. The disposition is `PASS` / `complete`, binds every terminal
+identity above and reports counters `1/1/1/1`, warmup `1`, rounds `2`, workload exit `0`.
+
+The frozen aggregate validator and independent Sol XHigh checks accept the exact order: five
+workloads at 48 kHz for round 1, five at 96 kHz for round 1, then the same rate/workload order for
+round 2. Every workload/rate output hash is stable across rounds. All 16 render records report zero
+errors and zero for all nine forbidden-operation categories and their total; the four preparation
+records correctly use `not_applicable` and make no render claim. Median times were descriptive
+only: identity about `1.028`–`1.034` microseconds, matrix about `1.441`–`1.461` microseconds, full
+chain about `2.285`–`2.301` microseconds, meter success/full about `25.369`–`25.586` microseconds,
+and 256-track preparation about `898.919`–`907.797` microseconds per operation across the two rates
+and rounds. These are neither thresholds nor comparative or release claims.
+
+Terminal failure is metadata completeness. Every record honestly contains JSON null for all 16
+host/build fields and lists all 16 in `missing_metadata`: `background_load_note`, `codegen_units`,
+`cpu_architecture`, `cpu_model`, `governor_or_power_mode`, `kernel`, `llvm_version`,
+`logical_core_count`, `lto`, `opt_level`, `os`, `physical_core_count`, `profile`, `rust_version`,
+`target_features`, and `target_triple`. Several were available on the benchmark host and therefore
+were required to be recorded. The benchmark reads fixed `MISO_ENGINE_BENCH_*` variables, but the
+runner exported only candidate commit and binary SHA-256. The validator correctly enforced honest
+null/list equivalence but did not and could not prove that the runner had attempted discovery.
+This contradicts the frozen runner contract and gate 7's complete host-metadata requirement.
+
+Sol XHigh therefore records **FAIL / TERMINAL STOP / NO OVERALL PASS**. Do not overwrite, delete,
+truncate, rename, link from or otherwise reuse any `target/issue72` artifact. Successor issue 109,
+**Repair builtin benchmark host metadata export and reauthorize one descriptive run**, owns only
+runner-side metadata discovery/export, successor-specific fake/static authority, a new zero-launch
+preflight and at most one separately authorized descriptive rerun under `target/issue109`.
 
 ## Outcome
 
@@ -189,7 +238,7 @@ or altering Issue-058 artifacts.
 Stopped Issue 058 is consumed only as the exact technical checkpoint and failure evidence above;
 it is deliberately not a PASS dependency.
 
-## Ordered acceptance gates
+## Ordered acceptance gates — gate 7 not met
 
 1. Static review proves the Issue-058 allocator-abort path is removed without changing product
    render, inputs, schema, validators, rates, operation counts, or output-hash content/order.
