@@ -519,6 +519,17 @@ async function testProcessor() {
 
     {
       const { processor, fake } = makeProcessor();
+      processor.ready = false;
+      const left = new Float32Array(64).fill(-0);
+      const right = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.deepEqual(fake.calls.render, []);
+      assert(left.every((sample) => Object.is(sample, 0)), "pre-ready left is positive zero");
+      assert(right.every((sample) => Object.is(sample, 0)), "pre-ready right is positive zero");
+    }
+
+    {
+      const { processor, fake } = makeProcessor();
       const wrong = new Float32Array(32).fill(1);
       assert.equal(processor.process([], [[wrong]]), true);
       assert.deepEqual(fake.calls.render, [0]);

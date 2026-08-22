@@ -37,6 +37,9 @@ trap cleanup EXIT
 "$repo_root/scripts/build-web-audioworklet.sh" "$artifact_dir"
 "$repo_root/scripts/check-web-audioworklet.sh" "$artifact_dir"
 python3 -B "$repo_root/scripts/web-audioworklet-browser-correctness.py" \
+  --check \
+  --artifacts "$artifact_dir"
+python3 -B "$repo_root/scripts/web-audioworklet-browser-correctness.py" \
   --seal \
   --artifacts "$artifact_dir" \
   --output "$seal" \

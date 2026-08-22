@@ -9,7 +9,9 @@ import http.server
 import json
 import os
 import pathlib
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -70,13 +72,10 @@ def candidate() -> str:
 
 
 def require_clean_candidate() -> None:
-    if subprocess.run(
-        ["git", "diff", "--quiet", "--ignore-submodules", "HEAD", "--"], cwd=ROOT, check=False
-    ).returncode != 0 or subprocess.run(
-        ["git", "diff", "--quiet", "--cached", "--ignore-submodules", "HEAD", "--"],
-        cwd=ROOT,
-        check=False,
-    ).returncode != 0:
+    status = subprocess.check_output(
+        ["git", "status", "--short", "--untracked-files=all"], cwd=ROOT, text=True
+    )
+    if status:
         raise RuntimeError("browser gate requires a clean committed candidate")
 
 
@@ -108,6 +107,24 @@ def load_inputs() -> tuple[dict, dict]:
         raise ValueError("fixture rate/quantum mismatch")
     if len(source.get("blocks", [])) != 2:
         raise ValueError("fixture requires exactly two source blocks")
+    if set(source) != {"schema", "sourceId", "sampleRateHz", "quantumFrames", "blocks"}:
+        raise ValueError("source fixture keys")
+    if set(expected) != {
+        "schema",
+        "sampleRateHz",
+        "quantumFrames",
+        "renderedQuantaBeforeDispose",
+        "nextAbsoluteSampleBeforeDispose",
+        "oracle",
+        "pcm",
+        "directOracle",
+    }:
+        raise ValueError("expected fixture keys")
+    direct = expected.get("directOracle", {})
+    if set(direct) != {"schema", "scalar", "simd128"}:
+        raise ValueError("direct oracle keys")
+    if direct.get("schema") != "miso.web.browser.direct-oracle.v1":
+        raise ValueError("direct oracle schema")
     session = (FIXTURE / "session.toml").read_text()
     for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 256"):
         if frozen not in session:
@@ -115,19 +132,49 @@ def load_inputs() -> tuple[dict, dict]:
     return source, expected
 
 
-class FixtureHandler(http.server.SimpleHTTPRequestHandler):
-    artifacts: pathlib.Path
+class FixtureHandler(http.server.BaseHTTPRequestHandler):
+    payloads: dict[str, tuple[str, bytes]]
 
-    def translate_path(self, path: str) -> str:
-        clean = path.split("?", 1)[0]
-        if clean.startswith("/artifacts/"):
-            return str(self.artifacts / clean.removeprefix("/artifacts/"))
-        if clean.startswith("/fixture/"):
-            return str(FIXTURE / clean.removeprefix("/fixture/"))
-        return str(FIXTURE / "index.html")
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback name
+        clean = self.path.split("?", 1)[0]
+        record = self.payloads.get(clean)
+        if record is None:
+            self.send_error(404)
+            return
+        content_type, payload = record
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+
+def immutable_payloads(artifacts: pathlib.Path) -> dict[str, tuple[str, bytes]]:
+    content_types = {
+        ".wasm": "application/wasm",
+        ".js": "text/javascript; charset=utf-8",
+        ".mjs": "text/javascript; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".toml": "text/plain; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".ts": "text/plain; charset=utf-8",
+    }
+    payloads = {}
+    for name in EXPECTED_ARTIFACTS:
+        path = artifacts / name
+        payloads[f"/artifacts/{name}"] = (content_types[path.suffix], path.read_bytes())
+    for path in sorted(FIXTURE.iterdir()):
+        if path.is_file():
+            payloads[f"/fixture/{path.name}"] = (
+                content_types.get(path.suffix, "application/octet-stream"),
+                path.read_bytes(),
+            )
+    payloads["/"] = payloads["/fixture/index.html"]
+    return payloads
 
 
 def free_port() -> int:
@@ -165,28 +212,30 @@ def float32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
-def expected_pcm(source: dict) -> list[list[float]]:
-    blocks = []
-    for description in source["blocks"]:
-        blocks.append([
-            float32(description["leftBase"] + description["leftStep"] * index)
-            for index in range(128)
-        ])
-    left = blocks[0] + blocks[0] + blocks[1] + [0.0] * 128
-    return [left, [0.0] * 512]
+def pcm_f32le_sha256(pcm: list[list[float]]) -> str:
+    digest = hashlib.sha256()
+    for channel in pcm:
+        for sample in channel[:384]:
+            digest.update(struct.pack("<f", sample))
+    return digest.hexdigest()
 
 
 def validate_result(result: dict, source: dict, expected: dict) -> None:
+    if set(result) != {"schema", "runs", "failure"}:
+        raise AssertionError("browser result keys")
     if result.get("schema") != "miso.web.browser.result.v1":
         raise AssertionError("browser result schema")
     runs = result.get("runs")
     if not isinstance(runs, list) or len(runs) != 4:
         raise AssertionError("exactly four fresh contexts required")
     expected_backends = ["scalar", "scalar", "simd128", "simd128"]
-    direct_pcm = expected_pcm(source)
     tolerance = expected["pcm"]["absoluteTolerance"]
-    baseline_resources = None
     for index, (run, backend) in enumerate(zip(runs, expected_backends, strict=True)):
+        if set(run) != {
+            "backend", "exposedMainQuantum", "memoryBytes", "memoryStable",
+            "positiveZeroSilence", "resources", "status", "acknowledgements", "pcm",
+        }:
+            raise AssertionError(f"run {index} keys")
         if run.get("backend") != backend:
             raise AssertionError(f"run {index} backend")
         if run.get("exposedMainQuantum") not in (0, 128):
@@ -210,49 +259,65 @@ def validate_result(result: dict, source: dict, expected: dict) -> None:
         if acknowledgements != exact_acks:
             raise AssertionError(f"run {index} acknowledgement transcript")
         status = run.get("status", {})
-        numeric_backend = 0 if backend == "scalar" else 1
-        if (
-            status.get("tag") != "miso.status.v1"
-            or status.get("result") != 0
-            or status.get("state") != 2
-            or status.get("lastResult") != 0
-            or status.get("backend") != numeric_backend
-            or status.get("sampleRateHz") != 48000
-            or status.get("quantumFrames") != 128
-            or status.get("nextAbsoluteSample") != expected["nextAbsoluteSampleBeforeDispose"]
-            or status.get("renderedQuanta") != str(expected["renderedQuantaBeforeDispose"])
-            or status.get("memoryBytes") != run.get("memoryBytes")
-        ):
+        if set(status) != {
+            "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
+            "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "memoryBytes",
+        }:
+            raise AssertionError(f"run {index} status keys")
+        direct_status = expected["directOracle"][backend]["beforeDisposeStatus"]
+        comparable_status = {
+            name: status[name]
+            for name in direct_status
+        }
+        if status.get("tag") != "miso.status.v1" or status.get("result") != 0 \
+                or comparable_status != direct_status \
+                or run.get("memoryBytes") != direct_status["memoryBytes"]:
             raise AssertionError(f"run {index} status")
         resources = run.get("resources", {})
-        if resources.get("backend") != numeric_backend:
-            raise AssertionError(f"run {index} resource backend")
-        for name, value in expected["resourceExact"].items():
-            if str(resources.get(name)) != str(value):
-                raise AssertionError(f"run {index} resource {name}")
-        for name in expected["resourcePositive"]:
-            if int(resources.get(name, "0")) <= 0:
-                raise AssertionError(f"run {index} positive resource {name}")
-        comparable = {name: value for name, value in resources.items() if name != "backend"}
-        if baseline_resources is None:
-            baseline_resources = comparable
-        elif comparable != baseline_resources:
-            raise AssertionError(f"run {index} resource determinism")
+        if resources != expected["directOracle"][backend]["resources"]:
+            raise AssertionError(f"run {index} complete resources")
         pcm = run.get("pcm")
         if not isinstance(pcm, list) or len(pcm) != 2:
             raise AssertionError(f"run {index} PCM shape")
         for channel in range(2):
             if len(pcm[channel]) != 512:
                 raise AssertionError(f"run {index} PCM frames")
-            for actual, wanted in zip(pcm[channel], direct_pcm[channel], strict=True):
-                if abs(actual - wanted) > tolerance:
-                    raise AssertionError(f"run {index} PCM mismatch")
+        if pcm_f32le_sha256(pcm) != expected["directOracle"][backend]["pcmF32leSha256"]:
+            raise AssertionError(f"run {index} independent direct PCM")
     if runs[0]["pcm"] != runs[1]["pcm"] or runs[2]["pcm"] != runs[3]["pcm"]:
         raise AssertionError("fresh-context determinism")
     for scalar, simd in zip(runs[0]["pcm"], runs[2]["pcm"], strict=True):
         for left, right in zip(scalar, simd, strict=True):
             if abs(left - right) > tolerance:
                 raise AssertionError("scalar/simd parity")
+    failure = result.get("failure")
+    if failure != {
+        "tag": "miso.error.v1",
+        "requestId": 0,
+        "result": 9,
+        "exposedMainQuantum": failure.get("exposedMainQuantum"),
+        "frames": 128,
+        "positiveZeroSilence": True,
+    } or failure.get("exposedMainQuantum") not in (0, 128):
+        raise AssertionError("observable failure silence")
+
+
+def check_oracle(artifacts: pathlib.Path) -> None:
+    if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
+        raise ValueError("artifact directory is not the exact frozen five-file set")
+    runtime = shutil.which("node") or shutil.which("bun")
+    if runtime is None:
+        raise RuntimeError("Node.js-compatible runtime required for raw-Wasm oracle")
+    subprocess.run(
+        [
+            runtime,
+            str(FIXTURE / "direct-oracle.mjs"),
+            str(artifacts),
+            str(FIXTURE / "expected.json"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
@@ -266,8 +331,9 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
     actual_seal = seal_record(artifacts, args.browser, args.driver)
     if sealed != actual_seal:
         raise RuntimeError("candidate/artifact/fixture/tool seal mismatch; browser not launched")
+    payloads = immutable_payloads(artifacts)
 
-    handler = type("BoundFixtureHandler", (FixtureHandler,), {"artifacts": artifacts})
+    handler = type("BoundFixtureHandler", (FixtureHandler,), {"payloads": payloads})
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -317,6 +383,10 @@ def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
             raise RuntimeError("browser correctness module failed")
         result = envelope["value"]
         validate_result(result, source, expected)
+        require_clean_candidate()
+        final_seal = seal_record(artifacts, args.browser, args.driver)
+        if final_seal != sealed or final_seal != actual_seal:
+            raise RuntimeError("candidate/artifact/fixture/tool seal changed during browser run")
         record = {
             "schema": "miso.web.browser.evidence.v1",
             "candidate": candidate(),
@@ -365,6 +435,9 @@ def main() -> int:
     args = parser.parse_args()
     source, expected = load_inputs()
     if args.check:
+        if args.artifacts is None:
+            parser.error("check mode requires --artifacts")
+        check_oracle(args.artifacts.resolve())
         print("web AudioWorklet browser fixture/runner static check passed")
         return 0
     if args.seal:

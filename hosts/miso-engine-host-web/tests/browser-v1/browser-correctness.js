@@ -1,6 +1,7 @@
 const SAMPLE_RATE = 48000;
 const QUANTUM = 128;
 const TOTAL_FRAMES = QUANTUM * 4;
+const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
 
 function limits() {
   return {
@@ -158,6 +159,55 @@ async function runContext(createHost, backend, source, sessionToml) {
   };
 }
 
+async function runFailureContext(sessionToml) {
+  const context = new OfflineAudioContext(2, QUANTUM, SAMPLE_RATE);
+  const exposedMainQuantum = Number(context.renderQuantumSize || 0);
+  if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
+    throw new Error("failure-context main quantum mismatch");
+  }
+  await context.audioWorklet.addModule("/artifacts/miso-engine-v2-audio-worklet.js");
+  const response = await fetch("/artifacts/miso-engine-v2-audio-worklet.scalar.wasm");
+  if (!response.ok) throw new Error("failure-context scalar fetch failed");
+  const module = await WebAssembly.compile(await response.arrayBuffer());
+  const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    processorOptions: {
+      requestId: 0,
+      module,
+      backend: "scalar",
+      sampleRateHz: 44100,
+      quantumFrames: QUANTUM,
+      sessionToml: new Uint8Array(sessionToml),
+      limits: limits(),
+    },
+  });
+  const failure = new Promise((resolve, reject) => {
+    node.port.onmessage = (event) => resolve(event.data);
+    node.port.onmessageerror = () => reject(new Error("failure-context message error"));
+    node.onprocessorerror = () => reject(new Error("failure-context processor error"));
+  });
+  node.connect(context.destination);
+  const [message, rendered] = await Promise.all([failure, context.startRendering()]);
+  node.port.onmessage = null;
+  node.port.onmessageerror = null;
+  node.onprocessorerror = null;
+  node.port.close?.();
+  node.disconnect();
+  const positiveZeroSilence = [0, 1].every((channel) => Array.from(
+    rendered.getChannelData(channel),
+  ).every((sample) => Object.is(sample, 0)));
+  return {
+    tag: message.tag,
+    requestId: message.requestId,
+    result: message.result,
+    exposedMainQuantum,
+    frames: rendered.length,
+    positiveZeroSilence,
+  };
+}
+
 export async function runMisoBrowserCorrectness() {
   const { createMisoAudioWorkletHost } = await import(
     "/artifacts/miso-engine-v2-audio-worklet-host.js"
@@ -174,5 +224,6 @@ export async function runMisoBrowserCorrectness() {
     runs.push(await runContext(createMisoAudioWorkletHost, backend, source, sessionToml));
     runs.push(await runContext(createMisoAudioWorkletHost, backend, source, sessionToml));
   }
-  return { schema: "miso.web.browser.result.v1", runs };
+  const failure = await runFailureContext(sessionToml);
+  return { schema: "miso.web.browser.result.v1", runs, failure };
 }
