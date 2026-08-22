@@ -54,6 +54,8 @@ CI logs, locked toolchain version, feature-resolution report, and lint output.
 
 - **CI prerequisite correction (2026-08-22):** The current Ubuntu image does not provide `rg`, which the host-policy and Wasm checks require. Those jobs install `ripgrep` explicitly; the benchmark job creates its artifact directory before piping output to `tee`; and the nested fuzz lockfile is refreshed so its `--locked` checks can resolve the current fuzz-target dependencies.
 
+- **Runner decision (2026-08-22):** Linux CI uses Blacksmith Ubuntu 24.04 runners. The parallel workspace host gate and dual release-Wasm artifacts use eight vCPUs; x86 probes, bounded fuzzers, and descriptive benchmarks use four. This preserves a fixed benchmark runner class while allocating larger compilation capacity only to the jobs that can use it.
+
 - Rust is pinned to 1.97.1 in both the workspace MSRV declaration and `rust-toolchain.toml`.
   The lock requests only clippy, rustfmt, and browser Wasm; simulator, SDK, NDK, and browser
   tooling are deliberately not implied.
