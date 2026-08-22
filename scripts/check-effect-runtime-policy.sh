@@ -12,7 +12,7 @@ if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,sessi
 package_references="$(
     rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools fuzz 2>/dev/null |
         rg -v '^crates/miso-engine-effect-package/' |
-        rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration)[.]rs):' || true
+        rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal)[.]rs):' || true
 )"
 package_references="$(printf '%s\n' "$package_references" |
     rg -v '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' || true)"

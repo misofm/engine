@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use miso_engine_effect_contract::{
-    InitialParameterValue, NativeEffectFactory, PrepareEffectLimits, StatePayloadInput,
+    EffectId, InitialParameterValue, NativeEffectFactory, PrepareEffectLimits, StatePayloadInput,
     StatePayloadOutput,
 };
 use miso_engine_effect_package::{
@@ -11,14 +11,17 @@ use miso_engine_effect_package::{
     EffectStateLimitsV1, EffectStateMigrationEdgeErrorV1, EffectStateSelectorV1,
     bind_effect_state_migration_edge_v1, effect_state_bound_selector_v1,
     effect_state_derived_resources_v1, effect_state_descriptor_provenance_v1,
-    effect_state_replay_view_from_verified_v1, effect_state_v1_requirements,
-    inspect_effect_state_selector_v1, validate_effect_state_current_layout_v1,
-    validate_effect_state_replay_configuration_v1, verify_effect_state_v1,
+    effect_state_expected_metadata_v1, effect_state_replay_view_from_verified_v1,
+    effect_state_v1_requirements, encode_effect_state_v1, inspect_effect_state_selector_v1,
+    validate_effect_state_current_layout_v1, validate_effect_state_replay_configuration_v1,
+    verify_effect_state_v1,
 };
 
 use crate::prepare::admit_restored_state;
 use crate::{
-    EffectBankPreparationV1, EffectStateRestoreAdmissionV1, WireBoundNativeEffectFactoryV1,
+    EffectBankPreparationV1, EffectStateRestoreAdmissionV1, RestoredScalarEffectStateV1,
+    UnpublishedEffectBankStateV1, WireBoundNativeEffectFactoryV1, restore_scalar_effect_state_v1,
+    restore_unpublished_effect_bank_track_state_v1,
 };
 
 pub const EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
@@ -344,6 +347,7 @@ pub struct ResolvedEffectStateMigrationV1<'registry, 'wire, 'factory_wire, 'stat
     registrations: Box<[&'registry RegisteredEffectStateMigrationV1<'wire>]>,
     source_envelope: &'state [u8],
     current_bound: BoundEffectDescriptorWireV1<'factory_wire>,
+    current_effect_id: EffectId,
     current_selector: EffectStateSelectorV1,
     current_provenance: EffectStateDescriptorProvenanceV1,
     factory: Arc<dyn NativeEffectFactory>,
@@ -362,6 +366,7 @@ impl core::fmt::Debug for ResolvedEffectStateMigrationV1<'_, '_, '_, '_> {
             .field("replay", &self.replay)
             .field("source_bytes", &self.source_envelope.len())
             .field("current_selector", &self.current_selector)
+            .field("current_effect_id", &self.current_effect_id)
             .field(
                 "current_bound_selector",
                 &effect_state_bound_selector_v1(self.current_bound),
@@ -389,6 +394,436 @@ impl<'registry, 'wire, 'factory_wire, 'state>
     pub fn chain_step_count(&self) -> usize {
         self.registrations.len()
     }
+}
+
+fn replay_is_bit_exact(left: &EffectBankPreparationV1, right: &EffectBankPreparationV1) -> bool {
+    left.sample_rate == right.sample_rate
+        && left.quantum == right.quantum
+        && left.quality == right.quality
+        && left.bypass == right.bypass
+        && left.link_mode == right.link_mode
+        && left.ports == right.ports
+        && left.limits == right.limits
+        && left.initial_values.len() == right.initial_values.len()
+        && left
+            .initial_values
+            .iter()
+            .zip(right.initial_values.iter())
+            .all(|(left, right)| {
+                left.parameter_index == right.parameter_index
+                    && left.channel == right.channel
+                    && left.value.to_bits() == right.value.to_bits()
+            })
+}
+
+fn buffer_diagnostic(detail: u32, required_bytes: u64) -> EffectStateMigrationDiagnosticV1 {
+    migration_diagnostic(
+        EffectStateMigrationDiagnosticCodeV1::BufferTooSmall,
+        detail,
+        None,
+        required_bytes,
+    )
+}
+
+fn step_diagnostic(detail: u32, index: usize) -> EffectStateMigrationDiagnosticV1 {
+    migration_diagnostic(
+        EffectStateMigrationDiagnosticCodeV1::Step,
+        detail,
+        Some(index),
+        0,
+    )
+}
+
+fn restore_diagnostic(
+    detail: u32,
+    nested_state: EffectStateDiagnosticV1,
+) -> EffectStateMigrationDiagnosticV1 {
+    EffectStateMigrationDiagnosticV1 {
+        code: EffectStateMigrationDiagnosticCodeV1::Restore,
+        detail,
+        item_index: EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        reserved: 0,
+        required_bytes: 0,
+        nested_state,
+    }
+}
+
+fn nested_restore(detail: u32) -> EffectStateDiagnosticV1 {
+    EffectStateDiagnosticV1::new(
+        EffectStateDiagnosticCodeV1::Restore,
+        detail,
+        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FinalEnvelopeLocation {
+    Source,
+    First(usize),
+    Second(usize),
+}
+
+fn preflight_workspace(
+    requirements: EffectStateMigrationWorkspaceRequirementsV1,
+    first_envelope: &[u8],
+    second_envelope: &[u8],
+    migration_scratch: &[u8],
+) -> Result<(usize, usize, usize), EffectStateMigrationDiagnosticV1> {
+    let first = usize::try_from(requirements.first_envelope_bytes).map_err(|_| {
+        migration_diagnostic(
+            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            2,
+            None,
+            requirements.first_envelope_bytes,
+        )
+    })?;
+    let second = usize::try_from(requirements.second_envelope_bytes).map_err(|_| {
+        migration_diagnostic(
+            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            2,
+            None,
+            requirements.second_envelope_bytes,
+        )
+    })?;
+    let scratch = usize::try_from(requirements.migration_scratch_bytes).map_err(|_| {
+        migration_diagnostic(
+            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            2,
+            None,
+            requirements.migration_scratch_bytes,
+        )
+    })?;
+    if first_envelope.len() < first {
+        return Err(buffer_diagnostic(1, requirements.first_envelope_bytes));
+    }
+    if second_envelope.len() < second {
+        return Err(buffer_diagnostic(2, requirements.second_envelope_bytes));
+    }
+    if migration_scratch.len() < scratch {
+        return Err(buffer_diagnostic(3, requirements.migration_scratch_bytes));
+    }
+    Ok((first, second, scratch))
+}
+
+fn validate_scalar_terminal(
+    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    capability: &WireBoundNativeEffectFactoryV1<'_>,
+) -> Result<(), EffectStateMigrationDiagnosticV1> {
+    let bound = capability.bound_descriptor();
+    if effect_state_bound_selector_v1(bound) != resolved.current_selector
+        || effect_state_descriptor_provenance_v1(bound) != resolved.current_provenance
+        || !Arc::ptr_eq(capability.factory(), &resolved.factory)
+        || !core::ptr::eq(capability.factory().descriptor(), capability.descriptor())
+    {
+        return Err(migration_diagnostic(
+            EffectStateMigrationDiagnosticCodeV1::Chain,
+            3,
+            None,
+            0,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bank_terminal(
+    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    capability: &UnpublishedEffectBankStateV1<'_>,
+    track_index: u32,
+) -> Result<(), EffectStateMigrationDiagnosticV1> {
+    let Some(replay) = capability.replays().get(track_index as usize) else {
+        return Err(restore_diagnostic(2, nested_restore(1)));
+    };
+    let live_metadata = capability.bank().metadata();
+    if capability.replays().len() != capability.width().lanes() as usize
+        || !capability.width().matches_backend(capability.backend())
+        || !replay_is_bit_exact(replay, &resolved.replay)
+        || capability.metadata().width != capability.width()
+        || live_metadata.width != capability.width()
+    {
+        return Err(restore_diagnostic(2, nested_restore(2)));
+    }
+    let expected = effect_state_expected_metadata_v1(
+        resolved.current_bound,
+        resolved.replay.state_replay(resolved.current_effect_id),
+    )
+    .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
+    if capability.metadata().program_key != expected.program_key()
+        || live_metadata.program_key != expected.program_key()
+    {
+        return Err(restore_diagnostic(2, nested_restore(3)));
+    }
+    let bound = capability.bound_factory().bound_descriptor();
+    if effect_state_bound_selector_v1(bound) != resolved.current_selector
+        || effect_state_descriptor_provenance_v1(bound) != resolved.current_provenance
+        || !Arc::ptr_eq(capability.bound_factory().factory(), &resolved.factory)
+        || !core::ptr::eq(
+            capability.bound_factory().factory().descriptor(),
+            capability.bound_factory().descriptor(),
+        )
+    {
+        return Err(restore_diagnostic(2, nested_restore(4)));
+    }
+    Ok(())
+}
+
+fn execute_migration_steps(
+    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    first_envelope: &mut [u8],
+    second_envelope: &mut [u8],
+    migration_scratch: &mut [u8],
+) -> Result<FinalEnvelopeLocation, EffectStateMigrationDiagnosticV1> {
+    let mut location = FinalEnvelopeLocation::Source;
+    for (index, registration) in resolved.registrations.iter().enumerate() {
+        let source_bytes: &[u8] = match location {
+            FinalEnvelopeLocation::Source => resolved.source_envelope,
+            FinalEnvelopeLocation::First(bytes) => &first_envelope[..bytes],
+            FinalEnvelopeLocation::Second(bytes) => &second_envelope[..bytes],
+        };
+        let source = verify_effect_state_v1(
+            registration.edge.source_bound(),
+            source_bytes,
+            resolved.state_limits,
+        )
+        .map_err(|diagnostic| state_diagnostic(1, Some(index), diagnostic))?;
+        validate_effect_state_current_layout_v1(source)
+            .map_err(|diagnostic| state_diagnostic(1, Some(index), diagnostic))?;
+        validate_effect_state_replay_configuration_v1(
+            source,
+            resolved.replay.state_replay(resolved.current_effect_id),
+        )
+        .map_err(|diagnostic| state_diagnostic(1, Some(index), diagnostic))?;
+
+        let target_bound = registration.edge.target_bound();
+        let replay = resolved.replay.state_replay(resolved.current_effect_id);
+        let requirements =
+            effect_state_v1_requirements(target_bound, replay, resolved.state_limits)
+                .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        let metadata = effect_state_expected_metadata_v1(target_bound, replay)
+            .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        let payload_bytes = usize::try_from(
+            metadata
+                .state_sizes
+                .total()
+                .ok_or_else(|| state_diagnostic(2, Some(index), state_limit(216, u64::MAX)))?,
+        )
+        .map_err(|_| state_diagnostic(2, Some(index), state_limit(216, u64::MAX)))?;
+        let algorithm_bytes = usize::try_from(registration.scratch_bytes).map_err(|_| {
+            migration_diagnostic(
+                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                2,
+                Some(index),
+                registration.scratch_bytes,
+            )
+        })?;
+        let used_scratch = payload_bytes.checked_add(algorithm_bytes).ok_or_else(|| {
+            migration_diagnostic(
+                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                2,
+                Some(index),
+                u64::MAX,
+            )
+        })?;
+        let (payload, algorithm) = migration_scratch[..used_scratch].split_at_mut(payload_bytes);
+        payload.fill(0xa5);
+        let common_end = metadata.state_sizes.common_bytes as usize;
+        let left_end = common_end + metadata.state_sizes.left_bytes as usize;
+        let (common, remainder) = payload.split_at_mut(common_end);
+        let (left, right) = remainder.split_at_mut(left_end - common_end);
+        let target = StatePayloadOutput::new(common, left, right, metadata.state_sizes)
+            .map_err(|_| step_diagnostic(3, index))?;
+        let (source_common, source_left, source_right) = source.payloads();
+        let source_payload = StatePayloadInput::new(
+            source_common,
+            source_left,
+            source_right,
+            source.state_sizes(),
+        )
+        .map_err(|_| {
+            state_diagnostic(
+                1,
+                Some(index),
+                EffectStateDiagnosticV1::new(
+                    EffectStateDiagnosticCodeV1::Payload,
+                    3,
+                    EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                    EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+                ),
+            )
+        })?;
+        let result = registration.step.migrate(
+            registration.edge.source_selector().state_layout_version(),
+            registration.edge.target_selector().state_layout_version(),
+            source_payload,
+            target,
+            algorithm,
+        );
+        let report = match result {
+            Ok(report) => report,
+            Err(_) => {
+                let changed = payload.iter().any(|byte| *byte != 0xa5);
+                return Err(step_diagnostic(if changed { 2 } else { 1 }, index));
+            }
+        };
+        if report.reserved != 0
+            || report.common_bytes != metadata.state_sizes.common_bytes
+            || report.left_bytes != metadata.state_sizes.left_bytes
+            || report.right_bytes != metadata.state_sizes.right_bytes
+        {
+            return Err(step_diagnostic(3, index));
+        }
+        let target_bytes = usize::try_from(requirements.envelope_bytes)
+            .map_err(|_| state_diagnostic(2, Some(index), state_limit(16, u64::MAX)))?;
+        let output = if index % 2 == 0 {
+            &mut first_envelope[..target_bytes]
+        } else {
+            &mut second_envelope[..target_bytes]
+        };
+        encode_effect_state_v1(
+            target_bound,
+            replay,
+            common,
+            left,
+            right,
+            resolved.state_limits,
+            output,
+        )
+        .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        let target_state = verify_effect_state_v1(target_bound, output, resolved.state_limits)
+            .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        validate_effect_state_current_layout_v1(target_state)
+            .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        validate_effect_state_replay_configuration_v1(target_state, replay)
+            .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        location = if index % 2 == 0 {
+            FinalEnvelopeLocation::First(target_bytes)
+        } else {
+            FinalEnvelopeLocation::Second(target_bytes)
+        };
+    }
+    Ok(location)
+}
+
+fn final_envelope<'a>(
+    location: FinalEnvelopeLocation,
+    source: &'a [u8],
+    first: &'a [u8],
+    second: &'a [u8],
+) -> &'a [u8] {
+    match location {
+        FinalEnvelopeLocation::Source => source,
+        FinalEnvelopeLocation::First(bytes) => &first[..bytes],
+        FinalEnvelopeLocation::Second(bytes) => &second[..bytes],
+    }
+}
+
+fn validate_final_envelope(
+    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    bound: BoundEffectDescriptorWireV1<'_>,
+    envelope: &[u8],
+) -> Result<(), EffectStateMigrationDiagnosticV1> {
+    let state = verify_effect_state_v1(bound, envelope, resolved.state_limits)
+        .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
+    validate_effect_state_current_layout_v1(state)
+        .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
+    validate_effect_state_replay_configuration_v1(
+        state,
+        resolved.replay.state_replay(resolved.current_effect_id),
+    )
+    .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))
+}
+
+pub fn restore_scalar_effect_state_with_migration_v1<'wire>(
+    resolved: ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    capability: WireBoundNativeEffectFactoryV1<'wire>,
+    first_envelope: &mut [u8],
+    second_envelope: &mut [u8],
+    migration_scratch: &mut [u8],
+    initial_value_scratch: &mut [InitialParameterValue],
+) -> Result<RestoredScalarEffectStateV1<'wire>, EffectStateMigrationDiagnosticV1> {
+    let requirements = resolved.requirements;
+    preflight_workspace(
+        requirements,
+        first_envelope,
+        second_envelope,
+        migration_scratch,
+    )?;
+    let initial_slots =
+        usize::try_from(requirements.scalar_initial_value_scratch_slots).map_err(|_| {
+            migration_diagnostic(
+                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                3,
+                None,
+                requirements.scalar_initial_value_scratch_bytes,
+            )
+        })?;
+    if initial_value_scratch.len() < initial_slots {
+        return Err(buffer_diagnostic(
+            4,
+            requirements.scalar_initial_value_scratch_bytes,
+        ));
+    }
+    validate_scalar_terminal(&resolved, &capability)?;
+    let location = execute_migration_steps(
+        &resolved,
+        first_envelope,
+        second_envelope,
+        migration_scratch,
+    )?;
+    let envelope = final_envelope(
+        location,
+        resolved.source_envelope,
+        first_envelope,
+        second_envelope,
+    );
+    validate_final_envelope(&resolved, capability.bound_descriptor(), envelope)?;
+    restore_scalar_effect_state_v1(
+        capability,
+        envelope,
+        resolved.state_limits,
+        resolved.restore_admission,
+        &mut initial_value_scratch[..initial_slots],
+    )
+    .map_err(|diagnostic| restore_diagnostic(1, diagnostic))
+}
+
+pub fn restore_unpublished_effect_bank_track_state_with_migration_v1<'wire>(
+    resolved: ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    capability: UnpublishedEffectBankStateV1<'wire>,
+    track_index: u32,
+    first_envelope: &mut [u8],
+    second_envelope: &mut [u8],
+    migration_scratch: &mut [u8],
+) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateMigrationDiagnosticV1> {
+    preflight_workspace(
+        resolved.requirements,
+        first_envelope,
+        second_envelope,
+        migration_scratch,
+    )?;
+    validate_bank_terminal(&resolved, &capability, track_index)?;
+    let location = execute_migration_steps(
+        &resolved,
+        first_envelope,
+        second_envelope,
+        migration_scratch,
+    )?;
+    let envelope = final_envelope(
+        location,
+        resolved.source_envelope,
+        first_envelope,
+        second_envelope,
+    );
+    let bound = capability.bound_factory().bound_descriptor();
+    validate_final_envelope(&resolved, bound, envelope)?;
+    restore_unpublished_effect_bank_track_state_v1(
+        capability,
+        track_index,
+        envelope,
+        resolved.state_limits,
+        resolved.restore_admission,
+    )
+    .map_err(|diagnostic| restore_diagnostic(2, diagnostic))
 }
 
 fn owned_replay_from_state(
@@ -525,6 +960,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
     let source_selector = inspect_effect_state_selector_v1(envelope, state_limits)
         .map_err(|diagnostic| state_diagnostic(1, None, diagnostic))?;
     let current_bound = current_factory.bound_descriptor();
+    let current_effect_id = current_factory.descriptor().id;
     let current_selector = effect_state_bound_selector_v1(current_bound);
     if source_selector.state_layout_version() > current_selector.state_layout_version()
         || (source_selector.state_layout_version() == current_selector.state_layout_version()
@@ -756,6 +1192,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         registrations: registrations.into_boxed_slice(),
         source_envelope: envelope,
         current_bound,
+        current_effect_id,
         current_selector,
         current_provenance: effect_state_descriptor_provenance_v1(current_bound),
         factory: Arc::clone(current_factory.factory()),
