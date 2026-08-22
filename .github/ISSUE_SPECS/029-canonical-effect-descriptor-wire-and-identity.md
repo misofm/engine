@@ -14,8 +14,9 @@ are accepted. Terra correctly found that the accepted descriptor and its nested 
 `'static`, so arbitrary borrowed wire cannot be reconstructed as `EffectDescriptorV1` and passed to
 the unchanged Issue-011 validator without an illegal lifetime extension or leak. No implementation
 was edited. This bounded Sol correction freezes the lifetime-correct validation architecture below
-and authorizes one corrected implementation pass. Any further contract or architecture blocker is
-a final STOP/rescope. Workload, benchmark and timed invocation counts remain zero.
+and authorizes one corrected implementation pass. This constructor-reachability amendment is the
+final clarification round; any further contract, API or testability blocker is a final STOP/rescope.
+Workload, benchmark and timed invocation counts remain zero.
 
 The provisional `miso-engine-effect-package` descriptor stub is unaccepted input. Preserve the
 semantic effect contract and compiler exactly: no runtime trait, descriptor meaning, registry,
@@ -166,16 +167,23 @@ same order rather than by validator message order. Rust and C expose the same re
   diagnostics.
 - Semantic validation parity is exhaustive and table-driven. Every launch-registry static
   descriptor and both comprehensive static vectors are accepted by the unchanged Issue-011
-  validator and by encode/parse/private-borrowed validation. Compile-time static invalid descriptor
-  fixtures cover contract/state versions; effect, display and ID text; link bits and mandatory
-  DualMono; parameter zero/duplicate/order; finite/negative-zero/default/domain rules; continuous
-  bounds/mapping/log positivity; Boolean shape; enumeration length/order/value/label/duplicate and
-  default rules; automation/automatable/smoothing consistency; port ID/duplicate/role/required/
-  layout/main-pair/sidechain cardinality; quality order/rate/Normal/accepted-rate coverage; and equal
-  lane-state sizes. Rate fixtures cover launch rates 44100/48000/88200/96000 and accepted optional
-  extended rates 176400/192000/352800/384000. Text fixtures use exact `char::is_control()` semantics.
-  For every fixture, the private validator returns the exact same sorted, deduplicated
-  `(path, DescriptorDiagnosticCode)` set as `validate_descriptor_v1`.
+  validator and by encode/parse/private-borrowed validation. Differential parity exhaustively covers
+  invalid descriptors representable through safe public constructors. Compile-time static fixtures
+  cover contract/state versions; display text; parameter zero/duplicate/order; finite/negative-zero/
+  default/domain rules; continuous bounds/mapping/log positivity; Boolean shape; enumeration
+  length/order/value/label/duplicate and default rules; automation/automatable/smoothing consistency;
+  port duplicate/role/required/layout/main-pair/sidechain cardinality; quality order/rate/Normal/
+  accepted-rate coverage; and equal lane-state sizes. Rate fixtures cover launch rates
+  44100/48000/88200/96000 and accepted optional extended rates
+  176400/192000/352800/384000. Text fixtures use exact `char::is_control()` semantics. For every
+  safely representable invalid fixture, the private validator returns the exact same sorted,
+  deduplicated `(path, DescriptorDiagnosticCode)` set as `validate_descriptor_v1`.
+- Invalid `EffectId`/`PortId` grammar and `LinkModeSet` values with unknown bits or missing DualMono
+  are constructor-sealed and cannot be placed in a safe static `EffectDescriptorV1`. Exhaustive
+  frozen grammar/boundary/bit mutations must prove `EffectId::new`, `PortId::new` and
+  `LinkModeSet::new` reject them, then prove Rust, C and Python reject their raw-wire encodings with
+  the exact frozen wire diagnostic. These cases must not claim or attempt a
+  `validate_descriptor_v1` call.
 - Semantic parity must not invent rules absent from Issue 011: `contract_minor` is not constrained;
   `readable` need not be true; the parameter list need not be nonempty; and no additional maximum
   for common state, scratch bytes or scratch-per-frame is imposed beyond representability and the
@@ -206,7 +214,8 @@ dependencies.
 STOP rather than implement if the static encoder cannot call the unchanged Issue-011 validator, if
 the private borrowed validator cannot prove the exhaustive exact diagnostic parity above, or if the
 solution requires lifetime laundering, a public effect-contract/runtime/compiler change, or any
-canonical-wire relaxation.
+canonical-wire relaxation. This is the final briefing clarification; any further contract, API or
+testability blocker triggers STOP/rescope rather than another amendment.
 
 No package/archive/artifact/CID encoding or selection; state envelope/restore/migration; third-party
 ABI; signatures/trust/repository; runtime trait change; graph/DSP work; fuzz/100-process/target
