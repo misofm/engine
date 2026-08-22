@@ -38,17 +38,24 @@ fn accepted_descriptor_package_round_trip_and_raw_cid_mutation() {
         effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap();
     let mut bytes = vec![0; required as usize];
     encode_effect_package_v1(&package, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
-    let cid = EffectCid::from_package_bytes(&bytes);
+    let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
     assert_eq!(cid.to_string().parse::<EffectCid>().unwrap(), cid);
     assert!(verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).is_ok());
+    assert!(verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &cid).is_ok());
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
-    assert_ne!(EffectCid::from_package_bytes(&bytes), cid);
+    assert_ne!(EffectCid::from_raw_bytes(&bytes), cid);
+    assert_eq!(
+        effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default())
+            .unwrap_err()
+            .code,
+        EffectPackageDiagnosticCodeV1::Hash
+    );
 }
 
 #[test]
 fn official_hello_cid_primitive_vector() {
-    let cid = EffectCid::from_package_bytes(b"hello");
+    let cid = EffectCid::from_raw_bytes(b"hello");
     assert_eq!(cid.as_binary()[..4], [1, 0x55, 0x12, 0x20]);
     assert_eq!(
         cid.to_string(),

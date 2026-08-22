@@ -1,99 +1,338 @@
+use crate::{
+    EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+    EffectPackageDiagnosticCodeV1, EffectPackageDiagnosticV1, EffectPackageLimitsV1,
+    VerifiedEffectPackageV1, verify_effect_package_v1,
+};
 use core::{fmt, str::FromStr};
 use sha2::{Digest, Sha256};
+
+const CID_BYTES: usize = 36;
+const CID_TEXT_BYTES: usize = 59;
+const CID_PREFIX: [u8; 4] = [0x01, 0x55, 0x12, 0x20];
+const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct EffectCid([u8; 36]);
+pub struct EffectCid([u8; CID_BYTES]);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CidError {
     InvalidText,
     InvalidBinary,
+    BufferTooSmall,
     Mismatch,
 }
+
 impl EffectCid {
-    pub fn from_package_bytes(bytes: &[u8]) -> Self {
-        let digest = Sha256::digest(bytes);
-        let mut out = [0u8; 36];
-        out[..4].copy_from_slice(&[1, 0x55, 0x12, 0x20]);
-        out[4..].copy_from_slice(&digest);
-        Self(out)
+    /// Raw-byte CID primitive retained for standard SHA-256/CID vectors.
+    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
+        Self::from_digest(Sha256::digest(bytes).into())
     }
+
+    fn from_digest(digest: [u8; 32]) -> Self {
+        let mut binary = [0; CID_BYTES];
+        binary[..4].copy_from_slice(&CID_PREFIX);
+        binary[4..].copy_from_slice(&digest);
+        Self(binary)
+    }
+
     pub fn from_binary(bytes: &[u8]) -> Result<Self, CidError> {
-        let out = <[u8; 36]>::try_from(bytes).map_err(|_| CidError::InvalidBinary)?;
-        if out[..4] != [1, 0x55, 0x12, 0x20] {
+        let binary = <[u8; CID_BYTES]>::try_from(bytes).map_err(|_| CidError::InvalidBinary)?;
+        if binary[..4] != CID_PREFIX {
             return Err(CidError::InvalidBinary);
         }
-        Ok(Self(out))
+        Ok(Self(binary))
     }
-    pub fn as_binary(&self) -> &[u8; 36] {
+
+    pub const fn as_binary(&self) -> &[u8; CID_BYTES] {
         &self.0
     }
-    pub fn verify(&self, bytes: &[u8]) -> Result<(), CidError> {
-        if *self == Self::from_package_bytes(bytes) {
+
+    pub fn write_text(&self, output: &mut [u8]) -> Result<usize, CidError> {
+        if output.len() < CID_TEXT_BYTES {
+            return Err(CidError::BufferTooSmall);
+        }
+        let mut encoded = [0; CID_TEXT_BYTES];
+        encode_text(&self.0, &mut encoded);
+        output[..CID_TEXT_BYTES].copy_from_slice(&encoded);
+        Ok(CID_TEXT_BYTES)
+    }
+
+    /// Raw-byte comparison retained beside the official primitive vector.
+    pub fn verify_raw_bytes(&self, bytes: &[u8]) -> Result<(), CidError> {
+        if *self == Self::from_raw_bytes(bytes) {
             Ok(())
         } else {
             Err(CidError::Mismatch)
         }
     }
-}
-impl fmt::Display for EffectCid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("b")?;
-        f.write_str(&base32(&self.0))
+
+    pub fn verify_package(
+        &self,
+        bytes: &[u8],
+        limits: EffectPackageLimitsV1,
+    ) -> Result<(), EffectPackageDiagnosticV1> {
+        verify_effect_package_cid_v1(bytes, limits, self).map(|_| ())
     }
 }
+
+pub fn effect_package_cid_v1(
+    bytes: &[u8],
+    limits: EffectPackageLimitsV1,
+) -> Result<EffectCid, EffectPackageDiagnosticV1> {
+    let verified = verify_effect_package_v1(bytes, limits)?;
+    Ok(EffectCid::from_raw_bytes(verified.as_bytes()))
+}
+
+pub fn verify_effect_package_cid_v1<'a>(
+    bytes: &'a [u8],
+    limits: EffectPackageLimitsV1,
+    expected: &EffectCid,
+) -> Result<VerifiedEffectPackageV1<'a>, EffectPackageDiagnosticV1> {
+    let verified = verify_effect_package_v1(bytes, limits)?;
+    if EffectCid::from_raw_bytes(verified.as_bytes()) != *expected {
+        return Err(EffectPackageDiagnosticV1::new(
+            EffectPackageDiagnosticCodeV1::Cid,
+            0,
+            EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
+            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+        ));
+    }
+    Ok(verified)
+}
+
+impl fmt::Display for EffectCid {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = [0; CID_TEXT_BYTES];
+        encode_text(&self.0, &mut text);
+        formatter.write_str(core::str::from_utf8(&text).expect("CID encoder emits ASCII"))
+    }
+}
+
 impl FromStr for EffectCid {
     type Err = CidError;
+
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 59
-            || !value.starts_with('b')
-            || value.as_bytes().iter().any(|b| b.is_ascii_uppercase())
-        {
+        let text = value.as_bytes();
+        if text.len() != CID_TEXT_BYTES || text[0] != b'b' {
             return Err(CidError::InvalidText);
         }
-        let bytes = unbase32(&value.as_bytes()[1..])?;
-        let cid = Self::from_binary(&bytes)?;
-        if cid.to_string() != value {
+        let mut binary = [0; CID_BYTES];
+        decode_base32(&text[1..], &mut binary)?;
+        let cid = Self::from_binary(&binary).map_err(|_| CidError::InvalidText)?;
+        let mut canonical = [0; CID_TEXT_BYTES];
+        encode_text(&binary, &mut canonical);
+        if canonical != text {
             return Err(CidError::InvalidText);
         }
         Ok(cid)
     }
 }
-fn base32(bytes: &[u8]) -> String {
-    const A: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut result = String::with_capacity((bytes.len() * 8).div_ceil(5));
-    let mut acc = 0u16;
-    let mut bits = 0;
-    for byte in bytes {
-        acc = (acc << 8) | u16::from(*byte);
+
+fn encode_text(binary: &[u8; CID_BYTES], output: &mut [u8; CID_TEXT_BYTES]) {
+    output[0] = b'b';
+    let mut accumulator = 0u16;
+    let mut bits = 0u8;
+    let mut cursor = 1usize;
+    for byte in binary {
+        accumulator = (accumulator << 8) | u16::from(*byte);
         bits += 8;
         while bits >= 5 {
             bits -= 5;
-            result.push(char::from(A[((acc >> bits) & 31) as usize]));
+            output[cursor] = BASE32[((accumulator >> bits) & 31) as usize];
+            cursor += 1;
         }
     }
     if bits != 0 {
-        result.push(char::from(A[((acc << (5 - bits)) & 31) as usize]));
+        output[cursor] = BASE32[((accumulator << (5 - bits)) & 31) as usize];
+        cursor += 1;
     }
-    result
+    debug_assert_eq!(cursor, CID_TEXT_BYTES);
 }
-fn unbase32(text: &[u8]) -> Result<Vec<u8>, CidError> {
-    let mut out = Vec::with_capacity(text.len() * 5 / 8);
-    let mut acc = 0u16;
-    let mut bits = 0;
-    for c in text {
-        let value = match c {
-            b'a'..=b'z' => c - b'a',
-            b'2'..=b'7' => c - b'2' + 26,
+
+fn decode_base32(text: &[u8], output: &mut [u8; CID_BYTES]) -> Result<(), CidError> {
+    if text.len() != CID_TEXT_BYTES - 1 {
+        return Err(CidError::InvalidText);
+    }
+    let mut accumulator = 0u16;
+    let mut bits = 0u8;
+    let mut cursor = 0usize;
+    for byte in text {
+        let value = match byte {
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
             _ => return Err(CidError::InvalidText),
         };
-        acc = (acc << 5) | u16::from(value);
+        accumulator = (accumulator << 5) | u16::from(value);
         bits += 5;
         if bits >= 8 {
             bits -= 8;
-            out.push((acc >> bits) as u8);
+            if cursor >= output.len() {
+                return Err(CidError::InvalidText);
+            }
+            output[cursor] = (accumulator >> bits) as u8;
+            cursor += 1;
         }
     }
-    if bits != 0 && (acc & ((1 << bits) - 1)) != 0 {
+    if cursor != output.len() || bits == 0 || accumulator & ((1u16 << bits) - 1) != 0 {
         return Err(CidError::InvalidText);
     }
-    Ok(out)
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectPackageAuthoringV1,
+        effect_package_v1_required_size, encode_effect_package_v1,
+    };
+
+    fn descriptor() -> Vec<u8> {
+        let compact: Vec<_> =
+            include_str!("../../../fixtures/effect-descriptor/v1/comprehensive-a.wire.hex")
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect();
+        compact
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    _ => panic!("fixture is lowercase hexadecimal"),
+                };
+                digit(pair[0]) << 4 | digit(pair[1])
+            })
+            .collect()
+    }
+
+    fn package() -> Vec<u8> {
+        let descriptor = descriptor();
+        let artifacts = [EffectArtifactAuthoringV1 {
+            kind: EffectArtifactKindV1::Source,
+            path: "src/lib.rs",
+            target: "",
+            features: "",
+            content: b"source",
+        }];
+        let authoring = EffectPackageAuthoringV1 {
+            descriptor: &descriptor,
+            artifacts: &artifacts,
+        };
+        let required = effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default())
+            .unwrap() as usize;
+        let mut bytes = vec![0; required];
+        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn official_hello_vector_and_fixed_layout_are_exact() {
+        let cid = EffectCid::from_raw_bytes(b"hello");
+        assert_eq!(core::mem::size_of::<EffectCid>(), CID_BYTES);
+        assert_eq!(&cid.as_binary()[..4], &CID_PREFIX);
+        assert_eq!(
+            cid.to_string(),
+            "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq"
+        );
+    }
+
+    #[test]
+    fn writer_is_atomic_and_preserves_trailing_canary() {
+        let cid = EffectCid::from_raw_bytes(b"hello");
+        let mut short = [0xa5; CID_TEXT_BYTES - 1];
+        assert_eq!(cid.write_text(&mut short), Err(CidError::BufferTooSmall));
+        assert_eq!(short, [0xa5; CID_TEXT_BYTES - 1]);
+        let mut output = [0xa5; CID_TEXT_BYTES + 3];
+        assert_eq!(cid.write_text(&mut output), Ok(CID_TEXT_BYTES));
+        assert_eq!(&output[..CID_TEXT_BYTES], cid.to_string().as_bytes());
+        assert_eq!(&output[CID_TEXT_BYTES..], &[0xa5; 3]);
+    }
+
+    #[test]
+    fn binary_codec_rejects_length_prefix_codec_hash_and_digest_length() {
+        let cid = EffectCid::from_raw_bytes(b"hello");
+        assert_eq!(EffectCid::from_binary(cid.as_binary()), Ok(cid));
+        assert_eq!(
+            EffectCid::from_binary(&cid.as_binary()[..35]),
+            Err(CidError::InvalidBinary)
+        );
+        for offset in 0..4 {
+            let mut binary = *cid.as_binary();
+            binary[offset] ^= 1;
+            assert_eq!(
+                EffectCid::from_binary(&binary),
+                Err(CidError::InvalidBinary),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_codec_rejects_every_alphabet_prefix_length_and_pad_bit_class() {
+        let cid = EffectCid::from_raw_bytes(b"hello");
+        let canonical = cid.to_string();
+        assert_eq!(canonical.parse::<EffectCid>(), Ok(cid));
+        assert_eq!(
+            canonical[..58].parse::<EffectCid>(),
+            Err(CidError::InvalidText)
+        );
+        assert_eq!(
+            format!("{canonical}a").parse::<EffectCid>(),
+            Err(CidError::InvalidText)
+        );
+        for replacement in *b"Ba108=+/" {
+            let mut text = canonical.as_bytes().to_owned();
+            text[0] = replacement;
+            assert_eq!(
+                core::str::from_utf8(&text).unwrap().parse::<EffectCid>(),
+                Err(CidError::InvalidText)
+            );
+        }
+        for replacement in *b"A0189=+/_" {
+            let mut text = canonical.as_bytes().to_owned();
+            text[10] = replacement;
+            assert_eq!(
+                core::str::from_utf8(&text).unwrap().parse::<EffectCid>(),
+                Err(CidError::InvalidText)
+            );
+        }
+        let mut nonzero_pad = canonical.as_bytes().to_owned();
+        nonzero_pad[58] = match nonzero_pad[58] {
+            b'a' => b'b',
+            _ => b'7',
+        };
+        assert_eq!(
+            core::str::from_utf8(&nonzero_pad)
+                .unwrap()
+                .parse::<EffectCid>(),
+            Err(CidError::InvalidText)
+        );
+    }
+
+    #[test]
+    fn package_creation_and_expected_verification_are_strict() {
+        let bytes = package();
+        let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        assert_eq!(cid, EffectCid::from_raw_bytes(&bytes));
+        let verified =
+            verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &cid).unwrap();
+        assert_eq!(verified.as_bytes().as_ptr(), bytes.as_ptr());
+        cid.verify_package(&bytes, EffectPackageLimitsV1::default())
+            .unwrap();
+        let wrong = EffectCid::from_raw_bytes(b"wrong");
+        let error = verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &wrong)
+            .unwrap_err();
+        assert_eq!(error.code, EffectPackageDiagnosticCodeV1::Cid);
+        assert_eq!(error.artifact_index, u32::MAX);
+        assert_eq!(error.byte_offset, u64::MAX);
+        let mut invalid = bytes.clone();
+        invalid[0] ^= 1;
+        assert_eq!(
+            effect_package_cid_v1(&invalid, EffectPackageLimitsV1::default())
+                .unwrap_err()
+                .code,
+            EffectPackageDiagnosticCodeV1::Header
+        );
+    }
 }
