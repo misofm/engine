@@ -37,8 +37,19 @@ for workload in descriptor_verify_identity_a package_verify_cid_select_a state_v
 done
 rg -q 'for round in 1\.\.=2' "$benchmark" || fail 'benchmark rounds changed'
 rg -Fq 'assert_eq!(records.len(), 8);' "$benchmark" || fail 'benchmark record count changed'
+if rg -Fq '\"issue\":108' "$benchmark"; then
+    (
+        source scripts/check-effect-interchange-benchmark-108.sh
+        validate_benchmark_source "$benchmark"
+        validate_successor_namespace \
+            scripts/effect-interchange-benchmark-108-validator.py \
+            scripts/preflight-effect-interchange-benchmark-108.sh \
+            scripts/run-effect-interchange-benchmark-108.sh \
+            scripts/test-effect-interchange-benchmark-108.sh
+    ) || fail 'current Issue-108 benchmark source policy failed'
+else
 python3 -I -B - "$benchmark" scripts/preflight-effect-interchange-benchmark.sh \
-    scripts/run-effect-interchange-benchmark.sh <<'PY' || fail 'benchmark output identities diverged'
+    scripts/run-effect-interchange-benchmark.sh <<'PY' || fail 'terminal Issue-081 benchmark output identities diverged'
 import pathlib, re, sys
 expected = [
     ("descriptor_verify_identity_a", "865a0a5a01ba157bea7f3279ad68cc17db0296655998a9b5307cf759c38656f1"),
@@ -60,6 +71,7 @@ for path_text in sys.argv[2:]:
         if f'"{workload}":"{digest}"' not in text:
             raise SystemExit(1)
 PY
+fi
 rg -q 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py ||
     fail 'validator observation contract changed'
 if rg -n 'serde|criterion|iai|rand' tools/miso-engine-effect-interchange-bench/Cargo.toml; then
