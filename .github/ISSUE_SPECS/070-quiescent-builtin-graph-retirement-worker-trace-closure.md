@@ -114,3 +114,44 @@ validator-output hashes; at least two trace TIDs; four intervals; zero violation
 counts/roles; strict Terra/Sol verdicts; `direct_audit_invocations=0`;
 `graph_trace_invocations=1`; `workload_invocations=0`; `timed_benchmark_invocations=0`; and
 `benchmark_invocations=0`.
+
+## Terra attempt 1 preflight evidence — trace-ready, one-shot graph trace not invoked
+
+Base candidate: `286f3e3`; technical input: stopped Issue-069 checkpoint `5ce93c0`.
+
+`tools/miso-engine-builtins-audit/src/graph_main.rs` now creates one capacity-one
+`bounded_spsc_move` reclaim queue before a scoped worker starts. The worker publishes its
+release-ready atomic immediately before its poll loop; while markers can be armed that loop only
+uses move-SPSC `try_pop`, acquire/release atomic handoff, and `core::hint::spin_loop`. After the
+fourth marker closes, control sends the sole `Reclaim`, observes `reclaimed_epoch_plus_one == 1`,
+release-stores stop, joins the worker, and only then destroys B/C through the control owner. The
+focused local protocol/role proof verifies ready-before-render, one transferred reclaim command,
+epoch-zero A reclamation, A worker destruction, B/C control destruction, and zero render-owner
+destruction. Its static companion rejects blocking command surfaces from the worker source.
+
+Preflight PASS:
+
+- focused graph-audit-bin unit tests: 3 passed, including the Issue-070 readiness/role and static
+  proofs;
+- all nine `test-builtins-graph-audit-probes.sh` terminating probes and the clean/render/auxiliary
+  `test-realtime-trace-validator.sh` mutations passed;
+- shell syntax, workspace format check, warning-denied audit-package all-target Clippy,
+  realtime policy plus mutations, graph policy, builtin policy plus mutations, and `git diff
+  --check` passed;
+- static scan found no `mpsc`, `.recv(`, `park`, `yield_now`, `sleep`, or direct-audit launch in
+  the changed graph path.
+
+Read-only identity checks preserve Cargo.lock SHA-256
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`, Issue-064 manifest
+`bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`, graph PCM
+`508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`, graph meters
+`958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`, and the five audit-fixture
+payload identities in their accepted manifest. The frozen direct-record/trace hashes and frozen
+graph functional-record hash remain technical input and were not rerun.
+
+No graph audit binary, graph trace, direct audit/trace, target, benchmark, preflight workload, or
+timing command was invoked. `direct_audit_invocations=0`; `graph_trace_invocations=0`;
+`workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
+
+Terra verdict: preflight PASS, pending the separately authorized sole graph-trace execution on a
+clean committed candidate.

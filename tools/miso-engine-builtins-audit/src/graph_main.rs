@@ -10,7 +10,10 @@ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::BTreeSet,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread::ThreadId,
 };
 
@@ -21,8 +24,9 @@ use miso_engine_builtins_compiler::{
 use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
 use miso_engine_core::realtime::{
-    PlanExchangeConfig, PlanarBufferMut, RealtimePlanOwner, RealtimeRenderReport, RenderError,
-    RenderIo, RenderTime, SwapOutcome, plan_exchange,
+    Consumer, PlanExchangeConfig, PlanRetirer, PlanarBufferMut, QueueGeneration, RealtimePlanOwner,
+    RealtimeRenderReport, RenderError, RenderIo, RenderTime, SwapOutcome, bounded_spsc_move,
+    plan_exchange,
 };
 use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
@@ -138,9 +142,41 @@ impl GraphRuntimeProcessor for ExternalOutput {
     }
 }
 
+#[derive(Debug)]
 enum RetirementCommand {
     Reclaim,
-    Stop,
+}
+
+/// Run only the audit-local, off-render retirement ownership handoff.
+///
+/// Before control disarms the graph markers this loop can reach only the move-SPSC poll, atomic
+/// loads/stores, and a processor spin hint. Reclamation, destruction, and thread exit occur only
+/// after control sends its sole command outside that armed lifetime.
+fn run_retirement_worker(
+    mut commands: Consumer<RetirementCommand>,
+    mut retirer: PlanRetirer,
+    ready: &AtomicBool,
+    reclaimed_epoch_plus_one: &AtomicU64,
+    stop: &AtomicBool,
+) -> ThreadId {
+    ready.store(true, Ordering::Release);
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return std::thread::current().id();
+        }
+        match commands.try_pop() {
+            Ok(RetirementCommand::Reclaim) => {
+                let (epoch, plan) = retirer.try_reclaim().expect("retired A is available");
+                assert_eq!(epoch.0, 0, "only epoch-zero A may retire here");
+                drop(plan);
+                reclaimed_epoch_plus_one.store(
+                    epoch.0.checked_add(1).expect("epoch plus one"),
+                    Ordering::Release,
+                );
+            }
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
 }
 
 fn main() {
@@ -163,7 +199,7 @@ fn run_audit() {
     let (initial, mut initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
     let (applied, mut applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
     let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
-    let (mut publisher, mut owner, mut retirer) = plan_exchange(
+    let (mut publisher, mut owner, retirer) = plan_exchange(
         initial,
         PlanExchangeConfig {
             publication_capacity: NonZeroUsize::new(1).expect("publication capacity"),
@@ -171,67 +207,81 @@ fn run_audit() {
         },
     )
     .expect("plan exchange");
-    let (command_sender, command_receiver) = mpsc::channel();
-    let (result_sender, result_receiver) = mpsc::channel();
-    let retirement_thread = std::thread::spawn(move || {
-        loop {
-            match command_receiver.recv().expect("retirement command") {
-                RetirementCommand::Reclaim => {
-                    let (epoch, plan) = retirer.try_reclaim().expect("retired plan");
-                    drop(plan);
-                    result_sender.send(epoch).expect("retirement result");
-                }
-                RetirementCommand::Stop => return std::thread::current().id(),
-            }
+    let (mut command_sender, command_receiver) = bounded_spsc_move(
+        NonZeroUsize::new(1).expect("one reclaim command"),
+        QueueGeneration(70),
+    )
+    .expect("prepare reclaim command queue");
+    let ready = AtomicBool::new(false);
+    let reclaimed_epoch_plus_one = AtomicU64::new(0);
+    let stop = AtomicBool::new(false);
+    let (retirement_thread_id, audit) = std::thread::scope(|scope| {
+        let ready_ref = &ready;
+        let reclaimed_ref = &reclaimed_epoch_plus_one;
+        let stop_ref = &stop;
+        let retirement_thread = scope.spawn(move || {
+            run_retirement_worker(
+                command_receiver,
+                retirer,
+                ready_ref,
+                reclaimed_ref,
+                stop_ref,
+            )
+        });
+        while !ready.load(Ordering::Acquire) {
+            core::hint::spin_loop();
         }
+
+        let mut output = [0.0_f32; QUANTUM * 2];
+        let left_address = output.as_ptr() as usize;
+        let right_address = output[QUANTUM..].as_ptr() as usize;
+        audit::warm_up();
+        audit::reset();
+
+        let first = traced_render(&mut owner, &mut output, 0);
+        assert_eq!(first.swap, SwapOutcome::None);
+        assert_eq!(first.render.plan_id, PLAN_A);
+        assert_pcm_fixture(&output);
+        let first_meter_values =
+            drain_fixture(&mut initial_meters, ACCEPTED_GRAPH_METERS, "A fixture");
+        let first_epoch = match publisher.publish(applied) {
+            Ok(epoch) => epoch,
+            Err(_) => panic!("B publication"),
+        };
+        assert_eq!(first_epoch.0, 1);
+        let second = traced_render(&mut owner, &mut output, 1);
+        assert_applied(&second, PLAN_B, 1);
+        assert_pcm_fixture(&output);
+        let second_epoch = match publisher.publish(deferred) {
+            Ok(epoch) => epoch,
+            Err(_) => panic!("C publication"),
+        };
+        assert_eq!(second_epoch.0, 2);
+        let third = traced_render(&mut owner, &mut output, 2);
+        assert_eq!(third.swap, SwapOutcome::DeferredRetirementFull);
+        assert_eq!(third.active_epoch.0, 1);
+        assert_eq!(third.render.plan_id, PLAN_B);
+        traced_range(&mut owner, &mut output, 3, BLOCKS, PLAN_B);
+        let second_meter_values = drain_values(&mut applied_meters, "B first window");
+        assert_eq!(second_meter_values, first_meter_values);
+
+        assert_eq!(owner.deferred_count(), BLOCKS - 2);
+        assert_eq!(output.as_ptr() as usize, left_address);
+        assert_eq!(output[QUANTUM..].as_ptr() as usize, right_address);
+        let audit = audit::snapshot();
+        assert_eq!(audit.total(), 0);
+
+        command_sender
+            .try_push(RetirementCommand::Reclaim)
+            .expect("one empty reclaim command slot");
+        while reclaimed_epoch_plus_one.load(Ordering::Acquire) == 0 {
+            core::hint::spin_loop();
+        }
+        assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
+        assert_eq!(command_sender.success_count(), 1);
+        stop.store(true, Ordering::Release);
+        (retirement_thread.join().expect("retirement owner"), audit)
     });
-
-    let mut output = [0.0_f32; QUANTUM * 2];
-    let left_address = output.as_ptr() as usize;
-    let right_address = output[QUANTUM..].as_ptr() as usize;
-    audit::warm_up();
-    audit::reset();
-
-    let first = traced_render(&mut owner, &mut output, 0);
-    assert_eq!(first.swap, SwapOutcome::None);
-    assert_eq!(first.render.plan_id, PLAN_A);
-    assert_pcm_fixture(&output);
-    let first_meter_values = drain_fixture(&mut initial_meters, ACCEPTED_GRAPH_METERS, "A fixture");
-    let first_epoch = match publisher.publish(applied) {
-        Ok(epoch) => epoch,
-        Err(_) => panic!("B publication"),
-    };
-    assert_eq!(first_epoch.0, 1);
-    let second = traced_render(&mut owner, &mut output, 1);
-    assert_applied(&second, PLAN_B, 1);
-    assert_pcm_fixture(&output);
-    let second_epoch = match publisher.publish(deferred) {
-        Ok(epoch) => epoch,
-        Err(_) => panic!("C publication"),
-    };
-    assert_eq!(second_epoch.0, 2);
-    let third = traced_render(&mut owner, &mut output, 2);
-    assert_eq!(third.swap, SwapOutcome::DeferredRetirementFull);
-    assert_eq!(third.active_epoch.0, 1);
-    assert_eq!(third.render.plan_id, PLAN_B);
-    traced_range(&mut owner, &mut output, 3, BLOCKS, PLAN_B);
-    let second_meter_values = drain_values(&mut applied_meters, "B first window");
-    assert_eq!(second_meter_values, first_meter_values);
-
-    assert_eq!(owner.deferred_count(), BLOCKS - 2);
-    assert_eq!(output.as_ptr() as usize, left_address);
-    assert_eq!(output[QUANTUM..].as_ptr() as usize, right_address);
-    let audit = audit::snapshot();
-    assert_eq!(audit.total(), 0);
-
-    command_sender
-        .send(RetirementCommand::Reclaim)
-        .expect("reclaim A");
-    assert_eq!(result_receiver.recv().expect("A epoch").0, 0);
-    command_sender
-        .send(RetirementCommand::Stop)
-        .expect("stop retirement owner");
-    let retirement_thread_id = retirement_thread.join().expect("retirement owner");
     drop(owner);
     let drops = drops.lock().expect("drop records");
     assert_eq!(drops.len(), 3);
@@ -741,5 +791,116 @@ mod tests {
                 .all(|sample| sample.to_bits() == 0)
         );
         assert_ne!(success_first[9].to_bits(), 0);
+    }
+
+    #[test]
+    fn issue070_retirement_worker_is_ready_quiescent_and_owns_only_a() {
+        let drops = Arc::new(Mutex::new(Vec::with_capacity(3)));
+        let control_thread_id = std::thread::current().id();
+        let (initial, _initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
+        let (applied, _applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
+        let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
+        let (mut publisher, mut owner, retirer) = plan_exchange(
+            initial,
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(1).expect("one publication"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one retirement"),
+            },
+        )
+        .expect("exchange");
+        let (mut command_sender, command_receiver) = bounded_spsc_move(
+            NonZeroUsize::new(1).expect("one reclaim command"),
+            QueueGeneration(70),
+        )
+        .expect("command queue");
+        let ready = AtomicBool::new(false);
+        let reclaimed_epoch_plus_one = AtomicU64::new(0);
+        let stop = AtomicBool::new(false);
+        let retirement_thread_id = std::thread::scope(|scope| {
+            let ready_ref = &ready;
+            let reclaimed_ref = &reclaimed_epoch_plus_one;
+            let stop_ref = &stop;
+            let retirement_thread = scope.spawn(move || {
+                run_retirement_worker(
+                    command_receiver,
+                    retirer,
+                    ready_ref,
+                    reclaimed_ref,
+                    stop_ref,
+                )
+            });
+            while !ready.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+
+            let b_epoch = match publisher.publish(applied) {
+                Ok(epoch) => epoch,
+                Err(_) => panic!("publish B"),
+            };
+            assert_eq!(b_epoch.0, 1);
+            let mut output = [0.0_f32; QUANTUM * 2];
+            assert_applied(&render(&mut owner, &mut output, 0), PLAN_B, 1);
+            let c_epoch = match publisher.publish(deferred) {
+                Ok(epoch) => epoch,
+                Err(_) => panic!("publish C"),
+            };
+            assert_eq!(c_epoch.0, 2);
+            assert_eq!(
+                render(&mut owner, &mut output, 1).swap,
+                SwapOutcome::DeferredRetirementFull
+            );
+            assert_eq!(owner.deferred_count(), 1);
+
+            command_sender
+                .try_push(RetirementCommand::Reclaim)
+                .expect("one reclaim command");
+            while reclaimed_epoch_plus_one.load(Ordering::Acquire) == 0 {
+                core::hint::spin_loop();
+            }
+            assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
+            assert_eq!(command_sender.success_count(), 1);
+            stop.store(true, Ordering::Release);
+            retirement_thread.join().expect("retirement worker")
+        });
+        drop(owner);
+        let drops = drops.lock().expect("drop records");
+        assert_eq!(drops.len(), 3);
+        for (plan, expected_thread) in [
+            (PLAN_A, retirement_thread_id),
+            (PLAN_B, control_thread_id),
+            (PLAN_C, control_thread_id),
+        ] {
+            assert_eq!(
+                drops
+                    .iter()
+                    .filter(|row| **row == (plan, expected_thread))
+                    .count(),
+                1,
+                "plan {plan} has one exact destruction role"
+            );
+        }
+    }
+
+    #[test]
+    fn issue070_retirement_worker_source_is_limited_to_nonblocking_primitives() {
+        let source = include_str!("graph_main.rs");
+        let (_, worker) = source
+            .split_once("fn run_retirement_worker")
+            .expect("worker source");
+        let (worker, _) = worker.split_once("\nfn main").expect("worker boundary");
+        assert!(worker.contains(concat!("spin", "_loop")));
+        assert!(source.contains(concat!("bounded_spsc", "_move")));
+        for forbidden in [
+            concat!("m", "psc"),
+            concat!(".re", "cv("),
+            concat!("pa", "rk"),
+            concat!("yield", "_now"),
+            concat!("sl", "eep"),
+        ] {
+            assert!(
+                !worker.contains(forbidden),
+                "worker must not contain {forbidden}"
+            );
+        }
     }
 }
