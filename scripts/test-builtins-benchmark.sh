@@ -163,4 +163,167 @@ for mutation in \
   reject_aggregate_mutation "$mutation"
 done
 
-printf 'builtins benchmark validators: PASS (runner/workload/timing invocations: 0/0/0)\n'
+lifecycle_runner="$script_directory/run-builtins-benchmark.sh"
+lifecycle_scratch="$(mktemp -d)"
+trap 'rm -rf -- "$lifecycle_scratch"' EXIT
+lifecycle_template="$lifecycle_scratch/template"
+mkdir -p "$lifecycle_template/scripts" "$lifecycle_template/bin" "$lifecycle_template/target/issue35"
+cp "$lifecycle_runner" "$script_directory/builtins-benchmark-record-validator.jq" \
+  "$script_directory/builtins-benchmark-validator.jq" "$lifecycle_template/scripts/"
+printf '%s\n' "$records" | jq -c '.[]' >"$lifecycle_template/records.jsonl"
+cat >"$lifecycle_template/bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *rev-parse*) printf '%s\n' "$MISO_TEST_CANDIDATE" ;;
+  *status*) exit 0 ;;
+  *) exit 91 ;;
+esac
+EOF
+cat >"$lifecycle_template/target/issue35/miso_engine_builtins_bench" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sealed-binary\n' >>"$MISO_TEST_LAUNCH_LOG"
+case "${MISO_TEST_MODE:?}" in
+  success) cat "$MISO_TEST_RECORDS" ;;
+  workload_failure) printf '{"partial":"workload"}\n'; exit 73 ;;
+  interrupted_partial) printf '{"partial":"interrupted"}\n'; kill -TERM "$BASHPID" ;;
+  validator_failure) printf '{}\n' ;;
+  *) exit 91 ;;
+esac
+EOF
+chmod 755 "$lifecycle_template/bin/git" "$lifecycle_template/target/issue35/miso_engine_builtins_bench"
+
+lifecycle_case=0
+new_lifecycle_case() {
+  lifecycle_case=$((lifecycle_case + 1))
+  case_root="$lifecycle_scratch/case-$lifecycle_case-$1"
+  mkdir "$case_root"
+  cp -a "$lifecycle_template/." "$case_root/"
+  launch_log="$case_root/launch.log"
+  seal="$case_root/target/issue35/builtins-benchmark.preflight.json"
+  raw="$case_root/target/issue35/builtins-benchmark.raw.jsonl"
+  accepted="$case_root/target/issue35/builtins-benchmark.jsonl"
+  stderr_log="$case_root/target/issue35/builtins-benchmark.validator.stderr"
+  disposition="$case_root/target/issue35/builtins-benchmark.disposition.json"
+  candidate="$commit40"
+  runner_sha="$(sha256sum "$case_root/scripts/run-builtins-benchmark.sh" | awk '{print $1}')"
+  record_sha="$(sha256sum "$case_root/scripts/builtins-benchmark-record-validator.jq" | awk '{print $1}')"
+  aggregate_sha="$(sha256sum "$case_root/scripts/builtins-benchmark-validator.jq" | awk '{print $1}')"
+  binary_sha="$(sha256sum "$case_root/target/issue35/miso_engine_builtins_bench" | awk '{print $1}')"
+  jq -cn --arg candidate "$candidate" --arg binary "$binary_sha" --arg runner "$runner_sha" \
+    --arg record "$record_sha" --arg aggregate "$aggregate_sha" \
+    '{schema_version:2,issue:58,kind:"builtins_benchmark_preflight",
+      candidate_commit:$candidate,binary_sha256:$binary,runner_sha256:$runner,
+      record_validator_sha256:$record,aggregate_validator_sha256:$aggregate,
+      runner_invocations:0,workload_invocations:0,timed_benchmark_invocations:0}' >"$seal"
+}
+run_lifecycle_runner() {
+  local mode=$1
+  shift
+  MISO_TEST_MODE="$mode" MISO_TEST_CANDIDATE="$candidate" \
+    MISO_TEST_LAUNCH_LOG="$launch_log" MISO_TEST_RECORDS="$case_root/records.jsonl" \
+    PATH="$case_root/bin:$PATH" bash "$case_root/scripts/run-builtins-benchmark.sh" "$@"
+}
+expect_no_scratch_launch() {
+  [[ ! -e "$launch_log" ]]
+}
+expect_no_accepted() {
+  [[ ! -e "$accepted" && ! -L "$accepted" ]]
+}
+
+new_lifecycle_case argument
+if run_lifecycle_runner success --retry >/dev/null 2>&1; then
+  printf 'sealed runner accepted an argument\n' >&2
+  exit 1
+fi
+expect_no_scratch_launch
+
+new_lifecycle_case success
+if ! published="$(run_lifecycle_runner success 2>"$case_root/result")"; then
+  cat "$case_root/result" >&2
+  [[ ! -f "$disposition" ]] || cat "$disposition" >&2
+  [[ ! -f "$stderr_log" ]] || cat "$stderr_log" >&2
+  exit 1
+fi
+[[ "$published" == "$accepted" ]] || {
+  printf 'unexpected sealed-runner stdout: %s\n' "$published" >&2
+  exit 1
+}
+cmp -s "$raw" "$accepted"
+[[ "$(wc -l <"$launch_log")" == 1 ]]
+jq -e '.status == "PASS" and .reason == "complete" and
+       .runner_invocations == 1 and .workload_invocations == 1 and
+       .warmup_passes == 1 and .measured_rounds_completed == 2 and
+       .timed_benchmark_invocations == 1 and .raw_sha256 == .accepted_sha256 and
+       .raw_bytes == .accepted_bytes and .workload_exit_status == 0' "$disposition" >/dev/null
+
+new_lifecycle_case workload-failure
+set +e
+run_lifecycle_runner workload_failure >"$case_root/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 73 ]]
+grep -Fqx '{"partial":"workload"}' "$raw"
+expect_no_accepted
+[[ "$(wc -l <"$launch_log")" == 1 ]]
+jq -e '.status == "FAIL" and .reason == "workload_failed" and .workload_exit_status == 73 and
+       .raw_sha256 != null and .accepted_sha256 == null' "$disposition" >/dev/null
+
+new_lifecycle_case interrupted-partial
+set +e
+run_lifecycle_runner interrupted_partial >"$case_root/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 143 ]]
+grep -Fqx '{"partial":"interrupted"}' "$raw"
+expect_no_accepted
+jq -e '.status == "FAIL" and .reason == "workload_interrupted" and .workload_exit_status == 143' \
+  "$disposition" >/dev/null
+
+new_lifecycle_case validator-failure
+set +e
+run_lifecycle_runner validator_failure >"$case_root/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 ]]
+grep -Fqx '{}' "$raw"
+expect_no_accepted
+[[ -s "$stderr_log" ]]
+jq -e '.status == "FAIL" and .reason == "validation_failed" and .workload_exit_status == 1' \
+  "$disposition" >/dev/null
+
+for artifact in raw accepted stderr disposition; do
+  new_lifecycle_case "existing-$artifact"
+  case "$artifact" in
+    raw) protected="$raw" ;;
+    accepted) protected="$accepted" ;;
+    stderr) protected="$stderr_log" ;;
+    disposition) protected="$disposition" ;;
+  esac
+  printf 'protected\n' >"$protected"
+  if run_lifecycle_runner success >/dev/null 2>&1; then
+    printf 'sealed runner accepted an existing %s artifact\n' "$artifact" >&2
+    exit 1
+  fi
+  expect_no_scratch_launch
+  [[ "$(<"$protected")" == protected ]]
+done
+
+new_lifecycle_case symlink-artifact
+ln -s "$case_root/records.jsonl" "$raw"
+if run_lifecycle_runner success >/dev/null 2>&1; then exit 1; fi
+expect_no_scratch_launch
+
+new_lifecycle_case hard-link-alias
+ln "$case_root/records.jsonl" "$accepted"
+if run_lifecycle_runner success >/dev/null 2>&1; then exit 1; fi
+expect_no_scratch_launch
+
+new_lifecycle_case seal-mismatch
+jq '.candidate_commit = "1111111111111111111111111111111111111111"' "$seal" >"$case_root/seal-mutated"
+mv "$case_root/seal-mutated" "$seal"
+if run_lifecycle_runner success >/dev/null 2>&1; then exit 1; fi
+expect_no_scratch_launch
+
+printf 'builtins benchmark validators/lifecycle: PASS (real runner/workload/timing invocations: 0/0/0; scratch stubs only)\n'
