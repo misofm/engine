@@ -1,11 +1,12 @@
 # 022 Stable C ABI and host-fed planar PCM render
 
-## Sol briefing checkpoint — 2026-08-22
+## Final Sol verdict — 2026-08-22
 
-**READY FOR TERRA ATTEMPT 1.** The authoritative implementation brief is
-`BRIEFS/022-stable-c-abi-and-host-fed-planar-pcm-render.md`. This issue permits one Terra attempt
-and one bounded Sol correction; a second failure stops and rescopes. No benchmark or timed workload
-is authorized.
+**PASS.** The authoritative implementation brief is
+`BRIEFS/022-stable-c-abi-and-host-fed-planar-pcm-render.md`. Terra attempt 1 and the sole bounded Sol
+correction are consumed; the exact non-timed audit passed on the clean evidence candidate. No
+benchmark or timed workload was authorized or invoked. Stateless Issue 073 remains open and owns
+the native PCM runner and broader ABI qualification; this verdict does not claim that scope.
 
 ### Bounded preimplementation correction — host region origin
 
@@ -258,3 +259,23 @@ Requirement audit before the executing audit:
 Pre-audit verdict: **PASS TO ONE NON-TIMED CAPI AUDIT AFTER THIS EVIDENCE IS COMMITTED ON A CLEAN
 CANDIDATE.** This is not overall Issue-022 PASS. `capi_audit_main_invocations=0`,
 `timed_benchmark_invocations=0`, and no benchmark, trace, target, or listening workload ran.
+
+## Final C-entry audit evidence — 2026-08-22
+
+The sole authorized non-timed audit ran once on clean candidate
+`8190baf24539dd31e38122712c791139d2fbe6d4` and exited zero. The candidate delta from the reviewed
+`334b680` was exactly the two Issue-022 evidence documents; the frozen FFI and audit source SHA-256
+values remained `d12cab166d917371020efb7ef380c3ee5d0efa752571198455453a4835a125b0` and
+`9db77ecf95fd67ea8d37491b346f5353a181fd10caa661cee4a9ee73e731bdda`.
+
+Preserved stdout `/tmp/engine-v2-issue-022-8190baf-capi-audit.json` is exactly 349 bytes with SHA-256
+`9bc0b8a1b8a032e0a29fef7154141646be65be29cd5c41901ce66d2666f6c408`. Its closed schema reports
+`calls=100000`, `sample_rate_hz=48000`, `quantum_frames=128`, stable output address, PCM digest
+`37380b654988f7cc`, zero render errors, zero allocations, deallocations, locks, feature detection,
+logs, file I/O, network I/O, syscalls, and panic unwinds, and zero total violations. Preserved stderr
+is empty with SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Final verdict: **PASS** for the bounded stable C ABI and host-fed planar PCM render product.
+`capi_audit_main_invocations=1`, `benchmark_workload_invocations=0`, and
+`timed_benchmark_invocations=0`. No retry, direct audit-binary run, benchmark, timing, trace, target,
+or Issue-073 qualification workload occurred.

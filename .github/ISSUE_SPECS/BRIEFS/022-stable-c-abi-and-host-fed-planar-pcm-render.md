@@ -2,10 +2,10 @@
 
 ## Decision and attempt budget
 
-**SOL PRE-AUDIT PASS AT `334b680`; AUDIT NOT YET RUN.** Terra attempt 1 and the sole bounded Sol
-correction are consumed. No further product correction is available: the remaining authorized work
-is the exact non-timed 100,000-call C-entry audit and final evidence only. Benchmark, timing, native
-file runner, target matrix, and listening work remain unauthorized.
+**FINAL SOL PASS AT `8190baf`.** Terra attempt 1 and the sole bounded Sol correction are consumed.
+The one authorized non-timed 100,000-call C-entry audit passed with every forbidden-operation
+counter and render error at zero. Benchmark/timed invocation count is zero. Native file runner,
+target breadth, and broader ABI qualification remain open Issue 073 scope and are not claimed here.
 
 ## Product seam
 
