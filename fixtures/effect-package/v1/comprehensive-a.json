@@ -1,0 +1,116 @@
+{
+  "artifacts": [
+    {
+      "artifact_index": 0,
+      "content_hex": "412f736f757263652f610a",
+      "content_sha256": "ebcd1e1cf252671bac35015b5e68348cd9aa73f5c9461ea7d7807ab50e406d18",
+      "features": "",
+      "kind": "source",
+      "kind_value": 1,
+      "path": "src/a.rs",
+      "target": ""
+    },
+    {
+      "artifact_index": 1,
+      "content_hex": "412f736f757263652f7a0a",
+      "content_sha256": "f891253b187296a1e51b8ea016d5c2b6f86dd194cbbe3cf6c5516b4bb32b368f",
+      "features": "",
+      "kind": "source",
+      "kind_value": 1,
+      "path": "src/z.rs",
+      "target": ""
+    },
+    {
+      "artifact_index": 2,
+      "content_hex": "0061736d412d62617365",
+      "content_sha256": "99ab3fd8f923338645c9ac751de2fc137d24c11a564aae2c88ca46e615dc209d",
+      "features": "",
+      "kind": "core-wasm",
+      "kind_value": 2,
+      "path": "wasm/base.wasm",
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "artifact_index": 3,
+      "content_hex": "0061736d412d62756c6b2b73696d64",
+      "content_sha256": "3fa3edf499363cea7820bed9045bc97b8025e777c1c2202290490e256100edff",
+      "features": "bulk-memory,simd128",
+      "kind": "core-wasm",
+      "kind_value": 2,
+      "path": "wasm/bulk.wasm",
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "artifact_index": 4,
+      "content_hex": "0061736d412d73696d64313238",
+      "content_sha256": "f42c959a633cab345e79e7612658530039d6cbd012032553bf14ce8b5cf4527b",
+      "features": "simd128",
+      "kind": "core-wasm",
+      "kind_value": 2,
+      "path": "wasm/simd.wasm",
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "artifact_index": 5,
+      "content_hex": "412f6e61746976652f626173657f454c46",
+      "content_sha256": "e14273d6df76488c573627247d87348435305c9557a529bcf489fa5c6a7df7b2",
+      "features": "",
+      "kind": "target-native",
+      "kind_value": 3,
+      "path": "native/x86-base.so",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    {
+      "artifact_index": 6,
+      "content_hex": "412f6e61746976652f617678322b666d610081",
+      "content_sha256": "4c604455c28633e8af6483312ff1801e3e68cfe1a5052b002ce77f19687a79ec",
+      "features": "avx2,fma",
+      "kind": "target-native",
+      "kind_value": 3,
+      "path": "native/x86-fma.so",
+      "target": "x86_64-unknown-linux-gnu"
+    }
+  ],
+  "cid_binary_hex": "01551220af7b5d38afd3191c33d9d40d95d933ff9b83fe949cb95c3d80bd7bbf916daa52",
+  "cid_text": "bafkreifppnotrl6tdeodhwoubwk5sm77tob75fe4xfod3af5po7zc3nkki",
+  "descriptor_fixture": "comprehensive-a.wire.hex",
+  "descriptor_identity_hex": "7d2f1ee79aa5833c546ea06548cb29e13b37f4ab690e9024f1480d2fdfade298",
+  "name": "comprehensive-a",
+  "package_bytes": 2547,
+  "package_sha256": "af7b5d38afd3191c33d9d40d95d933ff9b83fe949cb95c3d80bd7bbf916daa52",
+  "schema": "miso.effect-package.fixture.v1",
+  "selections": [
+    {
+      "capabilities": [],
+      "expected_path": "wasm/base.wasm",
+      "kind_value": 2,
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "capabilities": [
+        "simd128"
+      ],
+      "expected_path": "wasm/simd.wasm",
+      "kind_value": 2,
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "capabilities": [
+        "bulk-memory",
+        "simd128"
+      ],
+      "expected_path": "wasm/bulk.wasm",
+      "kind_value": 2,
+      "target": "wasm32-unknown-unknown"
+    },
+    {
+      "capabilities": [
+        "avx2",
+        "fma"
+      ],
+      "expected_path": "native/x86-fma.so",
+      "kind_value": 3,
+      "target": "x86_64-unknown-linux-gnu"
+    }
+  ]
+}

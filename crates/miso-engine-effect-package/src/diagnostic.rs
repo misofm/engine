@@ -10,6 +10,71 @@ pub enum PackageError {
     State,
 }
 
+pub const EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
+pub const EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET: u64 = u64::MAX;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EffectPackageDiagnosticCodeV1 {
+    Ok = 0,
+    Limit = 1,
+    BufferTooSmall = 2,
+    Header = 3,
+    Length = 4,
+    Reserved = 5,
+    Enum = 6,
+    Offset = 7,
+    Order = 8,
+    Path = 9,
+    Target = 10,
+    Features = 11,
+    Descriptor = 12,
+    Hash = 13,
+    Unavailable = 14,
+    Cid = 15,
+    Overflow = 16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct EffectPackageDiagnosticV1 {
+    pub code: EffectPackageDiagnosticCodeV1,
+    pub detail: u32,
+    pub artifact_index: u32,
+    pub reserved: u32,
+    pub byte_offset: u64,
+    pub required_bytes: u64,
+}
+
+impl EffectPackageDiagnosticV1 {
+    pub const fn new(
+        code: EffectPackageDiagnosticCodeV1,
+        detail: u32,
+        artifact_index: u32,
+        byte_offset: u64,
+    ) -> Self {
+        Self {
+            code,
+            detail,
+            artifact_index,
+            reserved: 0,
+            byte_offset,
+            required_bytes: 0,
+        }
+    }
+
+    pub const fn buffer_too_small(required_bytes: u64) -> Self {
+        Self {
+            code: EffectPackageDiagnosticCodeV1::BufferTooSmall,
+            detail: 0,
+            artifact_index: EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
+            reserved: 0,
+            byte_offset: EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            required_bytes,
+        }
+    }
+}
+
 pub const EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,33 +1,61 @@
-//! Package identity regression coverage.
+//! Package format and retained raw-CID primitive regression coverage.
 use miso_engine_effect_package::*;
-fn fixture() -> EffectPackageV1 {
-    EffectPackageV1 {
-        descriptor: OwnedEffectDescriptorV1 {
-            bytes: b"d".to_vec(),
-        },
-        artifacts: vec![ArtifactV1 {
-            kind: ArtifactKind::Source,
-            path: "source/a.rs".to_owned(),
-            target: String::new(),
-            features: String::new(),
-            content: b"hello".to_vec(),
-        }],
-    }
+
+fn descriptor() -> Vec<u8> {
+    let compact: Vec<_> =
+        include_str!("../../../fixtures/effect-descriptor/v1/comprehensive-a.wire.hex")
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+    compact
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("fixture is lowercase hexadecimal"),
+            };
+            digit(pair[0]) << 4 | digit(pair[1])
+        })
+        .collect()
 }
+
 #[test]
-fn package_round_trip_and_cid_mutation() {
-    let mut bytes = Vec::new();
-    encode_canonical_package_v1(&fixture(), PackageLimits::default(), &mut bytes).unwrap();
-    let cid = EffectCid::from_package_bytes(&bytes);
+fn accepted_descriptor_package_round_trip_and_raw_cid_mutation() {
+    let descriptor = descriptor();
+    let artifacts = [EffectArtifactAuthoringV1 {
+        kind: EffectArtifactKindV1::Source,
+        path: "source/a.rs",
+        target: "",
+        features: "",
+        content: b"hello",
+    }];
+    let package = EffectPackageAuthoringV1 {
+        descriptor: &descriptor,
+        artifacts: &artifacts,
+    };
+    let required =
+        effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap();
+    let mut bytes = vec![0; required as usize];
+    encode_effect_package_v1(&package, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
+    let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
     assert_eq!(cid.to_string().parse::<EffectCid>().unwrap(), cid);
-    assert!(verify_canonical_package_v1(&bytes, PackageLimits::default()).is_ok());
+    assert!(verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).is_ok());
+    assert!(verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &cid).is_ok());
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
-    assert_ne!(EffectCid::from_package_bytes(&bytes), cid);
+    assert_ne!(EffectCid::from_raw_bytes(&bytes), cid);
+    assert_eq!(
+        effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default())
+            .unwrap_err()
+            .code,
+        EffectPackageDiagnosticCodeV1::Hash
+    );
 }
+
 #[test]
 fn official_hello_cid_primitive_vector() {
-    let cid = EffectCid::from_package_bytes(b"hello");
+    let cid = EffectCid::from_raw_bytes(b"hello");
     assert_eq!(cid.as_binary()[..4], [1, 0x55, 0x12, 0x20]);
     assert_eq!(
         cid.to_string(),
