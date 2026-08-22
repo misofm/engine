@@ -14,8 +14,9 @@ agent cannot fabricate human listeners, playback conditions or trial responses.
 
 Issue 007 stopped after three attempts and accepted only a reusable DSP/runtime slice. The sealed
 *machine-qualified, human-listening pending* candidate and sole accepted builtin benchmark must
-instead come from **Builtin benchmark preflight and exactly-once qualification**, which consumes
-the stopped Issue-035 checkpoint through its stateless successor chain. This issue owns the two preregistered real
+instead come from **Separate builtin benchmark render timing from meter evidence collection**,
+which consumes stopped Issue 058 only as technical input and preserves its failed artifacts. This
+issue owns the two preregistered real
 listening executions against that exact corrected candidate. It is a hard dependency of
 **End-to-end release, performance, and listening qualification**. Neither the issue-007 rescope nor
 machine qualification implies this issue passed or authorizes a launch claim.
@@ -56,14 +57,14 @@ agent/facilitator as a human listener.
 
 ## Dependencies by exact issue title
 
-- Builtin benchmark preflight and exactly-once qualification
+- Separate builtin benchmark render timing from meter evidence collection
 - DSP research corpus and conformance harness
 
 ## Frozen procedure requirements
 
 Before the first answer is collected, the facilitator records:
 
-- exact clean candidate commit, target/features, issue-058 accepted builtin benchmark SHA-256 and
+- exact clean candidate commit, target/features, issue-072 accepted builtin benchmark SHA-256 and
   fixture manifest;
 - comparator identity and complete filter/matrix/session parameters;
 - both candidate render hashes, RMS match within 0.1 dB and peaks below 0 dBFS;
@@ -103,7 +104,7 @@ FAIL and blocks issue 026.
 
 ## Target matrix
 
-One pinned native issue-058 machine-qualified builtin candidate at 48 kHz/128 frames for both
+One pinned native issue-072 machine-qualified builtin candidate at 48 kHz/128 frames for both
 preregistered procedures. The playback chain is recorded exactly; results are not generalized to
 untested rooms, transducers, listeners, rates or targets.
 

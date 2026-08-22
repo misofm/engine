@@ -64,19 +64,22 @@ accepted technical input, but its retirement worker issued startup/blocking sysc
 armed graph interval. Issue 070, **Quiescent builtin graph retirement-worker trace closure**, owns
 only the audit-harness retirement-worker handoff and sole graph trace needed to close that blocker.
 Issue 068, **Builtin native, AArch64, and Wasm runtime-selection and instruction qualification**,
-follows 070 and owns the four-rate target
-matrix. Issue 058, **Builtin benchmark preflight and exactly-once qualification**, follows 068 and
-alone owns the eventual one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064,
-067–070 each permit one Terra attempt plus one Sol correction. The successor timed invocation
-count is currently zero.
+follows 070 and owns the four-rate target matrix. Issue 058, **Builtin benchmark preflight and
+exactly-once qualification**, stopped after its only authorized run exposed an allocation and
+evidence-timing defect. Issue 072, **Separate builtin benchmark render timing from meter evidence
+collection**, consumes that checkpoint as technical input and alone owns the corrected
+one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064, 067–070 and 072 each
+permit one Terra attempt plus one Sol correction. Issue-072 preflight/runner/workload/timed
+invocation counts are currently zero.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
-067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> 058. Issue 008 needs 036's accepted preparation/metadata and
+067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
+058 technical input -> 072. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
-listening only after 058 seals that candidate and its accepted benchmark; issue 026 waits for both
-058 and 033. This ordering forbids synthetic trials, audible-quality
+listening only after 072 seals that candidate and its accepted benchmark; issue 026 waits for both
+072 and 033. This ordering forbids synthetic trials, audible-quality
 claims and release bypasses while allowing independent SIMD work after its true contract
 dependency is complete.
 

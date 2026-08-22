@@ -37,7 +37,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Versioned TOML schema and transactional session compiler
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
-- Builtin benchmark preflight and exactly-once qualification
+- Separate builtin benchmark render timing from meter evidence collection
 - Issue-007 builtin filter and matrix human listening qualification
 - Production SIMD builtin bank graph retention and reachability qualification
 - Issue-008 real audio benchmark workloads and exactly-once qualification

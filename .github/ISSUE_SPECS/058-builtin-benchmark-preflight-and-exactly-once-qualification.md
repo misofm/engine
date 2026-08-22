@@ -225,3 +225,7 @@ outside; reseal a clean candidate; and own one newly frozen no-retry preflight p
 descriptive run. It must not change DSP, corpus, schema, rates, workload counts, tolerances,
 targets, audits, listening, or the one-warmup/two-round contract. Downstream exact-title
 dependencies must move to that successor before further qualification.
+
+The stateless successor is exact title **Separate builtin benchmark render timing from meter
+evidence collection**. It owns the correction and any future execution; Issue 058 remains stopped
+and is not a PASS dependency.
