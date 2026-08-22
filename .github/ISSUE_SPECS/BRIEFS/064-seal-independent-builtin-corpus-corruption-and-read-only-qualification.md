@@ -2,7 +2,7 @@
 
 ## Decision and budget
 
-**BLOCKED only on exact-title PASS of Issues 061, 063 and 065.** Once all three are clean and
+**BLOCKED only on exact-title PASS of Issues 061, 063 and 066.** Once all three are clean and
 pushed, this issue is READY for one Terra attempt and one bounded Sol correction/review; a second
 failure stops. It may not change accepted expected values. Workload and timed benchmark counts
 remain zero.

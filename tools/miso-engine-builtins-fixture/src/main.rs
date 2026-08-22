@@ -5276,11 +5276,11 @@ mod tests {
     }
 
     #[test]
-    fn issue065_graph_pdc_and_dependent_identity_mutations_are_rejected() {
+    fn issue066_graph_pdc_and_dependent_identity_mutations_are_rejected() {
         let files = complete_files();
-        let root = temporary_root("issue065-graph-baseline");
+        let root = temporary_root("issue066-graph-baseline");
         write_fixture(&root, &files);
-        check_read_only_fixture_root_v1(&root).expect("issue065 graph fixture baseline");
+        check_read_only_fixture_root_v1(&root).expect("issue066 graph fixture baseline");
         let records = parse_canonical_meter_records_v1(&root, "meters/graph-taps.jsonl")
             .expect("seven graph meter records");
         let summaries: BTreeSet<_> = records
@@ -5623,13 +5623,13 @@ mod tests {
         name: &str,
         mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
     ) {
-        let root = temporary_root(&format!("issue065-{name}"));
+        let root = temporary_root(&format!("issue066-{name}"));
         let mut mutated = files.clone();
         mutate(&mut mutated);
         write_fixture(&root, &mutated);
         assert!(
             check_fixture_root_v1(&root).is_err(),
-            "accepted manifest-valid issue065 mutation: {name}"
+            "accepted manifest-valid issue066 mutation: {name}"
         );
         remove_temporary_root(root);
     }

@@ -1,8 +1,8 @@
-# Sol implementation brief — issue 065 reconcile builtin graph fixture and dependent benchmark input identities
+# Sol implementation brief — issue 066 reconcile builtin graph fixture and dependent benchmark input identities
 
 ## Decision and budget
 
-**READY FOR TERRA ATTEMPT 1 after local/remote Issue 065 synchronization.** Consume stopped Issue
+**READY FOR TERRA ATTEMPT 1 after local/remote Issue 066 synchronization.** Consume stopped Issue
 062 checkpoint `2bbed6a` only as corrected technical input. One Terra attempt and one bounded Sol
 correction/review are available; a second failure stops. Workload, benchmark-runner and timed
 benchmark invocations are exactly zero.
