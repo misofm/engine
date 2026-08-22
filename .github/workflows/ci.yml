@@ -24,7 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -278,7 +281,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
           sudo apt-get update
-          sudo apt-get install -y wabt
+          sudo apt-get install -y ripgrep wabt
       - name: Browser-local realtime path has no atomic opcodes
         run: bash scripts/check-wasm-realtime-atomics.sh
       # #105 phase 2 C2: an artifact invocation names no evidence crate. Cargo unifies features

@@ -52,6 +52,8 @@ CI logs, locked toolchain version, feature-resolution report, and lint output.
 
 - **Scope correction (2026-08-22):** Mobile support is browser-based. Native iOS and Android apps are not in the current product scope, so the Android and iOS compile-only CI jobs are removed. The browser Wasm scalar/SIMD128 checks remain the mobile-browser portability gate. GitHub issue #23 is closed as out of current scope and may be reopened only if native app embedding is planned.
 
+- **CI prerequisite correction (2026-08-22):** The current Ubuntu image does not provide `rg`, which the host-policy and Wasm checks require. Those jobs install `ripgrep` explicitly; the benchmark job creates its artifact directory before piping output to `tee`; and the nested fuzz lockfile is refreshed so its `--locked` checks can resolve the current fuzz-target dependencies.
+
 - Rust is pinned to 1.97.1 in both the workspace MSRV declaration and `rust-toolchain.toml`.
   The lock requests only clippy, rustfmt, and browser Wasm; simulator, SDK, NDK, and browser
   tooling are deliberately not implied.
