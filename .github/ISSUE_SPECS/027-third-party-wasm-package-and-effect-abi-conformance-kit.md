@@ -16,7 +16,7 @@ Bind a capability-free core Wasm ABI to the canonical package/artifact/CID contr
 
 ## Required public interfaces/contracts
 
-`ThirdPartyEffectAbiV1` defines fixed f32 pointer/length process calls, prepare/reset/state/metadata exports, maximum resource declarations and no-WASI imports; `validate_third_party_effect_package` first requires a package verified under **Canonical effect interchange, state migration, and CID package identity**, then returns exact ABI diagnostic codes and the already-verified CID.
+`ThirdPartyEffectAbiV1` defines fixed f32 pointer/length process calls, prepare/reset/state/metadata exports, maximum resource declarations and no-WASI imports; `validate_third_party_effect_package` first requires a package verified under **Canonical effect package, CID, and artifact selection**, then returns exact ABI diagnostic codes and the already-verified CID.
 
 ## Deliverables
 
@@ -28,7 +28,7 @@ Executing untrusted Wasm, permitting it in SIMD racks, WASI/network/filesystem i
 
 ## Dependencies by exact issue title
 
-- Canonical effect interchange, state migration, and CID package identity
+- Canonical effect package, CID, and artifact selection
 - Transport-neutral binary control protocol
 - DSP research corpus and conformance harness
 

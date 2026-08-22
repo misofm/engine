@@ -1,0 +1,24 @@
+{
+  "name": "comprehensive-b",
+  "effect_id": "fixture.comprehensive-b",
+  "display_name": "Unicode\u2028Boundary",
+  "contract_major": 1,
+  "contract_minor": 65535,
+  "state_layout_version": 4294967295,
+  "supported_link_mode_bits": 1,
+  "parameters": [],
+  "ports": [
+    {"id": "main-out", "role": 2, "required": true, "layout": 1},
+    {"id": "main-in", "role": 1, "required": true, "layout": 1}
+  ],
+  "qualities": [
+    {"quality": 2, "sample_rate": 44100, "latency_samples": 18446744073709551615, "tail_kind": 1, "tail_samples": 18446744073709551615, "common_state_bytes": 4294967295, "left_state_bytes": 4294967295, "right_state_bytes": 4294967295, "scratch_fixed_bytes": 18446744073709551615, "scratch_bytes_per_frame": 18446744073709551615},
+    {"quality": 2, "sample_rate": 48000, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 88200, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 96000, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 176400, "latency_samples": 0, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 192000, "latency_samples": 0, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 352800, "latency_samples": 0, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0},
+    {"quality": 2, "sample_rate": 384000, "latency_samples": 0, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 0, "left_state_bytes": 0, "right_state_bytes": 0, "scratch_fixed_bytes": 0, "scratch_bytes_per_frame": 0}
+  ]
+}
