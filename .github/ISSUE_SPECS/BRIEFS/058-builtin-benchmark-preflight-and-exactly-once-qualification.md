@@ -260,3 +260,21 @@ were not invoked. Counters remain `runner_invocations=0`, `workload_invocations=
 `timed_benchmark_invocations=0`. After this evidence is committed cleanly, root may authorize one
 no-workload preflight; its seal and zero counters require a separate Sol check before the sole
 runner command can be authorized.
+
+## Final Sol verdict after the sole runner invocation — 2026-08-22
+
+**FAIL / STOPPED / RESCOPE REQUIRED; NO OVERALL PASS.** The one authorized runner invocation on
+candidate `79c1872753aa4943761f31a77aac98eaa633c31e` exited 134 before producing any JSONL. Raw and
+stderr are preserved empty, accepted output is absent, and the 974-byte FAIL disposition SHA-256
+is `e722148752733cb16cbfa1534c7bc10d048cea31182ea58c8af4eb1627ee44ce`. It binds the unchanged
+binary SHA-256 `242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944`
+and preflight-seal SHA-256 `85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d`,
+with exact counters runner/workload/timed `1/1/1`, warmup zero, and completed rounds zero.
+
+Read-only source review proves the abort boundary: the first audited `meter_success_full` warmup
+calls `drain_all().collect()` inside `audit::in_render_scope`; the audited global allocator aborts
+on that `Vec` allocation. Queue draining and evidence hashing are also incorrectly inside the
+timed/audited operation. No retry or correction remains in Issue 058. A stateless successor is
+required for the launch dependency chain and must own only off-scope/preallocated drain and
+evidence separation, nonexecuting armed-render proof, clean reseal, and one newly frozen
+exactly-once run while preserving every product, corpus, schema, workload and timing contract.

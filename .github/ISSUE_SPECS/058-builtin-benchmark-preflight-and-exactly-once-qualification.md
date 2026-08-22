@@ -177,3 +177,51 @@ Issue-035 artifacts. Sol must inspect the resulting binary/seal identities and z
 separately authorizing the sole public runner command. Current counters remain exactly
 `runner_invocations=0`, `workload_invocations=0`, and `timed_benchmark_invocations=0`; there is no
 machine-qualification, listening, capacity, threshold, or performance claim yet.
+
+## Final Sol disposition after the sole runner invocation — 2026-08-22
+
+**FAIL / STOPPED / RESCOPE REQUIRED; NO OVERALL PASS.** The sole authorized command
+`bash scripts/run-builtins-benchmark.sh` was consumed on clean candidate
+`79c1872753aa4943761f31a77aac98eaa633c31e` and terminated with status 134 before emitting a
+record. No retry, resume, direct-binary run, replacement timing, tuning run, or artifact deletion is
+authorized. `machine_qualification=FAIL`; human listening remains blocked.
+
+The preserved artifacts are internally consistent:
+
+- sealed binary: 3,191,104 bytes, SHA-256
+  `242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944`;
+- preflight seal: 2,211 bytes, SHA-256
+  `85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d`;
+- raw JSONL: 0 bytes, SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+- validator stderr: 0 bytes with the same empty-file SHA-256;
+- accepted JSONL: absent; and
+- FAIL disposition: 974 bytes, SHA-256
+  `e722148752733cb16cbfa1534c7bc10d048cea31182ea58c8af4eb1627ee44ce`.
+
+The disposition has the exact closed key set and binds the candidate, binary, runner, both
+validators, and preflight seal. It truthfully reports `status=FAIL`,
+`reason=workload_interrupted`, `workload_exit_status=134`, `runner_invocations=1`,
+`workload_invocations=1`, `timed_benchmark_invocations=1`, `warmup_passes=0`, and
+`measured_rounds_completed=0`. The runner's reason is its stable status-128-or-greater lifecycle
+classification; the source-level cause is narrower and provable without rerunning.
+
+The first `meter_success_full` warmup reaches `RenderRuntime::run_operation`, which arms
+`audit::in_render_scope`, and then calls `RealMeterTapRuntime::render_one`. After the successful
+plan renders, `drain_all` constructs a new `Vec<MeterConsumerSnapshot>` with iterator `collect`.
+The benchmark's audited global allocator sees that allocation while render is armed and calls
+`std::process::abort`, explaining status 134 plus zero raw and stderr bytes before the first record.
+The same code also places queue draining and evidence hashing inside the audited/timed operation,
+contradicting the frozen rule that input generation, evidence hashing, queue draining, metadata,
+and destruction stay outside the measured interval. This is a real benchmark-harness defect, not
+a runner, product DSP, corpus, tolerance, or evidence-serialization failure.
+
+Issue 058 has exhausted Terra attempt 1, the single bounded Sol correction, and its exactly-once
+authorization. Because Issues 033 and 026 require a completed machine candidate, a new stateless
+successor is required. Its minimum scope is: preserve these artifacts; separate product render
+from preallocated/off-scope meter drain and all evidence hashing for warmup and measurement; add a
+nonexecuting test that arms the allocator around every render workload while keeping drain/hash
+outside; reseal a clean candidate; and own one newly frozen no-retry preflight plus exactly-once
+descriptive run. It must not change DSP, corpus, schema, rates, workload counts, tolerances,
+targets, audits, listening, or the one-warmup/two-round contract. Downstream exact-title
+dependencies must move to that successor before further qualification.
