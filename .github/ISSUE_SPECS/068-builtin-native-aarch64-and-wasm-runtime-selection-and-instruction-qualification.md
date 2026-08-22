@@ -87,3 +87,47 @@ Exact Issue-070 PASS candidate plus preserved Issue-069 audit/corpus identities;
 unique scratch identity; four-rate rows; 16-row selection matrix; target/build and named-instruction
 transcripts; strict Terra/Sol verdicts; `workload_invocations=0` and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — STOP (2026-08-22)
+
+Terra stopped this single bounded attempt at the required Wasm SIMD named-symbol uniqueness gate.
+No DSP, corpus, audit, host, benchmark, preflight, workload, or timing work was performed.
+
+Two candidate-script harness repairs preceded the final candidate run and are not target evidence:
+
+- `61cfc069ad0744eea1029d293de92e1e7f724083`: the first clean run passed the three semantic test
+  stages, then stopped before a target build because a combined `local` declaration expanded
+  `name` under `set -u` (`name: unbound variable`). The script was corrected to assign local
+  variables sequentially.
+- `a86aaae3df5216d6a1f1c844b21ee0adad202eb4`: the second clean run again passed the semantic
+  stages, then rejected scalar `%xmm` instructions through an over-broad `%[xyz]mm` pattern. The
+  frozen scalar contract bans packed AVX/FMA, not scalar SSE; the harness was narrowed to
+  `%[yz]mm`, matching the established instruction check.
+
+Final candidate run: `ae57aefe41d127b5ca92625f2ab71a228ae658bf`; source-manifest seal
+`83e09d3c2088a9a18db9de3ebfcae3786800157b91141cd6fcf28b32521b33e6`; `Cargo.lock` seal
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`; scratch basename
+`miso-engine-issue068.Hc3DsO`. The three pre-run corpus identities matched the frozen values:
+`MANIFEST.tsv=bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`,
+`graph-taps.f32le=508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`, and
+`graph-taps.jsonl=958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`.
+
+PASS before the stop:
+
+- all 16 injected capability tuples selected the frozen backend/width precedence; the typed
+  unavailable-backend preparation test passed;
+- native four-rate public bank/scalar rows passed: 44,100 Hz `b1dc6cb4340e2587`, 48,000 Hz
+  `880b5d4b2bc6cce7`, 88,200 Hz `be67b6b958f1df14`, and 96,000 Hz `c4d6558079359c99`;
+- native scalar, AVX2, and AVX2+FMA named TPT object checks passed; all five-package release
+  closure builds passed for native scalar, Android AArch64, iOS AArch64, Wasm scalar, and Wasm
+  `simd128` (cross-target rows are compile/object-only, not device or browser execution);
+- AArch64 NEON and Wasm-scalar object checks passed.
+
+The exact first final-run failure was:
+
+`issue068 target qualification failure: expected exactly one Wasm SIMD TPT symbol, found 2`
+
+Terra did not inspect or repair that gate after the failure. Consequently the Wasm-SIMD opcode
+inspection, post-run candidate/source/lock/corpus re-seal, checked-corpus validation, full exact-
+closure test/Clippy/rustdoc/format/policy/static gates, and final PASS verdict remain unrun.
+`workload_invocations=0`; `timed_benchmark_invocations=0`.
