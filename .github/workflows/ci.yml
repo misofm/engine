@@ -202,13 +202,25 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Run one descriptive two-round benchmark
-        run: bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
+          test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
       - name: Build issue-003 audit harness
         run: cargo build --locked --release -p miso-engine-realtime-audit
       - name: Run one descriptive two-round realtime benchmark
-        run: bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
+          test -f target/realtime-benchmark.jsonl && test -s target/realtime-benchmark.jsonl
       - name: Run session benchmark once with two internal rounds
-        run: bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
+          test -f target/session-benchmark.jsonl && test -s target/session-benchmark.jsonl
       - name: Run native effect benchmark once with two internal rounds
         run: bash scripts/run-effect-contract-benchmark.sh
       - name: Upload benchmark evidence
