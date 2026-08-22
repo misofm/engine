@@ -31,9 +31,35 @@ def positive: whole and . > 0;
 def usable_text: type == "string" and length > 0 and . != "unknown" and . != "default";
 def render_workload:
   . == "full_chain_filters" or . == "identity_chain" or . == "matrix_ramp" or . == "meter_success_full";
+def frozen_manifest_sha256:
+  "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff";
+def frozen_input_sha256:
+  if .workload_kind == "full_chain_filters" and .sample_rate_hz == 48000 then
+    "4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9"
+  elif .workload_kind == "full_chain_filters" and .sample_rate_hz == 96000 then
+    "cc4f23f6579cc255a1282797de2b78c93951f947c7b0ab72fa2ca713780f8a1e"
+  elif .workload_kind == "identity_chain" and .sample_rate_hz == 48000 then
+    "65232ba5a59f54a22762a6ebc82620be6332f9d583c0e61fe4c5d82ede23e7ac"
+  elif .workload_kind == "identity_chain" and .sample_rate_hz == 96000 then
+    "9bc765fb84d94dd31f83137e2aa091fd09a28a8dab8fbe1d18a0b4a9a60c85a7"
+  elif .workload_kind == "matrix_ramp" and .sample_rate_hz == 48000 then
+    "f0d94928bed16804a26befde5eaabd3a8c233afa194a5cdcb259141af78c831b"
+  elif .workload_kind == "matrix_ramp" and .sample_rate_hz == 96000 then
+    "ef5bf8c4e954c1e497eea997bffeb85fabad69ac6966f2798bd34ce2fa5ced6f"
+  elif .workload_kind == "meter_success_full" and .sample_rate_hz == 48000 then
+    "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
+  elif .workload_kind == "meter_success_full" and .sample_rate_hz == 96000 then
+    "aa1c4d8835753ce290d7abcf1cbf3ffdb98b79a58f0ec6cd0cce6614f5befef9"
+  elif .workload_kind == "prepare_256_tracks" and .sample_rate_hz == 48000 then
+    "0c2130e5f3563e011cc7251a4a42d27b2a84f5871a81facae49be0a5c1cf21ff"
+  elif .workload_kind == "prepare_256_tracks" and .sample_rate_hz == 96000 then
+    "5ca5e3b6e0080b66c53f0a12753e3681ea1caf6571ff3747e2303ac8cf0779a6"
+  else null
+  end;
 def input_id:
   .workload_id == ("issue035." + .workload_kind + "." + (.sample_rate_hz | tostring) + "hz.q128") and
-  .input_fixture_id == ("fixtures/builtins/v1/benchmark/" + .workload_kind + "-" + (.sample_rate_hz | tostring) + ".toml");
+  .input_fixture_id == ("fixtures/builtins/v1/benchmark/" + .workload_kind + "-" + (.sample_rate_hz | tostring) + ".toml") and
+  .input_fixture_sha256 == frozen_input_sha256;
 def audit_names: [
   "render_allocations", "render_deallocations", "render_locks", "render_logs",
   "render_file_io", "render_network_io", "render_syscalls", "render_feature_detection",
@@ -92,6 +118,6 @@ def builtins_benchmark_record_valid:
   .units == "ns_per_operation" and .descriptive_only == true and percentiles and
   (.candidate_commit | commit) and (.binary_sha256 | hash) and
   .fixture_manifest_id == "fixtures/builtins/v1/MANIFEST.tsv" and
-  (.fixture_manifest_sha256 | hash) and (.input_fixture_sha256 | hash) and
+  .fixture_manifest_sha256 == frozen_manifest_sha256 and
   (.output_sha256 | hash) and metadata and
   (if .workload_kind | render_workload then render_shape else preparation_shape end);

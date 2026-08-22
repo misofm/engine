@@ -5,10 +5,10 @@ set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v jq >/dev/null || { printf 'jq is required for benchmark validator tests\n' >&2; exit 1; }
 
-hash64="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+hash64="4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9"
 binary64="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 output64="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-manifest64="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+manifest64="bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff"
 commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
@@ -91,7 +91,9 @@ for mutation in \
   '.candidate_commit = "bad"' \
   '.binary_sha256 = "bad"' \
   '.fixture_manifest_id = "fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml"' \
+  '.fixture_manifest_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' \
   '.input_fixture_id = "fixtures/builtins/v1/MANIFEST.tsv"' \
+  '.input_fixture_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
   '.output_sha256 = "bad"' \
   '.render_errors = 1' \
   '.render_feature_detection = 1' \
@@ -110,6 +112,7 @@ preparation="$(jq '
   .total_operations=128 | .frames_per_operation=null |
   .tracks=256 | .meter_observers=56 | .meter_queue_capacity=4 |
   .input_fixture_id="fixtures/builtins/v1/benchmark/prepare_256_tracks-48000.toml" |
+  .input_fixture_sha256="0c2130e5f3563e011cc7251a4a42d27b2a84f5871a81facae49be0a5c1cf21ff" |
   .render_errors="not_applicable" | .render_allocations="not_applicable" |
   .render_deallocations="not_applicable" | .render_locks="not_applicable" |
   .render_logs="not_applicable" | .render_file_io="not_applicable" |
@@ -123,7 +126,8 @@ if jq '.meter_observers=14' <<<"$preparation" | record_valid; then
   exit 1
 fi
 
-records="$(jq -cn --argjson base "$record" '
+records="$(jq -cn -L "$script_directory" --argjson base "$record" '
+  include "builtins-benchmark-record-validator";
   ["full_chain_filters","identity_chain","matrix_ramp","meter_success_full","prepare_256_tracks"] as $kinds |
   [48000,96000] as $rates | [1,2] as $rounds |
   [$kinds[] as $kind | $rates[] as $rate | $rounds[] as $round |
@@ -132,6 +136,7 @@ records="$(jq -cn --argjson base "$record" '
     .workload_id=("issue035." + $kind + "." + ($rate | tostring) + "hz.q128") |
     .sample_rate_hz=$rate | .round=$round |
     .input_fixture_id=("fixtures/builtins/v1/benchmark/" + $kind + "-" + ($rate | tostring) + ".toml") |
+    .input_fixture_sha256=({workload_kind:$kind,sample_rate_hz:$rate} | frozen_input_sha256) |
     if $kind == "prepare_256_tracks" then
       .render_scope="not_applicable_preparation" |
       .warmup_batches=16 | .measured_batches=128 | .operations_per_batch=1 |
