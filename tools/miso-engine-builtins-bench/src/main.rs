@@ -579,18 +579,24 @@ impl RealMeterTapPlan {
             .expect("frozen real-tap render");
     }
 
-    fn drain_all(&mut self) -> Vec<MeterConsumerSnapshot> {
-        self.consumers
-            .iter_mut()
-            .map(|consumer| MeterConsumerSnapshot {
+    fn drain_all_direct(&mut self, mut consume: impl FnMut(MeterConsumerSnapshot)) -> usize {
+        assert!(
+            !audit::is_render_scope_active(),
+            "meter evidence collection must be outside render"
+        );
+        let mut count = 0;
+        for consumer in &mut self.consumers {
+            consume(MeterConsumerSnapshot {
                 handle: consumer.handle,
                 tap: consumer.tap,
                 snapshot: consumer
                     .consumer
                     .try_pop()
                     .expect("one completed window per real tap"),
-            })
-            .collect()
+            });
+            count += 1;
+        }
+        count
     }
 }
 
@@ -624,8 +630,8 @@ impl RealMeterTapRuntime {
         let mut success = RealMeterTapPlan::bind(pair.success, pcm.clone());
         let mut full = RealMeterTapPlan::bind(pair.full, pcm.clone());
         success.render(0);
-        let prefill_success = success.drain_all();
-        assert_eq!(prefill_success.len(), OBSERVERS, "frozen success prefill");
+        let prefill_success = success.drain_all_direct(|_| {});
+        assert_eq!(prefill_success, OBSERVERS, "frozen success prefill");
         full.render(0);
         Self {
             success,
@@ -643,25 +649,44 @@ impl RealMeterTapRuntime {
 
     fn render_one(&mut self, first_sample: u64) {
         self.success.render(first_sample);
-        for record in self.success.drain_all() {
-            self.output.update(b"success");
-            hash_meter_snapshot(&mut self.output, record);
-        }
         self.full.render(first_sample);
+    }
+
+    fn collect_operation_evidence(&mut self, retain: bool) -> usize {
+        assert!(
+            !audit::is_render_scope_active(),
+            "meter drain and hashing must be outside render"
+        );
+        let output = &mut self.output;
+        let success_taps = self.success.drain_all_direct(|record| {
+            if retain {
+                output.update(b"success");
+                hash_meter_snapshot(output, record);
+            }
+        });
         self.full_drop_attempts = self
             .full_drop_attempts
             .checked_add(1)
             .expect("bounded full/drop operation count");
-        for value in self.success.pcm.iter().chain(&self.full.pcm) {
-            self.output.update(value.to_bits().to_le_bytes());
+        if retain {
+            for value in self.success.pcm.iter().chain(&self.full.pcm) {
+                self.output.update(value.to_bits().to_le_bytes());
+            }
         }
+        success_taps
     }
 
     fn output_sha256(&mut self) -> String {
-        for record in self.full.drain_all() {
-            self.output.update(b"full");
-            hash_meter_snapshot(&mut self.output, record);
-        }
+        assert!(
+            !audit::is_render_scope_active(),
+            "final meter evidence must be outside render"
+        );
+        let output = &mut self.output;
+        let full_taps = self.full.drain_all_direct(|record| {
+            output.update(b"full");
+            hash_meter_snapshot(output, record);
+        });
+        assert_eq!(full_taps, OBSERVERS, "frozen full tap count");
         self.output.update(b"full_drop_attempts_before");
         self.output
             .update(self.measurement_start_full_drop_attempts.to_le_bytes());
@@ -796,11 +821,14 @@ fn main() {
         fixture_sha256, INPUT_MANIFEST_SHA256,
         "frozen fixture manifest"
     );
+    eprintln!("MISO_BUILTINS_BENCH_PHASE workload_started");
     let mut render_states = prepare_render_round_states();
     for rate_hz in RATES {
         warmup_prepare(rate_hz);
     }
-    for plan in measured_record_plans() {
+    eprintln!("MISO_BUILTINS_BENCH_PHASE warmup_complete");
+    eprintln!("MISO_BUILTINS_BENCH_PHASE timed_started");
+    for (index, plan) in measured_record_plans().into_iter().enumerate() {
         let measurement = if plan.workload.is_prepare() {
             measure_prepare(plan.rate_hz)
         } else {
@@ -822,6 +850,9 @@ fn main() {
                 &measurement
             )
         );
+        if (index + 1) % (WORKLOADS.len() * RATES.len()) == 0 {
+            eprintln!("MISO_BUILTINS_BENCH_PHASE round_{}_complete", plan.round);
+        }
     }
 }
 
@@ -859,9 +890,11 @@ fn measure_render(runtime: &mut RenderRuntime) -> Measurement {
             let logical_batch = (RENDER_WARMUP_BATCHES + batch) as u64;
             runtime.prepare_operation_input(logical_batch, operation as u64);
             let started = Instant::now();
-            runtime.run_operation(logical_batch, operation as u64);
+            runtime.run_render_operation(logical_batch, operation as u64);
+            let elapsed = started.elapsed();
+            runtime.collect_operation_evidence(true);
             batch_ns = batch_ns.saturating_add(
-                u64::try_from(started.elapsed().as_nanos()).expect("benchmark duration fits u64"),
+                u64::try_from(elapsed.as_nanos()).expect("benchmark duration fits u64"),
             );
         }
         samples_ns.push(batch_ns / OPERATIONS_PER_RENDER_BATCH as u64);
@@ -959,7 +992,8 @@ impl RenderRuntime {
         for operation in 0..OPERATIONS_PER_RENDER_BATCH {
             let operation = operation as u64;
             self.prepare_operation_input(batch, operation);
-            self.run_operation(batch, operation);
+            self.run_render_operation(batch, operation);
+            self.collect_operation_evidence(false);
         }
     }
     fn prepare_operation_input(&mut self, batch: u64, operation: u64) {
@@ -967,16 +1001,6 @@ impl RenderRuntime {
             let first_sample = operation_first_sample(batch, operation);
             self.input
                 .fill(&mut self.left, &mut self.right, first_sample);
-        }
-    }
-    fn run_operation(&mut self, batch: u64, operation: u64) {
-        audit::in_render_scope(|| self.render_one(batch, operation));
-    }
-    fn render_one(&mut self, batch: u64, operation: u64) {
-        let first_sample = operation_first_sample(batch, operation);
-        if let Some(meter_runtime) = &mut self.meter_runtime {
-            meter_runtime.render_one(first_sample);
-            return;
         }
         if matches!(self.workload, Workload::MatrixRamp) {
             let target = matrix_target_for_operation(
@@ -988,15 +1012,37 @@ impl RenderRuntime {
                 .set_matrix_target(target)
                 .expect("frozen matrix target");
         }
+    }
+    fn run_render_operation(&mut self, batch: u64, operation: u64) {
+        audit::in_render_scope(|| self.render_product(batch, operation));
+    }
+    fn render_product(&mut self, batch: u64, operation: u64) {
+        let first_sample = operation_first_sample(batch, operation);
+        if let Some(meter_runtime) = &mut self.meter_runtime {
+            meter_runtime.render_one(first_sample);
+            return;
+        }
         self.chain
             .process_dual_mono(
                 DualMonoBlock::new(&mut self.left, &mut self.right, first_sample)
                     .expect("fixed block"),
             )
             .expect("frozen process");
-        for value in self.left.iter().chain(&self.right) {
-            self.output.update(value.to_bits().to_le_bytes());
+    }
+    fn collect_operation_evidence(&mut self, retain: bool) -> usize {
+        assert!(
+            !audit::is_render_scope_active(),
+            "PCM and meter evidence must be outside render"
+        );
+        if let Some(meter_runtime) = &mut self.meter_runtime {
+            return meter_runtime.collect_operation_evidence(retain);
         }
+        if retain {
+            for value in self.left.iter().chain(&self.right) {
+                self.output.update(value.to_bits().to_le_bytes());
+            }
+        }
+        0
     }
     fn output_sha256(&mut self) -> String {
         if let Some(meter_runtime) = &mut self.meter_runtime {
@@ -1932,6 +1978,60 @@ mod tests {
     }
 
     #[test]
+    fn all_render_workloads_arm_only_product_render_without_timing() {
+        audit::warm_up();
+        for workload in [
+            Workload::FullChainFilters,
+            Workload::IdentityChain,
+            Workload::MatrixRamp,
+            Workload::MeterSuccessFull,
+        ] {
+            for rate_hz in RATES {
+                let mut rounds = [
+                    RenderRuntime::new(workload, rate_hz),
+                    RenderRuntime::new(workload, rate_hz),
+                ];
+                for batch in 0..RENDER_WARMUP_BATCHES {
+                    for runtime in &mut rounds {
+                        runtime.run_batch(batch as u64);
+                    }
+                }
+
+                let mut first_output = None;
+                for runtime in &mut rounds {
+                    runtime.begin_measurement();
+                    audit::reset();
+                    let logical_batch = RENDER_WARMUP_BATCHES as u64;
+                    runtime.prepare_operation_input(logical_batch, 0);
+                    assert!(!audit::is_render_scope_active());
+                    runtime.run_render_operation(logical_batch, 0);
+                    assert!(!audit::is_render_scope_active());
+                    assert_eq!(audit::snapshot(), audit::AuditSnapshot::default());
+
+                    let success_taps = runtime.collect_operation_evidence(true);
+                    assert_eq!(audit::snapshot(), audit::AuditSnapshot::default());
+                    if let Some(meter) = &runtime.meter_runtime {
+                        assert_eq!(success_taps, OBSERVERS);
+                        assert_eq!(
+                            meter.full_drop_attempts,
+                            meter.measurement_start_full_drop_attempts + 1
+                        );
+                    } else {
+                        assert_eq!(success_taps, 0);
+                    }
+
+                    let output = runtime.output_sha256();
+                    if let Some(first) = &first_output {
+                        assert_eq!(&output, first, "identically warmed round state");
+                    } else {
+                        first_output = Some(output);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
         for plan in measured_record_plans() {
             let input = input_fixture(plan.workload, plan.rate_hz);
@@ -1981,29 +2081,23 @@ mod tests {
 
         full.render(0);
         full.render(QUANTUM as u64);
-        let full_windows = full.drain_all();
-        assert!(
-            full_windows
-                .iter()
-                .all(|record| record.snapshot.end_sample == QUANTUM as u64
-                    && record.snapshot.reset_generation == 7)
-        );
+        let full_windows = full.drain_all_direct(|record| {
+            assert_eq!(record.snapshot.end_sample, QUANTUM as u64);
+            assert_eq!(record.snapshot.reset_generation, 7);
+        });
+        assert_eq!(full_windows, OBSERVERS);
         full.render(QUANTUM as u64 * 2);
-        let post_drop = full.drain_all();
-        assert!(
-            post_drop
-                .iter()
-                .all(|record| record.snapshot.cumulative_dropped_snapshots == 1)
-        );
+        let post_drop = full.drain_all_direct(|record| {
+            assert_eq!(record.snapshot.cumulative_dropped_snapshots, 1);
+        });
+        assert_eq!(post_drop, OBSERVERS);
 
         success.render(QUANTUM as u64);
-        let success_windows = success.drain_all();
-        assert!(
-            success_windows
-                .iter()
-                .all(|record| record.snapshot.end_sample == QUANTUM as u64 * 2
-                    && record.snapshot.reset_generation == 7)
-        );
+        let success_windows = success.drain_all_direct(|record| {
+            assert_eq!(record.snapshot.end_sample, QUANTUM as u64 * 2);
+            assert_eq!(record.snapshot.reset_generation, 7);
+        });
+        assert_eq!(success_windows, OBSERVERS);
     }
 
     #[test]

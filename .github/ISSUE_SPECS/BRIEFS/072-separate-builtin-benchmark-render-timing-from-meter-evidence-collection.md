@@ -2,9 +2,10 @@
 
 ## Decision and attempt budget
 
-**SOL XHIGH REBRIEF PASS / READY FOR SOL HIGH PASS 1; ZERO EXECUTION AUTHORIZATION.** Permit one
-Sol High implementation pass and, after one Sol XHigh HOLD only, one bounded Sol High correction.
-Sol XHigh adversarially verifies both; a second HOLD stops. Issue-072 counters start at
+**PASS-2 STRICT SOL XHIGH FOCUSED PASS / CHECKPOINT COMMIT AUTHORIZED; ZERO EXECUTION
+AUTHORIZATION.** The issue permitted one Sol High implementation pass and, after one Sol XHigh
+HOLD, one bounded Sol High correction. Sol XHigh adversarially verified both; a second HOLD would
+have stopped the issue. Issue-072 counters remain
 `preflight_invocations=0`, `runner_invocations=0`, `workload_invocations=0`, and
 `timed_benchmark_invocations=0`. Issue 058's consumed `1/1/1` run remains immutable history.
 
@@ -12,6 +13,18 @@ The refreshed clean input is `main` commit `c0eb5c5cb438e7a3b3cdaea30370812e09d8
 `43c6fd994d798fa93576abcda9a9a2eda3198bfe`, and `Cargo.lock`
 `4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`.
 `target/issue72` is absent. This rebrief authorizes no preflight, main, runner, workload or timing.
+
+Sol High pass 1 produced a focused-green live tranche. Sol XHigh returned one bounded HOLD because
+the runner validated the preflight seal's shape but did not independently bind every source, lock
+and input authority or the complete nonbenchmark seal. Sol High pass 2 now recomputes and compares
+all authorities before raw creation, with direct and tandem seal-replacement lifecycle mutations.
+The untimed audited regression covers every render workload at both frozen rates and both
+independently prepared/warmed round states; package, validator/lifecycle-fake, locked workspace,
+fixture and policy gates pass. Retained Issue-058 artifacts remain exact and `target/issue72`
+remains absent. Current Issue-072 preflight/runner/workload/timed counters are still `0/0/0/0`.
+Sol XHigh's pass-2 re-review returns **STRICT SOL XHIGH FOCUSED PASS** and authorizes root to commit
+the exact six-path checkpoint. The nonbenchmark seal has not been created, and no preflight,
+benchmark main, runner, workload or timing command is authorized.
 
 ## Smallest correction
 
@@ -167,5 +180,6 @@ disposition, zero render audit violations, Issue-072 preflight/runner/workload/t
 counters `1/1/1/1`, unchanged
 Issue-058 artifacts, and no threshold or tuning claim. It unblocks exact title
 **Issue-007 builtin filter and matrix human listening qualification** and the release chain; it
-does not complete listening or release qualification. This rebrief is READY only for Sol High pass
-1; it grants no preflight or runner authority.
+does not complete listening or release qualification. This brief records only the pass-2 strict
+focused checkpoint PASS: checkpoint commit is authorized, while seal creation, preflight, benchmark
+main, runner, workload and timing remain unauthorized.

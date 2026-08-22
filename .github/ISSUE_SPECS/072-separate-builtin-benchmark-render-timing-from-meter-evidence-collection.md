@@ -2,7 +2,8 @@
 
 ## Sol briefing checkpoint — 2026-08-22
 
-**SOL XHIGH REBRIEF PASS / READY FOR SOL HIGH PASS 1; NO PREFLIGHT OR WORKLOAD IS AUTHORIZED.**
+**PASS-2 STRICT SOL XHIGH FOCUSED PASS / CHECKPOINT COMMIT AUTHORIZED; ZERO EXECUTION
+AUTHORIZATION.**
 The authoritative brief is
 `BRIEFS/072-separate-builtin-benchmark-render-timing-from-meter-evidence-collection.md`. This
 stateless successor permits one Sol High implementation pass and, only after a Sol XHigh HOLD, one
@@ -18,6 +19,20 @@ The refreshed clean baseline is `main` commit
 `4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`.
 `target/issue72` is absent. This docs checkpoint authorizes no preflight, benchmark main, runner,
 workload or timing command.
+
+Sol High pass 1 implemented the render-only audit/timer boundary and successor lifecycle. Sol XHigh
+returned one bounded HOLD because the runner did not independently compare every preflight
+source/lock/input authority or validate the complete nonbenchmark seal. Sol High pass 2 corrects
+that boundary before raw creation and adds direct plus tandem replacement mutations with zero fake
+launches. The focused untimed audited regression passes for all four render workloads, both frozen
+rates and both independently prepared/warmed round states; the benchmark package's 9 tests, locked
+check, warning-denied Clippy/rustdoc, frozen validator/lifecycle fakes, fixture/policy gates and
+locked nonbenchmark workspace check/tests pass. The five retained Issue-058 files still have the
+exact sizes, one-link state and hashes below, both forbidden files remain absent, and
+`target/issue72` remains absent. Issue-072 preflight/runner/workload/timed counters remain
+`0/0/0/0`. Sol XHigh's pass-2 re-review returns **STRICT SOL XHIGH FOCUSED PASS** and authorizes
+root to commit the exact six-path checkpoint. The nonbenchmark seal has not been created, and no
+preflight, benchmark main, runner, workload or timing command is authorized.
 
 ## Outcome
 
