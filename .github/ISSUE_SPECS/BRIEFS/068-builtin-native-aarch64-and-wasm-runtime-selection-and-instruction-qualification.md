@@ -2,9 +2,8 @@
 
 ## Decision and attempt budget
 
-**READY only after exact-title PASS of Builtin prepared-chain and graph realtime audit proof
-closure.** Consume
-that exact clean candidate. Permit one Terra implementation attempt and one bounded Sol
+**READY only after exact-title PASS of Quiescent builtin graph retirement-worker trace closure.**
+Consume that exact clean candidate and its preserved Issue-069 direct/functional evidence. Permit one Terra implementation attempt and one bounded Sol
 correction/review; a second failure stops. This issue performs no audit million-run, functional
 workload, benchmark, timing, device run, browser run or listening. Both
 `workload_invocations` and `timed_benchmark_invocations` start and remain zero.
@@ -119,12 +118,12 @@ opcode validation.
 Stop on a dirty or changing candidate, stale/ambiguous object, missing target/toolchain,
 unavailable mandatory native AVX2/FMA host, selection mismatch, four-rate numerical mismatch,
 unexpected opcode/fusion, cross-target execution claim, corpus change or second failed attempt.
-Do not repair DSP, regenerate fixtures, add a target abstraction, run #69 audits, touch benchmark
+Do not repair DSP, regenerate fixtures, add a target abstraction, run #69/#70 audits, touch benchmark
 or listening tools, or broaden into host adapters.
 
 ## Required evidence and verdict
 
-Record the Issue-069 PASS commit/audit identities; candidate commit; before/after source-manifest
+Record the Issue-070 PASS commit and preserved Issue-069 audit identities; candidate commit; before/after source-manifest
 and `Cargo.lock` hashes; unique scratch basename; the three frozen corpus hashes; 16 selection rows;
 four correctness-row hashes; target triples/features/tool versions; per-leg object and symbol hashes;
 exact command outcomes; Terra/Sol attempt count; strict PASS/FAIL; `workload_invocations=0`; and

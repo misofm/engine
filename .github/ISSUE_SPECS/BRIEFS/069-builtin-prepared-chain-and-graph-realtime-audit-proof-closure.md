@@ -2,11 +2,11 @@
 
 ## Decision and attempt budget
 
-**READY.** Consume the stopped Issue-057 checkpoint `376774f` only as technical input and the
-Issue-064 corpus as immutable accepted input. Permit one Terra attempt and one bounded Sol
-correction/review; a second failure stops. This issue executes non-timed correctness/realtime
-audits only. Benchmark, preflight, workload, timing, target and instruction invocations remain
-zero.
+**STOPPED / RESCOPED.** Both attempts are consumed. Checkpoint `5ce93c0` preserves the accepted
+direct trace, fixtures and graph functional million record only as technical input; the graph
+all-TID trace failed because retirement-worker startup/blocking syscalls overlapped an armed
+interval. **Quiescent builtin graph retirement-worker trace closure** owns that sole remaining
+audit-harness blocker. Issue 069 has no overall PASS and may not be retried.
 
 ## Smallest legal seam
 

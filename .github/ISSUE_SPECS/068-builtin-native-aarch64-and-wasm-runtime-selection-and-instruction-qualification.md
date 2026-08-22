@@ -7,8 +7,8 @@ backend-selection and instruction matrix without executing a benchmark.
 
 ## Context
 
-This issue starts only after **Builtin prepared-chain and graph realtime audit proof closure** passes and consumes
-that exact candidate, sealed corpus and audit evidence. It permits exactly one Terra attempt and
+This issue starts only after **Quiescent builtin graph retirement-worker trace closure** passes and consumes
+that exact candidate plus the preserved Issue-069 direct/functional evidence and sealed corpus. It permits exactly one Terra attempt and
 one bounded Sol correction/review; a second failure stops. Launch sample rates are exactly 44,100,
 48,000, 88,200 and 96,000 Hz. Workload, benchmark and timing invocations are forbidden and remain
 zero.
@@ -51,7 +51,7 @@ framework; benchmark/preflight/workload/timing; performance claims; listening; o
 
 ## Dependencies by exact issue title
 
-- Builtin prepared-chain and graph realtime audit proof closure
+- Quiescent builtin graph retirement-worker trace closure
 - Bootstrap Rust workspace and target matrix
 - Production SIMD builtin bank graph retention and reachability qualification
 
@@ -83,7 +83,7 @@ the native correctness evidence; cross-compilation alone makes no device-runtime
 
 ## Required evidence
 
-Exact Issue-069 candidate/audit/corpus identities; before/after source and `Cargo.lock` seals;
+Exact Issue-070 PASS candidate plus preserved Issue-069 audit/corpus identities; before/after source and `Cargo.lock` seals;
 unique scratch identity; four-rate rows; 16-row selection matrix; target/build and named-instruction
 transcripts; strict Terra/Sol verdicts; `workload_invocations=0` and
 `timed_benchmark_invocations=0`.

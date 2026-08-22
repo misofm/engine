@@ -6,7 +6,8 @@ Close the launch-critical 48-kHz/q128 builtin realtime proof with exact function
 prepared chain, the production graph and the A/B/C plan lifecycle, without changing DSP or the
 accepted Issue-064 corpus.
 
-**Status: STOPPED after the final Sol correction. No overall PASS.**
+**Status: STOPPED / RESCOPED after the final Sol correction. No overall PASS. Successor:
+Quiescent builtin graph retirement-worker trace closure.**
 
 ## Context
 
@@ -232,3 +233,12 @@ disclosed because the final brief prohibited retries. Gate 5 is red; Gate 6 and 
 seal are consequently incomplete. Issue 069 has no PASS and does not unblock Issue 068.
 
 `workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
+
+## Post-stop successor decision
+
+Checkpoint `5ce93c0` is accepted only as technical input. **Quiescent builtin graph
+retirement-worker trace closure** owns the sole remaining launch blocker: replace the audit-only
+blocking retirement command path with a prestarted, readiness-proved, syscall-quiescent
+move-SPSC/atomic handoff, then run exactly one graph all-TID trace without rerunning the accepted
+direct trace. It may not change production engine/DSP/API behavior, fixtures, functional graph
+counts or validator semantics. Issue 069 remains stopped and has no overall PASS.
