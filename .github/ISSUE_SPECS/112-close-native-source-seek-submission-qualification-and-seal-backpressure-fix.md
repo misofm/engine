@@ -6,10 +6,11 @@ Close the sole test-only synchronization defect left by stopped Issue 101, prese
 pending-seek production bytes and semantics, then run one fresh clean broad nonbenchmark seal on the
 successor candidate.
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1 / NO PRODUCT OR REAL WORKLOAD CHANGE.** Sol
-High implements. Sol XHigh briefs and adversarially verifies. The budget is one focused pass plus at
-most one bounded HOLD correction before the seal. A second HOLD, any product change or any failure
-of the sole successor broad seal is terminal STOP/rescope.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** Sol High implemented one focused pass and its sole
+bounded HOLD correction; Sol XHigh adversarially verified both and the one authorized broad
+nonbenchmark seal. No product behavior, public/resource shape or real workload changed. Issue 073
+is unblocked by this local acceptance; root still owns upstream evidence synchronization and remote
+closure.
 
 Remote read-only inspection on 2026-08-22 found no Issue 112, so the number is available. Root owns
 creation and synchronization under the exact title `112 Close native-source seek submission
@@ -108,9 +109,9 @@ workspace doctests; warning-denied workspace all-target/all-feature Clippy and r
 policy baselines/mutations; and clean/static/diff scans. Benchmark targets and ignored/manual tests
 are not executed. The first nonzero exit stops the seal. There is no retry under Issue 112.
 
-Initial Issue-112 broad-seal invocation count is zero. Real source workload, benchmark, timing,
-fuzz, playback and listening invocation counts are also zero and must remain zero. No persistent
-`target/issue112` artifact or execution namespace is required.
+Before seal authorization, the Issue-112 broad-seal invocation count was zero. Real source
+workload, benchmark, timing, fuzz, playback and listening invocation counts were also zero and had
+to remain zero. No persistent `target/issue112` artifact or execution namespace was required.
 
 ## Allowed paths and deferred work
 
@@ -128,3 +129,55 @@ No Issue-073 runner/provider/platform implementation begins here.
 Issue 112 passes only if Sol XHigh verifies the deterministic explicit-submit test evidence and the
 sole fresh broad nonbenchmark seal completes on one clean immutable candidate. Focused green alone
 is not overall PASS. No benchmark, performance, workload or human claim is possible.
+
+## Final implementation and acceptance evidence (2026-08-22)
+
+Sol High pass 1 changed only the test/test-support portion of
+`crates/miso-engine-source/src/native_source.rs`. It replaced the coalescing test's final snapshot
+readiness proxy with the audit-gate acknowledgements and added nonvacuous source checks for all four
+nonzero continuation reads. One default-parallel focused run stalled for more than 60 seconds and
+was interrupted. Although later serial and default-parallel runs passed, Sol XHigh returned the
+sole bounded HOLD: assertions executed while the audit gate held the worker, so assertion unwind
+could block in worker drop/join and mask a mismatch as that observed hang.
+
+The correction captured every held-risk read/report, released the corresponding hold, and only then
+evaluated assertions. Its static rows cover the single-seek initial, while-held and first-block
+reads plus the coalescing while-pending and latest-block reads; the original readiness rows still
+require a gate acknowledgement immediately before each of the four nonzero reads. During the
+correction, a first default-parallel run passed 35/35, then a serial run exposed generation-2 PCM
+`[8, 9, 10, 11]` occupying the second transfer slot instead of the intended zero. The final test
+uses the exact valid one-quantum `frame_capacity = 4`: the sole old block is discarded, the
+generation-2 boundary read is deterministically zero with exact stale count one, and held/resumed
+acknowledgements prove generation-4 frames 20 and 24 before their reads. The final exact selector
+passed 1/1 and the all-feature source suite passed 35/35 in both default-parallel and serial modes.
+Format, locked source check, warning-denied Clippy/rustdoc and workspace/realtime policy baselines
+and mutations passed. Sol XHigh then issued strict focused PASS.
+
+The committed clean candidate is `1ed2634ea8fed79e0ededcdf931cdc831a1e5daf`, tree
+`75fdc11e7aa543be8c5102a57a58466bb324e050`. Its frozen identities are:
+
+| Authority | SHA-256 |
+| --- | --- |
+| `crates/miso-engine-source/src/native_source.rs` | `f969d2a6175643e6b8b9f1aec14a09aeec6c950dbdea5136a7248679406e3770` |
+| production/test-support prefix, lines 1–1350 before `#[cfg(test)]` | `68d6d7bb4d7880de7ba552a2bb34cb5a5e93fa25ae8cd15375b9423b7c41c363` |
+| `crates/miso-engine-source/src/lib.rs` | `b11e3c77f603156184c4f0b43832e7d68f13e03f7f92b82d8b6710ed91f15852` |
+| `Cargo.lock` | `4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a` |
+
+Root authorized and executed the sole broad nonbenchmark seal on that immutable candidate. In
+order, format and locked workspace all-target/all-feature check passed; exact command
+`CARGO_BUILD_JOBS=1 cargo test --workspace --all-features --locked --lib --bins --tests --examples`
+passed 569 tests, failed 0 and retained 8 expected ignored/manual rows across 87 result groups;
+workspace doctests passed 8/0 across 29 groups; warning-denied workspace all-target/all-feature
+Clippy and warning-denied workspace all-feature rustdoc passed; workspace and realtime policy
+baselines/mutations passed; syntax validation passed for 111 shell scripts; and final clean
+HEAD/tree/index/worktree, conflict-marker, trailing-whitespace and artifact scans passed. Preserved
+transcript hashes are:
+
+- workspace tests: `70ae09e114b689adcd571693535d53f52ff55866195f049b894bb4ef6fa8fff7`;
+- doctests: `b1ffbb94781a64ae28451b70f9ceaf771da5a9fbebbfeef77571d13611236e79`.
+
+Issue 101's historical 543-pass/1-fail/8-ignored seal remains strict FAIL and was not retried or
+reclassified. Issue-112 broad-seal invocation count is exactly one. Real source workload,
+benchmark, timing, fuzz, audio/playback, listening, browser-main and audit-main invocation counts
+are all exactly zero. No execution artifact was created. **FINAL SOL XHIGH PASS / COMPLETE / READY
+TO CLOSE.** The accepted route is now `043 -> 101 (stopped technical input) -> 112 (PASS) -> 073`.
