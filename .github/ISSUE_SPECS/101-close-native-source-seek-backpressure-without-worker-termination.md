@@ -7,10 +7,9 @@ worker must retain a provider seek that encounters the already-full one-slot ren
 coalesce later accepted worker-local seeks deterministically, and continue running rather than
 terminating with `NativeSourceWorkerExit::SeekFailed(SourceSeekError::Backpressure)`.
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1 / NO WORKLOAD, BENCHMARK OR TIMING
-AUTHORIZED.** Sol High implements. Sol XHigh briefs and adversarially verifies. The budget is one
-focused implementation pass plus at most one bounded HOLD correction; a second HOLD is terminal
-STOP/rescope.
+**STOPPED / SECOND SOL XHIGH HOLD / NO OVERALL PASS.** Sol High completed one focused pass and the
+sole bounded correction; Sol XHigh adversarially reviewed both. The correction budget is exhausted.
+No further Issue-101 implementation or seal retry is authorized.
 
 The local briefing baseline is clean `main` commit `e1fbbb65`, tree `d35388fc`. Remote Issue 101 is
 OPEN under the audit title `101 Audit: miso-engine-source (worker lifecycle bug, spin, decoder)`.
@@ -24,9 +23,11 @@ This record claims no Git or GitHub mutation.
   sole direct dependency.
 
 Stopped Issue 010, **JIT PCM streaming and host-supplied source rings**, is transitive historical
-input through accepted Issue 043, not a PASS dependency. After Issue 101 passes, Issue 073,
-**Native PCM reference runner and C ABI qualification**, may consume the corrected native-source
-worker. The exact route is `043 -> 101 -> 073`.
+input through accepted Issue 043, not a PASS dependency. Issue 101 stopped with useful technical
+bytes but no PASS. Issue 112, **Close native-source seek submission qualification and seal
+backpressure fix**, owns the remaining test-only submission synchronization and fresh seal before
+Issue 073, **Native PCM reference runner and C ABI qualification**. The exact route is
+`043 -> 101 (stopped) -> 112 -> 073`.
 
 ## Frozen current defect
 
@@ -157,7 +158,48 @@ owner before implementation; none may be smuggled into Issue 101.
 
 ## Readiness decision
 
-The defect is live, reproducible from the existing bounded queues, independent of external input,
-and closable without public or resource-shape changes. **SOL XHIGH READINESS PASS / READY FOR SOL
-HIGH PASS 1.** This docs-only decision authorizes no product edit until root commits the exact docs
-checkpoint and synchronizes the issue workflow.
+The original briefing found the defect live, reproducible and bounded, but the issue did not close
+its qualification evidence within the frozen two-pass budget. **TERMINAL SOL XHIGH HOLD / STOP / NO
+OVERALL PASS.** Issue 112 alone may consume the technical checkpoint and close the remaining
+test-only synchronization; Issue 101 authorizes no further edit or execution.
+
+## Terminal implementation and seal evidence (2026-08-22)
+
+Sol High pass 1 produced the one-file pending-seek correction. Sol XHigh's focused review returned
+strict focused PASS: the private `PendingSeek`, bounded greatest-generation coalescing, retained
+nonterminal provider backpressure, provider-admission-before-decode ordering, exact-frame resume and
+unchanged public/resource surface were coherent. This focused verdict authorized a checkpoint, not
+overall acceptance.
+
+The first and sole authorized broad seal used clean candidate `dfdefff`, tree `49f03a`. Format and
+the locked workspace all-target/all-feature check passed. The locked workspace all-feature
+nonbenchmark test selector then stopped at
+`single_worker_seek_resumes_contiguously_at_the_exact_frame`: the second read returned positive
+zeros instead of `[16, 17, 18, 19]`. The preserved aggregate was 543 passed, 1 failed and 8 ignored;
+the source package was 33 passed and 1 failed. Later broad gates did not run. The candidate remained
+clean and unchanged, and the broad seal was recorded as strict FAIL without retry.
+
+The failure did not establish a production defect. The test's `sync_worker` helper waited for a
+`SnapshotSanitation` event, but the worker emits that event during command observation before the
+later decode/submission in the same turn. Snapshot return therefore was not a PCM-readiness
+barrier.
+
+The sole bounded test-only correction was committed as `02bec81`. Its complete
+`crates/miso-engine-source/src/native_source.rs` SHA-256 is
+`d8fd1762702a5b75a2943b8b99a45724e67afb7a82e5f63bff4f8bcb3f8aa98a` (2,677 lines,
+103,232 bytes). `NativeWorkerAuditGate::release_and_wait` became repeatable only after consuming its
+resumed acknowledgement, and the failing single-seek test used two explicit submit handshakes.
+Focused all-feature source tests passed 34/34 with format, locked check, warning-denied Clippy and
+rustdoc. Frozen `crates/miso-engine-source/src/lib.rs` remained
+`b11e3c77f603156184c4f0b43832e7d68f13e03f7f92b82d8b6710ed91f15852`; `Cargo.lock` remained
+`4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`.
+
+Final Sol XHigh review found the same false readiness primitive still at the coalescing test's final
+frame-24 read: one `sync_worker` snapshot could return before `[24, 25, 26, 27]` was decoded and
+submitted. A single green focused run could not close that scheduler race. This was the second HOLD
+and made Issue 101 terminal STOP. The `d8fd1762...` file is useful technical input, not accepted
+product or qualification authority.
+
+Real source workload, benchmark, timing, fuzz, audio-playback and listening invocation counts all
+remain exactly zero. No product failure is claimed, no broad retry occurred, and Issue 101 is not a
+dependency PASS for Issue 073.
