@@ -1,4 +1,4 @@
-//! Frozen issue-007 benchmark emitter. The runner is the sole authorized timing entrypoint.
+//! Frozen issue-035 benchmark emitter. The runner is the sole authorized timing entrypoint.
 
 #![allow(unsafe_code)]
 
@@ -13,9 +13,17 @@ use miso_engine_builtins::{
     MeterHandle, MeterTap, PreparedMeter,
 };
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
+use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
+use miso_engine_graph::GraphCompileCaps;
+use miso_engine_graph_compiler::{
+    GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+};
 use miso_engine_session::{
-    CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml,
+    CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
+    parse_session_toml,
 };
 use sha2::{Digest, Sha256};
 
@@ -29,6 +37,7 @@ const PREPARE_WARMUP_BATCHES: usize = 16;
 const PREPARE_MEASURED_BATCHES: usize = 128;
 const PREPARE_TRACKS: usize = 256;
 const OBSERVERS: usize = 7;
+const ISSUE: u32 = 35;
 const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANIFEST.tsv");
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
@@ -111,6 +120,150 @@ struct Measurement {
     output_sha256: String,
     shape: WorkloadShape,
     audit: Option<audit::AuditSnapshot>,
+}
+
+/// Two independently prepared graph artifacts for the frozen meter success/full workload.
+///
+/// This is intentionally only a preparation foundation in this checkpoint. The later runtime
+/// owns the separately bound plans, pre-fills only the capacity-one plan off timing, and drains
+/// both plans through their compiler-owned consumers.
+#[allow(dead_code)]
+struct RealMeterTapArtifactPair {
+    success: PreparedGraphBuiltinsArtifact,
+    full: PreparedGraphBuiltinsArtifact,
+}
+
+#[allow(dead_code)]
+fn prepare_real_meter_tap_artifacts(rate_hz: u32) -> RealMeterTapArtifactPair {
+    RealMeterTapArtifactPair {
+        success: prepare_real_meter_tap_artifact(rate_hz, 4, 35_001),
+        full: prepare_real_meter_tap_artifact(rate_hz, 1, 35_002),
+    }
+}
+
+#[allow(dead_code)]
+fn prepare_real_meter_tap_artifact(
+    rate_hz: u32,
+    queue_capacity: usize,
+    plan_id: u64,
+) -> PreparedGraphBuiltinsArtifact {
+    let mut model = parse_session_toml(SESSION).expect("frozen benchmark session");
+    model.sample_rate_hz = rate_hz;
+    model.sources[0].sample_rate_hz = rate_hz;
+    model.automation.clear();
+    let mut delay = model.tracks[0].dynamic.effects[0].clone();
+    delay.identity = EffectIdentity::Native {
+        effect_id: StableId::parse("conformance.delay").expect("frozen effect ID"),
+    };
+    delay.params.clear();
+    delay.id = StableId::parse("benchmark-simd1-delay").expect("frozen effect ID");
+    model.tracks[0].simd1.effects = vec![delay.clone()];
+    delay.id = StableId::parse("benchmark-dynamic-delay").expect("frozen effect ID");
+    model.tracks[0].dynamic.effects = vec![delay.clone()];
+    delay.id = StableId::parse("benchmark-simd2-delay").expect("frozen effect ID");
+    model.tracks[0].simd2.effects = vec![delay];
+
+    let session = compile_session(&model, unbounded_compile_caps()).expect("frozen session");
+    let registry = NativeEffectRegistry::new([
+        Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
+    ])
+    .expect("frozen effect registry");
+    let effects = prepare_native_session_effects(&session, &registry, unbounded_effect_caps())
+        .expect("frozen effects");
+    let builtins = prepare_session_builtins(
+        &effects.session,
+        &real_meter_tap_requests(&session, queue_capacity),
+        unbounded_builtin_caps(),
+    )
+    .expect("frozen builtin tap requests");
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        plan_id,
+        effects,
+        builtins,
+        caps: unbounded_graph_caps(),
+    })
+    .unwrap_or_else(|_| panic!("frozen real-tap graph"))
+}
+
+#[allow(dead_code)]
+fn real_meter_tap_requests(
+    session: &miso_engine_session::CompiledSession,
+    queue_capacity: usize,
+) -> Vec<MeterRequest> {
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(session.quantum().0).expect("frozen quantum"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(queue_capacity).expect("frozen meter capacity"),
+        reset_generation: 35,
+    };
+    [
+        MeterTap::Input,
+        MeterTap::PostInputBuiltins,
+        MeterTap::PostSimd1,
+        MeterTap::PostDynamic,
+        MeterTap::PostSimd2PreFader,
+        MeterTap::PostFader,
+        MeterTap::PostMatrix,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, tap)| MeterRequest {
+        handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("one-based handle")),
+        track_id: "vocal".to_owned(),
+        tap,
+        config,
+    })
+    .collect()
+}
+
+const fn unbounded_compile_caps() -> CompileCaps {
+    CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_requested_runtime_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_queue_items: u64::MAX,
+        max_source_ring_frames: u64::MAX,
+        max_source_ring_bytes: u64::MAX,
+    }
+}
+
+const fn unbounded_effect_caps() -> EffectCompileCaps {
+    EffectCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_scratch_bytes: u64::MAX,
+        maximum_automation_spans_per_block: u32::MAX,
+    }
+}
+
+const fn unbounded_builtin_caps() -> BuiltinCompileCaps {
+    BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    }
+}
+
+const fn unbounded_graph_caps() -> GraphCompileCaps {
+    GraphCompileCaps {
+        maximum_nodes: 10_000,
+        maximum_edges: 10_000,
+        maximum_schedule_items: 10_000,
+        maximum_dependency_levels: 10_000,
+        maximum_audio_buffer_samples: 10_000_000,
+        maximum_delay_samples_per_edge: 1_000_000,
+        maximum_total_delay_samples: 10_000_000,
+        maximum_graph_bytes: 10_000_000,
+        maximum_plan_bytes: 100_000_000,
+        maximum_single_allocation_bytes: 10_000_000,
+        maximum_finite_tail_samples: 10_000_000,
+    }
 }
 
 fn main() {
@@ -514,8 +667,9 @@ fn record_json(
     let render_fields = match measurement.audit { Some(a) => format!("\"render_scope\":\"render\",\"render_allocations\":{},\"render_deallocations\":{},\"render_locks\":{},\"render_logs\":{},\"render_file_io\":{},\"render_network_io\":{},\"render_syscalls\":{}", a.allocations, a.deallocations, a.locks, a.logs, a.file_io, a.network_io, a.syscalls), None => "\"render_scope\":\"not_applicable_preparation\",\"render_allocations\":\"not_applicable\",\"render_deallocations\":\"not_applicable\",\"render_locks\":\"not_applicable\",\"render_logs\":\"not_applicable\",\"render_file_io\":\"not_applicable\",\"render_network_io\":\"not_applicable\",\"render_syscalls\":\"not_applicable\"".to_owned() };
     format!(
         concat!(
-            "{{\"schema_version\":2,\"issue\":7,\"workload_kind\":\"{}\",\"workload_id\":\"issue007.{}.{}hz.q128\",\"sample_rate_hz\":{},\"quantum_frames\":128,\"round\":{},\"warmup_batches\":{},\"measured_batches\":{},\"operations_per_batch\":{},\"frames_per_operation\":128,\"tracks\":{},\"meter_observers\":{},\"meter_queue_capacity\":{},\"retained_payload_bytes\":{},\"percentile_method\":\"nearest_rank\",\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p99_9_ns\":{},\"max_ns\":{},\"fixture_manifest_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"fixture_manifest_sha256\":\"{}\",\"input_fixture_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"input_fixture_sha256\":\"{}\",\"output_sha256\":\"{}\",{},\"cpu_model\":\"{}\",\"logical_cores\":\"{}\",\"os\":\"{}\",\"kernel\":\"{}\",\"governor_or_power_mode\":\"{}\",\"rust_version\":\"{}\",\"llvm_version\":\"{}\",\"target_triple\":\"{}\",\"target_features\":\"{}\",\"profile\":\"{}\",\"opt_level\":\"{}\",\"lto\":\"{}\",\"codegen_units\":\"{}\",\"background_load_note\":\"{}\",\"missing_metadata\":[{}]}}"
+            "{{\"schema_version\":2,\"issue\":{},\"workload_kind\":\"{}\",\"workload_id\":\"issue035.{}.{}hz.q128\",\"sample_rate_hz\":{},\"quantum_frames\":128,\"round\":{},\"warmup_batches\":{},\"measured_batches\":{},\"operations_per_batch\":{},\"frames_per_operation\":128,\"tracks\":{},\"meter_observers\":{},\"meter_queue_capacity\":{},\"retained_payload_bytes\":{},\"percentile_method\":\"nearest_rank\",\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p99_9_ns\":{},\"max_ns\":{},\"fixture_manifest_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"fixture_manifest_sha256\":\"{}\",\"input_fixture_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"input_fixture_sha256\":\"{}\",\"output_sha256\":\"{}\",{},\"cpu_model\":\"{}\",\"logical_cores\":\"{}\",\"os\":\"{}\",\"kernel\":\"{}\",\"governor_or_power_mode\":\"{}\",\"rust_version\":\"{}\",\"llvm_version\":\"{}\",\"target_triple\":\"{}\",\"target_features\":\"{}\",\"profile\":\"{}\",\"opt_level\":\"{}\",\"lto\":\"{}\",\"codegen_units\":\"{}\",\"background_load_note\":\"{}\",\"missing_metadata\":[{}]}}"
         ),
+        ISSUE,
         workload.kind(),
         workload.kind(),
         rate_hz,
