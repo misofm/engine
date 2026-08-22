@@ -3,7 +3,8 @@ set -euo pipefail
 root="$(cd "${1:-.}" && pwd)"
 temp="$(mktemp -d)"
 trap 'rm -rf -- "$temp"' EXIT
-cp -R "$root/crates" "$root/hosts" "$root/fixtures" "$root/scripts" "$root/docs" "$temp/"
+cp -R "$root/crates" "$root/hosts" "$root/fixtures" "$root/scripts" "$root/docs" \
+    "$root/tools" "$temp/"
 
 check() { bash "$temp/scripts/check-effect-interchange-qualification.sh" "$temp" >/dev/null; }
 expect_failure() {
@@ -50,4 +51,10 @@ cp "$root/crates/miso-engine-effect-package/src/ffi.rs" \
 sed -i 's/TRIALS: usize = 10_000/TRIALS: usize = 9_999/' \
     "$temp/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs"
 expect_failure mutation-count
+cp "$root/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs" \
+    "$temp/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs"
+
+sed -i 's/const OBSERVATIONS: usize = 256/const OBSERVATIONS: usize = 255/' \
+    "$temp/tools/miso-engine-effect-interchange-bench/src/main.rs"
+expect_failure benchmark-observations
 printf 'effect interchange qualification policy mutations: ok\n'

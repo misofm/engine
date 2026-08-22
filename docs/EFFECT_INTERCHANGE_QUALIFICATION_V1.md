@@ -86,9 +86,30 @@ mandatory.
 
 ## Lifecycle barrier and counters
 
-Checkpoint 1 builds and fake-tests qualification infrastructure only. It does not run the real
-100-process matrix, exact 30,000-trial campaign, 48-row matrix, five-target script, benchmark
-preflight, benchmark runner, benchmark workload, or timed measurement. Those invocation counters
-therefore remain zero. Benchmark tooling and its zero-launch/preflight lifecycle belong exclusively
-to checkpoint 2; the sole timed invocation requires a later clean nonbenchmark seal and explicit
-Sol XHigh authorization. No benchmark result is a performance threshold.
+Checkpoint 1 builds and fake-tests qualification infrastructure only. Checkpoint 2 adds the
+dedicated `miso-engine-effect-interchange-bench` package and its one validator, zero-launch
+preflight, public runner, and hermetic lifecycle. The no-argument binary owns exactly four workloads:
+descriptor verify/identity, package verify/CID/AVX2+FMA selection, current state verify/re-encode,
+and two-step width-four bank-member migration/restore. It freezes each output digest untimed,
+including the complete canonical final migration snapshot rather than only its opaque payload,
+performs one all-workload warmup, then emits exactly eight closed-schema records from two measured
+rounds of 256 complete observations per workload. Percentiles are nearest-rank p50/p95/p99/p99.9;
+units are `ns_per_operation`; results are descriptive only.
+
+The preflight requires a clean exact candidate and a candidate-bound nonbenchmark seal, validates a
+synthetic record and the fake lifecycle, warning-denied release-builds into a temporary target,
+atomically publishes the sealed binary and a no-clobber seal, and never executes that binary. The
+public runner revalidates every candidate/tool/source/fixture/lock identity, invokes that exact
+binary once, preserves raw output on every postlaunch failure, strictly validates eight records,
+and atomically publishes accepted output and disposition without overwrite. Regular files,
+symlinks, and hardlinks at output paths are rejected. Prelaunch failures may be corrected;
+their first append-only prelaunch disposition remains preserved in a separate path, while the sole
+final disposition is reserved for an attempted binary launch. Accepted output is an fsynced copy
+with an inode distinct from the preserved mutable raw output. Postlaunch evidence is final for the
+attempt.
+
+During both implementation checkpoints the real 100-process matrix, exact 30,000-trial campaign,
+48-row matrix, five-target script, benchmark preflight, benchmark runner, benchmark workload, and
+timed measurement remain unexecuted, so every real counter remains zero. The sole timed invocation
+requires a later clean nonbenchmark seal and explicit Sol XHigh authorization. No benchmark result
+is a performance threshold.

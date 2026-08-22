@@ -80,6 +80,15 @@ if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; 
 fi
 cp "$root/fuzz/fuzz_targets/session_parse.rs" "$temp/fuzz/fuzz_targets/session_parse.rs"
 
+printf '\nuse miso_engine_effect_package as leaked_state_package;\n' \
+    >>"$temp/tools/miso-engine-rack-bench/src/main.rs"
+if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+    printf 'effect runtime package unrelated-tool mutation escaped\n' >&2
+    exit 1
+fi
+cp "$root/tools/miso-engine-rack-bench/src/main.rs" \
+    "$temp/tools/miso-engine-rack-bench/src/main.rs"
+
 printf '\npub fn effect_state_migration_render_leak() {}\n' \
     >>"$temp/crates/miso-engine-core/src/realtime/plan.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
