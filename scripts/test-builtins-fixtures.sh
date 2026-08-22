@@ -15,7 +15,7 @@ for mutation in content manifest unlisted missing coverage; do
         manifest) printf 'broken\n' >>"$copy/fixtures/builtins/v1/MANIFEST.tsv" ;;
         unlisted) printf 'unlisted\n' >"$copy/fixtures/builtins/v1/unlisted.txt" ;;
         missing) rm "$copy/fixtures/builtins/v1/pcm/identity-signed-zero.f32le" ;;
-        coverage) sed -i '/id = "response-cascade-44100-1-0-0"/,+8d' "$copy/fixtures/builtins/v1/cases.toml" ;;
+        coverage) sed -i '/id = "response-cascade-44100-1-fixed-0"/,+8d' "$copy/fixtures/builtins/v1/cases.toml" ;;
     esac
     if bash "$root/scripts/check-builtins-fixtures.sh" "$copy" >/dev/null 2>&1; then
         printf 'builtins fixture corruption escaped: %s\n' "$mutation" >&2

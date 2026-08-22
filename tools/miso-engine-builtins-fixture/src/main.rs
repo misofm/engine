@@ -5104,23 +5104,175 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CorpusClassV1 {
+        Toml,
+        F32Le,
+        Csv,
+        MeterJsonl,
+        DiagnosticsJsonl,
+        ResourcesJsonl,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CorpusMutationV1 {
+        Delete,
+        StaleManifestByteAlteration,
+        UnlistedAdd,
+        ManifestValidSemanticHole,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CorpusRejectionV1 {
+        FixtureTree,
+        ManifestSha256,
+        CasesCoverage,
+        PcmTuple,
+        ReferenceCoverage,
+        MeterTuple,
+        DiagnosticTuple,
+        ResourceGrid,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CorpusCorruptionResultV1 {
+        class: CorpusClassV1,
+        mutation: CorpusMutationV1,
+        rejection: CorpusRejectionV1,
+    }
 
     #[test]
-    fn v1_check_accepts_complete_generated_corpus_without_writing() {
-        let root = temporary_root("valid");
-        let files = complete_files();
-        write_fixture(&root, &files);
+    fn issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability() {
+        let root = copied_checked_in_fixture_root_v1("read-only");
         let before = read_fixture_tree(&root);
 
-        check_read_only_fixture_root_v1(&root).expect("complete V1 fixture corpus");
+        run(vec![
+            "--check".to_owned(),
+            root.to_str().expect("temporary root UTF-8").to_owned(),
+        ])
+        .expect("complete V1 fixture corpus through --check dispatch");
 
         assert_eq!(
             before,
             read_fixture_tree(&root),
             "--check mutated the fixture root"
         );
+        let manifest = parse_manifest_v1(&root).expect("checked manifest");
+        assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
+        assert_eq!(
+            sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
+            "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff",
+            "accepted joined-corpus manifest identity"
+        );
+
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(
+                "[mode, root] if mode == \"--check\" => check_read_only_fixture_root_v1(Path::new(root)),"
+            ),
+            "--check dispatch must remain the read-only checker entry"
+        );
+        let checker_region = source_segment_v1(
+            source,
+            "fn check_fixture_root_v1",
+            "#[cfg(test)]\nmod tests",
+        );
+        for forbidden in [
+            "generated(",
+            "write_and_verify(",
+            "verify_generated_scratch(",
+            "graph_tap_fixtures(",
+            "graph_tap_artifact_v1(",
+            "cases()",
+            "responses()",
+            "measure_response(",
+            "diagnostics()",
+            "meters()",
+            "resources()",
+            "pcm_cases()",
+            "render_pcm(",
+            "render_matrix_ramp(",
+            "render_matrix_retarget(",
+            "render_reset(",
+            "render_reset_fixture_v1(",
+            "render_lr_isolation(",
+            "render_partition(",
+            "fixture_session(",
+            "GraphCompiler::",
+            "plan.render(",
+            "fs::write(",
+            "fs::create_dir_all(",
+            "fs::remove",
+        ] {
+            assert!(
+                !checker_region.contains(forbidden),
+                "--check reachability must exclude {forbidden}"
+            );
+        }
         remove_temporary_root(root);
+    }
+
+    #[test]
+    fn issue064_checked_corpus_rejects_exactly_twenty_four_corruptions() {
+        let classes = [
+            CorpusClassV1::Toml,
+            CorpusClassV1::F32Le,
+            CorpusClassV1::Csv,
+            CorpusClassV1::MeterJsonl,
+            CorpusClassV1::DiagnosticsJsonl,
+            CorpusClassV1::ResourcesJsonl,
+        ];
+        let mutations = [
+            CorpusMutationV1::Delete,
+            CorpusMutationV1::StaleManifestByteAlteration,
+            CorpusMutationV1::UnlistedAdd,
+            CorpusMutationV1::ManifestValidSemanticHole,
+        ];
+        let mut actual = Vec::new();
+        for class in classes {
+            for mutation in mutations {
+                let root = copied_checked_in_fixture_root_v1(&format!("{class:?}-{mutation:?}"));
+                apply_issue064_mutation_v1(&root, class, mutation);
+                if mutation == CorpusMutationV1::ManifestValidSemanticHole {
+                    let manifest = parse_manifest_v1(&root).expect("manifest-valid semantic hole");
+                    verify_manifest_bytes_v1(&root, &manifest)
+                        .expect("semantic hole must pass manifest verification first");
+                }
+                let error = check_fixture_root_v1(&root).expect_err("corruption must reject");
+                actual.push(CorpusCorruptionResultV1 {
+                    class,
+                    mutation,
+                    rejection: issue064_rejection_identity_v1(class, mutation, &error),
+                });
+                remove_temporary_root(root);
+            }
+        }
+
+        let expected: Vec<_> = classes
+            .into_iter()
+            .flat_map(|class| {
+                mutations
+                    .into_iter()
+                    .map(move |mutation| CorpusCorruptionResultV1 {
+                        class,
+                        mutation,
+                        rejection: match mutation {
+                            CorpusMutationV1::Delete | CorpusMutationV1::UnlistedAdd => {
+                                CorpusRejectionV1::FixtureTree
+                            }
+                            CorpusMutationV1::StaleManifestByteAlteration => {
+                                CorpusRejectionV1::ManifestSha256
+                            }
+                            CorpusMutationV1::ManifestValidSemanticHole => {
+                                issue064_semantic_rejection_v1(class)
+                            }
+                        },
+                    })
+            })
+            .collect();
+        assert_eq!(actual, expected, "exact 24/24 corruption result matrix");
     }
 
     #[test]
@@ -5624,5 +5776,178 @@ mod tests {
 
     fn remove_temporary_root(root: PathBuf) {
         fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    impl CorpusClassV1 {
+        const fn payload_path(self) -> &'static str {
+            match self {
+                Self::Toml => "cases.toml",
+                Self::F32Le => "pcm/identity-signed-zero.f32le",
+                Self::Csv => "reference/filter-response.csv",
+                Self::MeterJsonl => "meters/window-and-drop.jsonl",
+                Self::DiagnosticsJsonl => "diagnostics.jsonl",
+                Self::ResourcesJsonl => "resources.jsonl",
+            }
+        }
+    }
+
+    fn issue064_semantic_rejection_v1(class: CorpusClassV1) -> CorpusRejectionV1 {
+        match class {
+            CorpusClassV1::Toml => CorpusRejectionV1::CasesCoverage,
+            CorpusClassV1::F32Le => CorpusRejectionV1::PcmTuple,
+            CorpusClassV1::Csv => CorpusRejectionV1::ReferenceCoverage,
+            CorpusClassV1::MeterJsonl => CorpusRejectionV1::MeterTuple,
+            CorpusClassV1::DiagnosticsJsonl => CorpusRejectionV1::DiagnosticTuple,
+            CorpusClassV1::ResourcesJsonl => CorpusRejectionV1::ResourceGrid,
+        }
+    }
+
+    fn copied_checked_in_fixture_root_v1(label: &str) -> PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/builtins/v1");
+        let root = temporary_root(label);
+        fs::create_dir_all(&root).expect("copied fixture root");
+        for path in list_files(&source).expect("checked fixture file list") {
+            let destination = root.join(&path);
+            fs::create_dir_all(destination.parent().expect("fixture parent"))
+                .expect("copied fixture directory");
+            fs::copy(source.join(&path), destination).expect("copied fixture payload");
+        }
+        fs::copy(source.join("MANIFEST.tsv"), root.join("MANIFEST.tsv"))
+            .expect("copied fixture manifest");
+        assert_eq!(list_files(&root).expect("copied file list").len(), 50);
+        root
+    }
+
+    fn apply_issue064_mutation_v1(root: &Path, class: CorpusClassV1, mutation: CorpusMutationV1) {
+        let path = class.payload_path();
+        match mutation {
+            CorpusMutationV1::Delete => {
+                fs::remove_file(root.join(path)).expect("delete required fixture payload");
+            }
+            CorpusMutationV1::StaleManifestByteAlteration => {
+                let mut bytes = fs::read(root.join(path)).expect("fixture payload bytes");
+                bytes[0] ^= 1;
+                fs::write(root.join(path), bytes).expect("alter fixture payload byte");
+            }
+            CorpusMutationV1::UnlistedAdd => {
+                fs::write(
+                    root.join(format!("issue064-unlisted-{class:?}")),
+                    b"unexpected\n",
+                )
+                .expect("add unlisted fixture payload");
+            }
+            CorpusMutationV1::ManifestValidSemanticHole => {
+                mutate_issue064_semantic_hole_v1(root, class);
+                refresh_manifest_entry_v1(root, path);
+            }
+        }
+    }
+
+    fn mutate_issue064_semantic_hole_v1(root: &Path, class: CorpusClassV1) {
+        let path = root.join(class.payload_path());
+        let bytes = fs::read(&path).expect("semantic-hole fixture bytes");
+        let mutated = match class {
+            CorpusClassV1::Toml => remove_first_response_case(
+                std::str::from_utf8(&bytes).expect("cases fixture UTF-8"),
+            )
+            .into_bytes(),
+            CorpusClassV1::F32Le => {
+                let mut truncated = bytes;
+                truncated.truncate(truncated.len() - 2 * core::mem::size_of::<f32>());
+                truncated
+            }
+            CorpusClassV1::Csv => {
+                remove_first_data_row(std::str::from_utf8(&bytes).expect("reference fixture UTF-8"))
+                    .into_bytes()
+            }
+            CorpusClassV1::MeterJsonl
+            | CorpusClassV1::DiagnosticsJsonl
+            | CorpusClassV1::ResourcesJsonl => {
+                let mut records = bytes;
+                remove_first_jsonl_record(&mut records);
+                records
+            }
+        };
+        fs::write(path, mutated).expect("write semantic-hole fixture payload");
+    }
+
+    fn refresh_manifest_entry_v1(root: &Path, path: &str) {
+        let bytes = fs::read(root.join(path)).expect("manifest payload bytes");
+        let old = fs::read_to_string(root.join("MANIFEST.tsv")).expect("manifest text");
+        let replacement = format!("{path}\t{}\t{}", bytes.len(), sha256(&bytes));
+        let mut replaced = false;
+        let manifest = old
+            .split_inclusive('\n')
+            .map(|line| {
+                if line
+                    .strip_suffix('\n')
+                    .is_some_and(|line| line.starts_with(&format!("{path}\t")))
+                {
+                    replaced = true;
+                    format!("{replacement}\n")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<String>();
+        assert!(replaced, "manifest entry for semantic-hole payload");
+        fs::write(root.join("MANIFEST.tsv"), manifest).expect("updated manifest entry");
+    }
+
+    fn issue064_rejection_identity_v1(
+        class: CorpusClassV1,
+        mutation: CorpusMutationV1,
+        error: &str,
+    ) -> CorpusRejectionV1 {
+        match mutation {
+            CorpusMutationV1::Delete | CorpusMutationV1::UnlistedAdd => {
+                assert_eq!(error, "fixture tree has missing or unlisted payload files");
+                CorpusRejectionV1::FixtureTree
+            }
+            CorpusMutationV1::StaleManifestByteAlteration => {
+                assert_eq!(
+                    error,
+                    format!("fixture sha256 mismatch: {}", class.payload_path())
+                );
+                CorpusRejectionV1::ManifestSha256
+            }
+            CorpusMutationV1::ManifestValidSemanticHole => {
+                let expected = issue064_semantic_rejection_v1(class);
+                let matches = match expected {
+                    CorpusRejectionV1::CasesCoverage => {
+                        error.starts_with("cases.toml coverage count differs")
+                    }
+                    CorpusRejectionV1::PcmTuple => {
+                        error.starts_with("PCM semantic mismatch: pcm/identity-signed-zero.f32le")
+                    }
+                    CorpusRejectionV1::ReferenceCoverage => {
+                        error.starts_with("reference/filter-response.csv coverage count differs")
+                    }
+                    CorpusRejectionV1::MeterTuple => {
+                        error
+                            == "meters/window-and-drop.jsonl differs from the independent 15-record tuple set"
+                    }
+                    CorpusRejectionV1::DiagnosticTuple => {
+                        error
+                            == "diagnostics.jsonl differs from the exact 13 stable code/path tuples"
+                    }
+                    CorpusRejectionV1::ResourceGrid => {
+                        error == "resources.jsonl differs from the exact 3-by-3 V1 resource grid"
+                    }
+                    CorpusRejectionV1::FixtureTree | CorpusRejectionV1::ManifestSha256 => false,
+                };
+                assert!(
+                    matches,
+                    "unexpected semantic rejection for {class:?}: {error}"
+                );
+                expected
+            }
+        }
+    }
+
+    fn source_segment_v1<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, source) = source.split_once(start).expect("source start");
+        let (source, _) = source.split_once(end).expect("source end");
+        source
     }
 }
