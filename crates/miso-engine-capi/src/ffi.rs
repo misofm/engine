@@ -1,0 +1,522 @@
+//! Raw C-pointer ownership boundary.
+
+#![allow(unsafe_code)]
+
+use crate::{
+    ABI_VERSION, BYTES_OUT_SIZE, BytesOut, CAPABILITIES_SIZE, Capabilities, CompileLimits,
+    EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, Plan, PlanResourceReport,
+    PlanarOutput, RESULT_ABI_MISMATCH, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
+};
+use core::ffi::c_void;
+use core::ptr;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
+    catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RESULT_INTERNAL)
+}
+
+fn catch_destroy(operation: impl FnOnce()) {
+    let _contained = catch_unwind(AssertUnwindSafe(operation));
+}
+
+unsafe fn engine_kind(engine: *const Engine) -> u32 {
+    if engine.is_null() {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
+    // returned by this library. All live handle representations begin with the frozen header.
+    if unsafe { &*engine }.has_valid_kind() {
+        RESULT_OK
+    } else {
+        RESULT_WRONG_HANDLE
+    }
+}
+
+unsafe fn session_kind(session: *const Session) -> u32 {
+    if session.is_null() {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
+    // returned by this library. All live handle representations begin with the frozen header.
+    if unsafe { &*session }.has_valid_kind() {
+        RESULT_OK
+    } else {
+        RESULT_WRONG_HANDLE
+    }
+}
+
+unsafe fn plan_kind(plan: *const Plan) -> u32 {
+    if plan.is_null() {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    // SAFETY: The ABI contract requires a nonnull handle pointer to identify a live handle
+    // returned by this library. All live handle representations begin with the frozen header.
+    if unsafe { &*plan }.has_valid_kind() {
+        RESULT_OK
+    } else {
+        RESULT_WRONG_HANDLE
+    }
+}
+
+/// Returns the frozen Engine V2 C ABI version.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_v2_abi_version() -> u32 {
+    catch_result(|| ABI_VERSION)
+}
+
+/// Writes the frozen ABI V1 launch-rate and feature capability masks.
+///
+/// # Safety
+///
+/// `out` must satisfy the writable ABI V1 capability-struct contract for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilities) -> u32 {
+    catch_result(|| {
+        if out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is nonnull and the caller promises writable storage whose first field is
+        // readable. The exact size check precedes the complete fixed-size write.
+        if unsafe { (*out).struct_size } != CAPABILITIES_SIZE {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The exact struct-size check above establishes writable ABI V1 storage according
+        // to the C contract; one complete value is written and no caller pointer is retained.
+        unsafe {
+            out.write(Capabilities {
+                struct_size: CAPABILITIES_SIZE,
+                abi_version: ABI_VERSION,
+                exact_launch_rate_mask: EXACT_LAUNCH_RATE_MASK,
+                feature_mask: FEATURE_MASK,
+                reserved: [0; 4],
+            });
+        }
+        RESULT_OK
+    })
+}
+
+/// Creates an engine factory handle without compiling runtime state.
+///
+/// # Safety
+///
+/// `config` and `out_engine` must satisfy their readable/writable ABI V1 pointer contracts.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_engine_create(
+    config: *const EngineConfig,
+    out_engine: *mut *mut Engine,
+) -> u32 {
+    catch_result(|| {
+        if out_engine.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The caller promises writable storage for one output pointer. Clearing it before
+        // all other validation preserves transactional publication on every rejection.
+        unsafe { out_engine.write(ptr::null_mut()) };
+        if config.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The caller promises `config` identifies a readable EngineConfig for this call.
+        let config = unsafe { &*config };
+        if config.struct_size != crate::ENGINE_CONFIG_SIZE || config.reserved != [0; 4] {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        if config.abi_version != ABI_VERSION {
+            return RESULT_ABI_MISMATCH;
+        }
+
+        let engine = Box::new(Engine::new());
+        // SAFETY: `out_engine` was validated as writable above. Box::into_raw transfers the unique
+        // allocation to the matching destroy entrypoint and no Rust owner remains.
+        unsafe { out_engine.write(Box::into_raw(engine)) };
+        RESULT_OK
+    })
+}
+
+/// Destroys an engine handle off render; null is a no-op.
+///
+/// # Safety
+///
+/// A nonnull `engine` must be the unique live engine handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
+    catch_destroy(|| {
+        if engine.is_null() {
+            return;
+        }
+        // SAFETY: The ABI contract requires `engine` to be a live unique engine handle returned by
+        // this library and destroy to be quiescent. A wrong live kind is observed but not freed.
+        if unsafe { engine_kind(engine) } != RESULT_OK {
+            return;
+        }
+        // SAFETY: The successful kind check and ABI ownership contract establish that this is the
+        // unique pointer produced by Box::into_raw and has not previously been destroyed.
+        drop(unsafe { Box::from_raw(engine) });
+    });
+}
+
+/// Session compilation is declared in checkpoint 1 and implemented in checkpoint 2.
+///
+/// # Safety
+///
+/// Every nonnull pointer must satisfy its ABI V1 readable, writable, or live-handle contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_compile_session(
+    engine: *mut Engine,
+    toml: *const u8,
+    _toml_bytes: u64,
+    limits: *const CompileLimits,
+    diagnostics: *mut BytesOut,
+    out_session: *mut *mut Session,
+    out_plan: *mut *mut Plan,
+) -> u32 {
+    catch_result(|| {
+        if out_session.is_null() || out_plan.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: Both output locations are nonnull and promised writable by the caller. Clearing
+        // both before validation preserves the frozen atomic-publication rule.
+        unsafe {
+            out_session.write(ptr::null_mut());
+            out_plan.write(ptr::null_mut());
+        }
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { engine_kind(engine) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if toml.is_null() || limits.is_null() || diagnostics.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Host-fed source submission is declared in checkpoint 1 and implemented in checkpoint 2.
+///
+/// # Safety
+///
+/// Every pointer must satisfy its ABI V1 borrowed-data, output, or live-handle contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
+    session: *mut Session,
+    source_id: *const u8,
+    _source_id_bytes: u64,
+    chunk: *const SourceChunk,
+    out_report: *mut SubmitReport,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if source_id.is_null() || chunk.is_null() || out_report.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Typed source seek is declared in checkpoint 1 and implemented in checkpoint 2.
+///
+/// # Safety
+///
+/// `session` must be live and `source_id` must reference the declared borrowed byte count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_source_seek(
+    session: *mut Session,
+    source_id: *const u8,
+    _source_id_bytes: u64,
+    _generation: u64,
+    _source_frame: u64,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if source_id.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Binary control submission is declared in checkpoint 1 and implemented in checkpoint 2.
+///
+/// # Safety
+///
+/// Every pointer must satisfy its ABI V1 borrowed-frame, output, or live-handle contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_submit_command(
+    session: *mut Session,
+    request: *const u8,
+    _request_bytes: u64,
+    response: *mut BytesOut,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if request.is_null() || response.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Planar render is declared in checkpoint 1 and implemented in checkpoint 3.
+///
+/// # Safety
+///
+/// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
+    plan: *mut Plan,
+    _absolute_sample: u64,
+    output: *const PlanarOutput,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { plan_kind(plan) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if output.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Resource reporting is declared in checkpoint 1 and implemented in checkpoint 2.
+///
+/// # Safety
+///
+/// `plan` must be live and `out` must satisfy the writable ABI V1 report contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_plan_resources(
+    plan: *const Plan,
+    out: *mut PlanResourceReport,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { plan_kind(plan) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        RESULT_UNSUPPORTED
+    })
+}
+
+/// Copies the handle-local diagnostic. Checkpoint 1 engine handles have an empty diagnostic.
+///
+/// # Safety
+///
+/// `live_handle` must identify a live ABI handle and `out` must satisfy the bytes-output contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_last_error(
+    live_handle: *const c_void,
+    out: *mut BytesOut,
+) -> u32 {
+    catch_result(|| {
+        if live_handle.is_null() || out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: Every live handle starts with the same header. Reading it through each opaque
+        // representation is valid for the live-handle kinds defined by this library.
+        let recognized = unsafe {
+            engine_kind(live_handle.cast::<Engine>()) == RESULT_OK
+                || session_kind(live_handle.cast::<Session>()) == RESULT_OK
+                || plan_kind(live_handle.cast::<Plan>()) == RESULT_OK
+        };
+        if !recognized {
+            return RESULT_WRONG_HANDLE;
+        }
+        // SAFETY: The caller promises `out` identifies readable/writable BytesOut storage.
+        let out = unsafe { &mut *out };
+        if out.struct_size != BYTES_OUT_SIZE || out.reserved0 != 0 {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        if out.data.is_null() && out.capacity_bytes != 0 {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        out.required_bytes = 0;
+        RESULT_OK
+    })
+}
+
+/// Destroys a session handle off render; null is a no-op.
+///
+/// # Safety
+///
+/// A nonnull `session` must be the unique live session handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
+    catch_destroy(|| {
+        if session.is_null() {
+            return;
+        }
+        // No session handle can be published before checkpoint 2. Observe the kind without
+        // reconstructing ownership so wrong-kind live handles are never freed.
+        // SAFETY: The caller supplies a live handle pointer under the C ABI contract.
+        let _kind = unsafe { session_kind(session) };
+    });
+}
+
+/// Destroys a render-plan handle off render; null is a no-op.
+///
+/// # Safety
+///
+/// A nonnull `plan` must be the unique live plan handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_plan_destroy(plan: *mut Plan) {
+    catch_destroy(|| {
+        if plan.is_null() {
+            return;
+        }
+        // No plan handle can be published before checkpoint 2. Observe the kind without
+        // reconstructing ownership so wrong-kind live handles are never freed.
+        // SAFETY: The caller supplies a live handle pointer under the C ABI contract.
+        let _kind = unsafe { plan_kind(plan) };
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(out: *mut Capabilities) -> u32 {
+        // SAFETY: Tests pass null deliberately or storage for one complete Capabilities value.
+        unsafe { miso_engine_v2_query_capabilities(out) }
+    }
+
+    fn create(config: *const EngineConfig, out: *mut *mut Engine) -> u32 {
+        // SAFETY: Tests pass valid local pointer storage, with deliberate null handled by the ABI.
+        unsafe { miso_engine_v2_engine_create(config, out) }
+    }
+
+    fn destroy(engine: *mut Engine) {
+        // SAFETY: Tests pass null or the unique live engine returned by `create` exactly once.
+        unsafe { miso_engine_v2_engine_destroy(engine) }
+    }
+
+    fn seek(
+        session: *mut Session,
+        source_id: *const u8,
+        source_id_bytes: u64,
+        generation: u64,
+        source_frame: u64,
+    ) -> u32 {
+        // SAFETY: The wrong-kind test passes a live engine handle cast to the common opaque header;
+        // the entrypoint rejects it before inspecting the deliberately null source ID.
+        unsafe {
+            miso_engine_v2_source_seek(
+                session,
+                source_id,
+                source_id_bytes,
+                generation,
+                source_frame,
+            )
+        }
+    }
+
+    fn last_error(live_handle: *const c_void, out: *mut BytesOut) -> u32 {
+        // SAFETY: Tests pass one live engine handle and writable BytesOut storage.
+        unsafe { miso_engine_v2_last_error(live_handle, out) }
+    }
+
+    fn config() -> EngineConfig {
+        EngineConfig {
+            struct_size: crate::ENGINE_CONFIG_SIZE,
+            abi_version: ABI_VERSION,
+            reserved: [0; 4],
+        }
+    }
+
+    #[test]
+    fn version_and_capabilities_are_exact() {
+        assert_eq!(miso_engine_v2_abi_version(), ABI_VERSION);
+        let mut capabilities = Capabilities {
+            struct_size: CAPABILITIES_SIZE,
+            abi_version: 0,
+            exact_launch_rate_mask: 0,
+            feature_mask: 0,
+            reserved: [u64::MAX; 4],
+        };
+        assert_eq!(query(&mut capabilities), RESULT_OK);
+        assert_eq!(capabilities.abi_version, ABI_VERSION);
+        assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
+        assert_eq!(capabilities.feature_mask, 0x1f);
+        assert_eq!(capabilities.reserved, [0; 4]);
+    }
+
+    #[test]
+    fn query_rejects_null_and_wrong_size_without_a_write() {
+        assert_eq!(query(ptr::null_mut()), RESULT_INVALID_ARGUMENT);
+        let mut capabilities = Capabilities {
+            struct_size: CAPABILITIES_SIZE - 1,
+            abi_version: 77,
+            exact_launch_rate_mask: 78,
+            feature_mask: 79,
+            reserved: [80; 4],
+        };
+        assert_eq!(query(&mut capabilities), RESULT_INVALID_ARGUMENT);
+        assert_eq!(capabilities.abi_version, 77);
+        assert_eq!(capabilities.reserved, [80; 4]);
+    }
+
+    #[test]
+    fn engine_creation_is_transactional_and_validates_v1() {
+        let mut engine = ptr::dangling_mut::<Engine>();
+        let mut wrong_version = config();
+        wrong_version.abi_version += 1;
+        assert_eq!(create(&wrong_version, &mut engine), RESULT_ABI_MISMATCH);
+        assert!(engine.is_null());
+
+        let mut nonzero_reserved = config();
+        nonzero_reserved.reserved[2] = 1;
+        assert_eq!(
+            create(&nonzero_reserved, &mut engine),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert!(engine.is_null());
+
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        assert!(!engine.is_null());
+        destroy(engine);
+        destroy(ptr::null_mut());
+    }
+
+    #[test]
+    fn wrong_live_handle_kind_is_rejected_by_stub() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let result = seek(engine.cast(), ptr::null(), 0, 0, 0);
+        assert_eq!(result, RESULT_WRONG_HANDLE);
+        destroy(engine);
+    }
+
+    #[test]
+    fn engine_last_error_uses_empty_query_result() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: u64::MAX,
+        };
+        assert_eq!(last_error(engine.cast(), &mut output), RESULT_OK);
+        assert_eq!(output.required_bytes, 0);
+        destroy(engine);
+    }
+}
