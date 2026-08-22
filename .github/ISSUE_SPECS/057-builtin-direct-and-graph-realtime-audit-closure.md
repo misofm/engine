@@ -128,3 +128,48 @@ seal, and Clippy gates remain unrun.
 This is a strict attempt-1 **FAIL**, awaiting only the single bounded Sol correction. No corpus or
 production DSP bytes changed; `workload_invocations=0`; `timed_benchmark_invocations=0`; no
 benchmark, preflight, workload, timing, target, or instruction command was invoked.
+
+## Sol attempt 2 final evidence — FAIL / STOP
+
+Sol reviewed clean checkpoint `376774f78c11a1fa6f67785cb9c20d9d7cdeb3dd` against the tracked
+brief at `682b9e0`. The repeated retirement-full result is valid and exact: after A occupies the
+capacity-one retirement queue and C is pending, render calls 3 through 1,000,000 must each return
+`DeferredRetirementFull` while B continues rendering. A legal record therefore requires
+A=1/B=999999/C=0, `swaps_applied=1`, `swaps_deferred=999998`,
+`prior_plan_renders_on_deferred=999998` and `owner.deferred_count()=999998`. The preserved tool
+instead requires `SwapOutcome::None` for calls 4 onward and serializes the three deferral values as
+one.
+
+That count correction is bounded, but the frozen direct acceptance gate cannot be completed
+inside this issue's permitted audit-tool/corpus boundary:
+
+- `BuiltinChain` exposes preparation, the three process sections, target update, reset and
+  consumption into sections, but no state snapshot/restore or state-injection interface. The
+  required exact retained-state comparison and paired nonfinite filter-state recovery injection
+  therefore cannot be exercised through the declared public prepared-chain path.
+- The sealed corpus contains functional PCM and meter payloads but no direct-audit state/report
+  payload for the required 257-update schedule. Creating that expected payload would change the
+  immutable Issue-064 input.
+- The direct audit has one queue-full meter set and feeds the same final post-chain buffers to all
+  seven accumulators. It does not expose or compare seven boundary taps, a successful-drain meter
+  set, either reset result, the retarget schedule, sanitation, recovery or sealed PCM/state/report
+  values.
+- Both trace scripts remain nonqualifying: the direct script supplies unsupported `--blocks`; the
+  graph script validates the obsolete two-swap/4+999996 lifecycle; and both inspect only the
+  marker-writing trace file rather than every traced TID. Neither proves auxiliary-thread syscall
+  rejection or preserves raw/validator hashes.
+- The graph tool checks PDC metadata only. Its per-plan meter handles and reset generations differ
+  from the sealed graph-meter payload, it does not compare graph PCM or seven snapshot bytes, and
+  its destruction assertions do not prove the exact retirement/control/render owner roles.
+
+Fixing the direct blocker requires a separately briefed test/qualification interface and sealed
+expected-state/report evidence, or a truthful narrowing of the direct gate; either change is
+outside this final correction and the immutable-input rule. Sol therefore made no partial code or
+script correction and did not rerun either million-call entrypoint or either trace. The Terra
+nine-probe results remain accepted technical input, but the incomplete direct, graph, lifecycle,
+fixture and all-thread trace gates prevent an overall PASS.
+
+Final verdict: **FAIL / STOP** after the allowed Terra attempt plus one bounded Sol correction
+review. `workload_invocations=0`; `timed_benchmark_invocations=0`; no benchmark, preflight,
+workload, timing, target or instruction command was invoked in either attempt. No production DSP,
+corpus, expected bytes or audit source changed in the Sol attempt.
