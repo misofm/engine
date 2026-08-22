@@ -31,6 +31,9 @@ use miso_engine_session::{
 use sha2::{Digest, Sha256};
 
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
+/// The checked graph fixture identity pinned by the two meter benchmark inputs.
+const GRAPH_TAP_PCM_SHA256_V1: &str =
+    "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
 const CASE_COUNT_V1: usize = 1_652;
@@ -667,19 +670,6 @@ fn verify_graph_tap_pdc_v1(report: &GraphCompileReport) -> Result<(), String> {
     };
     let late = timing("to-main")?;
     let early = timing("to-main-early")?;
-    if (
-        late.source_arrival.0,
-        late.compensation_delay.0,
-        late.destination_arrival.0,
-    ) != (9, 0, 9)
-        || (
-            early.source_arrival.0,
-            early.compensation_delay.0,
-            early.destination_arrival.0,
-        ) != (0, 9, 9)
-    {
-        return Err("graph-taps route timing is not the frozen 9-sample PDC relation".to_owned());
-    }
     let delays: Vec<_> = report
         .inserted_delays
         .iter()
@@ -690,7 +680,32 @@ fn verify_graph_tap_pdc_v1(report: &GraphCompileReport) -> Result<(), String> {
             )
         })
         .collect();
-    if delays.len() != 1 || delays[0].samples.0 != 9 {
+    verify_graph_tap_pdc_relation_v1(
+        (
+            late.source_arrival.0,
+            late.compensation_delay.0,
+            late.destination_arrival.0,
+        ),
+        (
+            early.source_arrival.0,
+            early.compensation_delay.0,
+            early.destination_arrival.0,
+        ),
+        delays.iter().map(|delay| delay.samples.0),
+    )
+}
+
+/// Checks the exact compiled route timings and one inserted early-route PDC delay.
+fn verify_graph_tap_pdc_relation_v1(
+    late: (u64, u64, u64),
+    early: (u64, u64, u64),
+    inserted_early_delays: impl IntoIterator<Item = u64>,
+) -> Result<(), String> {
+    if late != (9, 0, 9) || early != (0, 9, 9) {
+        return Err("graph-taps route timing is not the frozen 9-sample PDC relation".to_owned());
+    }
+    let inserted_early_delays: Vec<_> = inserted_early_delays.into_iter().collect();
+    if inserted_early_delays.as_slice() != [9] {
         return Err(
             "graph-taps PDC insertion differs from the frozen early-route delay".to_owned(),
         );
@@ -4979,7 +4994,10 @@ fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(Str
             benchmark_field_pair_v1("meter_queue_capacity", "1"),
             benchmark_field_pair_v1("state_mode", "\"continuous\""),
             benchmark_field_pair_v1("input_pcm_path", "\"pcm/graph-taps.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"e07cfb2696b6eb2d8114ab84653186395694ba9c16904b70d8b0238903cad46f\""),
+            benchmark_field_pair_v1(
+                "input_pcm_sha256",
+                &format!("\"{GRAPH_TAP_PCM_SHA256_V1}\""),
+            ),
             benchmark_field_pair_v1("meter_period_frames", "128"),
             benchmark_field_pair_v1("meter_peak_hold_frames", "0"),
             benchmark_field_pair_v1("meter_peak_decay_db_per_second", "0.0"),
@@ -5103,6 +5121,65 @@ mod tests {
             "--check mutated the fixture root"
         );
         remove_temporary_root(root);
+    }
+
+    #[test]
+    fn issue065_graph_pdc_and_dependent_identity_mutations_are_rejected() {
+        let files = complete_files();
+        let root = temporary_root("issue065-graph-baseline");
+        write_fixture(&root, &files);
+        check_read_only_fixture_root_v1(&root).expect("issue065 graph fixture baseline");
+        let records = parse_canonical_meter_records_v1(&root, "meters/graph-taps.jsonl")
+            .expect("seven graph meter records");
+        let summaries: BTreeSet<_> = records
+            .iter()
+            .map(|record| match record {
+                MeterRecordV1::Snapshot(snapshot) => (
+                    snapshot.left_peak,
+                    snapshot.right_peak,
+                    snapshot.left_energy,
+                    snapshot.right_energy,
+                    snapshot.left_rms,
+                    snapshot.right_rms,
+                ),
+                _ => panic!("graph meters are snapshots"),
+            })
+            .collect();
+        assert_eq!(records.len(), 7, "seven stable graph taps");
+        assert_eq!(
+            summaries.len(),
+            7,
+            "graph tap summaries are pairwise distinct"
+        );
+        remove_temporary_root(root);
+
+        reject_manifest_valid_graph_tap_mutation_v1(&files, "pcm-word", |files| {
+            files.get_mut("pcm/graph-taps.f32le").expect("graph PCM")
+                [9 * core::mem::size_of::<f32>()] ^= 1;
+        });
+        reject_manifest_valid_graph_tap_mutation_v1(&files, "tap-field", |files| {
+            replace_jsonl_fragment(
+                files
+                    .get_mut("meters/graph-taps.jsonl")
+                    .expect("graph meters"),
+                "\"tap\":\"Input\"",
+                "\"tap\":\"PostInputBuiltins\"",
+            );
+        });
+        reject_manifest_valid_graph_tap_mutation_v1(&files, "dependent-toml-hash", |files| {
+            let path = "benchmark/meter_success_full-48000.toml";
+            let input = String::from_utf8(files.get(path).expect("benchmark input").clone())
+                .expect("benchmark input UTF-8");
+            files.insert(
+                path.to_owned(),
+                input
+                    .replacen(GRAPH_TAP_PCM_SHA256_V1, &"0".repeat(64), 1)
+                    .into_bytes(),
+            );
+        });
+
+        assert!(verify_graph_tap_pdc_relation_v1((9, 0, 9), (0, 8, 8), [8]).is_err());
+        assert!(verify_graph_tap_pdc_relation_v1((9, 0, 9), (0, 9, 9), [8]).is_err());
     }
 
     #[test]
@@ -5385,6 +5462,22 @@ mod tests {
         assert!(
             check_fixture_root_v1(&root).is_err(),
             "accepted {class} {mutation} mutation"
+        );
+        remove_temporary_root(root);
+    }
+
+    fn reject_manifest_valid_graph_tap_mutation_v1(
+        files: &BTreeMap<String, Vec<u8>>,
+        name: &str,
+        mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
+    ) {
+        let root = temporary_root(&format!("issue065-{name}"));
+        let mut mutated = files.clone();
+        mutate(&mut mutated);
+        write_fixture(&root, &mutated);
+        assert!(
+            check_fixture_root_v1(&root).is_err(),
+            "accepted manifest-valid issue065 mutation: {name}"
         );
         remove_temporary_root(root);
     }

@@ -85,3 +85,66 @@ Dependency checkpoint; graph topology and exact latency; old/new graph PCM, grap
 TOML and manifest identities; seven distinct summary tuples; output/tap/PDC and dependent-hash
 mutation results; unchanged-file comparison; strict Terra/Sol verdicts;
 `workload_invocations=0`; `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — PASS, pending Sol review
+
+Dependency technical input: stopped Issue 062 checkpoint `2bbed6a`.
+
+- The regenerated graph PCM is SHA-256
+  `508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`; the seven-record
+  graph meter payload is SHA-256
+  `958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`.
+- The independent retained-`f32` PCM/snapshot model accepts exactly seven canonical, pairwise
+  distinct graph-tap summaries. Compiled route timing remains late `(9,0,9)`, early `(0,9,9)`,
+  with one inserted early-route delay of 9 samples; the early transformed contribution is
+  positive-zero through frames 0–8 and first nonzero at frame 9.
+- Only `input_pcm_sha256` changed in
+  `benchmark/meter_success_full-{48000,96000}.toml`; both now pin the regenerated graph PCM.
+  Their manifest rows, plus the graph PCM and graph-meter rows, were regenerated. Corpus
+  cardinality remains 50 payloads and 10 benchmark inputs.
+- Exact dirty artifacts are `tools/miso-engine-builtins-fixture/src/main.rs`,
+  `fixtures/builtins/v1/pcm/graph-taps.f32le`,
+  `fixtures/builtins/v1/meters/graph-taps.jsonl`,
+  `fixtures/builtins/v1/benchmark/meter_success_full-48000.toml`,
+  `fixtures/builtins/v1/benchmark/meter_success_full-96000.toml`, and
+  `fixtures/builtins/v1/MANIFEST.tsv`; no other payload or benchmark input changed.
+- Scratch author plus read-only validation and checked-corpus read-only validation passed.
+  The focused manifest-valid graph-word/tap/dependent-hash/PDC mutations passed rejection.
+  Fixture package tests passed 9/9 in 50.63s; format check, warning-denied all-target Clippy,
+  and diff/static checks passed.
+- `workload_invocations=0`; `timed_benchmark_invocations=0`; no benchmark runner, preflight,
+  workload, or timing invocation occurred.
+
+## Final Sol adversarial review — PASS
+
+**PASS. No Sol correction was required.** The implementation delta is exactly six owned paths:
+the fixture tool, graph PCM, graph meter, two `meter_success_full` TOMLs and `MANIFEST.tsv`; this
+spec is the only additional evidence path. The checker independently derives every PCM word and
+complete snapshot from the retained-`f32` source/filter/delay/fader/matrix/route/reduction model.
+The actual report is checked at late `(9,0,9)`, early `(0,9,9)` and one inserted 9-sample delay;
+the full-PCM check plus the focused word-9 mutation proves runtime placement rather than metadata
+alone. All seven canonical tap records have distinct peak/energy/RMS summary tuples.
+
+Artifact identities are:
+
+- graph PCM: `508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`;
+- graph meter: `958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`;
+- 48-kHz meter input: `ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de`;
+- 96-kHz meter input: `aa1c4d8835753ce290d7abcf1cbf3ffdb98b79a58f0ec6cd0cce6614f5befef9`;
+- manifest: `bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`.
+
+Both TOML diffs change only `input_pcm_sha256`; exactly four manifest rows change. The corpus
+remains exactly 50 manifest payloads, 10 benchmark inputs, one 1,024-byte graph PCM and seven graph
+meter records. Manifest-valid PCM-word, tap-field and dependent-hash mutations reject, as do both
+wrong PDC relations.
+
+Final Sol gates:
+
+- checked-corpus read-only validation: PASS;
+- exact `issue065_graph_pdc_and_dependent_identity_mutations_are_rejected`: PASS, `1/1`;
+- warning-denied all-target fixture-package Clippy: PASS;
+- format, six-path, four-row, TOML-field, cardinality and diff checks: PASS.
+
+This strict PASS unblocks **Seal independent builtin corpus corruption and read-only
+qualification**. `workload_invocations=0`; `timed_benchmark_invocations=0`; benchmark runner,
+preflight, workload and timing invocations remain zero.
