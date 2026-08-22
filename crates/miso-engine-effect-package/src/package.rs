@@ -584,15 +584,14 @@ pub fn verify_effect_package_v1(
     }
     let de = host(add(HEADER_BYTES, dl, 24)?, 24)?;
     let me = host(manifest, 32)?;
-    let table_available = de <= me && me <= bytes.len();
-    // Per-record limits are phase-one checks when the declared table is physically available.
-    // Malformed boundaries are deferred to the structural phase.
-    if table_available {
-        let table = &bytes[de..me];
+    // Phase-one fixed-prefix checks apply to every declared record prefix that is physically
+    // present. A later truncated table must not hide an earlier record's limit violation.
+    if de <= bytes.len() {
+        let table = &bytes[de..me.min(bytes.len())];
         let mut cursor = 0usize;
         let mut content_sum = 0u64;
         for i in 0..count {
-            if table.len().saturating_sub(cursor) < RECORD_BYTES as usize {
+            if table.len().saturating_sub(cursor) < 40 {
                 break;
             }
             let at = de as u64 + cursor as u64;
@@ -625,19 +624,26 @@ pub fn verify_effect_package_v1(
     if let Some(i) = bytes[88..96].iter().position(|b| *b != 0) {
         return Err(package_diag(Code::Reserved, 88 + i as u64));
     }
-    if table_available {
-        let table = &bytes[de..me];
+    if de <= bytes.len() {
+        let table = &bytes[de..me.min(bytes.len())];
         let mut cursor = 0usize;
         for i in 0..count {
-            if table.len().saturating_sub(cursor) < RECORD_BYTES as usize {
+            let remaining = table.len().saturating_sub(cursor);
+            if remaining < 8 {
                 break;
             }
             let at = de as u64 + cursor as u64;
             if table[cursor + 4..cursor + 8].iter().any(|b| *b != 0) {
                 return Err(diag(Code::Reserved, i, at + 4));
             }
+            if remaining < 24 {
+                break;
+            }
             if table[cursor + 20..cursor + 24].iter().any(|b| *b != 0) {
                 return Err(diag(Code::Reserved, i, at + 20));
+            }
+            if remaining < RECORD_BYTES as usize {
+                break;
             }
             let Ok(r) = raw_record(table, cursor, i, de as u64) else {
                 break;
@@ -1491,46 +1497,28 @@ mod tests {
             Ok(required as usize)
         );
         assert!(output[required as usize..].iter().all(|byte| *byte == 0xa5));
-        let mut below = authoring_exact;
-        below.maximum_descriptor_bytes -= 1;
-        assert_eq!(
-            effect_package_v1_required_size(&package, below)
-                .unwrap_err()
-                .code,
-            Code::Limit
-        );
-        below = authoring_exact;
-        below.maximum_manifest_bytes -= 1;
-        assert_eq!(
-            effect_package_v1_required_size(&package, below)
-                .unwrap_err()
-                .code,
-            Code::Limit
-        );
-        below = authoring_exact;
-        below.maximum_package_bytes -= 1;
-        assert_eq!(
-            effect_package_v1_required_size(&package, below)
-                .unwrap_err()
-                .code,
-            Code::Limit
-        );
-        below = authoring_exact;
-        below.maximum_artifacts -= 1;
-        assert_eq!(
-            effect_package_v1_required_size(&package, below)
-                .unwrap_err()
-                .code,
-            Code::Limit
-        );
-        below = authoring_exact;
-        below.maximum_artifact_bytes -= 1;
-        assert_eq!(
-            effect_package_v1_required_size(&package, below)
-                .unwrap_err()
-                .code,
-            Code::Limit
-        );
+        let mut below_limits = [authoring_exact; 5];
+        below_limits[0].maximum_descriptor_bytes -= 1;
+        below_limits[1].maximum_manifest_bytes -= 1;
+        below_limits[2].maximum_package_bytes -= 1;
+        below_limits[3].maximum_artifacts -= 1;
+        below_limits[4].maximum_artifact_bytes -= 1;
+        for below in below_limits {
+            assert_eq!(
+                effect_package_v1_required_size(&package, below)
+                    .unwrap_err()
+                    .code,
+                Code::Limit
+            );
+            let mut canary = vec![0xa5; required as usize + 8];
+            assert_eq!(
+                encode_effect_package_v1(&package, below, &mut canary)
+                    .unwrap_err()
+                    .code,
+                Code::Limit
+            );
+            assert!(canary.iter().all(|byte| *byte == 0xa5));
+        }
     }
 
     #[test]
@@ -1611,6 +1599,26 @@ mod tests {
         let error = assert_code(&malformed_path, Code::Length);
         assert_eq!(error.artifact_index, 0);
         assert_eq!(error.byte_offset, (first + 8) as u64);
+
+        let mut truncated_after_first_prefix = encoded();
+        let first = record_offsets(&truncated_after_first_prefix)[0];
+        put_u64(
+            &mut truncated_after_first_prefix,
+            first + 32,
+            EffectPackageLimitsV1::default().maximum_artifact_bytes + 1,
+        );
+        truncated_after_first_prefix.truncate(first + 40);
+        let error = assert_code(&truncated_after_first_prefix, Code::Limit);
+        assert_eq!(error.artifact_index, 0);
+        assert_eq!(error.byte_offset, (first + 32) as u64);
+
+        let mut truncated_after_first_reserved = encoded();
+        let first = record_offsets(&truncated_after_first_reserved)[0];
+        truncated_after_first_reserved[first + 20] = 1;
+        truncated_after_first_reserved.truncate(first + 24);
+        let error = assert_code(&truncated_after_first_reserved, Code::Reserved);
+        assert_eq!(error.artifact_index, 0);
+        assert_eq!(error.byte_offset, (first + 20) as u64);
     }
 
     #[test]

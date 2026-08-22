@@ -297,7 +297,10 @@ mod tests {
             format!("{canonical}a").parse::<EffectCid>(),
             Err(CidError::InvalidText)
         );
-        for replacement in *b"Ba108=+/" {
+        for replacement in 0u8..=0x7f {
+            if replacement == b'b' {
+                continue;
+            }
             let mut text = canonical.as_bytes().to_owned();
             text[0] = replacement;
             assert_eq!(
@@ -306,7 +309,10 @@ mod tests {
             );
         }
         for position in 1..CID_TEXT_BYTES {
-            for replacement in *b"A0189=+/_" {
+            for replacement in 0u8..=0x7f {
+                if replacement.is_ascii_lowercase() || (b'2'..=b'7').contains(&replacement) {
+                    continue;
+                }
                 let mut text = canonical.as_bytes().to_owned();
                 text[position] = replacement;
                 assert_eq!(

@@ -20,12 +20,28 @@ DESCRIPTOR_DOMAIN = b"miso.engine.effect-descriptor.identity.v1\0"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "fixtures" / "effect-package" / "v1"
 DESCRIPTORS = ROOT / "fixtures" / "effect-descriptor" / "v1"
+UNAVAILABLE_INDEX = (1 << 32) - 1
+UNAVAILABLE_OFFSET = (1 << 64) - 1
+MAX_DESCRIPTOR = 4_194_304
+MAX_MANIFEST = 16_777_216
+MAX_PACKAGE = 268_435_456
+MAX_ARTIFACTS = 4096
+MAX_ARTIFACT_BYTES = 134_217_728
+U64_MAX = (1 << 64) - 1
 
 
 class Rejected(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, detail: int = 0, index: int = UNAVAILABLE_INDEX,
+                 offset: int = UNAVAILABLE_OFFSET, required: int = 0):
         super().__init__(code)
         self.code = code
+        self.detail = detail
+        self.index = index
+        self.offset = offset
+        self.required = required
+
+    def identity(self) -> tuple[str, int, int, int, int]:
+        return (self.code, self.detail, self.index, self.offset, self.required)
 
 
 def u16(data: bytes, offset: int) -> int:
@@ -42,6 +58,13 @@ def u64(data: bytes, offset: int) -> int:
 
 def align8(value: int) -> int:
     return (value + 7) & ~7
+
+
+def add64(left: int, right: int, offset: int) -> int:
+    value = left + right
+    if value > U64_MAX:
+        raise Rejected("Overflow", offset=offset)
+    return value
 
 
 def sha(data: bytes) -> bytes:
@@ -127,7 +150,7 @@ def validate_artifact(artifact: dict) -> None:
 
 
 def encode(descriptor: bytes, artifacts: list[dict], require_source: bool = True) -> bytes:
-    if len(descriptor) > 4_194_304 or not descriptor.startswith(b"MISOEFD1"):
+    if len(descriptor) > MAX_DESCRIPTOR or not descriptor.startswith(b"MISOEFD1"):
         raise Rejected("Descriptor")
     canonical = sorted(artifacts, key=artifact_key)
     for artifact in canonical:
@@ -153,7 +176,9 @@ def encode(descriptor: bytes, artifacts: list[dict], require_source: bool = True
         contents += artifact["content"]
     manifest = HEADER + len(descriptor) + len(table)
     total = manifest + len(contents)
-    if manifest > 16_777_216 or total > 268_435_456 or len(canonical) > 4096:
+    if any(len(artifact["content"]) > MAX_ARTIFACT_BYTES for artifact in canonical):
+        raise Rejected("Limit")
+    if manifest > MAX_MANIFEST or total > MAX_PACKAGE or len(canonical) > MAX_ARTIFACTS:
         raise Rejected("Limit")
     header = bytearray(HEADER)
     header[:8] = MAGIC
@@ -169,12 +194,20 @@ def parse_records(data: bytes, table_start: int, table_bytes: int, count: int) -
     cursor = 0
     for index in range(count):
         if len(table) - cursor < RECORD:
-            raise Rejected("Length")
+            raise Rejected("Length", index=index, offset=table_start + cursor)
         path_len, target_len, feature_len = struct.unpack_from("<III", table, cursor + 8)
-        end = RECORD + path_len + target_len + feature_len
+        path_end = RECORD + path_len
+        if path_end > len(table) - cursor:
+            raise Rejected("Length", index=index, offset=table_start + cursor + 8)
+        target_end = path_end + target_len
+        if target_end > len(table) - cursor:
+            raise Rejected("Length", index=index, offset=table_start + cursor + 12)
+        end = target_end + feature_len
+        if end > len(table) - cursor:
+            raise Rejected("Length", index=index, offset=table_start + cursor + 16)
         padded = align8(end)
         if cursor + padded > len(table):
-            raise Rejected("Length")
+            raise Rejected("Length", index=index, offset=table_start + cursor + 16)
         path_start = cursor + RECORD
         target_start = path_start + path_len
         feature_start = target_start + target_len
@@ -196,52 +229,105 @@ def parse_records(data: bytes, table_start: int, table_bytes: int, count: int) -
         )
         cursor += padded
     if cursor != len(table):
-        raise Rejected("Length")
+        raise Rejected("Length", offset=32)
     return records
 
 
 def verify(data: bytes) -> dict:
-    if len(data) > 268_435_456:
-        raise Rejected("Limit")
+    if len(data) > MAX_PACKAGE:
+        raise Rejected("Limit", offset=16)
     if len(data) < HEADER:
-        raise Rejected("Header")
+        raise Rejected("Header", offset=0)
     total, descriptor_bytes, table_bytes, content_bytes = struct.unpack_from("<QQQQ", data, 16)
     count = u32(data, 48)
-    if descriptor_bytes > 4_194_304 or count > 4096:
-        raise Rejected("Limit")
-    manifest = HEADER + descriptor_bytes + table_bytes
-    if manifest > 16_777_216:
-        raise Rejected("Limit")
-    if data[:8] != MAGIC or u16(data, 8) != 1 or u16(data, 10) != HEADER:
-        raise Rejected("Header")
-    if any(data[12:16]) or any(data[52:56]) or any(data[88:96]):
-        raise Rejected("Reserved")
-    if total != manifest + content_bytes or total != len(data) or table_bytes & 7:
-        raise Rejected("Length")
+    if total > MAX_PACKAGE:
+        raise Rejected("Limit", offset=16)
+    if descriptor_bytes > MAX_DESCRIPTOR:
+        raise Rejected("Limit", offset=24)
+    manifest = add64(add64(HEADER, descriptor_bytes, 24), table_bytes, 32)
+    computed = add64(manifest, content_bytes, 40)
+    if manifest > MAX_MANIFEST:
+        raise Rejected("Limit", offset=32)
+    if count > MAX_ARTIFACTS:
+        raise Rejected("Limit", offset=48)
     descriptor_end = HEADER + descriptor_bytes
+    physical_table = data[descriptor_end:min(manifest, len(data))] if descriptor_end <= len(data) else b""
+    cursor = 0
+    for index in range(count):
+        if len(physical_table) - cursor < 40:
+            break
+        if u64(physical_table, cursor + 32) > MAX_ARTIFACT_BYTES:
+            raise Rejected("Limit", index=index, offset=descriptor_end + cursor + 32)
+        if len(physical_table) - cursor < RECORD:
+            break
+        record_bytes = align8(RECORD + u32(physical_table, cursor + 8)
+                              + u32(physical_table, cursor + 12)
+                              + u32(physical_table, cursor + 16))
+        if record_bytes > len(physical_table) - cursor:
+            break
+        cursor += record_bytes
+    if data[:8] != MAGIC:
+        raise Rejected("Header", offset=0)
+    if u16(data, 8) != 1:
+        raise Rejected("Header", offset=8)
+    if u16(data, 10) != HEADER:
+        raise Rejected("Header", offset=10)
+    for start, end in ((12, 16), (52, 56)):
+        if any(data[start:end]):
+            raise Rejected("Reserved", offset=start)
+    for offset in range(88, 96):
+        if data[offset]:
+            raise Rejected("Reserved", offset=offset)
+    cursor = 0
+    for index in range(count):
+        remaining = len(physical_table) - cursor
+        if remaining < 8:
+            break
+        if any(physical_table[cursor + 4:cursor + 8]):
+            raise Rejected("Reserved", index=index, offset=descriptor_end + cursor + 4)
+        if remaining < 24:
+            break
+        if any(physical_table[cursor + 20:cursor + 24]):
+            raise Rejected("Reserved", index=index, offset=descriptor_end + cursor + 20)
+        if remaining < RECORD:
+            break
+        record_bytes = align8(RECORD + u32(physical_table, cursor + 8)
+                              + u32(physical_table, cursor + 12)
+                              + u32(physical_table, cursor + 16))
+        if record_bytes > remaining:
+            break
+        cursor += record_bytes
+    if total != computed or total != len(data):
+        raise Rejected("Length", offset=16)
+    if table_bytes & 7:
+        raise Rejected("Length", offset=32)
     descriptor = data[HEADER:descriptor_end]
-    if not descriptor.startswith(b"MISOEFD1") or data[56:88] != descriptor_identity(descriptor):
-        raise Rejected("Descriptor")
+    if not descriptor.startswith(b"MISOEFD1"):
+        raise Rejected("Descriptor", detail=4, offset=96)
+    if data[56:88] != descriptor_identity(descriptor):
+        raise Rejected("Descriptor", offset=56)
     records = parse_records(data, descriptor_end, table_bytes, count)
     contents = data[manifest:]
     expected_offset = 0
     for record in records:
-        if any(record["reserved_a"]) or any(record["reserved_b"]) or any(record["padding"]):
-            raise Rejected("Reserved")
         if record["content_offset"] != expected_offset:
-            raise Rejected("Offset")
+            raise Rejected("Offset", index=record["artifact_index"], offset=record["record_offset"] + 24)
         if record["content_length"] == 0:
-            raise Rejected("Length")
+            raise Rejected("Length", index=record["artifact_index"], offset=record["record_offset"] + 32)
         expected_offset += record["content_length"]
         if expected_offset > content_bytes:
-            raise Rejected("Length")
+            raise Rejected("Length", index=record["artifact_index"], offset=record["record_offset"] + 32)
+        if any(record["padding"]):
+            first = next(index for index, byte in enumerate(record["padding"]) if byte)
+            unpadded = record["record_offset"] + RECORD + len(record["path_bytes"]) + len(record["target_bytes"]) + len(record["features_bytes"])
+            raise Rejected("Reserved", index=record["artifact_index"], offset=unpadded + first)
     if expected_offset != content_bytes:
-        raise Rejected("Length")
+        raise Rejected("Length", offset=40)
     for record in records:
         if record["kind"] not in KIND_NAMES:
-            raise Rejected("Enum")
+            raise Rejected("Enum", index=record["artifact_index"], offset=record["record_offset"])
         if not valid_path(record["path_bytes"]):
-            raise Rejected("Path")
+            raise Rejected("Path", index=record["artifact_index"], offset=record["record_offset"] + 8)
         if record["kind"] == 1:
             target_ok = not record["target_bytes"]
         elif record["kind"] == 2:
@@ -249,24 +335,25 @@ def verify(data: bytes) -> dict:
         else:
             target_ok = valid_native_target(record["target_bytes"])
         if not target_ok:
-            raise Rejected("Target")
+            raise Rejected("Target", index=record["artifact_index"], offset=record["record_offset"] + 12)
         if (record["kind"] == 1 and record["features_bytes"]) or not valid_features(record["features_bytes"]):
-            raise Rejected("Features")
+            raise Rejected("Features", index=record["artifact_index"], offset=record["record_offset"] + 16)
         try:
             record["path"] = record["path_bytes"].decode("ascii")
             record["target"] = record["target_bytes"].decode("ascii")
             record["features"] = record["features_bytes"].decode("ascii")
         except UnicodeDecodeError as error:
-            raise Rejected("Path") from error
+            raise Rejected("Path", index=record["artifact_index"], offset=record["record_offset"] + 8) from error
     keys = [(record["kind"], record["target_bytes"], record["features_bytes"], record["path_bytes"]) for record in records]
     if any(left >= right for left, right in zip(keys, keys[1:])):
-        raise Rejected("Order")
+        index = next(index for index, (left, right) in enumerate(zip(keys, keys[1:]), 1) if left >= right)
+        raise Rejected("Order", index=index, offset=records[index]["record_offset"])
     for record in records:
         start = record["content_offset"]
         end = start + record["content_length"]
         record["content"] = contents[start:end]
         if sha(record["content"]) != record["content_sha256"]:
-            raise Rejected("Hash")
+            raise Rejected("Hash", index=record["artifact_index"], offset=record["record_offset"] + 40)
     if not any(record["kind"] == 1 for record in records):
         raise Rejected("Unavailable")
     return {"descriptor": descriptor, "records": records}
@@ -351,14 +438,16 @@ def authoring_from_view(view: dict) -> list[dict]:
     ]
 
 
-def expect_rejection(data: bytes, expected: str) -> None:
+def expect_rejection(data: bytes, expected: Rejected) -> None:
     try:
         verify(data)
     except Rejected as error:
-        if error.code != expected:
-            raise AssertionError(f"expected {expected}, received {error.code}") from error
+        if error.identity() != expected.identity():
+            raise AssertionError(
+                f"expected {expected.identity()}, received {error.identity()}"
+            ) from error
     else:
-        raise AssertionError(f"expected {expected}, package accepted")
+        raise AssertionError(f"expected {expected.identity()}, package accepted")
 
 
 def mutation_matrix(vector: dict, package: bytes, view: dict) -> None:
@@ -368,55 +457,86 @@ def mutation_matrix(vector: dict, package: bytes, view: dict) -> None:
         return bytes(changed)
 
     for offset, code in [(0, "Header"), (8, "Header"), (10, "Header"), (12, "Reserved"), (52, "Reserved"), (56, "Descriptor"), (88, "Reserved")]:
-        expect_rejection(mutated(offset), code)
-    for offset in (16, 24, 32, 40, 48):
-        expect_rejection(mutated(offset), "Length")
-    expect_rejection(package[:-1], "Length")
-    expect_rejection(package + b"\0", "Length")
-    expect_rejection(mutated(HEADER), "Descriptor")
+        expect_rejection(mutated(offset), Rejected(code, offset=offset))
+    header_mutations = {
+        "comprehensive-a": {
+            16: Rejected("Length", offset=16),
+            24: Rejected("Length", offset=16),
+            32: Rejected("Length", offset=16),
+            40: Rejected("Length", offset=16),
+            48: Rejected("Length", offset=32),
+        },
+        "comprehensive-b": {
+            16: Rejected("Length", offset=16),
+            24: Rejected("Limit", index=0, offset=841),
+            32: Rejected("Length", offset=16),
+            40: Rejected("Length", offset=16),
+            48: Rejected("Length", index=4, offset=len(package) - u64(package, 40)),
+        },
+    }
+    for offset, expected in header_mutations[vector["name"]].items():
+        expect_rejection(mutated(offset), expected)
+    fewer_records = bytearray(package)
+    struct.pack_into("<I", fewer_records, 48, u32(package, 48) - 1)
+    expect_rejection(bytes(fewer_records), Rejected("Length", offset=32))
+    expect_rejection(package[:-1], Rejected("Length", offset=16))
+    expect_rejection(package + b"\0", Rejected("Length", offset=16))
+    overflow = bytearray(HEADER)
+    overflow[:8] = MAGIC
+    struct.pack_into("<HH", overflow, 8, 1, HEADER)
+    struct.pack_into("<Q", overflow, 32, U64_MAX)
+    expect_rejection(bytes(overflow), Rejected("Overflow", offset=32))
+    expect_rejection(mutated(HEADER), Rejected("Descriptor", detail=4, offset=HEADER))
     first = view["records"][0]["record_offset"]
     for relative in (8, 12, 16):
         changed = bytearray(package)
         struct.pack_into("<I", changed, first + relative, 0xFFFFFFFF)
-        expect_rejection(bytes(changed), "Length")
+        expect_rejection(bytes(changed), Rejected("Length", index=0, offset=first + relative))
     for relative, code in [(4, "Reserved"), (20, "Reserved"), (24, "Offset"), (32, "Length"), (40, "Hash")]:
         changed = bytearray(package)
         if relative == 32:
             struct.pack_into("<Q", changed, first + relative, 0)
         else:
             changed[first + relative] ^= 1
-        expect_rejection(bytes(changed), code)
+        expect_rejection(bytes(changed), Rejected(code, index=0, offset=first + relative))
+    changed = bytearray(package)
+    struct.pack_into("<Q", changed, first + 32, MAX_ARTIFACT_BYTES + 1)
+    expect_rejection(bytes(changed), Rejected("Limit", index=0, offset=first + 32))
+    expect_rejection(bytes(changed[:first + 40]), Rejected("Limit", index=0, offset=first + 32))
+    changed = bytearray(package)
+    changed[first + 20] = 1
+    expect_rejection(bytes(changed[:first + 24]), Rejected("Reserved", index=0, offset=first + 20))
     changed = bytearray(package)
     struct.pack_into("<I", changed, first, 99)
-    expect_rejection(bytes(changed), "Enum")
+    expect_rejection(bytes(changed), Rejected("Enum", index=0, offset=first))
     changed = bytearray(package)
     changed[first + RECORD] = ord("S")
-    expect_rejection(bytes(changed), "Path")
+    expect_rejection(bytes(changed), Rejected("Path", index=0, offset=first + 8))
     padded_end = view["records"][0]["record_offset"] + align8(
         RECORD + len(view["records"][0]["path_bytes"]) + len(view["records"][0]["target_bytes"]) + len(view["records"][0]["features_bytes"])
     )
     unpadded_end = first + RECORD + len(view["records"][0]["path_bytes"]) + len(view["records"][0]["target_bytes"]) + len(view["records"][0]["features_bytes"])
     if unpadded_end < padded_end:
-        expect_rejection(mutated(unpadded_end), "Reserved")
+        expect_rejection(mutated(unpadded_end), Rejected("Reserved", index=0, offset=unpadded_end))
     core = next(record for record in view["records"] if record["kind"] == 2 and record["target_bytes"])
     changed = bytearray(package)
     changed[core["record_offset"] + RECORD + len(core["path_bytes"])] = ord("W")
-    expect_rejection(bytes(changed), "Target")
+    expect_rejection(bytes(changed), Rejected("Target", index=core["artifact_index"], offset=core["record_offset"] + 12))
     featured = next(record for record in view["records"] if record["features_bytes"])
     changed = bytearray(package)
     feature_at = featured["record_offset"] + RECORD + len(featured["path_bytes"]) + len(featured["target_bytes"])
     changed[feature_at] = ord("A")
-    expect_rejection(bytes(changed), "Features")
+    expect_rejection(bytes(changed), Rejected("Features", index=featured["artifact_index"], offset=featured["record_offset"] + 16))
     content_start = HEADER + len(view["descriptor"]) + u64(package, 32)
-    expect_rejection(mutated(content_start), "Hash")
+    expect_rejection(mutated(content_start), Rejected("Hash", index=0, offset=first + 40))
     sources = [record for record in view["records"] if record["kind"] == 1]
     if len(sources) >= 2 and len(sources[0]["path_bytes"]) == len(sources[1]["path_bytes"]):
         changed = bytearray(package)
         path_at = sources[0]["record_offset"] + RECORD
         changed[path_at : path_at + len(sources[0]["path_bytes"])] = sources[1]["path_bytes"]
-        expect_rejection(bytes(changed), "Order")
+        expect_rejection(bytes(changed), Rejected("Order", index=1, offset=sources[1]["record_offset"]))
     without_source = [artifact for artifact in authoring_from_view(view) if artifact["kind"] != 1]
-    expect_rejection(encode(view["descriptor"], without_source, require_source=False), "Unavailable")
+    expect_rejection(encode(view["descriptor"], without_source, require_source=False), Rejected("Unavailable"))
 
     changed_cids = set()
     base_cid = cid_binary(package)
