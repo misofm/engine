@@ -76,21 +76,21 @@ or remove/overwrite terminal artifacts. Issue 081 remains STOP with no overall P
 
 ## Successor recommendation
 
-Open **083 Repair effect-interchange benchmark migration fixture and reauthorize one descriptive
+Open **108 Repair effect-interchange benchmark migration fixture and reauthorize one descriptive
 run** at
-`.github/ISSUE_SPECS/083-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`.
+`.github/ISSUE_SPECS/108-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`.
 Its exact dependencies are **Canonical effect interchange qualification, fuzzing, and benchmark**,
 **Prepared effect state envelope and transactional current-layout restore**, **Effect state
 migration registry and bounded chains**, and **Close canonical effect descriptor wire, identity,
 and C inspection ABI**.
 
-Issue 083 must preserve Issue 081 evidence and accepted product bytes, repair only the benchmark
+Issue 108 must preserve Issue 081 evidence and accepted product bytes, repair only the benchmark
 fixture to complete sorted four-rate D1/D2/D3 descriptors, add a focused nontimed executable
 descriptor/final-envelope regression, independently rebind the migration digest across every
 authority, and use a successor-specific no-clobber artifact namespace. Proportional compile/lint/
 fake/static gates and a new zero-launch preflight precede any new Sol authorization. Existing real
 100-process/mutation/migration/target/broad matrices are not rerun. Any later descriptive launch is
-an Issue 083 attempt, never an Issue 081 retry.
+an Issue 108 attempt, never an Issue 081 retry.
 
 ## Smallest closable vertical
 

@@ -152,10 +152,10 @@ benchmark PASS.
 
 Create a new stateless issue, not an Issue 081 retry:
 
-- number/title: **083 Repair effect-interchange benchmark migration fixture and reauthorize one
+- number/title: **108 Repair effect-interchange benchmark migration fixture and reauthorize one
   descriptive run**;
 - local path:
-  `.github/ISSUE_SPECS/083-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`;
+  `.github/ISSUE_SPECS/108-repair-effect-interchange-benchmark-migration-fixture-and-reauthorize-one-descriptive-run.md`;
 - dependencies by exact title: **Canonical effect interchange qualification, fuzzing, and
   benchmark**; **Prepared effect state envelope and transactional current-layout restore**;
   **Effect state migration registry and bounded chains**; and **Close canonical effect descriptor
@@ -168,7 +168,7 @@ validates all three descriptors and the exact two-step final envelope before any
 authorization; independently recompute and bind the migration digest across tool/checker/preflight/
 runner/lifecycle; and use a successor-specific no-clobber artifact namespace so Issue 081 evidence
 cannot be overwritten. Run only proportional compile/lint/fake/static gates, then a new zero-launch
-preflight and Sol XHigh review. A later descriptive invocation belongs solely to Issue 083 and
+preflight and Sol XHigh review. A later descriptive invocation belongs solely to Issue 108 and
 requires new explicit authorization; it is never described as an Issue 081 retry. Do not rerun the
 100-process, 30,000-mutation, 48-row, target or broad nonbenchmark matrices merely to repair this
 qualification tool.
