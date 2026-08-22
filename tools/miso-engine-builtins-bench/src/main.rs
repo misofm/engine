@@ -9,15 +9,23 @@ use std::{
 };
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinParameters, DualMonoBlock, Matrix2x2, MeterAccumulator, MeterConfig,
-    MeterHandle, MeterTap, PreparedMeter,
+    BuiltinChain, BuiltinParameters, DualMonoBlock, Matrix2x2, MeterConfig, MeterHandle,
+    MeterSnapshot, MeterTap,
 };
-use miso_engine_builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
+use miso_engine_builtins_compiler::{
+    BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
+};
 use miso_engine_conformance::DualAccumulatorDelayFactory;
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::realtime::{
+    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
+    audit::{self, ForbiddenOperation, record_allocator_violation},
+};
 use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
-use miso_engine_graph::GraphCompileCaps;
+use miso_engine_graph::{
+    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+    GraphRuntimeProcessor, TrackStage,
+};
 use miso_engine_graph_compiler::{
     GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
 };
@@ -85,7 +93,7 @@ unsafe impl GlobalAlloc for AuditedAllocator {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum Workload {
     FullChainFilters,
     IdentityChain,
@@ -122,18 +130,21 @@ struct Measurement {
     audit: Option<audit::AuditSnapshot>,
 }
 
+struct RenderRoundStates {
+    workload: Workload,
+    rate_hz: u32,
+    rounds: [RenderRuntime; 2],
+}
+
 /// Two independently prepared graph artifacts for the frozen meter success/full workload.
 ///
-/// This is intentionally only a preparation foundation in this checkpoint. The later runtime
-/// owns the separately bound plans, pre-fills only the capacity-one plan off timing, and drains
-/// both plans through their compiler-owned consumers.
-#[allow(dead_code)]
+/// The bound runtime owns the separately prepared plans, pre-fills only the capacity-one plan
+/// off timing, and drains the success plan through compiler-owned consumers.
 struct RealMeterTapArtifactPair {
     success: PreparedGraphBuiltinsArtifact,
     full: PreparedGraphBuiltinsArtifact,
 }
 
-#[allow(dead_code)]
 fn prepare_real_meter_tap_artifacts(rate_hz: u32) -> RealMeterTapArtifactPair {
     RealMeterTapArtifactPair {
         success: prepare_real_meter_tap_artifact(rate_hz, 4, 35_001),
@@ -141,7 +152,6 @@ fn prepare_real_meter_tap_artifacts(rate_hz: u32) -> RealMeterTapArtifactPair {
     }
 }
 
-#[allow(dead_code)]
 fn prepare_real_meter_tap_artifact(
     rate_hz: u32,
     queue_capacity: usize,
@@ -185,7 +195,176 @@ fn prepare_real_meter_tap_artifact(
     .unwrap_or_else(|_| panic!("frozen real-tap graph"))
 }
 
-#[allow(dead_code)]
+struct BenchmarkGraphSource;
+
+impl GraphRuntimeProcessor for BenchmarkGraphSource {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        for (index, (left, right)) in block
+            .left
+            .iter_mut()
+            .zip(block.right.iter_mut())
+            .enumerate()
+        {
+            let sample = block.first_sample + index as u64;
+            let value = sample as f32 * 0.0001 + 0.125;
+            *left = value;
+            *right = -value * 0.75;
+        }
+        Ok(())
+    }
+}
+
+struct BenchmarkGraphIdentity;
+
+impl GraphRuntimeProcessor for BenchmarkGraphIdentity {
+    fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        Ok(())
+    }
+}
+
+struct RealMeterTapPlan {
+    plan: PreparedRenderPlan,
+    consumers: Vec<MeterConsumer>,
+    pcm: [f32; QUANTUM * 2],
+}
+
+impl RealMeterTapPlan {
+    fn bind(artifact: PreparedGraphBuiltinsArtifact) -> Self {
+        let envelope = artifact.envelope();
+        let nodes = artifact
+            .external_binding_nodes()
+            .cloned()
+            .map(|node| {
+                let processor: Box<dyn GraphRuntimeProcessor> = match node {
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    } => Box::new(BenchmarkGraphSource),
+                    _ => Box::new(BenchmarkGraphIdentity),
+                };
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|_| panic!("frozen real-tap graph binding"));
+        Self {
+            plan: bound.plan,
+            consumers: bound.meter_consumers,
+            pcm: [0.0; QUANTUM * 2],
+        }
+    }
+
+    fn render(&mut self, first_sample: u64) {
+        self.plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut self.pcm, 2, QUANTUM, QUANTUM)
+                        .expect("fixed benchmark output"),
+                },
+                RenderTime {
+                    absolute_sample: first_sample,
+                },
+            )
+            .expect("frozen real-tap render");
+    }
+
+    fn drain_all(&mut self) -> Vec<MeterConsumerSnapshot> {
+        self.consumers
+            .iter_mut()
+            .map(|consumer| MeterConsumerSnapshot {
+                handle: consumer.handle,
+                tap: consumer.tap,
+                snapshot: consumer
+                    .consumer
+                    .try_pop()
+                    .expect("one completed window per real tap"),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MeterConsumerSnapshot {
+    handle: MeterHandle,
+    tap: MeterTap,
+    snapshot: MeterSnapshot,
+}
+
+struct RealMeterTapRuntime {
+    success: RealMeterTapPlan,
+    full: RealMeterTapPlan,
+    output: Sha256,
+}
+
+impl RealMeterTapRuntime {
+    fn new(rate_hz: u32) -> Self {
+        let pair = prepare_real_meter_tap_artifacts(rate_hz);
+        let mut success = RealMeterTapPlan::bind(pair.success);
+        let mut full = RealMeterTapPlan::bind(pair.full);
+        success.render(0);
+        let prefill_success = success.drain_all();
+        assert_eq!(prefill_success.len(), OBSERVERS, "frozen success prefill");
+        full.render(0);
+        Self {
+            success,
+            full,
+            output: Sha256::new(),
+        }
+    }
+
+    fn render_one(&mut self, first_sample: u64) {
+        self.success.render(first_sample);
+        for record in self.success.drain_all() {
+            hash_meter_snapshot(&mut self.output, record);
+        }
+        self.full.render(first_sample);
+        for value in self.success.pcm.iter().chain(&self.full.pcm) {
+            self.output.update(value.to_bits().to_le_bytes());
+        }
+    }
+
+    fn output_sha256(&self) -> String {
+        hex_digest(self.output.clone().finalize())
+    }
+}
+
+fn hash_meter_snapshot(hash: &mut Sha256, record: MeterConsumerSnapshot) {
+    hash.update(record.handle.0.get().to_le_bytes());
+    hash.update([record.tap as u8]);
+    let snapshot = record.snapshot;
+    for value in [
+        snapshot.reset_generation,
+        snapshot.window_sequence,
+        snapshot.start_sample,
+        snapshot.end_sample,
+        u64::from(snapshot.frames),
+        snapshot.left.sample_peak.to_bits().into(),
+        snapshot.left.rms.to_bits(),
+        snapshot.left.energy.to_bits(),
+        snapshot.left.held_peak.to_bits().into(),
+        snapshot.left.clipped_samples,
+        snapshot.left.sanitized_samples,
+        snapshot.right.sample_peak.to_bits().into(),
+        snapshot.right.rms.to_bits(),
+        snapshot.right.energy.to_bits(),
+        snapshot.right.held_peak.to_bits().into(),
+        snapshot.right.clipped_samples,
+        snapshot.right.sanitized_samples,
+        snapshot.cumulative_clipped_samples,
+        snapshot.cumulative_sanitized_samples,
+        snapshot.cumulative_discontinuities,
+        snapshot.cumulative_dropped_snapshots,
+    ] {
+        hash.update(value.to_le_bytes());
+    }
+}
+
 fn real_meter_tap_requests(
     session: &miso_engine_session::CompiledSession,
     queue_capacity: usize,
@@ -274,13 +453,21 @@ fn main() {
     );
     let metadata = Metadata::collect();
     let fixture_sha256 = sha256(INPUT_MANIFEST);
-    for round in ROUNDS {
+    let mut render_states = prepare_render_round_states();
+    for rate_hz in RATES {
+        warmup_prepare(rate_hz);
+    }
+    for (round_index, round) in ROUNDS.into_iter().enumerate() {
         for rate_hz in RATES {
             for workload in WORKLOADS {
                 let measurement = if workload.is_prepare() {
                     measure_prepare(rate_hz)
                 } else {
-                    measure_render(workload, rate_hz)
+                    let state = render_states
+                        .iter_mut()
+                        .find(|state| state.workload == workload && state.rate_hz == rate_hz)
+                        .expect("global render warmup state");
+                    measure_render(&mut state.rounds[round_index])
                 };
                 println!(
                     "{}",
@@ -298,20 +485,45 @@ fn main() {
     }
 }
 
-fn measure_render(workload: Workload, rate_hz: u32) -> Measurement {
-    let mut runtime = RenderRuntime::new(workload, rate_hz);
-    for batch in 0..RENDER_WARMUP_BATCHES {
-        runtime.run_batch(batch as u64);
+fn prepare_render_round_states() -> Vec<RenderRoundStates> {
+    let mut states = Vec::with_capacity((WORKLOADS.len() - 1) * RATES.len());
+    for workload in WORKLOADS {
+        if workload.is_prepare() {
+            continue;
+        }
+        for rate_hz in RATES {
+            let mut first = RenderRuntime::new(workload, rate_hz);
+            let mut second = RenderRuntime::new(workload, rate_hz);
+            for batch in 0..RENDER_WARMUP_BATCHES {
+                first.run_batch(batch as u64);
+                second.run_batch(batch as u64);
+            }
+            states.push(RenderRoundStates {
+                workload,
+                rate_hz,
+                rounds: [first, second],
+            });
+        }
     }
+    states
+}
+
+fn measure_render(runtime: &mut RenderRuntime) -> Measurement {
     let mut samples_ns = Vec::with_capacity(RENDER_MEASURED_BATCHES);
     audit::warm_up();
     audit::reset();
     for batch in 0..RENDER_MEASURED_BATCHES {
-        let started = Instant::now();
-        runtime.run_batch((RENDER_WARMUP_BATCHES + batch) as u64);
-        samples_ns.push(
-            u64::try_from(started.elapsed().as_nanos()).expect("benchmark duration fits u64"),
-        );
+        let mut batch_ns = 0_u64;
+        for operation in 0..OPERATIONS_PER_RENDER_BATCH {
+            let logical_batch = (RENDER_WARMUP_BATCHES + batch) as u64;
+            runtime.prepare_operation_input(logical_batch, operation as u64);
+            let started = Instant::now();
+            runtime.run_operation(logical_batch, operation as u64);
+            batch_ns = batch_ns.saturating_add(
+                u64::try_from(started.elapsed().as_nanos()).expect("benchmark duration fits u64"),
+            );
+        }
+        samples_ns.push(batch_ns / OPERATIONS_PER_RENDER_BATCH as u64);
     }
     let snapshot = audit::snapshot();
     assert_eq!(snapshot.total(), 0, "render audit must remain clean");
@@ -323,10 +535,13 @@ fn measure_render(workload: Workload, rate_hz: u32) -> Measurement {
     }
 }
 
-fn measure_prepare(rate_hz: u32) -> Measurement {
+fn warmup_prepare(rate_hz: u32) {
     for _ in 0..PREPARE_WARMUP_BATCHES {
         std::hint::black_box(prepare_256_tracks(rate_hz));
     }
+}
+
+fn measure_prepare(rate_hz: u32) -> Measurement {
     let mut samples_ns = Vec::with_capacity(PREPARE_MEASURED_BATCHES);
     let mut retained_payload_bytes = 0;
     let mut output = String::new();
@@ -360,8 +575,7 @@ struct RenderRuntime {
     chain: BuiltinChain,
     left: [f32; QUANTUM],
     right: [f32; QUANTUM],
-    success_meters: Vec<PreparedMeter>,
-    full_meters: Vec<PreparedMeter>,
+    meter_runtime: Option<RealMeterTapRuntime>,
 }
 impl RenderRuntime {
     fn new(workload: Workload, rate_hz: u32) -> Self {
@@ -391,27 +605,41 @@ impl RenderRuntime {
             };
             parameters.smoothing_samples = QUANTUM as u32;
         }
-        let (success_meters, full_meters) = if matches!(workload, Workload::MeterSuccessFull) {
-            meter_sets(rate_hz)
+        let meter_runtime = if matches!(workload, Workload::MeterSuccessFull) {
+            Some(RealMeterTapRuntime::new(rate_hz))
         } else {
-            (Vec::new(), Vec::new())
+            None
         };
         Self {
             workload,
             chain: BuiltinChain::new(rate_hz, parameters).expect("frozen parameters"),
             left: [0.0; QUANTUM],
             right: [0.0; QUANTUM],
-            success_meters,
-            full_meters,
+            meter_runtime,
         }
     }
     fn run_batch(&mut self, batch: u64) {
         for operation in 0..OPERATIONS_PER_RENDER_BATCH {
-            self.fill_input(batch, operation as u64);
-            audit::in_render_scope(|| self.render_one(batch, operation as u64));
+            let operation = operation as u64;
+            self.prepare_operation_input(batch, operation);
+            self.run_operation(batch, operation);
         }
     }
+    fn prepare_operation_input(&mut self, batch: u64, operation: u64) {
+        if self.meter_runtime.is_none() {
+            self.fill_input(batch, operation);
+        }
+    }
+    fn run_operation(&mut self, batch: u64, operation: u64) {
+        audit::in_render_scope(|| self.render_one(batch, operation));
+    }
     fn render_one(&mut self, batch: u64, operation: u64) {
+        let first_sample =
+            (batch * OPERATIONS_PER_RENDER_BATCH as u64 + operation) * QUANTUM as u64;
+        if let Some(meter_runtime) = &mut self.meter_runtime {
+            meter_runtime.render_one(first_sample);
+            return;
+        }
         if matches!(self.workload, Workload::MatrixRamp) {
             let target = if (batch + operation).is_multiple_of(2) {
                 Matrix2x2 {
@@ -434,23 +662,10 @@ impl RenderRuntime {
         }
         self.chain
             .process_dual_mono(
-                DualMonoBlock::new(&mut self.left, &mut self.right, batch * QUANTUM as u64)
+                DualMonoBlock::new(&mut self.left, &mut self.right, first_sample)
                     .expect("fixed block"),
             )
             .expect("frozen process");
-        for meter in &mut self.success_meters {
-            meter
-                .accumulator
-                .observe(&self.left, &self.right, batch * QUANTUM as u64)
-                .expect("fixed meter");
-            let _ = meter.consumer.try_pop().expect("success meter drains once");
-        }
-        for meter in &mut self.full_meters {
-            meter
-                .accumulator
-                .observe(&self.left, &self.right, batch * QUANTUM as u64)
-                .expect("fixed full meter");
-        }
     }
     fn fill_input(&mut self, batch: u64, operation: u64) {
         let phase = (batch * OPERATIONS_PER_RENDER_BATCH as u64 + operation) as f32 * 0.001;
@@ -461,6 +676,9 @@ impl RenderRuntime {
         }
     }
     fn output_sha256(&self) -> String {
+        if let Some(meter_runtime) = &self.meter_runtime {
+            return meter_runtime.output_sha256();
+        }
         let mut hash = Sha256::new();
         for value in self.left.iter().chain(&self.right) {
             hash.update(value.to_bits().to_le_bytes());
@@ -470,37 +688,15 @@ impl RenderRuntime {
     fn shape(&self) -> WorkloadShape {
         WorkloadShape {
             tracks: 1,
-            meters: self.success_meters.len() + self.full_meters.len(),
-            meter_capacity: if self.success_meters.is_empty() { 0 } else { 1 },
+            meters: if self.meter_runtime.is_some() {
+                OBSERVERS * 2
+            } else {
+                0
+            },
+            meter_capacity: usize::from(self.meter_runtime.is_some()),
             retained_payload_bytes: 0,
         }
     }
-}
-
-fn meter_sets(rate_hz: u32) -> (Vec<PreparedMeter>, Vec<PreparedMeter>) {
-    let config = MeterConfig {
-        period_frames: NonZeroU32::new(QUANTUM as u32).expect("quantum"),
-        peak_hold_frames: 0,
-        peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(1).expect("capacity"),
-        reset_generation: 7,
-    };
-    let mut success = Vec::with_capacity(OBSERVERS);
-    let mut full = Vec::with_capacity(OBSERVERS);
-    for index in 0..OBSERVERS {
-        let handle = MeterHandle(NonZeroU64::new((index + 1) as u64).expect("one based"));
-        success.push(MeterAccumulator::prepare(handle, config, rate_hz).expect("success meter"));
-        full.push(MeterAccumulator::prepare(handle, config, rate_hz).expect("full meter"));
-    }
-    let left = [0.25_f32; QUANTUM];
-    let right = [-0.25_f32; QUANTUM];
-    for meter in &mut full {
-        meter
-            .accumulator
-            .observe(&left, &right, 0)
-            .expect("prefill full meter");
-    }
-    (success, full)
 }
 
 fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBuiltinsSession {
@@ -762,4 +958,60 @@ fn json_safe(value: &str) -> String {
         .chars()
         .filter(|character| character.is_ascii_graphic() && *character != '"' && *character != '\\')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state() {
+        let pair = prepare_real_meter_tap_artifacts(48_000);
+        let mut success = RealMeterTapPlan::bind(pair.success);
+        let mut full = RealMeterTapPlan::bind(pair.full);
+        let expected_taps = [
+            MeterTap::Input,
+            MeterTap::PostInputBuiltins,
+            MeterTap::PostSimd1,
+            MeterTap::PostDynamic,
+            MeterTap::PostSimd2PreFader,
+            MeterTap::PostFader,
+            MeterTap::PostMatrix,
+        ];
+
+        assert_eq!(success.consumers.len(), OBSERVERS);
+        assert_eq!(full.consumers.len(), OBSERVERS);
+        assert_eq!(
+            success
+                .consumers
+                .iter()
+                .map(|consumer| consumer.tap)
+                .collect::<Vec<_>>(),
+            expected_taps
+        );
+        assert_eq!(
+            full.consumers
+                .iter()
+                .map(|consumer| consumer.tap)
+                .collect::<Vec<_>>(),
+            expected_taps
+        );
+
+        full.render(0);
+        full.render(QUANTUM as u64);
+        let full_windows = full.drain_all();
+        assert!(
+            full_windows
+                .iter()
+                .all(|record| record.snapshot.end_sample == QUANTUM as u64)
+        );
+
+        success.render(QUANTUM as u64);
+        let success_windows = success.drain_all();
+        assert!(
+            success_windows
+                .iter()
+                .all(|record| record.snapshot.end_sample == QUANTUM as u64 * 2)
+        );
+    }
 }
