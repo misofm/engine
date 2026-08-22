@@ -22,6 +22,75 @@ pub const EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH: u32 = 2;
 pub const EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectStateSelectorV1 {
+    descriptor_identity: EffectDescriptorIdentityV1,
+    state_layout_version: u32,
+}
+
+impl EffectStateSelectorV1 {
+    pub const fn descriptor_identity(self) -> EffectDescriptorIdentityV1 {
+        self.descriptor_identity
+    }
+
+    pub const fn state_layout_version(self) -> u32 {
+        self.state_layout_version
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EffectStateMigrationEdgeErrorV1 {
+    NonAdjacentLayout = 1,
+    UnchangedIdentity = 2,
+    EffectOrContractMismatch = 3,
+    IncompatibleReplayDescriptor = 4,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EffectStateDescriptorProvenanceV1 {
+    descriptor: &'static EffectDescriptorV1,
+    identity: EffectDescriptorIdentityV1,
+}
+
+impl PartialEq for EffectStateDescriptorProvenanceV1 {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::eq(self.descriptor, other.descriptor) && self.identity == other.identity
+    }
+}
+
+impl Eq for EffectStateDescriptorProvenanceV1 {}
+
+/// An adjacent, replay-compatible historical-to-target descriptor edge.
+///
+/// Private fields ensure identities, layouts, and static descriptor provenance can only originate
+/// from accepted descriptor-wire bindings.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundEffectStateMigrationEdgeV1<'wire> {
+    source: BoundEffectDescriptorWireV1<'wire>,
+    target: BoundEffectDescriptorWireV1<'wire>,
+    source_selector: EffectStateSelectorV1,
+    target_selector: EffectStateSelectorV1,
+}
+
+impl<'wire> BoundEffectStateMigrationEdgeV1<'wire> {
+    pub const fn source_bound(self) -> BoundEffectDescriptorWireV1<'wire> {
+        self.source
+    }
+
+    pub const fn target_bound(self) -> BoundEffectDescriptorWireV1<'wire> {
+        self.target
+    }
+
+    pub const fn source_selector(self) -> EffectStateSelectorV1 {
+        self.source_selector
+    }
+
+    pub const fn target_selector(self) -> EffectStateSelectorV1 {
+        self.target_selector
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectStateLimitsV1 {
     pub maximum_descriptor_bytes: u64,
     pub maximum_envelope_bytes: u64,
@@ -140,6 +209,126 @@ fn sidechain_parts(ports: PreparedPortsV1) -> (u32, &'static str, bool) {
         PreparedSidechainPort::Unconnected { id, required } => (1, id.as_str(), required),
         PreparedSidechainPort::Connected { id, required } => (2, id.as_str(), required),
     }
+}
+
+fn optional_float_bits_equal(left: Option<f32>, right: Option<f32>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn parameters_compatible(
+    left: &'static EffectDescriptorV1,
+    right: &'static EffectDescriptorV1,
+) -> bool {
+    left.parameters.len() == right.parameters.len()
+        && left
+            .parameters
+            .iter()
+            .zip(right.parameters)
+            .all(|(left, right)| {
+                left.id == right.id
+                    && left.display_name == right.display_name
+                    && left.display_unit == right.display_unit
+                    && left.unit == right.unit
+                    && left.domain == right.domain
+                    && optional_float_bits_equal(left.minimum, right.minimum)
+                    && optional_float_bits_equal(left.maximum, right.maximum)
+                    && left.default_value.to_bits() == right.default_value.to_bits()
+                    && left.mapping == right.mapping
+                    && left.automation_rate == right.automation_rate
+                    && left.channel_policy == right.channel_policy
+                    && left.smoothing == right.smoothing
+                    && left.smoothing_samples == right.smoothing_samples
+                    && left.readable == right.readable
+                    && left.automatable == right.automatable
+                    && left.enum_choices.len() == right.enum_choices.len()
+                    && left
+                        .enum_choices
+                        .iter()
+                        .zip(right.enum_choices)
+                        .all(|(left, right)| {
+                            left.value.to_bits() == right.value.to_bits()
+                                && left.label == right.label
+                        })
+            })
+}
+
+fn qualities_compatible(
+    left: &'static EffectDescriptorV1,
+    right: &'static EffectDescriptorV1,
+) -> bool {
+    left.qualities.len() == right.qualities.len()
+        && left
+            .qualities
+            .iter()
+            .zip(right.qualities)
+            .all(|(left, right)| {
+                left.quality == right.quality
+                    && left.sample_rate == right.sample_rate
+                    && left.latency == right.latency
+                    && left.tail == right.tail
+                    && left.scratch_fixed_bytes == right.scratch_fixed_bytes
+                    && left.scratch_bytes_per_frame == right.scratch_bytes_per_frame
+            })
+}
+
+pub fn effect_state_bound_selector_v1(
+    bound: BoundEffectDescriptorWireV1<'_>,
+) -> EffectStateSelectorV1 {
+    EffectStateSelectorV1 {
+        descriptor_identity: bound.identity(),
+        state_layout_version: bound.descriptor().state_layout_version,
+    }
+}
+
+pub fn effect_state_descriptor_provenance_v1(
+    bound: BoundEffectDescriptorWireV1<'_>,
+) -> EffectStateDescriptorProvenanceV1 {
+    EffectStateDescriptorProvenanceV1 {
+        descriptor: bound.descriptor(),
+        identity: bound.identity(),
+    }
+}
+
+pub fn bind_effect_state_migration_edge_v1<'wire>(
+    source: BoundEffectDescriptorWireV1<'wire>,
+    target: BoundEffectDescriptorWireV1<'wire>,
+) -> Result<BoundEffectStateMigrationEdgeV1<'wire>, EffectStateMigrationEdgeErrorV1> {
+    let source_descriptor = source.descriptor();
+    let target_descriptor = target.descriptor();
+    let adjacent = source_descriptor
+        .state_layout_version
+        .checked_add(1)
+        .is_some_and(|version| version == target_descriptor.state_layout_version);
+    if !adjacent {
+        return Err(EffectStateMigrationEdgeErrorV1::NonAdjacentLayout);
+    }
+    if source.identity() == target.identity() {
+        return Err(EffectStateMigrationEdgeErrorV1::UnchangedIdentity);
+    }
+    if source_descriptor.id != target_descriptor.id
+        || source_descriptor.contract_major != target_descriptor.contract_major
+        || source_descriptor.contract_minor != target_descriptor.contract_minor
+    {
+        return Err(EffectStateMigrationEdgeErrorV1::EffectOrContractMismatch);
+    }
+    if source_descriptor.display_name != target_descriptor.display_name
+        || source_descriptor.supported_link_modes != target_descriptor.supported_link_modes
+        || !parameters_compatible(source_descriptor, target_descriptor)
+        || source_descriptor.ports != target_descriptor.ports
+        || !qualities_compatible(source_descriptor, target_descriptor)
+    {
+        return Err(EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor);
+    }
+    Ok(BoundEffectStateMigrationEdgeV1 {
+        source,
+        target,
+        source_selector: effect_state_bound_selector_v1(source),
+        target_selector: effect_state_bound_selector_v1(target),
+    })
 }
 
 fn parameter_value_valid(
@@ -600,6 +789,37 @@ fn valid_id(value: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ParsedEffectStateV1<'a> {
+    bytes: &'a [u8],
+    descriptor_identity: EffectDescriptorIdentityV1,
+    effect_id: &'a str,
+    sidechain_id: &'a str,
+    contract_major: u16,
+    contract_minor: u16,
+    state_layout_version: u32,
+    sample_rate: u32,
+    quantum: u32,
+    quality: EffectQuality,
+    bypass: bool,
+    link_mode: LinkMode,
+    sidechain_kind: u32,
+    sidechain_required: bool,
+    latency_samples: u64,
+    tail: TailSamples,
+    state_sizes: StatePayloadSizes,
+    scratch_bytes: u64,
+    automation_capacity: u32,
+    request_maximum_total_state_bytes: u64,
+    request_maximum_scratch_bytes: u64,
+    request_maximum_automation_spans_per_block: u32,
+    initial_start: usize,
+    initial_count: usize,
+    common_start: usize,
+    left_start: usize,
+    right_start: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct VerifiedEffectStateV1<'a> {
     bytes: &'a [u8],
     descriptor_identity: EffectDescriptorIdentityV1,
@@ -741,11 +961,10 @@ impl Iterator for EffectStateInitialValuesV1<'_> {
 
 impl ExactSizeIterator for EffectStateInitialValuesV1<'_> {}
 
-fn parse_effect_state_v1<'a>(
-    bound: BoundEffectDescriptorWireV1<'_>,
+fn parse_effect_state_structure_v1<'a>(
     bytes: &'a [u8],
     limits: EffectStateLimitsV1,
-) -> Result<VerifiedEffectStateV1<'a>, Diagnostic> {
+) -> Result<ParsedEffectStateV1<'a>, Diagnostic> {
     let byte_length = u64::try_from(bytes.len()).map_err(|_| overflow(16))?;
     if byte_length > limits.maximum_envelope_bytes {
         return Err(limit(byte_length));
@@ -914,10 +1133,7 @@ fn parse_effect_state_v1<'a>(
     let mut identity = [0; 32];
     identity.copy_from_slice(&bytes[24..56]);
     let descriptor_identity = EffectDescriptorIdentityV1::from_bytes(identity);
-    if descriptor_identity != bound.identity() {
-        return Err(unavailable(Code::Descriptor, 3 << 16));
-    }
-    Ok(VerifiedEffectStateV1 {
+    Ok(ParsedEffectStateV1 {
         bytes,
         descriptor_identity,
         effect_id,
@@ -949,6 +1165,45 @@ fn parse_effect_state_v1<'a>(
         common_start,
         left_start,
         right_start,
+    })
+}
+
+fn bind_parsed_effect_state_v1<'a>(
+    parsed: ParsedEffectStateV1<'a>,
+    bound: BoundEffectDescriptorWireV1<'_>,
+) -> Result<VerifiedEffectStateV1<'a>, Diagnostic> {
+    if parsed.descriptor_identity != bound.identity() {
+        return Err(unavailable(Code::Descriptor, 3 << 16));
+    }
+    Ok(VerifiedEffectStateV1 {
+        bytes: parsed.bytes,
+        descriptor_identity: parsed.descriptor_identity,
+        effect_id: parsed.effect_id,
+        sidechain_id: parsed.sidechain_id,
+        contract_major: parsed.contract_major,
+        contract_minor: parsed.contract_minor,
+        state_layout_version: parsed.state_layout_version,
+        sample_rate: parsed.sample_rate,
+        quantum: parsed.quantum,
+        quality: parsed.quality,
+        bypass: parsed.bypass,
+        link_mode: parsed.link_mode,
+        sidechain_kind: parsed.sidechain_kind,
+        sidechain_required: parsed.sidechain_required,
+        latency_samples: parsed.latency_samples,
+        tail: parsed.tail,
+        state_sizes: parsed.state_sizes,
+        scratch_bytes: parsed.scratch_bytes,
+        automation_capacity: parsed.automation_capacity,
+        request_maximum_total_state_bytes: parsed.request_maximum_total_state_bytes,
+        request_maximum_scratch_bytes: parsed.request_maximum_scratch_bytes,
+        request_maximum_automation_spans_per_block: parsed
+            .request_maximum_automation_spans_per_block,
+        initial_start: parsed.initial_start,
+        initial_count: parsed.initial_count,
+        common_start: parsed.common_start,
+        left_start: parsed.left_start,
+        right_start: parsed.right_start,
         bound_descriptor: bound.descriptor(),
     })
 }
@@ -1174,6 +1429,135 @@ pub fn validate_effect_state_replay_v1(
     validate_verified_initial_values(state, descriptor)
 }
 
+pub fn validate_effect_state_replay_configuration_v1(
+    state: VerifiedEffectStateV1<'_>,
+    replay: EffectStateReplayViewV1<'_>,
+) -> Result<(), Diagnostic> {
+    let descriptor = state.bound_descriptor;
+    if replay.effect_id != descriptor.id || state.effect_id != descriptor.id.as_str() {
+        return Err(metadata_mismatch(1));
+    }
+    if (state.contract_major, state.contract_minor)
+        != (descriptor.contract_major, descriptor.contract_minor)
+    {
+        return Err(metadata_mismatch(2));
+    }
+    if state.sample_rate != replay.request.sample_rate {
+        return Err(metadata_mismatch(4));
+    }
+    if state.quantum != replay.request.quantum {
+        return Err(metadata_mismatch(5));
+    }
+    if state.quality != replay.request.quality {
+        return Err(metadata_mismatch(6));
+    }
+    if state.bypass != replay.request.bypass {
+        return Err(metadata_mismatch(7));
+    }
+    if state.link_mode != replay.request.link_mode {
+        return Err(metadata_mismatch(8));
+    }
+    if state.sidechain() != sidechain_parts(replay.request.ports) {
+        return Err(metadata_mismatch(9));
+    }
+    if state.request_limits()
+        != (
+            replay.request.limits.maximum_total_state_bytes,
+            replay.request.limits.maximum_scratch_bytes,
+            replay.request.limits.maximum_automation_spans_per_block,
+        )
+    {
+        return Err(metadata_mismatch(15));
+    }
+    let mut saved = state.initial_values();
+    for (index, expected) in replay.request.initial_values.iter().enumerate() {
+        let record = state.initial_start + index * INITIAL_BYTES;
+        let Some(actual) = saved.next() else {
+            return Err(diagnostic(Code::InitialValues, record, Some(index)));
+        };
+        if actual.parameter_index != expected.parameter_index {
+            return Err(diagnostic(Code::InitialValues, record, Some(index)));
+        }
+        if actual.channel != expected.channel {
+            return Err(diagnostic(Code::InitialValues, record + 4, Some(index)));
+        }
+        if actual.value.to_bits() != expected.value.to_bits() {
+            return Err(diagnostic(Code::InitialValues, record + 8, Some(index)));
+        }
+    }
+    if saved.next().is_some() {
+        return Err(unavailable(Code::InitialValues, 0));
+    }
+    Ok(())
+}
+
+pub fn effect_state_replay_view_from_verified_v1<'initial>(
+    state: VerifiedEffectStateV1<'_>,
+    initial_values: &'initial [InitialParameterValue],
+) -> Result<EffectStateReplayViewV1<'initial>, Diagnostic> {
+    let descriptor = state.bound_descriptor;
+    let (kind, id, required) = state.sidechain();
+    let sidechain = match kind {
+        0 => PreparedSidechainPort::None,
+        1 | 2 => {
+            let port = descriptor
+                .ports
+                .iter()
+                .find(|port| {
+                    port.role == miso_engine_effect_contract::PortRole::SidechainInput
+                        && port.id.as_str() == id
+                        && port.required == required
+                })
+                .ok_or_else(|| metadata_mismatch(9))?;
+            if kind == 1 {
+                PreparedSidechainPort::Unconnected {
+                    id: port.id,
+                    required,
+                }
+            } else {
+                PreparedSidechainPort::Connected {
+                    id: port.id,
+                    required,
+                }
+            }
+        }
+        _ => return Err(metadata_mismatch(9)),
+    };
+    let (maximum_total_state_bytes, maximum_scratch_bytes, maximum_automation_spans_per_block) =
+        state.request_limits();
+    let replay = EffectStateReplayViewV1 {
+        effect_id: descriptor.id,
+        request: PrepareEffectRequest {
+            sample_rate: state.sample_rate,
+            quantum: state.quantum,
+            quality: state.quality,
+            bypass: state.bypass,
+            link_mode: state.link_mode,
+            ports: PreparedPortsV1 { sidechain },
+            initial_values,
+            limits: miso_engine_effect_contract::PrepareEffectLimits {
+                maximum_total_state_bytes,
+                maximum_scratch_bytes,
+                maximum_automation_spans_per_block,
+            },
+        },
+    };
+    validate_effect_state_replay_configuration_v1(state, replay)?;
+    Ok(replay)
+}
+
+pub fn inspect_effect_state_selector_v1(
+    bytes: &[u8],
+    limits: EffectStateLimitsV1,
+) -> Result<EffectStateSelectorV1, Diagnostic> {
+    validate_limits(limits)?;
+    let parsed = parse_effect_state_structure_v1(bytes, limits)?;
+    Ok(EffectStateSelectorV1 {
+        descriptor_identity: parsed.descriptor_identity,
+        state_layout_version: parsed.state_layout_version,
+    })
+}
+
 pub fn verify_effect_state_v1<'a>(
     bound: BoundEffectDescriptorWireV1<'_>,
     bytes: &'a [u8],
@@ -1184,5 +1568,5 @@ pub fn verify_effect_state_v1<'a>(
     if descriptor_bytes > limits.maximum_descriptor_bytes {
         return Err(limit(descriptor_bytes));
     }
-    parse_effect_state_v1(bound, bytes, limits)
+    bind_parsed_effect_state_v1(parse_effect_state_structure_v1(bytes, limits)?, bound)
 }

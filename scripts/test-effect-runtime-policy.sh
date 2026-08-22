@@ -10,6 +10,7 @@ cp -R "$root/fuzz/fuzz_targets" "$temp/fuzz/"
 compiler_manifest="$temp/crates/miso-engine-effect-compiler/Cargo.toml"
 
 bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null
+bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null
 
 restore_compiler_manifest() {
     cp "$root/crates/miso-engine-effect-compiler/Cargo.toml" "$compiler_manifest"
@@ -78,6 +79,19 @@ if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; 
     exit 1
 fi
 cp "$root/fuzz/fuzz_targets/session_parse.rs" "$temp/fuzz/fuzz_targets/session_parse.rs"
+
+printf '\npub fn effect_state_migration_render_leak() {}\n' \
+    >>"$temp/crates/miso-engine-core/src/realtime/plan.rs"
+if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+    printf 'effect runtime migration render mutation escaped\n' >&2
+    exit 1
+fi
+if bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null 2>&1; then
+    printf 'effect state migration render mutation escaped narrow checker\n' >&2
+    exit 1
+fi
+cp "$root/crates/miso-engine-core/src/realtime/plan.rs" \
+    "$temp/crates/miso-engine-core/src/realtime/plan.rs"
 
 printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then

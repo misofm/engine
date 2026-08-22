@@ -681,6 +681,737 @@ fn borrowed_verification_enforces_each_caller_cap() {
     }
 }
 
+#[test]
+fn structural_selector_is_diagnostic_equivalent_until_descriptor_binding() {
+    let (wire, original) = encoded_state();
+    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let limits = EffectStateLimitsV1::default();
+    assert_eq!(
+        inspect_effect_state_selector_v1(&original, limits).unwrap(),
+        effect_state_bound_selector_v1(bound)
+    );
+
+    for length in 0..original.len() {
+        let bytes = &original[..length];
+        assert_eq!(
+            inspect_effect_state_selector_v1(bytes, limits).unwrap_err(),
+            verify_effect_state_v1(bound, bytes, limits).unwrap_err(),
+            "truncation {length}"
+        );
+    }
+    let mut trailing = original.clone();
+    trailing.push(0);
+    assert_eq!(
+        inspect_effect_state_selector_v1(&trailing, limits).unwrap_err(),
+        verify_effect_state_v1(bound, &trailing, limits).unwrap_err()
+    );
+    for offset in 0..original.len() {
+        let mut mutated = original.clone();
+        mutated[offset] ^= 1;
+        assert_eq!(
+            inspect_effect_state_selector_v1(&mutated, limits).unwrap_err(),
+            verify_effect_state_v1(bound, &mutated, limits).unwrap_err(),
+            "single-byte mutation at {offset}"
+        );
+    }
+
+    let mut changed_identity = original.clone();
+    changed_identity[24] ^= 1;
+    refresh_digest(&mut changed_identity);
+    let selector = inspect_effect_state_selector_v1(&changed_identity, limits).unwrap();
+    assert_ne!(selector.descriptor_identity(), bound.identity());
+    assert_eq!(selector.state_layout_version(), 3);
+    assert_eq!(
+        verify_effect_state_v1(bound, &changed_identity, limits)
+            .unwrap_err()
+            .code,
+        EffectStateDiagnosticCodeV1::Descriptor
+    );
+}
+
+fn migration_descriptor(layout: u32, sizes: StatePayloadSizes) -> &'static EffectDescriptorV1 {
+    let qualities = QUALITIES
+        .iter()
+        .copied()
+        .map(|quality| QualityDescriptorV1 {
+            maximum_state: sizes,
+            ..quality
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    Box::leak(Box::new(EffectDescriptorV1 {
+        state_layout_version: layout,
+        qualities: Box::leak(qualities),
+        ..DESCRIPTOR
+    }))
+}
+
+fn descriptor_with_parameters(
+    layout: u32,
+    sizes: StatePayloadSizes,
+    parameters: [ParameterDescriptorV1; 2],
+) -> &'static EffectDescriptorV1 {
+    let descriptor = migration_descriptor(layout, sizes);
+    Box::leak(Box::new(EffectDescriptorV1 {
+        parameters: Box::leak(Box::new(parameters)),
+        ..*descriptor
+    }))
+}
+
+fn assert_incompatible_edge(
+    source_bound: BoundEffectDescriptorWireV1<'_>,
+    descriptor: &'static EffectDescriptorV1,
+) {
+    let wire = descriptor_wire(descriptor);
+    let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+    assert_eq!(
+        bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
+        EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor
+    );
+}
+
+#[test]
+fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
+    let source = migration_descriptor(
+        2,
+        StatePayloadSizes {
+            common_bytes: 1,
+            left_bytes: 4,
+            right_bytes: 4,
+        },
+    );
+    let source_wire = descriptor_wire(source);
+    let target_wire = descriptor_wire(&DESCRIPTOR);
+    let source_bound = bind_effect_descriptor_wire_v1(source, &source_wire, 1 << 20).unwrap();
+    let target_bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &target_wire, 1 << 20).unwrap();
+    let edge = bind_effect_state_migration_edge_v1(source_bound, target_bound).unwrap();
+    assert_eq!(
+        edge.source_selector(),
+        effect_state_bound_selector_v1(source_bound)
+    );
+    assert_eq!(
+        edge.target_selector(),
+        effect_state_bound_selector_v1(target_bound)
+    );
+    assert_ne!(edge.source_selector(), edge.target_selector());
+    assert_eq!(edge.source_bound().wire(), source_wire);
+    assert_eq!(edge.target_bound().wire(), target_wire);
+    assert_eq!(
+        effect_state_descriptor_provenance_v1(target_bound),
+        effect_state_descriptor_provenance_v1(target_bound)
+    );
+
+    let identical_static = Box::leak(Box::new(DESCRIPTOR));
+    let identical_bound =
+        bind_effect_descriptor_wire_v1(identical_static, &target_wire, 1 << 20).unwrap();
+    assert_eq!(identical_bound.identity(), target_bound.identity());
+    assert_ne!(
+        effect_state_descriptor_provenance_v1(identical_bound),
+        effect_state_descriptor_provenance_v1(target_bound)
+    );
+
+    let nonadjacent = migration_descriptor(1, STATE_SIZES);
+    let nonadjacent_wire = descriptor_wire(nonadjacent);
+    let nonadjacent_bound =
+        bind_effect_descriptor_wire_v1(nonadjacent, &nonadjacent_wire, 1 << 20).unwrap();
+    assert_eq!(
+        bind_effect_state_migration_edge_v1(nonadjacent_bound, target_bound).unwrap_err(),
+        EffectStateMigrationEdgeErrorV1::NonAdjacentLayout
+    );
+    assert_eq!(
+        bind_effect_state_migration_edge_v1(target_bound, target_bound).unwrap_err(),
+        EffectStateMigrationEdgeErrorV1::NonAdjacentLayout
+    );
+
+    for descriptor in [
+        Box::leak(Box::new(EffectDescriptorV1 {
+            id: effect_id("test.other-state"),
+            ..DESCRIPTOR
+        })) as &'static EffectDescriptorV1,
+        Box::leak(Box::new(EffectDescriptorV1 {
+            contract_minor: 8,
+            ..DESCRIPTOR
+        })),
+    ] {
+        let wire = descriptor_wire(descriptor);
+        let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+        assert_eq!(
+            bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
+            EffectStateMigrationEdgeErrorV1::EffectOrContractMismatch
+        );
+    }
+
+    let mut changed_parameter = PARAMETERS;
+    changed_parameter[0].default_value = 0.5;
+    let mut changed_port = PORTS;
+    changed_port[2].required = true;
+    let mut changed_quality = QUALITIES;
+    changed_quality[0].latency = LatencySamples(10);
+    for descriptor in [
+        Box::leak(Box::new(EffectDescriptorV1 {
+            display_name: "Changed",
+            ..DESCRIPTOR
+        })) as &'static EffectDescriptorV1,
+        Box::leak(Box::new(EffectDescriptorV1 {
+            supported_link_modes: LinkModeSet::DUAL_MONO,
+            ..DESCRIPTOR
+        })),
+        Box::leak(Box::new(EffectDescriptorV1 {
+            parameters: Box::leak(Box::new(changed_parameter)),
+            ..DESCRIPTOR
+        })),
+        Box::leak(Box::new(EffectDescriptorV1 {
+            ports: Box::leak(Box::new(changed_port)),
+            ..DESCRIPTOR
+        })),
+        Box::leak(Box::new(EffectDescriptorV1 {
+            qualities: Box::leak(Box::new(changed_quality)),
+            ..DESCRIPTOR
+        })),
+    ] {
+        let wire = descriptor_wire(descriptor);
+        let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+        assert_eq!(
+            bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
+            EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor
+        );
+    }
+
+    // Every independently variable parameter field is forbidden. Fields coupled by descriptor
+    // validity (domain/minimum/maximum/mapping and automation/smoothing) use a valid bundle while
+    // the equality implementation compares every member separately with f32 `to_bits()`.
+    let parameter_mutations = [
+        ParameterDescriptorV1 {
+            id: ParameterId(3),
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            display_name: "Renamed",
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            display_unit: "ratio",
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            unit: ParameterUnit::Ratio,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            minimum: Some(-3.0),
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            maximum: Some(3.0),
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            default_value: 0.25,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            mapping: ParameterMapping::Exponential,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            automation_rate: AutomationRate::Sample,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            channel_policy: ParameterChannelPolicy::Shared,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            smoothing: SmoothingRule::Linear,
+            smoothing_samples: 1,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            readable: false,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            automation_rate: AutomationRate::None,
+            automatable: false,
+            ..PARAMETERS[1]
+        },
+        ParameterDescriptorV1 {
+            domain: ParameterDomain::Boolean,
+            minimum: None,
+            maximum: None,
+            default_value: 1.0,
+            mapping: ParameterMapping::Stepped,
+            ..PARAMETERS[1]
+        },
+    ];
+    for mutation in parameter_mutations {
+        assert_incompatible_edge(
+            source_bound,
+            descriptor_with_parameters(3, STATE_SIZES, [PARAMETERS[0], mutation]),
+        );
+    }
+
+    static ENUM_CHOICES: [EnumChoiceV1; 2] = [
+        EnumChoiceV1 {
+            value: 0.0,
+            label: "zero",
+        },
+        EnumChoiceV1 {
+            value: 1.0,
+            label: "one",
+        },
+    ];
+    static CHANGED_ENUM_CHOICES: [EnumChoiceV1; 2] = [
+        EnumChoiceV1 {
+            value: 0.0,
+            label: "none",
+        },
+        EnumChoiceV1 {
+            value: 1.0,
+            label: "one",
+        },
+    ];
+    let enum_parameter = ParameterDescriptorV1 {
+        domain: ParameterDomain::Enumeration,
+        minimum: None,
+        maximum: None,
+        default_value: 0.0,
+        mapping: ParameterMapping::Stepped,
+        enum_choices: &ENUM_CHOICES,
+        ..PARAMETERS[1]
+    };
+    let enum_source = descriptor_with_parameters(
+        2,
+        StatePayloadSizes {
+            common_bytes: 1,
+            left_bytes: 4,
+            right_bytes: 4,
+        },
+        [PARAMETERS[0], enum_parameter],
+    );
+    let enum_source_wire = descriptor_wire(enum_source);
+    let enum_source_bound =
+        bind_effect_descriptor_wire_v1(enum_source, &enum_source_wire, 1 << 20).unwrap();
+    assert_incompatible_edge(
+        enum_source_bound,
+        descriptor_with_parameters(
+            3,
+            STATE_SIZES,
+            [
+                PARAMETERS[0],
+                ParameterDescriptorV1 {
+                    enum_choices: &CHANGED_ENUM_CHOICES,
+                    ..enum_parameter
+                },
+            ],
+        ),
+    );
+
+    let mut changed_port_id = PORTS;
+    changed_port_id[2].id = port_id("alternate-detector");
+    let mut changed_port_required = PORTS;
+    changed_port_required[2].required = true;
+    for ports in [changed_port_id, changed_port_required] {
+        assert_incompatible_edge(
+            source_bound,
+            Box::leak(Box::new(EffectDescriptorV1 {
+                ports: Box::leak(Box::new(ports)),
+                ..DESCRIPTOR
+            })),
+        );
+    }
+
+    for mutation in [
+        QualityDescriptorV1 {
+            latency: LatencySamples(10),
+            ..QUALITIES[0]
+        },
+        QualityDescriptorV1 {
+            tail: TailSamples::Infinite,
+            ..QUALITIES[0]
+        },
+        QualityDescriptorV1 {
+            scratch_fixed_bytes: 12,
+            ..QUALITIES[0]
+        },
+        QualityDescriptorV1 {
+            scratch_bytes_per_frame: 3,
+            ..QUALITIES[0]
+        },
+    ] {
+        let mut qualities = QUALITIES;
+        qualities[0] = mutation;
+        assert_incompatible_edge(
+            source_bound,
+            Box::leak(Box::new(EffectDescriptorV1 {
+                qualities: Box::leak(Box::new(qualities)),
+                ..DESCRIPTOR
+            })),
+        );
+    }
+
+    let source_sizes = StatePayloadSizes {
+        common_bytes: 1,
+        left_bytes: 4,
+        right_bytes: 4,
+    };
+    let mut source_rates = QUALITIES
+        .iter()
+        .copied()
+        .map(|row| QualityDescriptorV1 {
+            maximum_state: source_sizes,
+            ..row
+        })
+        .collect::<Vec<_>>();
+    source_rates.push(QualityDescriptorV1 {
+        sample_rate: 176_400,
+        maximum_state: source_sizes,
+        ..QUALITIES[0]
+    });
+    let mut target_rates = QUALITIES.to_vec();
+    target_rates.push(QualityDescriptorV1 {
+        sample_rate: 192_000,
+        ..QUALITIES[0]
+    });
+    let rate_source = Box::leak(Box::new(EffectDescriptorV1 {
+        state_layout_version: 2,
+        qualities: Box::leak(source_rates.into_boxed_slice()),
+        ..DESCRIPTOR
+    }));
+    let rate_source_wire = descriptor_wire(rate_source);
+    let rate_source_bound =
+        bind_effect_descriptor_wire_v1(rate_source, &rate_source_wire, 1 << 20).unwrap();
+    assert_incompatible_edge(
+        rate_source_bound,
+        Box::leak(Box::new(EffectDescriptorV1 {
+            qualities: Box::leak(target_rates.into_boxed_slice()),
+            ..DESCRIPTOR
+        })),
+    );
+
+    let draft_source = QUALITIES
+        .iter()
+        .copied()
+        .map(|row| QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            maximum_state: source_sizes,
+            ..row
+        })
+        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptorV1 {
+            maximum_state: source_sizes,
+            ..row
+        }))
+        .collect::<Vec<_>>();
+    let normal_high_target = QUALITIES
+        .iter()
+        .copied()
+        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptorV1 {
+            quality: EffectQuality::High,
+            ..row
+        }))
+        .collect::<Vec<_>>();
+    let quality_source = Box::leak(Box::new(EffectDescriptorV1 {
+        state_layout_version: 2,
+        qualities: Box::leak(draft_source.into_boxed_slice()),
+        ..DESCRIPTOR
+    }));
+    let quality_source_wire = descriptor_wire(quality_source);
+    let quality_source_bound =
+        bind_effect_descriptor_wire_v1(quality_source, &quality_source_wire, 1 << 20).unwrap();
+    assert_incompatible_edge(
+        quality_source_bound,
+        Box::leak(Box::new(EffectDescriptorV1 {
+            qualities: Box::leak(normal_high_target.into_boxed_slice()),
+            ..DESCRIPTOR
+        })),
+    );
+}
+
+#[test]
+fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
+    let historical = migration_descriptor(
+        2,
+        StatePayloadSizes {
+            common_bytes: 1,
+            left_bytes: 4,
+            right_bytes: 4,
+        },
+    );
+    let wire = descriptor_wire(historical);
+    let bound = bind_effect_descriptor_wire_v1(historical, &wire, 1 << 20).unwrap();
+    let historical_replay = EffectStateReplayViewV1 {
+        effect_id: historical.id,
+        request: replay().request,
+    };
+    let requirements =
+        effect_state_v1_requirements(bound, historical_replay, EffectStateLimitsV1::default())
+            .unwrap();
+    let mut bytes = vec![0; requirements.envelope_bytes as usize];
+    encode_effect_state_v1(
+        bound,
+        historical_replay,
+        b"c",
+        b"left",
+        b"rght",
+        EffectStateLimitsV1::default(),
+        &mut bytes,
+    )
+    .unwrap();
+    let state = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
+    validate_effect_state_current_layout_v1(state).unwrap();
+    validate_effect_state_replay_configuration_v1(state, historical_replay).unwrap();
+    assert_eq!(state.state_layout_version(), 2);
+    assert_ne!(state.state_sizes(), DESCRIPTOR.qualities[1].maximum_state);
+
+    for offset in [88_usize, 90] {
+        let mut changed_contract = bytes.clone();
+        changed_contract[offset] ^= 1;
+        refresh_digest(&mut changed_contract);
+        let changed_state =
+            verify_effect_state_v1(bound, &changed_contract, EffectStateLimitsV1::default())
+                .unwrap();
+        let error = validate_effect_state_replay_configuration_v1(changed_state, historical_replay)
+            .unwrap_err();
+        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Metadata);
+        assert_eq!(error.detail, 2);
+    }
+
+    let mut changed = INITIAL;
+    changed[2].value = 1.25;
+    let changed_replay = EffectStateReplayViewV1 {
+        effect_id: historical.id,
+        request: PrepareEffectRequest {
+            initial_values: &changed,
+            ..historical_replay.request
+        },
+    };
+    let error = validate_effect_state_replay_configuration_v1(state, changed_replay).unwrap_err();
+    assert_eq!(error.code, EffectStateDiagnosticCodeV1::InitialValues);
+    assert_eq!(error.item_index, 2);
+
+    let assert_metadata = |candidate: EffectStateReplayViewV1<'_>, detail| {
+        let error = validate_effect_state_replay_configuration_v1(state, candidate).unwrap_err();
+        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Metadata);
+        assert_eq!(error.detail, detail);
+    };
+    assert_metadata(
+        EffectStateReplayViewV1 {
+            effect_id: effect_id("test.other-state"),
+            ..historical_replay
+        },
+        1,
+    );
+    for (request, detail) in [
+        (
+            PrepareEffectRequest {
+                sample_rate: 44_100,
+                ..historical_replay.request
+            },
+            4,
+        ),
+        (
+            PrepareEffectRequest {
+                quantum: 9,
+                ..historical_replay.request
+            },
+            5,
+        ),
+        (
+            PrepareEffectRequest {
+                quality: EffectQuality::High,
+                ..historical_replay.request
+            },
+            6,
+        ),
+        (
+            PrepareEffectRequest {
+                bypass: false,
+                ..historical_replay.request
+            },
+            7,
+        ),
+        (
+            PrepareEffectRequest {
+                link_mode: LinkMode::Average,
+                ..historical_replay.request
+            },
+            8,
+        ),
+        (
+            PrepareEffectRequest {
+                ports: PreparedPortsV1 {
+                    sidechain: PreparedSidechainPort::Unconnected {
+                        id: port_id("detector"),
+                        required: false,
+                    },
+                },
+                ..historical_replay.request
+            },
+            9,
+        ),
+        (
+            PrepareEffectRequest {
+                ports: PreparedPortsV1 {
+                    sidechain: PreparedSidechainPort::Connected {
+                        id: port_id("other-detector"),
+                        required: false,
+                    },
+                },
+                ..historical_replay.request
+            },
+            9,
+        ),
+        (
+            PrepareEffectRequest {
+                ports: PreparedPortsV1 {
+                    sidechain: PreparedSidechainPort::Connected {
+                        id: port_id("detector"),
+                        required: true,
+                    },
+                },
+                ..historical_replay.request
+            },
+            9,
+        ),
+        (
+            PrepareEffectRequest {
+                limits: PrepareEffectLimits {
+                    maximum_total_state_bytes: 63,
+                    ..historical_replay.request.limits
+                },
+                ..historical_replay.request
+            },
+            15,
+        ),
+        (
+            PrepareEffectRequest {
+                limits: PrepareEffectLimits {
+                    maximum_scratch_bytes: 127,
+                    ..historical_replay.request.limits
+                },
+                ..historical_replay.request
+            },
+            15,
+        ),
+        (
+            PrepareEffectRequest {
+                limits: PrepareEffectLimits {
+                    maximum_automation_spans_per_block: 22,
+                    ..historical_replay.request.limits
+                },
+                ..historical_replay.request
+            },
+            15,
+        ),
+    ] {
+        assert_metadata(
+            EffectStateReplayViewV1 {
+                request,
+                ..historical_replay
+            },
+            detail,
+        );
+    }
+
+    let mut wrong_index = INITIAL;
+    wrong_index[2].parameter_index = 0;
+    let mut wrong_channel = INITIAL;
+    wrong_channel[2].channel = ParameterChannel::Left;
+    let mut wrong_bits = INITIAL;
+    wrong_bits[2].value = f32::from_bits(INITIAL[2].value.to_bits() ^ 1);
+    let too_many = [INITIAL[0], INITIAL[1], INITIAL[2], INITIAL[2]];
+    let initial_offset = 248_usize;
+    for (values, item, offset) in [
+        (&wrong_index[..], 2, (initial_offset + 32) as u64),
+        (&wrong_channel[..], 2, (initial_offset + 36) as u64),
+        (&wrong_bits[..], 2, (initial_offset + 40) as u64),
+        (
+            &INITIAL[..2],
+            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        ),
+        (&too_many[..], 3, (initial_offset + 48) as u64),
+    ] {
+        let error = validate_effect_state_replay_configuration_v1(
+            state,
+            EffectStateReplayViewV1 {
+                request: PrepareEffectRequest {
+                    initial_values: values,
+                    ..historical_replay.request
+                },
+                ..historical_replay
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, EffectStateDiagnosticCodeV1::InitialValues);
+        assert_eq!(error.item_index, item);
+        assert_eq!(error.byte_offset, offset);
+    }
+}
+
+#[test]
+fn selector_and_registry_paths_perform_no_descriptor_validation_pass() {
+    let state_source = include_str!("../src/state.rs");
+    let selector = state_source
+        .split("pub fn inspect_effect_state_selector_v1")
+        .nth(1)
+        .unwrap()
+        .split("pub fn verify_effect_state_v1")
+        .next()
+        .unwrap();
+    assert!(!selector.contains("validate_descriptor_v1"));
+    assert!(!selector.contains("effect_descriptor_identity_v1"));
+    assert!(!selector.contains("bind_effect_descriptor_wire_v1"));
+
+    let wire_source = include_str!("../src/wire.rs");
+    let binder = wire_source
+        .split("pub fn bind_effect_descriptor_wire_v1")
+        .nth(1)
+        .unwrap()
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
+    assert_eq!(binder.matches("validate_descriptor_v1").count(), 1);
+
+    let compatibility = state_source
+        .split("fn parameters_compatible")
+        .nth(1)
+        .unwrap()
+        .split("pub fn effect_state_bound_selector_v1")
+        .next()
+        .unwrap();
+    for field in [
+        ".id",
+        ".display_name",
+        ".display_unit",
+        ".unit",
+        ".domain",
+        ".minimum",
+        ".maximum",
+        ".default_value",
+        ".mapping",
+        ".automation_rate",
+        ".channel_policy",
+        ".smoothing",
+        ".smoothing_samples",
+        ".readable",
+        ".automatable",
+        ".enum_choices",
+        ".quality",
+        ".sample_rate",
+        ".latency",
+        ".tail",
+        ".scratch_fixed_bytes",
+        ".scratch_bytes_per_frame",
+    ] {
+        assert!(
+            compatibility.contains(field),
+            "missing compatibility field {field}"
+        );
+    }
+    assert!(state_source.contains("source_descriptor.ports != target_descriptor.ports"));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assert_verify_diagnostic(
     name: &str,
