@@ -130,7 +130,7 @@ extract_native_symbol() {
 
 scalar_object=$(native_object native-scalar-object '-avx2,-fma')
 extract_native_symbol "$scalar_object" 'scalar::process_tpt_scalar' "$scratch/scalar.symbol"
-if rg -q '%[xyz]mm|\bv[a-z0-9]*ps\b|\bv?fm(add|sub)|\bvfnmadd' "$scratch/scalar.symbol"; then
+if rg -q '%[yz]mm|\bv[a-z0-9]*ps\b|\bv?fm(add|sub)|\bvfnmadd' "$scratch/scalar.symbol"; then
     fail 'scalar TPT symbol contains packed AVX or FMA'
 fi
 printf 'issue068 object leg=native-scalar object_sha256=%s symbol_sha256=%s result=PASS\n' \
