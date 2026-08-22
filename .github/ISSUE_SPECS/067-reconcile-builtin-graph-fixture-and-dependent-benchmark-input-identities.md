@@ -1,4 +1,4 @@
-# 066 Reconcile builtin graph fixture and dependent benchmark input identities
+# 067 Reconcile builtin graph fixture and dependent benchmark input identities
 
 ## Outcome
 
@@ -141,7 +141,7 @@ wrong PDC relations.
 Final Sol gates:
 
 - checked-corpus read-only validation: PASS;
-- exact `issue066_graph_pdc_and_dependent_identity_mutations_are_rejected`: PASS, `1/1`;
+- exact `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected`: PASS, `1/1`;
 - warning-denied all-target fixture-package Clippy: PASS;
 - format, six-path, four-row, TOML-field, cardinality and diff checks: PASS.
 

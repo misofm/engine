@@ -5276,11 +5276,11 @@ mod tests {
     }
 
     #[test]
-    fn issue066_graph_pdc_and_dependent_identity_mutations_are_rejected() {
+    fn issue067_graph_pdc_and_dependent_identity_mutations_are_rejected() {
         let files = complete_files();
-        let root = temporary_root("issue066-graph-baseline");
+        let root = temporary_root("issue067-graph-baseline");
         write_fixture(&root, &files);
-        check_read_only_fixture_root_v1(&root).expect("issue066 graph fixture baseline");
+        check_read_only_fixture_root_v1(&root).expect("issue067 graph fixture baseline");
         let records = parse_canonical_meter_records_v1(&root, "meters/graph-taps.jsonl")
             .expect("seven graph meter records");
         let summaries: BTreeSet<_> = records
@@ -5344,7 +5344,7 @@ mod tests {
         assert!(parse_canonical_response_f64_v1("10.0", "test").is_err());
 
         let row = parse_response_csv_row_v1(
-            "response-high_pass-44100-1-0-0,44100,high_pass,10.00000000000000000,4.00000000000000000,1,-16.02738287747026291,-16.02738235825830770,-16.02737817066901727,-16.02738648600919902,-131.33618179292395212,-16.02738648903881824,0.00000000000000000,0"
+            "response-high_pass-44100-1-0-0,44100,high_pass,10.00000000000000000,4.00000000000000000,1,-16.02738287747026291,-16.02738235825830770,-16.02737817067901727,-16.02738648600919902,-131.33618179292395212,-16.02738648903881824,0.00000000000000000,0"
                 .split(',')
                 .collect(),
             2,
@@ -5623,13 +5623,13 @@ mod tests {
         name: &str,
         mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
     ) {
-        let root = temporary_root(&format!("issue066-{name}"));
+        let root = temporary_root(&format!("issue067-{name}"));
         let mut mutated = files.clone();
         mutate(&mut mutated);
         write_fixture(&root, &mutated);
         assert!(
             check_fixture_root_v1(&root).is_err(),
-            "accepted manifest-valid issue066 mutation: {name}"
+            "accepted manifest-valid issue067 mutation: {name}"
         );
         remove_temporary_root(root);
     }

@@ -9,7 +9,7 @@ corpus through the exact 24/24 corruption matrix and final nonbenchmark policy g
 
 Stopped Issue 060 could not combine response/scalar PCM, graph/PDC, typed JSONL and final seal in
 one correction. Issues 061 and 063 close response/scalar PCM and typed JSONL; stopped Issue 062's
-graph/PDC technical input is completed by Issue 066. This issue changes no expected DSP value; it
+graph/PDC technical input is completed by Issue 067. This issue changes no expected DSP value; it
 validates their one joined corpus and becomes the sole corpus dependency of Issue 057.
 
 It permits exactly one Terra attempt and one bounded Sol correction/review. A second failure stops.
@@ -17,7 +17,7 @@ Workload, timing and benchmark invocations are forbidden and remain zero.
 
 ## Scope
 
-Join the exact accepted Issue-061/063/066 payloads without regeneration or tuning. Execute the
+Join the exact accepted Issue-061/063/067 payloads without regeneration or tuning. Execute the
 frozen six-class, four-mutation corruption matrix; prove the supplied-root checker cannot reach
 generation/production-render/write APIs and leaves a valid tree byte-identical; then run the
 focused nonbenchmark repository/policy seal.
@@ -66,7 +66,7 @@ counts; all 24 class/mutation/error identities; read-only proof; strict Terra/So
 
 ## Terra attempt 1 and final Sol correction evidence
 
-Accepted inputs are Issue 061 commit `f86a6d2`, Issue 063 commit `9533d36` and Issue 066 commit
+Accepted inputs are Issue 061 commit `f86a6d2`, Issue 063 commit `9533d36` and Issue 067 commit
 `092ded7`. No accepted payload changed. The joined `MANIFEST.tsv` SHA-256 is
 `bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff` and identifies exactly 50
 payloads: 1,652 cases, 1,630 response rows, 33 PCM files, two meter files with 7/15 records,

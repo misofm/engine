@@ -53,17 +53,17 @@ builtin response cases and scalar PCM semantics**, and Issue 063, **Complete bui
 diagnostic, and resource corpus semantics**, close two bounded surfaces. Issue 062, **Complete
 builtin graph-tap and PDC fixture semantics**, stopped after correcting its graph model at
 checkpoint `2bbed6a` because accepted benchmark-input TOMLs pin the displaced graph PCM hash.
-Issue 066, **Reconcile builtin graph fixture and dependent benchmark input identities**, owns that
+Issue 067, **Reconcile builtin graph fixture and dependent benchmark input identities**, owns that
 exact graph-payload/input-identity transaction. Issue 064, **Seal independent builtin corpus
-corruption and read-only qualification**, joins 061/063/066 and owns the final 24/24 seal.
+corruption and read-only qualification**, joins 061/063/067 and owns the final 24/24 seal.
 Issue 057, **Builtin direct and graph realtime audit and target qualification**, follows 064. Issue
 058, **Builtin benchmark preflight and exactly-once qualification**, follows 057 and alone owns the
-eventual one-invocation/two-round builtin benchmark. Issues 057–059, 061, 063–064 and 066 each permit
+eventual one-invocation/two-round builtin benchmark. Issues 057–059, 061, 063–064 and 067 each permit
 one Terra attempt plus one Sol correction. The successor timed invocation count is currently zero.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
-066 -> 064 -> 057 -> 058. Issue 008 needs 036's accepted preparation/metadata and
+067 -> 064 -> 057 -> 058. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
 for 057's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 058 seals that candidate and its accepted benchmark; issue 026 waits for both
