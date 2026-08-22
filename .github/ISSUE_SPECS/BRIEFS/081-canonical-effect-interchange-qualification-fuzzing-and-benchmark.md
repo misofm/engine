@@ -2,21 +2,55 @@
 
 ## Decision
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH ATTEMPT 1.** Implement qualification tooling only.
-Accepted descriptor/package/CID/state/migration bytes, APIs, product source, fixtures and C ABI are
-read-only. Use one Sol High implementation pass and at most one bounded Sol High correction, with a
-Sol XHigh adversarial verdict after each. A second failed pass stops and rescopes.
+**SOL XHIGH NONBENCHMARK PASS / CONDITIONAL GO FOR EXACTLY ONE ZERO-WORKLOAD PREFLIGHT; BENCHMARK
+RUNNER NOT AUTHORIZED.** Accepted descriptor/package/CID/state/migration bytes, APIs, product
+source, fixtures and C ABI remain read-only.
 
-At briefing, real reference-process, mutation-campaign, cross-target, benchmark preflight,
-benchmark runner, benchmark workload and timed benchmark counters were all zero. Qualification
-later recorded `cross_target_invocations=1` on candidate `709b3d2ccc6d`: native, Android and iOS
-completed; scalar Wasm check, package `rustc`, object creation and `wasm-objdump -x` completed before
-a harness-only export-selector false positive on the module/name
-`<miso_engine_effect_package.wasm>`. Scalar opcode inspection and the entire SIMD Wasm row did not
-run. No product or target failure occurred. The bounded correction parses exact Export-section
-`-> "..."` records and is synthetic-tested without rerunning the matrix; benchmark
-preflight/runner/workload/timed counters remain zero. A corrected target rerun requires a fresh Sol
-XHigh GO.
+At briefing, all real counters were zero. Qualification later recorded target invocation 1 on
+candidate `709b3d2ccc6d`: native and Android/iOS completed; scalar Wasm reached object creation and
+`wasm-objdump -x`, where a harness-only module/name false positive stopped before scalar opcode
+inspection and before the SIMD row. No product or target failure occurred. The exact function-
+export parser correction committed as `4cb3b5c`; Sol XHigh authorized target invocation 2, which
+passed all five rows.
+
+## Completed nonbenchmark verdict
+
+The clean qualification candidate is `4cb3b5c3a97361218f474700751653c4400dc08d`, tree
+`9aec9ade2645057cf2c93986a0d0eb47658df7d1`. Reference qualification passed in one runner
+invocation with 100 successful children `0..99`. The exact 30,000-trial mutation campaign passed
+with descriptor/package/state hashes `02d88fc02583926a1e53ffe56ae08d17bffe9039f8e75cefef70fefb07c34155`,
+`fc8ea16692695dac08b29b64b5d7394c53ca70448ad3abc7c5c7994d289f7714` and
+`1a153e0fe665d837deec13e014d442baeac49658baf8d3f927b5ddaef34a6ca2`. The exact 48-row migration
+matrix passed with hash `f834c9447fb57e3e93408a69285e2a42b3bf94422ce7c4eb23dc205333849f46`.
+C/Rust ABI and allocation/read-only gates passed; the spec records the exact native allocation
+counters. Target invocation 2 passed all five rows. Static policies/mutations, shell syntax, format,
+locked workspace check, warning-denied Clippy/rustdoc and final clean/diff/artifact checks passed.
+
+The first workspace nonbenchmark test invocation is mechanically inconclusive because its parent
+stream was lost after process completion; it is not counted as PASS or failure. The authoritative
+retained-session repeat was exactly
+`CARGO_BUILD_JOBS=1 cargo test --workspace --all-features --locked --lib --bins --tests --examples`
+and exited `0` with only expected ignored/manual rows. Doctests exited `0` with eight compile-fail
+doctests.
+
+Final counters are reference `1`, mutation `1`, migration `1`, cross-target `2`, and benchmark
+preflight/runner/workload/timed all `0`. `Cargo.lock` is
+`4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`; `fuzz/Cargo.lock` is
+`af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`; accepted baseline is
+`6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5`; qualification/target/
+reference/benchmark-runner/preflight scripts are respectively `bde208b34413dd4e7e10fc27c2a85019300d61860c5055d5b081a949a704f970`,
+`3edeacbbf6571bacfb87807ab6cf9d15612babf895c5215928fff1b3b0d3bae9`,
+`026aa241b5146480fc393279f0fea4326c1b3172da81cadbf5750d186268014e`,
+`4aca5153928bfee583cf5ea403483b63f848e4fb6a83045800424bc855a80429` and
+`3957a02b8e5d45efd3e3637c60fc04157180c555fb46b0aa0eee4157afa3029c`.
+
+Root must exact-path commit only this spec and brief, confirm the post-doc clean HEAD/tree, then
+create and independently verify the required atomic/no-clobber ignored 18-key
+`target/issue081/nonbenchmark.seal.json` bound to that post-doc candidate, the schema's accepted/
+Cargo/qualification/target hashes, `reference_processes=100`, `mutation_trials=30000`,
+`migration_rows=48`, `target_rows=5` and all four benchmark invocation counters at `0`. Only then is
+exactly one no-argument, zero-workload preflight authorized. The seal is not created by this brief,
+and benchmark runner/main/workload/timing remain unauthorized.
 
 ## Smallest closable vertical
 

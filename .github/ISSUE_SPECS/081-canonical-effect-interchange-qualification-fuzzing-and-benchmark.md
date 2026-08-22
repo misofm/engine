@@ -4,8 +4,9 @@
 
 Qualify the accepted descriptor, package/CID, state and migration products as one portable
 interchange boundary without changing their bytes, APIs or product implementation. **SOL XHIGH
-BRIEF PASS / READY FOR SOL HIGH ATTEMPT 1.** This is a qualification/tooling issue, not another
-product feature.
+NONBENCHMARK PASS / READY FOR EXACTLY ONE ZERO-WORKLOAD PREFLIGHT AFTER THE CONDITIONAL SEAL BELOW;
+BENCHMARK RUNNER NOT AUTHORIZED.** This is a qualification/tooling issue, not another product
+feature.
 
 Use one coherent Sol High implementation attempt and at most one bounded Sol High correction, each
 adversarially reviewed by Sol XHigh. A second failed implementation pass stops and requires a
@@ -14,16 +15,83 @@ stateless rescope/rebrief; gates are never weakened. At briefing,
 `cross_target_invocations=0`, `benchmark_preflight_invocations=0`, `benchmark_runner_invocations=0`,
 `benchmark_workload_invocations=0` and `timed_benchmark_invocations=0`.
 
-Qualification execution later recorded `cross_target_invocations=1` on candidate `709b3d2ccc6d`.
+Qualification execution first recorded `cross_target_invocations=1` on candidate `709b3d2ccc6d`.
 The native execution row and Android and iOS compile rows completed. The scalar Wasm check, package
 `rustc`, object creation and `wasm-objdump -x` completed, then the harness stopped because its
 export selector also treated the module/name `<miso_engine_effect_package.wasm>` as an export. The
-scalar opcode inspection and entire SIMD Wasm row did not run. This is a harness false positive,
-not a product or target failure. The accepted product and target artifacts are unchanged, the
-target matrix has not been rerun, and benchmark preflight/runner/workload/timed counters remain
-zero. The sole bounded correction parses only explicit `-> "..."` entries inside the Wasm Export
-section and adds a synthetic parser regression; a corrected target rerun requires a new Sol XHigh
-GO.
+scalar opcode inspection and entire SIMD Wasm row did not run. This was a harness false positive,
+not a product or target failure. The bounded correction committed as `4cb3b5c` admits only explicit
+function exports inside the Wasm Export section and has a synthetic missing/extra/duplicate/
+wrong-kind/reference regression. Sol XHigh authorized one corrected full rerun; target invocation
+2 passed all five rows. The accepted product and target artifacts remain unchanged.
+
+## Qualification and nonbenchmark evidence
+
+The completed clean nonbenchmark candidate is commit
+`4cb3b5c3a97361218f474700751653c4400dc08d`, tree
+`9aec9ade2645057cf2c93986a0d0eb47658df7d1`. Sol XHigh independently confirmed that HEAD/tree,
+clean index/worktree, the absent benchmark artifacts and these identities:
+
+- `Cargo.lock`: `4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a`;
+- `fuzz/Cargo.lock`: `af4547d5bae367e4249c6fcf482b249ff8af0ae29b9a933957d34b36ec36e5d5`;
+- accepted baseline: `6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5`;
+- qualification checker: `bde208b34413dd4e7e10fc27c2a85019300d61860c5055d5b081a949a704f970`;
+- target matrix: `3edeacbbf6571bacfb87807ab6cf9d15612babf895c5215928fff1b3b0d3bae9`;
+- reference runner: `026aa241b5146480fc393279f0fea4326c1b3172da81cadbf5750d186268014e`;
+- benchmark runner: `4aca5153928bfee583cf5ea403483b63f848e4fb6a83045800424bc855a80429`;
+  and
+- zero-workload preflight: `3957a02b8e5d45efd3e3637c60fc04157180c555fb46b0aa0eee4157afa3029c`.
+
+The sole reference-runner invocation launched exact children `0..99`; every child exited zero and
+emitted one record. Raw and accepted evidence are byte-identical 100-line files with SHA-256
+`0946cb00a980d7c94bdc37043d4384392d62e57994f7c5efcbb7e5bb4b924bb3`; the 100-row status file has
+SHA-256 `f4033cc066e7239664498a034d43ce05b3cb30581f9c2fb0ec3d749e5ab9ca51`.
+The exact 30,000-trial mutation campaign passed once, with ordered normalized-outcome hashes:
+
+- descriptor: `02d88fc02583926a1e53ffe56ae08d17bffe9039f8e75cefef70fefb07c34155`;
+- package: `fc8ea16692695dac08b29b64b5d7394c53ca70448ad3abc7c5c7994d289f7714`;
+  and
+- state: `1a153e0fe665d837deec13e014d442baeac49658baf8d3f927b5ddaef34a6ca2`.
+
+The exact 48-row migration matrix passed once with aggregate hash
+`f834c9447fb57e3e93408a69285e2a42b3bf94422ce7c4eb23dc205333849f46`. Native C11/Rust agreement
+passed for all six accepted descriptor ABI records and comprehensive-A projections. Isolated
+allocation evidence passed with these native measurements: descriptor/package publication `8/8`
+allocations/frees and `1000/1000` bytes, peak `736`, live `0`; postverify/prebound state `0`;
+registry construction/drop `4/4`, `864/864` bytes, peak `864`, live `0`; resolution and prebuilt
+bank restore `3/3`, `88/88` bytes, peak `48`, live `0`; normalized scalar success delta `2/0`,
+`160/0` bytes, peak/live `160`; and its drop delta `0/2`, `0/160` bytes, returning live bytes to
+baseline. Static policies and mutations, tracked-shell syntax, conflict/trailing-whitespace,
+artifact and diff checks passed. Target invocation 2 passed the native execution, Android/iOS
+compile-only and scalar/SIMD Wasm compile/object-only rows; it makes no mobile, Wasm or cross-CPU
+execution claim.
+
+The broad nonbenchmark seal is candid: format and locked workspace all-target/all-feature check
+passed. The first locked workspace nonbenchmark test process showed only passing output, but its
+parent evidence stream was lost after process completion, so that invocation is mechanically
+inconclusive and is neither PASS nor failure evidence. Root repeated exactly
+`CARGO_BUILD_JOBS=1 cargo test --workspace --all-features --locked --lib --bins --tests --examples`
+with a retained session; it exited `0` with only the expected ignored/manual rows. Workspace
+doctests exited `0` with eight compile-fail doctests; warning-denied workspace all-target/all-feature
+Clippy and warning-denied workspace all-feature rustdoc exited `0`. Final HEAD/tree, clean index/
+worktree, conflict, whitespace, artifact and diff checks passed.
+
+Final nonbenchmark counters are `reference_process_invocations=1`,
+`mutation_campaign_invocations=1`, `migration_matrix_invocations=1`,
+`cross_target_invocations=2`, `benchmark_preflight_invocations=0`,
+`benchmark_runner_invocations=0`, `benchmark_workload_invocations=0` and
+`timed_benchmark_invocations=0`. No benchmark binary, preflight seal, raw/accepted benchmark JSONL,
+stderr or benchmark disposition exists under `target/issue081/`.
+
+**SOL XHIGH PREFLIGHT GO is conditional.** Root must first commit only this spec and its tracked
+brief, confirm the resulting post-documentation HEAD/tree and clean index/worktree, then create and
+independently validate the required atomic/no-clobber `target/issue081/nonbenchmark.seal.json` with
+the exact 18-key schema, the post-documentation candidate identity, the schema's accepted/Cargo/
+qualification/target identities above, `reference_processes=100`, `mutation_trials=30000`,
+`migration_rows=48`, `target_rows=5` and all four benchmark invocation counters at `0`. That ignored
+seal is not authored or claimed here. After it exists and matches, root may invoke the no-argument
+zero-workload preflight exactly once. This verdict does not authorize the benchmark runner,
+benchmark main, workload or timing.
 
 Remote Issue 81 was read-only verified open with the exact title and no comments on 2026-08-22.
 Its original body has the correct outcome but leaves the matrices and benchmark lifecycle
