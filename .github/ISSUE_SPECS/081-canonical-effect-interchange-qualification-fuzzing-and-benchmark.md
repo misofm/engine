@@ -14,6 +14,17 @@ stateless rescope/rebrief; gates are never weakened. At briefing,
 `cross_target_invocations=0`, `benchmark_preflight_invocations=0`, `benchmark_runner_invocations=0`,
 `benchmark_workload_invocations=0` and `timed_benchmark_invocations=0`.
 
+Qualification execution later recorded `cross_target_invocations=1` on candidate `709b3d2ccc6d`.
+The native execution row and Android and iOS compile rows completed. The scalar Wasm check, package
+`rustc`, object creation and `wasm-objdump -x` completed, then the harness stopped because its
+export selector also treated the module/name `<miso_engine_effect_package.wasm>` as an export. The
+scalar opcode inspection and entire SIMD Wasm row did not run. This is a harness false positive,
+not a product or target failure. The accepted product and target artifacts are unchanged, the
+target matrix has not been rerun, and benchmark preflight/runner/workload/timed counters remain
+zero. The sole bounded correction parses only explicit `-> "..."` entries inside the Wasm Export
+section and adds a synthetic parser regression; a corrected target rerun requires a new Sol XHigh
+GO.
+
 Remote Issue 81 was read-only verified open with the exact title and no comments on 2026-08-22.
 Its original body has the correct outcome but leaves the matrices and benchmark lifecycle
 underspecified. Root synchronizes this corrected record only at the eventual CI-conscious batch

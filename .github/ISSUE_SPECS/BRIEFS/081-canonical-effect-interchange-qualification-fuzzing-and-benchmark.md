@@ -7,9 +7,16 @@ Accepted descriptor/package/CID/state/migration bytes, APIs, product source, fix
 read-only. Use one Sol High implementation pass and at most one bounded Sol High correction, with a
 Sol XHigh adversarial verdict after each. A second failed pass stops and rescopes.
 
-Current counters are all zero: real reference-process, mutation-campaign, cross-target, benchmark
-preflight, benchmark runner, benchmark workload and timed benchmark invocations. Do not run any of
-them while implementing the harness.
+At briefing, real reference-process, mutation-campaign, cross-target, benchmark preflight,
+benchmark runner, benchmark workload and timed benchmark counters were all zero. Qualification
+later recorded `cross_target_invocations=1` on candidate `709b3d2ccc6d`: native, Android and iOS
+completed; scalar Wasm check, package `rustc`, object creation and `wasm-objdump -x` completed before
+a harness-only export-selector false positive on the module/name
+`<miso_engine_effect_package.wasm>`. Scalar opcode inspection and the entire SIMD Wasm row did not
+run. No product or target failure occurred. The bounded correction parses exact Export-section
+`-> "..."` records and is synthetic-tested without rerunning the matrix; benchmark
+preflight/runner/workload/timed counters remain zero. A corrected target rerun requires a fresh Sol
+XHigh GO.
 
 ## Smallest closable vertical
 

@@ -19,6 +19,7 @@ for path in \
     scripts/run-effect-interchange-reference-processes.sh \
     scripts/test-effect-interchange-reference-runner.sh \
     scripts/check-effect-interchange-targets.sh \
+    scripts/test-effect-interchange-target-export-parser.sh \
     scripts/effect-interchange-benchmark-validator.py \
     scripts/preflight-effect-interchange-benchmark.sh \
     scripts/run-effect-interchange-benchmark.sh \
@@ -94,6 +95,10 @@ for feature in 'feature=-simd128' 'feature=+simd128'; do
     rg -Fq -- "$feature" scripts/check-effect-interchange-targets.sh ||
         fail "Wasm target feature row missing: $feature"
 done
+rg -Fq '/^Export\[/' scripts/check-effect-interchange-targets.sh ||
+    fail 'Wasm export parser does not enter the exact Export section'
+rg -Fq -- '-> "' scripts/check-effect-interchange-targets.sh ||
+    fail 'Wasm export parser does not select explicit export arrows'
 
 if rg -n 'miso-engine-effect-interchange|effect_interchange_qualification' \
     crates/*/Cargo.toml hosts/*/Cargo.toml 2>/dev/null; then
