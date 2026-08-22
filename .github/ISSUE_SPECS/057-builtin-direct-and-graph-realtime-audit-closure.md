@@ -97,3 +97,34 @@ Dependency/candidate/corpus identities; both exact million-count records; sealed
 A/B/C and destruction-thread rows; nine-category counter/probe rows; all-thread trace hash;
 commands/results and strict Terra/Sol verdicts; `workload_invocations=0` and
 `timed_benchmark_invocations=0`.
+
+## Terra attempt 1 evidence — FAIL pending bounded Sol correction
+
+Attempt 1 added the nine-category realtime detector surface and corresponding direct/graph
+terminating probes. The focused build plus both nine-probe scripts passed. The exact direct
+million-call command was run once through a yielded PTY:
+
+```text
+cargo run --locked -p miso-engine-builtins-audit --bin miso_engine_builtins_audit
+```
+
+It completed `blocks=1000000` at `sample_rate_hz=48000` and `quantum_frames=128`, with all nine
+serialized counters (`allocations`, `deallocations`, `locks`, `feature_detection`, `logs`,
+`file_io`, `network_io`, `syscalls`, `panic_unwinds`) and `total_violations` equal to zero.
+
+The single graph million-render command was also launched through a yielded PTY:
+
+```text
+cargo run --locked -p miso-engine-builtins-audit --bin miso_engine_builtins_audit_graph
+```
+
+It stopped at the first lifecycle assertion in
+`tools/miso-engine-builtins-audit/src/graph_main.rs:284`: after Plan C is pending behind the full
+retirement queue, subsequent Plan-B renders correctly report `DeferredRetirementFull`; the new
+range helper incorrectly required `SwapOutcome::None`. No sealed corpus PCM, meter, or PDC
+mismatch was observed before that stop. The graph million-run, all-thread trace, final policy
+seal, and Clippy gates remain unrun.
+
+This is a strict attempt-1 **FAIL**, awaiting only the single bounded Sol correction. No corpus or
+production DSP bytes changed; `workload_invocations=0`; `timed_benchmark_invocations=0`; no
+benchmark, preflight, workload, timing, target, or instruction command was invoked.

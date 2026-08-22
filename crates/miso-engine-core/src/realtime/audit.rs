@@ -15,6 +15,8 @@ pub enum ForbiddenOperation {
     Deallocation,
     /// Lock or blocking synchronization.
     Lock,
+    /// Runtime CPU-feature detection. It belongs exclusively to preparation.
+    FeatureDetection,
     /// Logging, tracing, printing, or formatting for output.
     Log,
     /// File input/output.
@@ -23,6 +25,8 @@ pub enum ForbiddenOperation {
     NetworkIo,
     /// Any other direct operating-system call.
     Syscall,
+    /// A panic crossing an armed render boundary.
+    PanicUnwind,
 }
 
 /// Fixed audit counters for the current thread.
@@ -34,6 +38,8 @@ pub struct AuditSnapshot {
     pub deallocations: u64,
     /// Lock attempts inside render.
     pub locks: u64,
+    /// Runtime feature-detection calls inside render.
+    pub feature_detection: u64,
     /// Log attempts inside render.
     pub logs: u64,
     /// File-I/O attempts inside render.
@@ -42,6 +48,8 @@ pub struct AuditSnapshot {
     pub network_io: u64,
     /// Other explicit syscall attempts inside render.
     pub syscalls: u64,
+    /// Panic/unwind escapes observed while a render scope is armed.
+    pub panic_unwinds: u64,
 }
 
 impl AuditSnapshot {
@@ -51,10 +59,12 @@ impl AuditSnapshot {
         self.allocations
             .saturating_add(self.deallocations)
             .saturating_add(self.locks)
+            .saturating_add(self.feature_detection)
             .saturating_add(self.logs)
             .saturating_add(self.file_io)
             .saturating_add(self.network_io)
             .saturating_add(self.syscalls)
+            .saturating_add(self.panic_unwinds)
     }
 
     fn increment(&mut self, operation: ForbiddenOperation) {
@@ -62,10 +72,12 @@ impl AuditSnapshot {
             ForbiddenOperation::Allocation => &mut self.allocations,
             ForbiddenOperation::Deallocation => &mut self.deallocations,
             ForbiddenOperation::Lock => &mut self.locks,
+            ForbiddenOperation::FeatureDetection => &mut self.feature_detection,
             ForbiddenOperation::Log => &mut self.logs,
             ForbiddenOperation::FileIo => &mut self.file_io,
             ForbiddenOperation::NetworkIo => &mut self.network_io,
             ForbiddenOperation::Syscall => &mut self.syscalls,
+            ForbiddenOperation::PanicUnwind => &mut self.panic_unwinds,
         };
         *counter = counter.saturating_add(1);
     }
@@ -84,10 +96,12 @@ std::thread_local! {
             allocations: 0,
             deallocations: 0,
             locks: 0,
+            feature_detection: 0,
             logs: 0,
             file_io: 0,
             network_io: 0,
             syscalls: 0,
+            panic_unwinds: 0,
         },
     }) };
 }
@@ -165,6 +179,9 @@ pub fn in_render_scope<T>(render: impl FnOnce() -> T) -> T {
         fn drop(&mut self) {
             STATE.with(|state| {
                 let mut current = state.get();
+                if std::thread::panicking() && current.depth != 0 {
+                    current.counters.increment(ForbiddenOperation::PanicUnwind);
+                }
                 current.depth = current.depth.saturating_sub(1);
                 state.set(current);
             });
@@ -205,6 +222,7 @@ mod tests {
             ForbiddenOperation::Allocation,
             ForbiddenOperation::Deallocation,
             ForbiddenOperation::Lock,
+            ForbiddenOperation::FeatureDetection,
             ForbiddenOperation::Log,
             ForbiddenOperation::FileIo,
             ForbiddenOperation::NetworkIo,
@@ -219,5 +237,14 @@ mod tests {
         assert_eq!(snapshot().deallocations, 1);
         assert_eq!(snapshot().locks, 1);
         assert_eq!(snapshot().logs, 1);
+        assert_eq!(snapshot().feature_detection, 1);
+    }
+
+    #[test]
+    fn armed_panic_is_counted_before_it_escapes() {
+        reset();
+        let result = std::panic::catch_unwind(|| in_render_scope(|| panic!("audit probe")));
+        assert!(result.is_err());
+        assert_eq!(snapshot().panic_unwinds, 1);
     }
 }

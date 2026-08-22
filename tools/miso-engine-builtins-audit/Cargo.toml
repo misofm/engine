@@ -17,6 +17,8 @@ path = "src/graph_main.rs"
 miso-engine-builtins.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-builtins-compiler.workspace = true
+miso-engine-conformance.workspace = true
+miso-engine-effect-contract.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-graph-compiler.workspace = true

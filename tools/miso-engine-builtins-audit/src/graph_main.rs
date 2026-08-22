@@ -17,25 +17,30 @@ use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
 };
+use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanarBufferMut, RealtimePlanOwner, RealtimeRenderReport, RenderError,
     RenderIo, RenderTime, SwapOutcome, plan_exchange,
 };
-use miso_engine_effect_compiler::EffectPreparedSession;
+use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
-    TrackStage,
+    GraphBindingBlock, GraphEdgeId, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+    GraphRuntimeProcessor, TrackStage,
 };
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
-use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
+use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler};
+use miso_engine_session::{
+    ChannelMatrix, CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
+    parse_session_toml,
+};
 
 const BLOCKS: u64 = 1_000_000;
 const QUANTUM: usize = 128;
 const OBSERVERS: usize = 7;
-const PLAN_INITIAL: u64 = 6;
-const PLAN_APPLIED: u64 = 7;
-const PLAN_DEFERRED: u64 = 8;
+const PLAN_A: u64 = 1;
+const PLAN_B: u64 = 2;
+const PLAN_C: u64 = 3;
 
 struct AuditedAllocator;
 
@@ -87,16 +92,17 @@ struct ExternalSource {
 
 impl GraphRuntimeProcessor for ExternalSource {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let base = self.plan_id as f32 * 0.01;
         for (index, (left, right)) in block
             .left
             .iter_mut()
             .zip(block.right.iter_mut())
             .enumerate()
         {
-            let offset = index as f32 * 0.0001;
-            *left = base + 0.125 + offset;
-            *right = -(base + 0.25 + offset);
+            (*left, *right) = if index == 0 {
+                (1.0, -0.5)
+            } else {
+                (0.125 + index as f32 * 0.001, -0.25 - index as f32 * 0.002)
+            };
         }
         Ok(())
     }
@@ -142,9 +148,9 @@ fn main() {
 
 fn run_audit() {
     let drops = Arc::new(Mutex::new(Vec::with_capacity(2)));
-    let (initial, _initial_meters) = prepare_graph_plan(PLAN_INITIAL, Some(Arc::clone(&drops)));
-    let (applied, mut applied_meters) = prepare_graph_plan(PLAN_APPLIED, Some(Arc::clone(&drops)));
-    let (deferred, mut deferred_meters) = prepare_graph_plan(PLAN_DEFERRED, None);
+    let (initial, _initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
+    let (applied, mut applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
+    let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
     let (mut publisher, mut owner, mut retirer) = plan_exchange(
         initial,
         PlanExchangeConfig {
@@ -153,12 +159,6 @@ fn run_audit() {
         },
     )
     .expect("plan exchange");
-    let first_epoch = match publisher.publish(applied) {
-        Ok(epoch) => epoch,
-        Err(_) => panic!("first publication"),
-    };
-    assert_eq!(first_epoch.0, 1);
-
     let (command_sender, command_receiver) = mpsc::channel();
     let (result_sender, result_receiver) = mpsc::channel();
     let retirement_thread = std::thread::spawn(move || {
@@ -181,45 +181,26 @@ fn run_audit() {
     audit::reset();
 
     let first = traced_render(&mut owner, &mut output, 0);
-    assert_applied(&first, PLAN_APPLIED, 1);
+    assert_eq!(first.swap, SwapOutcome::None);
+    assert_eq!(first.render.plan_id, PLAN_A);
+    let first_epoch = match publisher.publish(applied) {
+        Ok(epoch) => epoch,
+        Err(_) => panic!("B publication"),
+    };
+    assert_eq!(first_epoch.0, 1);
     let second = traced_render(&mut owner, &mut output, 1);
-    assert_eq!(second.swap, SwapOutcome::None);
-    assert_eq!(second.render.plan_id, PLAN_APPLIED);
-    drain_exact(&mut applied_meters, 0, "applied-first");
-
-    let third = traced_render(&mut owner, &mut output, 2);
-    assert_eq!(third.swap, SwapOutcome::None);
-    assert_eq!(third.render.plan_id, PLAN_APPLIED);
-    drain_exact(&mut applied_meters, 1, "applied-drop");
-
+    assert_applied(&second, PLAN_B, 1);
     let second_epoch = match publisher.publish(deferred) {
         Ok(epoch) => epoch,
-        Err(_) => panic!("second publication"),
+        Err(_) => panic!("C publication"),
     };
     assert_eq!(second_epoch.0, 2);
-    let fourth = traced_render(&mut owner, &mut output, 3);
-    assert_eq!(fourth.swap, SwapOutcome::DeferredRetirementFull);
-    assert_eq!(fourth.active_epoch.0, 1);
-    assert_eq!(fourth.render.plan_id, PLAN_APPLIED);
-    drain_exact(&mut applied_meters, 1, "deferred-prior-plan");
-
-    command_sender
-        .send(RetirementCommand::Reclaim)
-        .expect("reclaim initial");
-    assert_eq!(result_receiver.recv().expect("initial epoch").0, 0);
-
-    let fifth = traced_render(&mut owner, &mut output, 4);
-    assert_applied(&fifth, PLAN_DEFERRED, 2);
-    drain_exact(&mut deferred_meters, 0, "deferred-first");
-
-    traced_range(&mut owner, &mut output, 5, BLOCKS - 1, PLAN_DEFERRED);
-    // The window emitted at block five is intentionally retained while the queue is full. Drain
-    // it off render before the final block so that the final snapshot reports every exact drop.
-    drain_exact(&mut deferred_meters, 0, "deferred-pre-final");
-    let last = traced_render(&mut owner, &mut output, BLOCKS - 1);
-    assert_eq!(last.swap, SwapOutcome::None);
-    assert_eq!(last.render.plan_id, PLAN_DEFERRED);
-    drain_exact(&mut deferred_meters, BLOCKS - 7, "deferred-final");
+    let third = traced_render(&mut owner, &mut output, 2);
+    assert_eq!(third.swap, SwapOutcome::DeferredRetirementFull);
+    assert_eq!(third.active_epoch.0, 1);
+    assert_eq!(third.render.plan_id, PLAN_B);
+    traced_range(&mut owner, &mut output, 3, BLOCKS, PLAN_B);
+    drain_exact(&mut applied_meters, BLOCKS - 2, "B final");
 
     assert_eq!(owner.deferred_count(), 1);
     assert_eq!(output.as_ptr() as usize, left_address);
@@ -229,37 +210,40 @@ fn run_audit() {
 
     command_sender
         .send(RetirementCommand::Reclaim)
-        .expect("reclaim applied");
-    assert_eq!(result_receiver.recv().expect("applied epoch").0, 1);
+        .expect("reclaim A");
+    assert_eq!(result_receiver.recv().expect("A epoch").0, 0);
     command_sender
         .send(RetirementCommand::Stop)
         .expect("stop retirement owner");
     let retirement_thread_id = retirement_thread.join().expect("retirement owner");
+    drop(owner);
     let drops = drops.lock().expect("drop records");
-    assert_eq!(
-        drops.as_slice(),
-        &[
-            (PLAN_INITIAL, retirement_thread_id),
-            (PLAN_APPLIED, retirement_thread_id)
-        ]
+    assert!(drops.contains(&(PLAN_A, retirement_thread_id)));
+    assert!(
+        drops
+            .iter()
+            .any(|(plan, thread)| *plan == PLAN_B && *thread != retirement_thread_id)
+    );
+    assert!(
+        drops
+            .iter()
+            .any(|(plan, thread)| *plan == PLAN_C && *thread != retirement_thread_id)
     );
 
-    // Successes: three windows from plan seven and three from plan eight, each with seven taps.
-    // Fulls: one on plan seven, then blocks 6..=999_998 on plan eight, each at seven taps.
-    let queue_success_windows = 6_u64 * OBSERVERS as u64;
-    let queue_full_windows = (1 + (BLOCKS - 7)) * OBSERVERS as u64;
+    let queue_success_windows = OBSERVERS as u64;
+    let queue_full_windows = (BLOCKS - 2) * OBSERVERS as u64;
     println!(
         concat!(
-            "{{\"schema_version\":1,\"kind\":\"issue007_graph_realtime_lifecycle_audit\",",
-            "\"renders\":{},\"quantum_frames\":{},\"observers\":{},",
-            "\"render_count_by_epoch\":{{\"1\":4,\"2\":999996}},",
-            "\"swaps_applied\":2,\"swaps_deferred\":1,",
-            "\"prior_plan_renders_on_deferred\":1,\"drained_blocks\":6,",
+            "{{\"schema_version\":1,\"kind\":\"issue057_graph_realtime_lifecycle_audit\",",
+            "\"renders\":{},\"sample_rate_hz\":48000,\"quantum_frames\":{},\"observers\":{},",
+            "\"render_count_by_plan\":{{\"A\":1,\"B\":999999,\"C\":0}},",
+            "\"swaps_applied\":1,\"swaps_deferred\":1,",
+            "\"prior_plan_renders_on_deferred\":1,\"drained_blocks\":1,",
             "\"observer_windows_per_drained_block\":7,",
             "\"queue_success_windows\":{},\"queue_full_windows\":{},",
-            "\"retired_destroyed_off_render\":2,\"left_address\":{},\"right_address\":{},",
-            "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"logs\":{},",
-            "\"file_io\":{},\"network_io\":{},\"syscalls\":{},\"total_violations\":{}}}"
+            "\"retired_destroyed_off_render\":1,\"left_address\":{},\"right_address\":{},",
+            "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"feature_detection\":{},\"logs\":{},",
+            "\"file_io\":{},\"network_io\":{},\"syscalls\":{},\"panic_unwinds\":{},\"total_violations\":{}}}"
         ),
         BLOCKS,
         QUANTUM,
@@ -271,10 +255,12 @@ fn run_audit() {
         audit.allocations,
         audit.deallocations,
         audit.locks,
+        audit.feature_detection,
         audit.logs,
         audit.file_io,
         audit.network_io,
         audit.syscalls,
+        audit.panic_unwinds,
         audit.total(),
     );
 }
@@ -356,10 +342,33 @@ fn prepare_graph_plan(
 ) {
     let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
         .expect("canonical session");
-    model.tracks[0].simd1.effects.clear();
-    model.tracks[0].dynamic.effects.clear();
-    model.tracks[0].simd2.effects.clear();
+    let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
+    fixture_effect.identity = EffectIdentity::Native {
+        effect_id: StableId::parse("conformance.delay").expect("fixture effect ID"),
+    };
+    fixture_effect.params.clear();
+    fixture_effect.id = StableId::parse("fixture-simd1").expect("fixture effect ID");
+    model.tracks[0].simd1.effects = vec![fixture_effect.clone()];
+    fixture_effect.id = StableId::parse("fixture-dynamic").expect("fixture effect ID");
+    model.tracks[0].dynamic.effects = vec![fixture_effect.clone()];
+    fixture_effect.id = StableId::parse("fixture-simd2").expect("fixture effect ID");
+    model.tracks[0].simd2.effects = vec![fixture_effect];
+    model.tracks[0].fader.left_db = -6.0;
+    model.tracks[0].fader.right_db = 3.0;
     model.automation.clear();
+    let mut early = model.routes[0].clone();
+    early.id = StableId::parse("to-main-early").expect("fixture route ID");
+    early.source = RouteSource::Track {
+        track_id: model.tracks[0].id.clone(),
+        tap: SendTap::PostInputBuiltins,
+    };
+    early.channel_matrix = ChannelMatrix {
+        ll: 0.25,
+        lr: -0.5,
+        rl: 0.75,
+        rr: 0.125,
+    };
+    model.routes.push(early);
     let session = compile_session(
         &model,
         CompileCaps {
@@ -405,8 +414,22 @@ fn prepare_graph_plan(
         config,
     })
     .collect();
-    let builtins = prepare_session_builtins(
+    let registry = NativeEffectRegistry::new([
+        Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
+    ])
+    .expect("fixture registry");
+    let effects = prepare_native_session_effects(
         &session,
+        &registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: u32::MAX,
+        },
+    )
+    .expect("fixture effects");
+    let builtins = prepare_session_builtins(
+        &effects.session,
         &requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
@@ -423,10 +446,7 @@ fn prepare_graph_plan(
     .expect("sealed builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         plan_id,
-        effects: EffectPreparedSession {
-            session,
-            entries: Vec::new(),
-        },
+        effects,
         builtins,
         caps: miso_engine_graph::GraphCompileCaps {
             maximum_nodes: 10_000,
@@ -443,6 +463,7 @@ fn prepare_graph_plan(
         },
     })
     .unwrap_or_else(|_| panic!("graph compile"));
+    assert_graph_fixture_pdc(artifact.report());
     assert_eq!(artifact.external_binding_nodes().count(), 2);
     let envelope = artifact.envelope();
     let nodes = artifact
@@ -476,10 +497,55 @@ fn prepare_graph_plan(
     (bound.plan, bound.meter_consumers)
 }
 
+fn assert_graph_fixture_pdc(report: &GraphCompileReport) {
+    let timing = |id: &str| {
+        report
+            .route_timings
+            .iter()
+            .find(|row| row.route_id.as_str() == id)
+            .unwrap_or_else(|| panic!("missing route timing: {id}"))
+    };
+    let late = timing("to-main");
+    let early = timing("to-main-early");
+    assert_eq!(
+        (
+            late.source_arrival.0,
+            late.compensation_delay.0,
+            late.destination_arrival.0
+        ),
+        (9, 0, 9)
+    );
+    assert_eq!(
+        (
+            early.source_arrival.0,
+            early.compensation_delay.0,
+            early.destination_arrival.0,
+        ),
+        (0, 9, 9)
+    );
+    let delays: Vec<_> = report
+        .inserted_delays
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.edge_id,
+                GraphEdgeId::RouteDestination { route_id } if route_id.as_str() == "to-main-early"
+            )
+        })
+        .map(|row| row.samples.0)
+        .collect();
+    assert_eq!(delays, [9]);
+}
+
 fn run_probe(operation: ForbiddenOperation) -> ! {
     audit::warm_up();
     audit::reset();
-    audit::in_render_scope(|| audit::forbidden(operation));
+    audit::in_render_scope(|| {
+        if operation == ForbiddenOperation::PanicUnwind {
+            panic!("deliberate panic/unwind detector probe");
+        }
+        audit::forbidden(operation);
+    });
     panic!("forbidden-operation probe unexpectedly survived")
 }
 
@@ -488,10 +554,12 @@ fn parse_operation(value: &str) -> ForbiddenOperation {
         "allocation" => ForbiddenOperation::Allocation,
         "deallocation" => ForbiddenOperation::Deallocation,
         "lock" => ForbiddenOperation::Lock,
+        "feature-detection" => ForbiddenOperation::FeatureDetection,
         "log" => ForbiddenOperation::Log,
         "file-io" => ForbiddenOperation::FileIo,
         "network-io" => ForbiddenOperation::NetworkIo,
         "syscall" => ForbiddenOperation::Syscall,
+        "panic-unwind" => ForbiddenOperation::PanicUnwind,
         _ => panic!("unknown forbidden operation"),
     }
 }

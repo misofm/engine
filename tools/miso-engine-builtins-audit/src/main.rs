@@ -68,15 +68,15 @@ enum Mode {
 }
 
 fn main() {
-    let (mode, blocks) = parse_arguments();
+    let mode = parse_arguments();
     match mode {
-        Mode::Audit => run_audit(blocks),
+        Mode::Audit => run_audit(),
         Mode::Probe(operation) => run_probe(operation),
     }
 }
 
-fn run_audit(blocks: u64) {
-    assert!(blocks > 0, "audit requires a positive block count");
+fn run_audit() {
+    const BLOCKS: u64 = 1_000_000;
     let (mut chain, mut meters) = prepare();
     let mut left = [0.25_f32; 128];
     let mut right = [-0.5_f32; 128];
@@ -86,7 +86,7 @@ fn run_audit(blocks: u64) {
     audit::reset();
     eprintln!("MISO_BUILTINS_RT_BEGIN");
     audit::in_render_scope(|| {
-        for block in 0..blocks {
+        for block in 0..BLOCKS {
             let first_sample = block.checked_mul(128).expect("bounded audit sample time");
             let report = chain
                 .process_dual_mono(
@@ -103,7 +103,7 @@ fn run_audit(blocks: u64) {
     });
     eprintln!("MISO_BUILTINS_RT_END");
     let snapshot = audit::snapshot();
-    let expected_drops = blocks.saturating_sub(1);
+    let expected_drops = BLOCKS.saturating_sub(1);
     for meter in &meters {
         assert_eq!(meter.dropped_snapshots(), expected_drops);
     }
@@ -113,24 +113,25 @@ fn run_audit(blocks: u64) {
     println!(
         concat!(
             "{{\"schema_version\":1,\"kind\":\"builtins_realtime_audit\",",
-            "\"blocks\":{},\"quantum_frames\":128,\"observers\":7,",
+            "\"blocks\":1000000,\"sample_rate_hz\":48000,\"quantum_frames\":128,\"observers\":7,",
             "\"queue_success_windows\":7,\"queue_full_windows\":{},",
             "\"left_address\":{},\"right_address\":{},",
-            "\"allocations\":{},\"deallocations\":{},\"locks\":{},",
+            "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"feature_detection\":{},",
             "\"logs\":{},\"file_io\":{},\"network_io\":{},",
-            "\"syscalls\":{},\"total_violations\":{}}}"
+            "\"syscalls\":{},\"panic_unwinds\":{},\"total_violations\":{}}}"
         ),
-        blocks,
         expected_drops.saturating_mul(7),
         left_address,
         right_address,
         snapshot.allocations,
         snapshot.deallocations,
         snapshot.locks,
+        snapshot.feature_detection,
         snapshot.logs,
         snapshot.file_io,
         snapshot.network_io,
         snapshot.syscalls,
+        snapshot.panic_unwinds,
         snapshot.total(),
     );
 }
@@ -184,25 +185,21 @@ fn run_probe(operation: ForbiddenOperation) -> ! {
     audit::warm_up();
     audit::reset();
     ABORT_ALLOCATOR_VIOLATION.store(false, Ordering::Relaxed);
-    audit::in_render_scope(|| audit::forbidden(operation));
+    audit::in_render_scope(|| {
+        if operation == ForbiddenOperation::PanicUnwind {
+            panic!("deliberate panic/unwind detector probe");
+        }
+        audit::forbidden(operation);
+    });
     panic!("forbidden-operation probe unexpectedly survived")
 }
 
-fn parse_arguments() -> (Mode, u64) {
+fn parse_arguments() -> Mode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let mut mode = Mode::Audit;
-    let mut blocks = 1_000_000_u64;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
-            "--blocks" => {
-                index += 1;
-                blocks = arguments
-                    .get(index)
-                    .and_then(|value| value.parse().ok())
-                    .filter(|value: &u64| *value > 0)
-                    .expect("--blocks requires a positive integer");
-            }
             "--probe" => {
                 index += 1;
                 mode = Mode::Probe(parse_operation(
@@ -213,7 +210,7 @@ fn parse_arguments() -> (Mode, u64) {
         }
         index += 1;
     }
-    (mode, blocks)
+    mode
 }
 
 fn parse_operation(value: &str) -> ForbiddenOperation {
@@ -221,10 +218,12 @@ fn parse_operation(value: &str) -> ForbiddenOperation {
         "allocation" => ForbiddenOperation::Allocation,
         "deallocation" => ForbiddenOperation::Deallocation,
         "lock" => ForbiddenOperation::Lock,
+        "feature-detection" => ForbiddenOperation::FeatureDetection,
         "log" => ForbiddenOperation::Log,
         "file-io" => ForbiddenOperation::FileIo,
         "network-io" => ForbiddenOperation::NetworkIo,
         "syscall" => ForbiddenOperation::Syscall,
+        "panic-unwind" => ForbiddenOperation::PanicUnwind,
         _ => panic!("unknown forbidden operation"),
     }
 }
