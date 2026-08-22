@@ -102,11 +102,21 @@ fn overflow(byte_offset: usize, record_index: Option<usize>) -> Diagnostic {
 }
 
 fn checked_add(left: u32, right: u32) -> Result<u32, Diagnostic> {
-    left.checked_add(right).ok_or_else(|| overflow(16, None))
+    checked_add_at(left, right, 16)
 }
 
 fn checked_mul(left: u32, right: u32) -> Result<u32, Diagnostic> {
-    left.checked_mul(right).ok_or_else(|| overflow(16, None))
+    checked_mul_at(left, right, 16)
+}
+
+fn checked_add_at(left: u32, right: u32, byte_offset: usize) -> Result<u32, Diagnostic> {
+    left.checked_add(right)
+        .ok_or_else(|| overflow(byte_offset, None))
+}
+
+fn checked_mul_at(left: u32, right: u32, byte_offset: usize) -> Result<u32, Diagnostic> {
+    left.checked_mul(right)
+        .ok_or_else(|| overflow(byte_offset, None))
 }
 
 fn u32_len(length: usize) -> Result<u32, Diagnostic> {
@@ -544,20 +554,27 @@ fn parse_borrowed_wire(
     let choices = read_u32(bytes, 72);
     let string_bytes = read_u32(bytes, 80);
     let parameter_offset = HEADER_BYTES as u32;
-    let port_offset = checked_add(
+    let port_offset = checked_add_at(
         parameter_offset,
-        checked_mul(parameters, PARAMETER_BYTES as u32)?,
+        checked_mul_at(parameters, PARAMETER_BYTES as u32, 48)?,
+        48,
     )?;
-    let quality_offset = checked_add(port_offset, checked_mul(ports, PORT_BYTES as u32)?)?;
-    let choice_offset = checked_add(
+    let quality_offset = checked_add_at(
+        port_offset,
+        checked_mul_at(ports, PORT_BYTES as u32, 56)?,
+        56,
+    )?;
+    let choice_offset = checked_add_at(
         quality_offset,
-        checked_mul(qualities, QUALITY_BYTES as u32)?,
+        checked_mul_at(qualities, QUALITY_BYTES as u32, 64)?,
+        64,
     )?;
-    let string_offset = checked_add(
+    let string_offset = checked_add_at(
         choice_offset,
-        checked_mul(choices, ENUM_CHOICE_BYTES as u32)?,
+        checked_mul_at(choices, ENUM_CHOICE_BYTES as u32, 72)?,
+        72,
     )?;
-    if checked_add(string_offset, string_bytes)? != total {
+    if checked_add_at(string_offset, string_bytes, 80)? != total {
         return Err(diagnostic(Code::Length, 80, None));
     }
     let layout = Layout {
@@ -583,11 +600,6 @@ fn parse_borrowed_wire(
     }
     for index in 0..parameters as usize {
         let record = parameter_offset as usize + index * PARAMETER_BYTES;
-        for field in [72, 76] {
-            if read_u32(bytes, record + field) != 0 {
-                return Err(diagnostic(Code::Reserved, record + field, Some(index)));
-            }
-        }
         let flags = read_u32(bytes, record + 32);
         if flags & !15 != 0 {
             return Err(diagnostic(Code::Flags, record + 32, Some(index)));
@@ -597,6 +609,11 @@ fn parse_borrowed_wire(
         }
         if flags & 8 == 0 && read_u32(bytes, record + 40) != 0 {
             return Err(diagnostic(Code::Flags, record + 40, Some(index)));
+        }
+        for field in [72, 76] {
+            if read_u32(bytes, record + field) != 0 {
+                return Err(diagnostic(Code::Reserved, record + field, Some(index)));
+            }
         }
     }
     for index in 0..ports as usize {
@@ -621,17 +638,6 @@ fn parse_borrowed_wire(
     }
 
     // Phase 6: exact offsets, table order, and first-use string ownership.
-    for (field, expected) in [
-        (52, parameter_offset),
-        (60, port_offset),
-        (68, quality_offset),
-        (76, choice_offset),
-        (84, string_offset),
-    ] {
-        if read_u32(bytes, field) != expected {
-            return Err(diagnostic(Code::Offset, field, None));
-        }
-    }
     let mut string_cursor = string_offset;
     let effect_id_bytes = take_text(
         bytes,
@@ -649,6 +655,17 @@ fn parse_borrowed_wire(
         40,
         None,
     )?;
+    for (field, expected) in [
+        (52, parameter_offset),
+        (60, port_offset),
+        (68, quality_offset),
+        (76, choice_offset),
+        (84, string_offset),
+    ] {
+        if read_u32(bytes, field) != expected {
+            return Err(diagnostic(Code::Offset, field, None));
+        }
+    }
     let mut choice_cursor = 0u32;
     let mut prior_parameter = None;
     for index in 0..parameters as usize {
@@ -820,6 +837,19 @@ fn parse_borrowed_wire(
                 return Err(diagnostic(Code::Text, record + field, Some(index)));
             }
         }
+    }
+    for index in 0..ports as usize {
+        let record = port_offset as usize + index * PORT_BYTES;
+        let offset = read_u32(bytes, record) as usize;
+        let length = read_u32(bytes, record + 4) as usize;
+        let value = core::str::from_utf8(&bytes[offset..offset + length])
+            .map_err(|_| diagnostic(Code::Text, record, Some(index)))?;
+        if !valid_id(value) {
+            return Err(diagnostic(Code::Text, record, Some(index)));
+        }
+    }
+    for index in 0..parameters as usize {
+        let record = parameter_offset as usize + index * PARAMETER_BYTES;
         let start = read_u32(bytes, record + 48) as usize;
         let count = read_u32(bytes, record + 52) as usize;
         for choice_index in start..start + count {
@@ -835,16 +865,6 @@ fn parse_borrowed_wire(
                     Some(choice_index),
                 ));
             }
-        }
-    }
-    for index in 0..ports as usize {
-        let record = port_offset as usize + index * PORT_BYTES;
-        let offset = read_u32(bytes, record) as usize;
-        let length = read_u32(bytes, record + 4) as usize;
-        let value = core::str::from_utf8(&bytes[offset..offset + length])
-            .map_err(|_| diagnostic(Code::Text, record, Some(index)))?;
-        if !valid_id(value) {
-            return Err(diagnostic(Code::Text, record, Some(index)));
         }
     }
 
@@ -1240,6 +1260,21 @@ mod tests {
             label: "No",
         },
     ];
+    static OUT_OF_ORDER_CHOICES: [EnumChoiceV1; 2] = [CHOICES[1], CHOICES[0]];
+    static NONFINITE_CHOICES: [EnumChoiceV1; 2] = [
+        EnumChoiceV1 {
+            value: f32::NAN,
+            label: "No",
+        },
+        CHOICES[1],
+    ];
+    static CONTROL_LABEL_CHOICES: [EnumChoiceV1; 2] = [
+        EnumChoiceV1 {
+            label: "\n",
+            ..CHOICES[0]
+        },
+        CHOICES[1],
+    ];
     static PARAMETERS: [ParameterDescriptorV1; 3] = [
         ParameterDescriptorV1 {
             id: ParameterId(1),
@@ -1336,6 +1371,132 @@ mod tests {
             ..PARAMETERS[2]
         },
     ];
+    static DUPLICATE_ID_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        ParameterDescriptorV1 {
+            id: ParameterId(1),
+            ..PARAMETERS[1]
+        },
+        PARAMETERS[2],
+    ];
+    static OUT_OF_ORDER_PARAMETERS: [ParameterDescriptorV1; 3] =
+        [PARAMETERS[1], PARAMETERS[0], PARAMETERS[2]];
+    static MISSING_MINIMUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            minimum: None,
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static BAD_LOG_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            mapping: ParameterMapping::Logarithmic,
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static BAD_BOOLEAN_DEFAULT_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        ParameterDescriptorV1 {
+            default_value: 0.5,
+            ..PARAMETERS[1]
+        },
+        PARAMETERS[2],
+    ];
+    static SHORT_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            enum_choices: &[CHOICES[0]],
+            ..PARAMETERS[2]
+        },
+    ];
+    static BAD_ENUM_DEFAULT_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            default_value: 2.0,
+            ..PARAMETERS[2]
+        },
+    ];
+    static BAD_AUTOMATION_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            automatable: false,
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            automatable: true,
+            ..PARAMETERS[2]
+        },
+    ];
+    static NONFINITE_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            minimum: Some(f32::NAN),
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static NEGATIVE_ZERO_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            default_value: -0.0,
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static REVERSED_BOUND_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            minimum: Some(24.0),
+            maximum: Some(-24.0),
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static CONTINUOUS_CHOICES_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            enum_choices: &CHOICES,
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
+    ];
+    static BOOLEAN_MAPPING_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        ParameterDescriptorV1 {
+            mapping: ParameterMapping::Linear,
+            ..PARAMETERS[1]
+        },
+        PARAMETERS[2],
+    ];
+    static OUT_OF_ORDER_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            enum_choices: &OUT_OF_ORDER_CHOICES,
+            ..PARAMETERS[2]
+        },
+    ];
+    static NONFINITE_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            enum_choices: &NONFINITE_CHOICES,
+            ..PARAMETERS[2]
+        },
+    ];
+    static CONTROL_LABEL_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            enum_choices: &CONTROL_LABEL_CHOICES,
+            ..PARAMETERS[2]
+        },
+    ];
 
     static PORTS_UNSORTED: [PortDescriptorV1; 3] = [
         PortDescriptorV1 {
@@ -1366,6 +1527,24 @@ mod tests {
         },
         PORTS_SORTED[1],
         PORTS_SORTED[2],
+    ];
+    static DUPLICATE_PORTS: [PortDescriptorV1; 3] = [
+        PORTS_SORTED[0],
+        PortDescriptorV1 {
+            id: PORTS_SORTED[0].id,
+            ..PORTS_SORTED[1]
+        },
+        PORTS_SORTED[2],
+    ];
+    static MISSING_OUTPUT_PORTS: [PortDescriptorV1; 1] = [PORTS_SORTED[0]];
+    static TWO_SIDECHAIN_PORTS: [PortDescriptorV1; 4] = [
+        PORTS_SORTED[0],
+        PORTS_SORTED[1],
+        PORTS_SORTED[2],
+        PortDescriptorV1 {
+            id: port_id("key-input"),
+            ..PORTS_SORTED[2]
+        },
     ];
 
     const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
@@ -1424,6 +1603,59 @@ mod tests {
         QUALITIES[5],
         QUALITIES[6],
         QUALITIES[7],
+    ];
+    static OUT_OF_ORDER_QUALITIES: [QualityDescriptorV1; 8] = [
+        QUALITIES[1],
+        QUALITIES[0],
+        QUALITIES[2],
+        QUALITIES[3],
+        QUALITIES[4],
+        QUALITIES[5],
+        QUALITIES[6],
+        QUALITIES[7],
+    ];
+    static MISSING_RATE_QUALITIES: [QualityDescriptorV1; 7] = [
+        QUALITIES[0],
+        QUALITIES[1],
+        QUALITIES[2],
+        QUALITIES[4],
+        QUALITIES[5],
+        QUALITIES[6],
+        QUALITIES[7],
+    ];
+    static DRAFT_ONLY_QUALITIES: [QualityDescriptorV1; 8] = [
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[0]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[1]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[2]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[3]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[4]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[5]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[6]
+        },
+        QualityDescriptorV1 {
+            quality: EffectQuality::Draft,
+            ..QUALITIES[7]
+        },
     ];
 
     static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
@@ -1486,6 +1718,102 @@ mod tests {
         ..DESCRIPTOR
     };
     static BAD_STATE: EffectDescriptorV1 = EffectDescriptorV1 {
+        qualities: &BAD_STATE_QUALITIES,
+        ..DESCRIPTOR
+    };
+    static DUPLICATE_ID: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &DUPLICATE_ID_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static OUT_OF_ORDER_PARAMETER: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &OUT_OF_ORDER_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static MISSING_MINIMUM: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &MISSING_MINIMUM_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static BAD_LOG: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &BAD_LOG_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static BAD_BOOLEAN_DEFAULT: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &BAD_BOOLEAN_DEFAULT_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static SHORT_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &SHORT_ENUM_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static BAD_ENUM_DEFAULT: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &BAD_ENUM_DEFAULT_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static BAD_AUTOMATION: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &BAD_AUTOMATION_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static NONFINITE: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &NONFINITE_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static NEGATIVE_ZERO: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &NEGATIVE_ZERO_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static REVERSED_BOUND: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &REVERSED_BOUND_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static CONTINUOUS_CHOICES: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &CONTINUOUS_CHOICES_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static BOOLEAN_MAPPING: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &BOOLEAN_MAPPING_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static OUT_OF_ORDER_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &OUT_OF_ORDER_ENUM_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static NONFINITE_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &NONFINITE_ENUM_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static CONTROL_LABEL: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &CONTROL_LABEL_PARAMETERS,
+        ..DESCRIPTOR
+    };
+    static DUPLICATE_PORT: EffectDescriptorV1 = EffectDescriptorV1 {
+        ports: &DUPLICATE_PORTS,
+        ..DESCRIPTOR
+    };
+    static MISSING_OUTPUT: EffectDescriptorV1 = EffectDescriptorV1 {
+        ports: &MISSING_OUTPUT_PORTS,
+        ..DESCRIPTOR
+    };
+    static TWO_SIDECHAINS: EffectDescriptorV1 = EffectDescriptorV1 {
+        ports: &TWO_SIDECHAIN_PORTS,
+        ..DESCRIPTOR
+    };
+    static OUT_OF_ORDER_QUALITY: EffectDescriptorV1 = EffectDescriptorV1 {
+        qualities: &OUT_OF_ORDER_QUALITIES,
+        ..DESCRIPTOR
+    };
+    static MISSING_RATE: EffectDescriptorV1 = EffectDescriptorV1 {
+        qualities: &MISSING_RATE_QUALITIES,
+        ..DESCRIPTOR
+    };
+    static MISSING_NORMAL: EffectDescriptorV1 = EffectDescriptorV1 {
+        qualities: &DRAFT_ONLY_QUALITIES,
+        ..DESCRIPTOR
+    };
+    static MULTI_ERROR: EffectDescriptorV1 = EffectDescriptorV1 {
+        contract_major: 2,
+        state_layout_version: 0,
+        parameters: &DUPLICATE_ID_PARAMETERS,
+        ports: &BAD_PORTS,
         qualities: &BAD_STATE_QUALITIES,
         ..DESCRIPTOR
     };
@@ -1667,6 +1995,71 @@ mod tests {
     }
 
     #[test]
+    fn field_overflow_offsets_and_within_phase_tie_breaks_are_exact() {
+        for (field, expected_offset) in [(48, 48), (56, 56), (64, 64), (72, 72), (80, 80)] {
+            let mut bytes = vec![0; HEADER_BYTES];
+            bytes[..8].copy_from_slice(MAGIC);
+            write_u16(&mut bytes, 8, VERSION);
+            write_u16(&mut bytes, 10, HEADER_BYTES as u16);
+            write_u32(&mut bytes, 16, HEADER_BYTES as u32);
+            write_u32(&mut bytes, 52, HEADER_BYTES as u32);
+            write_u32(&mut bytes, 60, HEADER_BYTES as u32);
+            write_u32(&mut bytes, 68, HEADER_BYTES as u32);
+            write_u32(&mut bytes, 76, HEADER_BYTES as u32);
+            write_u32(&mut bytes, 84, HEADER_BYTES as u32);
+            write_u32(&mut bytes, field, u32::MAX);
+            let error = verify_effect_descriptor_wire_v1(&bytes, u32::MAX).unwrap_err();
+            assert_eq!(
+                (error.code, error.byte_offset, error.record_index),
+                (
+                    Code::Overflow,
+                    expected_offset,
+                    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE
+                )
+            );
+        }
+
+        let original = encode(&DESCRIPTOR);
+        let mut flags_before_reserved = original.clone();
+        write_u32(&mut flags_before_reserved, HEADER_BYTES + 32, 16);
+        write_u32(&mut flags_before_reserved, HEADER_BYTES + 72, 1);
+        let error = verify_effect_descriptor_wire_v1(&flags_before_reserved, 1 << 20).unwrap_err();
+        assert_eq!(
+            (error.code, error.byte_offset),
+            (Code::Flags, (HEADER_BYTES + 32) as u32)
+        );
+
+        let mut header_text_before_table_offset = original.clone();
+        write_u32(
+            &mut header_text_before_table_offset,
+            32,
+            read_u32(&original, 32) + 1,
+        );
+        write_u32(
+            &mut header_text_before_table_offset,
+            52,
+            HEADER_BYTES as u32 + 4,
+        );
+        let error = verify_effect_descriptor_wire_v1(&header_text_before_table_offset, 1 << 20)
+            .unwrap_err();
+        assert_eq!((error.code, error.byte_offset), (Code::Offset, 32));
+
+        let mut port_text_before_choice_text = original;
+        let first_port = read_u32(&port_text_before_choice_text, 60) as usize;
+        let port_text = read_u32(&port_text_before_choice_text, first_port) as usize;
+        port_text_before_choice_text[port_text] = b'A';
+        let first_choice = read_u32(&port_text_before_choice_text, 76) as usize;
+        let choice_text = read_u32(&port_text_before_choice_text, first_choice + 4) as usize;
+        port_text_before_choice_text[choice_text] = b'\n';
+        let error =
+            verify_effect_descriptor_wire_v1(&port_text_before_choice_text, 1 << 20).unwrap_err();
+        assert_eq!(
+            (error.code, error.byte_offset, error.record_index),
+            (Code::Text, first_port as u32, 0)
+        );
+    }
+
+    #[test]
     fn safe_constructor_semantic_differential_parity_is_exact() {
         assert_parity(&BAD_CONTRACT, |bytes| write_u16(bytes, 20, 2));
         assert_parity(&BAD_STATE_VERSION, |bytes| write_u32(bytes, 24, 0));
@@ -1697,6 +2090,169 @@ mod tests {
             write_u32(bytes, quality + 4, 12_345);
         });
         assert_parity(&BAD_STATE, |bytes| {
+            let quality = read_u32(bytes, 68) as usize;
+            write_u32(bytes, quality + 40, 17);
+        });
+        assert_parity(&DUPLICATE_ID, |bytes| {
+            write_u32(bytes, HEADER_BYTES + PARAMETER_BYTES, 1);
+        });
+        assert_parity(&OUT_OF_ORDER_PARAMETER, |bytes| {
+            write_u32(bytes, HEADER_BYTES, 2);
+            write_u32(bytes, HEADER_BYTES + PARAMETER_BYTES, 1);
+        });
+        assert_parity(&MISSING_MINIMUM, |bytes| {
+            let flags = read_u32(bytes, HEADER_BYTES + 32) & !4;
+            write_u32(bytes, HEADER_BYTES + 32, flags);
+            write_u32(bytes, HEADER_BYTES + 36, 0);
+        });
+        assert_parity(&BAD_LOG, |bytes| {
+            write_u32(
+                bytes,
+                HEADER_BYTES + 12,
+                ParameterMapping::Logarithmic as u32,
+            );
+        });
+        assert_parity(&BAD_BOOLEAN_DEFAULT, |bytes| {
+            write_u32(bytes, HEADER_BYTES + PARAMETER_BYTES + 44, 0.5f32.to_bits());
+        });
+        assert_parity(&SHORT_ENUM, |bytes| {
+            write_u32(bytes, HEADER_BYTES + 2 * PARAMETER_BYTES + 52, 1);
+        });
+        assert_parity(&BAD_ENUM_DEFAULT, |bytes| {
+            write_u32(
+                bytes,
+                HEADER_BYTES + 2 * PARAMETER_BYTES + 44,
+                2.0f32.to_bits(),
+            );
+        });
+        assert_parity(&BAD_AUTOMATION, |bytes| {
+            let first_flags = read_u32(bytes, HEADER_BYTES + 32) & !2;
+            write_u32(bytes, HEADER_BYTES + 32, first_flags);
+            let third = HEADER_BYTES + 2 * PARAMETER_BYTES;
+            let third_flags = read_u32(bytes, third + 32) | 2;
+            write_u32(bytes, third + 32, third_flags);
+        });
+        assert_parity(&NONFINITE, |bytes| {
+            write_u32(bytes, HEADER_BYTES + 36, f32::NAN.to_bits());
+        });
+        assert_parity(&NEGATIVE_ZERO, |bytes| {
+            write_u32(bytes, HEADER_BYTES + 44, (-0.0f32).to_bits());
+        });
+        assert_parity(&REVERSED_BOUND, |bytes| {
+            write_u32(bytes, HEADER_BYTES + 36, 24.0f32.to_bits());
+            write_u32(bytes, HEADER_BYTES + 40, (-24.0f32).to_bits());
+        });
+        assert_parity(&CONTINUOUS_CHOICES, |bytes| {
+            write_u32(bytes, HEADER_BYTES + 52, 2);
+        });
+        assert_parity(&BOOLEAN_MAPPING, |bytes| {
+            write_u32(
+                bytes,
+                HEADER_BYTES + PARAMETER_BYTES + 12,
+                ParameterMapping::Linear as u32,
+            );
+        });
+        assert_parity(&OUT_OF_ORDER_ENUM, |bytes| {
+            let choice = read_u32(bytes, 76) as usize;
+            write_u32(bytes, choice, 1.0f32.to_bits());
+            write_u32(bytes, choice + ENUM_CHOICE_BYTES, 0.0f32.to_bits());
+        });
+        assert_parity(&NONFINITE_ENUM, |bytes| {
+            let choice = read_u32(bytes, 76) as usize;
+            write_u32(bytes, choice, f32::NAN.to_bits());
+        });
+        assert_parity(&CONTROL_LABEL, |bytes| {
+            let choice = read_u32(bytes, 76) as usize;
+            let label = read_u32(bytes, choice + 4) as usize;
+            bytes[label] = b'\n';
+        });
+        assert_parity(&DUPLICATE_PORT, |bytes| {
+            let port = read_u32(bytes, 60) as usize;
+            write_u32(bytes, port + PORT_BYTES, read_u32(bytes, port));
+            write_u32(bytes, port + PORT_BYTES + 4, read_u32(bytes, port + 4));
+        });
+        assert_parity(&MISSING_OUTPUT, |bytes| write_u32(bytes, 56, 1));
+        let mut two_sidechains = encode(&DESCRIPTOR);
+        let quality = read_u32(&two_sidechains, 68) as usize;
+        let old_choice = read_u32(&two_sidechains, 76) as usize;
+        let old_string = read_u32(&two_sidechains, 84) as usize;
+        two_sidechains.splice(quality..quality, [0; PORT_BYTES]);
+        let new_length = two_sidechains.len() as u32;
+        write_u32(&mut two_sidechains, 16, new_length);
+        write_u32(&mut two_sidechains, 56, 4);
+        write_u32(&mut two_sidechains, 68, (quality + PORT_BYTES) as u32);
+        write_u32(&mut two_sidechains, 76, (old_choice + PORT_BYTES) as u32);
+        write_u32(&mut two_sidechains, 84, (old_string + PORT_BYTES) as u32);
+        for field in [32, 40] {
+            let offset = read_u32(&two_sidechains, field);
+            write_u32(&mut two_sidechains, field, offset + PORT_BYTES as u32);
+        }
+        for index in 0..3 {
+            let record = HEADER_BYTES + index * PARAMETER_BYTES;
+            for field in [56, 64] {
+                let offset = read_u32(&two_sidechains, record + field);
+                write_u32(
+                    &mut two_sidechains,
+                    record + field,
+                    offset + PORT_BYTES as u32,
+                );
+            }
+        }
+        let port = read_u32(&two_sidechains, 60) as usize;
+        for index in 0..3 {
+            let record = port + index * PORT_BYTES;
+            let offset = read_u32(&two_sidechains, record);
+            write_u32(&mut two_sidechains, record, offset + PORT_BYTES as u32);
+        }
+        let extra_port = quality;
+        let effect_id_offset = read_u32(&two_sidechains, 32);
+        write_u32(&mut two_sidechains, extra_port, effect_id_offset);
+        write_u32(&mut two_sidechains, extra_port + 4, 11);
+        write_u32(
+            &mut two_sidechains,
+            extra_port + 8,
+            PortRole::SidechainInput as u32,
+        );
+        write_u32(
+            &mut two_sidechains,
+            extra_port + 16,
+            PortLayout::DualMonoPlanar as u32,
+        );
+        let choice = old_choice + PORT_BYTES;
+        for index in 0..2 {
+            let record = choice + index * ENUM_CHOICE_BYTES;
+            let offset = read_u32(&two_sidechains, record + 4);
+            write_u32(&mut two_sidechains, record + 4, offset + PORT_BYTES as u32);
+        }
+        assert_eq!(
+            borrowed_errors(&two_sidechains),
+            accepted_errors(&TWO_SIDECHAINS)
+        );
+        assert_parity(&OUT_OF_ORDER_QUALITY, |bytes| {
+            let quality = read_u32(bytes, 68) as usize;
+            write_u32(bytes, quality + 4, 48_000);
+            write_u32(bytes, quality + QUALITY_BYTES + 4, 44_100);
+        });
+        assert_parity(&MISSING_RATE, |bytes| {
+            let quality = read_u32(bytes, 68) as usize;
+            write_u32(bytes, quality + 3 * QUALITY_BYTES + 4, 100_000);
+        });
+        assert_parity(&MISSING_NORMAL, |bytes| {
+            let quality = read_u32(bytes, 68) as usize;
+            for index in 0..8 {
+                write_u32(
+                    bytes,
+                    quality + index * QUALITY_BYTES,
+                    EffectQuality::Draft as u32,
+                );
+            }
+        });
+        assert_parity(&MULTI_ERROR, |bytes| {
+            write_u16(bytes, 20, 2);
+            write_u32(bytes, 24, 0);
+            write_u32(bytes, HEADER_BYTES + PARAMETER_BYTES, 1);
+            let port = read_u32(bytes, 60) as usize;
+            write_u32(bytes, port + 12, 0);
             let quality = read_u32(bytes, 68) as usize;
             write_u32(bytes, quality + 40, 17);
         });

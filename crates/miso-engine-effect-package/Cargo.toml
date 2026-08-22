@@ -15,5 +15,15 @@ miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+miso-engine-compressor.workspace = true
+miso-engine-delay.workspace = true
+miso-engine-gate-expander.workspace = true
+miso-engine-multiband-compressor.workspace = true
+miso-engine-parametric-eq.workspace = true
+miso-engine-soft-clip.workspace = true
+miso-engine-transient-shaper.workspace = true
+miso-engine-true-peak-limiter.workspace = true
+
 [lints]
 workspace = true

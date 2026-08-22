@@ -30,16 +30,15 @@ esac
     exit 1
 }
 
-mapfile -t exported_symbols < <(
+exported_symbols="$({
     "${dynamic_symbols[@]}" "$library_file" |
         awk '{print $NF}' |
         LC_ALL=C sort -u |
-        sed -n '/^miso_engine_effect_descriptor/p'
-)
-[[ "${#exported_symbols[@]}" == 1 &&
-    "${exported_symbols[0]}" == "miso_engine_effect_descriptor_v1_inspect" ]] || {
+        sed -n '/^miso_engine_/p'
+} || true)"
+[[ "$exported_symbols" == "miso_engine_effect_descriptor_v1_inspect" ]] || {
     printf 'effect descriptor C smoke failure: unexpected descriptor symbols\n' >&2
-    printf '  %s\n' "${exported_symbols[@]}" >&2
+    printf '%s\n' "$exported_symbols" >&2
     exit 1
 }
 
@@ -50,4 +49,5 @@ cc -std=c11 -pedantic -Wall -Wextra -Werror \
     -Wl,-rpath,"$(dirname "$library_file")" \
     -o "$scratch_directory/descriptor-smoke"
 
-"$scratch_directory/descriptor-smoke"
+"$scratch_directory/descriptor-smoke" \
+    "$workspace_root/fixtures/effect-descriptor/v1/comprehensive-a.wire.hex"
