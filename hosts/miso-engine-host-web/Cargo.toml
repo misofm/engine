@@ -10,6 +10,13 @@ name = "miso_engine_host_web"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+miso-engine-builtins-compiler.workspace = true
+miso-engine-core.workspace = true
+miso-engine-effect-compiler.workspace = true
+miso-engine-graph.workspace = true
+miso-engine-graph-compiler.workspace = true
+miso-engine-session.workspace = true
+miso-engine-source.workspace = true
 miso-engine-target-smoke.workspace = true
 
 [features]
