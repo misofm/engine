@@ -245,6 +245,7 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-graph",
  "miso-engine-graph-compiler",
+ "miso-engine-protocol",
  "miso-engine-session",
  "miso-engine-source",
 ]

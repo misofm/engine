@@ -7,13 +7,13 @@ use crate::{
     EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, HandleHeader, Plan,
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
+    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
 };
 use core::ffi::c_void;
 use core::ptr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::runtime::{compile_children, limits_are_valid};
+use crate::runtime::{CommandError, compile_children, limits_are_valid};
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RESULT_INTERNAL)
@@ -474,7 +474,7 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
     })
 }
 
-/// Binary control submission remains unsupported until checkpoint 3.
+/// Process one bounded Issue-005 capability command with exact-byte replay.
 ///
 /// # Safety
 ///
@@ -483,7 +483,7 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
 pub unsafe extern "C" fn miso_engine_v2_submit_command(
     session: *mut Session,
     request: *const u8,
-    _request_bytes: u64,
+    request_bytes: u64,
     response: *mut BytesOut,
 ) -> u32 {
     catch_result(|| {
@@ -495,11 +495,55 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
         if request.is_null() || response.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The response descriptor is nonnull and promised readable/writable for this call.
+        let output_capacity = match unsafe { validate_bytes_out(response) } {
+            Ok(value) => value.capacity_bytes,
+            Err(code) => return code,
+        };
+        // SAFETY: The caller promises the complete request frame is readable for this call.
+        let request = match unsafe { borrowed_bytes(request, request_bytes) } {
+            Ok(value) if !value.is_empty() => value,
+            _ => return RESULT_INVALID_ARGUMENT,
+        };
+        // SAFETY: The live-kind check establishes the concrete session representation; generic
+        // command calls are serialized with source control by the ABI contract.
+        let session = unsafe { &mut *session };
+        match session.state.command(request, output_capacity) {
+            Ok(bytes) => {
+                let encoded = session.state.command_response(bytes);
+                // SAFETY: The descriptor was validated and command preflight proved capacity.
+                let code = unsafe { write_bytes(response, encoded) };
+                if code == RESULT_OK {
+                    session.last_error.borrow_mut().clear();
+                }
+                code
+            }
+            Err(CommandError::BufferTooSmall { required }) => {
+                // SAFETY: The response descriptor was validated above; only required length is
+                // updated and no caller payload byte is written.
+                unsafe { (*response).required_bytes = required };
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.output.too_small");
+                RESULT_BUFFER_TOO_SMALL
+            }
+            Err(CommandError::Invalid) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.frame.invalid");
+                RESULT_INVALID_ARGUMENT
+            }
+            Err(CommandError::Internal) => {
+                session.last_error.borrow_mut().set(b"control.internal");
+                RESULT_INTERNAL
+            }
+        }
     })
 }
 
-/// Planar render is declared in checkpoint 1 and implemented in checkpoint 3.
+/// Render one exact-time quantum directly into caller-owned contiguous planar storage.
 ///
 /// # Safety
 ///
@@ -507,7 +551,7 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
     plan: *mut Plan,
-    _absolute_sample: u64,
+    absolute_sample: u64,
     output: *const PlanarOutput,
 ) -> u32 {
     catch_result(|| {
@@ -519,7 +563,76 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         if output.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        RESULT_UNSUPPORTED
+        // SAFETY: The caller promises one readable fixed ABI output descriptor for this call.
+        let output = unsafe { &*output };
+        if output.struct_size != crate::PLANAR_OUTPUT_SIZE
+            || output.reserved != [0; 2]
+            || output.samples.is_null()
+        {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The live-kind check establishes the concrete render-plan representation and the
+        // ABI requires exclusive ownership for this call.
+        let plan = unsafe { &mut *plan };
+        let frames = plan.state.quantum_frames();
+        let required_samples =
+            match u64::from(output.plane_stride_samples).checked_add(u64::from(output.frames)) {
+                Some(value) => value,
+                None => {
+                    plan.last_error.borrow_mut().set(b"render.output.overflow");
+                    return RESULT_RENDER_REJECTED;
+                }
+            };
+        if output.channels != 2
+            || output.frames != frames
+            || output.plane_stride_samples < frames
+            || required_samples > output.sample_capacity
+            || absolute_sample != plan.state.next_absolute_sample()
+        {
+            plan.last_error
+                .borrow_mut()
+                .set(b"render.contract.rejected");
+            return RESULT_RENDER_REJECTED;
+        }
+        let required_samples = match usize::try_from(required_samples) {
+            Ok(value)
+                if value
+                    .checked_mul(core::mem::size_of::<f32>())
+                    .is_some_and(|bytes| bytes <= isize::MAX as usize) =>
+            {
+                value
+            }
+            _ => {
+                plan.last_error.borrow_mut().set(b"render.output.platform");
+                return RESULT_RENDER_REJECTED;
+            }
+        };
+        // SAFETY: Scalar validation proved the exact contiguous region required by two planes is
+        // within caller capacity and Rust's maximum slice extent. The caller promises this many
+        // writable aligned `f32` elements exclusively for the duration of the call.
+        let samples = unsafe { core::slice::from_raw_parts_mut(output.samples, required_samples) };
+        let output = match miso_engine_core::realtime::PlanarBufferMut::try_new(
+            samples,
+            2,
+            frames as usize,
+            output.plane_stride_samples as usize,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                plan.last_error.borrow_mut().set(b"render.output.rejected");
+                return RESULT_RENDER_REJECTED;
+            }
+        };
+        match plan.state.render(absolute_sample, output) {
+            Ok(()) => {
+                plan.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(()) => {
+                plan.last_error.borrow_mut().set(b"render.plan.rejected");
+                RESULT_RENDER_REJECTED
+            }
+        }
     })
 }
 
@@ -645,6 +758,62 @@ pub unsafe extern "C" fn miso_engine_v2_plan_destroy(plan: *mut Plan) {
             drop(unsafe { Box::from_raw(plan) });
         }
     });
+}
+
+#[cfg(test)]
+pub(crate) fn test_source_submit(
+    session: *mut Session,
+    source_id: &[u8],
+    chunk: &SourceChunk,
+    report: &mut SubmitReport,
+) -> u32 {
+    // SAFETY: Test callers retain the live session and all borrowed ABI storage for this call.
+    unsafe {
+        miso_engine_v2_source_submit_planar_f32(
+            session,
+            source_id.as_ptr(),
+            source_id.len() as u64,
+            chunk,
+            report,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_source_seek(
+    session: *mut Session,
+    source_id: &[u8],
+    generation: u64,
+    source_frame: u64,
+) -> u32 {
+    // SAFETY: Test callers retain the live session and borrowed source ID for this call.
+    unsafe {
+        miso_engine_v2_source_seek(
+            session,
+            source_id.as_ptr(),
+            source_id.len() as u64,
+            generation,
+            source_frame,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_render(plan: *mut Plan, absolute_sample: u64, output: &PlanarOutput) -> u32 {
+    // SAFETY: Test callers retain the exclusive live plan and writable output for this call.
+    unsafe { miso_engine_v2_render_f32_planar(plan, absolute_sample, output) }
+}
+
+#[cfg(test)]
+pub(crate) fn test_session_destroy(session: *mut Session) {
+    // SAFETY: Test callers transfer one unique quiescent live session exactly once.
+    unsafe { miso_engine_v2_session_destroy(session) }
+}
+
+#[cfg(test)]
+pub(crate) fn test_plan_destroy(plan: *mut Plan) {
+    // SAFETY: Test callers transfer one unique quiescent live plan exactly once.
+    unsafe { miso_engine_v2_plan_destroy(plan) }
 }
 
 #[cfg(test)]
@@ -917,6 +1086,47 @@ mod tests {
             RESULT_OK
         );
         assert_eq!(submitted.accepted_frames, 128);
+
+        let mut pcm = vec![f32::NAN; 256];
+        let mut output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            // SAFETY: The plan is live and the complete contiguous planar region is writable.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        assert!(pcm.iter().all(|sample| sample.is_nan()));
+        output.sample_capacity = 255;
+        assert_eq!(
+            // SAFETY: The intentionally short declared capacity is rejected before dereference.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        assert!(pcm.iter().all(|sample| sample.is_nan()));
+        output.sample_capacity = 256;
+        assert_eq!(
+            // SAFETY: The output descriptor now satisfies the complete render contract.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_OK
+        );
+        assert!(pcm.iter().all(|sample| sample.is_finite()));
+        assert_eq!(
+            // SAFETY: The stale time is rejected before entering the prepared plan.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        assert_eq!(
+            // SAFETY: The exact next block time advances the same live exclusive plan.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &output) },
+            RESULT_OK
+        );
         assert_eq!(
             seek(session, b"fixture-source".as_ptr(), 14, 2, 48_001),
             RESULT_INVALID_ARGUMENT
@@ -945,6 +1155,67 @@ mod tests {
         source_error.capacity_bytes = 0;
         assert_eq!(last_error(session.cast(), &mut source_error), RESULT_OK);
         assert_eq!(source_error.required_bytes, 0);
+
+        let codec = miso_engine_protocol::ProtocolCodec::default();
+        let mut request = vec![0_u8; 128];
+        let request_len = codec
+            .encode_command_frame_into(
+                &miso_engine_protocol::TypedCommandFrame {
+                    request_id: miso_engine_protocol::RequestId::new(1).expect("request"),
+                    expected_revision: miso_engine_protocol::ExpectedRevision::Any,
+                    payload: miso_engine_protocol::CommandPayload::CapabilitiesGet,
+                },
+                &mut request,
+            )
+            .expect("capability command");
+        request.truncate(request_len);
+        let mut response = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        assert_eq!(
+            // SAFETY: The complete request and output descriptor remain live for this call.
+            unsafe {
+                miso_engine_v2_submit_command(
+                    session,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    &mut response,
+                )
+            },
+            RESULT_BUFFER_TOO_SMALL
+        );
+        assert_eq!(response.required_bytes, 4_096);
+        let mut response_bytes = vec![0xa5; response.required_bytes as usize];
+        response.data = response_bytes.as_mut_ptr();
+        response.capacity_bytes = response_bytes.len() as u64;
+        assert_eq!(
+            // SAFETY: Retry storage satisfies the advertised complete response reservation.
+            unsafe {
+                miso_engine_v2_submit_command(
+                    session,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    &mut response,
+                )
+            },
+            RESULT_OK
+        );
+        response_bytes.truncate(response.required_bytes as usize);
+        let mut decode_fields = [0_u16; 64];
+        assert!(matches!(
+            codec
+                .decode_typed_response(
+                    &response_bytes,
+                    &mut miso_engine_protocol::DecodeScratch::new(&mut decode_fields),
+                )
+                .expect("canonical capability response"),
+            miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
+                if header.request_id.get() == 1
+        ));
 
         // SAFETY: Each independently owned child and engine is destroyed exactly once, quiescent.
         unsafe {
