@@ -44,6 +44,13 @@ pub struct EffectPackageLimitsV1 {
     pub maximum_artifact_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ArtifactSelectionRequestV1<'a> {
+    pub kind: EffectArtifactKindV1,
+    pub target: &'a str,
+    pub capabilities: &'a [&'a str],
+}
+
 impl Default for EffectPackageLimitsV1 {
     fn default() -> Self {
         Self {
@@ -293,19 +300,21 @@ fn valid_features(features: &[u8]) -> bool {
     }
     let mut prior: Option<&[u8]> = None;
     for token in features.split(|b| *b == b',') {
-        if token.is_empty()
-            || token.len() > 32
-            || !token[0].is_ascii_lowercase()
-            || !token[1..]
-                .iter()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-            || prior.is_some_and(|p| p >= token)
-        {
+        if !valid_feature_token(token) || prior.is_some_and(|p| p >= token) {
             return false;
         }
         prior = Some(token);
     }
     true
+}
+
+fn valid_feature_token(token: &[u8]) -> bool {
+    !token.is_empty()
+        && token.len() <= 32
+        && token[0].is_ascii_lowercase()
+        && token[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 fn validate_artifact(
     a: &EffectArtifactAuthoringV1<'_>,
@@ -750,6 +759,111 @@ fn trusted_record(table: &[u8], cursor: usize) -> TrustedRecord<'_> {
     }
 }
 
+fn validate_selection_request(request: ArtifactSelectionRequestV1<'_>) -> Result<(), Diagnostic> {
+    let target_valid = match request.kind {
+        EffectArtifactKindV1::Source => request.target.is_empty(),
+        EffectArtifactKindV1::CoreWasm => request.target == "wasm32-unknown-unknown",
+        EffectArtifactKindV1::TargetNative => valid_native_target(request.target.as_bytes()),
+    };
+    if !target_valid {
+        return Err(package_diag(
+            Code::Target,
+            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+        ));
+    }
+    let mut prior: Option<&[u8]> = None;
+    for capability in request.capabilities {
+        let token = capability.as_bytes();
+        if !valid_feature_token(token) || prior.is_some_and(|value| value >= token) {
+            return Err(package_diag(
+                Code::Features,
+                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            ));
+        }
+        prior = Some(token);
+    }
+    Ok(())
+}
+
+fn feature_subset(features: &str, capabilities: &[&str]) -> bool {
+    if features.is_empty() {
+        return true;
+    }
+    let mut capability_index = 0usize;
+    for feature in features.split(',') {
+        while capability_index < capabilities.len()
+            && capabilities[capability_index].as_bytes() < feature.as_bytes()
+        {
+            capability_index += 1;
+        }
+        if capability_index == capabilities.len() || capabilities[capability_index] != feature {
+            return false;
+        }
+    }
+    true
+}
+
+fn feature_count(features: &str) -> usize {
+    if features.is_empty() {
+        0
+    } else {
+        features.split(',').count()
+    }
+}
+
+fn preferred_candidate(
+    candidate: VerifiedArtifactV1<'_>,
+    selected: VerifiedArtifactV1<'_>,
+) -> bool {
+    let candidate_count = feature_count(candidate.features());
+    let selected_count = feature_count(selected.features());
+    candidate_count > selected_count
+        || (candidate_count == selected_count
+            && (candidate.features() < selected.features()
+                || (candidate.features() == selected.features()
+                    && candidate.path() < selected.path())))
+}
+
+fn artifact_hash_offset(package: VerifiedEffectPackageV1<'_>, artifact_index: u32) -> u64 {
+    let mut cursor = 0usize;
+    for index in 0..package.count {
+        if index == artifact_index {
+            return 96 + package.descriptor.len() as u64 + cursor as u64 + 40;
+        }
+        cursor = trusted_record(package.table, cursor).next;
+    }
+    EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET
+}
+
+pub fn select_effect_package_artifact_v1<'a>(
+    package: &VerifiedEffectPackageV1<'a>,
+    request: ArtifactSelectionRequestV1<'_>,
+) -> Result<VerifiedArtifactV1<'a>, Diagnostic> {
+    validate_selection_request(request)?;
+    let mut selected = None;
+    for candidate in package.artifacts() {
+        if candidate.kind() != request.kind
+            || candidate.target() != request.target
+            || !feature_subset(candidate.features(), request.capabilities)
+        {
+            continue;
+        }
+        if selected.is_none_or(|current| preferred_candidate(candidate, current)) {
+            selected = Some(candidate);
+        }
+    }
+    let selected = selected
+        .ok_or_else(|| package_diag(Code::Unavailable, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET))?;
+    if Sha256::digest(selected.content()).as_slice() != selected.sha2_256() {
+        return Err(diag(
+            Code::Hash,
+            selected.artifact_index(),
+            artifact_hash_offset(*package, selected.artifact_index()),
+        ));
+    }
+    Ok(selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,6 +921,134 @@ mod tests {
         ];
         encode_effect_package_v1(&p, EffectPackageLimitsV1::default(), &mut b).unwrap();
         b
+    }
+
+    fn selection_bytes(reverse: bool) -> Vec<u8> {
+        let descriptor = descriptor();
+        let mut artifacts = [
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::Source,
+                path: "src/a.rs",
+                target: "",
+                features: "",
+                content: b"source-a",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::Source,
+                path: "src/z.rs",
+                target: "",
+                features: "",
+                content: b"source-z",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/base-a.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "",
+                content: b"core-base-a",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/base-b.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "",
+                content: b"core-base-b",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/bulk.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "bulk-memory,simd128",
+                content: b"core-bulk",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/relaxed.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "relaxed-simd,simd128",
+                content: b"core-relaxed",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/simd-a.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "simd128",
+                content: b"core-simd-a",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/simd-b.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "simd128",
+                content: b"core-simd-b",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                path: "core/threads.wasm",
+                target: "wasm32-unknown-unknown",
+                features: "threads",
+                content: b"core-threads",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::TargetNative,
+                path: "native/x86-base.so",
+                target: "x86_64-unknown-linux-gnu",
+                features: "",
+                content: b"native-base",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::TargetNative,
+                path: "native/x86-avx2.so",
+                target: "x86_64-unknown-linux-gnu",
+                features: "avx2",
+                content: b"native-avx2",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::TargetNative,
+                path: "native/x86-fma.so",
+                target: "x86_64-unknown-linux-gnu",
+                features: "avx2,fma",
+                content: b"native-fma",
+            },
+            EffectArtifactAuthoringV1 {
+                kind: EffectArtifactKindV1::TargetNative,
+                path: "native/arm.so",
+                target: "aarch64-unknown-linux-gnu",
+                features: "",
+                content: b"native-arm",
+            },
+        ];
+        if reverse {
+            artifacts.reverse();
+        }
+        let package = EffectPackageAuthoringV1 {
+            descriptor: &descriptor,
+            artifacts: &artifacts,
+        };
+        let mut bytes = vec![
+            0;
+            effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap()
+                as usize
+        ];
+        encode_effect_package_v1(&package, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
+        bytes
+    }
+
+    fn select_path<'a>(
+        package: &VerifiedEffectPackageV1<'a>,
+        kind: EffectArtifactKindV1,
+        target: &str,
+        capabilities: &[&str],
+    ) -> Result<&'a str, Diagnostic> {
+        select_effect_package_artifact_v1(
+            package,
+            ArtifactSelectionRequestV1 {
+                kind,
+                target,
+                capabilities,
+            },
+        )
+        .map(VerifiedArtifactV1::path)
     }
     #[test]
     fn round_trip_layout_and_borrows() {
@@ -1413,5 +1655,219 @@ mod tests {
                 "{features}"
             );
         }
+    }
+
+    #[test]
+    fn selection_baselines_supersets_and_total_ties_are_exact() {
+        let bytes = selection_bytes(false);
+        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        assert_eq!(
+            select_path(&package, EffectArtifactKindV1::Source, "", &[]),
+            Ok("src/a.rs")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &[]
+            ),
+            Ok("core/base-a.wasm")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &["simd128"]
+            ),
+            Ok("core/simd-a.wasm")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &["simd128", "threads"]
+            ),
+            Ok("core/simd-a.wasm")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &["bulk-memory", "relaxed-simd", "simd128"],
+            ),
+            Ok("core/bulk.wasm")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::TargetNative,
+                "x86_64-unknown-linux-gnu",
+                &["avx2", "fma"],
+            ),
+            Ok("native/x86-fma.so")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::TargetNative,
+                "x86_64-unknown-linux-gnu",
+                &["fma"],
+            ),
+            Ok("native/x86-base.so")
+        );
+    }
+
+    #[test]
+    fn selection_has_no_feature_kind_or_target_implication() {
+        let bytes = selection_bytes(false);
+        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &["relaxed-simd"],
+            ),
+            Ok("core/base-a.wasm")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::TargetNative,
+                "riscv64-unknown-linux-gnu",
+                &[],
+            )
+            .unwrap_err()
+            .code,
+            Code::Unavailable
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::TargetNative,
+                "aarch64-unknown-linux-gnu",
+                &["avx2", "fma"],
+            ),
+            Ok("native/arm.so")
+        );
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "x86_64-unknown-linux-gnu",
+                &[],
+            )
+            .unwrap_err()
+            .code,
+            Code::Target
+        );
+    }
+
+    #[test]
+    fn selection_request_capabilities_are_canonical_and_strict() {
+        let bytes = selection_bytes(false);
+        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        for capabilities in [
+            &["simd128", "avx2"][..],
+            &["simd128", "simd128"][..],
+            &[""][..],
+            &["1simd"][..],
+            &["simd_128"][..],
+            &["simd+128"][..],
+            &["SIMD128"][..],
+        ] {
+            let error = select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                capabilities,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, Code::Features, "{capabilities:?}");
+            assert_eq!(error.artifact_index, u32::MAX);
+            assert_eq!(error.byte_offset, u64::MAX);
+        }
+        let too_long = "a23456789012345678901234567890123";
+        assert_eq!(too_long.len(), 33);
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &[too_long],
+            )
+            .unwrap_err()
+            .code,
+            Code::Features
+        );
+    }
+
+    #[test]
+    fn selection_is_permutation_stable_and_returns_borrowed_content() {
+        let forward = selection_bytes(false);
+        let reverse = selection_bytes(true);
+        assert_eq!(forward, reverse);
+        let package = verify_effect_package_v1(&forward, EffectPackageLimitsV1::default()).unwrap();
+        let selected = select_effect_package_artifact_v1(
+            &package,
+            ArtifactSelectionRequestV1 {
+                kind: EffectArtifactKindV1::CoreWasm,
+                target: "wasm32-unknown-unknown",
+                capabilities: &["bulk-memory", "relaxed-simd", "simd128"],
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.path(), "core/bulk.wasm");
+        assert_eq!(selected.content(), b"core-bulk");
+        let package_start = forward.as_ptr() as usize;
+        let content_start = selected.content().as_ptr() as usize;
+        assert!(content_start >= package_start);
+        assert!(content_start + selected.content().len() <= package_start + forward.len());
+        assert_eq!(
+            selected.sha2_256(),
+            Sha256::digest(selected.content()).as_slice()
+        );
+    }
+
+    #[test]
+    fn selection_rehash_detects_post_verification_content_tamper() {
+        let mut bytes = selection_bytes(false);
+        let request = ArtifactSelectionRequestV1 {
+            kind: EffectArtifactKindV1::CoreWasm,
+            target: "wasm32-unknown-unknown",
+            capabilities: &["simd128"],
+        };
+        let (selected_index, content_offset) = {
+            let package =
+                verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+            let selected = select_effect_package_artifact_v1(&package, request).unwrap();
+            (
+                selected.artifact_index(),
+                selected.content().as_ptr() as usize - bytes.as_ptr() as usize,
+            )
+        };
+        bytes[content_offset] ^= 1;
+        let descriptor_end = table_start(&bytes);
+        let manifest = descriptor_end + u64_at(&bytes, 32) as usize;
+        let forged = VerifiedEffectPackageV1 {
+            bytes: &bytes,
+            descriptor: &bytes[96..descriptor_end],
+            table: &bytes[descriptor_end..manifest],
+            contents: &bytes[manifest..],
+            count: u32_at(&bytes, 48),
+        };
+        let error = select_effect_package_artifact_v1(&forged, request).unwrap_err();
+        assert_eq!(
+            (error.code, error.artifact_index),
+            (Code::Hash, selected_index)
+        );
+        assert_eq!(
+            error.byte_offset,
+            (record_offsets(&bytes)[selected_index as usize] + 40) as u64
+        );
     }
 }
