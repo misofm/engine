@@ -217,3 +217,44 @@ Record exact header/source hashes, ABI/layout/symbol transcript, direct-vs-C PCM
 hashes, error mutation table, 100,000-call audit counters, ownership/drop assertions, focused and
 workspace/policy gates, attempt owner/count, and strict PASS/FAIL. Benchmark/timed invocation count
 must remain zero.
+
+## Sol pre-audit evidence — 2026-08-22
+
+Candidate `334b680f6e561f4d679e4cc240b4acec25f0835f` passes the complete non-audit
+seal after Terra attempt 1 and the sole bounded Sol correction. Sol corrected one ABI defect before
+this clean seal: capability and plan-resource output structs now reject nonzero reserved input
+atomically instead of overwriting it. No ABI shape, symbol, resource row, DSP, graph, source, or
+threading contract changed.
+
+Requirement audit before the executing audit:
+
+- ABI/header/layout/link: CAPI unit tests pass 14/14; the C11 linked consumer, C++17 include-only
+  consumer, exact export list, and all ABI mutation rows pass. The relevant frozen SHA-256 values
+  are header `e7ba468361e0255cb465828c5dd317f1e5293213662c7bf9a5225cb2afaba4e7`,
+  `abi.rs` `ec1d6f2b3f27108f540da869d200125343e12f3088c48c4614b0cd626a1971aa`,
+  `ffi.rs` `d12cab166d917371020efb7ef380c3ee5d0efa752571198455453a4835a125b0`, and
+  `runtime.rs` `6f58a176b264a6f19a610cae0c8dafd71ba438a424cc007677d9696d55d7c5d0`.
+- Product behavior: executed C/direct tests cover transactional children, handle-local diagnostics,
+  absolute-region submit/seek, exact-time caller-owned render, capability replay/typed unsupported,
+  exact resource caps, one/ten-track bit parity at all four launch rates, signed zero, partial final
+  blocks, underrun, seek, bank/scalar/PDC continuation, destroy orders, and the bounded two-thread
+  source-producer/render-owner schedule. Dependency tests cover strict session/source/protocol error
+  and retry semantics; static review confirms validation precedes publication or render entry.
+- Sealed seams/resources: source-origin preparation, source-aware builtin graph bind ownership
+  return, graph output latency/tail propagation, scalar-equivalent effect rows, named-largest rules,
+  and fixed C controller/replay storage pass their focused and full-workspace tests. The only source
+  production diff remains the permitted `crates/miso-engine-source/src/lib.rs` constructor surface.
+- Clean gates pass: `cargo fmt --all --check`; locked workspace all-target/all-feature check and
+  tests; warning-denied workspace all-target/all-feature Clippy; warning-denied workspace rustdoc;
+  workspace, realtime, effect-runtime, graph/determinism, builtin, protocol-control, and rack policy
+  checks plus their available mutation suites. `git diff --check` and the transient-artifact scan
+  pass.
+- Unsafe remains confined to `crates/miso-engine-capi/src/ffi.rs` and
+  `tools/miso-engine-capi-audit/src/main.rs`; the exact policy and mutations pass. Audit-tool unit
+  tests pass 3/3, its source SHA-256 is
+  `9db77ecf95fd67ea8d37491b346f5353a181fd10caa661cee4a9ee73e731bdda`, and a static scan proves no
+  timer API. The audit main has not been invoked.
+
+Pre-audit verdict: **PASS TO ONE NON-TIMED CAPI AUDIT AFTER THIS EVIDENCE IS COMMITTED ON A CLEAN
+CANDIDATE.** This is not overall Issue-022 PASS. `capi_audit_main_invocations=0`,
+`timed_benchmark_invocations=0`, and no benchmark, trace, target, or listening workload ran.

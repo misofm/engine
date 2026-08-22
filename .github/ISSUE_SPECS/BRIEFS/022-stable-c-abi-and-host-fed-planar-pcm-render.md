@@ -2,10 +2,10 @@
 
 ## Decision and attempt budget
 
-**READY FOR TERRA ATTEMPT 1.** One Terra implementation and one bounded Sol correction are allowed;
-a second failure stops. No benchmark, timing, native file runner, target matrix, or listening work is
-authorized. The smallest product is one immutable compiled session with host-fed planar sources,
-separate control/render ownership, and caller-owned stereo output.
+**SOL PRE-AUDIT PASS AT `334b680`; AUDIT NOT YET RUN.** Terra attempt 1 and the sole bounded Sol
+correction are consumed. No further product correction is available: the remaining authorized work
+is the exact non-timed 100,000-call C-entry audit and final evidence only. Benchmark, timing, native
+file runner, target matrix, and listening work remain unauthorized.
 
 ## Product seam
 
