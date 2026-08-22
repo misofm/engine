@@ -5,8 +5,8 @@
 Complete the real blinded listening evidence for the exact machine-qualified Issue-007 builtin
 candidate before any launch or audible-quality claim.
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH AGENT-PREPARATION PASS 1 / REAL LISTENING NOT
-AUTHORIZED.** The smallest honest agent-executable tranche is preparation only: freeze the accepted
+**TERMINAL STOP / NO SOL XHIGH PASS / RESCOPED TO ISSUE 111 / REAL LISTENING NOT AUTHORIZED.** The
+smallest honest agent-executable tranche was preparation only: freeze the accepted
 candidate and source identities, render and seal the exact stimuli without playback, preregister a
 concealed balanced schedule, validate the response/reveal/statistics formats, and produce a
 no-clobber facilitator packet. It must stop at **AGENT PREPARATION COMPLETE / READY FOR REAL
@@ -294,3 +294,58 @@ tooling.
 
 This briefing changed documentation only. Cargo/build, render, audio playback, listening, preflight,
 benchmark, timing, workload, Git mutation and GitHub mutation counts are all zero.
+
+## Agent-preparation implementation evidence (2026-08-22)
+
+Sol High implemented the bounded, nonexecuting preparation tranche from local base
+`7d2f99f31694a78914632d015efcbcfd31955a68` / tree
+`88434df3b55678f4a80564e8347a2dbf0ec8b601`. The tranche registers the offline renderer, adds the
+four canonical schemas and answer-free facilitator resources, and adds the stdlib validator,
+static mutation gate, zero-render preflight, no-playback preparation wrapper and hermetic fake
+lifecycle at only the allowed paths.
+
+Focused evidence is green: five renderer unit tests; the independent statistics/record self-test
+over all 21 count rows; the static checker; 26 rejected policy mutations; the expanded hermetic
+lifecycle including missing-tool/input/provenance, authority drift, link/type/mode/namespace,
+partial preservation and no-clobber rows; locked package check/test; warning-denied package Clippy
+and rustdoc; formatting; and shell syntax. The lifecycle reports exact real counters
+`0/0/0/0/0/0/0/0` for preflight/render/playback/session/trial/response/reveal/result.
+
+No permissioned source was supplied or read. `target/issue33` remains absent. No real preflight,
+renderer, playback, listening session, response, reveal, result, benchmark, timing, workload, Git
+mutation or GitHub mutation ran. This is a commit-ready implementation checkpoint pending Sol
+XHigh adversarial review; it does not claim agent preparation complete and grants no authority for
+the real preflight or preparation invocation.
+
+Sol XHigh's sole bounded HOLD was closed before checkpoint handoff: all four schemas now freeze the
+validator's closed fields and expressible cross-field rules; the preparation record commits every
+non-self packet member and the validator recomputes every digest; all copied tracked inputs are
+bound into both seals and checked again after render; response attempts allow only an invalid
+prefix followed by one terminal valid row; and qualification requires and recomputes the exact
+preparation/response/reveal authorities, mappings, counts and statistics. New fake/static rows
+reject post-preflight schema drift, post-render packet-input drift, copied-packet mutation,
+post-valid retries and linked qualification/order faults. No real counter changed.
+
+## Terminal second HOLD and successor routing (2026-08-22)
+
+Sol XHigh's pass-2 review found one remaining end-to-end authority defect. The linked qualification
+validator hashes the named preparation, responses and reveal and validates the reveal against the
+supplied assignment-key file, but it never compares that key file's SHA-256 with either
+`Issue007ListeningPreparationV1.assignment_key_sha256` or
+`packet_member_sha256["private/assignment-key.json"]`. A preparation and concealed schedule from
+key A can therefore be combined with responses, reveal and key B while the three qualification
+authority hashes, derived counts and statistics still validate. The format-only self-test exposes
+the same mismatch by retaining an unrelated preparation key digest while its independently hashed
+key file passes linked qualification.
+
+This was the second HOLD under the frozen two-pass budget, so Issue 033 is **TERMINAL STOP / NO
+OVERALL PASS**. The current 18-path tranche is useful technical input only; it is not accepted
+preparation authority and authorizes no preflight, render, playback, listening, response, reveal or
+qualification action. No permissioned source was supplied or read, `target/issue33` remains absent,
+and exact real preflight/render/playback/session/trial/response/reveal/result counters remain
+`0/0/0/0/0/0/0/0`.
+
+Stateless Issue 111, **Close builtin listening assignment-key authority and prepare the real
+facilitator packet**, owns only the missing commitment link, fresh successor authority and eventual
+machine-only packet preparation. It must preserve this failed tranche and use `target/issue111`;
+Issue 033 is never retried and `target/issue33` is never created.

@@ -84,7 +84,8 @@ no-clobber repair seal was created against the pre-correction lifecycle during a
 handoff. Its counters remain `0/0/0/0` and `target/issue109` is immutable stale evidence. Issue 110,
 **Complete builtin benchmark host metadata run from a fresh successor namespace**, completed the
 fresh zero-workload preflight and sole descriptive run with Sol XHigh PASS. Its exact seven
-`target/issue110` artifacts are immutable and it is the machine authority for Issue 033. Issues
+`target/issue110` artifacts are immutable and it is the machine authority for stopped Issue 033
+and its stateless preparation successor Issue 111. Issues
 058–059, 061, 063–064 and 067–070 retain their recorded attempt
 ownership.
 
@@ -113,10 +114,12 @@ then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plu
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
 058 technical input -> stopped 072 technical input -> stopped 109 technical input -> 110. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 077 wait
-for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
-listening only after 110 seals that candidate and its accepted benchmark; issue 026 waits for both
-110 and 033. Issue 033 first permits a two-pass agent-only packet-preparation tranche, then stops
-for a real facilitator/listener with all human/listening counters still zero. This ordering forbids synthetic trials, audible-quality
+for 068's audited/target-qualified machine candidate. Issue 033 attempted the agent-only packet
+preparation after 110 but stopped after its second HOLD: linked qualification did not compare the
+private assignment key with both preparation commitments. Issue 111, **Close builtin listening
+assignment-key authority and prepare the real facilitator packet**, owns that sole correction and a
+fresh `target/issue111` packet lifecycle. Issue 026 waits for completed machine preparation in 111
+and the later real facilitator/listener evidence. This ordering forbids synthetic trials, audible-quality
 claims and release bypasses while allowing independent SIMD work after its true contract
 dependency is complete.
 

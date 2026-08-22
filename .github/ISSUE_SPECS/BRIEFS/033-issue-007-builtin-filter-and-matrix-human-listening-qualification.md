@@ -2,10 +2,10 @@
 
 ## Decision and role boundary
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1 / REAL LISTENING NOT AUTHORIZED.** Implement
-only the machine preparation vertical in the Issue-033 spec. Sol High owns one focused pass; Sol
-XHigh briefs and adversarially verifies. One bounded HOLD correction is the only second pass. A
-second HOLD is terminal STOP/rescope.
+**TERMINAL STOP / NO SOL XHIGH PASS / RESCOPED TO ISSUE 111 / REAL LISTENING NOT AUTHORIZED.** Sol
+High completed the machine-preparation vertical and its sole bounded correction; Sol XHigh's second
+review found the remaining assignment-key commitment gap described below. The two-pass budget is
+exhausted and Issue 033 must not be retried.
 
 The technical finish line is **AGENT PREPARATION COMPLETE / READY FOR REAL FACILITATOR**, not Issue
 033 completion. Human identities, conditions, playback, answers, observations, reveal and sign-offs
@@ -117,3 +117,37 @@ After the later sealed packet passes Sol XHigh review, hand it to a real facilit
 Issue 033 remains OPEN until the exact two completed real records, pre-reveal hashes, matching
 reveal, statistics, conditions, three sign-offs and adverse-observation disposition pass the full
 spec. Root alone owns commits, remote body synchronization and closure.
+
+## Pass-1 implementation handoff (2026-08-22)
+
+Sol High completed the allowed agent-only implementation on local base
+`7d2f99f31694a78914632d015efcbcfd31955a68` / tree
+`88434df3b55678f4a80564e8347a2dbf0ec8b601`. The focused renderer, schema/statistics, static
+mutation, hermetic lifecycle, locked package check/test, warning-denied Clippy/rustdoc, format and
+shell-syntax gates are green. The lifecycle's real
+preflight/render/playback/session/trial/response/reveal/result counters are exactly
+`0/0/0/0/0/0/0/0`; `target/issue33` remains absent. No source audio, private assignment, human
+identity, response, observation, sign-off or completed result was created. This handoff requests
+Sol XHigh review of a commit-ready checkpoint only and does not authorize preflight, preparation,
+rendering or listening.
+
+Sol XHigh's one bounded protocol-closure HOLD was addressed without expanding paths or execution:
+the schemas and validator now close every record, the packet carries recomputed non-self member
+digests, both seals bind every copied tracked input, response retries terminate at the sole valid
+row, and qualification is linked to exact preparation/response/reveal bytes and derived counts.
+The expanded hermetic/static rows reject those drifts with all real counters still zero.
+
+## Terminal verifier decision
+
+Pass 2 is a second HOLD and therefore terminal STOP. `validate_linked_qualification` validates the
+preparation record and separately binds reveal to the supplied assignment-key file, but never
+requires that key SHA-256 to equal the preparation's `assignment_key_sha256` and
+`packet_member_sha256["private/assignment-key.json"]`. Preparation/key A may therefore be mixed
+with response/reveal/key B and still produce internally correct authority hashes, counts and
+statistics. The self-test's unrelated base-preparation key digest demonstrates the defect.
+
+Preserve the exact 18-path tranche as technical input only. `target/issue33` remains absent and
+real preflight/render/playback/session/trial/response/reveal/result counters remain
+`0/0/0/0/0/0/0/0`. No preflight, render or human activity is authorized. Issue 111, **Close builtin
+listening assignment-key authority and prepare the real facilitator packet**, owns the stateless
+correction and fresh `target/issue111` lifecycle.
