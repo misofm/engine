@@ -26,8 +26,9 @@ use miso_engine_core::realtime::{
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
     GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
-    GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphRuntimeBindings,
-    GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
+    GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
+    StableGraphId, TrackStage,
 };
 use miso_engine_rack::{AoSoaScratch, KernelDispatch};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
@@ -456,6 +457,14 @@ pub struct PreparedBuiltinsNativeGraphBound {
 pub struct PreparedBuiltinsGraphBindFailure<R> {
     pub artifact: PreparedBuiltinsGraphArtifact<R>,
     pub bindings: GraphRuntimeBindings,
+    pub code: &'static str,
+}
+
+/// A rejected source-set binding preserves the opaque artifact and every caller-owned input.
+pub struct PreparedBuiltinsGraphSourceBindFailure<R> {
+    pub artifact: PreparedBuiltinsGraphArtifact<R>,
+    pub bindings: GraphRuntimeBindings,
+    pub source_set: GraphPreparedSourceSet,
     pub code: &'static str,
 }
 
@@ -1147,6 +1156,129 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             plan,
             meter_consumers: self.meter_consumers,
         })
+    }
+
+    /// Consume the sealed wrapper and bind one coordinator-owned source set.
+    ///
+    /// The wrapper first applies the same builtin-node and observer prevalidation as
+    /// [`Self::into_bound`]. It then appends only its genuine private bindings and delegates the
+    /// source claims to the graph's transactional source-set bind. Every rejection returns the
+    /// opaque artifact, caller bindings, and source set without cloning or exposing sealed parts.
+    #[allow(clippy::result_large_err)]
+    pub fn into_bound_with_source_set(
+        mut self,
+        mut bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+    ) -> Result<PreparedBuiltinsGraphBound, PreparedBuiltinsGraphSourceBindFailure<R>> {
+        let builtin_nodes: BTreeSet<_> = self
+            .builtin_processors
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let bank_nodes: BTreeSet<_> = self.graph.builtin_bank_members().collect();
+        let expected: BTreeSet<_> = self
+            .graph
+            .required_bindings
+            .iter()
+            .filter(|node| !builtin_nodes.contains(*node) && !bank_nodes.contains(*node))
+            .cloned()
+            .collect();
+        let supplied: BTreeSet<_> = bindings
+            .nodes
+            .iter()
+            .map(|binding| binding.node.clone())
+            .collect();
+        let source_nodes: BTreeSet<_> = source_set
+            .claims()
+            .iter()
+            .map(|claim| claim.node.clone())
+            .collect();
+        let mut all_supplied = supplied.clone();
+        all_supplied.extend(source_nodes);
+        let duplicate_nodes = supplied.len() != bindings.nodes.len();
+        let overlaps_builtin = supplied.iter().any(|node| builtin_nodes.contains(node));
+        let builtin_observer_pairs: BTreeSet<_> = self
+            .builtin_observers
+            .iter()
+            .map(|observer| (observer.node.clone(), observer.handle))
+            .collect();
+        let mut observer_pairs = BTreeSet::new();
+        let valid_observers = bindings
+            .observers
+            .iter()
+            .chain(self.builtin_observers.iter())
+            .all(|observer| {
+                matches!(observer.node, GraphNodeId::TrackStage { .. })
+                    && observer_pairs.insert((observer.node.clone(), observer.handle))
+            });
+        if bindings.envelope != self.graph.envelope
+            || duplicate_nodes
+            || overlaps_builtin
+            || all_supplied != expected
+            || !valid_observers
+        {
+            let code = if !valid_observers {
+                "graph.plan.observer"
+            } else if bindings.envelope != self.graph.envelope {
+                "graph.plan.envelope_mismatch"
+            } else if duplicate_nodes || overlaps_builtin {
+                "graph.plan.binding"
+            } else if all_supplied != expected {
+                "source.graph.binding_mismatch"
+            } else {
+                "graph.plan.binding"
+            };
+            return Err(PreparedBuiltinsGraphSourceBindFailure {
+                artifact: self,
+                bindings,
+                source_set,
+                code,
+            });
+        }
+        bindings.nodes.append(&mut self.builtin_processors);
+        bindings.observers.append(&mut self.builtin_observers);
+        match self.graph.bind_with_source_set(bindings, source_set) {
+            Ok(plan) => Ok(PreparedBuiltinsGraphBound {
+                plan,
+                meter_consumers: self.meter_consumers,
+            }),
+            Err(failure) => {
+                let mut builtin_processors = Vec::new();
+                let mut external_processors = Vec::new();
+                for binding in failure.bindings.nodes {
+                    if builtin_nodes.contains(&binding.node) {
+                        builtin_processors.push(binding);
+                    } else {
+                        external_processors.push(binding);
+                    }
+                }
+                let mut builtin_observers = Vec::new();
+                let mut external_observers = Vec::new();
+                for observer in failure.bindings.observers {
+                    if builtin_observer_pairs.contains(&(observer.node.clone(), observer.handle)) {
+                        builtin_observers.push(observer);
+                    } else {
+                        external_observers.push(observer);
+                    }
+                }
+                Err(PreparedBuiltinsGraphSourceBindFailure {
+                    artifact: PreparedBuiltinsGraphArtifact {
+                        graph: *failure.plan,
+                        builtin_processors,
+                        builtin_observers,
+                        report: self.report,
+                        meter_consumers: self.meter_consumers,
+                    },
+                    bindings: GraphRuntimeBindings {
+                        envelope: failure.bindings.envelope,
+                        nodes: external_processors,
+                        observers: external_observers,
+                    },
+                    source_set: failure.source_set,
+                    code: failure.code,
+                })
+            }
+        }
     }
 
     /// Consume the sealed wrapper into the ownership-split native dependency-wave executor.
@@ -1904,8 +2036,15 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 mod tests {
     use super::*;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-    use miso_engine_core::TargetCapabilities;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use miso_engine_core::{QuantumFrames, SampleRateHz, TargetCapabilities};
+    use miso_engine_graph::{
+        GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId, GraphPortKind,
+        GraphPreparedSourceSetDriver, GraphResourceEstimate, GraphSourceInputClaim,
+        GraphSourceSetResourceReport, PreparedGraphPlanParts,
+    };
     use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
+    use std::sync::Arc;
 
     fn session() -> CompiledSession {
         let document = include_str!("../../../fixtures/session/v1/canonical.toml");
@@ -1934,6 +2073,426 @@ mod tests {
             maximum_peak_hold_frames: u32::MAX,
             maximum_smoothing_samples: u32::MAX,
         }
+    }
+
+    struct SourceSetDriver {
+        claim_count: usize,
+        marker: u64,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for SourceSetDriver {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl GraphPreparedSourceSetDriver for SourceSetDriver {
+        fn claim_count(&self) -> usize {
+            self.claim_count
+        }
+
+        fn begin_block(&mut self, _first_sample: u64, _frames: u32) -> Result<(), RenderError> {
+            Ok(())
+        }
+
+        fn copy_track_input(
+            &mut self,
+            _claim_index: usize,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            left.fill(0.0);
+            right.fill(0.0);
+            Ok(())
+        }
+
+        fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
+            if let Some(first) = output.first_mut() {
+                *first = self.marker;
+                1
+            } else {
+                0
+            }
+        }
+    }
+
+    struct DropProcessor(Arc<AtomicUsize>);
+
+    impl Drop for DropProcessor {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl GraphRuntimeProcessor for DropProcessor {
+        fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    struct NoopObserver;
+
+    impl GraphRuntimeObserver for NoopObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    struct SourceBindFixture {
+        artifact: PreparedBuiltinsGraphArtifact<u64>,
+        bindings: GraphRuntimeBindings,
+        source_set: GraphPreparedSourceSet,
+        input: GraphNodeId,
+        builtin: GraphNodeId,
+        output: GraphNodeId,
+        builtin_drops: Arc<AtomicUsize>,
+        external_drops: Arc<AtomicUsize>,
+        source_drops: Arc<AtomicUsize>,
+    }
+
+    struct SourceBindOwnership {
+        input: GraphNodeId,
+        builtin_drops: Arc<AtomicUsize>,
+        external_drops: Arc<AtomicUsize>,
+        source_drops: Arc<AtomicUsize>,
+    }
+
+    impl SourceBindFixture {
+        fn ownership(&self) -> SourceBindOwnership {
+            SourceBindOwnership {
+                input: self.input.clone(),
+                builtin_drops: Arc::clone(&self.builtin_drops),
+                external_drops: Arc::clone(&self.external_drops),
+                source_drops: Arc::clone(&self.source_drops),
+            }
+        }
+    }
+
+    fn zero_graph_estimate() -> GraphResourceEstimate {
+        GraphResourceEstimate {
+            logical_nodes: 0,
+            materialized_nodes: 0,
+            edges: 0,
+            schedule_items: 0,
+            dependency_levels: 0,
+            reductions: 0,
+            routes: 0,
+            effects: 0,
+            audio_buffer_samples: 0,
+            total_delay_samples: 0,
+            delay_bytes: 0,
+            graph_metadata_bytes: 0,
+            declared_effect_bytes: 0,
+            effect_bank_count: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            builtin_bank_count: 0,
+            largest_allocation_bytes: 0,
+            incremental_plan_bytes: 0,
+            session_plus_plan_bytes: 0,
+        }
+    }
+
+    fn source_bind_fixture() -> SourceBindFixture {
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two output channels"),
+        };
+        let track_id = StableGraphId::parse("source-track").expect("test ID");
+        let input = GraphNodeId::TrackStage {
+            track_id: track_id.clone(),
+            stage: TrackStage::Input,
+        };
+        let builtin = GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::PostInputBuiltins,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main-output").expect("test ID"),
+        };
+        let edge = |source: GraphNodeId, target: GraphNodeId| GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: target.clone(),
+            },
+            source: GraphPortId {
+                node: source,
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: target,
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.source-bind-test".to_owned(),
+        };
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 22,
+            spec: miso_engine_graph::GraphSpec {
+                nodes: [input.clone(), builtin.clone(), output.clone()]
+                    .into_iter()
+                    .map(|id| GraphNode {
+                        id,
+                        latency: miso_engine_effect_contract::LatencySamples(0),
+                        tail: miso_engine_effect_contract::TailSamples::Finite(0),
+                    })
+                    .collect(),
+                ports: Vec::new(),
+                edges: vec![
+                    edge(input.clone(), builtin.clone()),
+                    edge(builtin.clone(), output.clone()),
+                ],
+            },
+            sequential_schedule: vec![input.clone(), builtin.clone(), output.clone()],
+            dependency_levels: Vec::new(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: zero_graph_estimate(),
+            envelope,
+            required_bindings: vec![input.clone(), builtin.clone(), output.clone()],
+            routes: Vec::new(),
+            effects: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let builtin_drops = Arc::new(AtomicUsize::new(0));
+        let external_drops = Arc::new(AtomicUsize::new(0));
+        let source_drops = Arc::new(AtomicUsize::new(0));
+        let artifact = PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: vec![GraphNodeBinding::new(
+                builtin.clone(),
+                Box::new(DropProcessor(Arc::clone(&builtin_drops))),
+            )],
+            builtin_observers: vec![GraphNodeObserverBinding::new(
+                builtin.clone(),
+                0x22_73,
+                Box::new(NoopObserver),
+            )],
+            report: 0x22_73,
+            meter_consumers: Vec::new(),
+        };
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes: vec![GraphNodeBinding::new(
+                output.clone(),
+                Box::new(DropProcessor(Arc::clone(&external_drops))),
+            )],
+            observers: Vec::new(),
+        };
+        let source_set = GraphPreparedSourceSet::new(
+            envelope,
+            vec![GraphSourceInputClaim {
+                node: input.clone(),
+            }],
+            GraphSourceSetResourceReport {
+                pcm_payload_already_charged_bytes: 0,
+                overhead_bytes: 0,
+                total_engine_owned_bytes: 0,
+                largest_allocation_bytes: 0,
+            },
+            Box::new(SourceSetDriver {
+                claim_count: 1,
+                marker: 0x22_73,
+                drops: Arc::clone(&source_drops),
+            }),
+        );
+        SourceBindFixture {
+            artifact,
+            bindings,
+            source_set,
+            input,
+            builtin,
+            output,
+            builtin_drops,
+            external_drops,
+            source_drops,
+        }
+    }
+
+    fn assert_source_bind_failure_ownership(
+        failure: &PreparedBuiltinsGraphSourceBindFailure<u64>,
+        ownership: &SourceBindOwnership,
+        expected_binding_nodes: &[GraphNodeId],
+    ) {
+        assert_eq!(*failure.artifact.report(), 0x22_73);
+        assert_eq!(
+            failure
+                .bindings
+                .nodes
+                .iter()
+                .map(|binding| binding.node.clone())
+                .collect::<Vec<_>>(),
+            expected_binding_nodes
+        );
+        assert_eq!(
+            failure.source_set.claims(),
+            [GraphSourceInputClaim {
+                node: ownership.input.clone()
+            }]
+        );
+        let mut telemetry = [0];
+        assert_eq!(
+            failure
+                .source_set
+                .copy_after_disarm_telemetry(&mut telemetry),
+            1
+        );
+        assert_eq!(telemetry, [0x22_73]);
+        assert_eq!(ownership.builtin_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(ownership.external_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(ownership.source_drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn source_set_bind_succeeds_with_private_builtin_and_external_ownership() {
+        let fixture = source_bind_fixture();
+        let SourceBindFixture {
+            artifact,
+            bindings,
+            source_set,
+            builtin_drops,
+            external_drops,
+            source_drops,
+            ..
+        } = fixture;
+        let bound = artifact
+            .into_bound_with_source_set(bindings, source_set)
+            .unwrap_or_else(|failure| panic!("source-set bind rejected: {}", failure.code));
+        assert!(bound.meter_consumers.is_empty());
+        assert_eq!(builtin_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(external_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 0);
+        drop(bound);
+        assert_eq!(builtin_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(external_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn source_set_bind_prevalidation_returns_all_ownership_for_each_code() {
+        {
+            let mut fixture = source_bind_fixture();
+            fixture.bindings.envelope.quantum = QuantumFrames(8);
+            let ownership = fixture.ownership();
+            let expected = [fixture.output.clone()];
+            let failure = match fixture
+                .artifact
+                .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+            {
+                Ok(_) => panic!("envelope mismatch must reject"),
+                Err(failure) => failure,
+            };
+            assert_eq!(failure.code, "graph.plan.envelope_mismatch");
+            assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+        }
+        {
+            let mut fixture = source_bind_fixture();
+            fixture.bindings.nodes.push(GraphNodeBinding::new(
+                fixture.output.clone(),
+                Box::new(DropProcessor(Arc::clone(&fixture.external_drops))),
+            ));
+            let ownership = fixture.ownership();
+            let expected = [fixture.output.clone(), fixture.output.clone()];
+            let failure = match fixture
+                .artifact
+                .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+            {
+                Ok(_) => panic!("duplicate external binding must reject"),
+                Err(failure) => failure,
+            };
+            assert_eq!(failure.code, "graph.plan.binding");
+            assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+        }
+        {
+            let mut fixture = source_bind_fixture();
+            fixture.bindings.nodes[0].node = fixture.builtin.clone();
+            let ownership = fixture.ownership();
+            let expected = [fixture.builtin.clone()];
+            let failure = match fixture
+                .artifact
+                .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+            {
+                Ok(_) => panic!("external builtin overlap must reject"),
+                Err(failure) => failure,
+            };
+            assert_eq!(failure.code, "graph.plan.binding");
+            assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+        }
+        {
+            let mut fixture = source_bind_fixture();
+            fixture.bindings.nodes.clear();
+            fixture.external_drops.store(0, Ordering::SeqCst);
+            let ownership = fixture.ownership();
+            let failure = match fixture
+                .artifact
+                .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+            {
+                Ok(_) => panic!("missing external binding must reject"),
+                Err(failure) => failure,
+            };
+            assert_eq!(failure.code, "source.graph.binding_mismatch");
+            assert_source_bind_failure_ownership(&failure, &ownership, &[]);
+        }
+        {
+            let mut fixture = source_bind_fixture();
+            fixture
+                .bindings
+                .observers
+                .push(GraphNodeObserverBinding::new(
+                    fixture.output.clone(),
+                    1,
+                    Box::new(NoopObserver),
+                ));
+            let ownership = fixture.ownership();
+            let expected = [fixture.output.clone()];
+            let failure = match fixture
+                .artifact
+                .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+            {
+                Ok(_) => panic!("invalid observer node must reject"),
+                Err(failure) => failure,
+            };
+            assert_eq!(failure.code, "graph.plan.observer");
+            assert_eq!(failure.bindings.observers.len(), 1);
+            assert_source_bind_failure_ownership(&failure, &ownership, &expected);
+        }
+    }
+
+    #[test]
+    fn delegated_source_rejection_restores_private_and_external_ownership() {
+        let mut fixture = source_bind_fixture();
+        fixture.bindings.nodes.push(GraphNodeBinding::new(
+            fixture.input.clone(),
+            Box::new(DropProcessor(Arc::clone(&fixture.external_drops))),
+        ));
+        let ownership = fixture.ownership();
+        let expected = [fixture.output.clone(), fixture.input.clone()];
+        let expected_builtin = fixture.builtin.clone();
+        let failure = match fixture
+            .artifact
+            .into_bound_with_source_set(fixture.bindings, fixture.source_set)
+        {
+            Ok(_) => panic!("source/external overlap must reject in graph bind"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "source.graph.binding_mismatch");
+        assert_eq!(failure.artifact.builtin_processors.len(), 1);
+        assert_eq!(
+            failure.artifact.builtin_processors[0].node,
+            expected_builtin
+        );
+        assert_eq!(failure.artifact.builtin_observers.len(), 1);
+        assert_eq!(failure.artifact.builtin_observers[0].handle, 0x22_73);
+        assert_source_bind_failure_ownership(&failure, &ownership, &expected);
     }
 
     #[test]
