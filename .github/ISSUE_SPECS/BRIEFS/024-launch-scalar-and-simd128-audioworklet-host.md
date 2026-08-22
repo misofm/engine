@@ -16,17 +16,23 @@ suspended and outside `process()`, may parse and allocate. Once ready, topology,
 memory and cached output views are immutable.
 
 The prepared Rust object owns the strict session, bounded host source producers/consumers, sealed
-builtins/effects, graph and exclusive plan. The message handler serially accepts one transferred
-source/seek request at a time, copies into preallocated Wasm staging and ACKs it. `process()` sees no
-message payload, invokes one exact-time render and copies cached contiguous L/R views into the two
-browser planes. No plan publication/retirement or general command controller is in scope.
+builtins/effects, graph and exclusive plan. The processor constructor synchronously instantiates the
+selected module, writes config, prepares, writes TOML, compiles, reacquires all pointers and caches
+views only against the final post-compile `memory.buffer`; there is no init message. The message
+handler serially accepts one transferred source/seek request at a time, copies into preallocated Wasm
+staging and ACKs it. `process()` sees no message payload, invokes one exact-time render and copies
+cached contiguous L/R views into the two browser planes. No plan publication/retirement or general
+command controller is in scope.
 
 Preparation binds `context.sampleRate`, caller-supplied explicit `quantumFrames` and strict TOML
 exactly. Do not claim a suspended main realm can discover the actual quantum:
 `context.renderQuantumSize` is comparison evidence only when exposed and nonzero. Before ready, the
 processor also compares `AudioWorkletGlobalScope.renderQuantumSize` only when exposed and nonzero.
-Every callback validates actual output-plane length against the prepared quantum; mismatch becomes
-sticky reprepare-required, but `process()` never parses, allocates or reprepares. Launch rates only.
+Every callback validates actual output-plane length and post-compile `memory.buffer` identity before
+touching cached views. Render is exactly `render(handle, actual_frames: u32)`; the safe host owns and
+advances absolute time internally. A shape mismatch passes zero, leaves the plan unrendered and
+becomes sticky reprepare-required; an identity mismatch likewise emits positive zero and fails.
+`process()` never creates/advances a JavaScript `BigInt`, parses, allocates or reprepares. Launch rates only.
 Test synthetic 64/128/256 plus the representative actual-browser path without treating 128 as
 normative.
 
@@ -59,8 +65,16 @@ provisional ownership on rejection. `compile` publishes control/source ownership
 Source IDs are exact UTF-8 session IDs. Submission uses staged planar PCM, exact rate, generation
 and absolute frame; accepts no more than one quantum per message; and inherits accepted region/final/
 backpressure semantics. Seek is absolute and generation-tagged. Update browser-local expected
-position only after product acceptance. One message may be in flight; any second client call rejects
-locally with `BACKPRESSURE` until ACK.
+position only after product acceptance. Request IDs are caller-supplied safe integers that must be
+strictly increasing and unique. One pending slot covers submit, seek, status and dispose; any second
+call rejects locally with `BACKPRESSURE`. Settle and clear it exactly once on ACK/error,
+`messageerror`, `processorerror` or disposal; repeated settled disposal is a local no-op.
+
+Accept only nonshared `ArrayBuffer` plane storage. Reject SAB, validate each view and deduplicate the
+transfer list by underlying buffer. Successful posting transfers ownership to the worklet. After the
+synchronous staging copy/submission, return the original typed plane views and their unique buffers
+in every ACK/error—including validation failure and engine `BACKPRESSURE`—so caller ownership is
+restored for reuse or retry before the pending call settles.
 
 `process()` has cached exact-quantum `Float32Array` views. Default/not-ready/fatal/mismatch output is
 positive zero. Render failure stores only a fixed numeric sticky status inside preallocated state;
@@ -80,7 +94,9 @@ Both Wasm modules bind the same source and `Cargo.lock`. Scalar is built with `-
 The main ESM validates the canonical simd128 probe and compiles the SIMD module before
 `audioWorklet.addModule`. Validation or compilation failure selects scalar. Pass only that compiled
 module, config and TOML to `processorOptions`; instantiate synchronously in the processor
-constructor. Selection and readiness are immutable, address-free and returned in `miso.ready.v1`.
+constructor and complete config/prepare/TOML/compile there. Reacquire all views after each
+allocation-capable call; only post-compile views may be cached. Selection and readiness are
+immutable, address-free and returned in `miso.ready.v1`.
 After explicit quiescent disposal, destroy plan/source/session ownership in reverse preparation order
 and make later `process()` return `false`.
 
@@ -93,8 +109,9 @@ and make later `process()` return `false`.
 3. Add build script and checked-in ESM/worklet/type declaration. Run static/hermetic loader and object
    gates first; stop on any import, atomics, relaxed-SIMD or export mismatch.
 4. Add one small strict fixture and independent direct-V2 expected result, then run the single
-   representative Chromium correctness gate for forced scalar and supported simd128. No long run or
-   performance measurement.
+   representative Chromium correctness gate for forced scalar and supported simd128. Compare
+   consecutive PCM plus status/resources; no inaccessible DSP-state snapshot is claimed. No long run
+   or performance measurement.
 5. On a clean unchanged candidate run focused and locked workspace tests/check, warning-denied
    Clippy/rustdoc, format, policies/mutations and no-artifact/no-timer scans. Record strict PASS/FAIL.
 

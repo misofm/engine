@@ -31,15 +31,21 @@ thread, shared memory, `memory64`, Wasm atomics or relaxed SIMD. Launch rates re
 
 The main-realm module selects and compiles one Wasm artifact, loads the checked-in worklet module,
 and constructs a node while its `AudioContext` is suspended. The processor constructor synchronously
-instantiates the selected module. Its message handler performs all strict-TOML parsing, preparation,
-source submit/seek copies, status encoding and destruction between callbacks. Only `process()` calls
-the already-prepared render export and copies its two cached contiguous output views into the browser
-output planes.
+instantiates the selected module, writes and validates configuration, prepares fixed staging, writes
+the strict TOML, compiles the immutable session/plan, reacquires every post-growth pointer/view, pins
+the post-compile `memory.buffer` identity, caches the output/status/resource views and only then posts
+ready. Its message handler performs source submit/seek copies, status encoding and destruction
+between callbacks. Only `process()` calls the already-prepared render export and copies its two
+cached contiguous output views into the browser output planes.
 
 One processor owns one Wasm instance, engine host, source producers/consumers and prepared plan.
-JavaScript never retains a Rust pointer across memory growth; preparation completes before views are
-cached and the memory byte length may not change afterwards. Transferred source buffers become owned
-by the worklet message and are copied into the bounded Wasm staging region before acknowledgement.
+JavaScript never retains a Rust pointer or typed view across an allocation-capable call. Config and
+TOML views are temporary; the constructor reacquires all pointers after both `prepare` and `compile`.
+Only post-compile views are cached, and `process()` compares `memory.buffer` identity before touching
+them. Any identity change writes positive-zero output and becomes sticky reprepare-required. The
+memory byte length may not change after compile. Transferred source buffers become owned by the
+worklet message, are copied into bounded Wasm staging, and are transferred back in the matching ACK
+or error before the pending call settles, including validation failure or engine backpressure.
 There is exactly one in-flight source/control request: the main wrapper sends the next only after the
 matching ACK, providing typed browser-side backpressure without `SharedArrayBuffer` or `Atomics`.
 
@@ -71,7 +77,7 @@ miso_engine_web_v1_source_submit(handle, source_id_bytes, generation: u64,
     start_frame: u64, channels, frames, end_of_region) -> u32
 miso_engine_web_v1_source_seek(handle, source_id_bytes, generation: u64,
     source_frame: u64) -> u32
-miso_engine_web_v1_render(handle, absolute_sample: u64) -> u32
+miso_engine_web_v1_render(handle, actual_frames: u32) -> u32
 miso_engine_web_v1_resource_ptr(handle) -> u32
 miso_engine_web_v1_status_ptr(handle) -> u32
 miso_engine_web_v1_dispose(handle) -> u32
@@ -99,6 +105,12 @@ quantum. Buffer pointers are stable only after `prepare` and until `dispose`. `c
 failure retains no partial session/plan and leaves the config host reusable only for diagnostic read
 and disposal. Source submit/seek preserve the accepted absolute-frame, generation, bounded-ring and
 transactional ownership semantics.
+
+The render export owns no caller timeline: the safe host's `next_absolute_sample` is authoritative.
+It first compares `actual_frames` with the prepared quantum; a mismatch atomically sets state
+`FAILED`, records `REPREPARE_REQUIRED`, leaves the plan unrendered and requires positive-zero browser
+output. An exact match invokes one `render_next()` and advances the internal timeline. The worklet
+passes zero for any malformed/missing/unequal output-plane shape, otherwise the common exact length.
 
 `WebStatusV1` is exactly `struct_size`, `abi_version`, `state`, `last_result`, `backend`,
 `sample_rate_hz`, `quantum_frames`, `reserved0`, `next_absolute_sample`, `rendered_quanta`,
@@ -145,20 +157,33 @@ The resolved host exposes immutable `node`, `backend: "scalar" | "simd128"`, exa
 exactly `{requestId, sourceId, generation, startFrame, sampleRateHz, planes, frames, endOfRegion}`;
 a seek request is exactly `{requestId, sourceId, generation, sourceFrame}`. Requests carry a
 monotonic safe-integer `requestId`, UTF-8 source ID, `BigInt` generation/absolute frame, exact sample
-rate, planar `Float32Array` data and final marker. Message tags are `miso.init.v1`,
-`miso.source.v1`, `miso.seek.v1`, `miso.status.v1`, `miso.dispose.v1`, `miso.ready.v1`,
+rate, planar `Float32Array` data and final marker. The wrapper rejects non-safe, duplicate or
+non-increasing request IDs before transfer. Message tags are `miso.source.v1`, `miso.seek.v1`,
+`miso.status.v1`, `miso.dispose.v1`, `miso.ready.v1`,
 `miso.ack.v1`, `miso.error.v1`. Every response echoes `requestId` and returns a frozen result code;
 unknown tags/fields reject, and errors are sticky/address-free. There is no generic session mutation
 or PCM on a protocol/network transport.
+
+Only nonshared `ArrayBuffer`-backed planes are accepted; `SharedArrayBuffer` rejects. Build a unique
+transfer list by underlying buffer so multiple planar views over one buffer do not duplicate a
+transferable. Preserve each view's exact type/offset/length. Once `postMessage` succeeds the worklet
+owns those buffers; its ACK/error returns the original plane views with the unique buffers in the
+response transfer list on every result, including `BACKPRESSURE`, so the resolved/rejected result
+restores caller ownership for reuse or retry. The one pending slot covers submit, seek, status and
+dispose. ACK/error, `messageerror`, `processorerror` and disposal each settle and clear it exactly
+once; a concurrent call rejects locally with typed `BACKPRESSURE`. Repeated dispose after the first
+settled disposal resolves without another message or Wasm call.
 
 Selection occurs in the main realm before `addModule`: validate the canonical minimal simd128 probe,
 then compile the simd artifact; either failure selects scalar. The selected compiled
 `WebAssembly.Module`, configuration and TOML are transferred/cloned into `processorOptions`. There
 is no fallback after node construction and no render-time capability detection.
 
-Before ready, on sticky error and on output mismatch, `process()` writes `+0.0` to every output
-sample. While ready it invokes exactly one render per quantum and uses pre-created `Float32Array`
-views plus `output[0][0].set(left)`/`output[0][1].set(right)`. It does not allocate, grow memory,
+Before ready, on sticky error, post-compile memory-buffer identity change or output mismatch,
+`process()` writes `+0.0` to every available output sample. While ready it validates the actual
+two-plane shape, invokes exactly one `render(handle, actual_frames)` per quantum and uses pre-created
+`Float32Array` views plus `output[0][0].set(left)`/`output[0][1].set(right)`. It does not allocate,
+construct or advance a JavaScript `BigInt`, grow memory,
 post messages, format/log, feature-detect or call a fallible unbounded operation. It returns `true`
 until explicit disposal; after quiescent disposal it returns `false`. Abrupt user-agent teardown
 reclaims the isolated Wasm instance; no native worker or external resource exists.
@@ -197,7 +222,8 @@ file may change.
    scalar and supported simd128 at 48 kHz and an explicit actual-browser `quantumFrames` value,
    confirms each nonzero exposed main/worklet quantum matches it, renders the same
    strict one-track host-fed session over consecutive quanta, exercises submit and seek, and compares
-   PCM/state/status to an independent direct V2 fixture. Each backend is deterministic across two
+   PCM plus `WebStatusV1` and `WebResourceReportV1` to an independent direct V2 fixture. Consecutive
+   PCM blocks prove continuation without claiming inaccessible DSP-state introspection. Each backend is deterministic across two
    fresh contexts; scalar/simd parity uses the accepted backend tolerance. The memory byte length and
    resource report stay unchanged after ready. This is a correctness test, not a timer or benchmark.
 5. Focused plus locked workspace check/tests, warning-denied Clippy/rustdoc, format, web/realtime/
