@@ -8,6 +8,10 @@ graph trace; stopped Issues 057 and 069 supply only the exact technical evidence
 accepted by their successors. Do not reopen or rerun those feature, corpus, audit, trace, target or
 instruction gates.
 
+The rejected draft `main.rs` patch left no repository mutation, checkpoint, focused gate or
+adversarial implementation verdict. It was preimplementation exploration, not an implementation
+attempt; Terra attempt 1 remains unused.
+
 Permit one Terra implementation/review attempt and at most one bounded Sol correction/review. A
 second failure stops. During implementation, testing, preflight and Sol review, do not invoke
 `miso_engine_builtins_bench`, `cargo run -p miso-engine-builtins-bench`, or the real runner. Only
@@ -42,8 +46,17 @@ authoring any fixture:
 - accepted Issue-068 five-package source-manifest SHA-256
   `0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19`;
   and
-- `Cargo.lock` SHA-256
+- preimplementation `Cargo.lock` provenance SHA-256
   `96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`.
+
+The benchmark crate cannot construct and bind the frozen real-tap graph through its old direct
+dependency set. Terra may therefore add only the direct benchmark-package graph/effect/
+conformance dependencies required by that workload and update only the corresponding
+`miso-engine-builtins-bench` dependency stanza in root `Cargo.lock`. Every unrelated lock stanza
+and every existing package version, source and checksum must remain byte-for-byte unchanged. The
+resulting post-change lockfile SHA-256 becomes the candidate identity sealed by preflight; the
+preimplementation hash above remains provenance and is not the post-change expected hash. Any
+other lockfile drift stops Issue 058.
 
 All ten `fixtures/builtins/v1/benchmark/<kind>-<rate>.toml` files remain manifest-listed immutable
 inputs. Their manifest rows, not duplicated constants, are the authority for byte lengths and
@@ -161,6 +174,7 @@ bash scripts/run-builtins-benchmark.sh
 Limit implementation to the existing benchmark crate and its direct tooling:
 
 - `tools/miso-engine-builtins-bench/{Cargo.toml,src/main.rs}`;
+- root `Cargo.lock`, limited to the benchmark-package dependency-stanza transition frozen above;
 - `scripts/{builtins-benchmark-record-validator.jq,builtins-benchmark-validator.jq}`;
 - `scripts/{run-builtins-benchmark.sh,preflight-builtins-benchmark.sh,test-builtins-benchmark.sh}`;
   and
@@ -176,8 +190,10 @@ Ordered gates:
 1. Static review proves all existing Issue-007 identities and fake single-buffer tap paths are
    gone, production duplicate rejection is preserved, and the binary has one warmup pass plus two
    measured rounds.
-2. Format, locked package check/tests, warning-denied all-target Clippy/rustdoc and focused
-   fixture/reference/graph tests pass without invoking benchmark `main`.
+2. A static lock comparison proves the permitted benchmark-package-only transition and freezes
+   the post-change lock hash. Format, locked package check/tests, warning-denied all-target
+   Clippy/rustdoc and focused fixture/reference/graph tests pass without invoking benchmark
+   `main`.
 3. Both validators and the complete synthetic mutation matrix pass. Hermetic scratch tests prove
    argument/missing-tool/seal mismatch, counted success, workload failure, interruption/partial
    raw, validator failure, existing/symlink/alias artifacts, atomic no-clobber publication and

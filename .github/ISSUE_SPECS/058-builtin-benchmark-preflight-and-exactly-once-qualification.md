@@ -8,6 +8,16 @@ Terra implementation/review attempt and one bounded Sol correction/review; a sec
 At briefing, `runner_invocations=0`, `workload_invocations=0`, and
 `timed_benchmark_invocations=0`.
 
+The rejected draft `main.rs` patch left no repository mutation, checkpoint, focused gate or
+adversarial implementation verdict, so it was preimplementation exploration and Terra attempt 1
+remains unused. The preimplementation root `Cargo.lock` SHA-256 is
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`. The frozen real-tap graph
+cannot be constructed through the benchmark crate's old direct dependencies: implementation may
+add only its required direct graph/effect/conformance dependencies and update only the
+`miso-engine-builtins-bench` dependency stanza in root `Cargo.lock`. Every unrelated lock stanza
+and every existing version, source and checksum remains byte-for-byte unchanged. Preflight must
+freeze the resulting post-change lock SHA; any other lock drift stops the issue.
+
 The accepted Issue-068 dependency is closed and its target/source/corpus evidence is technical
 input. The current benchmark binary, validators, runner and preflight are scaffolding, not accepted
 evidence: they still emit the superseded Issue-007 record shape, do not consume the ten checked
