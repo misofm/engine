@@ -15,7 +15,7 @@ binary="$artifact_directory/miso_engine_builtins_bench"
 record_validator="$script_directory/builtins-benchmark-record-validator.jq"
 aggregate_validator="$script_directory/builtins-benchmark-validator.jq"
 
-for tool in jq sha256sum wc cmp mktemp mv git; do
+for tool in jq sha256sum wc cmp mktemp mv git awk tr cp; do
     command -v "$tool" >/dev/null || { printf 'required tool is unavailable: %s\n' "$tool" >&2; exit 1; }
 done
 for path in "$raw_output" "$accepted_output" "$stderr_output" "$disposition"; do
@@ -73,17 +73,43 @@ write_disposition() {
     local status=$1 reason=$2 exit_status=$3
     local raw_identity accepted_identity stderr_identity
     local raw_sha raw_bytes accepted_sha accepted_bytes stderr_sha stderr_bytes
+    local progress warmup_passes measured_rounds_completed
     raw_identity="$(artifact_identity "$raw_output")"
     accepted_identity="$(artifact_identity "$accepted_output")"
     stderr_identity="$(artifact_identity "$stderr_output")"
     read -r raw_sha raw_bytes <<<"$raw_identity"
     read -r accepted_sha accepted_bytes <<<"$accepted_identity"
     read -r stderr_sha stderr_bytes <<<"$stderr_identity"
-    printf '{"schema_version":2,"issue":58,"status":"%s","reason":"%s","runner_invocations":1,"workload_invocations":1,"warmup_passes":1,"measured_rounds_completed":2,"timed_benchmark_invocations":1,"candidate_commit":"%s","binary_sha256":"%s","runner_sha256":"%s","record_validator_sha256":"%s","aggregate_validator_sha256":"%s","preflight_sha256":"%s","workload_exit_status":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
-        "$status" "$reason" "$candidate_commit" "$binary_sha256" "$runner_sha256" \
+    progress="$(lifecycle_progress)"
+    read -r warmup_passes measured_rounds_completed <<<"$progress"
+    printf '{"schema_version":2,"issue":58,"status":"%s","reason":"%s","runner_invocations":1,"workload_invocations":%s,"warmup_passes":%s,"measured_rounds_completed":%s,"timed_benchmark_invocations":%s,"candidate_commit":"%s","binary_sha256":"%s","runner_sha256":"%s","record_validator_sha256":"%s","aggregate_validator_sha256":"%s","preflight_sha256":"%s","workload_exit_status":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+        "$status" "$reason" "$workload_started" "$warmup_passes" \
+        "$measured_rounds_completed" "$workload_started" "$candidate_commit" \
+        "$binary_sha256" "$runner_sha256" \
         "$record_validator_sha256" "$aggregate_validator_sha256" "$preflight_sha256" \
         "$exit_status" "$raw_sha" "$raw_bytes" "$accepted_sha" "$accepted_bytes" \
         "$stderr_sha" "$stderr_bytes" >"$disposition"
+}
+lifecycle_progress() {
+    local progress
+    if [[ ! -f "$raw_output" || -L "$raw_output" ]]; then
+        printf '0 0\n'
+        return
+    fi
+    progress="$(jq -s -r -L "$script_directory" '
+      include "builtins-benchmark-record-validator";
+      [.[] | select([builtins_benchmark_record_valid] | all)] as $valid |
+      [$valid[] | select(.round == 1) |
+       [.workload_kind, .sample_rate_hz] | @json] as $round_one |
+      [$valid[] | select(.round == 2) |
+       [.workload_kind, .sample_rate_hz] | @json] as $round_two |
+      [if ($valid | length) > 0 then 1 else 0 end,
+       ((if (($round_one | length) == 10 and
+             ($round_one | unique | length) == 10) then 1 else 0 end) +
+        (if (($round_two | length) == 10 and
+             ($round_two | unique | length) == 10) then 1 else 0 end))] | @tsv
+    ' "$raw_output" 2>/dev/null)" || progress=$'0\t0'
+    printf '%s\n' "$progress"
 }
 publish_accepted_copy() {
     local temporary
@@ -105,6 +131,7 @@ exec {raw_fd}>"$raw_output"
 exec {stderr_fd}>"$stderr_output"
 failure_reason=workload_failed
 workload_status=1
+workload_started=0
 completed=0
 on_exit() {
     local status=$?
@@ -124,6 +151,7 @@ trap on_exit EXIT
 trap on_signal INT TERM
 
 set +e
+workload_started=1
 MISO_ENGINE_BUILTINS_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
 MISO_ENGINE_BUILTINS_BENCH_BINARY_SHA256="$binary_sha256" \
 "$binary" >&"$raw_fd" 2>&"$stderr_fd"

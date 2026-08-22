@@ -192,8 +192,9 @@ printf 'sealed-binary\n' >>"$MISO_TEST_LAUNCH_LOG"
 case "${MISO_TEST_MODE:?}" in
   success) cat "$MISO_TEST_RECORDS" ;;
   workload_failure) printf '{"partial":"workload"}\n'; exit 73 ;;
+  round_one_failure) jq -c 'select(.round == 1)' "$MISO_TEST_RECORDS"; exit 73 ;;
   interrupted_partial) printf '{"partial":"interrupted"}\n'; kill -TERM "$BASHPID" ;;
-  validator_failure) printf '{}\n' ;;
+  validator_failure) cat "$MISO_TEST_RECORDS"; printf '{}\n' ;;
   *) exit 91 ;;
 esac
 EOF
@@ -244,6 +245,20 @@ if run_lifecycle_runner success --retry >/dev/null 2>&1; then
 fi
 expect_no_scratch_launch
 
+new_lifecycle_case missing-tool
+missing_tool_bin="$case_root/missing-tool-bin"
+mkdir "$missing_tool_bin"
+ln -s "$(command -v bash)" "$missing_tool_bin/bash"
+ln -s "$(command -v dirname)" "$missing_tool_bin/dirname"
+set +e
+PATH="$missing_tool_bin" "$missing_tool_bin/bash" \
+  "$case_root/scripts/run-builtins-benchmark.sh" >"$case_root/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 ]]
+grep -Fq 'required tool is unavailable: jq' "$case_root/result"
+expect_no_scratch_launch
+
 new_lifecycle_case success
 if ! published="$(run_lifecycle_runner success 2>"$case_root/result")"; then
   cat "$case_root/result" >&2
@@ -273,7 +288,21 @@ grep -Fqx '{"partial":"workload"}' "$raw"
 expect_no_accepted
 [[ "$(wc -l <"$launch_log")" == 1 ]]
 jq -e '.status == "FAIL" and .reason == "workload_failed" and .workload_exit_status == 73 and
+       .workload_invocations == 1 and .timed_benchmark_invocations == 1 and
+       .warmup_passes == 0 and .measured_rounds_completed == 0 and
        .raw_sha256 != null and .accepted_sha256 == null' "$disposition" >/dev/null
+
+new_lifecycle_case round-one-failure
+set +e
+run_lifecycle_runner round_one_failure >"$case_root/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 73 ]]
+[[ "$(wc -l <"$raw")" == 10 ]]
+expect_no_accepted
+jq -e '.status == "FAIL" and .reason == "workload_failed" and .workload_exit_status == 73 and
+       .workload_invocations == 1 and .timed_benchmark_invocations == 1 and
+       .warmup_passes == 1 and .measured_rounds_completed == 1' "$disposition" >/dev/null
 
 new_lifecycle_case interrupted-partial
 set +e
@@ -285,6 +314,9 @@ grep -Fqx '{"partial":"interrupted"}' "$raw"
 expect_no_accepted
 jq -e '.status == "FAIL" and .reason == "workload_interrupted" and .workload_exit_status == 143' \
   "$disposition" >/dev/null
+jq -e '.warmup_passes == 0 and .measured_rounds_completed == 0 and
+       .workload_invocations == 1 and .timed_benchmark_invocations == 1' \
+  "$disposition" >/dev/null
 
 new_lifecycle_case validator-failure
 set +e
@@ -295,7 +327,9 @@ set -e
 grep -Fqx '{}' "$raw"
 expect_no_accepted
 [[ -s "$stderr_log" ]]
-jq -e '.status == "FAIL" and .reason == "validation_failed" and .workload_exit_status == 1' \
+jq -e '.status == "FAIL" and .reason == "validation_failed" and .workload_exit_status == 1 and
+       .warmup_passes == 1 and .measured_rounds_completed == 2 and
+       .workload_invocations == 1 and .timed_benchmark_invocations == 1' \
   "$disposition" >/dev/null
 
 for artifact in raw accepted stderr disposition; do
