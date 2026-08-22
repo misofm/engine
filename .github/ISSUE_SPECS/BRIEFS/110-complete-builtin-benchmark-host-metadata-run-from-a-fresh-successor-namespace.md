@@ -2,12 +2,10 @@
 
 ## Decision
 
-**SOL XHIGH BRIEF PASS / READY FOR SOL HIGH PASS 1 / ZERO EXECUTION AUTHORIZATION.** Sol High may
-make one focused implementation pass and, after one Sol XHigh HOLD only, one bounded correction.
-A second HOLD is terminal STOP. Sol XHigh briefs and verifies. Initial Issue-110 preflight/runner/
-workload/timed counters are `0/0/0/0`; `target/issue110` is absent. No preflight, runner, benchmark
-main, workload or timing invocation is authorized. Remote #110 was read-only confirmed available;
-root must create it with the exact spec title before implementation.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE / NO FURTHER EXECUTION AUTHORIZATION.** Sol High used
+one focused pass and the one bounded correction; Sol XHigh independently verified the clean seal,
+sole preflight and sole runner. Final preflight/runner/workload/timed counters are `1/1/1/1`, warmup
+`1`, measured rounds `2`, records `20`. Root owns upstream evidence synchronization and closure.
 
 ## Why this successor exists
 
@@ -112,4 +110,33 @@ stale Issue-109 evidence remains unchanged, all seven Issue-109 future artifacts
 Issue-110 namespace remain absent, and real preflight/runner/workload/timed counters remain
 `0/0/0/0`. The bounded review correction additionally proves exact sole-member Issue-109 namespace
 membership and rejects an arbitrary extra member before launch/build. This is a focused review
-handoff only; no execution authority or overall PASS is claimed.
+handoff record; the separately reviewed execution evidence follows.
+
+## Terminal evidence
+
+Candidate `47daeda00683acb6e0fd29bafd3ee6d6403cd782`, tree
+`1f51a7bba86bbe34afb18567272faa2dc86bc397`, produced exactly one successful zero-workload
+preflight and one successful runner. Completion seal, binary and preflight are respectively
+2,988/3,200,296/1,893 bytes with SHA-256 values `3ce39b2653d6b912b6ede083fe8479e46bcbce665095190bd94d15fe82ca238d`,
+`a7bafc459b69fb8bdfd7d9195e4ff8d1febf8602a57540498cb579d04a486912` and
+`9a7a78748b32d8a7cdee1bf7e886e38e6a358f6dfd093d93bbd51bdac2eddaa0`.
+
+Raw and accepted are distinct-inode, byte-identical 38,477-byte files with SHA-256
+`8a2d3f2f9f6d5a6f2edb4513fd304b121c934f6dcc1f5379b96f4256b54aa2dc`. Exact five-phase stderr is
+211 bytes, SHA-256 `7935bf62063c0e9d2bfaac91d02db6f448dbf0636fbf16d3c49660738f55b396`.
+The 1,075-byte PASS/complete disposition hashes to
+`361f3a4f612e88dcc8a6dcb9f810528b175a64fbf3eea07122024df7971f274f`, records counters `1/1/1/1`,
+warmup `1`, rounds `2`, and projection SHA-256
+`59efa293fd6781d8da916490621f0973475b4dc4cbff7f5bd92baccb833d095f`. Prelaunch disposition is
+absent and final target membership is exactly seven regular nlink1 files.
+
+All 20 ordered records pass the frozen schema, identity, output, percentile and audit contracts.
+All 16 metadata values are identical and populated with `missing_metadata=[]`; the independently
+reconstructed canonical projection matches the disposition digest. Render audit fields are all
+zero and preparation audit fields are `not_applicable`. Rough descriptive p50 ranges are full chain
+2,298–2,306, identity 1,009–1,029, matrix 1,442–1,446, meter 25,408–31,430, and preparation
+890,644–957,490 ns/op. These are descriptive period observations only.
+
+Issue-072 and Issue-109 namespaces remain exact. No retry, alternate invocation or tuning occurred.
+No further preflight, runner, benchmark-main, workload or timing execution is authorized. Issue 110
+is `COMPLETE / SOL XHIGH PASS / READY TO CLOSE`.
