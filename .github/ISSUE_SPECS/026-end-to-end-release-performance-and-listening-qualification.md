@@ -28,7 +28,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 
 ## Dependencies by exact issue title
 
-- Stable C ABI and native PCM reference runner
+- Native PCM reference runner and C ABI qualification
 - iOS and Android embedding examples
 - WASM SIMD AudioWorklet embedding
 - Launch sample-rate scope: 44.1–96 kHz and extended-rate deferral

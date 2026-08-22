@@ -29,7 +29,7 @@ Replacing in-process API, streaming PCM, invoking engine render from socket call
 ## Dependencies by exact issue title
 
 - Transport-neutral binary control protocol
-- Stable C ABI and native PCM reference runner
+- Native PCM reference runner and C ABI qualification
 
 ## Hazards/decisions
 

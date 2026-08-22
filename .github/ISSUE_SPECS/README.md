@@ -72,6 +72,14 @@ one-invocation/two-round builtin benchmark. Issues 058–059, 061, 063–064, 06
 permit one Terra attempt plus one Sol correction. Issue-072 preflight/runner/workload/timed
 invocation counts are currently zero.
 
+Issue 022 is now the launch-sized **Stable C ABI and host-fed planar PCM render** product: immutable
+strict-session compilation, separate control/render ownership, bounded host source submission and
+caller-owned planar output. Issue 073, **Native PCM reference runner and C ABI qualification**,
+follows it and alone owns native WAV/RF64 runner breadth, complete Issue-005 provider/mutation
+integration and native platform qualification. Issue 023 consumes the host-fed product directly;
+Issues 025 and 026 wait for Issue 073. Both issues permit one Terra attempt plus one Sol correction
+and prohibit benchmarks/timing.
+
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
