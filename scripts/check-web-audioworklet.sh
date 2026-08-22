@@ -1,6 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+process_policy_re='postMessage|BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.'
+check_process_policy() {
+  local source=$1
+  local body
+  body=$(sed -n '/PROCESS_POLICY_BEGIN/,/PROCESS_POLICY_END/p' "$source")
+  grep -q 'silence(outputs)' <<<"$body" || return 1
+  ! grep -Eq "$process_policy_re" <<<"$body"
+}
+
+check_opcode_policy() {
+  local scalar_text=$1
+  local simd_text=$2
+  ! grep -Eq '(^|[[:space:]])(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.' \
+    <<<"$scalar_text" || return 1
+  grep -q 'f32x4.mul' <<<"$simd_text" || return 1
+  grep -q 'f32x4.add' <<<"$simd_text" || return 1
+  grep -q 'f32x4.sub' <<<"$simd_text" || return 1
+  ! grep -Eqi 'relaxed|atomic' <<<"$simd_text"
+}
+
+if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
+  valid_simd=$'f32x4.mul\nf32x4.add\nf32x4.sub'
+  check_opcode_policy 'f32.mul' "$valid_simd"
+  for mutation in \
+    $'f32x4.add\nf32x4.sub' \
+    $'f32x4.mul\nf32x4.sub' \
+    $'f32x4.mul\nf32x4.add' \
+    $'f32x4.mul\nf32x4.add\nf32x4.sub\ni8x16.relaxed_swizzle' \
+    $'f32x4.mul\nf32x4.add\nf32x4.sub\ni32.atomic.load'
+  do
+    if check_opcode_policy 'f32.mul' "$mutation"; then
+      echo "missing/forbidden SIMD opcode mutation escaped policy" >&2
+      exit 1
+    fi
+  done
+  if check_opcode_policy 'f32x4.add' "$valid_simd"; then
+    echo "scalar SIMD mutation escaped policy" >&2
+    exit 1
+  fi
+  echo "web AudioWorklet opcode-policy mutations passed"
+  exit 0
+fi
+
+if (($# == 1)) && [[ $1 == --source-policy=* ]]; then
+  check_process_policy "${1#--source-policy=}" || {
+    echo "render callback or transitive helper violates the frozen static policy" >&2
+    exit 1
+  }
+  exit 0
+fi
+
 if (($# != 1)); then
   echo "usage: $0 ARTIFACT_DIRECTORY" >&2
   exit 2
@@ -86,15 +137,9 @@ for module in "$scalar" "$simd"; do
 done
 
 scalar_disassembly=$(wasm-objdump -d "$scalar")
-if grep -Eq '(^|[[:space:]])(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.' <<<"$scalar_disassembly"; then
-  echo "scalar artifact contains SIMD instructions" >&2
-  exit 1
-fi
 simd_disassembly=$(wasm-objdump -d "$simd")
-grep -q 'f32x4.mul' <<<"$simd_disassembly" || { echo "simd artifact lacks f32x4.mul" >&2; exit 1; }
-grep -q 'f32x4.add' <<<"$simd_disassembly" || { echo "simd artifact lacks f32x4.add" >&2; exit 1; }
-if grep -Eqi 'relaxed|atomic' <<<"$simd_disassembly"; then
-  echo "simd artifact contains relaxed SIMD or atomics" >&2
+if ! check_opcode_policy "$scalar_disassembly" "$simd_disassembly"; then
+  echo "scalar/simd opcode contract failed" >&2
   exit 1
 fi
 
@@ -106,12 +151,11 @@ if rg -n 'quantumFrames[[:space:]]*[:=][[:space:]]*128' "$main_js" "$worklet_js"
   echo "hardcoded 128-frame quantum found" >&2
   exit 1
 fi
-process_body=$(sed -n '/PROCESS_POLICY_BEGIN/,/PROCESS_POLICY_END/p' "$worklet_js")
-if grep -Eq 'postMessage|BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.' \
-    <<<"$process_body"; then
+if ! check_process_policy "$worklet_js"; then
   echo "render callback violates the frozen static policy" >&2
   exit 1
 fi
+process_body=$(sed -n '/PROCESS_POLICY_BEGIN/,/PROCESS_POLICY_END/p' "$worklet_js")
 grep -q 'miso_engine_web_v1_render(this.handle, actualFrames)' <<<"$process_body"
 grep -q 'output\[0\]\.set(this.outputLeft)' <<<"$process_body"
 grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"

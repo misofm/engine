@@ -51,11 +51,14 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.stickyResult = RESULT_OK;
     this.lastRequestId = 0;
     this.handle = 0;
+    this.handleDisposed = false;
+    this.initializationErrorPosted = false;
     this.port.onmessage = (event) => this.receive(event.data);
     try {
-      this.initialize(options?.processorOptions);
+      const result = this.initialize(options?.processorOptions);
+      if (result !== RESULT_OK) this.failInitialization(result, 0);
     } catch (_) {
-      this.sticky(RESULT_INTERNAL, 0);
+      this.failInitialization(RESULT_INTERNAL, 0);
     }
   }
 
@@ -64,50 +67,44 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         || (init.backend !== "scalar" && init.backend !== "simd128")
         || !u32(init.sampleRateHz) || !u32(init.quantumFrames) || init.quantumFrames === 0
         || !(init.sessionToml instanceof Uint8Array) || !exactFields(init.limits, LIMIT_FIELDS)) {
-      this.sticky(RESULT_INVALID_ARGUMENT, init?.requestId ?? 0);
-      return;
+      return RESULT_INVALID_ARGUMENT;
     }
+    if (globalThis.sampleRate !== init.sampleRateHz) return RESULT_REPREPARE_REQUIRED;
     const exposedQuantum = globalThis.renderQuantumSize;
     if (typeof exposedQuantum === "number" && exposedQuantum !== 0
         && exposedQuantum !== init.quantumFrames) {
-      this.sticky(RESULT_REPREPARE_REQUIRED, init.requestId);
-      return;
+      return RESULT_REPREPARE_REQUIRED;
     }
     this.instance = new WebAssembly.Instance(init.module, {});
     this.exports = this.instance.exports;
     if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION
         || this.exports.miso_engine_web_v1_config_bytes() !== CONFIG_BYTES) {
-      this.sticky(2, init.requestId);
-      return;
+      return 2;
     }
     this.handle = this.exports.miso_engine_web_v1_config_new();
     const configPointer = this.exports.miso_engine_web_v1_config_ptr(this.handle);
     if (this.handle === 0 || configPointer === 0) {
-      this.sticky(RESULT_INTERNAL, init.requestId);
-      return;
+      return RESULT_INTERNAL;
     }
     try {
       this.writeConfig(configPointer, init);
     } catch (_) {
-      this.sticky(RESULT_INVALID_ARGUMENT, init.requestId);
-      return;
+      return RESULT_INVALID_ARGUMENT;
     }
     let result = this.exports.miso_engine_web_v1_prepare(this.handle);
     if (result !== RESULT_OK) {
-      this.sticky(result, init.requestId);
-      return;
+      return result;
     }
     const tomlPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SESSION_TOML);
     const tomlCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SESSION_TOML);
-    if (init.sessionToml.byteLength > tomlCapacity) {
-      this.sticky(4, init.requestId);
-      return;
+    if (!u32(tomlPointer) || tomlPointer === 0 || !u32(tomlCapacity)
+        || init.sessionToml.byteLength > tomlCapacity) {
+      return 4;
     }
     new Uint8Array(this.exports.memory.buffer, tomlPointer, init.sessionToml.byteLength).set(init.sessionToml);
     result = this.exports.miso_engine_web_v1_compile(this.handle, init.sessionToml.byteLength);
     if (result !== RESULT_OK) {
-      this.sticky(result, init.requestId);
-      return;
+      return result;
     }
     this.backend = init.backend;
     this.sampleRateHz = init.sampleRateHz;
@@ -117,12 +114,30 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
     this.sourcePcmPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_PCM);
+    const sourcePcmCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_SOURCE_PCM,
+    );
+    const outputPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_OUTPUT_PCM);
+    const outputCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_OUTPUT_PCM,
+    );
+    const statusPointer = this.exports.miso_engine_web_v1_status_ptr(this.handle);
+    const resourcePointer = this.exports.miso_engine_web_v1_resource_ptr(this.handle);
+    if (!u32(this.sourceIdPointer) || this.sourceIdPointer === 0 || !u32(this.sourceIdCapacity)
+        || !u32(this.sourcePcmPointer) || this.sourcePcmPointer === 0
+        || !u32(sourcePcmCapacity) || sourcePcmCapacity % 4 !== 0
+        || sourcePcmCapacity < this.maximumSourceChannels * this.quantumFrames * 4
+        || !u32(outputPointer) || outputPointer === 0
+        || outputCapacity !== this.quantumFrames * 2 * 4
+        || !u32(statusPointer) || statusPointer === 0
+        || !u32(resourcePointer) || resourcePointer === 0) return RESULT_INTERNAL;
     this.sourcePcm = new Float32Array(
       this.memoryBuffer,
       this.sourcePcmPointer,
-      this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_PCM) / 4,
+      sourcePcmCapacity / 4,
     );
-    const outputPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_OUTPUT_PCM);
     this.outputLeft = new Float32Array(this.memoryBuffer, outputPointer, this.quantumFrames);
     this.outputRight = new Float32Array(
       this.memoryBuffer,
@@ -131,18 +146,28 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     );
     this.statusView = new DataView(
       this.memoryBuffer,
-      this.exports.miso_engine_web_v1_status_ptr(this.handle),
+      statusPointer,
       80,
     );
     this.resourceView = new DataView(
       this.memoryBuffer,
-      this.exports.miso_engine_web_v1_resource_ptr(this.handle),
+      resourcePointer,
       224,
     );
     this.encoder = new TextEncoder();
     this.resources = this.readResources();
+    const status = this.readStatus();
+    const expectedBackend = init.backend === "scalar" ? 0 : 1;
+    if (this.resources.backend !== expectedBackend || status.backend !== expectedBackend
+        || this.resources.sampleRateHz !== init.sampleRateHz
+        || status.sampleRateHz !== init.sampleRateHz
+        || this.resources.quantumFrames !== init.quantumFrames
+        || status.quantumFrames !== init.quantumFrames
+        || status.state !== STATE_READY || status.lastResult !== RESULT_OK
+        || status.nextAbsoluteSample !== 0n || status.renderedQuanta !== 0n) {
+      return RESULT_INVALID_ARGUMENT;
+    }
     this.memoryBytes = this.memoryBuffer.byteLength;
-    this.ready = true;
     this.port.postMessage({
       tag: "miso.ready.v1",
       requestId: init.requestId,
@@ -151,6 +176,31 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       resources: this.resources,
       memoryBytes: this.memoryBytes,
     });
+    this.ready = true;
+    return RESULT_OK;
+  }
+
+  failInitialization(result, requestId) {
+    if (this.handle !== 0 && !this.handleDisposed) {
+      this.handleDisposed = true;
+      try {
+        this.exports.miso_engine_web_v1_dispose(this.handle);
+      } catch (_) {
+        // Cleanup is best-effort only when a malformed module throws from its dispose export.
+      }
+    }
+    this.handle = 0;
+    this.ready = false;
+    this.disposed = true;
+    this.stickyResult = result;
+    if (!this.initializationErrorPosted) {
+      this.initializationErrorPosted = true;
+      try {
+        this.port.postMessage({ tag: "miso.error.v1", requestId, result });
+      } catch (_) {
+        // A failed MessagePort cannot receive the one address-free construction error.
+      }
+    }
   }
 
   writeConfig(pointer, init) {
@@ -183,7 +233,10 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
 
   readResources() {
     const view = this.resourceView;
-    if (view.getUint32(0, true) !== 224 || view.getUint32(4, true) !== ABI_VERSION) {
+    if (view.getUint32(0, true) !== 224 || view.getUint32(4, true) !== ABI_VERSION
+        || view.getUint32(20, true) !== 0 || view.getUint32(24, true) !== 0
+        || view.getUint32(28, true) !== 0
+        || [192, 200, 208, 216].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
       throw new RangeError("Invalid resource report");
     }
     const names = [
@@ -205,7 +258,9 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
 
   readStatus() {
     const view = this.statusView;
-    if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION) {
+    if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
+        || view.getUint32(28, true) !== 0
+        || [48, 56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -250,7 +305,11 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.lastRequestId = message.requestId;
     if (message.tag === "miso.dispose.v1" && exactFields(message, ["tag", "requestId"])) {
       const result = this.exports.miso_engine_web_v1_dispose(this.handle);
-      if (result === RESULT_OK) this.disposed = true;
+      if (result === RESULT_OK) {
+        this.disposed = true;
+        this.handleDisposed = true;
+        this.handle = 0;
+      }
       this.acknowledge(message.requestId, result);
       return;
     }
@@ -333,6 +392,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     );
   }
 
+  // PROCESS_POLICY_BEGIN
   silence(outputs) {
     for (let outputIndex = 0; outputIndex < outputs.length; outputIndex += 1) {
       const output = outputs[outputIndex];
@@ -342,7 +402,6 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
-  // PROCESS_POLICY_BEGIN
   process(_inputs, outputs) {
     if (this.disposed) {
       this.silence(outputs);

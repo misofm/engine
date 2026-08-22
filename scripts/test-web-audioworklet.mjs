@@ -27,6 +27,34 @@ const limits = Object.freeze({
   maximumMeterBytes: 4096n,
 });
 
+function resourceReport(backend, quantumFrames) {
+  return Object.freeze({
+    sampleRateHz: 48000,
+    quantumFrames,
+    backend,
+    configBytes: 1n,
+    statusBytes: 1n,
+    sessionTomlBytes: 1n,
+    diagnosticBytes: 1n,
+    sourceIdBytes: 1n,
+    sourcePcmStagingBytes: 1n,
+    outputPcmBytes: 1n,
+    bridgeMetadataBytes: 1n,
+    bridgeRetainedBytes: 1n,
+    largestBridgeAllocationBytes: 1n,
+    sourceTotalBytes: 1n,
+    sourceOverheadBytes: 1n,
+    effectScalarStateBytes: 1n,
+    effectScalarScratchBytes: 1n,
+    builtinRetainedBytes: 1n,
+    graphSessionPlusPlanBytes: 1n,
+    graphIncrementalPlanBytes: 1n,
+    graphMetadataBytes: 1n,
+    graphDelayBytes: 1n,
+    largestNamedAllocationBytes: 1n,
+  });
+}
+
 function errorResult(promise, result) {
   return promise.then(
     () => assert.fail("expected rejection"),
@@ -50,10 +78,18 @@ async function testMainRealm() {
   let holdSource = false;
   let failSource = false;
   let held = null;
+  let readyMutation = null;
+  let statusMutation = null;
+  let planeMutation = null;
 
   class FakePort {
     onmessage = null;
     onmessageerror = null;
+    closeCount = 0;
+
+    close() {
+      this.closeCount += 1;
+    }
 
     postMessage(message, transfer) {
       const received = structuredClone(message, { transfer });
@@ -72,11 +108,15 @@ async function testMainRealm() {
         } else if (received.tag === "miso.status.v1") {
           response = {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
-            lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
+            lastResult: 0, backend: 0, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
           };
+          if (statusMutation !== null) response = statusMutation(response);
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
+        }
+        if (received.tag === "miso.source.v1" && planeMutation !== null) {
+          response = planeMutation(response);
         }
         const delivered = structuredClone(response, { transfer: responseTransfer });
         queueMicrotask(() => this.onmessage?.({ data: delivered }));
@@ -94,14 +134,22 @@ async function testMainRealm() {
       this.onprocessorerror = null;
       this.options = options;
       this.disposeMessages = 0;
+      this.disconnectCount = 0;
       FakeNode.latest = this;
-      queueMicrotask(() => this.port.onmessage?.({
-        data: {
+      queueMicrotask(() => {
+        let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: options.processorOptions.backend,
-          resources: { quantumFrames: 64 }, memoryBytes: 65536,
-        },
-      }));
+          resources: resourceReport(options.processorOptions.backend === "scalar" ? 0 : 1, 64),
+          memoryBytes: 65536,
+        };
+        if (readyMutation !== null) data = readyMutation(data);
+        this.port.onmessage?.({ data });
+      });
+    }
+
+    disconnect() {
+      this.disconnectCount += 1;
     }
   }
 
@@ -190,6 +238,62 @@ async function testMainRealm() {
     await host.dispose();
     const disposeEvents = events.filter((event) => event[1] === "miso.dispose.v1");
     assert.equal(disposeEvents.length, 1, "settled disposal is idempotent");
+    assert.equal(FakeNode.latest.port.closeCount, 1);
+    assert.equal(FakeNode.latest.disconnectCount, 1);
+
+    readyMutation = (ready) => ({
+      ...ready,
+      resources: { ...ready.resources, backend: 1 },
+    });
+    await errorResult(createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new Uint8Array(),
+      limits,
+      scalarModuleUrl: "scalar.wasm",
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    }), 255);
+    assert.equal(FakeNode.latest.port.closeCount, 1, "creation rejection closes the port");
+    assert.equal(FakeNode.latest.disconnectCount, 1, "creation rejection disconnects the node");
+    readyMutation = null;
+
+    const schemaHost = await createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new Uint8Array(),
+      limits,
+      scalarModuleUrl: "scalar.wasm",
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    statusMutation = (statusValue) => ({ ...statusValue, memoryBytes: 65537 });
+    await errorResult(schemaHost.status(), 255);
+    statusMutation = null;
+    await schemaHost.dispose();
+
+    const planeHost = await createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new Uint8Array(),
+      limits,
+      scalarModuleUrl: "scalar.wasm",
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    failSource = false;
+    planeMutation = (response) => ({
+      ...response,
+      planes: [new Float32Array(response.planes[0].buffer, 4, 3)],
+    });
+    const malformedStorage = new ArrayBuffer(16);
+    await errorResult(planeHost.submitSource({
+      requestId: 1, sourceId: "source", generation: 1n, startFrame: 0n,
+      sampleRateHz: 48000, planes: [new Float32Array(malformedStorage)], frames: 4,
+      endOfRegion: false,
+    }), 255);
+    planeMutation = null;
+    await planeHost.dispose();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;
@@ -198,7 +302,7 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum) {
+function createFakeExports(quantum, backend = 0) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -206,7 +310,7 @@ function createFakeExports(quantum) {
   status.setUint32(0, 80, true);
   status.setUint32(4, 0x00010000, true);
   status.setUint32(8, 2, true);
-  status.setUint32(16, 1, true);
+  status.setUint32(16, backend, true);
   status.setUint32(20, 48000, true);
   status.setUint32(24, quantum, true);
   const resources = new DataView(memory.buffer, resourcePointer, 224);
@@ -214,7 +318,7 @@ function createFakeExports(quantum) {
   resources.setUint32(4, 0x00010000, true);
   resources.setUint32(8, 48000, true);
   resources.setUint32(12, quantum, true);
-  resources.setUint32(16, 1, true);
+  resources.setUint32(16, backend, true);
   for (let index = 0; index < 20; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = { render: [], source: [], seek: [], dispose: 0, sourceResult: 0 };
   const pointers = { 1: 2048, 2: 4096, 3: 5000, 5: 8192 };
@@ -261,13 +365,20 @@ async function testProcessor() {
   const originalProcessor = globalThis.AudioWorkletProcessor;
   const originalRegister = globalThis.registerProcessor;
   const originalInstance = WebAssembly.Instance;
+  const originalSampleRate = globalThis.sampleRate;
   let registered;
   let nextFake;
+  let instanceCount = 0;
+  let throwInstance = false;
+  let throwReadyPost = false;
   class FakePort {
     onmessage = null;
     posts = [];
 
     postMessage(message, transfer = []) {
+      if (throwReadyPost && message?.tag === "miso.ready.v1") {
+        throw new Error("synthetic ready publication failure");
+      }
       this.posts.push({ message: structuredClone(message, { transfer }), transferCount: transfer.length });
     }
   }
@@ -278,33 +389,119 @@ async function testProcessor() {
   }
   globalThis.AudioWorkletProcessor = FakeProcessor;
   globalThis.registerProcessor = (_name, implementation) => { registered = implementation; };
+  globalThis.sampleRate = 48000;
   WebAssembly.Instance = class {
     constructor() {
+      instanceCount += 1;
+      if (throwInstance) throw new Error("synthetic instantiation failure");
       this.exports = nextFake.exports;
     }
   };
   try {
     await import(`${workletUrl.href}?processor-test`);
     assert.equal(typeof registered, "function");
-    const makeProcessor = () => {
-      nextFake = createFakeExports(64);
-      const processor = new registered({
+    const construct = (fake, backend = "scalar") => {
+      nextFake = fake;
+      return new registered({
         processorOptions: {
           requestId: 0,
           module: {},
-          backend: "scalar",
+          backend,
           sampleRateHz: 48000,
           quantumFrames: 64,
           sessionToml: new TextEncoder().encode("format_version = 2"),
           limits,
         },
       });
+    };
+    const makeProcessor = () => {
+      const fake = createFakeExports(64);
+      const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "scalar",
         resources: processor.resources, memoryBytes: 65536,
       });
-      return { processor, fake: nextFake };
+      return { processor, fake };
     };
+
+    {
+      const before = instanceCount;
+      globalThis.sampleRate = 44100;
+      const fake = createFakeExports(64);
+      const processor = construct(fake);
+      globalThis.sampleRate = 48000;
+      assert.equal(instanceCount, before, "sample-rate mismatch precedes instantiation");
+      assert.equal(fake.calls.dispose, 0);
+      assert.equal(processor.port.posts[0].message.result, 9);
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
+
+    {
+      const before = instanceCount;
+      globalThis.renderQuantumSize = 128;
+      const fake = createFakeExports(64);
+      const processor = construct(fake);
+      delete globalThis.renderQuantumSize;
+      assert.equal(instanceCount, before, "quantum mismatch precedes instantiation");
+      assert.equal(fake.calls.dispose, 0);
+      assert.equal(processor.port.posts[0].message.result, 9);
+    }
+
+    {
+      throwInstance = true;
+      const fake = createFakeExports(64);
+      const processor = construct(fake);
+      throwInstance = false;
+      assert.equal(fake.calls.dispose, 0);
+      assert.equal(processor.port.posts[0].message.result, 255);
+      assert.equal(processor.disposed, true);
+    }
+
+    const failureMutations = [
+      (fake) => { fake.exports.miso_engine_web_v1_config_ptr = () => 0; },
+      (fake) => { fake.exports.miso_engine_web_v1_config_ptr = () => 65500; },
+      (fake) => { fake.exports.miso_engine_web_v1_prepare = () => 5; },
+      (fake) => { fake.exports.miso_engine_web_v1_buffer_capacity = () => 0; },
+      (fake) => { fake.exports.miso_engine_web_v1_compile = () => 5; },
+      (fake) => { fake.exports.miso_engine_web_v1_status_ptr = () => 65500; },
+      (fake) => { new DataView(fake.exports.memory.buffer, 17000).setUint32(20, 1, true); },
+    ];
+    for (const mutate of failureMutations) {
+      const fake = createFakeExports(64);
+      mutate(fake);
+      const processor = construct(fake);
+      assert.equal(fake.calls.dispose, 1, "post-handle construction failure disposes exactly once");
+      assert.equal(processor.disposed, true);
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+      assert.equal(processor.port.posts.length, 1);
+      assert.equal(processor.port.posts[0].message.tag, "miso.error.v1");
+    }
+
+    {
+      const fake = createFakeExports(64, 1);
+      const processor = construct(fake, "scalar");
+      assert.equal(fake.calls.dispose, 1, "swapped backend artifact is transactionally disposed");
+      assert.equal(processor.port.posts[0].message.result, 1);
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
+
+    for (const offset of [16384 + 16, 17000 + 16]) {
+      const fake = createFakeExports(64);
+      new DataView(fake.exports.memory.buffer).setUint32(offset, 1, true);
+      const processor = construct(fake, "scalar");
+      assert.equal(fake.calls.dispose, 1, "each Rust backend row is independently authoritative");
+      assert.equal(processor.port.posts[0].message.result, 1);
+    }
+
+    {
+      const fake = createFakeExports(64);
+      throwReadyPost = true;
+      const processor = construct(fake);
+      throwReadyPost = false;
+      assert.equal(fake.calls.dispose, 1, "ready publication failure disposes exactly once");
+      assert.equal(processor.disposed, true);
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
 
     {
       const { processor, fake } = makeProcessor();
@@ -388,6 +585,7 @@ async function testProcessor() {
   } finally {
     globalThis.AudioWorkletProcessor = originalProcessor;
     globalThis.registerProcessor = originalRegister;
+    globalThis.sampleRate = originalSampleRate;
     WebAssembly.Instance = originalInstance;
   }
 }

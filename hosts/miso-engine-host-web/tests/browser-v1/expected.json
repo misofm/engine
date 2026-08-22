@@ -1,0 +1,41 @@
+{
+  "schema": "miso.web.browser.expected.v1",
+  "sampleRateHz": 48000,
+  "quantumFrames": 128,
+  "renderedQuantaBeforeDispose": 3,
+  "nextAbsoluteSampleBeforeDispose": "384",
+  "oracle": {
+    "kind": "algebraic-direct-v2",
+    "left": "identity(input_builtins)*identity(racks)*identity(fader)*identity_matrix*identity_route",
+    "right": "positive-zero source through the same identity path",
+    "timeline": "three successful 128-frame direct render transitions",
+    "resources": "exact repr(C)/configured staging rows plus positive retained-production rows"
+  },
+  "pcm": {
+    "leftBlocks": [0, 0, 1, "positive-zero"],
+    "rightBlocks": ["positive-zero", "positive-zero", "positive-zero", "positive-zero"],
+    "absoluteTolerance": 0.000001
+  },
+  "resourceExact": {
+    "sampleRateHz": 48000,
+    "quantumFrames": 128,
+    "configBytes": "192",
+    "statusBytes": "80",
+    "sessionTomlBytes": "1048576",
+    "diagnosticBytes": "16384",
+    "sourceIdBytes": "1024",
+    "sourcePcmStagingBytes": "1024",
+    "outputPcmBytes": "1024"
+  },
+  "resourcePositive": [
+    "bridgeMetadataBytes",
+    "bridgeRetainedBytes",
+    "largestBridgeAllocationBytes",
+    "sourceTotalBytes",
+    "sourceOverheadBytes",
+    "graphSessionPlusPlanBytes",
+    "graphIncrementalPlanBytes",
+    "graphMetadataBytes",
+    "largestNamedAllocationBytes"
+  ]
+}

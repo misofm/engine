@@ -1,0 +1,10 @@
+{
+  "schema": "miso.web.browser.source.v1",
+  "sourceId": "fixture-source",
+  "sampleRateHz": 48000,
+  "quantumFrames": 128,
+  "blocks": [
+    { "startFrame": 0, "frames": 128, "final": false, "leftBase": 0.125, "leftStep": 0.0009765625 },
+    { "startFrame": 128, "frames": 128, "final": true, "leftBase": -0.25, "leftStep": 0.00048828125 }
+  ]
+}
