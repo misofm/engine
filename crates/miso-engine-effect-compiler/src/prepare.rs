@@ -1,14 +1,29 @@
 use miso_engine_effect_contract::{
-    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
-    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedEffectMetadata, PreparedNativeEffect, PreparedPortsV1,
-    PreparedSidechainPort, RegistryError, expected_prepared_metadata,
+    BankWidth, EffectDescriptorV1, EffectProgramKeyV1, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, NativeEffectRegistry, ParameterChannel, ParameterChannelPolicy,
+    ParameterUnit, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedPortsV1, PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
+    expected_prepared_metadata,
+};
+use miso_engine_effect_package::{
+    BoundEffectDescriptorWireV1, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+    EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH, EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+    EFFECT_STATE_V1_UNAVAILABLE_INDEX, EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+    EffectDescriptorBindingErrorKindV1, EffectStateDerivedResourcesV1, EffectStateDiagnosticCodeV1,
+    EffectStateDiagnosticV1, EffectStateLimitsV1, EffectStateReplayViewV1,
+    EffectStateRequirementsV1, VerifiedEffectStateV1, bind_effect_descriptor_wire_v1,
+    effect_state_derived_resources_v1, effect_state_expected_metadata_v1,
+    effect_state_v1_requirements, encode_effect_state_v1, validate_effect_state_current_layout_v1,
+    validate_effect_state_metadata_v1, validate_effect_state_replay_v1, verify_effect_state_v1,
 };
 use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
     ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
 };
 use std::sync::Arc;
+
+use miso_engine_core::KernelBackendV1;
 
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
 
@@ -57,6 +72,699 @@ impl EffectBankPreparationV1 {
             limits: self.limits,
         }
     }
+
+    #[must_use]
+    pub fn state_replay(
+        &self,
+        effect_id: miso_engine_effect_contract::EffectId,
+    ) -> EffectStateReplayViewV1<'_> {
+        EffectStateReplayViewV1 {
+            effect_id,
+            request: self.request(),
+        }
+    }
+}
+
+pub struct WireBoundNativeEffectFactoryV1<'wire> {
+    factory: Arc<dyn NativeEffectFactory>,
+    descriptor: &'static EffectDescriptorV1,
+    bound_descriptor: BoundEffectDescriptorWireV1<'wire>,
+}
+
+impl core::fmt::Debug for WireBoundNativeEffectFactoryV1<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("WireBoundNativeEffectFactoryV1")
+            .field("effect_id", &self.descriptor.id)
+            .field("descriptor_identity", &self.bound_descriptor.identity())
+            .finish_non_exhaustive()
+    }
+}
+
+impl WireBoundNativeEffectFactoryV1<'_> {
+    #[must_use]
+    pub fn factory(&self) -> &Arc<dyn NativeEffectFactory> {
+        &self.factory
+    }
+
+    #[must_use]
+    pub const fn descriptor(&self) -> &'static EffectDescriptorV1 {
+        self.descriptor
+    }
+
+    #[must_use]
+    pub const fn bound_descriptor(&self) -> BoundEffectDescriptorWireV1<'_> {
+        self.bound_descriptor
+    }
+}
+
+fn descriptor_binding_diagnostic(
+    error: miso_engine_effect_package::EffectDescriptorBindingErrorV1,
+) -> EffectStateDiagnosticV1 {
+    let nested = error.diagnostic();
+    let kind = match error.kind() {
+        EffectDescriptorBindingErrorKindV1::ExternalWire => 1,
+        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch => 2,
+    };
+    let byte_offset = if nested.byte_offset
+        == miso_engine_effect_package::EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE
+    {
+        EFFECT_STATE_V1_UNAVAILABLE_OFFSET
+    } else {
+        u64::from(nested.byte_offset)
+    };
+    let mut diagnostic = EffectStateDiagnosticV1::new(
+        EffectStateDiagnosticCodeV1::Descriptor,
+        (kind << 16) | nested.code as u32,
+        nested.record_index,
+        byte_offset,
+    );
+    diagnostic.required_bytes = u64::from(nested.required_bytes);
+    diagnostic
+}
+
+pub fn bind_native_effect_factory_state_v1(
+    factory: Arc<dyn NativeEffectFactory>,
+    descriptor_wire: &[u8],
+    maximum_descriptor_bytes: u32,
+) -> Result<WireBoundNativeEffectFactoryV1<'_>, EffectStateDiagnosticV1> {
+    let descriptor = factory.descriptor();
+    let bound_descriptor =
+        bind_effect_descriptor_wire_v1(descriptor, descriptor_wire, maximum_descriptor_bytes)
+            .map_err(descriptor_binding_diagnostic)?;
+    Ok(WireBoundNativeEffectFactoryV1 {
+        factory,
+        descriptor,
+        bound_descriptor,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectStateRestoreAdmissionV1 {
+    pub sample_rate: u32,
+    pub quantum: u32,
+    pub maximum_total_state_bytes: u64,
+    pub maximum_scratch_bytes: u64,
+    pub maximum_automation_spans_per_block: u32,
+}
+
+pub struct RestoredScalarEffectStateV1<'wire> {
+    processor: Box<dyn PreparedNativeEffect>,
+    metadata: PreparedEffectMetadata,
+    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+    replay: EffectBankPreparationV1,
+}
+
+impl core::fmt::Debug for RestoredScalarEffectStateV1<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RestoredScalarEffectStateV1")
+            .field("metadata", &self.metadata)
+            .field("replay", &self.replay)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RestoredScalarEffectStateV1<'_> {
+    #[must_use]
+    pub fn processor(&self) -> &dyn PreparedNativeEffect {
+        self.processor.as_ref()
+    }
+
+    #[must_use]
+    pub fn processor_mut(&mut self) -> &mut dyn PreparedNativeEffect {
+        self.processor.as_mut()
+    }
+
+    #[must_use]
+    pub const fn metadata(&self) -> PreparedEffectMetadata {
+        self.metadata
+    }
+
+    #[must_use]
+    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactoryV1<'_> {
+        &self.bound_factory
+    }
+
+    #[must_use]
+    pub fn replay(&self) -> &EffectBankPreparationV1 {
+        &self.replay
+    }
+}
+
+pub struct UnpublishedEffectBankStateV1<'wire> {
+    bank: Box<dyn PreparedNativeEffectBank>,
+    metadata: PreparedBankMetadata,
+    backend: KernelBackendV1,
+    width: BankWidth,
+    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+    replays: Box<[EffectBankPreparationV1]>,
+}
+
+impl core::fmt::Debug for UnpublishedEffectBankStateV1<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("UnpublishedEffectBankStateV1")
+            .field("metadata", &self.metadata)
+            .field("backend", &self.backend)
+            .field("width", &self.width)
+            .field("replay_count", &self.replays.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl UnpublishedEffectBankStateV1<'_> {
+    #[must_use]
+    pub fn bank(&self) -> &dyn PreparedNativeEffectBank {
+        self.bank.as_ref()
+    }
+
+    #[must_use]
+    pub fn bank_mut(&mut self) -> &mut dyn PreparedNativeEffectBank {
+        self.bank.as_mut()
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &PreparedBankMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> KernelBackendV1 {
+        self.backend
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+
+    #[must_use]
+    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactoryV1<'_> {
+        &self.bound_factory
+    }
+
+    #[must_use]
+    pub fn replays(&self) -> &[EffectBankPreparationV1] {
+        &self.replays
+    }
+}
+
+fn state_diagnostic(
+    code: EffectStateDiagnosticCodeV1,
+    detail: u32,
+    byte_offset: u64,
+) -> EffectStateDiagnosticV1 {
+    EffectStateDiagnosticV1::new(code, detail, EFFECT_STATE_V1_UNAVAILABLE_INDEX, byte_offset)
+}
+
+fn state_unavailable(code: EffectStateDiagnosticCodeV1, detail: u32) -> EffectStateDiagnosticV1 {
+    state_diagnostic(code, detail, EFFECT_STATE_V1_UNAVAILABLE_OFFSET)
+}
+
+fn bank_restore_error(detail: u32) -> EffectStateDiagnosticV1 {
+    state_unavailable(EffectStateDiagnosticCodeV1::Restore, detail)
+}
+
+fn admit_bank_preparation(
+    replay: &EffectBankPreparationV1,
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<(), EffectStateDiagnosticV1> {
+    if !miso_engine_core::is_launch_sample_rate(miso_engine_core::SampleRateHz(
+        admission.sample_rate,
+    )) || replay.sample_rate != admission.sample_rate
+    {
+        return Err(state_limit(96, u64::from(replay.sample_rate)));
+    }
+    if admission.quantum == 0 || replay.quantum != admission.quantum {
+        return Err(state_limit(100, u64::from(replay.quantum)));
+    }
+    if admission.maximum_total_state_bytes == 0
+        || replay.limits.maximum_total_state_bytes > admission.maximum_total_state_bytes
+    {
+        return Err(state_limit(192, replay.limits.maximum_total_state_bytes));
+    }
+    if admission.maximum_scratch_bytes == 0
+        || replay.limits.maximum_scratch_bytes > admission.maximum_scratch_bytes
+    {
+        return Err(state_limit(200, replay.limits.maximum_scratch_bytes));
+    }
+    if admission.maximum_automation_spans_per_block == 0
+        || replay.limits.maximum_automation_spans_per_block
+            > admission.maximum_automation_spans_per_block
+    {
+        return Err(state_limit(
+            208,
+            u64::from(replay.limits.maximum_automation_spans_per_block),
+        ));
+    }
+    Ok(())
+}
+
+fn admit_bank_derived_resources(
+    resources: EffectStateDerivedResourcesV1,
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<(), EffectStateDiagnosticV1> {
+    let payload_bytes = resources
+        .state_sizes
+        .total()
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if payload_bytes > admission.maximum_total_state_bytes {
+        return Err(state_limit(216, payload_bytes));
+    }
+    if resources.scratch_bytes > admission.maximum_scratch_bytes {
+        return Err(state_limit(176, resources.scratch_bytes));
+    }
+    if resources.automation_capacity > admission.maximum_automation_spans_per_block {
+        return Err(state_limit(184, u64::from(resources.automation_capacity)));
+    }
+    Ok(())
+}
+
+fn expected_bank_program_key(
+    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
+    backend: KernelBackendV1,
+    width: BankWidth,
+    replays: &[EffectBankPreparationV1],
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<EffectProgramKeyV1, EffectStateDiagnosticV1> {
+    if !width.matches_backend(backend) || replays.len() != width.lanes() as usize {
+        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2));
+    }
+    let mut program_key = None;
+    for (track_index, replay) in replays.iter().enumerate() {
+        admit_bank_preparation(replay, admission).map_err(|mut diagnostic| {
+            diagnostic.item_index = track_index as u32;
+            diagnostic
+        })?;
+        let replay_view = replay.state_replay(bound_factory.descriptor.id);
+        let resources =
+            effect_state_derived_resources_v1(bound_factory.bound_descriptor, replay.request())
+                .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))?;
+        admit_bank_derived_resources(resources, admission).map_err(|mut diagnostic| {
+            diagnostic.item_index = track_index as u32;
+            diagnostic
+        })?;
+        let metadata =
+            effect_state_expected_metadata_v1(bound_factory.bound_descriptor, replay_view)
+                .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))?;
+        let candidate = metadata.program_key();
+        if program_key
+            .as_ref()
+            .is_some_and(|expected| expected != &candidate)
+        {
+            return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2));
+        }
+        program_key = Some(candidate);
+    }
+    program_key.ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))
+}
+
+pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
+    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+    backend: KernelBackendV1,
+    width: BankWidth,
+    replays: Box<[EffectBankPreparationV1]>,
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateDiagnosticV1> {
+    let program_key =
+        expected_bank_program_key(&bound_factory, backend, width, replays.as_ref(), admission)?;
+    let requests: Vec<_> = replays
+        .iter()
+        .map(EffectBankPreparationV1::request)
+        .collect();
+    let bank = bound_factory
+        .factory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+        })
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?;
+    let metadata = bank.metadata();
+    if metadata.width != width || metadata.program_key != program_key {
+        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4));
+    }
+    if !core::ptr::eq(bound_factory.factory.descriptor(), bound_factory.descriptor) {
+        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4));
+    }
+    Ok(UnpublishedEffectBankStateV1 {
+        bank,
+        metadata,
+        backend,
+        width,
+        bound_factory,
+        replays,
+    })
+}
+
+fn unpublished_bank_track_replay<'a>(
+    capability: &'a UnpublishedEffectBankStateV1<'_>,
+    track_index: u32,
+) -> Result<&'a EffectBankPreparationV1, EffectStateDiagnosticV1> {
+    let replay = capability
+        .replays
+        .get(track_index as usize)
+        .ok_or_else(|| bank_restore_error(1))?;
+    if !capability.width.matches_backend(capability.backend)
+        || capability.replays.len() != capability.width.lanes() as usize
+    {
+        return Err(bank_restore_error(2));
+    }
+    if capability.metadata.width != capability.width {
+        return Err(bank_restore_error(2));
+    }
+    Ok(replay)
+}
+
+fn validate_unpublished_bank_program_and_provenance(
+    capability: &UnpublishedEffectBankStateV1<'_>,
+    replay: &EffectBankPreparationV1,
+) -> Result<(), EffectStateDiagnosticV1> {
+    let metadata = capability.bank.metadata();
+    if metadata.width != capability.width {
+        return Err(bank_restore_error(2));
+    }
+    let expected = effect_state_expected_metadata_v1(
+        capability.bound_factory.bound_descriptor,
+        replay.state_replay(capability.bound_factory.descriptor.id),
+    )
+    .map_err(|_| bank_restore_error(2))?;
+    if metadata.program_key != expected.program_key()
+        || capability.metadata.program_key != expected.program_key()
+    {
+        return Err(bank_restore_error(3));
+    }
+    if !core::ptr::eq(
+        capability.bound_factory.factory.descriptor(),
+        capability.bound_factory.descriptor,
+    ) {
+        return Err(bank_restore_error(4));
+    }
+    Ok(())
+}
+
+pub fn snapshot_unpublished_effect_bank_track_state_v1(
+    capability: &UnpublishedEffectBankStateV1<'_>,
+    track_index: u32,
+    limits: EffectStateLimitsV1,
+    payload_scratch: &mut [u8],
+    output: &mut [u8],
+) -> Result<u64, EffectStateDiagnosticV1> {
+    let replay = capability
+        .replays
+        .get(track_index as usize)
+        .ok_or_else(|| bank_restore_error(1))?;
+    let replay_view = replay.state_replay(capability.bound_factory.descriptor.id);
+    let requirements = effect_state_v1_requirements(
+        capability.bound_factory.bound_descriptor,
+        replay_view,
+        limits,
+    )?;
+    let output_bytes = usize::try_from(requirements.envelope_bytes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if output.len() < output_bytes {
+        return Err(EffectStateDiagnosticV1::buffer_too_small(
+            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+            requirements.envelope_bytes,
+        ));
+    }
+    let scratch_bytes = usize::try_from(requirements.payload_snapshot_scratch_bytes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if payload_scratch.len() < scratch_bytes {
+        return Err(EffectStateDiagnosticV1::buffer_too_small(
+            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+            requirements.payload_snapshot_scratch_bytes,
+        ));
+    }
+    let replay = unpublished_bank_track_replay(capability, track_index)?;
+    validate_unpublished_bank_program_and_provenance(capability, replay)?;
+    let sizes = capability.metadata.program_key.state_sizes;
+    let (common, remainder) =
+        payload_scratch[..scratch_bytes].split_at_mut(sizes.common_bytes as usize);
+    let (left, right) = remainder.split_at_mut(sizes.left_bytes as usize);
+    let payload_output = StatePayloadOutput::new(common, left, right, sizes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 2))?;
+    capability
+        .bank
+        .snapshot_track_state_payload(track_index, payload_output)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 2))?;
+    encode_effect_state_v1(
+        capability.bound_factory.bound_descriptor,
+        replay.state_replay(capability.bound_factory.descriptor.id),
+        common,
+        left,
+        right,
+        limits,
+        output,
+    )
+}
+
+pub fn restore_unpublished_effect_bank_track_state_v1<'wire>(
+    mut capability: UnpublishedEffectBankStateV1<'wire>,
+    track_index: u32,
+    envelope: &[u8],
+    limits: EffectStateLimitsV1,
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateDiagnosticV1> {
+    let state =
+        verify_effect_state_v1(capability.bound_factory.bound_descriptor, envelope, limits)?;
+    admit_restored_state(state, admission)?;
+    let replay = unpublished_bank_track_replay(&capability, track_index)?;
+    validate_effect_state_current_layout_v1(state)?;
+    validate_effect_state_replay_v1(
+        state,
+        replay.state_replay(capability.bound_factory.descriptor.id),
+    )
+    .map_err(|_| bank_restore_error(2))?;
+    validate_unpublished_bank_program_and_provenance(&capability, replay)?;
+    let (common, left, right) = state.payloads();
+    let payload_input = StatePayloadInput::new(
+        common,
+        left,
+        right,
+        capability.metadata.program_key.state_sizes,
+    )
+    .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 4))?;
+    capability
+        .bank
+        .restore_track_state_payload(track_index, state.state_layout_version(), payload_input)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 4))?;
+    Ok(capability)
+}
+
+fn state_limit(byte_offset: u64, required_bytes: u64) -> EffectStateDiagnosticV1 {
+    let mut diagnostic = state_diagnostic(EffectStateDiagnosticCodeV1::Limit, 0, byte_offset);
+    diagnostic.required_bytes = required_bytes;
+    diagnostic
+}
+
+pub fn scalar_effect_state_v1_requirements(
+    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
+    replay: &EffectBankPreparationV1,
+    limits: EffectStateLimitsV1,
+) -> Result<EffectStateRequirementsV1, EffectStateDiagnosticV1> {
+    effect_state_v1_requirements(
+        bound_factory.bound_descriptor,
+        replay.state_replay(bound_factory.descriptor.id),
+        limits,
+    )
+}
+
+pub fn snapshot_scalar_effect_state_v1(
+    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
+    replay: &EffectBankPreparationV1,
+    processor: &dyn PreparedNativeEffect,
+    limits: EffectStateLimitsV1,
+    payload_scratch: &mut [u8],
+    output: &mut [u8],
+) -> Result<u64, EffectStateDiagnosticV1> {
+    let replay_view = replay.state_replay(bound_factory.descriptor.id);
+    let requirements =
+        effect_state_v1_requirements(bound_factory.bound_descriptor, replay_view, limits)?;
+    let output_bytes = usize::try_from(requirements.envelope_bytes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if output.len() < output_bytes {
+        return Err(EffectStateDiagnosticV1::buffer_too_small(
+            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+            requirements.envelope_bytes,
+        ));
+    }
+    let scratch_bytes = usize::try_from(requirements.payload_snapshot_scratch_bytes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if payload_scratch.len() < scratch_bytes {
+        return Err(EffectStateDiagnosticV1::buffer_too_small(
+            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+            requirements.payload_snapshot_scratch_bytes,
+        ));
+    }
+    let metadata = processor.metadata();
+    validate_effect_state_metadata_v1(bound_factory.bound_descriptor, replay_view, metadata)?;
+    let sizes = metadata.state_sizes;
+    let (common, remainder) =
+        payload_scratch[..scratch_bytes].split_at_mut(sizes.common_bytes as usize);
+    let (left, right) = remainder.split_at_mut(sizes.left_bytes as usize);
+    let payload_output = StatePayloadOutput::new(common, left, right, sizes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 1))?;
+    processor
+        .snapshot_state_payload(payload_output)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 1))?;
+    encode_effect_state_v1(
+        bound_factory.bound_descriptor,
+        replay_view,
+        common,
+        left,
+        right,
+        limits,
+        output,
+    )
+}
+
+fn admit_restored_state(
+    state: VerifiedEffectStateV1<'_>,
+    admission: EffectStateRestoreAdmissionV1,
+) -> Result<(), EffectStateDiagnosticV1> {
+    if !miso_engine_core::is_launch_sample_rate(miso_engine_core::SampleRateHz(
+        admission.sample_rate,
+    )) || state.sample_rate() != admission.sample_rate
+    {
+        return Err(state_limit(96, u64::from(state.sample_rate())));
+    }
+    if admission.quantum == 0 || state.quantum() != admission.quantum {
+        return Err(state_limit(100, u64::from(state.quantum())));
+    }
+    let (saved_state_cap, saved_scratch_cap, saved_automation_cap) = state.request_limits();
+    if admission.maximum_total_state_bytes == 0
+        || saved_state_cap > admission.maximum_total_state_bytes
+    {
+        return Err(state_limit(192, saved_state_cap));
+    }
+    if admission.maximum_scratch_bytes == 0 || saved_scratch_cap > admission.maximum_scratch_bytes {
+        return Err(state_limit(200, saved_scratch_cap));
+    }
+    if admission.maximum_automation_spans_per_block == 0
+        || saved_automation_cap > admission.maximum_automation_spans_per_block
+    {
+        return Err(state_limit(208, u64::from(saved_automation_cap)));
+    }
+    let payload_bytes = state
+        .state_sizes()
+        .total()
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+    if payload_bytes > admission.maximum_total_state_bytes {
+        return Err(state_limit(216, payload_bytes));
+    }
+    if state.scratch_bytes() > admission.maximum_scratch_bytes {
+        return Err(state_limit(176, state.scratch_bytes()));
+    }
+    if state.automation_capacity() > admission.maximum_automation_spans_per_block {
+        return Err(state_limit(184, u64::from(state.automation_capacity())));
+    }
+    Ok(())
+}
+
+fn restored_ports(
+    descriptor: &'static EffectDescriptorV1,
+    state: VerifiedEffectStateV1<'_>,
+) -> Result<PreparedPortsV1, EffectStateDiagnosticV1> {
+    let (kind, id, required) = state.sidechain();
+    let sidechain = match kind {
+        0 => PreparedSidechainPort::None,
+        1 | 2 => {
+            let port = descriptor
+                .ports
+                .iter()
+                .find(|port| {
+                    port.role == miso_engine_effect_contract::PortRole::SidechainInput
+                        && port.id.as_str() == id
+                        && port.required == required
+                })
+                .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Metadata, 9))?;
+            if kind == 1 {
+                PreparedSidechainPort::Unconnected {
+                    id: port.id,
+                    required,
+                }
+            } else {
+                PreparedSidechainPort::Connected {
+                    id: port.id,
+                    required,
+                }
+            }
+        }
+        _ => return Err(state_unavailable(EffectStateDiagnosticCodeV1::Metadata, 9)),
+    };
+    Ok(PreparedPortsV1 { sidechain })
+}
+
+pub fn restore_scalar_effect_state_v1<'wire>(
+    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+    envelope: &[u8],
+    limits: EffectStateLimitsV1,
+    admission: EffectStateRestoreAdmissionV1,
+    initial_value_scratch: &mut [InitialParameterValue],
+) -> Result<RestoredScalarEffectStateV1<'wire>, EffectStateDiagnosticV1> {
+    let state = verify_effect_state_v1(bound_factory.bound_descriptor, envelope, limits)?;
+    admit_restored_state(state, admission)?;
+    validate_effect_state_current_layout_v1(state)?;
+    let initial_count = state.initial_values().len();
+    if initial_value_scratch.len() < initial_count {
+        let required_bytes = initial_count
+            .checked_mul(core::mem::size_of::<InitialParameterValue>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        return Err(EffectStateDiagnosticV1::buffer_too_small(
+            EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH,
+            required_bytes,
+        ));
+    }
+    for (destination, value) in initial_value_scratch[..initial_count]
+        .iter_mut()
+        .zip(state.initial_values())
+    {
+        *destination = value;
+    }
+    let ports = restored_ports(bound_factory.descriptor, state)?;
+    let (maximum_total_state_bytes, maximum_scratch_bytes, maximum_automation_spans_per_block) =
+        state.request_limits();
+    let replay = EffectBankPreparationV1 {
+        sample_rate: state.sample_rate(),
+        quantum: state.quantum(),
+        quality: state.quality(),
+        bypass: state.bypass(),
+        link_mode: state.link_mode(),
+        ports,
+        initial_values: initial_value_scratch[..initial_count]
+            .to_vec()
+            .into_boxed_slice(),
+        limits: PrepareEffectLimits {
+            maximum_total_state_bytes,
+            maximum_scratch_bytes,
+            maximum_automation_spans_per_block,
+        },
+    };
+    let replay_view = replay.state_replay(bound_factory.descriptor.id);
+    validate_effect_state_replay_v1(state, replay_view)?;
+    let mut processor = bound_factory
+        .factory
+        .prepare(replay.request())
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?;
+    let metadata = processor.metadata();
+    validate_effect_state_metadata_v1(bound_factory.bound_descriptor, replay_view, metadata)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4))?;
+    let (common, left, right) = state.payloads();
+    let payload_input = StatePayloadInput::new(common, left, right, metadata.state_sizes)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
+    processor
+        .restore_state_payload(state.state_layout_version(), payload_input)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
+    Ok(RestoredScalarEffectStateV1 {
+        processor,
+        metadata,
+        bound_factory,
+        replay,
+    })
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EffectRack {

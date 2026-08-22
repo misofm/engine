@@ -311,6 +311,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-delay",
  "miso-engine-effect-contract",
+ "miso-engine-effect-package",
  "miso-engine-gate-expander",
  "miso-engine-multiband-compressor",
  "miso-engine-parametric-eq",
@@ -318,6 +319,7 @@ dependencies = [
  "miso-engine-soft-clip",
  "miso-engine-transient-shaper",
  "miso-engine-true-peak-limiter",
+ "sha2",
 ]
 
 [[package]]

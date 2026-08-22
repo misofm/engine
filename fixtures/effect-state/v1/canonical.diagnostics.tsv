@@ -1,0 +1,11 @@
+name	code	detail	item_index	byte_offset	required_bytes
+truncated-header	3	0	4294967295	223	0
+magic	3	0	4294967295	0	0
+reserved-flags	5	0	4294967295	12	0
+total-length	4	0	4294967295	16	0
+initial-reserved	5	0	0	260	0
+quality-enum	6	0	4294967295	104	0
+effect-text	8	0	4294967295	124	0
+initial-order	7	0	2	280	0
+digest	10	0	4294967295	56	0
+descriptor-identity	9	196608	4294967295	18446744073709551615	0

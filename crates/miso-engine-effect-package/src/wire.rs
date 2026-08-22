@@ -29,6 +29,57 @@ impl EffectDescriptorIdentityV1 {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EffectDescriptorBindingErrorKindV1 {
+    ExternalWire = 1,
+    StaticDescriptorMismatch = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectDescriptorBindingErrorV1 {
+    kind: EffectDescriptorBindingErrorKindV1,
+    diagnostic: Diagnostic,
+}
+
+impl EffectDescriptorBindingErrorV1 {
+    pub const fn kind(self) -> EffectDescriptorBindingErrorKindV1 {
+        self.kind
+    }
+
+    pub const fn diagnostic(self) -> Diagnostic {
+        self.diagnostic
+    }
+}
+
+/// Canonical Issue-082 wire proven to describe one exact static descriptor.
+///
+/// Private fields prevent raw wire or identity bytes from being treated as factory provenance.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundEffectDescriptorWireV1<'a> {
+    descriptor: &'static EffectDescriptorV1,
+    wire: &'a [u8],
+    identity: EffectDescriptorIdentityV1,
+}
+
+impl<'a> BoundEffectDescriptorWireV1<'a> {
+    pub const fn wire(&self) -> &'a [u8] {
+        self.wire
+    }
+
+    pub const fn identity(&self) -> EffectDescriptorIdentityV1 {
+        self.identity
+    }
+
+    pub(crate) const fn descriptor(&self) -> &'static EffectDescriptorV1 {
+        self.descriptor
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1180,6 +1231,206 @@ fn borrowed_semantic_errors(
     errors
 }
 
+fn semantic_mismatch(byte_offset: usize, record_index: Option<usize>) -> Diagnostic {
+    diagnostic(Code::Semantic, byte_offset, record_index)
+}
+
+fn compare_static_descriptor(
+    view: BorrowedEffectDescriptorViewV1<'_>,
+    descriptor: &'static EffectDescriptorV1,
+) -> Result<(), Diagnostic> {
+    if read_u16(view.bytes, 20) != descriptor.contract_major {
+        return Err(semantic_mismatch(20, None));
+    }
+    if read_u16(view.bytes, 22) != descriptor.contract_minor {
+        return Err(semantic_mismatch(22, None));
+    }
+    if read_u32(view.bytes, 24) != descriptor.state_layout_version {
+        return Err(semantic_mismatch(24, None));
+    }
+    if read_u32(view.bytes, 28) != descriptor.supported_link_modes.bits() {
+        return Err(semantic_mismatch(28, None));
+    }
+    if view.effect_id != descriptor.id.as_str() {
+        return Err(semantic_mismatch(32, None));
+    }
+    if view.display_name != descriptor.display_name {
+        return Err(semantic_mismatch(40, None));
+    }
+    if view.layout.parameters as usize != descriptor.parameters.len() {
+        return Err(semantic_mismatch(48, None));
+    }
+    if view.layout.ports as usize != descriptor.ports.len() {
+        return Err(semantic_mismatch(56, None));
+    }
+    if view.layout.qualities as usize != descriptor.qualities.len() {
+        return Err(semantic_mismatch(64, None));
+    }
+    let descriptor_choices = descriptor
+        .parameters
+        .iter()
+        .try_fold(0usize, |total, parameter| {
+            total.checked_add(parameter.enum_choices.len())
+        })
+        .ok_or_else(|| semantic_mismatch(72, None))?;
+    if view.layout.choices as usize != descriptor_choices {
+        return Err(semantic_mismatch(72, None));
+    }
+
+    let mut choice_index = 0usize;
+    for (index, parameter) in descriptor.parameters.iter().enumerate() {
+        let record = view.layout.parameter_offset as usize + index * PARAMETER_BYTES;
+        let flags = u32::from(parameter.readable)
+            | (u32::from(parameter.automatable) << 1)
+            | (u32::from(parameter.minimum.is_some()) << 2)
+            | (u32::from(parameter.maximum.is_some()) << 3);
+        let scalar_fields = [
+            (0, parameter.id.0),
+            (4, parameter.unit as u32),
+            (8, parameter.domain as u32),
+            (12, parameter.mapping as u32),
+            (16, parameter.automation_rate as u32),
+            (20, parameter.channel_policy as u32),
+            (24, parameter.smoothing as u32),
+            (28, parameter.smoothing_samples),
+            (32, flags),
+            (36, parameter.minimum.unwrap_or(0.0).to_bits()),
+            (40, parameter.maximum.unwrap_or(0.0).to_bits()),
+            (44, parameter.default_value.to_bits()),
+            (48, choice_index as u32),
+            (52, parameter.enum_choices.len() as u32),
+        ];
+        if let Some((field, _)) = scalar_fields
+            .into_iter()
+            .find(|(field, expected)| read_u32(view.bytes, record + field) != *expected)
+        {
+            return Err(semantic_mismatch(record + field, Some(index)));
+        }
+        let borrowed = view.parameter(index);
+        if borrowed.display_name != parameter.display_name {
+            return Err(semantic_mismatch(record + 56, Some(index)));
+        }
+        if borrowed.display_unit != parameter.display_unit {
+            return Err(semantic_mismatch(record + 64, Some(index)));
+        }
+        choice_index += parameter.enum_choices.len();
+    }
+
+    for index in 0..descriptor.ports.len() {
+        let expected = canonical_port_at(descriptor.ports, index);
+        let actual = view.port(index);
+        let record = view.layout.port_offset as usize + index * PORT_BYTES;
+        if actual.id != expected.id.as_str() {
+            return Err(semantic_mismatch(record, Some(index)));
+        }
+        if actual.role != expected.role {
+            return Err(semantic_mismatch(record + 8, Some(index)));
+        }
+        if actual.required != expected.required {
+            return Err(semantic_mismatch(record + 12, Some(index)));
+        }
+        if actual.layout != expected.layout {
+            return Err(semantic_mismatch(record + 16, Some(index)));
+        }
+    }
+
+    for (index, quality) in descriptor.qualities.iter().enumerate() {
+        let record = view.layout.quality_offset as usize + index * QUALITY_BYTES;
+        let (tail_kind, tail_samples) = match quality.tail {
+            TailSamples::Finite(samples) => (1, samples),
+            TailSamples::Infinite => (2, 0),
+        };
+        let u32_fields = [
+            (0, quality.quality as u32),
+            (4, quality.sample_rate),
+            (16, tail_kind),
+            (32, quality.maximum_state.common_bytes),
+            (36, quality.maximum_state.left_bytes),
+            (40, quality.maximum_state.right_bytes),
+        ];
+        if let Some((field, _)) = u32_fields
+            .into_iter()
+            .find(|(field, expected)| read_u32(view.bytes, record + field) != *expected)
+        {
+            return Err(semantic_mismatch(record + field, Some(index)));
+        }
+        let u64_fields = [
+            (8, quality.latency.0),
+            (24, tail_samples),
+            (48, quality.scratch_fixed_bytes),
+            (56, quality.scratch_bytes_per_frame),
+        ];
+        if let Some((field, _)) = u64_fields
+            .into_iter()
+            .find(|(field, expected)| read_u64(view.bytes, record + field) != *expected)
+        {
+            return Err(semantic_mismatch(record + field, Some(index)));
+        }
+    }
+
+    let mut choice_index = 0usize;
+    for parameter in descriptor.parameters {
+        for choice in parameter.enum_choices {
+            let choice_record =
+                view.layout.choice_offset as usize + choice_index * ENUM_CHOICE_BYTES;
+            let borrowed = view.choice(choice_index);
+            if borrowed.0.to_bits() != choice.value.to_bits() {
+                return Err(semantic_mismatch(choice_record, Some(choice_index)));
+            }
+            if borrowed.1 != choice.label {
+                return Err(semantic_mismatch(choice_record + 4, Some(choice_index)));
+            }
+            choice_index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn descriptor_identity(bytes: &[u8]) -> EffectDescriptorIdentityV1 {
+    let mut hasher = Sha256::new();
+    hasher.update(IDENTITY_DOMAIN);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    EffectDescriptorIdentityV1(hasher.finalize().into())
+}
+
+pub fn bind_effect_descriptor_wire_v1<'a>(
+    descriptor: &'static EffectDescriptorV1,
+    wire: &'a [u8],
+    maximum_descriptor_bytes: u32,
+) -> Result<BoundEffectDescriptorWireV1<'a>, EffectDescriptorBindingErrorV1> {
+    validate_descriptor_v1(descriptor).map_err(|_| EffectDescriptorBindingErrorV1 {
+        kind: EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+        diagnostic: semantic_mismatch(0, None),
+    })?;
+    let view = parse_borrowed_wire(wire, maximum_descriptor_bytes).map_err(|diagnostic| {
+        EffectDescriptorBindingErrorV1 {
+            kind: EffectDescriptorBindingErrorKindV1::ExternalWire,
+            diagnostic,
+        }
+    })?;
+    if let Some(error) = borrowed_semantic_errors(view)
+        .into_iter()
+        .min_by_key(|error| (error.byte_offset, error.record_index))
+    {
+        return Err(EffectDescriptorBindingErrorV1 {
+            kind: EffectDescriptorBindingErrorKindV1::ExternalWire,
+            diagnostic: diagnostic(Code::Semantic, error.byte_offset, error.record_index),
+        });
+    }
+    compare_static_descriptor(view, descriptor).map_err(|diagnostic| {
+        EffectDescriptorBindingErrorV1 {
+            kind: EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+            diagnostic,
+        }
+    })?;
+    Ok(BoundEffectDescriptorWireV1 {
+        descriptor,
+        wire,
+        identity: descriptor_identity(wire),
+    })
+}
+
 pub fn verify_effect_descriptor_wire_v1(
     bytes: &[u8],
     maximum_descriptor_bytes: u32,
@@ -1211,11 +1462,7 @@ pub fn effect_descriptor_identity_v1(
     maximum_descriptor_bytes: u32,
 ) -> Result<EffectDescriptorIdentityV1, Diagnostic> {
     let verified = verify_effect_descriptor_wire_v1(bytes, maximum_descriptor_bytes)?;
-    let mut hasher = Sha256::new();
-    hasher.update(IDENTITY_DOMAIN);
-    hasher.update((verified.bytes.len() as u64).to_le_bytes());
-    hasher.update(verified.bytes);
-    Ok(EffectDescriptorIdentityV1(hasher.finalize().into()))
+    Ok(descriptor_identity(verified.bytes))
 }
 
 #[cfg(test)]
@@ -1675,6 +1922,31 @@ mod tests {
     };
     static EMPTY_PARAMETER_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
         parameters: &[],
+        ..DESCRIPTOR
+    };
+    static NO_SIDECHAIN_PORTS: [PortDescriptorV1; 2] = [PORTS_SORTED[0], PORTS_SORTED[1]];
+    static NO_SIDECHAIN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        ports: &NO_SIDECHAIN_PORTS,
+        ..DESCRIPTOR
+    };
+    static LAUNCH_QUALITIES: [QualityDescriptorV1; 4] =
+        [QUALITIES[0], QUALITIES[1], QUALITIES[2], QUALITIES[3]];
+    static LAUNCH_QUALITY_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        qualities: &LAUNCH_QUALITIES,
+        ..DESCRIPTOR
+    };
+    static NO_CHOICE_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        PARAMETERS[0],
+        PARAMETERS[1],
+        ParameterDescriptorV1 {
+            domain: ParameterDomain::Boolean,
+            default_value: 1.0,
+            enum_choices: &[],
+            ..PARAMETERS[2]
+        },
+    ];
+    static NO_CHOICE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &NO_CHOICE_PARAMETERS,
         ..DESCRIPTOR
     };
     static BAD_CONTRACT: EffectDescriptorV1 = EffectDescriptorV1 {
@@ -2359,6 +2631,114 @@ mod tests {
                 44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000
             ]
         );
+    }
+
+    #[test]
+    fn bound_descriptor_comparison_reports_earliest_semantic_wire_field() {
+        fn assert_mismatch(bytes: &[u8], offset: u32, record_index: u32) {
+            let error = bind_effect_descriptor_wire_v1(&DESCRIPTOR, bytes, 1 << 20).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+                "expected static mismatch at wire offset {offset}; nested={:?}",
+                error.diagnostic()
+            );
+            assert_eq!(
+                (
+                    error.diagnostic().code,
+                    error.diagnostic().byte_offset,
+                    error.diagnostic().record_index,
+                ),
+                (Code::Semantic, offset, record_index)
+            );
+        }
+
+        for (offset, value) in [(22, 1), (24, 8), (28, 1)] {
+            let mut bytes = encode(&DESCRIPTOR);
+            if offset == 22 {
+                write_u16(&mut bytes, offset, value as u16);
+            } else {
+                write_u32(&mut bytes, offset, value);
+            }
+            assert_mismatch(&bytes, offset as u32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE);
+        }
+
+        for field in [32, 40] {
+            let mut bytes = encode(&DESCRIPTOR);
+            let text = read_u32(&bytes, field) as usize;
+            bytes[text] = if field == 32 { b'u' } else { b'R' };
+            assert_mismatch(&bytes, field as u32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE);
+        }
+
+        assert_mismatch(
+            &encode(&EMPTY_PARAMETER_DESCRIPTOR),
+            48,
+            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+        );
+        assert_mismatch(
+            &encode(&NO_SIDECHAIN_DESCRIPTOR),
+            56,
+            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+        );
+        assert_mismatch(
+            &encode(&LAUNCH_QUALITY_DESCRIPTOR),
+            64,
+            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+        );
+        assert_mismatch(
+            &encode(&NO_CHOICE_DESCRIPTOR),
+            72,
+            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+        );
+
+        let parameter = HEADER_BYTES;
+        for (field, value) in [
+            (4, ParameterUnit::Hz as u32),
+            (28, 65),
+            (32, 15),
+            (36, (-23.0f32).to_bits()),
+            (40, 23.0f32.to_bits()),
+            (44, 1.0f32.to_bits()),
+        ] {
+            let mut bytes = encode(&DESCRIPTOR);
+            write_u32(&mut bytes, parameter + field, value);
+            assert_mismatch(&bytes, (parameter + field) as u32, 0);
+        }
+        for field in [56, 64] {
+            let mut bytes = encode(&DESCRIPTOR);
+            let text = read_u32(&bytes, parameter + field) as usize;
+            bytes[text] = b'R';
+            assert_mismatch(&bytes, (parameter + field) as u32, 0);
+        }
+
+        let port = read_u32(&encode(&DESCRIPTOR), 60) as usize;
+        let mut bytes = encode(&DESCRIPTOR);
+        let sidechain = port + 2 * PORT_BYTES;
+        let port_text = read_u32(&bytes, sidechain) as usize;
+        bytes[port_text] = b't';
+        assert_mismatch(&bytes, sidechain as u32, 2);
+        let mut bytes = encode(&DESCRIPTOR);
+        write_u32(&mut bytes, sidechain + 12, 1);
+        assert_mismatch(&bytes, (sidechain + 12) as u32, 2);
+
+        let quality = read_u32(&encode(&DESCRIPTOR), 68) as usize;
+        for (field, value) in [(8, 5_u64), (24, 9), (48, u64::MAX - 1), (56, u64::MAX - 1)] {
+            let mut bytes = encode(&DESCRIPTOR);
+            write_u64(&mut bytes, quality + field, value);
+            assert_mismatch(&bytes, (quality + field) as u32, 0);
+        }
+        let mut bytes = encode(&DESCRIPTOR);
+        write_u32(&mut bytes, quality + 32, u32::MAX - 1);
+        assert_mismatch(&bytes, (quality + 32) as u32, 0);
+
+        let choice = read_u32(&encode(&DESCRIPTOR), 76) as usize;
+        let mut bytes = encode(&DESCRIPTOR);
+        write_u32(&mut bytes, choice, (-1.0f32).to_bits());
+        assert_mismatch(&bytes, choice as u32, 0);
+        let mut bytes = encode(&DESCRIPTOR);
+        let choice_text = read_u32(&bytes, choice + 4) as usize;
+        bytes[choice_text] = b'G';
+        assert_mismatch(&bytes, (choice + 4) as u32, 0);
     }
 
     #[test]

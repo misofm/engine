@@ -75,6 +75,71 @@ impl EffectPackageDiagnosticV1 {
     }
 }
 
+pub const EFFECT_STATE_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
+pub const EFFECT_STATE_V1_UNAVAILABLE_OFFSET: u64 = u64::MAX;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EffectStateDiagnosticCodeV1 {
+    Ok = 0,
+    Limit = 1,
+    BufferTooSmall = 2,
+    Header = 3,
+    Length = 4,
+    Reserved = 5,
+    Enum = 6,
+    Order = 7,
+    Text = 8,
+    Descriptor = 9,
+    Digest = 10,
+    Metadata = 11,
+    InitialValues = 12,
+    Payload = 13,
+    Factory = 14,
+    Restore = 15,
+    Overflow = 16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct EffectStateDiagnosticV1 {
+    pub code: EffectStateDiagnosticCodeV1,
+    pub detail: u32,
+    pub item_index: u32,
+    pub reserved: u32,
+    pub byte_offset: u64,
+    pub required_bytes: u64,
+}
+
+impl EffectStateDiagnosticV1 {
+    pub const fn new(
+        code: EffectStateDiagnosticCodeV1,
+        detail: u32,
+        item_index: u32,
+        byte_offset: u64,
+    ) -> Self {
+        Self {
+            code,
+            detail,
+            item_index,
+            reserved: 0,
+            byte_offset,
+            required_bytes: 0,
+        }
+    }
+
+    pub const fn buffer_too_small(detail: u32, required_bytes: u64) -> Self {
+        Self {
+            code: EffectStateDiagnosticCodeV1::BufferTooSmall,
+            detail,
+            item_index: EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            reserved: 0,
+            byte_offset: EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            required_bytes,
+        }
+    }
+}
+
 pub const EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
