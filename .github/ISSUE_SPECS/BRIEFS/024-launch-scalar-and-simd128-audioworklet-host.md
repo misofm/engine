@@ -2,10 +2,12 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Implement one immutable host-fed strict session in one nonshared
-Wasm instance. Build scalar and base-`simd128` variants and choose exactly once before worklet
-construction. This is a two-attempt product issue: Terra plus one bounded Sol correction. Do not
-implement the old SAB path or the deferred Issue-074 qualification matrix.
+**FINAL SOL FAIL / STOPPED / RESCOPED.** Terra attempt 1 and the sole bounded Sol correction are
+consumed. Checkpoint `ba7ffc6` preserves the safe host, 14-export ABI and focused-green JS boundary
+only as technical input; it is not PASS. Browser-correctness/workload/benchmark/timed invocation
+counts are zero. Issue 075, **Close AudioWorklet lifecycle and backend identity**, owns only backend/
+rate proof, constructor cleanup, strict schema/static evidence and the single representative browser
+gate. Issue 074 remains broad qualification.
 
 ## Smallest vertical
 

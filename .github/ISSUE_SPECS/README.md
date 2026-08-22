@@ -77,17 +77,21 @@ strict-session compilation, separate control/render ownership, bounded host sour
 caller-owned planar output. Issue 073, **Native PCM reference runner and C ABI qualification**,
 follows it and alone owns native WAV/RF64 runner breadth, complete Issue-005 provider/mutation
 integration and native platform qualification. Issue 023 consumes the host-fed product directly;
-Issues 025 and 026 wait for Issue 073. Issue 024 is now the launch-sized **Launch scalar and
-simd128 AudioWorklet host** product; Issue 074, **Browser AudioWorklet qualification and deployment
-matrix**, owns the separable demo, browser/device matrix, long-run, memory/GC, bundle and descriptive
-performance breadth and gates only Issue 026. These host issues permit one Terra attempt plus one
-Sol correction; Issue 024 prohibits benchmarks/timing.
+Issues 025 and 026 wait for Issue 073. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
+stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
+not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, owns
+only the remaining backend/rate/lifecycle/schema/static proof plus the sole representative Chromium
+correctness gate. Issue 074, **Browser AudioWorklet qualification and deployment matrix**, follows
+accepted Issue 075 and owns the separable demo, browser/device matrix, long-run, memory/GC, bundle
+and descriptive performance breadth; it gates only Issue 026. Issues 075 and 074 each permit one
+Terra attempt plus one Sol correction. Issue 075 permits at most one no-retry browser correctness
+invocation and prohibits benchmark/timing work.
 
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
 058 technical input -> 072. Issue 008 needs 036's accepted preparation/metadata and
-sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 024 wait
+sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 075 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
 listening only after 072 seals that candidate and its accepted benchmark; issue 026 waits for both
 072 and 033. This ordering forbids synthetic trials, audible-quality
@@ -104,7 +108,7 @@ qualification**, follows 037, replaces the placeholder byte-fold workload and al
 authorize one warmup plus two measured rounds. Issue 038 completed its one authorized invocation
 without retry; its evidence remains descriptive rather than an optimization claim.
 
-Issues 009, 022, 024 and 026 wait for 037 because their completed product contracts require
+Issues 009, 022, 075 and 026 wait for 037 because their completed product contracts require
 the retained production builtin-SIMD graph. Issue 031 is a bounded evaluation-only comparison
 after accepted Issues 036, 037 and 068; it may close with no adoption and gates no launch consumer.
 Issue 038 is a dependency only of release
@@ -130,7 +134,7 @@ ownership and accounting closure**, then stopped after two attempts: its plan-ow
 shape, representative correctness and non-`Arc` accounting checkpoint remain accepted technical
 input, but its opaque telemetry `Arc` prevents exact retained accounting and therefore overall PASS.
 Issue 043, **Exact lock-free native source sanitation telemetry handoff**, owns the remaining safe
-move/SPSC/block-stamped correction and gates Issues 022–024. Issue 041, **Issue-010 source streaming
+move/SPSC/block-stamped correction and gates Issues 022, 023 and 075. Issue 041, **Issue-010 source streaming
 qualification tooling and adversarial evidence**, follows 043 and owns the expanded diagnostic
 corpus, frozen seek races, real worker-delay audit and duration-independent allocation-layout/RSS
 proof. Issue 041 is nonblocking for hosts/features and gates only release qualification Issue 026.

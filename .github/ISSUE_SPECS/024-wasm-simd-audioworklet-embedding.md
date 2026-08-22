@@ -9,10 +9,11 @@ and scalar fallback. This issue is the launch product; broad browser qualificati
 
 ## Status and attempt budget
 
-**SOL-BRIEFED / READY FOR TERRA ATTEMPT 1.** Permit exactly one Terra implementation attempt and one
-bounded Sol correction/review. A second failed attempt stops and rescopes; gates may not be weakened.
-No implementation, browser workload, benchmark or timing invocation has occurred while briefing.
-The local and remote Issue 024 title/body must be synchronized before implementation.
+**FINAL SOL FAIL / STOPPED / RESCOPED.** Terra attempt 1 and the sole bounded Sol correction/review
+are consumed. Checkpoint `ba7ffc6` is useful technical input but is not an accepted dependency and
+this issue has no overall PASS. Browser-correctness, workload, benchmark and timed invocation counts
+are all zero. **Close AudioWorklet lifecycle and backend identity** owns the exact remaining product
+closure; Issue 074 remains broad browser qualification only.
 
 ## Context and fixed boundary
 
@@ -273,3 +274,24 @@ lists; ABI/layout/resource reports; scalar/simd object records; hermetic mutatio
 name/version and fixture/PCM/status hashes; unchanged memory bytes; strict Terra/Sol verdicts;
 `browser_correctness_invocations` and `benchmark_or_timed_invocations=0`. No qualification claim
 from Issue 074 is implied.
+
+## Final Sol evidence and disposition — FAIL/STOP (2026-08-22)
+
+Checkpoint `ba7ffc6` preserves the safe immutable host, exact 14-export Wasm ABI, constructor-based
+JS/worklet boundary, transferred-plane ACK behavior, build/static scripts and focused hermetic tests.
+Shell syntax and `scripts/test-web-audioworklet.sh` passed read-only review. No browser, workload,
+benchmark or timed command ran.
+
+Adversarial review found four frozen launch blockers:
+
+- the worklet trusts the requested scalar/simd label and never proves it against Rust status/resource
+  backend identity, so swapped artifact URLs can falsely claim `simd128`;
+- it does not compare worklet-global `sampleRate` with the prepared rate;
+- every constructor failure leaves the processor alive and may retain an allocated Wasm handle,
+  while main-realm creation rejection does not disconnect/settle complete ownership; and
+- nested ready/status/resource typing plus transitive process-helper and exact `f32x4.sub` evidence
+  are incomplete, so the representative browser gate is not authorized.
+
+The sole Sol correction already amended the render/lifecycle contract before this review. Gates are
+not relaxed and no further disguised retry is permitted here. Issue 075 consumes `ba7ffc6` only as
+technical input and owns the narrow correction plus the single representative browser gate.

@@ -2,13 +2,15 @@
 
 ## Outcome
 
-Qualify the accepted **Launch scalar and simd128 AudioWorklet host** across the launch browser and
-deployment matrix without changing its Wasm ABI, JavaScript API, engine behavior or artifacts.
+Qualify the accepted **Close AudioWorklet lifecycle and backend identity** product across the launch
+browser and deployment matrix without changing its Wasm ABI, JavaScript API, engine behavior or
+artifacts.
 
 ## Status and attempt budget
 
-Stateless successor; begins only after Issue 024 passes. Permit one Terra attempt and one bounded Sol
-correction. A second failure stops. Benchmark/timed invocation count starts at zero; any future
+Stateless successor; begins only after Issue 075 passes. Stopped Issue 024 and checkpoint `ba7ffc6`
+are historical technical input only, not accepted dependencies. Permit one Terra attempt and one
+bounded Sol correction. A second failure stops. Benchmark/timed invocation count starts at zero; any future
 descriptive measurement must be frozen and authorized here before it runs.
 
 ## Scope
@@ -32,12 +34,12 @@ claims. A product defect discovered here fails and returns to a new bounded issu
 
 ## Dependencies by exact issue title
 
-- Launch scalar and simd128 AudioWorklet host
+- Close AudioWorklet lifecycle and backend identity
 
 ## Acceptance and evidence
 
 All named browser/version/device rows load the sealed scalar/SIMD artifacts and reproduce the Issue-
-024 fixture within its frozen gate. The offline/live rows preserve memory and report zero render/
+075 fixture within its frozen gate. The offline/live rows preserve memory and report zero render/
 schema errors. Deployment/demo files pass static and local-server smoke. Record exact candidate,
 source/lock/artifact/fixture hashes; browser/OS/device versions; feature selection; PCM/status/memory/
 GC results; strict Terra/Sol verdicts; and exact browser workload/timed invocation counts.
