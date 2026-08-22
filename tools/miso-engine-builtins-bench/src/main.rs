@@ -47,6 +47,8 @@ const PREPARE_TRACKS: usize = 256;
 const OBSERVERS: usize = 7;
 const ISSUE: u32 = 35;
 const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANIFEST.tsv");
+const INPUT_MANIFEST_SHA256: &str =
+    "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
 const WORKLOADS: [Workload; 5] = [
@@ -130,10 +132,124 @@ struct Measurement {
     audit: Option<audit::AuditSnapshot>,
 }
 
+struct BenchmarkIdentities {
+    candidate_commit: String,
+    binary_sha256: String,
+}
+
+impl BenchmarkIdentities {
+    fn from_environment() -> Self {
+        Self {
+            candidate_commit: required_identity("MISO_ENGINE_BUILTINS_BENCH_CANDIDATE_COMMIT", 40),
+            binary_sha256: required_identity("MISO_ENGINE_BUILTINS_BENCH_BINARY_SHA256", 64),
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic() -> Self {
+        Self {
+            candidate_commit: "a".repeat(40),
+            binary_sha256: "b".repeat(64),
+        }
+    }
+}
+
+struct InputFixture {
+    id: &'static str,
+    bytes: &'static [u8],
+}
+
+fn input_fixture(workload: Workload, rate_hz: u32) -> InputFixture {
+    match (workload, rate_hz) {
+        (Workload::FullChainFilters, 48_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml"
+            ),
+        },
+        (Workload::FullChainFilters, 96_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/full_chain_filters-96000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/full_chain_filters-96000.toml"
+            ),
+        },
+        (Workload::IdentityChain, 48_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/identity_chain-48000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/identity_chain-48000.toml"
+            ),
+        },
+        (Workload::IdentityChain, 96_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/identity_chain-96000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/identity_chain-96000.toml"
+            ),
+        },
+        (Workload::MatrixRamp, 48_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/matrix_ramp-48000.toml",
+            bytes: include_bytes!("../../../fixtures/builtins/v1/benchmark/matrix_ramp-48000.toml"),
+        },
+        (Workload::MatrixRamp, 96_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/matrix_ramp-96000.toml",
+            bytes: include_bytes!("../../../fixtures/builtins/v1/benchmark/matrix_ramp-96000.toml"),
+        },
+        (Workload::MeterSuccessFull, 48_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/meter_success_full-48000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"
+            ),
+        },
+        (Workload::MeterSuccessFull, 96_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/meter_success_full-96000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/meter_success_full-96000.toml"
+            ),
+        },
+        (Workload::Prepare256Tracks, 48_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/prepare_256_tracks-48000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/prepare_256_tracks-48000.toml"
+            ),
+        },
+        (Workload::Prepare256Tracks, 96_000) => InputFixture {
+            id: "fixtures/builtins/v1/benchmark/prepare_256_tracks-96000.toml",
+            bytes: include_bytes!(
+                "../../../fixtures/builtins/v1/benchmark/prepare_256_tracks-96000.toml"
+            ),
+        },
+        _ => panic!("unsupported frozen benchmark input"),
+    }
+}
+
 struct RenderRoundStates {
     workload: Workload,
     rate_hz: u32,
     rounds: [RenderRuntime; 2],
+}
+
+#[derive(Clone, Copy)]
+struct RecordPlan {
+    workload: Workload,
+    rate_hz: u32,
+    round: u32,
+    round_index: usize,
+}
+
+fn measured_record_plans() -> Vec<RecordPlan> {
+    let mut plans = Vec::with_capacity(WORKLOADS.len() * RATES.len() * ROUNDS.len());
+    for (round_index, round) in ROUNDS.into_iter().enumerate() {
+        for rate_hz in RATES {
+            for workload in WORKLOADS {
+                plans.push(RecordPlan {
+                    workload,
+                    rate_hz,
+                    round,
+                    round_index,
+                });
+            }
+        }
+    }
+    plans
 }
 
 /// Two independently prepared graph artifacts for the frozen meter success/full workload.
@@ -451,37 +567,39 @@ fn main() {
         1,
         "benchmark accepts no arguments"
     );
+    let identities = BenchmarkIdentities::from_environment();
     let metadata = Metadata::collect();
     let fixture_sha256 = sha256(INPUT_MANIFEST);
+    assert_eq!(
+        fixture_sha256, INPUT_MANIFEST_SHA256,
+        "frozen fixture manifest"
+    );
     let mut render_states = prepare_render_round_states();
     for rate_hz in RATES {
         warmup_prepare(rate_hz);
     }
-    for (round_index, round) in ROUNDS.into_iter().enumerate() {
-        for rate_hz in RATES {
-            for workload in WORKLOADS {
-                let measurement = if workload.is_prepare() {
-                    measure_prepare(rate_hz)
-                } else {
-                    let state = render_states
-                        .iter_mut()
-                        .find(|state| state.workload == workload && state.rate_hz == rate_hz)
-                        .expect("global render warmup state");
-                    measure_render(&mut state.rounds[round_index])
-                };
-                println!(
-                    "{}",
-                    record_json(
-                        workload,
-                        rate_hz,
-                        round,
-                        &fixture_sha256,
-                        &metadata,
-                        &measurement
-                    )
-                );
-            }
-        }
+    for plan in measured_record_plans() {
+        let measurement = if plan.workload.is_prepare() {
+            measure_prepare(plan.rate_hz)
+        } else {
+            let state = render_states
+                .iter_mut()
+                .find(|state| state.workload == plan.workload && state.rate_hz == plan.rate_hz)
+                .expect("global render warmup state");
+            measure_render(&mut state.rounds[plan.round_index])
+        };
+        println!(
+            "{}",
+            record_json(
+                plan.workload,
+                plan.rate_hz,
+                plan.round,
+                &fixture_sha256,
+                &identities,
+                &metadata,
+                &measurement
+            )
+        );
     }
 }
 
@@ -783,65 +901,201 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
 }
 
 struct Metadata {
-    cpu_model: String,
-    logical_cores: String,
-    os: String,
-    kernel: String,
-    governor: String,
-    rust_version: String,
-    llvm_version: String,
-    target: String,
-    target_features: String,
-    profile: String,
-    opt_level: String,
-    lto: String,
-    codegen_units: String,
-    background_load: String,
+    cpu_model: Option<String>,
+    cpu_architecture: Option<String>,
+    logical_core_count: Option<u32>,
+    physical_core_count: Option<u32>,
+    os: Option<String>,
+    kernel: Option<String>,
+    governor_or_power_mode: Option<String>,
+    rust_version: Option<String>,
+    llvm_version: Option<String>,
+    target_triple: Option<String>,
+    target_features: Option<String>,
+    profile: Option<String>,
+    opt_level: Option<String>,
+    lto: Option<String>,
+    codegen_units: Option<String>,
+    background_load_note: Option<String>,
     missing: Vec<&'static str>,
 }
+
 impl Metadata {
     fn collect() -> Self {
         let mut missing = Vec::new();
-        let take = |key: &'static str, missing: &mut Vec<&'static str>| match std::env::var(key) {
-            Ok(value) if !value.is_empty() => json_safe(&value),
-            _ => {
-                missing.push(key);
-                "unknown".to_owned()
-            }
-        };
-        let cpu_model = take("MISO_ENGINE_BENCH_CPU_MODEL", &mut missing);
-        let logical_cores = take("MISO_ENGINE_BENCH_LOGICAL_CORES", &mut missing);
-        let os = take("MISO_ENGINE_BENCH_OS", &mut missing);
-        let kernel = take("MISO_ENGINE_BENCH_KERNEL", &mut missing);
-        let governor = take("MISO_ENGINE_BENCH_GOVERNOR", &mut missing);
-        let rust_version = take("MISO_ENGINE_BENCH_RUST_VERSION", &mut missing);
-        let llvm_version = take("MISO_ENGINE_BENCH_LLVM_VERSION", &mut missing);
-        let target = take("MISO_ENGINE_BENCH_TARGET", &mut missing);
-        let target_features = take("MISO_ENGINE_BENCH_TARGET_FEATURES", &mut missing);
-        let profile = take("MISO_ENGINE_BENCH_PROFILE", &mut missing);
-        let opt_level = take("MISO_ENGINE_BENCH_OPT_LEVEL", &mut missing);
-        let lto = take("MISO_ENGINE_BENCH_LTO", &mut missing);
-        let codegen_units = take("MISO_ENGINE_BENCH_CODEGEN_UNITS", &mut missing);
-        let background_load = take("MISO_ENGINE_BENCH_BACKGROUND_LOAD", &mut missing);
+        let cpu_model = text_metadata("MISO_ENGINE_BENCH_CPU_MODEL", "cpu_model", &mut missing);
+        let cpu_architecture = text_metadata(
+            "MISO_ENGINE_BENCH_CPU_ARCHITECTURE",
+            "cpu_architecture",
+            &mut missing,
+        );
+        let logical_core_count = number_metadata(
+            "MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT",
+            "logical_core_count",
+            &mut missing,
+        );
+        let physical_core_count = number_metadata(
+            "MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT",
+            "physical_core_count",
+            &mut missing,
+        );
+        let os = text_metadata("MISO_ENGINE_BENCH_OS", "os", &mut missing);
+        let kernel = text_metadata("MISO_ENGINE_BENCH_KERNEL", "kernel", &mut missing);
+        let governor_or_power_mode = text_metadata(
+            "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+            "governor_or_power_mode",
+            &mut missing,
+        );
+        let rust_version = text_metadata(
+            "MISO_ENGINE_BENCH_RUST_VERSION",
+            "rust_version",
+            &mut missing,
+        );
+        let llvm_version = text_metadata(
+            "MISO_ENGINE_BENCH_LLVM_VERSION",
+            "llvm_version",
+            &mut missing,
+        );
+        let target_triple = text_metadata(
+            "MISO_ENGINE_BENCH_TARGET_TRIPLE",
+            "target_triple",
+            &mut missing,
+        );
+        let target_features = text_metadata(
+            "MISO_ENGINE_BENCH_TARGET_FEATURES",
+            "target_features",
+            &mut missing,
+        );
+        let profile = text_metadata("MISO_ENGINE_BENCH_PROFILE", "profile", &mut missing);
+        let opt_level = text_metadata("MISO_ENGINE_BENCH_OPT_LEVEL", "opt_level", &mut missing);
+        let lto = text_metadata("MISO_ENGINE_BENCH_LTO", "lto", &mut missing);
+        let codegen_units = text_metadata(
+            "MISO_ENGINE_BENCH_CODEGEN_UNITS",
+            "codegen_units",
+            &mut missing,
+        );
+        let background_load_note = text_metadata(
+            "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+            "background_load_note",
+            &mut missing,
+        );
         missing.sort_unstable();
+        missing.dedup();
         Self {
             cpu_model,
-            logical_cores,
+            cpu_architecture,
+            logical_core_count,
+            physical_core_count,
             os,
             kernel,
-            governor,
+            governor_or_power_mode,
             rust_version,
             llvm_version,
-            target,
+            target_triple,
             target_features,
             profile,
             opt_level,
             lto,
             codegen_units,
-            background_load,
+            background_load_note,
             missing,
         }
     }
+
+    #[cfg(test)]
+    fn all_missing() -> Self {
+        Self {
+            cpu_model: None,
+            cpu_architecture: None,
+            logical_core_count: None,
+            physical_core_count: None,
+            os: None,
+            kernel: None,
+            governor_or_power_mode: None,
+            rust_version: None,
+            llvm_version: None,
+            target_triple: None,
+            target_features: None,
+            profile: None,
+            opt_level: None,
+            lto: None,
+            codegen_units: None,
+            background_load_note: None,
+            missing: METADATA_FIELDS.to_vec(),
+        }
+    }
+}
+
+#[cfg(test)]
+const METADATA_FIELDS: [&str; 16] = [
+    "background_load_note",
+    "codegen_units",
+    "cpu_architecture",
+    "cpu_model",
+    "governor_or_power_mode",
+    "kernel",
+    "llvm_version",
+    "logical_core_count",
+    "lto",
+    "opt_level",
+    "os",
+    "physical_core_count",
+    "profile",
+    "rust_version",
+    "target_features",
+    "target_triple",
+];
+
+fn text_metadata(
+    environment: &'static str,
+    field: &'static str,
+    missing: &mut Vec<&'static str>,
+) -> Option<String> {
+    match std::env::var(environment) {
+        Ok(value) if usable_metadata(&value) => Some(value),
+        _ => {
+            missing.push(field);
+            None
+        }
+    }
+}
+
+fn number_metadata(
+    environment: &'static str,
+    field: &'static str,
+    missing: &mut Vec<&'static str>,
+) -> Option<u32> {
+    match std::env::var(environment)
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        Some(value) if value > 0 => Some(value),
+        _ => {
+            missing.push(field);
+            None
+        }
+    }
+}
+
+fn usable_metadata(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(value, "unknown" | "default")
+        && value.chars().all(|character| !character.is_control())
+}
+
+fn required_identity(environment: &'static str, length: usize) -> String {
+    let value = std::env::var(environment).unwrap_or_else(|_| panic!("missing {environment}"));
+    assert!(
+        value.len() == length && is_lower_hex(&value),
+        "invalid {environment}"
+    );
+    value
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn record_json(
@@ -849,73 +1103,348 @@ fn record_json(
     rate_hz: u32,
     round: u32,
     fixture_sha256: &str,
+    identities: &BenchmarkIdentities,
     metadata: &Metadata,
     measurement: &Measurement,
 ) -> String {
-    let p = Percentiles::from_samples(&measurement.samples_ns);
     let shape = measurement.shape;
-    let missing = metadata
-        .missing
-        .iter()
-        .map(|key| format!("\"{key}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let render_fields = match measurement.audit { Some(a) => format!("\"render_scope\":\"render\",\"render_allocations\":{},\"render_deallocations\":{},\"render_locks\":{},\"render_logs\":{},\"render_file_io\":{},\"render_network_io\":{},\"render_syscalls\":{}", a.allocations, a.deallocations, a.locks, a.logs, a.file_io, a.network_io, a.syscalls), None => "\"render_scope\":\"not_applicable_preparation\",\"render_allocations\":\"not_applicable\",\"render_deallocations\":\"not_applicable\",\"render_locks\":\"not_applicable\",\"render_logs\":\"not_applicable\",\"render_file_io\":\"not_applicable\",\"render_network_io\":\"not_applicable\",\"render_syscalls\":\"not_applicable\"".to_owned() };
-    format!(
-        concat!(
-            "{{\"schema_version\":2,\"issue\":{},\"workload_kind\":\"{}\",\"workload_id\":\"issue035.{}.{}hz.q128\",\"sample_rate_hz\":{},\"quantum_frames\":128,\"round\":{},\"warmup_batches\":{},\"measured_batches\":{},\"operations_per_batch\":{},\"frames_per_operation\":128,\"tracks\":{},\"meter_observers\":{},\"meter_queue_capacity\":{},\"retained_payload_bytes\":{},\"percentile_method\":\"nearest_rank\",\"min_ns\":{},\"p50_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p99_9_ns\":{},\"max_ns\":{},\"fixture_manifest_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"fixture_manifest_sha256\":\"{}\",\"input_fixture_id\":\"fixtures/builtins/v1/MANIFEST.tsv\",\"input_fixture_sha256\":\"{}\",\"output_sha256\":\"{}\",{},\"cpu_model\":\"{}\",\"logical_cores\":\"{}\",\"os\":\"{}\",\"kernel\":\"{}\",\"governor_or_power_mode\":\"{}\",\"rust_version\":\"{}\",\"llvm_version\":\"{}\",\"target_triple\":\"{}\",\"target_features\":\"{}\",\"profile\":\"{}\",\"opt_level\":\"{}\",\"lto\":\"{}\",\"codegen_units\":\"{}\",\"background_load_note\":\"{}\",\"missing_metadata\":[{}]}}"
+    let expected_shape = workload_shape(workload);
+    assert_eq!(
+        (shape.tracks, shape.meters, shape.meter_capacity),
+        (
+            expected_shape.tracks,
+            expected_shape.meters,
+            expected_shape.meter_capacity,
         ),
-        ISSUE,
-        workload.kind(),
-        workload.kind(),
-        rate_hz,
-        rate_hz,
-        round,
+        "frozen workload shape"
+    );
+    assert_eq!(
+        fixture_sha256, INPUT_MANIFEST_SHA256,
+        "frozen manifest identity"
+    );
+    let input = input_fixture(workload, rate_hz);
+    let input_sha256 = manifest_input_sha256(input.id);
+    assert_eq!(sha256(input.bytes), input_sha256, "frozen input identity");
+    assert!(is_lower_hex(&measurement.output_sha256), "output hash");
+    let p = Percentiles::from_samples(&measurement.samples_ns);
+    let (warmup_batches, measured_batches, operations_per_batch, frames_per_operation) =
         if workload.is_prepare() {
-            PREPARE_WARMUP_BATCHES
+            (
+                PREPARE_WARMUP_BATCHES,
+                PREPARE_MEASURED_BATCHES,
+                1,
+                "null".to_owned(),
+            )
         } else {
-            RENDER_WARMUP_BATCHES
+            (
+                RENDER_WARMUP_BATCHES,
+                RENDER_MEASURED_BATCHES,
+                OPERATIONS_PER_RENDER_BATCH,
+                QUANTUM.to_string(),
+            )
+        };
+    let mut fields = vec![
+        json_number("schema_version", 2),
+        json_number("issue", ISSUE),
+        json_string_field("workload_kind", workload.kind()),
+        json_string_field(
+            "workload_id",
+            &format!("issue035.{}.{}hz.q128", workload.kind(), rate_hz),
+        ),
+        json_number("sample_rate_hz", rate_hz),
+        json_number("quantum_frames", QUANTUM),
+        json_number("round", round),
+        json_string_field(
+            "render_scope",
+            if workload.is_prepare() {
+                "not_applicable_preparation"
+            } else {
+                "render"
+            },
+        ),
+        json_number("warmup_batches", warmup_batches),
+        json_number("measured_batches", measured_batches),
+        json_number("operations_per_batch", operations_per_batch),
+        json_number("total_operations", measured_batches * operations_per_batch),
+        json_raw("frames_per_operation", frames_per_operation),
+        json_number("tracks", shape.tracks),
+        json_number("meter_observers", shape.meters),
+        json_optional_number("meter_queue_capacity", workload_meter_capacity(workload)),
+        json_number("retained_payload_bytes", shape.retained_payload_bytes),
+        json_string_field("percentile_method", "nearest_rank"),
+        json_string_field("units", "ns_per_operation"),
+        json_number("min_ns", p.min),
+        json_number("p50_ns", p.p50),
+        json_number("p95_ns", p.p95),
+        json_number("p99_ns", p.p99),
+        json_number("p99_9_ns", p.p999),
+        json_number("max_ns", p.max),
+        json_raw("descriptive_only", "true".to_owned()),
+        json_string_field("candidate_commit", &identities.candidate_commit),
+        json_string_field("binary_sha256", &identities.binary_sha256),
+        json_string_field("fixture_manifest_id", "fixtures/builtins/v1/MANIFEST.tsv"),
+        json_string_field("fixture_manifest_sha256", fixture_sha256),
+        json_string_field("input_fixture_id", input.id),
+        json_string_field("input_fixture_sha256", input_sha256),
+        json_string_field("output_sha256", &measurement.output_sha256),
+    ];
+    append_audit_fields(&mut fields, measurement.audit);
+    append_metadata_fields(&mut fields, metadata);
+    assert_record_keys(&fields);
+    format!("{{{}}}", fields.join(","))
+}
+
+fn workload_shape(workload: Workload) -> WorkloadShape {
+    match workload {
+        Workload::Prepare256Tracks => WorkloadShape {
+            tracks: PREPARE_TRACKS,
+            meters: OBSERVERS * 8,
+            meter_capacity: 4,
+            retained_payload_bytes: 0,
         },
-        if workload.is_prepare() {
-            PREPARE_MEASURED_BATCHES
-        } else {
-            RENDER_MEASURED_BATCHES
+        Workload::MeterSuccessFull => WorkloadShape {
+            tracks: 1,
+            meters: OBSERVERS * 2,
+            meter_capacity: 1,
+            retained_payload_bytes: 0,
         },
-        if workload.is_prepare() {
-            1
-        } else {
-            OPERATIONS_PER_RENDER_BATCH
+        _ => WorkloadShape {
+            tracks: 1,
+            meters: 0,
+            meter_capacity: 0,
+            retained_payload_bytes: 0,
         },
-        shape.tracks,
-        shape.meters,
-        shape.meter_capacity,
-        shape.retained_payload_bytes,
-        p.min,
-        p.p50,
-        p.p95,
-        p.p99,
-        p.p999,
-        p.max,
-        fixture_sha256,
-        fixture_sha256,
-        measurement.output_sha256,
-        render_fields,
-        metadata.cpu_model,
-        metadata.logical_cores,
-        metadata.os,
-        metadata.kernel,
-        metadata.governor,
-        metadata.rust_version,
-        metadata.llvm_version,
-        metadata.target,
-        metadata.target_features,
-        metadata.profile,
-        metadata.opt_level,
-        metadata.lto,
-        metadata.codegen_units,
-        metadata.background_load,
-        missing
-    )
+    }
+}
+
+fn manifest_input_sha256(input_id: &str) -> &'static str {
+    let manifest_path = input_id
+        .strip_prefix("fixtures/builtins/v1/")
+        .expect("frozen benchmark input path");
+    std::str::from_utf8(INPUT_MANIFEST)
+        .expect("UTF-8 fixture manifest")
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let path = fields.next()?;
+            let _length = fields.next()?;
+            let sha256 = fields.next()?;
+            (path == manifest_path).then_some(sha256)
+        })
+        .unwrap_or_else(|| panic!("missing frozen manifest row for {input_id}"))
+}
+
+fn workload_meter_capacity(workload: Workload) -> Option<usize> {
+    match workload {
+        Workload::MeterSuccessFull => Some(1),
+        Workload::Prepare256Tracks => Some(4),
+        _ => None,
+    }
+}
+
+fn append_audit_fields(fields: &mut Vec<String>, audit: Option<audit::AuditSnapshot>) {
+    let values = match audit {
+        Some(snapshot) => [
+            snapshot.allocations,
+            snapshot.deallocations,
+            snapshot.locks,
+            snapshot.logs,
+            snapshot.file_io,
+            snapshot.network_io,
+            snapshot.syscalls,
+            snapshot.feature_detection,
+            snapshot.panic_unwinds,
+        ],
+        None => {
+            fields.push(json_string_field("render_errors", "not_applicable"));
+            for name in RENDER_AUDIT_FIELDS {
+                fields.push(json_string_field(name, "not_applicable"));
+            }
+            fields.push(json_string_field(
+                "render_total_forbidden_operations",
+                "not_applicable",
+            ));
+            return;
+        }
+    };
+    fields.push(json_number("render_errors", 0));
+    for (name, value) in RENDER_AUDIT_FIELDS.into_iter().zip(values) {
+        fields.push(json_number(name, value));
+    }
+    fields.push(json_number(
+        "render_total_forbidden_operations",
+        values.into_iter().sum::<u64>(),
+    ));
+}
+
+const RENDER_AUDIT_FIELDS: [&str; 9] = [
+    "render_allocations",
+    "render_deallocations",
+    "render_locks",
+    "render_logs",
+    "render_file_io",
+    "render_network_io",
+    "render_syscalls",
+    "render_feature_detection",
+    "render_panic_unwind",
+];
+
+const RECORD_KEYS: [&str; 61] = [
+    "schema_version",
+    "issue",
+    "workload_kind",
+    "workload_id",
+    "sample_rate_hz",
+    "quantum_frames",
+    "round",
+    "render_scope",
+    "warmup_batches",
+    "measured_batches",
+    "operations_per_batch",
+    "total_operations",
+    "frames_per_operation",
+    "tracks",
+    "meter_observers",
+    "meter_queue_capacity",
+    "retained_payload_bytes",
+    "percentile_method",
+    "units",
+    "min_ns",
+    "p50_ns",
+    "p95_ns",
+    "p99_ns",
+    "p99_9_ns",
+    "max_ns",
+    "descriptive_only",
+    "candidate_commit",
+    "binary_sha256",
+    "fixture_manifest_id",
+    "fixture_manifest_sha256",
+    "input_fixture_id",
+    "input_fixture_sha256",
+    "output_sha256",
+    "render_errors",
+    "render_allocations",
+    "render_deallocations",
+    "render_locks",
+    "render_logs",
+    "render_file_io",
+    "render_network_io",
+    "render_syscalls",
+    "render_feature_detection",
+    "render_panic_unwind",
+    "render_total_forbidden_operations",
+    "cpu_model",
+    "cpu_architecture",
+    "logical_core_count",
+    "physical_core_count",
+    "os",
+    "kernel",
+    "governor_or_power_mode",
+    "rust_version",
+    "llvm_version",
+    "target_triple",
+    "target_features",
+    "profile",
+    "opt_level",
+    "lto",
+    "codegen_units",
+    "background_load_note",
+    "missing_metadata",
+];
+
+fn assert_record_keys(fields: &[String]) {
+    assert_eq!(fields.len(), RECORD_KEYS.len(), "exact record key count");
+    for (field, expected) in fields.iter().zip(RECORD_KEYS) {
+        assert!(
+            field.starts_with(&format!("\"{expected}\":")),
+            "unexpected record field: {field}"
+        );
+    }
+}
+
+fn append_metadata_fields(fields: &mut Vec<String>, metadata: &Metadata) {
+    fields.extend([
+        json_optional_string("cpu_model", metadata.cpu_model.as_deref()),
+        json_optional_string("cpu_architecture", metadata.cpu_architecture.as_deref()),
+        json_optional_number("logical_core_count", metadata.logical_core_count),
+        json_optional_number("physical_core_count", metadata.physical_core_count),
+        json_optional_string("os", metadata.os.as_deref()),
+        json_optional_string("kernel", metadata.kernel.as_deref()),
+        json_optional_string(
+            "governor_or_power_mode",
+            metadata.governor_or_power_mode.as_deref(),
+        ),
+        json_optional_string("rust_version", metadata.rust_version.as_deref()),
+        json_optional_string("llvm_version", metadata.llvm_version.as_deref()),
+        json_optional_string("target_triple", metadata.target_triple.as_deref()),
+        json_optional_string("target_features", metadata.target_features.as_deref()),
+        json_optional_string("profile", metadata.profile.as_deref()),
+        json_optional_string("opt_level", metadata.opt_level.as_deref()),
+        json_optional_string("lto", metadata.lto.as_deref()),
+        json_optional_string("codegen_units", metadata.codegen_units.as_deref()),
+        json_optional_string(
+            "background_load_note",
+            metadata.background_load_note.as_deref(),
+        ),
+        format!(
+            "\"missing_metadata\":[{}]",
+            metadata
+                .missing
+                .iter()
+                .map(|field| json_string(field))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ]);
+}
+
+fn json_number(name: &str, value: impl core::fmt::Display) -> String {
+    format!("\"{name}\":{value}")
+}
+
+fn json_optional_number(name: &str, value: Option<impl core::fmt::Display>) -> String {
+    match value {
+        Some(value) => json_number(name, value),
+        None => json_raw(name, "null".to_owned()),
+    }
+}
+
+fn json_string_field(name: &str, value: &str) -> String {
+    format!("\"{name}\":{}", json_string(value))
+}
+
+fn json_optional_string(name: &str, value: Option<&str>) -> String {
+    match value {
+        Some(value) => json_string_field(name, value),
+        None => json_raw(name, "null".to_owned()),
+    }
+}
+
+fn json_raw(name: &str, value: String) -> String {
+    format!("\"{name}\":{value}")
+}
+
+fn json_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            character if character.is_control() => {
+                use core::fmt::Write;
+                write!(quoted, "\\u{:04x}", character as u32).expect("String write");
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 struct Percentiles {
@@ -953,16 +1482,114 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
     }
     output
 }
-fn json_safe(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_graphic() && *character != '"' && *character != '\\')
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_measurement(workload: Workload) -> Measurement {
+        Measurement {
+            samples_ns: vec![3, 1, 2],
+            output_sha256: "c".repeat(64),
+            shape: workload_shape(workload),
+            audit: if workload.is_prepare() {
+                None
+            } else {
+                Some(audit::AuditSnapshot::default())
+            },
+        }
+    }
+
+    #[test]
+    fn issue035_record_has_exact_render_identity_shape_and_typed_missing_metadata() {
+        let record = record_json(
+            Workload::FullChainFilters,
+            48_000,
+            1,
+            INPUT_MANIFEST_SHA256,
+            &BenchmarkIdentities::synthetic(),
+            &Metadata::all_missing(),
+            &synthetic_measurement(Workload::FullChainFilters),
+        );
+
+        assert_eq!(record.matches("\":").count(), RECORD_KEYS.len());
+        assert!(record.contains("\"issue\":35"));
+        assert!(record.contains("\"workload_id\":\"issue035.full_chain_filters.48000hz.q128\""));
+        assert!(record.contains("\"total_operations\":4096"));
+        assert!(record.contains("\"units\":\"ns_per_operation\""));
+        assert!(record.contains("\"frames_per_operation\":128"));
+        assert!(record.contains("\"meter_queue_capacity\":null"));
+        assert!(record.contains(
+            "\"input_fixture_id\":\"fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml\""
+        ));
+        assert!(record.contains("\"input_fixture_sha256\":\"4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9\""));
+        assert!(record.contains("\"render_errors\":0"));
+        assert!(record.contains("\"render_feature_detection\":0"));
+        assert!(record.contains("\"render_panic_unwind\":0"));
+        assert!(record.contains("\"render_total_forbidden_operations\":0"));
+        assert!(record.contains("\"cpu_model\":null"));
+        assert!(record.contains("\"logical_core_count\":null"));
+        assert!(record.contains("\"missing_metadata\":[\"background_load_note\",\"codegen_units\",\"cpu_architecture\",\"cpu_model\",\"governor_or_power_mode\",\"kernel\",\"llvm_version\",\"logical_core_count\",\"lto\",\"opt_level\",\"os\",\"physical_core_count\",\"profile\",\"rust_version\",\"target_features\",\"target_triple\"]"));
+    }
+
+    #[test]
+    fn issue035_preparation_record_uses_only_required_null_and_not_applicable_values() {
+        let mut measurement = synthetic_measurement(Workload::Prepare256Tracks);
+        measurement.shape.retained_payload_bytes = 123;
+        let record = record_json(
+            Workload::Prepare256Tracks,
+            96_000,
+            2,
+            INPUT_MANIFEST_SHA256,
+            &BenchmarkIdentities::synthetic(),
+            &Metadata::all_missing(),
+            &measurement,
+        );
+
+        assert!(record.contains("\"frames_per_operation\":null"));
+        assert!(record.contains("\"total_operations\":128"));
+        assert!(record.contains("\"tracks\":256"));
+        assert!(record.contains("\"meter_observers\":56"));
+        assert!(record.contains("\"meter_queue_capacity\":4"));
+        assert!(record.contains("\"retained_payload_bytes\":123"));
+        assert!(record.contains("\"render_scope\":\"not_applicable_preparation\""));
+        assert!(record.contains("\"render_errors\":\"not_applicable\""));
+        assert!(record.contains("\"render_feature_detection\":\"not_applicable\""));
+        assert!(record.contains("\"render_total_forbidden_operations\":\"not_applicable\""));
+        assert!(record.contains(
+            "\"input_fixture_id\":\"fixtures/builtins/v1/benchmark/prepare_256_tracks-96000.toml\""
+        ));
+    }
+
+    #[test]
+    fn measured_plan_is_the_frozen_twenty_row_cartesian_set() {
+        let plans = measured_record_plans();
+        assert_eq!(plans.len(), 20);
+        for workload in WORKLOADS {
+            for rate_hz in RATES {
+                let matching: Vec<_> = plans
+                    .iter()
+                    .filter(|plan| plan.workload == workload && plan.rate_hz == rate_hz)
+                    .collect();
+                assert_eq!(matching.len(), 2);
+                assert_eq!(matching[0].round, 1);
+                assert_eq!(matching[0].round_index, 0);
+                assert_eq!(matching[1].round, 2);
+                assert_eq!(matching[1].round_index, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
+        for plan in measured_record_plans() {
+            let input = input_fixture(plan.workload, plan.rate_hz);
+            assert_eq!(sha256(input.bytes), manifest_input_sha256(input.id));
+        }
+        assert_eq!(
+            manifest_input_sha256("fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"),
+            "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
+        );
+    }
 
     #[test]
     fn real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state() {
