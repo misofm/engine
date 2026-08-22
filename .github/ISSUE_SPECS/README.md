@@ -15,10 +15,11 @@ These Markdown files are source-of-truth bodies for later GitHub issue creation.
 Files/H1s are ordered by numeric prefix and use lowercase kebab-case filenames.  The prefix is planning metadata, not part of the published GitHub title; dependency entries therefore name the exact published title and remain portable outside this repository.
 
 Issue numbers preserve creation order, not dependency order. The issue-011 rescope moved external
-descriptor/package/state bytes into issue 029 without renumbering existing specs: launch work uses
-**Native effect runtime contract and conformance**, while issue 027 and future repository work use
-**Canonical effect interchange, state migration, and CID package identity**. Therefore the
-extensibility sequence is 029 -> 027 -> 028.
+descriptor/package/state bytes out of the native runtime contract. Issue 029 now owns only
+**Canonical effect descriptor wire and identity**. Issue 078 owns package/CID/artifact selection and
+gates issue 027; Issues 079 and 080 own current-layout state then migration; Issue 081 joins their
+qualification and gates release issue 026. The extensibility order is 029 -> 078 -> 027 -> 028,
+while persistence is 029 -> 079 -> 080 and qualification joins 078 + 080 -> 081.
 
 The issue-006 three-attempt workflow remains recorded as failed at runner artifact promotion. A
 fresh Sol rescope accepted its launch-critical graph compiler/runtime/PDC outcome from complete

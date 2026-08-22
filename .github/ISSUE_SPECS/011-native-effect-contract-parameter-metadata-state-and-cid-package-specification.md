@@ -24,7 +24,7 @@ Render-reachable Rust traits and semantic descriptors in `miso-engine-effect-con
 
 ## Explicit non-goals
 
-Descriptor wire bytes or a C descriptor header; package/archive encoding; artifact hashes; CIDv1; download, resolution, cache, signature, trust, licensing or repository policy; persisted state envelopes or cross-version migration; third-party execution; production DSP algorithms; graph/PDC scheduling; arbitrary allocation in process; stringly runtime parameters; or a stable engine C ABI. Those interchange, persistence and identity concerns belong to **Canonical effect interchange, state migration, and CID package identity**.
+Descriptor wire bytes or a C descriptor header; package/archive encoding; artifact hashes; CIDv1; download, resolution, cache, signature, trust, licensing or repository policy; persisted state envelopes or cross-version migration; third-party execution; production DSP algorithms; graph/PDC scheduling; arbitrary allocation in process; stringly runtime parameters; or a stable engine C ABI. Descriptor bytes/identity belong to **Canonical effect descriptor wire and identity**; package/CID, state and migration remain its stateless successors.
 
 ## Dependencies by exact issue title
 
@@ -42,7 +42,7 @@ All descriptors reject non-finite/invalid domains, duplicate or zero parameter I
 
 ## Target matrix
 
-Native scalar, AArch64/portable four-lane and AVX2 eight-lane consumers; browser scalar/Wasm-SIMD compilation. Third-party package and ABI consumers depend on issue 029 instead of blocking this launch contract.
+Native scalar, AArch64/portable four-lane and AVX2 eight-lane consumers; browser scalar/Wasm-SIMD compilation. Third-party package and ABI consumers depend on Issue 078 instead of blocking this launch contract.
 
 ## Required evidence
 
@@ -146,9 +146,9 @@ guess.
 The failed attempts and observations above remain the complete evidence for the superseded combined
 brief; none is converted into acceptance evidence. The issue is now narrowed to the launch-critical
 native runtime contract described by the current Outcome through Required evidence sections.
-Descriptor wire/C records, canonical package/artifact/CID identity, and full state envelopes and
-migration moved intact to **Canonical effect interchange, state migration, and CID package
-identity**. They are not gates for issue 011, the graph compiler, or launch native effects.
+Descriptor wire/C identity moved to **Canonical effect descriptor wire and identity**; package/CID,
+state envelopes and migration moved to its stateless successors. They are not gates for issue 011,
+the graph compiler, or launch native effects.
 
 The prior attempt counter is closed with the superseded scope. The workflow restarts at a new Sol
 brief followed by a new Terra attempt 1; no current implementation is presumed conforming, and no
@@ -264,5 +264,5 @@ All frozen acceptance gates are therefore satisfied and issue 011 may close. Rem
 are nonblocking and explicit: timings are descriptive with no hardware-independent threshold;
 the bank workloads measure the homogeneous no-op trait/interface path rather than production DSP;
 Android/iOS/Wasm results are compilation claims, not device-run claims; and all external
-descriptor/package/CID bytes and persisted migration semantics remain issue-029 scope and were not
-used as issue-011 evidence.
+descriptor bytes and the successor-owned package/CID/persistence/migration semantics remain outside
+issue-011 scope and were not used as issue-011 evidence.

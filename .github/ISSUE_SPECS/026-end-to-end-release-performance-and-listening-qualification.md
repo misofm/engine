@@ -45,6 +45,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Exact lock-free native source sanitation telemetry handoff
 - Issue-010 source streaming qualification tooling and adversarial evidence
 - Native effect runtime contract and conformance
+- Canonical effect interchange qualification, fuzzing, and benchmark
 - Launch parametric EQ recurrence derivation and runtime proof
 - Launch feed-forward peak compressor
 - Launch compressor qualification, realtime audit, and benchmark
