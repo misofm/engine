@@ -9,12 +9,11 @@ artifacts; do not reopen DSP, graph, source, session or host architecture.
 
 ## Status, technical input and attempt budget
 
-**SOL-BRIEFED / READY FOR TERRA ATTEMPT 1.** Checkpoint `ba7ffc6` is technical input, not an accepted
-dependency and not overall PASS. Permit exactly one Terra attempt and one bounded Sol correction;
-a second failure stops. `browser_correctness_invocations=0`, `workload_invocations=0`,
-`benchmark_invocations=0`, and `timed_invocations=0` at briefing. The representative browser command
-may run once only after all nonexecuting gates pass on a clean committed candidate and Sol explicitly
-authorizes it. There is no retry.
+**FINAL SOL FAIL / STOPPED / RESCOPED; NO OVERALL PASS.** The bounded product and fixture checkpoint
+at `a0c46af` remains technical input only. Terra plus the bounded Sol correction are consumed, as is
+the sole browser authorization. No retry is permitted in this issue. Issue 076 owns only the
+WebDriver response-compatibility repair, clean reseal and one fresh no-retry execution of the same
+representative browser proof.
 
 ## Narrow product correction
 
@@ -100,3 +99,23 @@ clean candidate/source/lock/tool/fixture seals; and static proof no browser/benc
 Final evidence records strict Terra/Sol verdicts, exact commands/hashes, each constructor cleanup and
 schema mutation, backend/rate rows, artifact/opcode records, the sole browser result and counters.
 Workload/benchmark/timed counts must remain zero.
+
+## Final Sol evidence and disposition
+
+The clean `a0c46af` candidate passed the frozen nonexecuting product, artifact, independent-oracle,
+fixture and lifecycle gates. Its no-browser seal is 2,744 bytes with SHA-256
+`5f30451e45ba2d81e8ec665a726f0ca423268100ee3f812aab9ba16b7addf0c7`.
+
+The sole authorized browser runner invocation then stopped during WebDriver navigation, before the
+fixture import or any product/audio observation. The server returned the standards-conforming HTTP
+200 response `{ "value": null }`; the generic Python request helper rejected every non-DELETE null
+value and raised `RuntimeError` at `request()`/navigation. The W3C WebDriver Navigate To algorithm
+explicitly returns [success with data null](https://www.w3.org/TR/webdriver2/#navigate-to), so this is
+a runner compatibility defect, not an AudioWorklet or PCM result. The seal remains preserved;
+browser evidence and checksum files were not created, the tree is clean and no browser/driver
+process remains.
+
+Final counters: `browser_correctness_invocations=1`, `workload_invocations=0`,
+`benchmark_invocations=0`, `timed_invocations=0`. There is no product/audio PASS or FAIL result.
+Issue 076 is the stateless successor; checkpoint `a0c46af`, its fixture and this failed invocation are
+technical input rather than a PASS dependency.

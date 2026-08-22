@@ -2,10 +2,12 @@
 
 ## Decision
 
-**READY FOR TERRA ATTEMPT 1.** Consume stopped Issue-024 checkpoint `ba7ffc6` as technical input,
-not a PASS dependency. Use one Terra attempt plus one bounded Sol correction. Close only the exact
-JS/worklet identity/lifetime defects and then run at most one preauthorized representative browser
-correctness invocation. Benchmark/workload/timed counts remain zero.
+**FINAL SOL FAIL / STOPPED / RESCOPED; NO OVERALL PASS.** The product/fixture checkpoint `a0c46af`
+and seal SHA-256 `5f30451e45ba2d81e8ec665a726f0ca423268100ee3f812aab9ba16b7addf0c7`
+remain technical input. The one authorized browser invocation was consumed before product execution:
+the runner rejected WebDriver Navigate To's valid HTTP 200 `{ "value": null }` success response.
+Final counters are browser correctness 1 and workload/benchmark/timed 0. Do not retry Issue 075;
+Issue 076 owns the narrow response-helper correction, fresh reseal and one new no-retry browser gate.
 
 ## Literal correction
 

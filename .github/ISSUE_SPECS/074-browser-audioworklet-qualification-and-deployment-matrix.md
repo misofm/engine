@@ -2,16 +2,16 @@
 
 ## Outcome
 
-Qualify the accepted **Close AudioWorklet lifecycle and backend identity** product across the launch
-browser and deployment matrix without changing its Wasm ABI, JavaScript API, engine behavior or
-artifacts.
+Qualify the accepted **Accept WebDriver null navigation success and close AudioWorklet browser
+proof** product across the launch browser and deployment matrix without changing its Wasm ABI,
+JavaScript API, engine behavior or artifacts.
 
 ## Status and attempt budget
 
-Stateless successor; begins only after Issue 075 passes. Stopped Issue 024 and checkpoint `ba7ffc6`
-are historical technical input only, not accepted dependencies. Permit one Terra attempt and one
-bounded Sol correction. A second failure stops. Benchmark/timed invocation count starts at zero; any future
-descriptive measurement must be frozen and authorized here before it runs.
+Stateless successor; begins only after Issue 076 passes. Stopped Issues 024 and 075 and checkpoints
+`ba7ffc6`/`a0c46af` are historical technical input only, not accepted dependencies. Permit one Terra
+attempt and one bounded Sol correction. A second failure stops. Benchmark/timed invocation count
+starts at zero; any future descriptive measurement must be frozen and authorized here before it runs.
 
 ## Scope
 
@@ -34,12 +34,12 @@ claims. A product defect discovered here fails and returns to a new bounded issu
 
 ## Dependencies by exact issue title
 
-- Close AudioWorklet lifecycle and backend identity
+- Accept WebDriver null navigation success and close AudioWorklet browser proof
 
 ## Acceptance and evidence
 
 All named browser/version/device rows load the sealed scalar/SIMD artifacts and reproduce the Issue-
-075 fixture within its frozen gate. The offline/live rows preserve memory and report zero render/
+076 accepted fixture within its frozen gate. The offline/live rows preserve memory and report zero render/
 schema errors. Deployment/demo files pass static and local-server smoke. Record exact candidate,
 source/lock/artifact/fixture hashes; browser/OS/device versions; feature selection; PCM/status/memory/
 GC results; strict Terra/Sol verdicts; and exact browser workload/timed invocation counts.
