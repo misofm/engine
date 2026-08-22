@@ -201,9 +201,17 @@ printf 'issue068 object leg=wasm-scalar object_sha256=%s symbol_sha256=%s result
 
 wasm_simd_object=$(wasm_object wasm-simd128-object '+simd128')
 wasm-objdump -d "$wasm_simd_object" >"$scratch/wasm-simd128.all"
-wasm_simd_count=$(rg -c 'process_tpt_wasm_simd128_inner' "$scratch/wasm-simd128.all" || true)
+wasm_simd_header='^[[:space:]]*[[:xdigit:]]+[[:space:]]+func\[[0-9]+\][[:space:]]+<[^>]*process_tpt_wasm_simd128_inner[^>]*>:$'
+wasm_simd_count=$(rg -c "$wasm_simd_header" "$scratch/wasm-simd128.all" || true)
 [[ "$wasm_simd_count" == 1 ]] || fail "expected exactly one Wasm SIMD TPT symbol, found $wasm_simd_count"
-awk '/process_tpt_wasm_simd128_inner/ { emit = 1 } emit && /^ *func\[/ && !/process_tpt_wasm_simd128_inner/ { exit } emit { print }' \
+awk -v suffix='process_tpt_wasm_simd128_inner' '
+    function is_header(line) {
+        return line ~ /^[[:space:]]*[[:xdigit:]]+[[:space:]]+func\[[0-9]+\][[:space:]]+</
+    }
+    is_header($0) && index($0, suffix) { emit = 1 }
+    emit && is_header($0) && !index($0, suffix) { exit }
+    emit { print }
+' \
     "$scratch/wasm-simd128.all" >"$scratch/wasm-simd128.symbol"
 [[ -s "$scratch/wasm-simd128.symbol" ]] || fail 'empty Wasm SIMD TPT symbol body'
 for instruction in mul add sub; do
