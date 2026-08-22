@@ -25,7 +25,14 @@ const EXPECTED_OUTPUT_SHA256: [&str; 4] = [
     "865a0a5a01ba157bea7f3279ad68cc17db0296655998a9b5307cf759c38656f1",
     "02e944154ccdc0315b96a7f493a11f6c60f70993750fb26ed766bc3273685d0f",
     "b38a9abad3da50b0c38bd02b9de19b641e79f9a8f48099fbb67d1ec3d481cf48",
-    "350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441",
+    "5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777",
+];
+#[cfg(test)]
+const ISSUE_081_UNREACHABLE_MIGRATION_SHA256: &str =
+    "350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441";
+const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+const EXPECTED_MIGRATION_PAYLOAD: [u8; 11] = [
+    0x10, 0x82, 0x83, 0x11, 0x12, 0x82, 0x83, 0x13, 0x14, 0x82, 0x83,
 ];
 
 const fn effect_id(value: &'static str) -> EffectId {
@@ -255,9 +262,24 @@ const fn migration_quality(rate: u32, layout: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static MIGRATION_Q1: [QualityDescriptorV1; 1] = [migration_quality(48_000, 1)];
-static MIGRATION_Q2: [QualityDescriptorV1; 1] = [migration_quality(48_000, 2)];
-static MIGRATION_Q3: [QualityDescriptorV1; 1] = [migration_quality(48_000, 3)];
+static MIGRATION_Q1: [QualityDescriptorV1; 4] = [
+    migration_quality(44_100, 1),
+    migration_quality(48_000, 1),
+    migration_quality(88_200, 1),
+    migration_quality(96_000, 1),
+];
+static MIGRATION_Q2: [QualityDescriptorV1; 4] = [
+    migration_quality(44_100, 2),
+    migration_quality(48_000, 2),
+    migration_quality(88_200, 2),
+    migration_quality(96_000, 2),
+];
+static MIGRATION_Q3: [QualityDescriptorV1; 4] = [
+    migration_quality(44_100, 3),
+    migration_quality(48_000, 3),
+    migration_quality(88_200, 3),
+    migration_quality(96_000, 3),
+];
 static MIGRATION_D1: EffectDescriptorV1 = EffectDescriptorV1 {
     id: effect_id("bench.migration"),
     display_name: "Benchmark migration",
@@ -525,7 +547,85 @@ fn migration_envelope() -> Vec<u8> {
     envelope
 }
 
-fn migration_workload() -> (u64, Vec<u8>) {
+fn validate_migration_descriptors() {
+    for (descriptor, layout) in [(&MIGRATION_D1, 1), (&MIGRATION_D2, 2), (&MIGRATION_D3, 3)] {
+        assert_eq!(descriptor.state_layout_version, layout);
+        assert_eq!(descriptor.qualities.len(), LAUNCH_RATES.len());
+        for (quality, rate) in descriptor.qualities.iter().zip(LAUNCH_RATES) {
+            assert_eq!(quality.quality, EffectQuality::Normal);
+            assert_eq!(quality.sample_rate, rate);
+            assert_eq!(quality.latency, LatencySamples(0));
+            assert_eq!(quality.tail, TailSamples::Finite(0));
+            assert_eq!(quality.maximum_state, migration_sizes(layout));
+            assert_eq!(quality.scratch_fixed_bytes, 2);
+            assert_eq!(quality.scratch_bytes_per_frame, 0);
+        }
+        let wire = descriptor_wire(descriptor);
+        verify_effect_descriptor_wire_v1(wire, 1 << 20).expect("migration descriptor wire");
+        let bound = bound_descriptor(descriptor);
+        assert_eq!(bound.wire(), wire);
+    }
+}
+
+trait MigrationTimer {
+    fn start(&mut self);
+    fn finish(&mut self) -> u64;
+}
+
+struct WallMigrationTimer(Option<Instant>);
+
+impl MigrationTimer for WallMigrationTimer {
+    fn start(&mut self) {
+        self.0 = Some(Instant::now());
+    }
+
+    fn finish(&mut self) -> u64 {
+        u64::try_from(
+            self.0
+                .take()
+                .expect("migration timer started")
+                .elapsed()
+                .as_nanos()
+                .max(1),
+        )
+        .expect("nanoseconds fit u64")
+    }
+}
+
+#[cfg(test)]
+struct UntimedMigration;
+
+#[cfg(test)]
+impl MigrationTimer for UntimedMigration {
+    fn start(&mut self) {}
+
+    fn finish(&mut self) -> u64 {
+        0
+    }
+}
+
+fn snapshot_bank_member(bank: &UnpublishedEffectBankStateV1<'_>, index: u32) -> Vec<u8> {
+    let requirements = scalar_effect_state_v1_requirements(
+        bank.bound_factory(),
+        &bank.replays()[index as usize],
+        EffectStateLimitsV1::default(),
+    )
+    .expect("member snapshot requirements");
+    let mut payload = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
+    let mut output = vec![0; requirements.envelope_bytes as usize];
+    snapshot_unpublished_effect_bank_track_state_v1(
+        bank,
+        index,
+        EffectStateLimitsV1::default(),
+        &mut payload,
+        &mut output,
+    )
+    .expect("member snapshot");
+    output
+}
+
+fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
+    validate_migration_descriptors();
     let registry = StateMigrationRegistryV1::new(
         2,
         vec![
@@ -592,7 +692,7 @@ fn migration_workload() -> (u64, Vec<u8>) {
     .expect("snapshot requirements");
     let mut payload = vec![0; snapshot_requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; snapshot_requirements.envelope_bytes as usize];
-    let start = Instant::now();
+    timer.start();
     let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
         resolved,
         bank,
@@ -610,7 +710,7 @@ fn migration_workload() -> (u64, Vec<u8>) {
         &mut output,
     )
     .expect("final bank snapshot");
-    let elapsed = u64::try_from(start.elapsed().as_nanos().max(1)).expect("nanoseconds fit u64");
+    let elapsed = timer.finish();
     let verified = verify_effect_state_v1(
         bound_descriptor(&MIGRATION_D3),
         &output,
@@ -622,8 +722,11 @@ fn migration_workload() -> (u64, Vec<u8>) {
         .expect("final replay");
     let (common, left, right) = verified.payloads();
     let final_payload = [common, left, right].concat();
-    let expected_payload = expected_migrated_payload(migration_payload(1, 0x10));
-    assert_eq!(final_payload, expected_payload);
+    assert_eq!(
+        expected_migrated_payload(migration_payload(1, 0x10)),
+        EXPECTED_MIGRATION_PAYLOAD
+    );
+    assert_eq!(final_payload, EXPECTED_MIGRATION_PAYLOAD);
     let sizes = migration_sizes(3);
     let common_bytes = sizes.common_bytes as usize;
     let left_bytes = sizes.left_bytes as usize;
@@ -631,15 +734,38 @@ fn migration_workload() -> (u64, Vec<u8>) {
     encode_effect_state_v1(
         bound_descriptor(&MIGRATION_D3),
         migration_replay().state_replay(MIGRATION_D3.id),
-        &expected_payload[..common_bytes],
-        &expected_payload[common_bytes..common_bytes + left_bytes],
-        &expected_payload[common_bytes + left_bytes..],
+        &EXPECTED_MIGRATION_PAYLOAD[..common_bytes],
+        &EXPECTED_MIGRATION_PAYLOAD[common_bytes..common_bytes + left_bytes],
+        &EXPECTED_MIGRATION_PAYLOAD[common_bytes + left_bytes..],
         EffectStateLimitsV1::default(),
         &mut expected_envelope,
     )
     .expect("expected final envelope");
+    assert_eq!(output.len(), 283);
     assert_eq!(output, expected_envelope);
+    for (index, seed) in [(0, 0x20), (2, 0x40), (3, 0x50)] {
+        let sibling = snapshot_bank_member(&bank, index);
+        let sibling_state = verify_effect_state_v1(
+            bound_descriptor(&MIGRATION_D3),
+            &sibling,
+            EffectStateLimitsV1::default(),
+        )
+        .expect("unaffected sibling state");
+        validate_effect_state_current_layout_v1(sibling_state)
+            .expect("unaffected sibling current layout");
+        validate_effect_state_replay_v1(
+            sibling_state,
+            migration_replay().state_replay(MIGRATION_D3.id),
+        )
+        .expect("unaffected sibling replay");
+        let (common, left, right) = sibling_state.payloads();
+        assert_eq!([common, left, right].concat(), migration_payload(3, seed));
+    }
     (elapsed, output)
+}
+
+fn migration_workload() -> (u64, Vec<u8>) {
+    execute_migration(WallMigrationTimer(None))
 }
 
 fn descriptor_workload(wire: &[u8]) -> (u64, Vec<u8>) {
@@ -867,7 +993,7 @@ fn record(
         .join(",");
     format!(
         concat!(
-            "{{\"schema_version\":1,\"issue\":81,\"workload_id\":{},\"round\":{},",
+            "{{\"schema_version\":1,\"issue\":108,\"workload_id\":{},\"round\":{},",
             "\"observation_count\":256,\"unit\":\"ns_per_operation\",",
             "\"candidate_commit\":{},\"candidate_tree\":{},\"binary_sha256\":{},",
             "\"tool_manifest_sha256\":{},\"tool_source_sha256\":{},",
@@ -949,5 +1075,20 @@ fn main() {
     assert_eq!(records.len(), 8);
     for record in records {
         println!("{record}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_four_rate_migration_envelope_without_timing() {
+        let (elapsed, envelope) = execute_migration(UntimedMigration);
+        assert_eq!(elapsed, 0);
+        assert_eq!(envelope.len(), 283);
+        let actual = digest_hex(&envelope);
+        assert_ne!(actual, ISSUE_081_UNREACHABLE_MIGRATION_SHA256);
+        assert_eq!(actual, EXPECTED_OUTPUT_SHA256[3]);
     }
 }

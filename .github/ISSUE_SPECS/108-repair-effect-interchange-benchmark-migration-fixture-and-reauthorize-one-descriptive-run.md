@@ -20,6 +20,13 @@ verified occupied and open on 2026-08-22; remote issue 108 does not exist. Root 
 108 with the H1 title in the docs checkpoint before implementation. This local brief does not
 claim remote creation or synchronization.
 
+Attempt-1 focused implementation derives the reachable four-rate D1→D2→D3 final-envelope SHA-256
+as `5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777`. The shared untimed Rust
+regression validates the exact 283-byte envelope and eleven-byte payload and confirms the digest is
+different from the unreachable Issue-081 value. Issue-108 preflight/runner/workload/timed counters
+remain `0/0/0/0`; no real benchmark authority has been invoked. This is checkpoint evidence only,
+pending Sol XHigh review, not an overall PASS or run authorization.
+
 ## Dependencies by exact issue title
 
 - Canonical effect interchange qualification, fuzzing, and benchmark

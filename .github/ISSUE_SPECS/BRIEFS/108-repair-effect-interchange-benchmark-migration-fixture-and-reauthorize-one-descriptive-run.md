@@ -12,6 +12,12 @@ Remote #83 and #107 are occupied/open and #108 is available as of 2026-08-22. Ro
 matching GitHub issue with the exact spec H1 title before implementation and later owns remote
 synchronization. The initial Issue-108 preflight/runner/workload/timed counters are `0/0/0/0`.
 
+Attempt-1 focused implementation derives the reachable migration-envelope SHA-256 as
+`5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777`; the untimed exact-envelope
+regression passes and distinguishes it from Issue 081's unreachable digest. Current Issue-108
+preflight/runner/workload/timed counters remain `0/0/0/0`. This is unreviewed checkpoint evidence,
+not preflight or runner authorization.
+
 ## Immutable boundary
 
 Treat the complete Issue-081 result as historical evidence: nonbenchmark qualification is valid,
