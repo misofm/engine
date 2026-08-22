@@ -61,3 +61,25 @@ fixtures, scalar PCM, other JSONL classes, final 24-format seal, targets, benchm
 Fixture topology and latency; exact PCM/meter/manifest hashes; seven distinct snapshot identities
 and values; mutation results; strict Terra/Sol verdicts; `workload_invocations=0` and
 `timed_benchmark_invocations=0`.
+
+## Attempt evidence and final disposition
+
+- Terra attempt 1 produced a compiling fixture/checker tranche, but its first scratch read-only
+  check failed at `pcm/graph-taps.f32le` word 9: production `3eb022d1`, independent model
+  `3f56aa6f`. The three conformance delays and compiled 9-sample PDC metadata were correct; the
+  model incorrectly supplied external fader/matrix processors even though prepared builtins own
+  those nodes.
+- Sol correction 2 removed those ineffective external bindings, moved the nonidentity fader into
+  the fixture session, modeled its prepared fader and canonical pan operations, retained the exact
+  three-sample recurrence, and added a direct expected-output assertion that the transformed early
+  route is zero through frame 8 and first nonzero at frame 9. The corrected scratch graph PCM hash
+  is `508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`.
+- The sole corrected scratch author then stopped at the next frozen blocker: both accepted
+  `benchmark/meter_success_full-{48000,96000}.toml` inputs pin the old graph PCM hash
+  `e07cfb2696b6eb2d8114ab84653186395694ba9c16904b70d8b0238903cad46f`. Updating those benchmark
+  payloads would exceed Issue 062's graph-PCM/meter-only deliverables; ignoring the mismatch would
+  weaken the existing benchmark-input identity validator.
+
+**FINAL: FAIL / STOPPED. No overall PASS.** The accepted benchmark-input dependency must be
+explicitly decoupled or repinned in a separately authorized bounded rescope before this graph
+fixture can be sealed. `workload_invocations=0`; `timed_benchmark_invocations=0`.

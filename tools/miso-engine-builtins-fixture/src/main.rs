@@ -12,18 +12,21 @@ use miso_engine_builtins::{
     DualMonoBlock, Matrix2x2, MeterAccumulator, MeterConfig, MeterHandle, MeterTap,
 };
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
+use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
 use miso_engine_dsp_reference::{
     ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput, rbj_butterworth_magnitude_db,
 };
-use miso_engine_effect_compiler::EffectPreparedSession;
+use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
+use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
-    TrackStage,
+    GraphBindingBlock, GraphEdgeId, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+    GraphRuntimeProcessor, TrackStage,
 };
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
+use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler};
 use miso_engine_session::{
-    CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml,
+    ChannelMatrix, CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
+    parse_session_toml,
 };
 use sha2::{Digest, Sha256};
 
@@ -457,8 +460,7 @@ impl GraphRuntimeProcessor for FixtureSource {
             .zip(block.right.iter_mut())
             .enumerate()
         {
-            *left = 0.125 + index as f32 * 0.001;
-            *right = -0.25 - index as f32 * 0.002;
+            (*left, *right) = fixture_source_frame_v1(index);
         }
         Ok(())
     }
@@ -472,12 +474,90 @@ impl GraphRuntimeProcessor for FixtureIdentity {
 }
 
 fn graph_tap_fixtures() -> (Vec<u8>, String) {
+    let artifact = graph_tap_artifact_v1();
+    verify_graph_tap_pdc_v1(artifact.report()).expect("fixture PDC");
+    let envelope = artifact.envelope();
+    let bindings = artifact
+        .external_binding_nodes()
+        .cloned()
+        .map(|node| {
+            let processor: Box<dyn GraphRuntimeProcessor> = match node {
+                GraphNodeId::TrackStage {
+                    stage: TrackStage::Input,
+                    ..
+                } => Box::new(FixtureSource),
+                _ => Box::new(FixtureIdentity),
+            };
+            GraphNodeBinding::new(node, processor)
+        })
+        .collect();
+    let bound = artifact
+        .into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes: bindings,
+            observers: Vec::new(),
+        })
+        .unwrap_or_else(|_| panic!("bind graph"));
+    let mut plan = bound.plan;
+    let frames = envelope.quantum.0 as usize;
+    let mut pcm = vec![0.0_f32; frames * 2];
+    plan.render(
+        RenderIo {
+            input: None,
+            output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+        },
+        RenderTime { absolute_sample: 0 },
+    )
+    .expect("render graph");
+    let mut records = Vec::new();
+    for mut consumer in bound.meter_consumers {
+        let snapshot = consumer
+            .consumer
+            .try_pop()
+            .expect("one window per graph tap");
+        records.push(format!(
+            "{{\"tap\":\"{:?}\",\"snapshot\":{}}}",
+            consumer.tap,
+            meter_snapshot_json("graph-taps", snapshot)
+        ));
+    }
+    records.sort();
+    (
+        pcm.into_iter().flat_map(f32::to_le_bytes).collect(),
+        records.join("\n") + "\n",
+    )
+}
+
+fn graph_tap_artifact_v1() -> miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
         .expect("fixture session");
-    model.tracks[0].simd1.effects.clear();
-    model.tracks[0].dynamic.effects.clear();
-    model.tracks[0].simd2.effects.clear();
+    let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
+    fixture_effect.identity = EffectIdentity::Native {
+        effect_id: StableId::parse("conformance.delay").expect("stable effect ID"),
+    };
+    fixture_effect.params.clear();
+    fixture_effect.id = StableId::parse("fixture-simd1").expect("stable effect ID");
+    model.tracks[0].simd1.effects = vec![fixture_effect.clone()];
+    fixture_effect.id = StableId::parse("fixture-dynamic").expect("stable effect ID");
+    model.tracks[0].dynamic.effects = vec![fixture_effect.clone()];
+    fixture_effect.id = StableId::parse("fixture-simd2").expect("stable effect ID");
+    model.tracks[0].simd2.effects = vec![fixture_effect];
+    model.tracks[0].fader.left_db = -6.0;
+    model.tracks[0].fader.right_db = 3.0;
     model.automation.clear();
+    let mut early = model.routes[0].clone();
+    early.id = StableId::parse("to-main-early").expect("stable route ID");
+    early.source = RouteSource::Track {
+        track_id: model.tracks[0].id.clone(),
+        tap: SendTap::PostInputBuiltins,
+    };
+    early.channel_matrix = ChannelMatrix {
+        ll: 0.25,
+        lr: -0.5,
+        rl: 0.75,
+        rr: 0.125,
+    };
+    model.routes.push(early);
     let session = compile_session(
         &model,
         CompileCaps {
@@ -518,8 +598,22 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         config,
     })
     .collect();
-    let builtins = prepare_session_builtins(
+    let registry = NativeEffectRegistry::new([
+        Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>
+    ])
+    .expect("fixture registry");
+    let effects = prepare_native_session_effects(
         &session,
+        &registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: u32::MAX,
+        },
+    )
+    .expect("prepare fixture effects");
+    let builtins = prepare_session_builtins(
+        &effects.session,
         &requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: u64::MAX,
@@ -534,12 +628,9 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         },
     )
     .expect("prepare builtins");
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         plan_id: 7,
-        effects: EffectPreparedSession {
-            session,
-            entries: Vec::new(),
-        },
+        effects,
         builtins,
         caps: miso_engine_graph::GraphCompileCaps {
             maximum_nodes: 10_000,
@@ -555,59 +646,56 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
             maximum_finite_tail_samples: 10_000_000,
         },
     })
-    .unwrap_or_else(|_| panic!("compile graph"));
-    let envelope = artifact.envelope();
-    let bindings = artifact
-        .external_binding_nodes()
-        .cloned()
-        .map(|node| {
-            let processor: Box<dyn GraphRuntimeProcessor> = matches!(
-                node,
-                GraphNodeId::TrackStage {
-                    stage: TrackStage::Input,
-                    ..
-                }
+    .unwrap_or_else(|_| panic!("compile graph"))
+}
+
+fn fixture_source_frame_v1(index: usize) -> (f32, f32) {
+    if index == 0 {
+        (1.0, -0.5)
+    } else {
+        (0.125 + index as f32 * 0.001, -0.25 - index as f32 * 0.002)
+    }
+}
+
+fn verify_graph_tap_pdc_v1(report: &GraphCompileReport) -> Result<(), String> {
+    let timing = |id: &str| {
+        report
+            .route_timings
+            .iter()
+            .find(|timing| timing.route_id.as_str() == id)
+            .ok_or_else(|| format!("graph-taps has no route timing for {id}"))
+    };
+    let late = timing("to-main")?;
+    let early = timing("to-main-early")?;
+    if (
+        late.source_arrival.0,
+        late.compensation_delay.0,
+        late.destination_arrival.0,
+    ) != (9, 0, 9)
+        || (
+            early.source_arrival.0,
+            early.compensation_delay.0,
+            early.destination_arrival.0,
+        ) != (0, 9, 9)
+    {
+        return Err("graph-taps route timing is not the frozen 9-sample PDC relation".to_owned());
+    }
+    let delays: Vec<_> = report
+        .inserted_delays
+        .iter()
+        .filter(|delay| {
+            matches!(
+                &delay.edge_id,
+                GraphEdgeId::RouteDestination { route_id } if route_id.as_str() == "to-main-early"
             )
-            .then(|| Box::new(FixtureSource) as Box<dyn GraphRuntimeProcessor>)
-            .unwrap_or_else(|| Box::new(FixtureIdentity));
-            GraphNodeBinding::new(node, processor)
         })
         .collect();
-    let bound = artifact
-        .into_bound(GraphRuntimeBindings {
-            envelope,
-            nodes: bindings,
-            observers: Vec::new(),
-        })
-        .unwrap_or_else(|_| panic!("bind graph"));
-    let mut plan = bound.plan;
-    let frames = envelope.quantum.0 as usize;
-    let mut pcm = vec![0.0_f32; frames * 2];
-    plan.render(
-        RenderIo {
-            input: None,
-            output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
-        },
-        RenderTime { absolute_sample: 0 },
-    )
-    .expect("render graph");
-    let mut records = Vec::new();
-    for mut consumer in bound.meter_consumers {
-        let snapshot = consumer
-            .consumer
-            .try_pop()
-            .expect("one window per graph tap");
-        records.push(format!(
-            "{{\"tap\":\"{:?}\",\"snapshot\":{}}}",
-            consumer.tap,
-            meter_snapshot_json("graph-taps", snapshot)
-        ));
+    if delays.len() != 1 || delays[0].samples.0 != 9 {
+        return Err(
+            "graph-taps PDC insertion differs from the frozen early-route delay".to_owned(),
+        );
     }
-    records.sort();
-    (
-        pcm.into_iter().flat_map(f32::to_le_bytes).collect(),
-        records.join("\n") + "\n",
-    )
+    Ok(())
 }
 
 fn metadata() -> String {
@@ -2415,6 +2503,17 @@ fn read_pcm_words_v1(root: &Path, path: &str) -> Result<Vec<u32>, String> {
 }
 
 fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
+    let expected = graph_fixture_expected_v1()?;
+    verify_pcm_words_v1(root, "pcm/graph-taps.f32le", &expected.output_words())?;
+    if expected.early.0[..9]
+        .iter()
+        .chain(&expected.early.1[..9])
+        .any(|sample| sample.to_bits() != 0)
+        || expected.early.0[9].to_bits() == 0
+        || expected.early.1[9].to_bits() == 0
+    {
+        return Err("graph-taps early route does not begin at exact output frame 9".to_owned());
+    }
     let bytes = read_regular_file(
         &root.join("meters/graph-taps.jsonl"),
         "meters/graph-taps.jsonl",
@@ -2455,13 +2554,20 @@ fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
     {
         return Err("graph-taps PostMatrix declaration is invalid".to_owned());
     }
-    let samples = read_pcm_words_v1(root, "pcm/graph-taps.f32le")?;
-    if samples.len() != 256 {
-        return Err("graph-taps PCM frame count differs".to_owned());
-    }
-    let (left, right) = samples.split_at(128);
-    verify_graph_lane_summary_v1(post_matrix, "left", left)?;
-    verify_graph_lane_summary_v1(post_matrix, "right", right)
+    let matrix_left: Vec<_> = expected
+        .matrix
+        .0
+        .iter()
+        .map(|sample| sample.to_bits())
+        .collect();
+    let matrix_right: Vec<_> = expected
+        .matrix
+        .1
+        .iter()
+        .map(|sample| sample.to_bits())
+        .collect();
+    verify_graph_lane_summary_v1(post_matrix, "left", &matrix_left)?;
+    verify_graph_lane_summary_v1(post_matrix, "right", &matrix_right)
 }
 
 fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Result<(), String> {
@@ -2478,7 +2584,7 @@ fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Resu
         || json_u64_hex_field_v1(record, &energy_field)? != energy.to_bits()
     {
         return Err(format!(
-            "graph-taps PostMatrix {lane} summary does not match output PCM"
+            "graph-taps PostMatrix {lane} summary does not match the independent stage model"
         ));
     }
     Ok(())
@@ -3692,35 +3798,144 @@ fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
 }
 
 fn expected_graph_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
-    let source_left: Vec<_> = (0..128).map(|index| 0.125 + index as f32 * 0.001).collect();
-    let source_right: Vec<_> = (0..128).map(|index| -0.25 - index as f32 * 0.002).collect();
-    let post_input_left = retained_tpt_filter_chain_v1(&source_left)?;
-    let post_input_right = retained_tpt_filter_chain_v1(&source_right)?;
-    let (post_matrix_left, post_matrix_right) =
-        supplied_post_matrix_samples_v1(&post_input_left, &post_input_right);
+    let expected = graph_fixture_expected_v1()?;
     let mut records = vec![
-        graph_meter_snapshot_v1("Input", 1, &source_left, &source_right)?,
-        graph_meter_snapshot_v1("PostInputBuiltins", 2, &post_input_left, &post_input_right)?,
-        graph_meter_snapshot_v1("PostSimd1", 3, &post_input_left, &post_input_right)?,
-        graph_meter_snapshot_v1("PostDynamic", 4, &post_input_left, &post_input_right)?,
-        graph_meter_snapshot_v1("PostSimd2PreFader", 5, &post_input_left, &post_input_right)?,
-        graph_meter_snapshot_v1("PostFader", 6, &post_input_left, &post_input_right)?,
-        graph_meter_snapshot_v1("PostMatrix", 7, &post_matrix_left, &post_matrix_right)?,
+        graph_meter_snapshot_v1("Input", 1, &expected.input.0, &expected.input.1)?,
+        graph_meter_snapshot_v1(
+            "PostInputBuiltins",
+            2,
+            &expected.post_input.0,
+            &expected.post_input.1,
+        )?,
+        graph_meter_snapshot_v1("PostSimd1", 3, &expected.simd1.0, &expected.simd1.1)?,
+        graph_meter_snapshot_v1("PostDynamic", 4, &expected.dynamic.0, &expected.dynamic.1)?,
+        graph_meter_snapshot_v1("PostSimd2PreFader", 5, &expected.simd2.0, &expected.simd2.1)?,
+        graph_meter_snapshot_v1("PostFader", 6, &expected.fader.0, &expected.fader.1)?,
+        graph_meter_snapshot_v1("PostMatrix", 7, &expected.matrix.0, &expected.matrix.1)?,
     ];
+    let distinct_summaries: BTreeSet<_> = records
+        .iter()
+        .map(|record| match record {
+            MeterRecordV1::Snapshot(snapshot) => vec![
+                u64::from(snapshot.left_peak),
+                u64::from(snapshot.right_peak),
+                snapshot.left_energy,
+                snapshot.right_energy,
+                snapshot.left_rms,
+                snapshot.right_rms,
+            ],
+            _ => unreachable!("graph meter records are snapshots"),
+        })
+        .collect();
+    if distinct_summaries.len() != records.len() {
+        return Err("independent graph tap summaries are not pairwise distinct".to_owned());
+    }
     records.sort_by_key(canonical_meter_record_v1);
     Ok(records)
 }
 
-/// Supplied scalar stage samples for the frozen current pan endpoint.  This is intentionally a
-/// meter input model, not a read from `pcm/graph-taps.f32le`; Issue 062 may replace this provider
-/// once it seals its graph/PDC model without changing the meter recurrence below.
-fn supplied_post_matrix_samples_v1(left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
+struct GraphFixtureExpectedV1 {
+    input: (Vec<f32>, Vec<f32>),
+    post_input: (Vec<f32>, Vec<f32>),
+    simd1: (Vec<f32>, Vec<f32>),
+    dynamic: (Vec<f32>, Vec<f32>),
+    simd2: (Vec<f32>, Vec<f32>),
+    fader: (Vec<f32>, Vec<f32>),
+    matrix: (Vec<f32>, Vec<f32>),
+    early: (Vec<f32>, Vec<f32>),
+    output: (Vec<f32>, Vec<f32>),
+}
+
+impl GraphFixtureExpectedV1 {
+    fn output_words(&self) -> Vec<u32> {
+        self.output
+            .0
+            .iter()
+            .chain(&self.output.1)
+            .copied()
+            .map(f32::to_bits)
+            .collect()
+    }
+}
+
+/// This is deliberately a pre-candidate, retained-f32 operation model.  It contains the fixed
+/// input builtins, all three 3-sample rack delays, the prepared fader/matrix, both route matrices,
+/// and the exact 9-sample early-route PDC placement; it never reads a fixture candidate.
+fn graph_fixture_expected_v1() -> Result<GraphFixtureExpectedV1, String> {
+    let input: (Vec<_>, Vec<_>) = (0..128).map(fixture_source_frame_v1).unzip();
+    let post_input = (
+        retained_tpt_filter_chain_v1(&input.0)?,
+        retained_tpt_filter_chain_v1(&input.1)?,
+    );
+    let simd1 = (delay_three_v1(&post_input.0), delay_three_v1(&post_input.1));
+    let dynamic = (delay_three_v1(&simd1.0), delay_three_v1(&simd1.1));
+    let simd2 = (delay_three_v1(&dynamic.0), delay_three_v1(&dynamic.1));
+    // The fixture session owns these stages through prepared builtins.  The explicitly frozen
+    // nonidentity fader values and canonical left=right=1 pan endpoint are modeled independently.
+    let fader: (Vec<_>, Vec<_>) = (
+        simd2
+            .0
+            .iter()
+            .map(|sample| *sample * independent_db_gain_v1(-6.0))
+            .collect(),
+        simd2
+            .1
+            .iter()
+            .map(|sample| *sample * independent_db_gain_v1(3.0))
+            .collect(),
+    );
     let cross = (core::f64::consts::FRAC_PI_2.cos()) as f32;
-    left.iter()
+    let matrix: (Vec<_>, Vec<_>) = fader
+        .0
+        .iter()
         .copied()
-        .zip(right.iter().copied())
+        .zip(fader.1.iter().copied())
         .map(|(left, right)| (cross * left + cross * right, left + right))
-        .unzip()
+        .unzip();
+    let mut early_left = vec![0.0; 128];
+    let mut early_right = vec![0.0; 128];
+    for index in 9..128 {
+        let left = post_input.0[index - 9];
+        let right = post_input.1[index - 9];
+        early_left[index] = 0.25 * left + -0.5 * right;
+        early_right[index] = 0.75 * left + 0.125 * right;
+    }
+    let output: (Vec<_>, Vec<_>) = matrix
+        .0
+        .iter()
+        .copied()
+        .zip(matrix.1.iter().copied())
+        .zip(early_left.iter().copied().zip(early_right.iter().copied()))
+        .map(|((late_left, late_right), (early_left, early_right))| {
+            (late_left + early_left, late_right + early_right)
+        })
+        .unzip();
+    Ok(GraphFixtureExpectedV1 {
+        input,
+        post_input,
+        simd1,
+        dynamic,
+        simd2,
+        fader,
+        matrix,
+        early: (early_left, early_right),
+        output,
+    })
+}
+
+fn delay_three_v1(input: &[f32]) -> Vec<f32> {
+    let mut delay = [0.0; 3];
+    input
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, input)| {
+            let lane = index % delay.len();
+            let output = delay[lane];
+            delay[lane] = input;
+            output
+        })
+        .collect()
 }
 
 fn retained_tpt_filter_chain_v1(input: &[f32]) -> Result<Vec<f32>, String> {
