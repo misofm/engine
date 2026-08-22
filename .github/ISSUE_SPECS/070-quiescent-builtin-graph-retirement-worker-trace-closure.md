@@ -155,3 +155,53 @@ timing command was invoked. `direct_audit_invocations=0`; `graph_trace_invocatio
 
 Terra verdict: preflight PASS, pending the separately authorized sole graph-trace execution on a
 clean committed candidate.
+
+## Sol attempt 2 final evidence — PASS
+
+Final clean candidate: `91d2fa23e76f18200289003748f6f63b6cb2cc32`; stopped Issue-069
+technical input: `5ce93c0`. Static adversarial review found one bounded pre-execution wrapper gap:
+the trace wrapper consumed the shared validator but did not independently require at least two
+trace TIDs or the frozen canonical graph-record SHA-256. The Sol correction added only those
+non-executing assertions plus exact validator schema/interval/violation checks; it did not change
+the graph audit, validator, fixtures, engine, DSP or public API.
+
+All preconditions passed before the trace: the fixture checker was read-only; audit-package
+all-target tests passed (five tests total, including all three graph tests); audit-package
+warning-denied all-target/all-feature Clippy and workspace format passed; all nine graph probes and
+the shared clean/render-thread/auxiliary-thread validator mutations passed; realtime policy plus
+mutations, graph policy, builtin policy plus mutations, shell syntax, source/static and diff checks
+passed. The worker source contains no `mpsc`, blocking receive, park, yield, sleep, mutex, logging
+or direct-audit launch in its armed loop. Candidate inputs remained unchanged: Cargo.lock SHA-256
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`, Issue-064 manifest
+`bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`, graph PCM
+`508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19`, graph meters
+`958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`, and all five
+Issue-069 audit-fixture identities recorded above. The accepted direct audit/trace was not rerun.
+
+After the corrected preflight was committed and the candidate was clean, Sol invoked exactly once
+and without retry:
+
+```sh
+scripts/trace-builtins-graph-audit.sh
+```
+
+The command passed. The canonical graph record retained SHA-256
+`54103c89b557a72da9c79cd00a636ea64933240a4dcb27c27647fb960b013db4` and exact values:
+1,000,000 renders at 48,000 Hz/q128; A/B/C `1/999999/0`; one applied swap; 999,998 deferred
+swaps and prior-B renders; PDC 9; seven distinct taps; queue successes/full windows `14/6999986`;
+A destroyed once by the retirement owner, B/C twice total by control, zero render-owner
+destruction; stable storage; and zero allocation, deallocation, lock, feature-detection, log,
+file-I/O, network-I/O, syscall, panic/unwind and total detector counts.
+
+The shared all-TID validator recorded exactly two trace files (`trace.299361`, `trace.299362`),
+four paired intervals and zero violations. The sorted raw trace-set SHA-256 is
+`812e7c62cf8963fba1cb6f32615005ec8bd7df6b97f6c72a0c4960fadcf0d4c1`; canonical validator
+output SHA-256 is `1c98d033c0c5d156dea887a829cc683d460145c08856c705fdbde7ef8b4324c5`.
+The unchanged shared validator SHA-256 is
+`a017fafd0b26941331cb7cc6386689055aee96501503baeaa1b652e2b3de8288`; the final wrapper
+SHA-256 is `89e91c3816363365ef59badd164716fa472cdcdcab59528b5861582e2630b695`.
+
+Sol verdict: **PASS**. Issue 070 closes the quiescent retirement-worker trace contract and unblocks
+**Builtin native, AArch64, and Wasm runtime-selection and instruction qualification**.
+`direct_audit_invocations=0`; `graph_trace_invocations=1`; `graph_audit_invocations=1`;
+`workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
