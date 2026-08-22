@@ -365,4 +365,148 @@ mv "$case_root/seal-mutated" "$seal"
 if run_lifecycle_runner success >/dev/null 2>&1; then exit 1; fi
 expect_no_scratch_launch
 
-printf 'builtins benchmark validators/lifecycle: PASS (real runner/workload/timing invocations: 0/0/0; scratch stubs only)\n'
+preflight_template="$lifecycle_scratch/preflight-template"
+mkdir -p "$preflight_template"/{scripts,bin,crates,tools/miso-engine-builtins-bench/src,fixtures/builtins/v1/{pcm,meters},.github/ISSUE_SPECS}
+cp "$script_directory/preflight-builtins-benchmark.sh" "$preflight_template/scripts/"
+for script in run-builtins-benchmark.sh builtins-benchmark-record-validator.jq \
+  builtins-benchmark-validator.jq; do
+  printf 'sealed-tool\n' >"$preflight_template/scripts/$script"
+done
+for script in test-builtins-benchmark.sh check-builtins-fixtures.sh \
+  check-workspace-policy.sh check-realtime-policy.sh check-builtins-policy.sh \
+  check-graph-policy.sh check-rack-policy.sh check-builtins-targets.sh \
+  check-rack-instructions.sh check-builtins-target-instructions.sh; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$preflight_template/scripts/$script"
+done
+printf '[workspace]\n' >"$preflight_template/Cargo.toml"
+printf 'candidate-lock\n' >"$preflight_template/Cargo.lock"
+printf '[package]\nname="bench"\n' >"$preflight_template/tools/miso-engine-builtins-bench/Cargo.toml"
+printf 'fn main() {}\n' >"$preflight_template/tools/miso-engine-builtins-bench/src/main.rs"
+for crate in miso-engine-core miso-engine-builtins miso-engine-builtins-compiler \
+  miso-engine-graph miso-engine-graph-compiler; do
+  mkdir -p "$preflight_template/crates/$crate/src"
+  printf '[package]\nname="%s"\n' "$crate" >"$preflight_template/crates/$crate/Cargo.toml"
+  printf 'pub fn marker() {}\n' >"$preflight_template/crates/$crate/src/lib.rs"
+done
+printf 'manifest\n' >"$preflight_template/fixtures/builtins/v1/MANIFEST.tsv"
+printf 'pcm\n' >"$preflight_template/fixtures/builtins/v1/pcm/graph-taps.f32le"
+printf 'meter\n' >"$preflight_template/fixtures/builtins/v1/meters/graph-taps.jsonl"
+cat >"$preflight_template/.github/ISSUE_SPECS/068-builtin-native-aarch64-and-wasm-runtime-selection-and-instruction-qualification.md" <<'EOF'
+0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19
+EOF
+cat >"$preflight_template/.github/ISSUE_SPECS/070-quiescent-builtin-graph-retirement-worker-trace-closure.md" <<'EOF'
+3581ebf058151a0a0014ff08adcdd7fcd6fe6ad51a5baf41538272d4bba6ce8e
+54103c89b557a72da9c79cd00a636ea64933240a4dcb27c27647fb960b013db4
+812e7c62cf8963fba1cb6f32615005ec8bd7df6b97f6c72a0c4960fadcf0d4c1
+1c98d033c0c5d156dea887a829cc683d460145c08856c705fdbde7ef8b4324c5
+EOF
+
+real_sha256sum="$(command -v sha256sum)"
+cat >"$preflight_template/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  rev-parse) printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+  status) ;;
+  show) printf 'base-lock\n' ;;
+  cat-file) printf '10\n' ;;
+  diff) printf 'lock-diff\n' ;;
+  *) exit 91 ;;
+esac
+EOF
+cat >"$preflight_template/bin/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$#" == 0 ]]; then
+  input="$(cat)"
+  case "$input" in
+    base-lock) hash=96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424 ;;
+    lock-diff) hash=5ebc70f8a35208d50ff4d9afd92602462180b345125263a0a4916aa3bb08940e ;;
+    *) hash="$(printf '%s' "$input" | "$MISO_TEST_REAL_SHA256SUM" | awk '{print $1}')" ;;
+  esac
+  printf '%s  -\n' "$hash"
+  exit
+fi
+case "$1" in
+  *fixtures/builtins/v1/MANIFEST.tsv)
+    hash=bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff ;;
+  *fixtures/builtins/v1/pcm/graph-taps.f32le)
+    hash=508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19 ;;
+  *fixtures/builtins/v1/meters/graph-taps.jsonl)
+    hash=958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f ;;
+  */issue068-source-manifest.tsv|*/issue068-source-after.tsv)
+    hash=0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19 ;;
+  *) exec "$MISO_TEST_REAL_SHA256SUM" "$@" ;;
+esac
+printf '%s  %s\n' "$hash" "$1"
+EOF
+cat >"$preflight_template/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MISO_TEST_PREFLIGHT_CARGO_LOG"
+if [[ " $* " == *' build '* ]]; then
+  mkdir -p "$CARGO_TARGET_DIR/release"
+  cat >"$CARGO_TARGET_DIR/release/miso_engine_builtins_bench" <<'INNER'
+#!/usr/bin/env bash
+printf 'launched\n' >>"$MISO_TEST_PREFLIGHT_LAUNCH_LOG"
+INNER
+  chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_builtins_bench"
+  if [[ "${MISO_TEST_PREFLIGHT_DRIFT:-0}" == 1 ]]; then
+    printf 'drift\n' >>"$MISO_TEST_PREFLIGHT_ROOT/Cargo.toml"
+  fi
+fi
+EOF
+chmod 755 "$preflight_template/bin/"{git,sha256sum,cargo}
+
+for tool in bash jq wc cmp cp chmod find rg awk mktemp mv sort tr mkdir rm dirname cat; do
+  ln -s "$(command -v "$tool")" "$preflight_template/bin/$tool"
+done
+run_scratch_preflight() {
+  local mode=$1 root="$lifecycle_scratch/preflight-$1"
+  cp -a "$preflight_template" "$root"
+  : >"$root/cargo.log"
+  MISO_TEST_REAL_SHA256SUM="$real_sha256sum" \
+  MISO_TEST_PREFLIGHT_CARGO_LOG="$root/cargo.log" \
+  MISO_TEST_PREFLIGHT_LAUNCH_LOG="$root/launch.log" \
+  MISO_TEST_PREFLIGHT_ROOT="$root" \
+  MISO_TEST_PREFLIGHT_DRIFT="${2:-0}" \
+  PATH="$root/bin" "$root/bin/bash" "$root/scripts/preflight-builtins-benchmark.sh"
+}
+
+run_scratch_preflight success >"$lifecycle_scratch/preflight-success.log"
+[[ ! -e "$lifecycle_scratch/preflight-success/launch.log" ]]
+[[ "$(grep -c '^build ' "$lifecycle_scratch/preflight-success/cargo.log")" == 1 ]]
+jq -e '.runner_invocations == 0 and .workload_invocations == 0 and
+       .timed_benchmark_invocations == 0 and .records_required == 20 and
+       .warmup_passes == 1 and .measured_rounds == 2' \
+  "$lifecycle_scratch/preflight-success/target/issue35/builtins-benchmark.preflight.json" >/dev/null
+
+set +e
+run_scratch_preflight drift 1 >"$lifecycle_scratch/preflight-drift.log" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 ]]
+grep -Fq 'candidate source changed during preflight' "$lifecycle_scratch/preflight-drift.log"
+[[ ! -e "$lifecycle_scratch/preflight-drift/target/issue35/miso_engine_builtins_bench" ]]
+[[ ! -e "$lifecycle_scratch/preflight-drift/target/issue35/builtins-benchmark.preflight.json" ]]
+[[ ! -e "$lifecycle_scratch/preflight-drift/launch.log" ]]
+
+preflight_existing="$lifecycle_scratch/preflight-existing"
+cp -a "$preflight_template" "$preflight_existing"
+mkdir -p "$preflight_existing/target/issue35"
+printf 'protected\n' >"$preflight_existing/target/issue35/builtins-benchmark.raw.jsonl"
+: >"$preflight_existing/cargo.log"
+set +e
+MISO_TEST_REAL_SHA256SUM="$real_sha256sum" \
+MISO_TEST_PREFLIGHT_CARGO_LOG="$preflight_existing/cargo.log" \
+MISO_TEST_PREFLIGHT_LAUNCH_LOG="$preflight_existing/launch.log" \
+MISO_TEST_PREFLIGHT_ROOT="$preflight_existing" \
+PATH="$preflight_existing/bin" "$preflight_existing/bin/bash" \
+  "$preflight_existing/scripts/preflight-builtins-benchmark.sh" \
+  >"$preflight_existing/result" 2>&1
+status=$?
+set -e
+[[ "$status" == 1 ]]
+grep -Fq 'refusing to overwrite Issue-035 artifact' "$preflight_existing/result"
+[[ "$(<"$preflight_existing/target/issue35/builtins-benchmark.raw.jsonl")" == protected ]]
+[[ ! -s "$preflight_existing/cargo.log" ]]
+[[ ! -e "$preflight_existing/launch.log" ]]
+
+printf 'builtins benchmark validators/runner/preflight lifecycle: PASS (real runner/workload/timing invocations: 0/0/0; scratch stubs only)\n'

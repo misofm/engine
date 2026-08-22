@@ -36,7 +36,7 @@ require_literal() {
     local path=$1 literal=$2
     rg -Fq -- "$literal" "$path" || fail "accepted evidence identity is absent from $path: $literal"
 }
-source_manifest() {
+issue068_source_manifest() {
     {
         printf '%s\n' Cargo.toml Cargo.lock \
             scripts/check-builtins-targets.sh \
@@ -48,12 +48,35 @@ source_manifest() {
             crates/miso-engine-graph-compiler -type f \
             \( -name Cargo.toml -o -name '*.rs' \) -print
     } | LC_ALL=C sort -u | while IFS= read -r path; do
-        [[ -f "$path" && ! -L "$path" ]] || fail "source-manifest entry is not a regular file: $path"
+        if [[ "$path" == Cargo.lock ]]; then
+            printf '%s\t%s\t%s\n' "$path" \
+                "$(git cat-file -s "$lock_base_commit:$path")" \
+                "$(git show "$lock_base_commit:$path" | sha256sum | awk '{print $1}')"
+        else
+            [[ -f "$path" && ! -L "$path" ]] || fail "source-manifest entry is not a regular file: $path"
+            printf '%s\t%s\t%s\n' "$path" "$(wc -c <"$path" | tr -d ' ')" "$(hash_file "$path")"
+        fi
+    done
+}
+candidate_source_manifest() {
+    {
+        printf '%s\n' Cargo.toml Cargo.lock \
+            scripts/run-builtins-benchmark.sh \
+            scripts/preflight-builtins-benchmark.sh \
+            scripts/test-builtins-benchmark.sh \
+            scripts/builtins-benchmark-record-validator.jq \
+            scripts/builtins-benchmark-validator.jq
+        [[ ! -d .cargo ]] || find .cargo -type f -print
+        find crates -type f \( -name Cargo.toml -o -name '*.rs' \) -print
+        find tools/miso-engine-builtins-bench -type f \
+            \( -name Cargo.toml -o -name '*.rs' \) -print
+    } | LC_ALL=C sort -u | while IFS= read -r path; do
+        [[ -f "$path" && ! -L "$path" ]] || fail "candidate-source entry is not a regular file: $path"
         printf '%s\t%s\t%s\n' "$path" "$(wc -c <"$path" | tr -d ' ')" "$(hash_file "$path")"
     done
 }
 
-for tool in cargo git jq sha256sum wc cmp cp chmod find rg awk mktemp mv; do
+for tool in bash cargo git jq sha256sum wc cmp cp chmod find rg awk mktemp mv sort tr; do
     command -v "$tool" >/dev/null || fail "required tool is unavailable: $tool"
 done
 cd "$repository_root"
@@ -91,8 +114,16 @@ candidate_lock_sha256="$(hash_file Cargo.lock)"
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-issue058-preflight.XXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
-source_manifest >"$scratch/source-manifest.tsv"
-candidate_source_sha256="$(hash_file "$scratch/source-manifest.tsv")"
+issue068_source_manifest >"$scratch/issue068-source-manifest.tsv"
+[[ "$(hash_file "$scratch/issue068-source-manifest.tsv")" == "$accepted_issue068_source_sha256" ]] ||
+    fail 'accepted Issue-068 source manifest cannot be reconstructed from the frozen inputs'
+candidate_source_manifest >"$scratch/source-before.tsv"
+candidate_source_sha256="$(hash_file "$scratch/source-before.tsv")"
+runner_sha256="$(hash_file "$runner")"
+preflight_script_sha256="$(hash_file "$script_directory/preflight-builtins-benchmark.sh")"
+record_validator_sha256="$(hash_file "$record_validator")"
+aggregate_validator_sha256="$(hash_file "$aggregate_validator")"
+validator_test_sha256="$(hash_file "$validator_test")"
 
 # Proportional, nonexecuting qualification. None of these commands invokes benchmark main.
 bash scripts/check-builtins-fixtures.sh
@@ -111,6 +142,31 @@ CARGO_TARGET_DIR="$build_directory" cargo build --locked --release -p miso-engin
 built_binary="$build_directory/release/miso_engine_builtins_bench"
 [[ -x "$built_binary" && ! -L "$built_binary" ]] || fail 'fresh release binary was not produced'
 
+[[ "$(git rev-parse --verify HEAD)" == "$candidate_commit" ]] || fail 'candidate commit changed during preflight'
+[[ -z "$(git status --porcelain=v1 --untracked-files=normal)" ]] || fail 'candidate became dirty during preflight'
+candidate_source_manifest >"$scratch/source-after.tsv"
+cmp -s "$scratch/source-before.tsv" "$scratch/source-after.tsv" || fail 'candidate source changed during preflight'
+[[ "$(hash_file Cargo.lock)" == "$candidate_lock_sha256" ]] || fail 'Cargo.lock changed during preflight'
+[[ "$(git diff --no-ext-diff --binary "$lock_base_commit" -- Cargo.lock | sha256sum | awk '{print $1}')" == "$lock_diff_sha256" ]] ||
+    fail 'Cargo.lock transition changed during preflight'
+issue068_source_manifest >"$scratch/issue068-source-after.tsv"
+[[ "$(hash_file "$scratch/issue068-source-after.tsv")" == "$accepted_issue068_source_sha256" ]] ||
+    fail 'accepted Issue-068 source identity changed during preflight'
+require_hash fixtures/builtins/v1/MANIFEST.tsv "$manifest_sha256"
+require_hash fixtures/builtins/v1/pcm/graph-taps.f32le "$graph_pcm_sha256"
+require_hash fixtures/builtins/v1/meters/graph-taps.jsonl "$graph_meter_sha256"
+require_hash "$runner" "$runner_sha256"
+require_hash "$script_directory/preflight-builtins-benchmark.sh" "$preflight_script_sha256"
+require_hash "$record_validator" "$record_validator_sha256"
+require_hash "$aggregate_validator" "$aggregate_validator_sha256"
+require_hash "$validator_test" "$validator_test_sha256"
+for identity in "$direct_audit_sha256" "$graph_audit_sha256" "$graph_trace_sha256" "$graph_trace_validator_sha256"; do
+    require_literal "$issue070_spec" "$identity"
+done
+for path in "$sealed_binary" "$seal" "$raw_output" "$accepted_output" "$stderr_output" "$disposition"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || fail "Issue-035 artifact appeared during preflight: $path"
+done
+
 mkdir -p "$artifact_directory"
 temporary_binary="$(mktemp "$artifact_directory/.miso_engine_builtins_bench.XXXXXX")"
 cp -- "$built_binary" "$temporary_binary"
@@ -120,11 +176,6 @@ mv -n -- "$temporary_binary" "$sealed_binary"
 [[ ! -e "$temporary_binary" && -x "$sealed_binary" && ! -L "$sealed_binary" ]] || fail 'binary publication was not atomic and no-clobber'
 
 binary_sha256="$(hash_file "$sealed_binary")"
-runner_sha256="$(hash_file "$runner")"
-preflight_script_sha256="$(hash_file "$script_directory/preflight-builtins-benchmark.sh")"
-record_validator_sha256="$(hash_file "$record_validator")"
-aggregate_validator_sha256="$(hash_file "$aggregate_validator")"
-validator_test_sha256="$(hash_file "$validator_test")"
 issue068_spec_sha256="$(hash_file "$issue068_spec")"
 issue070_spec_sha256="$(hash_file "$issue070_spec")"
 seal_payload_sha256="$(printf '%s\n' \
@@ -179,6 +230,9 @@ jq -n -S \
       runner_invocations:0, workload_invocations:0, timed_benchmark_invocations:0}' \
     >"$temporary_seal"
 [[ -s "$temporary_seal" ]] || fail 'preflight seal is empty'
+for path in "$seal" "$raw_output" "$accepted_output" "$stderr_output" "$disposition"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || fail "Issue-035 artifact appeared before seal publication: $path"
+done
 [[ ! -e "$seal" && ! -L "$seal" ]] || fail 'preflight seal appeared during publication'
 mv -n -- "$temporary_seal" "$seal"
 [[ ! -e "$temporary_seal" && -f "$seal" && ! -L "$seal" ]] || fail 'seal publication was not atomic and no-clobber'
