@@ -103,3 +103,30 @@ three guarded pipeline rows; scratch producer launch/status/artifact matrix; cha
 checks; strict verdict; `historical_unrecorded_benchmark_pipeline_invocations=1`;
 `fuzz_run_invocations=0`; `benchmark_workload_invocations=0`;
 `timed_benchmark_invocations=0`; and confirmation that no CI rerun was requested.
+
+## Terra attempt 1 evidence — PASS (2026-08-22)
+
+Candidate `81c1013` preserves the frozen fuzz manifest
+`8b25d5c05a7f5c86b9fab83cde70e3e3c362b2aeb978f037d03ecd21b973c55b`, root lock
+`96d0585ab8059905b256f87e7cadd717ae6e790aa140de3a4e7cc9db4791d424`, and toolchain file
+`f6a2b4a1eb8d7d2cad50aa25f028c86a20ca90191f2ff066e8cc34896e94ffd3`. Pinned Cargo 1.97.1
+generated `fuzz/Cargo.lock` from stale `0be0fbe18be5635a5bc40d12395dd50a4ea358ed822722c426a9559443a0873b`
+to `bf56130a8ea92bae516074ee60c40eb7740c04fe91b78a16b95f6a014d12e9f6`; it remains version 4,
+contains `miso-engine-effect-package` and `miso-engine-effect-contract`, and lists the three
+unchanged path dependencies under `miso-engine-session-fuzz`. Pinned `metadata --locked --no-deps`
+and `check --locked --bins` passed; one repeated generation preserved that exact lock hash.
+
+Workflow SHA-256 changed from frozen incident value
+`8f85718ec907dcabd808a8d9b5a1a0d8d4b6152a1ed60c8f8ced967b61fcab0a` to
+`8f69e862876d0bdda977c96be46f945d1826199bde9a096abcc4206b7ab064b7`. Static validation found
+exactly three `| tee target/` rows. Each has, in its own literal shell block, `set -o pipefail`,
+`mkdir -p target`, the unchanged pipeline/arguments, and a nonempty regular-file assertion; the
+native-effect benchmark step remains unchanged. Scratch-only proof `miso-engine-issue071.7frWbg`
+captured exact success bytes, propagated producer status 73 while retaining partial bytes, and
+proved a synthetic mkdir failure made zero additional launches (two total stub launches from the
+success and status-73 cases only).
+
+Final changed-path/static seal and `git diff --check` passed. Terra verdict: **PASS**.
+`historical_unrecorded_benchmark_pipeline_invocations=1`;
+`issue071_fuzz_run_invocations=0`; `issue071_benchmark_workload_invocations=0`;
+`issue071_timed_benchmark_invocations=0`; `issue071_ci_rerun_requests=0`.

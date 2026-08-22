@@ -112,3 +112,16 @@ PASS requires all local nonexecuting gates and exact evidence with:
 - `issue071_benchmark_workload_invocations=0`;
 - `issue071_timed_benchmark_invocations=0`; and
 - `issue071_ci_rerun_requests=0`.
+
+## Terra attempt 1 completion record
+
+PASS on candidate `81c1013`: pinned Cargo 1.97.1 generated and then reproduced fuzz lock hash
+`bf56130a8ea92bae516074ee60c40eb7740c04fe91b78a16b95f6a014d12e9f6`; pinned standalone
+metadata and `--locked --bins` check passed. The generated lock now carries the unchanged
+effect-package closure. The three workflow tee pipelines each have ordered local `pipefail`,
+directory creation, and nonempty-artifact guards; static and scratch-only producer proofs passed.
+The root lock, fuzz manifest, and toolchain remained frozen; exact-path/diff checks passed.
+
+`historical_unrecorded_benchmark_pipeline_invocations=1`;
+`issue071_fuzz_run_invocations=0`; `issue071_benchmark_workload_invocations=0`;
+`issue071_timed_benchmark_invocations=0`; `issue071_ci_rerun_requests=0`.
