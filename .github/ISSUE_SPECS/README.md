@@ -82,10 +82,10 @@ Issue 109, **Repair builtin benchmark host metadata export and reauthorize one d
 accepted its runner-metadata semantics as technical input but stopped before preflight: its sole
 no-clobber repair seal was created against the pre-correction lifecycle during a concurrent
 handoff. Its counters remain `0/0/0/0` and `target/issue109` is immutable stale evidence. Issue 110,
-**Complete builtin benchmark host metadata run from a fresh successor namespace**, owns only
-successor-named routes of those accepted semantics, a fresh `target/issue110` zero-workload
-preflight and at most one separately authorized descriptive run. Sol High implements; Sol XHigh
-briefs and verifies. Issues 058–059, 061, 063–064 and 067–070 retain their recorded attempt
+**Complete builtin benchmark host metadata run from a fresh successor namespace**, completed the
+fresh zero-workload preflight and sole descriptive run with Sol XHigh PASS. Its exact seven
+`target/issue110` artifacts are immutable and it is the machine authority for Issue 033. Issues
+058–059, 061, 063–064 and 067–070 retain their recorded attempt
 ownership.
 
 Issue 022 is now the launch-sized **Stable C ABI and host-fed planar PCM render** product: immutable
@@ -111,11 +111,12 @@ permit one Terra attempt plus one Sol correction and prohibit benchmark/timing w
 Dependency order is 007 accepted slice -> 034 corrections -> 036 -> both 008 and stopped 035,
 then 035 checkpoint -> stopped 056 -> 059 -> stopped 060 -> parallel 061/063 plus stopped 062 ->
 067 -> 064 -> stopped 057 technical input -> stopped 069 technical input -> 070 -> 068 -> stopped
-058 technical input -> stopped 072 technical input -> 109. Issue 008 needs 036's accepted preparation/metadata and
+058 technical input -> stopped 072 technical input -> stopped 109 technical input -> 110. Issue 008 needs 036's accepted preparation/metadata and
 sealed graph/resource contract but not the qualification successors. Issues 022, 023 and 077 wait
 for 068's audited/target-qualified machine candidate. Issue 033 runs the real preregistered human
-listening only after 109 seals that candidate and its accepted benchmark; issue 026 waits for both
-109 and 033. This ordering forbids synthetic trials, audible-quality
+listening only after 110 seals that candidate and its accepted benchmark; issue 026 waits for both
+110 and 033. Issue 033 first permits a two-pass agent-only packet-preparation tranche, then stops
+for a real facilitator/listener with all human/listening counters still zero. This ordering forbids synthetic trials, audible-quality
 claims and release bypasses while allowing independent SIMD work after its true contract
 dependency is complete.
 
