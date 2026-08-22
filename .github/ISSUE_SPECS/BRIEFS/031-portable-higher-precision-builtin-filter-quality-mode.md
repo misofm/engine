@@ -1,5 +1,12 @@
 # Sol brief — Issue 031 portable higher-precision builtin filter quality mode
 
+## Final status
+
+**NO ADOPTION.** The sole corrected complete matrix ran once and completed, but the retained-`f64`
+candidate failed 38 frozen analytic rows and the candidate impulse/DFT gate. The accepted launch
+`f32` realization remains unchanged; no production successor is authorized. Total matrix
+invocations are one and timed benchmark invocations are zero.
+
 ## Decision boundary
 
 Issue 031 is a reference-only, non-timed adoption decision. It does not implement or expose a

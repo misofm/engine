@@ -2,7 +2,7 @@
 
 ## Status and outcome
 
-**READY — evaluation/adoption decision only.** Determine whether one portable retained-`f64`
+**FINAL — NO ADOPTION.** This evaluation determined whether one portable retained-`f64`
 variant produces a preregistered material numerical improvement over the accepted launch `f32`
 HPF/LPF recurrence at acceptable static storage/SIMD cost. If it qualifies, close this issue with a
 selection record and create a separate stateless implementation successor. If it does not qualify,
@@ -156,3 +156,43 @@ Non-matrix evidence on the unchanged correction:
 The complete Issue-031 comparison was not invoked. Counts remain `matrix_invocations=0` and
 `timed_benchmark_invocations=0`. This is a green correction checkpoint, not final numerical
 evidence and not authorization to run from a dirty candidate.
+
+## Final Sol evidence and verdict (2026-08-22)
+
+The sole authorized complete comparison ran once on clean candidate
+`cf611ef48f43df9db7422762e9f90006936b37af` and persisted `decision=NO_ADOPTION` followed by
+`complete=true`. It was not retried. The corrected reference module SHA-256 is
+`887be248efe2c23175d7b026dcd3fdedd887591656a0e603a3ecf31f9ce53e7e`; the 10-line,
+2,803-byte transcript SHA-256 is
+`ca1b5177869f36b20a63d5f535e17e995c30816855dfec5a61db1c4db922472f`; and the 18-line,
+3,193-byte captured test output SHA-256 is
+`64b18be488f607ebf195f0c383a7a0ced807cc6e443a11b89019090f303ecc2a`.
+
+The frozen grid and lifecycle were exact: equation `493033315f463634`, seed
+`0000000000000310`, grid `b2a2d521a519e55a`, 64 configurations, 296 analytic/sustained rows,
+64 one-second impulse configurations, 192 DC/noise rows, eight semantic rows, all five partitions,
+`matrix_invocations=1` and `timed_benchmark_invocations=0`.
+
+The candidate did not qualify:
+
+- normalized transfer equivalence passed with worst coefficient error
+  `6.66133814775093924e-16 <= 1e-12`, but 38 analytic rows failed the `1e-9 dB` gate. The first
+  failure and analytic worst were the 44.1-kHz low-pass at the exact maximum-predecessor cutoff
+  `0x46ac42f6` (`22,049.48046875 Hz`); worst error was
+  `1.76030052756459554e-7 dB`;
+- the impulse phase recorded 74 aggregate failures. The decisive candidate DFT worst was
+  `1.82763560973455697e-2 dB > 0.005 dB` at 44.1 kHz, 100-Hz low-pass, 19,844-Hz probe; and
+- therefore gates 1 and 2 failed independently and `pass=false` is required.
+
+The remaining evidence does not rescue selection: materiality covered 198 rows across all four
+rates and both filter kinds, with `147.665737227548988 dB` global and
+`31.810227668712969 dB` minimum limited-row improvement, candidate worst residual
+`-134.923113322814231 dB`, and zero regression failures. All eight semantic rows passed with eight
+injected recoveries and zero legal invalid recoveries. The exact candidate projection remained
+48-byte payload/16-byte state versus 24/8, W4 `f64x2x2`, W8 `f64x4x2`, 2x vector-operation
+ceiling, zero scratch, zero latency and zero tail.
+
+**Final verdict: NO ADOPTION.** The accepted retained-`f32` launch HPF/LPF remains unchanged.
+Both attempts and the sole matrix authorization are consumed. No production quality mode or
+implementation successor is created, and this issue may close when local/remote evidence is
+synchronized.
