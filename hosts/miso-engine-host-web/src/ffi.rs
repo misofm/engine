@@ -301,15 +301,13 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
     })
 }
 
-/// Render one exact prepared quantum at `absolute_sample` into output staging.
+/// Render one exact prepared quantum after validating the browser's actual frame count.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_render(handle: u32, absolute_sample: u64) -> u32 {
+pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
     catch_result(|| {
         with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            if host.status().state == STATE_READY
-                && host.status().next_absolute_sample != absolute_sample
-            {
-                return host.reject_render_time();
+            if host.status().state == STATE_READY && host.config().quantum_frames != actual_frames {
+                return host.reject_output_quantum(actual_frames);
             }
             host.render_next()
         })

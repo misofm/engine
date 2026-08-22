@@ -149,7 +149,7 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
 }
 
 #[test]
-fn raw_ffi_uses_stable_staging_and_exact_render_time_without_growth() {
+fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let quantum = 64_u32;
     let toml = one_track_session(quantum);
     let handle = miso_engine_web_v1_config_new();
@@ -192,17 +192,13 @@ fn raw_ffi_uses_stable_staging_and_exact_render_time_without_growth() {
         miso_engine_web_v1_source_submit(handle, 14, 1, u64::from(quantum), 2, quantum, 1),
         RESULT_BACKPRESSURE
     );
-    assert_eq!(miso_engine_web_v1_render(handle, 1), RESULT_RENDER_REJECTED);
-    assert_eq!(miso_engine_web_v1_render(handle, 0), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_render(handle, quantum), RESULT_OK);
     assert_eq!(
         miso_engine_web_v1_source_submit(handle, 14, 1, u64::from(quantum), 2, quantum, 1),
         RESULT_OK
     );
     assert_eq!(miso_engine_web_v1_source_seek(handle, 14, 2, 0), RESULT_OK);
-    assert_eq!(
-        miso_engine_web_v1_render(handle, u64::from(quantum)),
-        RESULT_OK
-    );
+    assert_eq!(miso_engine_web_v1_render(handle, quantum), RESULT_OK);
     let after = [
         BUFFER_SESSION_TOML,
         BUFFER_SOURCE_ID,
@@ -215,6 +211,14 @@ fn raw_ffi_uses_stable_staging_and_exact_render_time_without_growth() {
     let status = crate::ffi::test_status(handle).expect("status");
     assert_eq!(status.rendered_quanta, 2);
     assert_eq!(status.next_absolute_sample, u64::from(quantum) * 2);
+    assert_eq!(
+        miso_engine_web_v1_render(handle, 0),
+        RESULT_REPREPARE_REQUIRED
+    );
+    let mismatch = crate::ffi::test_status(handle).expect("status");
+    assert_eq!(mismatch.state, STATE_FAILED);
+    assert_eq!(mismatch.rendered_quanta, 2);
+    assert_eq!(mismatch.next_absolute_sample, u64::from(quantum) * 2);
     let resources = crate::ffi::test_resources(handle).expect("resources");
     assert!(resources.bridge_retained_bytes <= config.maximum_host_retained_bytes);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);

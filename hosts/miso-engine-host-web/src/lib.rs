@@ -589,10 +589,6 @@ impl AudioWorkletEngineHost {
         }
     }
 
-    pub(crate) fn reject_render_time(&mut self) -> u32 {
-        self.record(RESULT_RENDER_REJECTED)
-    }
-
     pub(crate) fn record_boundary_result(&mut self, code: u32) -> u32 {
         self.record(code)
     }
