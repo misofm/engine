@@ -2033,6 +2033,189 @@ mod tests {
         ]
     }
 
+    fn issue068_hash_words(words: impl IntoIterator<Item = u32>) -> u64 {
+        words
+            .into_iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, word| {
+                (hash ^ u64::from(word)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    #[test]
+    fn issue068_launch_rates_match_scalar_for_nonfused_and_fma_tpt_banks() {
+        let (nonfused_backend, nonfused_width) =
+            available_nonfused_bank().expect("Issue 068 requires a native nonfused bank");
+        PreparedTptBankKernelV1::try_new(KernelBackendV1::X86Avx2Fma)
+            .expect("Issue 068 requires native AVX2+FMA");
+
+        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+            let nonfused_lanes = nonfused_width.lanes() as usize;
+            let nonfused_parameters: Vec<_> = (0..nonfused_lanes).map(bank_parameters).collect();
+            let mut nonfused_scalar: Vec<_> = nonfused_parameters
+                .iter()
+                .copied()
+                .map(|parameters| {
+                    BuiltinChain::new(rate, parameters)
+                        .expect("scalar input")
+                        .into_input_builtins()
+                })
+                .collect();
+            let mut nonfused = BuiltinInputBankV1::new(
+                nonfused_backend,
+                nonfused_width,
+                nonfused_parameters
+                    .into_iter()
+                    .map(|parameters| {
+                        BuiltinChain::new(rate, parameters)
+                            .expect("bank input")
+                            .into_input_builtins()
+                    })
+                    .collect(),
+                &vec![true; nonfused_lanes],
+            )
+            .expect("nonfused bank");
+
+            let fma_parameters: Vec<_> = (0..8).map(bank_parameters).collect();
+            let mut fma_scalar: Vec<_> = fma_parameters
+                .iter()
+                .copied()
+                .map(|parameters| {
+                    BuiltinChain::new(rate, parameters)
+                        .expect("FMA scalar input")
+                        .into_input_builtins()
+                })
+                .collect();
+            let mut fma = BuiltinInputBankV1::new(
+                KernelBackendV1::X86Avx2Fma,
+                BankWidth::Eight,
+                fma_parameters
+                    .into_iter()
+                    .map(|parameters| {
+                        BuiltinChain::new(rate, parameters)
+                            .expect("FMA bank input")
+                            .into_input_builtins()
+                    })
+                    .collect(),
+                &[true; 8],
+            )
+            .expect("FMA bank");
+
+            let mut row_words = Vec::new();
+            for (block, frames) in [17usize, 29usize].into_iter().enumerate() {
+                let first_sample = (block * 29) as u64;
+                let mut left = vec![0.0; frames * nonfused_lanes];
+                let mut right = vec![0.0; frames * nonfused_lanes];
+                let mut expected_left = vec![vec![0.0; frames]; nonfused_lanes];
+                let mut expected_right = vec![vec![0.0; frames]; nonfused_lanes];
+                for frame in 0..frames {
+                    for lane in 0..nonfused_lanes {
+                        let index = frame * nonfused_lanes + lane;
+                        left[index] =
+                            ((rate as usize + frame * 19 + lane * 23) as f32 * 0.013).sin() * 0.67;
+                        right[index] =
+                            ((rate as usize + frame * 11 + lane * 29) as f32 * 0.017).cos() * -0.53;
+                        expected_left[lane][frame] = left[index];
+                        expected_right[lane][frame] = right[index];
+                    }
+                }
+                for lane in 0..nonfused_lanes {
+                    nonfused_scalar[lane]
+                        .process(
+                            DualMonoBlock::new(
+                                &mut expected_left[lane],
+                                &mut expected_right[lane],
+                                first_sample,
+                            )
+                            .expect("nonfused scalar block"),
+                        )
+                        .expect("nonfused scalar process");
+                }
+                let report = nonfused
+                    .process(&mut left, &mut right, frames as u32, first_sample)
+                    .expect("nonfused bank process");
+                assert_eq!(report, BuiltinProcessReport::default());
+                for frame in 0..frames {
+                    for lane in 0..nonfused_lanes {
+                        let index = frame * nonfused_lanes + lane;
+                        assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
+                        assert_eq!(
+                            right[index].to_bits(),
+                            expected_right[lane][frame].to_bits()
+                        );
+                        row_words.extend([
+                            expected_left[lane][frame].to_bits(),
+                            expected_right[lane][frame].to_bits(),
+                        ]);
+                    }
+                }
+                assert_bank_state_matches_scalar(&nonfused, &nonfused_scalar);
+
+                let mut fma_left = vec![0.0; frames * 8];
+                let mut fma_right = vec![0.0; frames * 8];
+                let mut fma_expected_left = vec![vec![0.0; frames]; 8];
+                let mut fma_expected_right = vec![vec![0.0; frames]; 8];
+                for frame in 0..frames {
+                    for lane in 0..8 {
+                        let index = frame * 8 + lane;
+                        fma_left[index] =
+                            ((rate as usize + frame * 31 + lane * 7) as f32 * 0.009).sin() * 0.81;
+                        fma_right[index] =
+                            ((rate as usize + frame * 5 + lane * 37) as f32 * 0.021).cos() * -0.41;
+                        fma_expected_left[lane][frame] = fma_left[index];
+                        fma_expected_right[lane][frame] = fma_right[index];
+                    }
+                }
+                for lane in 0..8 {
+                    fma_scalar[lane]
+                        .process(
+                            DualMonoBlock::new(
+                                &mut fma_expected_left[lane],
+                                &mut fma_expected_right[lane],
+                                first_sample,
+                            )
+                            .expect("FMA scalar block"),
+                        )
+                        .expect("FMA scalar process");
+                }
+                let fma_report = fma
+                    .process(&mut fma_left, &mut fma_right, frames as u32, first_sample)
+                    .expect("FMA bank process");
+                assert_eq!(fma_report, BuiltinProcessReport::default());
+                for frame in 0..frames {
+                    for lane in 0..8 {
+                        let index = frame * 8 + lane;
+                        assert_tpt_tolerance(fma_left[index], fma_expected_left[lane][frame]);
+                        assert_tpt_tolerance(fma_right[index], fma_expected_right[lane][frame]);
+                    }
+                }
+                for (lane, scalar) in fma_scalar.iter().enumerate() {
+                    for (actual, expected) in bank_lane_state_bits(&fma, lane)
+                        .into_iter()
+                        .zip(input_state_bits(scalar))
+                    {
+                        assert_tpt_tolerance(f32::from_bits(actual), f32::from_bits(expected));
+                    }
+                }
+            }
+            for lane in 0..nonfused_lanes {
+                row_words.extend(bank_lane_state_bits(&nonfused, lane));
+            }
+            let row_hash = issue068_hash_words(row_words);
+            let expected_hash = match rate {
+                44_100 => 0xb1dc_6cb4_340e_2587,
+                48_000 => 0x880b_5d4b_2bc6_cce7,
+                88_200 => 0xbe67_b6b9_58f1_df14,
+                96_000 => 0xc4d6_5580_7935_9c99,
+                _ => unreachable!("launch rate set is frozen"),
+            };
+            assert_eq!(row_hash, expected_hash, "rate={rate}");
+            println!(
+                "issue068 four-rate row rate={rate} scalar_hash={:016x}",
+                row_hash
+            );
+        }
+    }
+
     #[test]
     fn available_nonfused_bank_is_bit_identical_to_independent_scalar_tpt() {
         let Some((backend, width)) = available_nonfused_bank() else {

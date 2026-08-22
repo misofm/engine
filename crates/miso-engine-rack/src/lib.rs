@@ -351,6 +351,50 @@ impl AoSoaScratch {
 mod tests {
     use super::*;
     use miso_engine_core::TargetCapabilities;
+
+    #[test]
+    fn issue068_all_capability_tuples_select_exact_backend_and_width() {
+        for wasm_simd128 in [false, true] {
+            for aarch64_neon in [false, true] {
+                for x86_avx2 in [false, true] {
+                    for x86_fma in [false, true] {
+                        let capabilities = TargetCapabilities::from_detected(
+                            wasm_simd128,
+                            aarch64_neon,
+                            x86_avx2,
+                            x86_fma,
+                        );
+                        let expected = if x86_avx2 && x86_fma {
+                            KernelBackendV1::X86Avx2Fma
+                        } else if x86_avx2 {
+                            KernelBackendV1::X86Avx2
+                        } else if aarch64_neon {
+                            KernelBackendV1::Aarch64Neon
+                        } else if wasm_simd128 {
+                            KernelBackendV1::WasmSimd128
+                        } else {
+                            KernelBackendV1::Scalar
+                        };
+                        let expected_width = match expected {
+                            KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon => {
+                                Some(BankWidth::Four)
+                            }
+                            KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma => {
+                                Some(BankWidth::Eight)
+                            }
+                            KernelBackendV1::Scalar => None,
+                            _ => unreachable!("frozen backend matrix"),
+                        };
+                        let dispatch = KernelDispatch::select(capabilities);
+                        assert_eq!(KernelBackendV1::select(capabilities), expected);
+                        assert_eq!(dispatch.backend(), expected);
+                        assert_eq!(dispatch.bank_width(), expected_width);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn dispatch_requires_avx2_for_fma() {
         assert_eq!(
