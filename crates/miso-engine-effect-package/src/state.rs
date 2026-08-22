@@ -298,6 +298,51 @@ fn validate_replay(
     Ok(expected)
 }
 
+pub fn validate_effect_state_metadata_v1(
+    bound: BoundEffectDescriptorWireV1<'_>,
+    replay: EffectStateReplayViewV1<'_>,
+    actual: PreparedEffectMetadata,
+) -> Result<(), Diagnostic> {
+    let descriptor = bound.descriptor();
+    if replay.effect_id != descriptor.id
+        || !core::ptr::eq(actual.descriptor, descriptor)
+        || actual.descriptor.id != descriptor.id
+    {
+        return Err(metadata_mismatch(1));
+    }
+    if actual.descriptor.contract_major != descriptor.contract_major
+        || actual.descriptor.contract_minor != descriptor.contract_minor
+    {
+        return Err(metadata_mismatch(2));
+    }
+    if actual.descriptor.state_layout_version != descriptor.state_layout_version {
+        return Err(metadata_mismatch(3));
+    }
+    let expected = derive_expected_metadata_without_revalidation(descriptor, replay.request)?;
+    for (detail, equal) in [
+        (4, actual.sample_rate == expected.sample_rate),
+        (5, actual.quantum == expected.quantum),
+        (6, actual.quality == expected.quality),
+        (7, actual.bypass == expected.bypass),
+        (8, actual.link_mode == expected.link_mode),
+        (9, actual.ports == expected.ports),
+        (10, actual.latency == expected.latency),
+        (11, actual.tail == expected.tail),
+        (12, actual.state_sizes == expected.state_sizes),
+        (13, actual.scratch_bytes == expected.scratch_bytes),
+        (
+            14,
+            actual.automation_capacity == expected.automation_capacity,
+        ),
+    ] {
+        if !equal {
+            return Err(metadata_mismatch(detail));
+        }
+    }
+    validate_request_limits(expected, replay.request)?;
+    validate_initial_values_no_alloc(descriptor, replay.request.initial_values)
+}
+
 fn authoring_layout(
     bound: BoundEffectDescriptorWireV1<'_>,
     replay: EffectStateReplayViewV1<'_>,
@@ -911,6 +956,92 @@ fn validate_verified_initial_values(
         ));
     }
     Ok(())
+}
+
+pub fn validate_effect_state_current_layout_v1(
+    state: VerifiedEffectStateV1<'_>,
+) -> Result<(), Diagnostic> {
+    let descriptor = state.bound_descriptor;
+    if state.effect_id != descriptor.id.as_str() {
+        return Err(metadata_mismatch(1));
+    }
+    if (state.contract_major, state.contract_minor)
+        != (descriptor.contract_major, descriptor.contract_minor)
+    {
+        return Err(metadata_mismatch(2));
+    }
+    if state.state_layout_version != descriptor.state_layout_version {
+        return Err(metadata_mismatch(3));
+    }
+    if !is_launch_sample_rate(SampleRateHz(state.sample_rate)) {
+        return Err(metadata_mismatch(4));
+    }
+    if state.quantum == 0 {
+        return Err(metadata_mismatch(5));
+    }
+    let quality = descriptor
+        .qualities
+        .iter()
+        .find(|quality| {
+            quality.quality == state.quality && quality.sample_rate == state.sample_rate
+        })
+        .ok_or_else(|| metadata_mismatch(6))?;
+    if !descriptor.supported_link_modes.contains(state.link_mode) {
+        return Err(metadata_mismatch(8));
+    }
+    let sidechain_matches = match state.sidechain_kind {
+        0 => !descriptor
+            .ports
+            .iter()
+            .any(|port| port.role == miso_engine_effect_contract::PortRole::SidechainInput),
+        1 => {
+            !state.sidechain_required
+                && descriptor.ports.iter().any(|port| {
+                    port.role == miso_engine_effect_contract::PortRole::SidechainInput
+                        && port.id.as_str() == state.sidechain_id
+                        && !port.required
+                })
+        }
+        2 => descriptor.ports.iter().any(|port| {
+            port.role == miso_engine_effect_contract::PortRole::SidechainInput
+                && port.id.as_str() == state.sidechain_id
+                && port.required == state.sidechain_required
+        }),
+        _ => false,
+    };
+    if !sidechain_matches {
+        return Err(metadata_mismatch(9));
+    }
+    if state.latency_samples != quality.latency.0 {
+        return Err(metadata_mismatch(10));
+    }
+    if state.tail != quality.tail {
+        return Err(metadata_mismatch(11));
+    }
+    if state.state_sizes != quality.maximum_state {
+        return Err(metadata_mismatch(12));
+    }
+    let expected_scratch = quality
+        .scratch_bytes_per_frame
+        .checked_mul(u64::from(state.quantum))
+        .and_then(|bytes| quality.scratch_fixed_bytes.checked_add(bytes))
+        .ok_or_else(|| overflow(176))?;
+    if state.scratch_bytes != expected_scratch {
+        return Err(metadata_mismatch(13));
+    }
+    if state.automation_capacity != state.request_maximum_automation_spans_per_block {
+        return Err(metadata_mismatch(14));
+    }
+    let payload = state.state_sizes.total().ok_or_else(|| overflow(216))?;
+    if state.request_maximum_total_state_bytes == 0
+        || state.request_maximum_scratch_bytes == 0
+        || state.request_maximum_automation_spans_per_block == 0
+        || payload > state.request_maximum_total_state_bytes
+        || state.scratch_bytes > state.request_maximum_scratch_bytes
+    {
+        return Err(metadata_mismatch(15));
+    }
+    validate_verified_initial_values(state, descriptor)
 }
 
 pub fn validate_effect_state_replay_v1(

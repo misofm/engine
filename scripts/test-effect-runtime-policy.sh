@@ -21,7 +21,7 @@ expect_dependency_failure() {
     restore_compiler_manifest
 }
 
-printf '\nmiso-engine-effect-package.workspace = true\n' >>"$temp/crates/miso-engine-effect-compiler/Cargo.toml"
+sed -i '/^\[dependencies\]$/a miso-engine-graph.workspace = true' "$compiler_manifest"
 expect_dependency_failure arbitrary-extra
 
 sed -i '/^miso-engine-parametric-eq[.]workspace = true$/d' "$compiler_manifest"
@@ -56,6 +56,17 @@ sed -i '/^miso-engine-delay[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-delay
 sed -i 's/^miso-engine-delay[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-delay
+
+for reverse_dependency in miso-engine-core miso-engine-session; do
+    reverse_manifest="$temp/crates/$reverse_dependency/Cargo.toml"
+    printf '\nmiso-engine-effect-package.workspace = true\n' >>"$reverse_manifest"
+    if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+        printf 'effect runtime package reverse-dependency mutation escaped: %s\n' \
+            "$reverse_dependency" >&2
+        exit 1
+    fi
+    cp "$root/crates/$reverse_dependency/Cargo.toml" "$reverse_manifest"
+done
 
 printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
