@@ -20,7 +20,7 @@ env:
 jobs:
   host:
     name: host quality and native shell
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -82,7 +82,7 @@ jobs:
 
   x86-probes:
     name: x86 scalar and SIMD compile probes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -105,7 +105,7 @@ jobs:
 
   wasm:
     name: browser Wasm artifact probes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain and Wasm standard library
@@ -131,7 +131,7 @@ jobs:
 
   android-check:
     name: Android pure-Rust compile check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain and Android target standard library
@@ -143,7 +143,7 @@ jobs:
 
   ios-check:
     name: iOS pure-Rust compile check
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain and iOS target standard library
@@ -155,7 +155,7 @@ jobs:
 
   session-fuzz:
     name: bounded session parser and compiler fuzzing
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -176,7 +176,7 @@ jobs:
 
   protocol-fuzz:
     name: bounded issue-005 protocol decoder fuzzing
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust and cargo-fuzz toolchains
@@ -196,7 +196,7 @@ jobs:
 
   benchmark:
     name: bounded descriptive benchmarks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
