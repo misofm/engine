@@ -9,8 +9,8 @@ use std::{
 };
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinParameters, DualMonoBlock, Matrix2x2, MeterConfig, MeterHandle,
-    MeterSnapshot, MeterTap,
+    BuiltinChain, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock, Matrix2x2,
+    MeterConfig, MeterHandle, MeterSnapshot, MeterTap,
 };
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
@@ -159,6 +159,126 @@ struct InputFixture {
     bytes: &'static [u8],
 }
 
+impl InputFixture {
+    fn field(&self, name: &str) -> &str {
+        let prefix = format!("{name} = ");
+        let text = std::str::from_utf8(self.bytes).expect("checked benchmark TOML is UTF-8");
+        let mut matches = text.lines().filter_map(|line| line.strip_prefix(&prefix));
+        let value = matches
+            .next()
+            .unwrap_or_else(|| panic!("checked benchmark TOML is missing {name}"));
+        assert!(matches.next().is_none(), "duplicate benchmark field {name}");
+        value
+    }
+
+    fn text(&self, name: &str) -> &str {
+        self.field(name)
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("benchmark field {name} is not a quoted string"))
+    }
+
+    fn u32(&self, name: &str) -> u32 {
+        self.field(name)
+            .parse()
+            .unwrap_or_else(|_| panic!("benchmark field {name} is not u32"))
+    }
+
+    fn usize(&self, name: &str) -> usize {
+        self.field(name)
+            .parse()
+            .unwrap_or_else(|_| panic!("benchmark field {name} is not usize"))
+    }
+
+    fn f32(&self, name: &str) -> f32 {
+        let value: f32 = self
+            .field(name)
+            .parse()
+            .unwrap_or_else(|_| panic!("benchmark field {name} is not f32"));
+        assert!(value.is_finite(), "benchmark field {name} is not finite");
+        value
+    }
+
+    fn boolean(&self, name: &str) -> bool {
+        match self.field(name) {
+            "true" => true,
+            "false" => false,
+            _ => panic!("benchmark field {name} is not bool"),
+        }
+    }
+
+    fn validate_common(&self, workload: Workload, rate_hz: u32) {
+        assert_eq!(sha256(self.bytes), manifest_input_sha256(self.id));
+        assert_eq!(self.u32("fixture_schema"), 1);
+        assert_eq!(self.u32("issue"), ISSUE);
+        assert_eq!(self.text("workload_kind"), workload.kind());
+        assert_eq!(
+            self.text("workload_id"),
+            format!("issue035.{}.{}hz.q128", workload.kind(), rate_hz)
+        );
+        assert_eq!(self.u32("sample_rate_hz"), rate_hz);
+        assert_eq!(self.usize("quantum_frames"), QUANTUM);
+    }
+
+    fn pcm(&self) -> FixturePcm {
+        let (path, bytes): (&str, &[u8]) = match self.text("input_pcm_path") {
+            "pcm/filters-asymmetric.f32le" => (
+                "pcm/filters-asymmetric.f32le",
+                include_bytes!("../../../fixtures/builtins/v1/pcm/filters-asymmetric.f32le"),
+            ),
+            "pcm/identity-signed-zero.f32le" => (
+                "pcm/identity-signed-zero.f32le",
+                include_bytes!("../../../fixtures/builtins/v1/pcm/identity-signed-zero.f32le"),
+            ),
+            "pcm/matrix-ramp-128.f32le" => (
+                "pcm/matrix-ramp-128.f32le",
+                include_bytes!("../../../fixtures/builtins/v1/pcm/matrix-ramp-128.f32le"),
+            ),
+            "pcm/graph-taps.f32le" => (
+                "pcm/graph-taps.f32le",
+                include_bytes!("../../../fixtures/builtins/v1/pcm/graph-taps.f32le"),
+            ),
+            path => panic!("unsupported checked benchmark PCM path {path}"),
+        };
+        assert_eq!(self.text("input_pcm_path"), path);
+        assert_eq!(sha256(bytes), self.text("input_pcm_sha256"));
+        FixturePcm::from_planar_f32le(bytes)
+    }
+}
+
+#[derive(Clone)]
+struct FixturePcm {
+    left: Box<[f32]>,
+    right: Box<[f32]>,
+}
+
+impl FixturePcm {
+    fn from_planar_f32le(bytes: &[u8]) -> Self {
+        assert!(bytes.len().is_multiple_of(8), "stereo planar f32le PCM");
+        let words: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|word| f32::from_bits(u32::from_le_bytes(word.try_into().expect("f32 word"))))
+            .collect();
+        let frames = words.len() / 2;
+        assert!(frames > 0, "nonempty benchmark PCM");
+        Self {
+            left: words[..frames].into(),
+            right: words[frames..].into(),
+        }
+    }
+
+    fn fill(&self, left: &mut [f32], right: &mut [f32], first_sample: u64) {
+        assert_eq!(left.len(), right.len(), "dual-mono benchmark block");
+        let frames = self.left.len();
+        let offset = usize::try_from(first_sample % frames as u64).expect("PCM offset");
+        for (index, (left_out, right_out)) in left.iter_mut().zip(right).enumerate() {
+            let source = (offset + index) % frames;
+            *left_out = self.left[source];
+            *right_out = self.right[source];
+        }
+    }
+}
+
 fn input_fixture(workload: Workload, rate_hz: u32) -> InputFixture {
     match (workload, rate_hz) {
         (Workload::FullChainFilters, 48_000) => InputFixture {
@@ -221,6 +341,84 @@ fn input_fixture(workload: Workload, rate_hz: u32) -> InputFixture {
     }
 }
 
+fn render_parameters_from_fixture(
+    fixture: &InputFixture,
+    workload: Workload,
+) -> (BuiltinParameters, Option<[Matrix2x2; 2]>) {
+    match workload {
+        Workload::FullChainFilters | Workload::IdentityChain => (
+            BuiltinParameters {
+                left: ChannelParameters {
+                    hpf_hz: fixture.f32("left_hpf_hz"),
+                    lpf_hz: fixture.f32("left_lpf_hz"),
+                    trim_db: fixture.f32("left_trim_db"),
+                    fader_db: fixture.f32("left_fader_db"),
+                    ..ChannelParameters::default()
+                },
+                right: ChannelParameters {
+                    hpf_hz: fixture.f32("right_hpf_hz"),
+                    lpf_hz: fixture.f32("right_lpf_hz"),
+                    trim_db: fixture.f32("right_trim_db"),
+                    fader_db: fixture.f32("right_fader_db"),
+                    ..ChannelParameters::default()
+                },
+                matrix: Matrix2x2 {
+                    ll: fixture.f32("matrix_ll"),
+                    lr: fixture.f32("matrix_lr"),
+                    rl: fixture.f32("matrix_rl"),
+                    rr: fixture.f32("matrix_rr"),
+                },
+                smoothing_samples: 0,
+            },
+            None,
+        ),
+        Workload::MatrixRamp => (
+            BuiltinParameters {
+                matrix: Matrix2x2 {
+                    ll: fixture.f32("initial_matrix_ll"),
+                    lr: fixture.f32("initial_matrix_lr"),
+                    rl: fixture.f32("initial_matrix_rl"),
+                    rr: fixture.f32("initial_matrix_rr"),
+                },
+                smoothing_samples: fixture.u32("smoothing_updates"),
+                ..BuiltinParameters::default()
+            },
+            Some([
+                Matrix2x2 {
+                    ll: fixture.f32("even_target_ll"),
+                    lr: fixture.f32("even_target_lr"),
+                    rl: fixture.f32("even_target_rl"),
+                    rr: fixture.f32("even_target_rr"),
+                },
+                Matrix2x2 {
+                    ll: fixture.f32("odd_target_ll"),
+                    lr: fixture.f32("odd_target_lr"),
+                    rl: fixture.f32("odd_target_rl"),
+                    rr: fixture.f32("odd_target_rr"),
+                },
+            ]),
+        ),
+        Workload::MeterSuccessFull | Workload::Prepare256Tracks => {
+            (BuiltinParameters::default(), None)
+        }
+    }
+}
+
+fn meter_config_from_fixture(fixture: &InputFixture) -> MeterConfig {
+    MeterConfig {
+        period_frames: NonZeroU32::new(fixture.u32("meter_period_frames"))
+            .expect("checked nonzero meter period"),
+        peak_hold_frames: fixture.u32("meter_peak_hold_frames"),
+        peak_decay_db_per_second: fixture.f32("meter_peak_decay_db_per_second"),
+        queue_capacity: NonZeroUsize::new(fixture.usize("meter_queue_capacity"))
+            .expect("checked nonzero meter capacity"),
+        reset_generation: fixture
+            .field("meter_reset_generation")
+            .parse()
+            .expect("checked meter reset generation"),
+    }
+}
+
 struct RenderRoundStates {
     workload: Workload,
     rate_hz: u32,
@@ -261,14 +459,17 @@ struct RealMeterTapArtifactPair {
     full: PreparedGraphBuiltinsArtifact,
 }
 
-fn prepare_real_meter_tap_artifacts(rate_hz: u32) -> RealMeterTapArtifactPair {
+fn prepare_real_meter_tap_artifacts(rate_hz: u32, config: MeterConfig) -> RealMeterTapArtifactPair {
     RealMeterTapArtifactPair {
-        success: prepare_real_meter_tap_artifact(rate_hz),
-        full: prepare_real_meter_tap_artifact(rate_hz),
+        success: prepare_real_meter_tap_artifact(rate_hz, config),
+        full: prepare_real_meter_tap_artifact(rate_hz, config),
     }
 }
 
-fn prepare_real_meter_tap_artifact(rate_hz: u32) -> PreparedGraphBuiltinsArtifact {
+fn prepare_real_meter_tap_artifact(
+    rate_hz: u32,
+    config: MeterConfig,
+) -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_toml(SESSION).expect("frozen benchmark session");
     model.sample_rate_hz = rate_hz;
     model.sources[0].sample_rate_hz = rate_hz;
@@ -294,7 +495,7 @@ fn prepare_real_meter_tap_artifact(rate_hz: u32) -> PreparedGraphBuiltinsArtifac
         .expect("frozen effects");
     let builtins = prepare_session_builtins(
         &effects.session,
-        &real_meter_tap_requests(&session),
+        &real_meter_tap_requests(&session, config),
         unbounded_builtin_caps(),
     )
     .expect("frozen builtin tap requests");
@@ -307,21 +508,13 @@ fn prepare_real_meter_tap_artifact(rate_hz: u32) -> PreparedGraphBuiltinsArtifac
     .unwrap_or_else(|_| panic!("frozen real-tap graph"))
 }
 
-struct BenchmarkGraphSource;
+struct BenchmarkGraphSource {
+    pcm: FixturePcm,
+}
 
 impl GraphRuntimeProcessor for BenchmarkGraphSource {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        for (index, (left, right)) in block
-            .left
-            .iter_mut()
-            .zip(block.right.iter_mut())
-            .enumerate()
-        {
-            let sample = block.first_sample + index as u64;
-            let value = sample as f32 * 0.0001 + 0.125;
-            *left = value;
-            *right = -value * 0.75;
-        }
+        self.pcm.fill(block.left, block.right, block.first_sample);
         Ok(())
     }
 }
@@ -341,7 +534,7 @@ struct RealMeterTapPlan {
 }
 
 impl RealMeterTapPlan {
-    fn bind(artifact: PreparedGraphBuiltinsArtifact) -> Self {
+    fn bind(artifact: PreparedGraphBuiltinsArtifact, pcm: FixturePcm) -> Self {
         let envelope = artifact.envelope();
         let nodes = artifact
             .external_binding_nodes()
@@ -351,7 +544,7 @@ impl RealMeterTapPlan {
                     GraphNodeId::TrackStage {
                         stage: TrackStage::Input,
                         ..
-                    } => Box::new(BenchmarkGraphSource),
+                    } => Box::new(BenchmarkGraphSource { pcm: pcm.clone() }),
                     _ => Box::new(BenchmarkGraphIdentity),
                 };
                 GraphNodeBinding::new(node, processor)
@@ -412,13 +605,24 @@ struct RealMeterTapRuntime {
     success: RealMeterTapPlan,
     full: RealMeterTapPlan,
     output: Sha256,
+    full_drop_attempts: u64,
+    measurement_start_full_drop_attempts: u64,
 }
 
 impl RealMeterTapRuntime {
-    fn new(rate_hz: u32) -> Self {
-        let pair = prepare_real_meter_tap_artifacts(rate_hz);
-        let mut success = RealMeterTapPlan::bind(pair.success);
-        let mut full = RealMeterTapPlan::bind(pair.full);
+    fn new(rate_hz: u32, fixture: &InputFixture, pcm: &FixturePcm) -> Self {
+        let config = meter_config_from_fixture(fixture);
+        assert_eq!(config.period_frames.get(), QUANTUM as u32);
+        assert_eq!(config.queue_capacity.get(), 1);
+        assert_eq!(config.reset_generation, 7);
+        assert!(fixture.boolean("success_drain_per_operation"));
+        assert!(fixture.boolean("full_prefill"));
+        let expected_taps = "input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix";
+        assert_eq!(fixture.text("success_taps"), expected_taps);
+        assert_eq!(fixture.text("full_taps"), expected_taps);
+        let pair = prepare_real_meter_tap_artifacts(rate_hz, config);
+        let mut success = RealMeterTapPlan::bind(pair.success, pcm.clone());
+        let mut full = RealMeterTapPlan::bind(pair.full, pcm.clone());
         success.render(0);
         let prefill_success = success.drain_all();
         assert_eq!(prefill_success.len(), OBSERVERS, "frozen success prefill");
@@ -427,25 +631,49 @@ impl RealMeterTapRuntime {
             success,
             full,
             output: Sha256::new(),
+            full_drop_attempts: 0,
+            measurement_start_full_drop_attempts: 0,
         }
     }
 
     fn begin_measurement(&mut self) {
         self.output = Sha256::new();
+        self.measurement_start_full_drop_attempts = self.full_drop_attempts;
     }
 
     fn render_one(&mut self, first_sample: u64) {
         self.success.render(first_sample);
         for record in self.success.drain_all() {
+            self.output.update(b"success");
             hash_meter_snapshot(&mut self.output, record);
         }
         self.full.render(first_sample);
+        self.full_drop_attempts = self
+            .full_drop_attempts
+            .checked_add(1)
+            .expect("bounded full/drop operation count");
         for value in self.success.pcm.iter().chain(&self.full.pcm) {
             self.output.update(value.to_bits().to_le_bytes());
         }
     }
 
-    fn output_sha256(&self) -> String {
+    fn output_sha256(&mut self) -> String {
+        for record in self.full.drain_all() {
+            self.output.update(b"full");
+            hash_meter_snapshot(&mut self.output, record);
+        }
+        self.output.update(b"full_drop_attempts_before");
+        self.output
+            .update(self.measurement_start_full_drop_attempts.to_le_bytes());
+        self.output.update(b"full_drop_attempts_after");
+        self.output.update(self.full_drop_attempts.to_le_bytes());
+        self.output.update(b"full_drop_attempts_measured");
+        self.output.update(
+            self.full_drop_attempts
+                .checked_sub(self.measurement_start_full_drop_attempts)
+                .expect("monotonic full/drop count")
+                .to_le_bytes(),
+        );
         hex_digest(self.output.clone().finalize())
     }
 }
@@ -481,14 +709,11 @@ fn hash_meter_snapshot(hash: &mut Sha256, record: MeterConsumerSnapshot) {
     }
 }
 
-fn real_meter_tap_requests(session: &miso_engine_session::CompiledSession) -> Vec<MeterRequest> {
-    let config = MeterConfig {
-        period_frames: NonZeroU32::new(session.quantum().0).expect("frozen quantum"),
-        peak_hold_frames: 0,
-        peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(1).expect("frozen meter capacity"),
-        reset_generation: 7,
-    };
+fn real_meter_tap_requests(
+    session: &miso_engine_session::CompiledSession,
+    config: MeterConfig,
+) -> Vec<MeterRequest> {
+    assert_eq!(config.period_frames.get(), session.quantum().0);
     [
         MeterTap::Input,
         MeterTap::PostInputBuiltins,
@@ -660,22 +885,22 @@ fn warmup_prepare(rate_hz: u32) {
 fn measure_prepare(rate_hz: u32) -> Measurement {
     let mut samples_ns = Vec::with_capacity(PREPARE_MEASURED_BATCHES);
     let mut retained_payload_bytes = 0;
-    let mut output = String::new();
-    for _ in 0..PREPARE_MEASURED_BATCHES {
+    let mut output = Sha256::new();
+    for operation in 0..PREPARE_MEASURED_BATCHES {
         let started = Instant::now();
         let prepared = prepare_256_tracks(rate_hz);
         let elapsed = started.elapsed();
         retained_payload_bytes = prepared
             .resource_report()
             .engine_owned_retained_payload_bytes;
-        output =
-            sha256(format!("{}:{retained_payload_bytes}", prepared.processor_count()).as_bytes());
+        output.update((operation as u64).to_le_bytes());
+        hash_preparation_projection(&mut output, &prepared);
         std::hint::black_box(prepared); // destruction is deliberately outside the elapsed interval.
         samples_ns.push(u64::try_from(elapsed.as_nanos()).expect("benchmark duration fits u64"));
     }
     Measurement {
         samples_ns,
-        output_sha256: output,
+        output_sha256: hex_digest(output.finalize()),
         shape: WorkloadShape {
             tracks: PREPARE_TRACKS,
             meters: OBSERVERS * 8,
@@ -693,38 +918,23 @@ struct RenderRuntime {
     right: [f32; QUANTUM],
     meter_runtime: Option<RealMeterTapRuntime>,
     output: Sha256,
+    input: FixturePcm,
+    matrix_targets: Option<[Matrix2x2; 2]>,
 }
 impl RenderRuntime {
     fn new(workload: Workload, rate_hz: u32) -> Self {
-        let mut parameters = BuiltinParameters::default();
-        if matches!(workload, Workload::FullChainFilters) {
-            parameters.left.hpf_hz = 100.0;
-            parameters.right.hpf_hz = 200.0;
-            parameters.left.lpf_hz = 1_000.0;
-            parameters.right.lpf_hz = 2_000.0;
-            parameters.left.trim_db = -3.0;
-            parameters.right.trim_db = 2.0;
-            parameters.left.fader_db = -1.0;
-            parameters.right.fader_db = -4.0;
-            parameters.matrix = Matrix2x2 {
-                ll: 0.8,
-                lr: 0.2,
-                rl: -0.3,
-                rr: 0.7,
-            };
-        }
-        if matches!(workload, Workload::MatrixRamp) {
-            parameters.matrix = Matrix2x2 {
-                ll: 0.7,
-                lr: 0.3,
-                rl: -0.2,
-                rr: 0.8,
-            };
-            parameters.smoothing_samples = QUANTUM as u32;
-        }
+        let fixture = input_fixture(workload, rate_hz);
+        fixture.validate_common(workload, rate_hz);
+        assert_eq!(fixture.usize("tracks"), 1);
+        assert_eq!(fixture.text("state_mode"), "continuous");
+        let input = fixture.pcm();
+        let (parameters, matrix_targets) = render_parameters_from_fixture(&fixture, workload);
         let meter_runtime = if matches!(workload, Workload::MeterSuccessFull) {
-            Some(RealMeterTapRuntime::new(rate_hz))
+            assert_eq!(fixture.usize("meter_observers"), OBSERVERS * 2);
+            Some(RealMeterTapRuntime::new(rate_hz, &fixture, &input))
         } else {
+            assert_eq!(fixture.usize("meter_observers"), 0);
+            assert_eq!(fixture.usize("meter_queue_capacity"), 0);
             None
         };
         Self {
@@ -734,6 +944,8 @@ impl RenderRuntime {
             right: [0.0; QUANTUM],
             meter_runtime,
             output: Sha256::new(),
+            input,
+            matrix_targets,
         }
     }
 
@@ -752,21 +964,26 @@ impl RenderRuntime {
     }
     fn prepare_operation_input(&mut self, batch: u64, operation: u64) {
         if self.meter_runtime.is_none() {
-            self.fill_input(batch, operation);
+            let first_sample = operation_first_sample(batch, operation);
+            self.input
+                .fill(&mut self.left, &mut self.right, first_sample);
         }
     }
     fn run_operation(&mut self, batch: u64, operation: u64) {
         audit::in_render_scope(|| self.render_one(batch, operation));
     }
     fn render_one(&mut self, batch: u64, operation: u64) {
-        let first_sample =
-            (batch * OPERATIONS_PER_RENDER_BATCH as u64 + operation) * QUANTUM as u64;
+        let first_sample = operation_first_sample(batch, operation);
         if let Some(meter_runtime) = &mut self.meter_runtime {
             meter_runtime.render_one(first_sample);
             return;
         }
         if matches!(self.workload, Workload::MatrixRamp) {
-            let target = matrix_target_for_operation(batch, operation);
+            let target = matrix_target_for_operation(
+                batch,
+                operation,
+                self.matrix_targets.expect("checked matrix targets"),
+            );
             self.chain
                 .set_matrix_target(target)
                 .expect("frozen matrix target");
@@ -781,16 +998,8 @@ impl RenderRuntime {
             self.output.update(value.to_bits().to_le_bytes());
         }
     }
-    fn fill_input(&mut self, batch: u64, operation: u64) {
-        let phase = (batch * OPERATIONS_PER_RENDER_BATCH as u64 + operation) as f32 * 0.001;
-        for (index, (left, right)) in self.left.iter_mut().zip(&mut self.right).enumerate() {
-            let value = phase + index as f32 * 0.0001;
-            *left = value;
-            *right = -value * 0.75;
-        }
-    }
-    fn output_sha256(&self) -> String {
-        if let Some(meter_runtime) = &self.meter_runtime {
+    fn output_sha256(&mut self) -> String {
+        if let Some(meter_runtime) = &mut self.meter_runtime {
             return meter_runtime.output_sha256();
         }
         hex_digest(self.output.clone().finalize())
@@ -809,29 +1018,43 @@ impl RenderRuntime {
     }
 }
 
-fn matrix_target_for_operation(batch: u64, operation: u64) -> Matrix2x2 {
+fn operation_first_sample(batch: u64, operation: u64) -> u64 {
+    batch
+        .checked_mul(OPERATIONS_PER_RENDER_BATCH as u64)
+        .and_then(|value| value.checked_add(operation))
+        .and_then(|value| value.checked_mul(QUANTUM as u64))
+        .expect("bounded benchmark sample position")
+}
+
+fn matrix_target_for_operation(batch: u64, operation: u64, targets: [Matrix2x2; 2]) -> Matrix2x2 {
     let global_operation = batch
         .checked_mul(OPERATIONS_PER_RENDER_BATCH as u64)
         .and_then(|value| value.checked_add(operation))
         .expect("bounded benchmark operation index");
     if global_operation.is_multiple_of(2) {
-        Matrix2x2 {
-            ll: 0.6,
-            lr: 0.4,
-            rl: -0.4,
-            rr: 0.6,
-        }
+        targets[0]
     } else {
-        Matrix2x2 {
-            ll: 0.9,
-            lr: -0.1,
-            rl: 0.2,
-            rr: 0.8,
-        }
+        targets[1]
     }
 }
 
 fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBuiltinsSession {
+    let fixture = input_fixture(Workload::Prepare256Tracks, rate_hz);
+    fixture.validate_common(Workload::Prepare256Tracks, rate_hz);
+    assert_eq!(fixture.text("state_mode"), "new_per_prepare");
+    assert_eq!(
+        fixture.text("session_template_path"),
+        "fixtures/session/v1/canonical.toml"
+    );
+    assert_eq!(
+        sha256(SESSION.as_bytes()),
+        fixture.text("session_template_sha256")
+    );
+    assert!(fixture.boolean("empty_effect_racks"));
+    let track_count = fixture.usize("track_id_count");
+    assert_eq!(fixture.usize("tracks"), track_count);
+    assert_eq!(track_count, PREPARE_TRACKS);
+    let track_prefix = fixture.text("track_id_prefix");
     let mut model = parse_session_toml(SESSION).expect("frozen session");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
@@ -840,16 +1063,19 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
     model.automation.clear();
     model.limits.memory_bytes = u64::MAX;
     model.tracks.clear();
-    model.tracks.reserve(PREPARE_TRACKS);
-    for index in 0..PREPARE_TRACKS {
+    model.tracks.reserve(track_count);
+    for index in 0..track_count {
         let mut track = template.clone();
-        track.id = StableId::parse(&format!("benchmark-track-{index}")).expect("stable ID");
+        track.id = StableId::parse(&format!("{track_prefix}{index}")).expect("stable ID");
         model.tracks.push(track);
     }
     model.sample_rate_hz = rate_hz;
     model.routes[0].source = RouteSource::Track {
-        track_id: StableId::parse("benchmark-track-0").expect("route track"),
-        tap: SendTap::PostMatrix,
+        track_id: StableId::parse(fixture.text("route_source_track_id")).expect("route track"),
+        tap: match fixture.text("route_source_tap") {
+            "post_matrix" => SendTap::PostMatrix,
+            value => panic!("unsupported checked route source tap {value}"),
+        },
     };
     let session = compile_session(
         &model,
@@ -863,34 +1089,34 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
         },
     )
     .expect("prepared session");
-    let config = MeterConfig {
-        period_frames: NonZeroU32::new(QUANTUM as u32).expect("quantum"),
-        peak_hold_frames: 0,
-        peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(4).expect("capacity"),
-        reset_generation: 7,
-    };
-    let taps = [
-        MeterTap::Input,
-        MeterTap::PostInputBuiltins,
-        MeterTap::PostSimd1,
-        MeterTap::PostDynamic,
-        MeterTap::PostSimd2PreFader,
-        MeterTap::PostFader,
-        MeterTap::PostMatrix,
-    ];
-    let requests: Vec<_> = (0..8)
-        .flat_map(|track| {
+    let config = meter_config_from_fixture(&fixture);
+    assert_eq!(config.queue_capacity.get(), 4);
+    let meter_track_ids: Vec<_> = fixture.text("meter_track_ids").split(',').collect();
+    let taps: Vec<_> = fixture
+        .text("meter_taps")
+        .split(',')
+        .map(meter_tap_from_name)
+        .collect();
+    assert_eq!(
+        meter_track_ids.len() * taps.len(),
+        fixture.usize("meter_observers")
+    );
+    let requests: Vec<_> = meter_track_ids
+        .into_iter()
+        .enumerate()
+        .flat_map(|(track, track_id)| {
+            let taps = taps.clone();
+            let tap_count = taps.len();
             taps.into_iter()
                 .enumerate()
                 .map(move |(tap_index, tap)| MeterRequest {
                     handle: MeterHandle(
                         core::num::NonZeroU64::new(
-                            u64::try_from(track * taps.len() + tap_index).expect("bounded") + 1,
+                            u64::try_from(track * tap_count + tap_index).expect("bounded") + 1,
                         )
                         .expect("nonzero"),
                     ),
-                    track_id: format!("benchmark-track-{track}"),
+                    track_id: track_id.to_owned(),
                     tap,
                     config,
                 })
@@ -912,6 +1138,67 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
         },
     )
     .expect("prepared workload")
+}
+
+fn meter_tap_from_name(name: &str) -> MeterTap {
+    match name {
+        "input" => MeterTap::Input,
+        "post_input_builtins" => MeterTap::PostInputBuiltins,
+        "post_simd1" => MeterTap::PostSimd1,
+        "post_dynamic" => MeterTap::PostDynamic,
+        "post_simd2_pre_fader" => MeterTap::PostSimd2PreFader,
+        "post_fader" => MeterTap::PostFader,
+        "post_matrix" => MeterTap::PostMatrix,
+        value => panic!("unsupported checked meter tap {value}"),
+    }
+}
+
+fn hash_preparation_projection(
+    hash: &mut Sha256,
+    prepared: &miso_engine_builtins_compiler::PreparedBuiltinsSession,
+) {
+    hash.update(b"issue035.prepare_256_tracks.address_free.v1");
+    for count in [
+        prepared.processor_count(),
+        prepared.tail_count(),
+        prepared.observer_count(),
+        prepared.meter_consumer_count(),
+    ] {
+        hash.update(
+            u64::try_from(count)
+                .expect("preparation count fits u64")
+                .to_le_bytes(),
+        );
+    }
+    for (track_id, tail) in prepared.tails() {
+        hash.update(
+            u64::try_from(track_id.len())
+                .expect("track ID length fits u64")
+                .to_le_bytes(),
+        );
+        hash.update(track_id.as_bytes());
+        hash.update([match tail {
+            BuiltinTail::FiniteZero => 0,
+            BuiltinTail::Infinite => 1,
+        }]);
+    }
+    let report = prepared.resource_report();
+    for value in [
+        report.engine_owned_processor_payload_bytes,
+        report.engine_owned_meter_payload_bytes,
+        report.engine_owned_retained_payload_bytes,
+        report.meter_items,
+        report.maximum_single_allocation_bytes,
+        report.retained_allocation_count,
+        u64::from(report.retained_layout_class_count),
+    ] {
+        hash.update(value.to_le_bytes());
+    }
+    for layout in report.retained_layouts() {
+        hash.update(layout.size_bytes.to_le_bytes());
+        hash.update(layout.align_bytes.to_le_bytes());
+        hash.update(layout.allocation_count.to_le_bytes());
+    }
 }
 
 struct Metadata {
@@ -1595,22 +1882,53 @@ mod tests {
 
     #[test]
     fn matrix_targets_alternate_by_global_operation_across_batch_boundaries() {
+        let fixture = input_fixture(Workload::MatrixRamp, 48_000);
+        let (_, targets) = render_parameters_from_fixture(&fixture, Workload::MatrixRamp);
+        let targets = targets.expect("checked matrix targets");
         assert_eq!(
-            matrix_target_for_operation(0, 6).ll.to_bits(),
+            matrix_target_for_operation(0, 6, targets).ll.to_bits(),
             0.6_f32.to_bits()
         );
         assert_eq!(
-            matrix_target_for_operation(0, 7).ll.to_bits(),
+            matrix_target_for_operation(0, 7, targets).ll.to_bits(),
             0.9_f32.to_bits()
         );
         assert_eq!(
-            matrix_target_for_operation(1, 0).ll.to_bits(),
+            matrix_target_for_operation(1, 0, targets).ll.to_bits(),
             0.6_f32.to_bits()
         );
         assert_eq!(
-            matrix_target_for_operation(1, 1).ll.to_bits(),
+            matrix_target_for_operation(1, 1, targets).ll.to_bits(),
             0.9_f32.to_bits()
         );
+    }
+
+    #[test]
+    fn checked_toml_and_referenced_pcm_drive_render_configuration_bit_exactly() {
+        for workload in [
+            Workload::FullChainFilters,
+            Workload::IdentityChain,
+            Workload::MatrixRamp,
+            Workload::MeterSuccessFull,
+        ] {
+            for rate_hz in RATES {
+                let fixture = input_fixture(workload, rate_hz);
+                fixture.validate_common(workload, rate_hz);
+                let pcm = fixture.pcm();
+                assert_eq!(pcm.left.len(), pcm.right.len());
+                assert!(!pcm.left.is_empty());
+            }
+        }
+
+        let fixture = input_fixture(Workload::IdentityChain, 48_000);
+        let pcm = fixture.pcm();
+        assert_eq!(pcm.left[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(pcm.left[1].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(pcm.right[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(pcm.right[1].to_bits(), 0.0_f32.to_bits());
+        let (parameters, _) = render_parameters_from_fixture(&fixture, Workload::IdentityChain);
+        assert_eq!(parameters.matrix, Matrix2x2::IDENTITY);
+        assert_eq!(parameters.left.trim_db.to_bits(), 0.0_f32.to_bits());
     }
 
     #[test]
@@ -1627,10 +1945,12 @@ mod tests {
 
     #[test]
     fn real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state() {
-        let pair = prepare_real_meter_tap_artifacts(48_000);
+        let fixture = input_fixture(Workload::MeterSuccessFull, 48_000);
+        let pcm = fixture.pcm();
+        let pair = prepare_real_meter_tap_artifacts(48_000, meter_config_from_fixture(&fixture));
         assert_eq!(pair.success.report(), pair.full.report());
-        let mut success = RealMeterTapPlan::bind(pair.success);
-        let mut full = RealMeterTapPlan::bind(pair.full);
+        let mut success = RealMeterTapPlan::bind(pair.success, pcm.clone());
+        let mut full = RealMeterTapPlan::bind(pair.full, pcm.clone());
         let expected_taps = [
             MeterTap::Input,
             MeterTap::PostInputBuiltins,
@@ -1668,6 +1988,13 @@ mod tests {
                 .all(|record| record.snapshot.end_sample == QUANTUM as u64
                     && record.snapshot.reset_generation == 7)
         );
+        full.render(QUANTUM as u64 * 2);
+        let post_drop = full.drain_all();
+        assert!(
+            post_drop
+                .iter()
+                .all(|record| record.snapshot.cumulative_dropped_snapshots == 1)
+        );
 
         success.render(QUANTUM as u64);
         let success_windows = success.drain_all();
@@ -1677,5 +2004,25 @@ mod tests {
                 .all(|record| record.snapshot.end_sample == QUANTUM as u64 * 2
                     && record.snapshot.reset_generation == 7)
         );
+    }
+
+    #[test]
+    fn preparation_projection_is_complete_address_free_and_deterministic() {
+        let first = prepare_256_tracks(48_000);
+        let second = prepare_256_tracks(48_000);
+        let mut first_hash = Sha256::new();
+        let mut second_hash = Sha256::new();
+        hash_preparation_projection(&mut first_hash, &first);
+        hash_preparation_projection(&mut second_hash, &second);
+        assert_eq!(first_hash.finalize(), second_hash.finalize());
+        assert_eq!(first.processor_count(), PREPARE_TRACKS * 3);
+        assert_eq!(first.tail_count(), PREPARE_TRACKS);
+        assert_eq!(first.observer_count(), OBSERVERS * 8);
+        assert_eq!(first.meter_consumer_count(), OBSERVERS * 8);
+        assert_eq!(
+            first.resource_report().meter_items,
+            (OBSERVERS * 8 * 5) as u64
+        );
+        assert!(!first.resource_report().retained_layouts().is_empty());
     }
 }
