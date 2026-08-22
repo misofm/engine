@@ -38,6 +38,8 @@ pub struct ReferenceTptRetainedStep {
     pub action: ReferenceTptRetainedAction,
     /// Number of invalid-state recovery report increments for this step.
     pub recovery_delta: u64,
+    /// Whether the selected raw output was nonfinite/subnormal and became positive zero.
+    pub output_sanitized: bool,
 }
 
 /// Independent retained-`f32`, non-fused recurrence for the conditioned launch TPT section.
@@ -150,6 +152,7 @@ impl ReferenceRetainedTptF32 {
                 output_bits: 0.0_f32.to_bits(),
                 action,
                 recovery_delta,
+                output_sanitized: false,
             };
         }
         let post_action = canonicalize_retained_word(&mut self.s1, n1)
@@ -161,12 +164,14 @@ impl ReferenceRetainedTptF32 {
             ReferenceTptOutput::LowPass => low,
             ReferenceTptOutput::HighPass => high,
         };
+        let output_sanitized = !output.is_finite() || output.is_subnormal();
         ReferenceTptRetainedStep {
             pre_state_bits,
             next_state_bits: self.state_bits(),
             output_bits: canonical_output(output).to_bits(),
             action,
             recovery_delta,
+            output_sanitized,
         }
     }
 

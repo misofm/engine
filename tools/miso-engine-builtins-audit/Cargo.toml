@@ -13,9 +13,14 @@ path = "src/main.rs"
 name = "miso_engine_builtins_audit_graph"
 path = "src/graph_main.rs"
 
+[[bin]]
+name = "miso_engine_builtins_audit_fixture"
+path = "src/fixture_main.rs"
+
 [dependencies]
 miso-engine-builtins.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-dsp-reference.workspace = true
 miso-engine-builtins-compiler.workspace = true
 miso-engine-conformance.workspace = true
 miso-engine-effect-contract.workspace = true
@@ -23,6 +28,7 @@ miso-engine-effect-compiler.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-graph-compiler.workspace = true
 miso-engine-session.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,14 @@
+{"outcome":"success","tap":"Input","handle":"0000000000000001","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostInputBuiltins","handle":"0000000000000002","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostSimd1","handle":"0000000000000003","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostDynamic","handle":"0000000000000004","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostSimd2PreFader","handle":"0000000000000005","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostFader","handle":"0000000000000006","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"success","tap":"PostMatrix","handle":"0000000000000007","first_dropped":"0000000000000000","post_dropped":"0000000000000000","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"Input","handle":"0000000000000001","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostInputBuiltins","handle":"0000000000000002","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostSimd1","handle":"0000000000000003","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostDynamic","handle":"0000000000000004","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostSimd2PreFader","handle":"0000000000000005","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostFader","handle":"0000000000000006","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}
+{"outcome":"saturation","tap":"PostMatrix","handle":"0000000000000007","first_dropped":"0000000000000000","post_dropped":"0000000000000001","pdc_samples":9,"first_early_route_frame":9}

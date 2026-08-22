@@ -9,11 +9,12 @@
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    collections::BTreeSet,
     sync::{Arc, Mutex, mpsc},
     thread::ThreadId,
 };
 
-use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
+use miso_engine_builtins::{MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
 };
@@ -41,6 +42,16 @@ const OBSERVERS: usize = 7;
 const PLAN_A: u64 = 1;
 const PLAN_B: u64 = 2;
 const PLAN_C: u64 = 3;
+const ACCEPTED_MANIFEST_SHA256: &str =
+    "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff";
+const ACCEPTED_GRAPH_PCM_SHA256: &str =
+    "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
+const ACCEPTED_GRAPH_METERS_SHA256: &str =
+    "958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f";
+const ACCEPTED_GRAPH_PCM: &[u8] =
+    include_bytes!("../../../fixtures/builtins/v1/pcm/graph-taps.f32le");
+const ACCEPTED_GRAPH_METERS: &str =
+    include_str!("../../../fixtures/builtins/v1/meters/graph-taps.jsonl");
 
 struct AuditedAllocator;
 
@@ -147,8 +158,9 @@ fn main() {
 }
 
 fn run_audit() {
-    let drops = Arc::new(Mutex::new(Vec::with_capacity(2)));
-    let (initial, _initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
+    let drops = Arc::new(Mutex::new(Vec::with_capacity(3)));
+    let control_thread_id = std::thread::current().id();
+    let (initial, mut initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
     let (applied, mut applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
     let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
     let (mut publisher, mut owner, mut retirer) = plan_exchange(
@@ -183,6 +195,8 @@ fn run_audit() {
     let first = traced_render(&mut owner, &mut output, 0);
     assert_eq!(first.swap, SwapOutcome::None);
     assert_eq!(first.render.plan_id, PLAN_A);
+    assert_pcm_fixture(&output);
+    let first_meter_values = drain_fixture(&mut initial_meters, ACCEPTED_GRAPH_METERS, "A fixture");
     let first_epoch = match publisher.publish(applied) {
         Ok(epoch) => epoch,
         Err(_) => panic!("B publication"),
@@ -190,6 +204,7 @@ fn run_audit() {
     assert_eq!(first_epoch.0, 1);
     let second = traced_render(&mut owner, &mut output, 1);
     assert_applied(&second, PLAN_B, 1);
+    assert_pcm_fixture(&output);
     let second_epoch = match publisher.publish(deferred) {
         Ok(epoch) => epoch,
         Err(_) => panic!("C publication"),
@@ -200,9 +215,10 @@ fn run_audit() {
     assert_eq!(third.active_epoch.0, 1);
     assert_eq!(third.render.plan_id, PLAN_B);
     traced_range(&mut owner, &mut output, 3, BLOCKS, PLAN_B);
-    drain_exact(&mut applied_meters, BLOCKS - 2, "B final");
+    let second_meter_values = drain_values(&mut applied_meters, "B first window");
+    assert_eq!(second_meter_values, first_meter_values);
 
-    assert_eq!(owner.deferred_count(), 1);
+    assert_eq!(owner.deferred_count(), BLOCKS - 2);
     assert_eq!(output.as_ptr() as usize, left_address);
     assert_eq!(output[QUANTUM..].as_ptr() as usize, right_address);
     let audit = audit::snapshot();
@@ -218,30 +234,46 @@ fn run_audit() {
     let retirement_thread_id = retirement_thread.join().expect("retirement owner");
     drop(owner);
     let drops = drops.lock().expect("drop records");
-    assert!(drops.contains(&(PLAN_A, retirement_thread_id)));
-    assert!(
+    assert_eq!(drops.len(), 3);
+    assert_eq!(
         drops
             .iter()
-            .any(|(plan, thread)| *plan == PLAN_B && *thread != retirement_thread_id)
+            .filter(|row| **row == (PLAN_A, retirement_thread_id))
+            .count(),
+        1
     );
-    assert!(
+    assert_eq!(
         drops
             .iter()
-            .any(|(plan, thread)| *plan == PLAN_C && *thread != retirement_thread_id)
+            .filter(|row| **row == (PLAN_B, control_thread_id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        drops
+            .iter()
+            .filter(|row| **row == (PLAN_C, control_thread_id))
+            .count(),
+        1
     );
 
-    let queue_success_windows = OBSERVERS as u64;
+    let queue_success_windows = 2 * OBSERVERS as u64;
     let queue_full_windows = (BLOCKS - 2) * OBSERVERS as u64;
     println!(
         concat!(
-            "{{\"schema_version\":1,\"kind\":\"issue057_graph_realtime_lifecycle_audit\",",
+            "{{\"schema_version\":1,\"kind\":\"issue069_graph_realtime_lifecycle_audit\",",
             "\"renders\":{},\"sample_rate_hz\":48000,\"quantum_frames\":{},\"observers\":{},",
             "\"render_count_by_plan\":{{\"A\":1,\"B\":999999,\"C\":0}},",
-            "\"swaps_applied\":1,\"swaps_deferred\":1,",
-            "\"prior_plan_renders_on_deferred\":1,\"drained_blocks\":1,",
+            "\"swaps_applied\":1,\"swaps_deferred\":999998,",
+            "\"prior_plan_renders_on_deferred\":999998,\"drained_blocks\":2,",
             "\"observer_windows_per_drained_block\":7,",
             "\"queue_success_windows\":{},\"queue_full_windows\":{},",
-            "\"retired_destroyed_off_render\":1,\"left_address\":{},\"right_address\":{},",
+            "\"pdc_samples\":9,\"distinct_taps\":7,",
+            "\"accepted_manifest_sha256\":\"{}\",\"accepted_graph_pcm_sha256\":\"{}\",",
+            "\"accepted_graph_meters_sha256\":\"{}\",",
+            "\"retirement_owner_destroyed\":1,\"control_owner_destroyed\":2,",
+            "\"render_owner_destroyed\":0,\"stable_left_address\":true,",
+            "\"stable_right_address\":true,",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"feature_detection\":{},\"logs\":{},",
             "\"file_io\":{},\"network_io\":{},\"syscalls\":{},\"panic_unwinds\":{},\"total_violations\":{}}}"
         ),
@@ -250,8 +282,9 @@ fn run_audit() {
         OBSERVERS,
         queue_success_windows,
         queue_full_windows,
-        left_address,
-        right_address,
+        ACCEPTED_MANIFEST_SHA256,
+        ACCEPTED_GRAPH_PCM_SHA256,
+        ACCEPTED_GRAPH_METERS_SHA256,
         audit.allocations,
         audit.deallocations,
         audit.locks,
@@ -278,13 +311,14 @@ fn traced_range(
     end_exclusive: u64,
     plan_id: u64,
 ) {
-    eprintln!("MISO_ISSUE007_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ISSUE069_GRAPH_RT_BEGIN");
     for block in first..end_exclusive {
         let report = render(owner, output, block);
-        assert_eq!(report.swap, SwapOutcome::None);
+        assert_eq!(report.swap, SwapOutcome::DeferredRetirementFull);
+        assert_eq!(report.active_epoch.0, 1);
         assert_eq!(report.render.plan_id, plan_id);
     }
-    eprintln!("MISO_ISSUE007_GRAPH_RT_END");
+    eprintln!("MISO_ISSUE069_GRAPH_RT_END");
 }
 
 fn traced_render(
@@ -292,9 +326,9 @@ fn traced_render(
     output: &mut [f32; QUANTUM * 2],
     block: u64,
 ) -> RealtimeRenderReport {
-    eprintln!("MISO_ISSUE007_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ISSUE069_GRAPH_RT_BEGIN");
     let report = render(owner, output, block);
-    eprintln!("MISO_ISSUE007_GRAPH_RT_END");
+    eprintln!("MISO_ISSUE069_GRAPH_RT_END");
     report
 }
 
@@ -303,32 +337,114 @@ fn render(
     output: &mut [f32; QUANTUM * 2],
     block: u64,
 ) -> RealtimeRenderReport {
-    owner
-        .render(
-            RenderIo {
-                input: None,
-                output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM)
-                    .expect("fixed planar output"),
-            },
-            RenderTime {
-                absolute_sample: block.checked_mul(QUANTUM as u64).expect("audit time"),
-            },
-        )
-        .expect("graph render")
+    audit::in_render_scope(|| {
+        owner
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM)
+                        .expect("fixed planar output"),
+                },
+                RenderTime {
+                    absolute_sample: block.checked_mul(QUANTUM as u64).expect("audit time"),
+                },
+            )
+            .expect("graph render")
+    })
 }
 
-fn drain_exact(meters: &mut [MeterConsumer], expected_dropped: u64, label: &str) {
+fn drain_values(meters: &mut [MeterConsumer], label: &str) -> Vec<String> {
     assert_eq!(meters.len(), OBSERVERS, "{label}: all seven consumers");
+    let mut values = Vec::with_capacity(OBSERVERS);
     for meter in meters {
         let snapshot = meter.consumer.try_pop().expect("one observer window");
         assert_eq!(snapshot.frames as usize, QUANTUM, "{label}: quantum window");
-        assert_eq!(
-            snapshot.cumulative_dropped_snapshots, expected_dropped,
-            "{label}: exact drops"
-        );
         assert!(
             meter.consumer.try_pop().is_err(),
             "{label}: exactly one window"
+        );
+        values.push(meter_value_row(meter.tap, snapshot));
+    }
+    values.sort();
+    assert_eq!(values.iter().collect::<BTreeSet<_>>().len(), OBSERVERS);
+    values
+}
+
+fn drain_fixture(meters: &mut [MeterConsumer], expected: &str, label: &str) -> Vec<String> {
+    assert_eq!(meters.len(), OBSERVERS, "{label}: all seven consumers");
+    let mut records = Vec::with_capacity(OBSERVERS);
+    let mut values = Vec::with_capacity(OBSERVERS);
+    for meter in meters {
+        let snapshot = meter.consumer.try_pop().expect("one observer window");
+        records.push(format!(
+            "{{\"tap\":\"{:?}\",\"snapshot\":{}}}",
+            meter.tap,
+            meter_snapshot_json("graph-taps", snapshot)
+        ));
+        values.push(meter_value_row(meter.tap, snapshot));
+        assert!(
+            meter.consumer.try_pop().is_err(),
+            "{label}: exactly one window"
+        );
+    }
+    records.sort();
+    values.sort();
+    assert_eq!(records.join("\n") + "\n", expected);
+    assert_eq!(values.iter().collect::<BTreeSet<_>>().len(), OBSERVERS);
+    values
+}
+
+fn meter_value_row(tap: MeterTap, snapshot: MeterSnapshot) -> String {
+    format!(
+        "{:?}:{:016x}:{:08x}:{:08x}:{:08x}:{:08x}:{:016x}:{:016x}:{:016x}:{:016x}:{:016x}:{:016x}",
+        tap,
+        snapshot.handle.0.get(),
+        snapshot.left.sample_peak.to_bits(),
+        snapshot.right.sample_peak.to_bits(),
+        snapshot.left.held_peak.to_bits(),
+        snapshot.right.held_peak.to_bits(),
+        snapshot.left.energy.to_bits(),
+        snapshot.right.energy.to_bits(),
+        snapshot.left.rms.to_bits(),
+        snapshot.right.rms.to_bits(),
+        snapshot.cumulative_clipped_samples,
+        snapshot.cumulative_sanitized_samples,
+    )
+}
+
+fn meter_snapshot_json(case: &str, snapshot: MeterSnapshot) -> String {
+    format!(
+        "{{\"case\":\"{case}\",\"handle\":\"{:016x}\",\"reset_generation\":\"{:016x}\",\"sequence\":\"{:016x}\",\"start\":\"{:016x}\",\"end\":\"{:016x}\",\"frames\":{},\"left_peak\":\"{:08x}\",\"right_peak\":\"{:08x}\",\"left_held_peak\":\"{:08x}\",\"right_held_peak\":\"{:08x}\",\"left_energy\":\"{:016x}\",\"right_energy\":\"{:016x}\",\"left_rms\":\"{:016x}\",\"right_rms\":\"{:016x}\",\"clipped\":\"{:016x}\",\"sanitized\":\"{:016x}\",\"dropped\":\"{:016x}\",\"discontinuities\":\"{:016x}\"}}",
+        snapshot.handle.0.get(),
+        snapshot.reset_generation,
+        snapshot.window_sequence,
+        snapshot.start_sample,
+        snapshot.end_sample,
+        snapshot.frames,
+        snapshot.left.sample_peak.to_bits(),
+        snapshot.right.sample_peak.to_bits(),
+        snapshot.left.held_peak.to_bits(),
+        snapshot.right.held_peak.to_bits(),
+        snapshot.left.energy.to_bits(),
+        snapshot.right.energy.to_bits(),
+        snapshot.left.rms.to_bits(),
+        snapshot.right.rms.to_bits(),
+        snapshot.cumulative_clipped_samples,
+        snapshot.cumulative_sanitized_samples,
+        snapshot.cumulative_dropped_snapshots,
+        snapshot.cumulative_discontinuities,
+    )
+}
+
+fn assert_pcm_fixture(output: &[f32; QUANTUM * 2]) {
+    assert_eq!(
+        ACCEPTED_GRAPH_PCM.len(),
+        output.len() * core::mem::size_of::<f32>()
+    );
+    for (sample, expected) in output.iter().zip(ACCEPTED_GRAPH_PCM.chunks_exact(4)) {
+        assert_eq!(
+            sample.to_bits(),
+            u32::from_le_bytes(expected.try_into().expect("word"))
         );
     }
 }
@@ -386,7 +502,7 @@ fn prepare_graph_plan(
         peak_hold_frames: 0,
         peak_decay_db_per_second: 0.0,
         queue_capacity: NonZeroUsize::new(1).expect("queue"),
-        reset_generation: plan_id,
+        reset_generation: 0,
     };
     let requests: Vec<_> = [
         MeterTap::Input,
@@ -401,13 +517,7 @@ fn prepare_graph_plan(
     .enumerate()
     .map(|(index, tap)| MeterRequest {
         handle: MeterHandle(
-            NonZeroU64::new(
-                plan_id
-                    .checked_mul(100)
-                    .and_then(|value| value.checked_add(u64::try_from(index).expect("bounded") + 1))
-                    .expect("bounded plan meter handle"),
-            )
-            .expect("nonzero"),
+            NonZeroU64::new(u64::try_from(index).expect("bounded") + 1).expect("nonzero"),
         ),
         track_id: "vocal".to_owned(),
         tap,
@@ -561,5 +671,75 @@ fn parse_operation(value: &str) -> ForbiddenOperation {
         "syscall" => ForbiddenOperation::Syscall,
         "panic-unwind" => ForbiddenOperation::PanicUnwind,
         _ => panic!("unknown forbidden operation"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_prepared(
+        plan: &mut miso_engine_core::realtime::PreparedRenderPlan,
+        block: u64,
+    ) -> [f32; QUANTUM * 2] {
+        let mut output = [0.0; QUANTUM * 2];
+        plan.render(
+            RenderIo {
+                input: None,
+                output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM)
+                    .expect("fixed output"),
+            },
+            RenderTime {
+                absolute_sample: block * QUANTUM as u64,
+            },
+        )
+        .expect("render graph proof");
+        output
+    }
+
+    fn pop_rows(meters: &mut [MeterConsumer]) -> (Vec<String>, Vec<u64>) {
+        let mut rows = Vec::with_capacity(OBSERVERS);
+        let mut drops = Vec::with_capacity(OBSERVERS);
+        for meter in meters {
+            let snapshot = meter.consumer.try_pop().expect("meter window");
+            rows.push(meter_value_row(meter.tap, snapshot));
+            drops.push(snapshot.cumulative_dropped_snapshots);
+            assert!(meter.consumer.try_pop().is_err());
+        }
+        rows.sort();
+        (rows, drops)
+    }
+
+    #[test]
+    fn issue069_two_graph_instances_prove_success_and_saturation_without_duplicates() {
+        let (mut success, mut success_meters) = prepare_graph_plan(70, None);
+        let (mut saturation, mut saturation_meters) = prepare_graph_plan(71, None);
+
+        let success_first = render_prepared(&mut success, 0);
+        let (success_first_rows, success_first_drops) = pop_rows(&mut success_meters);
+        assert_eq!(success_first_drops, [0; OBSERVERS]);
+        let _ = render_prepared(&mut success, 1);
+        let _ = pop_rows(&mut success_meters);
+        let success_continuation = render_prepared(&mut success, 2);
+        let _ = pop_rows(&mut success_meters);
+
+        let saturation_first = render_prepared(&mut saturation, 0);
+        let _saturated = render_prepared(&mut saturation, 1);
+        let (saturation_first_rows, saturation_first_drops) = pop_rows(&mut saturation_meters);
+        assert_eq!(saturation_first_drops, [0; OBSERVERS]);
+        let saturation_continuation = render_prepared(&mut saturation, 2);
+        let (post_full_rows, post_full_drops) = pop_rows(&mut saturation_meters);
+
+        assert_eq!(success_first, saturation_first);
+        assert_eq!(success_first_rows, saturation_first_rows);
+        assert_eq!(post_full_drops, [1; OBSERVERS]);
+        assert_eq!(post_full_rows.len(), OBSERVERS);
+        assert_eq!(success_continuation, saturation_continuation);
+        assert!(
+            success_first[..9]
+                .iter()
+                .all(|sample| sample.to_bits() == 0)
+        );
+        assert_ne!(success_first[9].to_bits(), 0);
     }
 }

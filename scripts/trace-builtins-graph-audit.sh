@@ -4,6 +4,11 @@ set -euo pipefail
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
 binary="$workspace_dir/target/release/miso_engine_builtins_audit_graph"
 trace_root="$workspace_dir/target/issue7/graph-strace"
+validator="$workspace_dir/scripts/validate-realtime-trace.sh"
+[[ "$#" -eq 0 ]] || {
+  printf 'trace-builtins-graph-audit.sh accepts no arguments\n' >&2
+  exit 2
+}
 cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
   -p miso-engine-builtins-audit --bin miso_engine_builtins_audit_graph
 command -v strace >/dev/null 2>&1 || {
@@ -13,37 +18,25 @@ command -v strace >/dev/null 2>&1 || {
 mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
-strace -ff -qq -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
-
-marker_file=""
-while IFS= read -r candidate; do
-  if rg -q 'MISO_ISSUE007_GRAPH_RT_BEGIN' "$candidate" && rg -q 'MISO_ISSUE007_GRAPH_RT_END' "$candidate"; then
-    [[ -z "$marker_file" ]] || { printf 'multiple graph render trace threads\n' >&2; exit 1; }
-    marker_file="$candidate"
-  fi
-done < <(find "$trace_root" -maxdepth 1 -type f -name 'trace.*' | sort)
-[[ -n "$marker_file" ]] || { printf 'missing issue-007 graph render markers\n' >&2; exit 1; }
-[[ "$(rg -c 'MISO_ISSUE007_GRAPH_RT_BEGIN' "$marker_file")" == 7 ]] || {
-  printf 'unexpected issue-007 graph render marker begin count\n' >&2; exit 1;
-}
-[[ "$(rg -c 'MISO_ISSUE007_GRAPH_RT_END' "$marker_file")" == 7 ]] || {
-  printf 'unexpected issue-007 graph render marker end count\n' >&2; exit 1;
-}
-unexpected=$(awk '
-  /MISO_ISSUE007_GRAPH_RT_BEGIN/ { inside = 1; next }
-  /MISO_ISSUE007_GRAPH_RT_END/ { inside = 0; next }
-  inside { print }
-' "$marker_file")
-[[ -z "$unexpected" ]] || { printf 'unexpected issue-007 graph render syscall(s):\n%s\n' "$unexpected" >&2; exit 1; }
+strace -ff -qq -ttt -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
+"$validator" "$trace_root" MISO_ISSUE069_GRAPH_RT_BEGIN MISO_ISSUE069_GRAPH_RT_END 4 \
+  >"$trace_root/validator.json"
 jq -e '
-  .kind == "issue007_graph_realtime_lifecycle_audit" and
+  .kind == "issue069_graph_realtime_lifecycle_audit" and
   .renders == 1000000 and .quantum_frames == 128 and .observers == 7 and
-  .render_count_by_epoch == {"1":4,"2":999996} and
-  .swaps_applied == 2 and .swaps_deferred == 1 and .prior_plan_renders_on_deferred == 1 and
-  .drained_blocks == 6 and .observer_windows_per_drained_block == 7 and
-  .queue_success_windows == 42 and .queue_full_windows == 6999958 and
-  .retired_destroyed_off_render == 2 and
-  .allocations == 0 and .deallocations == 0 and .locks == 0 and .logs == 0 and
-  .file_io == 0 and .network_io == 0 and .syscalls == 0 and .total_violations == 0
+  .render_count_by_plan == {"A":1,"B":999999,"C":0} and
+  .swaps_applied == 1 and .swaps_deferred == 999998 and
+  .prior_plan_renders_on_deferred == 999998 and
+  .pdc_samples == 9 and .distinct_taps == 7 and
+  .retirement_owner_destroyed == 1 and .control_owner_destroyed == 2 and
+  .render_owner_destroyed == 0 and
+  .stable_left_address == true and .stable_right_address == true and
+  .allocations == 0 and .deallocations == 0 and .locks == 0 and
+  .feature_detection == 0 and .logs == 0 and .file_io == 0 and
+  .network_io == 0 and .syscalls == 0 and .panic_unwinds == 0 and
+  .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
-printf 'issue-007 graph lifecycle syscall trace: PASS (1000000 renders)\n'
+raw_hash=$(for file in "$trace_root"/trace.*; do sha256sum "$file" | cut -d' ' -f1; done | sha256sum | cut -d' ' -f1)
+validator_hash=$(sha256sum "$trace_root/validator.json" | cut -d' ' -f1)
+printf 'issue-069 graph all-TID trace: PASS (raw=%s validator=%s)\n' \
+  "$raw_hash" "$validator_hash"

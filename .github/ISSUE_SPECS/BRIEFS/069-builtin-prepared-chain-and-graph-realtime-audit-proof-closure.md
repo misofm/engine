@@ -25,11 +25,14 @@ arbitrary private mutation, add restore/migration or change normal layout. A non
 scan proves the helper is absent from every production/audit binary.
 
 Put the seven true tap/two-meter-set proof in a graph-compiler integration test modeled on the
-accepted Issue-067 graph. Bind two genuine `MeterRequest`s for each of the seven ordered taps. One
-set is drained successfully; the capacity-one set reaches the exact full/drop outcome; all 14
-requests preserve tap identity, the accepted seven tuples remain distinct, runtime audio first
-contains the early-route contribution at sample 9, and rendering continues unchanged after the
-drain/full event. Do not invent rack boundaries in the scalar chain.
+accepted Issue-067 graph. Preserve `builtin.meter.duplicate`: prepare two independent graph
+instances, each with exactly one genuine `MeterRequest` for each of the seven ordered taps. Drain
+the success instance normally; allow the capacity-one saturation instance to reach the exact
+full/drop outcome. Before that intentional queue divergence, require identical tap IDs/order and
+first-window tuple bytes. In both instances the accepted seven tuples remain distinct, compiler
+and runtime PDC are exactly 9 with the first early-route contribution at frame 9, and an identical
+post-drain/full continuation digest proves processing did not diverge. Do not invent rack boundaries
+in the scalar chain or change duplicate-meter preparation semantics.
 
 ## Separate deterministic evidence
 
@@ -98,7 +101,8 @@ count and complete deterministic JSON schema.
 ## Ordered implementation and gates
 
 1. Land the internal test seam and focused layout/reset/recovery tests; prove non-test absence.
-   Land the graph-compiler two-set/seven-tap integration proof separately from the scalar chain.
+   Land the two-instance graph-compiler success/saturation seven-tap proof separately from the
+   scalar chain and retain duplicate-request rejection.
 2. Land the independent scratch author, read-only checker and four accepted payloads; freeze hashes
    and unchanged Issue-064/benchmark-input identities.
 3. Correct direct functional evidence and both probe suites. Stop on the first fixture mismatch.

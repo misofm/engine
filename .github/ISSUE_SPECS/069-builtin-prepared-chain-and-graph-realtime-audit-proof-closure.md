@@ -6,6 +6,8 @@ Close the launch-critical 48-kHz/q128 builtin realtime proof with exact function
 prepared chain, the production graph and the A/B/C plan lifecycle, without changing DSP or the
 accepted Issue-064 corpus.
 
+**Status: STOPPED after the final Sol correction. No overall PASS.**
+
 ## Context
 
 Issue 057 stopped after two attempts because its count-only direct tool could not observe retained
@@ -51,12 +53,16 @@ the prior output back as new input. The internal test owns the injected call-4 s
 The external direct audit mirrors the public target/input/reset schedule with ordinary finite call 4
 and zero recovery, then runs calls 7 through 1,000,000 in deterministic steady state.
 
-The seven true tap/two-meter-set proof is a graph-compiler integration test, not a fabricated
-`BuiltinChain` tap API. It binds two real `MeterRequest`s at each ordered tap `Input`,
+The seven true tap/two-meter-set proof preserves the production
+`builtin.meter.duplicate` prohibition. It uses two separately prepared instances of the accepted
+Issue-067 graph, not two requests for one `(track_id, tap)` and not a fabricated `BuiltinChain` tap
+API. Each instance binds exactly one real `MeterRequest` at each ordered tap `Input`,
 `PostInputBuiltins`, `PostSimd1`, `PostDynamic`, `PostSimd2PreFader`, `PostFader` and
-`PostMatrix`. One set is drained successfully and the capacity-one set is rendered full and proves
-its exact drop count. The test also proves seven distinct accepted tuples, positive runtime PDC and
-continued rendering after drain/full. Meter drains remain outside render.
+`PostMatrix`. The success instance is drained successfully; the capacity-one saturation instance
+is rendered full and proves its exact drop count. Before queue outcomes diverge, require identical
+tap IDs/order and first-window tuple bytes across the instances. Both independently prove seven
+distinct accepted tuples, compiler and runtime PDC=9 with first early-route contribution at frame
+9, and an identical continuation digest after drain/full. Meter drains remain outside render.
 
 Audit-only expected bytes live exclusively under
 `tools/miso-engine-builtins-audit/fixtures/v1/`: `direct-schedule.pcm.f32le`,
@@ -120,8 +126,8 @@ claims; listening; or V1 inspection.
 
 1. Non-test builds contain no qualification seam or symbol. Internal focused tests prove the exact
    17-word-plus-two-counter state layout, atomic nonfinite-target rejection, both reset modes and
-   lane/filter recovery isolation; graph-compiler integration proves seven real ordered taps and
-   both seven-meter-set outcomes.
+   lane/filter recovery isolation; two graph-compiler instances prove seven real ordered taps and
+   the success/saturation outcomes without duplicate requests.
 2. The separate audit fixture author/checker proves independent provenance, canonical bytes,
    read-only operation and exact manifest/payload hashes without changing any Issue-064 or
    benchmark-input byte.
@@ -171,5 +177,58 @@ Focused builtin command: `cargo test --locked -p miso-engine-builtins --lib
 issue069_prepared_chain_snapshot_reset_and_recovery_script_is_exact` — PASS (1 passed, 0 failed).
 Graph work stopped at the exact duplicate-meter diagnostic; no graph replacement test, audit,
 fixture author, lifecycle/trace, workload, timing, or benchmark command ran.
+
+`workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
+
+## Sol attempt 2 final evidence — FAIL / STOP
+
+Base candidate: `43aa1d478a1d4d1c7f67a1c262a3585a5100fdd0`. The bounded correction preserved
+`builtin.meter.duplicate` and added two separately prepared seven-request graph instances, the
+test-only retained-state/report proof, independent audit fixture author/read-only checker, corrected
+direct and graph deterministic records, exact A=1/B=999999/C=0 lifecycle accounting, nine probes
+per audit entrypoint and one shared timestamped all-TID trace validator. It also corrected a
+reference-only sanitation omission: legal nonfinite/subnormal TPT output sanitation is distinct
+from retained-state recovery and matrix-output sanitation. No production coefficient, operation
+order, layout, latency, tail or resource contract changed.
+
+The separate audit fixture identities are manifest
+`065aa23474266e9882853ffea3220fc8ce9559596c42e937a7a9b6fe4b369942`, direct result
+`91f326645f8ddd0fd5edb4d8c476bfce24830dec3c1b0d3fcf73f49e6da201c8`, direct PCM
+`c0b5a7bcd7770893fc94139b505981ce6322aaf31b9b47080b8d5f8425f4af03`, graph meter sets
+`ec0102dc8a0686eeb6973f203ff78f0ea86b902293963d2adf862088e17311f0` and retained
+state/report `967952227c2b48399cb4fdbca396edbb6e1541543821505cc24e3cfb226c4fbe`.
+The immutable Issue-064 manifest/graph-PCM/graph-meter identities remained respectively
+`bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff`,
+`508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19` and
+`958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f`.
+
+Focused audit all-target tests passed (three binaries, three tests); the internal prepared-chain
+test passed; audit/builtins/reference warning-denied all-target Clippy passed; both nine-probe
+suites passed; realtime policy plus its mutations passed; graph policy passed; shell syntax,
+synthetic clean/render-thread/auxiliary-thread trace mutations, format and diff checks passed. The
+direct real trace passed exactly 1,000,000 calls and seven intervals with canonical record SHA-256
+`3581ebf058151a0a0014ff08adcdd7fcd6fe6ad51a5baf41538272d4bba6ce8e`, raw trace-set hash
+`09f820aecf3490c3189595478d0a53deb14c8288e21de46a04bd0bda693a4c04` and validator-output hash
+`6fe4fa42f86b4a3e35c611acfc99b568001827bda23b202af01a931920f7e3de`; every detector and
+trace violation count was zero.
+
+The graph binary itself completed the exact 1,000,000-render record with A/B/C
+`1/999999/0`, one applied swap, 999,998 repeated deferrals, PDC 9, seven distinct taps, exact
+off-render destruction roles and all nine in-process counters zero; its canonical record SHA-256 is
+`54103c89b557a72da9c79cd00a636ea64933240a4dcb27c27647fb960b013db4`. The required one-shot
+all-TID graph trace nevertheless **failed**. The shared validator found retirement-thread startup
+and blocking syscalls (`set_robust_list`, `rt_sigprocmask`, `mmap`, `sched_getaffinity`, `gettid`,
+`sigaltstack`, `mprotect`, `futex`) timestamped inside the first armed graph interval in
+`trace.292308`; the failed raw trace-set hash is
+`4bf5ae55232659874075c172670fc1e2811ca4dca2ddcc993f817012a702a6a7`. The validator therefore
+worked as frozen, but the audit's auxiliary-thread lifecycle was not quiescent before render.
+
+The final-attempt brief forbids a trace or million-call retry, so no synchronization/lifecycle
+repair or rerun was attempted after this failure. During correction development, before the two
+one-shot trace gates, the direct audit had one early assertion abort and one completed independent-
+oracle mismatch used to correct the reference model, and the graph audit had one standalone exact
+record run. Those are non-timed qualification executions, not benchmark workloads, but are
+disclosed because the final brief prohibited retries. Gate 5 is red; Gate 6 and a clean-candidate
+seal are consequently incomplete. Issue 069 has no PASS and does not unblock Issue 068.
 
 `workload_invocations=0`; `timed_benchmark_invocations=0`; `benchmark_invocations=0`.

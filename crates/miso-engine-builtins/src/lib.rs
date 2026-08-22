@@ -1613,6 +1613,7 @@ fn sanitize(value: f32, count: &mut u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::fmt::Write as _;
     use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
     use miso_engine_dsp_reference::{
         ReferenceBiquad, ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput,
@@ -3150,6 +3151,38 @@ mod tests {
         }
     }
 
+    fn issue069_words(values: &[u32]) -> String {
+        let mut output = String::from("[");
+        for (index, value) in values.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            write!(&mut output, "\"{value:08x}\"").expect("string");
+        }
+        output.push(']');
+        output
+    }
+
+    fn issue069_state_row(
+        call: u32,
+        snapshot: &PreparedChainSnapshotV1,
+        report: BuiltinProcessReport,
+    ) -> String {
+        format!(
+            "{{\"call\":{call},\"filter\":{},\"current\":{},\"target\":{},\"remaining\":{},\"lifetime\":[\"{:016x}\",\"{:016x}\"],\"report\":[\"{:016x}\",\"{:016x}\",\"{:016x}\",\"{:016x}\"]}}",
+            issue069_words(&snapshot.filter_state_bits),
+            issue069_words(&snapshot.matrix_current_bits),
+            issue069_words(&snapshot.matrix_target_bits),
+            snapshot.remaining_updates,
+            snapshot.lifetime_recoveries[0],
+            snapshot.lifetime_recoveries[1],
+            report.sanitized_input,
+            report.sanitized_output,
+            report.recovered_left_state,
+            report.recovered_right_state,
+        )
+    }
+
     fn inject_prepared_chain_filter_state_v1(
         chain: &mut BuiltinChain,
         section: PreparedChainFilterSectionV1,
@@ -3189,6 +3222,7 @@ mod tests {
 
     #[test]
     fn issue069_prepared_chain_snapshot_reset_and_recovery_script_is_exact() {
+        let mut evidence = String::new();
         let mut chain = BuiltinChain::new(
             48_000,
             BuiltinParameters {
@@ -3226,13 +3260,17 @@ mod tests {
             rr: 0.0,
         };
         chain.set_matrix_target(swap).expect("call one target");
-        assert_eq!(
-            issue069_process_call(&mut chain, 0, None, None),
-            BuiltinProcessReport::default()
-        );
+        let report = issue069_process_call(&mut chain, 0, None, None);
+        assert_eq!(report, BuiltinProcessReport::default());
         let after_call_one = prepared_chain_snapshot_v1(&chain);
         assert_eq!(after_call_one.matrix_target_bits, matrix_bits(swap));
         assert_eq!(after_call_one.remaining_updates, 129);
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(1, &after_call_one, report)
+        )
+        .expect("string");
 
         let second_target = Matrix2x2 {
             ll: 0.9,
@@ -3244,11 +3282,16 @@ mod tests {
             .set_matrix_target(second_target)
             .expect("call two retarget");
         assert_eq!(chain.matrix.remaining_updates, 257);
-        assert_eq!(
-            issue069_process_call(&mut chain, 128, None, None),
-            BuiltinProcessReport::default()
-        );
-        assert_eq!(prepared_chain_snapshot_v1(&chain).remaining_updates, 129);
+        let report = issue069_process_call(&mut chain, 128, None, None);
+        assert_eq!(report, BuiltinProcessReport::default());
+        let after_call_two = prepared_chain_snapshot_v1(&chain);
+        assert_eq!(after_call_two.remaining_updates, 129);
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(2, &after_call_two, report)
+        )
+        .expect("string");
 
         let before_rejected_target = prepared_chain_snapshot_v1(&chain);
         assert_eq!(
@@ -3265,8 +3308,9 @@ mod tests {
             before_rejected_target,
             "a rejected target is transactional"
         );
+        let report = issue069_process_call(&mut chain, 256, Some(f32::NAN), Some(f32::INFINITY));
         assert_eq!(
-            issue069_process_call(&mut chain, 256, Some(f32::NAN), Some(f32::INFINITY)),
+            report,
             BuiltinProcessReport {
                 sanitized_input: 2,
                 sanitized_output: 0,
@@ -3274,6 +3318,13 @@ mod tests {
                 recovered_right_state: 0,
             }
         );
+        let after_call_three = prepared_chain_snapshot_v1(&chain);
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(3, &after_call_three, report)
+        )
+        .expect("string");
 
         inject_prepared_chain_filter_state_v1(
             &mut chain,
@@ -3287,8 +3338,9 @@ mod tests {
             f32::INFINITY.to_bits(),
             0.0_f32.to_bits(),
         );
+        let report = issue069_process_call(&mut chain, 384, None, None);
         assert_eq!(
-            issue069_process_call(&mut chain, 384, None, None),
+            report,
             BuiltinProcessReport {
                 sanitized_input: 0,
                 sanitized_output: 0,
@@ -3302,6 +3354,12 @@ mod tests {
             let value = f32::from_bits(bits);
             value.is_finite() && !value.is_subnormal()
         }));
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(4, &after_recovery, report)
+        )
+        .expect("string");
 
         chain.reset(BuiltinResetKind::DiscontinuityKeepTargets);
         let after_discontinuity = prepared_chain_snapshot_v1(&chain);
@@ -3312,10 +3370,15 @@ mod tests {
         );
         assert_eq!(after_discontinuity.remaining_updates, 0);
         assert_eq!(after_discontinuity.lifetime_recoveries, [1, 1]);
-        assert_eq!(
-            issue069_process_call(&mut chain, 512, None, None),
-            BuiltinProcessReport::default()
-        );
+        let report = issue069_process_call(&mut chain, 512, None, None);
+        assert_eq!(report, BuiltinProcessReport::default());
+        let after_call_five = prepared_chain_snapshot_v1(&chain);
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(5, &after_call_five, report)
+        )
+        .expect("string");
 
         chain.reset(BuiltinResetKind::FullToPrepared);
         let after_full = prepared_chain_snapshot_v1(&chain);
@@ -3326,9 +3389,20 @@ mod tests {
         );
         assert_eq!(after_full.remaining_updates, 0);
         assert_eq!(after_full.lifetime_recoveries, [1, 1]);
+        let report = issue069_process_call(&mut chain, 640, None, None);
+        assert_eq!(report, BuiltinProcessReport::default());
+        let after_call_six = prepared_chain_snapshot_v1(&chain);
+        writeln!(
+            evidence,
+            "{}",
+            issue069_state_row(6, &after_call_six, report)
+        )
+        .expect("string");
         assert_eq!(
-            issue069_process_call(&mut chain, 640, None, None),
-            BuiltinProcessReport::default()
+            evidence,
+            include_str!(
+                "../../../tools/miso-engine-builtins-audit/fixtures/v1/prepared-chain-state-report.jsonl"
+            )
         );
     }
 
