@@ -2260,20 +2260,48 @@ mod tests {
 
     #[test]
     fn constructor_sealed_id_and_link_mutations_have_raw_wire_diagnostics() {
-        for invalid in ["", "A", "a/b", "a\n"] {
+        const VALID_127: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const INVALID_128: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(VALID_127.len(), 127);
+        assert_eq!(INVALID_128.len(), 128);
+        for valid in ["a", "z0._-a", VALID_127] {
+            assert!(EffectId::new(valid).is_ok());
+            assert!(PortId::new(valid).is_ok());
+        }
+        for invalid in [
+            "",
+            "0a",
+            ".a",
+            "_a",
+            "-a",
+            "Aa",
+            "éa",
+            "aA",
+            "a/b",
+            "a b",
+            "a\n",
+            "aé",
+            INVALID_128,
+        ] {
             assert!(EffectId::new(invalid).is_err());
             assert!(PortId::new(invalid).is_err());
         }
-        assert!(EffectId::new(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        )
-        .is_err());
-        for invalid in [0, 2, 4, 6, 8, 9, u32::MAX] {
-            assert!(LinkModeSet::new(invalid).is_none());
+        let link_values = (0u32..256)
+            .chain((8..32).map(|bit| 1u32 << bit))
+            .chain((8..32).map(|bit| (1u32 << bit) | 1));
+        for value in link_values {
+            let valid = value & !7 == 0 && value & 1 != 0;
+            assert_eq!(LinkModeSet::new(value).is_some(), valid);
+            if valid {
+                continue;
+            }
             let mut bytes = encode(&DESCRIPTOR);
-            write_u32(&mut bytes, 28, invalid);
+            write_u32(&mut bytes, 28, value);
             let error = verify_effect_descriptor_wire_v1(&bytes, 1 << 20).unwrap_err();
-            assert_eq!((error.code, error.byte_offset), (Code::Enum, 28));
+            assert_eq!(
+                (error.code, error.byte_offset, error.record_index),
+                (Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE)
+            );
         }
         let mut effect_id = encode(&DESCRIPTOR);
         let offset = read_u32(&effect_id, 32) as usize;
@@ -2284,6 +2312,14 @@ mod tests {
                 .code,
             Code::Text
         );
+        let mut effect_id_rest = encode(&DESCRIPTOR);
+        let offset = read_u32(&effect_id_rest, 32) as usize;
+        effect_id_rest[offset + 4] = b'/';
+        let error = verify_effect_descriptor_wire_v1(&effect_id_rest, 1 << 20).unwrap_err();
+        assert_eq!(
+            (error.code, error.byte_offset, error.record_index),
+            (Code::Text, 32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE)
+        );
         let mut port_id = encode(&DESCRIPTOR);
         let port = read_u32(&port_id, 60) as usize;
         let offset = read_u32(&port_id, port) as usize;
@@ -2293,6 +2329,15 @@ mod tests {
                 .unwrap_err()
                 .code,
             Code::Text
+        );
+        let mut port_id_rest = encode(&DESCRIPTOR);
+        let port = read_u32(&port_id_rest, 60) as usize;
+        let offset = read_u32(&port_id_rest, port) as usize;
+        port_id_rest[offset + 4] = b'/';
+        let error = verify_effect_descriptor_wire_v1(&port_id_rest, 1 << 20).unwrap_err();
+        assert_eq!(
+            (error.code, error.byte_offset, error.record_index),
+            (Code::Text, port as u32, 0)
         );
     }
 

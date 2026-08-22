@@ -482,7 +482,7 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
             "scratch_fixed_bytes": u64(data, record + 48),
             "scratch_bytes_per_frame": u64(data, record + 56),
         })
-    validate_source({
+    decoded = {
         "effect_id": effect_id.decode("utf-8"),
         "display_name": display_name.decode("utf-8"),
         "contract_major": u16(data, 20),
@@ -492,7 +492,10 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
         "parameters": parameters,
         "ports": ports,
         "qualities": qualities,
-    })
+    }
+    validate_source(decoded)
+    if encode(decoded) != data:
+        raise AssertionError("verified descriptor does not decode/re-encode byte-identically")
     return (*counts, u32(data, 24), u32(data, 28))
 
 
@@ -503,14 +506,33 @@ def identity(data: bytes) -> bytes:
 
 def mutation_matrix(data: bytes) -> None:
     parameter_offset, port_offset, quality_offset = u32(data, 52), u32(data, 60), u32(data, 68)
+    choice_offset = u32(data, 76)
     cases = [
         ("header", 0, b"X", (4, 0, UNAVAILABLE, 0)),
+        ("version", 8, struct.pack("<H", 2), (4, 8, UNAVAILABLE, 0)),
+        ("header-size", 10, struct.pack("<H", HEADER + 8), (4, 10, UNAVAILABLE, 0)),
         ("length", 16, struct.pack("<I", len(data) - 1), (5, 16, UNAVAILABLE, 0)),
         ("reserved", 12, b"\x01", (6, 12, UNAVAILABLE, 0)),
+        ("header-reserved-tail", 95, b"\x01", (6, 95, UNAVAILABLE, 0)),
         ("flags", parameter_offset + 32, struct.pack("<I", 16), (8, parameter_offset + 32, 0, 0)),
+        ("absent-minimum-bits", parameter_offset + 3 * PARAMETER + 36,
+         struct.pack("<I", 1), (8, parameter_offset + 3 * PARAMETER + 36, 3, 0)),
+        ("parameter-reserved", parameter_offset + 72, struct.pack("<I", 1),
+         (6, parameter_offset + 72, 0, 0)),
+        ("port-reserved", port_offset + 20, struct.pack("<I", 1),
+         (6, port_offset + 20, 0, 0)),
+        ("quality-reserved", quality_offset + 20, struct.pack("<I", 1),
+         (6, quality_offset + 20, 0, 0)),
+        ("choice-reserved", choice_offset + 12, struct.pack("<I", 1),
+         (6, choice_offset + 12, 0, 0)),
         ("offset", 52, struct.pack("<I", HEADER + 4), (10, 52, UNAVAILABLE, 0)),
         ("parameter-order", parameter_offset + PARAMETER, struct.pack("<I", 1), (9, parameter_offset + PARAMETER, 1, 0)),
+        ("quality-order", quality_offset + QUALITY + 4, struct.pack("<I", 44100),
+         (9, quality_offset + QUALITY, 1, 0)),
+        ("choice-order", choice_offset + CHOICE, struct.pack("<I", 0xc0000000),
+         (9, choice_offset + CHOICE, 1, 0)),
         ("link-missing", 28, struct.pack("<I", 2), (7, 28, UNAVAILABLE, 0)),
+        ("link-unknown", 28, struct.pack("<I", 9), (7, 28, UNAVAILABLE, 0)),
         ("unit", parameter_offset + 4, struct.pack("<I", 0), (7, parameter_offset + 4, 0, 0)),
         ("domain", parameter_offset + 8, struct.pack("<I", 0), (7, parameter_offset + 8, 0, 0)),
         ("mapping", parameter_offset + 12, struct.pack("<I", 0), (7, parameter_offset + 12, 0, 0)),
@@ -522,7 +544,13 @@ def mutation_matrix(data: bytes) -> None:
         ("port-layout", port_offset + 16, struct.pack("<I", 0), (7, port_offset + 16, 0, 0)),
         ("quality", quality_offset, struct.pack("<I", 0), (7, quality_offset, 0, 0)),
         ("tail", quality_offset + 16, struct.pack("<I", 0), (7, quality_offset + 16, 0, 0)),
+        ("infinite-tail-samples", quality_offset + 8 * QUALITY + 24,
+         struct.pack("<Q", 1), (7, quality_offset + 8 * QUALITY + 24, 8, 0)),
         ("float", parameter_offset + 44, struct.pack("<I", 0x80000000), (12, parameter_offset + 44, 0, 0)),
+        ("float-nan", parameter_offset + 44, struct.pack("<I", 0x7fc00000),
+         (12, parameter_offset + 44, 0, 0)),
+        ("choice-float-nan", choice_offset, struct.pack("<I", 0x7fc00000),
+         (12, choice_offset, 0, 0)),
         ("parameter-semantic", parameter_offset + 44, struct.pack("<I", 0x7f7fffff),
          (13, parameter_offset + 4, 0, 0)),
         ("port-semantic", port_offset + 12, struct.pack("<I", 0),
@@ -536,6 +564,16 @@ def mutation_matrix(data: bytes) -> None:
                       (14, field, UNAVAILABLE, 0)))
     display = u32(data, 40)
     cases.append(("text", display, b"\x0a", (11, 40, UNAVAILABLE, 0)))
+    cases.append(("text-invalid-utf8", display, b"\xff", (11, 40, UNAVAILABLE, 0)))
+    effect_id = u32(data, 32)
+    cases.append(("string-alias", 40, struct.pack("<I", effect_id), (10, 40, UNAVAILABLE, 0)))
+    cases.append(("string-gap", 40, struct.pack("<I", u32(data, 40) + 1),
+                  (10, 40, UNAVAILABLE, 0)))
+    cases.append(("effect-id-first", effect_id, b"F", (11, 32, UNAVAILABLE, 0)))
+    cases.append(("effect-id-rest", effect_id + 7, b"/", (11, 32, UNAVAILABLE, 0)))
+    port_id = u32(data, port_offset)
+    cases.append(("port-id-first", port_id, b"M", (11, port_offset, 0, 0)))
+    cases.append(("port-id-rest", port_id + 4, b"/", (11, port_offset, 0, 0)))
     for name, offset, replacement, expected in cases:
         mutated = bytearray(data)
         mutated[offset:offset + len(replacement)] = replacement
@@ -544,6 +582,42 @@ def mutation_matrix(data: bytes) -> None:
         except WireError as error:
             if error.diagnostic != expected:
                 raise AssertionError(f"{name}: {error.diagnostic} != {expected}") from error
+        else:
+            raise AssertionError(f"{name}: mutation accepted")
+
+    port_order = bytearray(data)
+    put32(port_order, port_offset + PORT + 8, 1)
+    second_port_text = u32(data, port_offset + PORT)
+    port_order[second_port_text] = ord("a")
+    try:
+        verify(bytes(port_order))
+    except WireError as error:
+        assert error.diagnostic == (9, port_offset + PORT + 8, 1, 0)
+    else:
+        raise AssertionError("port-order: mutation accepted")
+
+    for link_bits in list(range(256)) + [1 << bit for bit in range(8, 32)] + [
+        (1 << bit) | 1 for bit in range(8, 32)
+    ]:
+        if link_bits in (1, 3, 5, 7):
+            continue
+        mutated = bytearray(data)
+        put32(mutated, 28, link_bits)
+        try:
+            verify(bytes(mutated))
+        except WireError as error:
+            assert error.diagnostic == (7, 28, UNAVAILABLE, 0)
+        else:
+            raise AssertionError(f"link-bits-{link_bits}: mutation accepted")
+
+    for name, mutated, expected in (
+        ("truncated", data[:-1], (5, 16, UNAVAILABLE, 0)),
+        ("trailing", data + b"\x00", (5, 16, UNAVAILABLE, 0)),
+    ):
+        try:
+            verify(mutated)
+        except WireError as error:
+            assert error.diagnostic == expected
         else:
             raise AssertionError(f"{name}: mutation accepted")
 

@@ -536,6 +536,141 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn assert_valid_identity_change(original: &[u8], name: &str, mutate: impl FnOnce(&mut [u8])) {
+    let before = *effect_descriptor_identity_v1(original, 1 << 20)
+        .unwrap()
+        .as_bytes();
+    let mut changed = original.to_vec();
+    mutate(&mut changed);
+    verify_effect_descriptor_wire_v1(&changed, 1 << 20)
+        .unwrap_or_else(|error| panic!("{name}: legal semantic mutation rejected: {error:?}"));
+    let after = effect_descriptor_identity_v1(&changed, 1 << 20).unwrap();
+    assert_ne!(&before, after.as_bytes(), "{name}: identity did not change");
+}
+
+#[test]
+fn every_legally_mutable_semantic_field_class_changes_identity() {
+    let original = encoded(&DESCRIPTOR_A);
+    let parameter = u32::from_le_bytes(original[52..56].try_into().unwrap()) as usize;
+    let port = u32::from_le_bytes(original[60..64].try_into().unwrap()) as usize;
+    let quality = u32::from_le_bytes(original[68..72].try_into().unwrap()) as usize;
+    let choice = u32::from_le_bytes(original[76..80].try_into().unwrap()) as usize;
+
+    assert_valid_identity_change(&original, "effect ID", |bytes| {
+        let offset = u32::from_le_bytes(bytes[32..36].try_into().unwrap()) as usize;
+        bytes[offset + "fixture.comprehensive-a".len() - 1] = b'b';
+    });
+    assert_valid_identity_change(&original, "display name", |bytes| {
+        let offset = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        bytes[offset] = b'D';
+    });
+    assert_valid_identity_change(&original, "contract minor", |bytes| put_u16(bytes, 22, 8));
+    assert_valid_identity_change(&original, "state layout", |bytes| put_u32(bytes, 24, 4));
+    assert_valid_identity_change(&original, "link modes", |bytes| put_u32(bytes, 28, 1));
+    assert_valid_identity_change(&original, "parameter ID", |bytes| {
+        put_u32(bytes, parameter + 5 * 80, 7);
+    });
+    assert_valid_identity_change(&original, "parameter unit", |bytes| {
+        put_u32(bytes, parameter + 4, ParameterUnit::Linear as u32);
+    });
+    assert_valid_identity_change(&original, "parameter domain", |bytes| {
+        let record = parameter + 3 * 80;
+        put_u32(bytes, record + 8, ParameterDomain::Continuous as u32);
+        put_u32(bytes, record + 12, ParameterMapping::Linear as u32);
+        put_u32(bytes, record + 32, 15);
+        put_u32(bytes, record + 36, 0.0f32.to_bits());
+        put_u32(bytes, record + 40, 1.0f32.to_bits());
+    });
+    assert_valid_identity_change(&original, "parameter mapping", |bytes| {
+        put_u32(bytes, parameter + 12, ParameterMapping::Exponential as u32);
+    });
+    assert_valid_identity_change(&original, "automation rate", |bytes| {
+        put_u32(bytes, parameter + 16, AutomationRate::Block as u32);
+    });
+    assert_valid_identity_change(&original, "channel policy", |bytes| {
+        put_u32(bytes, parameter + 20, ParameterChannelPolicy::Shared as u32);
+    });
+    assert_valid_identity_change(&original, "smoothing rule", |bytes| {
+        put_u32(bytes, parameter + 24, SmoothingRule::OnePole99 as u32);
+    });
+    assert_valid_identity_change(&original, "smoothing samples", |bytes| {
+        put_u32(bytes, parameter + 28, 63);
+    });
+    assert_valid_identity_change(&original, "readable flag", |bytes| {
+        put_u32(bytes, parameter + 32, 15);
+    });
+    assert_valid_identity_change(&original, "automatable flag", |bytes| {
+        let record = parameter + 4 * 80;
+        put_u32(bytes, record + 16, AutomationRate::Block as u32);
+        put_u32(bytes, record + 32, 3);
+    });
+    assert_valid_identity_change(&original, "minimum", |bytes| {
+        put_u32(bytes, parameter + 36, (-59.0f32).to_bits());
+    });
+    assert_valid_identity_change(&original, "maximum", |bytes| {
+        put_u32(bytes, parameter + 40, 11.0f32.to_bits());
+    });
+    assert_valid_identity_change(&original, "default", |bytes| {
+        put_u32(bytes, parameter + 44, 1.0f32.to_bits());
+    });
+    assert_valid_identity_change(&original, "enum value", |bytes| {
+        put_u32(bytes, choice, (-2.0f32).to_bits());
+    });
+    assert_valid_identity_change(&original, "enum label", |bytes| {
+        let offset = u32::from_le_bytes(bytes[choice + 4..choice + 8].try_into().unwrap()) as usize;
+        bytes[offset..offset + 3].copy_from_slice(b"Lox");
+    });
+    assert_valid_identity_change(&original, "port ID", |bytes| {
+        let record = port + 2 * 24;
+        let offset = u32::from_le_bytes(bytes[record..record + 4].try_into().unwrap()) as usize;
+        bytes[offset + 8] = b'j';
+    });
+    assert_valid_identity_change(&original, "port required", |bytes| {
+        put_u32(bytes, port + 2 * 24 + 12, 1);
+    });
+    assert_valid_identity_change(&original, "latency", |bytes| {
+        put_u64(bytes, quality + 8, 1);
+    });
+    assert_valid_identity_change(&original, "tail kind", |bytes| {
+        put_u32(bytes, quality + 16, 2);
+    });
+    assert_valid_identity_change(&original, "tail samples", |bytes| {
+        put_u64(bytes, quality + 24, 1);
+    });
+    assert_valid_identity_change(&original, "common state", |bytes| {
+        put_u32(bytes, quality + 32, 9);
+    });
+    assert_valid_identity_change(&original, "lane state", |bytes| {
+        put_u32(bytes, quality + 36, 17);
+        put_u32(bytes, quality + 40, 17);
+    });
+    assert_valid_identity_change(&original, "fixed scratch", |bytes| {
+        put_u64(bytes, quality + 48, 33);
+    });
+    assert_valid_identity_change(&original, "per-frame scratch", |bytes| {
+        put_u64(bytes, quality + 56, 5);
+    });
+
+    let alternate = encoded(&DESCRIPTOR_B);
+    assert_ne!(
+        effect_descriptor_identity_v1(&original, 1 << 20)
+            .unwrap()
+            .as_bytes(),
+        effect_descriptor_identity_v1(&alternate, 1 << 20)
+            .unwrap()
+            .as_bytes(),
+        "parameter/port/quality table-shape classes must change identity"
+    );
+}
+
 #[test]
 fn raw_closed_values_and_field_overflows_have_exact_public_diagnostics() {
     let original = encoded(&DESCRIPTOR_A);

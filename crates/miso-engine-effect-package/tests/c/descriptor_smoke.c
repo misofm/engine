@@ -32,6 +32,14 @@ static uint32_t get_u32(const uint8_t *bytes, size_t offset) {
     return value;
 }
 
+static uint64_t get_u64(const uint8_t *bytes, size_t offset) {
+    uint64_t value = 0;
+    for (size_t index = 0; index < 8; ++index) {
+        value |= (uint64_t)bytes[offset + index] << (8 * index);
+    }
+    return value;
+}
+
 static void make_wire(uint8_t wire[WIRE_BYTES]) {
     static const uint32_t rates[4] = {44100, 48000, 88200, 96000};
     memset(wire, 0, WIRE_BYTES);
@@ -165,6 +173,68 @@ typedef struct choice_canary {
     uint64_t after;
 } choice_canary;
 
+static void require_exact_projection(
+    const uint8_t *wire,
+    const parameter_canary *parameters,
+    const port_canary *ports,
+    const quality_canary *qualities,
+    const choice_canary *choices) {
+    const size_t parameter_offset = get_u32(wire, 52);
+    const size_t port_offset = get_u32(wire, 60);
+    const size_t quality_offset = get_u32(wire, 68);
+    const size_t choice_offset = get_u32(wire, 76);
+    for (size_t index = 0; index < get_u32(wire, 48); ++index) {
+        const size_t record = parameter_offset + index * 80;
+        const miso_engine_effect_parameter_record_v1 *row = &parameters->rows[index];
+        const uint32_t actual[20] = {
+            row->id, row->unit, row->domain, row->mapping, row->automation_rate,
+            row->channel_policy, row->smoothing, row->smoothing_samples, row->flags,
+            row->minimum_bits, row->maximum_bits, row->default_bits, row->enum_start,
+            row->enum_count, row->display_name_offset, row->display_name_length,
+            row->display_unit_offset, row->display_unit_length, row->reserved0, row->reserved1};
+        for (size_t field = 0; field < 20; ++field) {
+            require(actual[field] == get_u32(wire, record + field * 4),
+                    "complete parameter projection");
+        }
+    }
+    for (size_t index = 0; index < get_u32(wire, 56); ++index) {
+        const size_t record = port_offset + index * 24;
+        const miso_engine_effect_port_record_v1 *row = &ports->rows[index];
+        const uint32_t actual[6] = {row->id_offset, row->id_length, row->role,
+                                    row->required, row->layout, row->reserved};
+        for (size_t field = 0; field < 6; ++field) {
+            require(actual[field] == get_u32(wire, record + field * 4),
+                    "complete port projection");
+        }
+    }
+    for (size_t index = 0; index < get_u32(wire, 64); ++index) {
+        const size_t record = quality_offset + index * 64;
+        const miso_engine_effect_quality_record_v1 *row = &qualities->rows[index];
+        require(row->quality == get_u32(wire, record) &&
+                    row->sample_rate == get_u32(wire, record + 4) &&
+                    row->latency_samples == get_u64(wire, record + 8) &&
+                    row->tail_kind == get_u32(wire, record + 16) &&
+                    row->reserved0 == get_u32(wire, record + 20) &&
+                    row->tail_samples == get_u64(wire, record + 24) &&
+                    row->common_state_bytes == get_u32(wire, record + 32) &&
+                    row->left_state_bytes == get_u32(wire, record + 36) &&
+                    row->right_state_bytes == get_u32(wire, record + 40) &&
+                    row->reserved1 == get_u32(wire, record + 44) &&
+                    row->scratch_fixed_bytes == get_u64(wire, record + 48) &&
+                    row->scratch_bytes_per_frame == get_u64(wire, record + 56),
+                "complete quality projection");
+    }
+    for (size_t index = 0; index < get_u32(wire, 72); ++index) {
+        const size_t record = choice_offset + index * 16;
+        const miso_engine_effect_enum_choice_record_v1 *row = &choices->rows[index];
+        require(row->value_bits == get_u32(wire, record) &&
+                    row->label_offset == get_u32(wire, record + 4) &&
+                    row->label_length == get_u32(wire, record + 8) &&
+                    row->reserved == get_u32(wire, record + 12),
+                "complete enum-choice projection");
+    }
+}
+
 static uint32_t inspect_comprehensive(
     const uint8_t *wire,
     size_t wire_len,
@@ -233,6 +303,7 @@ static void comprehensive_smoke(const char *fixture_path) {
                 choices.rows[1].value_bits == 0 &&
                 choices.rows[2].value_bits == UINT32_C(0x3f800000),
             "enum choice projection");
+    require_exact_projection(wire, &parameters, &ports, &qualities, &choices);
     require(parameters.before == UINT64_C(0x1122334455667788) &&
                 parameters.after == UINT64_C(0x1122334455667788) &&
                 ports.before == UINT64_C(0x2233445566778899) &&
@@ -314,6 +385,66 @@ static void comprehensive_smoke(const char *fixture_path) {
                 memcmp(&choices, &null_choices_before, sizeof choices) == 0,
             "mandatory summary null has no record writes");
 
+    result = inspect_comprehensive(NULL, 1, &summary, &parameters, 6, &ports, 3, &qualities, 12,
+                                   &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_NULL_V1 && required[0] == 0 &&
+                required[1] == 0 && required[2] == 0 && required[3] == 0,
+            "null nonempty wire");
+
+    for (size_t null_array = 0; null_array < 4; ++null_array) {
+        parameter_canary *parameter_pointer = null_array == 0 ? NULL : &parameters;
+        port_canary *port_pointer = null_array == 1 ? NULL : &ports;
+        quality_canary *quality_pointer = null_array == 2 ? NULL : &qualities;
+        choice_canary *choice_pointer = null_array == 3 ? NULL : &choices;
+        result = inspect_comprehensive(
+            wire, wire_len, &summary, parameter_pointer, 6, port_pointer, 3, quality_pointer, 12,
+            choice_pointer, 3, required, &diagnostic);
+        require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_NULL_V1 && required[0] == 0 &&
+                    required[1] == 0 && required[2] == 0 && required[3] == 0,
+                "nonnull capacity requires each record pointer");
+    }
+
+    for (size_t null_count = 0; null_count < 4; ++null_count) {
+        uint32_t counts[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        result = miso_engine_effect_descriptor_v1_inspect(
+            wire, wire_len, MAXIMUM_WIRE_BYTES, &summary, parameters.rows, 6, ports.rows, 3,
+            qualities.rows, 12, choices.rows, 3, null_count == 0 ? NULL : &counts[0],
+            null_count == 1 ? NULL : &counts[1], null_count == 2 ? NULL : &counts[2],
+            null_count == 3 ? NULL : &counts[3], &diagnostic);
+        require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_NULL_V1,
+                "each required-count pointer is mandatory");
+        for (size_t index = 0; index < 4; ++index) {
+            require(counts[index] == (index == null_count ? UINT32_MAX : 0),
+                    "mandatory-null count publication");
+        }
+    }
+
+    for (size_t zero_capacity = 0; zero_capacity < 4; ++zero_capacity) {
+        miso_engine_effect_descriptor_summary_v1 summary_before;
+        parameter_canary parameter_before;
+        port_canary port_before;
+        quality_canary quality_before;
+        choice_canary choice_before;
+        memcpy(&parameter_before, &parameters, sizeof parameters);
+        memcpy(&port_before, &ports, sizeof ports);
+        memcpy(&quality_before, &qualities, sizeof qualities);
+        memcpy(&choice_before, &choices, sizeof choices);
+        memset(&summary, 0xa5, sizeof summary);
+        memcpy(&summary_before, &summary, sizeof summary);
+        result = inspect_comprehensive(
+            wire, wire_len, &summary, &parameters, zero_capacity == 0 ? 0 : 6, &ports,
+            zero_capacity == 1 ? 0 : 3, &qualities, zero_capacity == 2 ? 0 : 12, &choices,
+            zero_capacity == 3 ? 0 : 3, required, &diagnostic);
+        require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_BUFFER_TOO_SMALL_V1,
+                "nonnull zero-capacity record pointer is legal and short");
+        require(memcmp(&summary, &summary_before, sizeof summary) == 0 &&
+                    memcmp(&parameters, &parameter_before, sizeof parameters) == 0 &&
+                    memcmp(&ports, &port_before, sizeof ports) == 0 &&
+                    memcmp(&qualities, &quality_before, sizeof qualities) == 0 &&
+                    memcmp(&choices, &choice_before, sizeof choices) == 0,
+                "zero-capacity short call is all-or-none");
+    }
+
     const size_t parameter_offset = get_u32(wire, 52);
     const size_t port_offset = get_u32(wire, 60);
     const size_t quality_offset = get_u32(wire, 68);
@@ -325,8 +456,12 @@ static void comprehensive_smoke(const char *fixture_path) {
         uint32_t record_index;
     } mutation_case;
     const mutation_case mutations[] = {
+        {8, 2, MISO_ENGINE_EFFECT_DESCRIPTOR_HEADER_V1, 8, UINT32_MAX},
+        {10, 104, MISO_ENGINE_EFFECT_DESCRIPTOR_HEADER_V1, 10, UINT32_MAX},
         {28, 0, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1, 28, UINT32_MAX},
         {28, 8, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1, 28, UINT32_MAX},
+        {28, 9, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1, 28, UINT32_MAX},
+        {95, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1, 95, UINT32_MAX},
         {parameter_offset + 4, 0, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1,
          (uint32_t)parameter_offset + 4, 0},
         {parameter_offset + 8, 0, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1,
@@ -351,6 +486,35 @@ static void comprehensive_smoke(const char *fixture_path) {
          (uint32_t)quality_offset + 16, 0},
         {parameter_offset + 32, 16, MISO_ENGINE_EFFECT_DESCRIPTOR_FLAGS_V1,
          (uint32_t)parameter_offset + 32, 0},
+        {parameter_offset + 3 * 80 + 36, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_FLAGS_V1,
+         (uint32_t)parameter_offset + 3 * 80 + 36, 3},
+        {parameter_offset + 72, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
+         (uint32_t)parameter_offset + 72, 0},
+        {port_offset + 20, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
+         (uint32_t)port_offset + 20, 0},
+        {quality_offset + 20, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
+         (uint32_t)quality_offset + 20, 0},
+        {get_u32(wire, 76) + 12, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
+         get_u32(wire, 76) + 12, 0},
+        {parameter_offset + 80, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_ORDER_V1,
+         (uint32_t)parameter_offset + 80, 1},
+        {quality_offset + 64 + 4, 44100, MISO_ENGINE_EFFECT_DESCRIPTOR_ORDER_V1,
+         (uint32_t)quality_offset + 64, 1},
+        {get_u32(wire, 76) + 16, UINT32_C(0xc0000000), MISO_ENGINE_EFFECT_DESCRIPTOR_ORDER_V1,
+         get_u32(wire, 76) + 16, 1},
+        {parameter_offset + 44, UINT32_C(0x7fc00000), MISO_ENGINE_EFFECT_DESCRIPTOR_FLOAT_V1,
+         (uint32_t)parameter_offset + 44, 0},
+        {parameter_offset + 44, UINT32_C(0x80000000), MISO_ENGINE_EFFECT_DESCRIPTOR_FLOAT_V1,
+         (uint32_t)parameter_offset + 44, 0},
+        {get_u32(wire, 76), UINT32_C(0x7fc00000), MISO_ENGINE_EFFECT_DESCRIPTOR_FLOAT_V1,
+         get_u32(wire, 76), 0},
+        {parameter_offset + 44, UINT32_C(0x7f7fffff), MISO_ENGINE_EFFECT_DESCRIPTOR_SEMANTIC_V1,
+         (uint32_t)parameter_offset + 4, 0},
+        {port_offset + 12, 0, MISO_ENGINE_EFFECT_DESCRIPTOR_SEMANTIC_V1,
+         (uint32_t)port_offset, UINT32_MAX},
+        {quality_offset + 40, 17, MISO_ENGINE_EFFECT_DESCRIPTOR_SEMANTIC_V1,
+         (uint32_t)quality_offset + 36, 0},
+        {20, 2, MISO_ENGINE_EFFECT_DESCRIPTOR_SEMANTIC_V1, 20, UINT32_MAX},
         {48, UINT32_MAX, MISO_ENGINE_EFFECT_DESCRIPTOR_OVERFLOW_V1, 48, UINT32_MAX},
         {56, UINT32_MAX, MISO_ENGINE_EFFECT_DESCRIPTOR_OVERFLOW_V1, 56, UINT32_MAX},
         {64, UINT32_MAX, MISO_ENGINE_EFFECT_DESCRIPTOR_OVERFLOW_V1, 64, UINT32_MAX},
@@ -369,6 +533,118 @@ static void comprehensive_smoke(const char *fixture_path) {
                 "raw diagnostic matrix");
         put_u32(wire, mutations[index].field, saved);
     }
+
+    const uint32_t saved_second_port_role = get_u32(wire, port_offset + 24 + 8);
+    const size_t second_port_text = get_u32(wire, port_offset + 24);
+    const uint8_t saved_second_port_text = wire[second_port_text];
+    put_u32(wire, port_offset + 24 + 8, 1);
+    wire[second_port_text] = 'a';
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_ORDER_V1 &&
+                diagnostic.byte_offset == port_offset + 24 + 8 &&
+                diagnostic.record_index == 1,
+            "port order diagnostic");
+    put_u32(wire, port_offset + 24 + 8, saved_second_port_role);
+    wire[second_port_text] = saved_second_port_text;
+
+    for (uint32_t link_bits = 0; link_bits < 256; ++link_bits) {
+        if (link_bits == 1 || link_bits == 3 || link_bits == 5 || link_bits == 7) {
+            continue;
+        }
+        put_u32(wire, 28, link_bits);
+        result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                       &qualities, 12, &choices, 3, required, &diagnostic);
+        require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1 && diagnostic.byte_offset == 28 &&
+                    diagnostic.record_index == UINT32_MAX,
+                "bounded invalid link-bit matrix");
+    }
+    for (uint32_t bit = 8; bit < 32; ++bit) {
+        for (uint32_t base = 0; base <= 1; ++base) {
+            put_u32(wire, 28, (UINT32_C(1) << bit) | base);
+            result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                           &qualities, 12, &choices, 3, required, &diagnostic);
+            require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1 &&
+                        diagnostic.byte_offset == 28 && diagnostic.record_index == UINT32_MAX,
+                    "high invalid link-bit matrix");
+        }
+    }
+    put_u32(wire, 28, 7);
+
+    const size_t effect_text = get_u32(wire, 32);
+    const size_t first_port_text = get_u32(wire, port_offset);
+    const struct {
+        size_t offset;
+        uint8_t value;
+        uint32_t field;
+        uint32_t index;
+    } id_mutations[] = {
+        {effect_text, 'F', 32, UINT32_MAX},
+        {effect_text + 7, '/', 32, UINT32_MAX},
+        {first_port_text, 'M', (uint32_t)port_offset, 0},
+        {first_port_text + 4, '/', (uint32_t)port_offset, 0}};
+    for (size_t index = 0; index < sizeof id_mutations / sizeof id_mutations[0]; ++index) {
+        const uint8_t saved = wire[id_mutations[index].offset];
+        wire[id_mutations[index].offset] = id_mutations[index].value;
+        result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                       &qualities, 12, &choices, 3, required, &diagnostic);
+        require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_TEXT_V1 &&
+                    diagnostic.byte_offset == id_mutations[index].field &&
+                    diagnostic.record_index == id_mutations[index].index,
+                "constructor-sealed raw ID matrix");
+        wire[id_mutations[index].offset] = saved;
+    }
+
+    const uint32_t saved_display_offset = get_u32(wire, 40);
+    put_u32(wire, 40, (uint32_t)effect_text);
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_OFFSET_V1 &&
+                diagnostic.byte_offset == 40 && diagnostic.record_index == UINT32_MAX,
+            "aliased string range diagnostic");
+    put_u32(wire, 40, saved_display_offset + 1);
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_OFFSET_V1 &&
+                diagnostic.byte_offset == 40 && diagnostic.record_index == UINT32_MAX,
+            "gapped string range diagnostic");
+    put_u32(wire, 40, saved_display_offset);
+
+    const size_t display_text = get_u32(wire, 40);
+    const uint8_t saved_display_text = wire[display_text];
+    wire[display_text] = UINT8_C(0xff);
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_TEXT_V1 &&
+                diagnostic.byte_offset == 40 && diagnostic.record_index == UINT32_MAX,
+            "invalid UTF-8 diagnostic");
+    wire[display_text] = '\n';
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_TEXT_V1 &&
+                diagnostic.byte_offset == 40 && diagnostic.record_index == UINT32_MAX,
+            "control text diagnostic");
+    wire[display_text] = saved_display_text;
+
+    const uint64_t saved_tail = get_u64(wire, quality_offset + 8 * 64 + 24);
+    put_u64(wire, quality_offset + 8 * 64 + 24, 1);
+    result = inspect_comprehensive(wire, wire_len, &summary, &parameters, 6, &ports, 3, &qualities,
+                                   12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1 &&
+                diagnostic.byte_offset == quality_offset + 8 * 64 + 24 &&
+                diagnostic.record_index == 8,
+            "infinite tail requires zero samples");
+    put_u64(wire, quality_offset + 8 * 64 + 24, saved_tail);
+
+    result = inspect_comprehensive(wire, wire_len - 1, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_LENGTH_V1 && diagnostic.byte_offset == 16,
+            "truncated wire diagnostic");
+    wire[wire_len] = 0;
+    result = inspect_comprehensive(wire, wire_len + 1, &summary, &parameters, 6, &ports, 3,
+                                   &qualities, 12, &choices, 3, required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_LENGTH_V1 && diagnostic.byte_offset == 16,
+            "trailing wire diagnostic");
 
     const uint32_t saved_flags = get_u32(wire, parameter_offset + 32);
     const uint32_t saved_reserved = get_u32(wire, parameter_offset + 72);
