@@ -145,7 +145,10 @@ pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilitie
         }
         // SAFETY: `out` is nonnull and the caller promises writable storage whose first field is
         // readable. The exact size check precedes the complete fixed-size write.
-        if unsafe { (*out).struct_size } != CAPABILITIES_SIZE {
+        // SAFETY: `out` is nonnull and the caller promises readable capability storage for these
+        // two input-validation fields before the complete fixed-size write.
+        let (struct_size, reserved) = unsafe { ((*out).struct_size, (*out).reserved) };
+        if struct_size != CAPABILITIES_SIZE || reserved != [0; 4] {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The exact struct-size check above establishes writable ABI V1 storage according
@@ -657,7 +660,10 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
         }
         // SAFETY: The caller promises readable/writable storage for one report. The size check
         // precedes the complete fixed-size write.
-        if unsafe { (*out).struct_size } != crate::PLAN_RESOURCE_REPORT_SIZE {
+        // SAFETY: `out` is nonnull and the caller promises readable report storage for these two
+        // input-validation fields before the complete fixed-size write.
+        let (struct_size, reserved) = unsafe { ((*out).struct_size, (*out).reserved) };
+        if struct_size != crate::PLAN_RESOURCE_REPORT_SIZE || reserved != [0; 4] {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: `plan` passed the live-kind check and is borrowed immutably for the copy.
@@ -906,7 +912,7 @@ mod tests {
             abi_version: 0,
             exact_launch_rate_mask: 0,
             feature_mask: 0,
-            reserved: [u64::MAX; 4],
+            reserved: [0; 4],
         };
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
@@ -925,6 +931,11 @@ mod tests {
             feature_mask: 79,
             reserved: [80; 4],
         };
+        assert_eq!(query(&mut capabilities), RESULT_INVALID_ARGUMENT);
+        assert_eq!(capabilities.abi_version, 77);
+        assert_eq!(capabilities.reserved, [80; 4]);
+
+        capabilities.struct_size = CAPABILITIES_SIZE;
         assert_eq!(query(&mut capabilities), RESULT_INVALID_ARGUMENT);
         assert_eq!(capabilities.abi_version, 77);
         assert_eq!(capabilities.reserved, [80; 4]);
@@ -1040,6 +1051,14 @@ mod tests {
             largest_named_allocation_bytes: 0,
             reserved: [u64::MAX; 4],
         };
+        assert_eq!(
+            // SAFETY: The plan is live and `resources` is writable storage of the exact size.
+            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(resources.abi_version, 0);
+        assert_eq!(resources.reserved, [u64::MAX; 4]);
+        resources.reserved = [0; 4];
         assert_eq!(
             // SAFETY: The plan is live and `resources` is writable storage of the exact size.
             unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
