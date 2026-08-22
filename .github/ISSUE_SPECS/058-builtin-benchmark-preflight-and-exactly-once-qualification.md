@@ -1,5 +1,20 @@
 # 058 Builtin benchmark preflight and exactly-once qualification
 
+## Sol briefing checkpoint — 2026-08-22
+
+**READY FOR TERRA ATTEMPT 1, WITH NO BENCHMARK AUTHORIZATION.** The authoritative tracked brief is
+`BRIEFS/058-builtin-benchmark-preflight-and-exactly-once-qualification.md`. This issue permits one
+Terra implementation/review attempt and one bounded Sol correction/review; a second failure stops.
+At briefing, `runner_invocations=0`, `workload_invocations=0`, and
+`timed_benchmark_invocations=0`.
+
+The accepted Issue-068 dependency is closed and its target/source/corpus evidence is technical
+input. The current benchmark binary, validators, runner and preflight are scaffolding, not accepted
+evidence: they still emit the superseded Issue-007 record shape, do not consume the ten checked
+benchmark inputs, do not observe seven real graph taps, repeat warmup within both rounds, and do
+not implement the frozen raw/stderr/disposition lifecycle. Terra must close only those tooling
+gaps. Production DSP, corpus bytes and accepted audit/target evidence remain immutable.
+
 ## Outcome
 
 Seal the nonbenchmark-qualified builtin candidate with the frozen schema-v2 benchmark lifecycle and
@@ -26,8 +41,10 @@ clean identity seal and the sole exactly-once invocation/artifact disposition.
 ## Required public interfaces/contracts
 
 `bash scripts/run-builtins-benchmark.sh` is the only workload entrypoint. It accepts no arguments,
-contains one fixed launch, refuses overwrite/retry/resume, preserves raw output on every outcome,
-validates before atomic byte-identical accepted publication and writes a checksummed disposition.
+contains one fixed launch of the preflight-sealed release binary, refuses overwrite/retry/resume,
+preserves raw output on every outcome, validates before atomic byte-identical accepted publication
+and writes a checksummed disposition. The single binary process performs one untimed warmup pass
+and exactly two measured rounds; it emits no warmup records and exactly 20 measured JSONL records.
 Preflight and tests use counted stubs/synthetic records only and report zero workload launches.
 
 ## Deliverables
@@ -54,6 +71,13 @@ runner/validator hashes and reports zero launches. Only then may root authorize 
 external runner invocation; it emits exactly 20 validator-valid records for five kinds, rates
 48/96 kHz and rounds 1/2, preserves byte-identical raw/accepted output and has no threshold or
 retry. Any launch or post-launch failure consumes authorization and is strict FAIL.
+
+The Issue-035 record ownership remains exact: `issue=35`, `issue035.*` workload IDs and
+`target/issue35/` artifact paths. Issue 058 owns the qualification disposition and counters but
+does not silently rename that frozen schema. The meter workload preserves
+`builtin.meter.duplicate`: it uses two separately prepared otherwise-identical accepted graph
+plans, each with seven unique real tap requests, for success-drain versus capacity-one full/drop
+outcomes. No production duplicate-meter API change is permitted.
 
 ## Target matrix
 
