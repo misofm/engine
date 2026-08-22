@@ -9,6 +9,10 @@ publish.workspace = true
 name = "miso_engine_builtins_fixture"
 path = "src/main.rs"
 
+[[bin]]
+name = "miso_engine_builtins_fixture_listening"
+path = "src/listening_main.rs"
+
 [dependencies]
 miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
