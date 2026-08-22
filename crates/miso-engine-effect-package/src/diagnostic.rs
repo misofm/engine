@@ -55,6 +55,7 @@ impl EffectDescriptorWireDiagnosticCodeV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct EffectDescriptorWireDiagnosticV1 {
     pub code: EffectDescriptorWireDiagnosticCodeV1,
     pub byte_offset: u32,
