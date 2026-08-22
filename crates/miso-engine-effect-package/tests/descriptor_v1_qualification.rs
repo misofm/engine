@@ -7,9 +7,11 @@ use miso_engine_effect_contract::{
     QualityDescriptorV1, SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor_v1,
 };
 use miso_engine_effect_package::{
-    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectDescriptorWireDiagnosticCodeV1 as Code,
-    effect_descriptor_identity_v1, effect_descriptor_wire_v1_required_size,
-    encode_effect_descriptor_wire_v1, verify_effect_descriptor_wire_v1,
+    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectArtifactAuthoringV1, EffectArtifactKindV1,
+    EffectDescriptorWireDiagnosticCodeV1 as Code, EffectPackageAuthoringV1, EffectPackageLimitsV1,
+    effect_descriptor_identity_v1, effect_descriptor_wire_v1_required_size, effect_package_cid_v1,
+    effect_package_v1_required_size, encode_effect_descriptor_wire_v1, encode_effect_package_v1,
+    verify_effect_descriptor_wire_v1, verify_effect_package_v1,
 };
 use std::{fs, path::PathBuf};
 
@@ -529,6 +531,26 @@ fn every_current_production_descriptor_encodes_and_verifies() {
         let wire = encoded(descriptor);
         verify_effect_descriptor_wire_v1(&wire, 1 << 20).unwrap();
         effect_descriptor_identity_v1(&wire, 1 << 20).unwrap();
+        let artifacts = [EffectArtifactAuthoringV1 {
+            kind: EffectArtifactKindV1::Source,
+            path: "src/lib.rs",
+            target: "",
+            features: "",
+            content: b"production descriptor package coverage",
+        }];
+        let authoring = EffectPackageAuthoringV1 {
+            descriptor: &wire,
+            artifacts: &artifacts,
+        };
+        let mut package = vec![
+            0;
+            effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default()).unwrap()
+                as usize
+        ];
+        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut package)
+            .unwrap();
+        verify_effect_package_v1(&package, EffectPackageLimitsV1::default()).unwrap();
+        effect_package_cid_v1(&package, EffectPackageLimitsV1::default()).unwrap();
     }
 }
 

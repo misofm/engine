@@ -592,14 +592,18 @@ pub fn verify_effect_package_v1(
         let mut cursor = 0usize;
         let mut content_sum = 0u64;
         for i in 0..count {
+            if table.len().saturating_sub(cursor) < RECORD_BYTES as usize {
+                break;
+            }
+            let at = de as u64 + cursor as u64;
+            let content_len = u64_at(table, cursor + 32);
+            if content_len > limits.maximum_artifact_bytes {
+                return Err(diag(Code::Limit, i, at + 32));
+            }
+            content_sum = add(content_sum, content_len, at + 32)?;
             let Ok(r) = raw_record(table, cursor, i, de as u64) else {
                 break;
             };
-            let at = de as u64 + cursor as u64;
-            if r.content_len > limits.maximum_artifact_bytes {
-                return Err(diag(Code::Limit, i, at + 32));
-            }
-            content_sum = add(content_sum, r.content_len, at + 32)?;
             cursor = r.next;
         }
     }
@@ -625,9 +629,9 @@ pub fn verify_effect_package_v1(
         let table = &bytes[de..me];
         let mut cursor = 0usize;
         for i in 0..count {
-            let Ok(r) = raw_record(table, cursor, i, de as u64) else {
+            if table.len().saturating_sub(cursor) < RECORD_BYTES as usize {
                 break;
-            };
+            }
             let at = de as u64 + cursor as u64;
             if table[cursor + 4..cursor + 8].iter().any(|b| *b != 0) {
                 return Err(diag(Code::Reserved, i, at + 4));
@@ -635,6 +639,9 @@ pub fn verify_effect_package_v1(
             if table[cursor + 20..cursor + 24].iter().any(|b| *b != 0) {
                 return Err(diag(Code::Reserved, i, at + 20));
             }
+            let Ok(r) = raw_record(table, cursor, i, de as u64) else {
+                break;
+            };
             cursor = r.next;
         }
     }
@@ -772,9 +779,20 @@ fn validate_selection_request(request: ArtifactSelectionRequestV1<'_>) -> Result
         ));
     }
     let mut prior: Option<&[u8]> = None;
-    for capability in request.capabilities {
+    let mut joined_bytes = 0usize;
+    for (index, capability) in request.capabilities.iter().enumerate() {
         let token = capability.as_bytes();
         if !valid_feature_token(token) || prior.is_some_and(|value| value >= token) {
+            return Err(package_diag(
+                Code::Features,
+                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            ));
+        }
+        joined_bytes = joined_bytes
+            .checked_add(token.len())
+            .and_then(|value| value.checked_add(usize::from(index != 0)))
+            .ok_or_else(|| package_diag(Code::Overflow, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET))?;
+        if joined_bytes > 255 {
             return Err(package_diag(
                 Code::Features,
                 EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
@@ -1105,6 +1123,13 @@ mod tests {
     #[test]
     fn diagnostic_layout_and_mutations() {
         assert_eq!(std::mem::size_of::<Diagnostic>(), 32);
+        assert_eq!(std::mem::align_of::<Diagnostic>(), 8);
+        assert_eq!(std::mem::offset_of!(Diagnostic, code), 0);
+        assert_eq!(std::mem::offset_of!(Diagnostic, detail), 4);
+        assert_eq!(std::mem::offset_of!(Diagnostic, artifact_index), 8);
+        assert_eq!(std::mem::offset_of!(Diagnostic, reserved), 12);
+        assert_eq!(std::mem::offset_of!(Diagnostic, byte_offset), 16);
+        assert_eq!(std::mem::offset_of!(Diagnostic, required_bytes), 24);
         let base = encoded();
         for &(o, c) in &[
             (0, Code::Header),
@@ -1560,6 +1585,32 @@ mod tests {
             assert_code(&offset_and_padding, Code::Offset).artifact_index,
             0
         );
+
+        let base = encoded();
+        let first = record_offsets(&base)[0];
+        let mut malformed_path_and_limit = base.clone();
+        put_u32(&mut malformed_path_and_limit, first + 8, u32::MAX);
+        put_u64(
+            &mut malformed_path_and_limit,
+            first + 32,
+            EffectPackageLimitsV1::default().maximum_artifact_bytes + 1,
+        );
+        let error = assert_code(&malformed_path_and_limit, Code::Limit);
+        assert_eq!(error.artifact_index, 0);
+        assert_eq!(error.byte_offset, (first + 32) as u64);
+
+        let mut malformed_path_and_reserved = base.clone();
+        put_u32(&mut malformed_path_and_reserved, first + 8, u32::MAX);
+        malformed_path_and_reserved[first + 4] = 1;
+        let error = assert_code(&malformed_path_and_reserved, Code::Reserved);
+        assert_eq!(error.artifact_index, 0);
+        assert_eq!(error.byte_offset, (first + 4) as u64);
+
+        let mut malformed_path = base;
+        put_u32(&mut malformed_path, first + 8, u32::MAX);
+        let error = assert_code(&malformed_path, Code::Length);
+        assert_eq!(error.artifact_index, 0);
+        assert_eq!(error.byte_offset, (first + 8) as u64);
     }
 
     #[test]
@@ -1799,6 +1850,37 @@ mod tests {
                 EffectArtifactKindV1::CoreWasm,
                 "wasm32-unknown-unknown",
                 &[too_long],
+            )
+            .unwrap_err()
+            .code,
+            Code::Features
+        );
+
+        let capabilities: Vec<String> = (b'a'..=b'h')
+            .map(|first| format!("{}{}", char::from(first), "0".repeat(30)))
+            .collect();
+        let references: Vec<&str> = capabilities.iter().map(String::as_str).collect();
+        assert_eq!(references.join(",").len(), 255);
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &references,
+            )
+            .unwrap(),
+            "core/base-a.wasm"
+        );
+        let mut too_many_bytes = capabilities;
+        too_many_bytes[7].push('0');
+        let references: Vec<&str> = too_many_bytes.iter().map(String::as_str).collect();
+        assert_eq!(references.join(",").len(), 256);
+        assert_eq!(
+            select_path(
+                &package,
+                EffectArtifactKindV1::CoreWasm,
+                "wasm32-unknown-unknown",
+                &references,
             )
             .unwrap_err()
             .code,

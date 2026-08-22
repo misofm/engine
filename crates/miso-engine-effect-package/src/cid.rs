@@ -253,18 +253,31 @@ mod tests {
     fn binary_codec_rejects_length_prefix_codec_hash_and_digest_length() {
         let cid = EffectCid::from_raw_bytes(b"hello");
         assert_eq!(EffectCid::from_binary(cid.as_binary()), Ok(cid));
+        for length in 0..CID_BYTES {
+            assert_eq!(
+                EffectCid::from_binary(&cid.as_binary()[..length]),
+                Err(CidError::InvalidBinary),
+                "length {length}"
+            );
+        }
+        let mut trailing = cid.as_binary().to_vec();
+        trailing.push(0);
         assert_eq!(
-            EffectCid::from_binary(&cid.as_binary()[..35]),
+            EffectCid::from_binary(&trailing),
             Err(CidError::InvalidBinary)
         );
         for offset in 0..4 {
-            let mut binary = *cid.as_binary();
-            binary[offset] ^= 1;
-            assert_eq!(
-                EffectCid::from_binary(&binary),
-                Err(CidError::InvalidBinary),
-                "offset {offset}"
-            );
+            for replacement in u8::MIN..=u8::MAX {
+                if replacement != cid.as_binary()[offset] {
+                    let mut binary = *cid.as_binary();
+                    binary[offset] = replacement;
+                    assert_eq!(
+                        EffectCid::from_binary(&binary),
+                        Err(CidError::InvalidBinary),
+                        "offset {offset}, replacement {replacement}"
+                    );
+                }
+            }
         }
     }
 
@@ -273,10 +286,13 @@ mod tests {
         let cid = EffectCid::from_raw_bytes(b"hello");
         let canonical = cid.to_string();
         assert_eq!(canonical.parse::<EffectCid>(), Ok(cid));
-        assert_eq!(
-            canonical[..58].parse::<EffectCid>(),
-            Err(CidError::InvalidText)
-        );
+        for length in 0..CID_TEXT_BYTES {
+            assert_eq!(
+                canonical[..length].parse::<EffectCid>(),
+                Err(CidError::InvalidText),
+                "length {length}"
+            );
+        }
         assert_eq!(
             format!("{canonical}a").parse::<EffectCid>(),
             Err(CidError::InvalidText)
@@ -289,25 +305,33 @@ mod tests {
                 Err(CidError::InvalidText)
             );
         }
-        for replacement in *b"A0189=+/_" {
-            let mut text = canonical.as_bytes().to_owned();
-            text[10] = replacement;
+        for position in 1..CID_TEXT_BYTES {
+            for replacement in *b"A0189=+/_" {
+                let mut text = canonical.as_bytes().to_owned();
+                text[position] = replacement;
+                assert_eq!(
+                    core::str::from_utf8(&text).unwrap().parse::<EffectCid>(),
+                    Err(CidError::InvalidText),
+                    "position {position}, replacement {replacement}"
+                );
+            }
+        }
+        let last_value = BASE32
+            .iter()
+            .position(|byte| *byte == canonical.as_bytes()[58])
+            .unwrap();
+        assert_eq!(last_value & 3, 0);
+        for pad_bits in 1..=3 {
+            let mut nonzero_pad = canonical.as_bytes().to_owned();
+            nonzero_pad[58] = BASE32[(last_value & !3) | pad_bits];
             assert_eq!(
-                core::str::from_utf8(&text).unwrap().parse::<EffectCid>(),
-                Err(CidError::InvalidText)
+                core::str::from_utf8(&nonzero_pad)
+                    .unwrap()
+                    .parse::<EffectCid>(),
+                Err(CidError::InvalidText),
+                "pad bits {pad_bits}"
             );
         }
-        let mut nonzero_pad = canonical.as_bytes().to_owned();
-        nonzero_pad[58] = match nonzero_pad[58] {
-            b'a' => b'b',
-            _ => b'7',
-        };
-        assert_eq!(
-            core::str::from_utf8(&nonzero_pad)
-                .unwrap()
-                .parse::<EffectCid>(),
-            Err(CidError::InvalidText)
-        );
     }
 
     #[test]
