@@ -5,15 +5,17 @@
 Close the one missing assignment-key authority edge left by stopped Issue 033, then prepare and
 independently verify one no-playback facilitator packet from a fresh successor namespace.
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1 / REAL PREFLIGHT, RENDER AND LISTENING NOT
-AUTHORIZED.** Sol High implements. Sol XHigh briefs and adversarially verifies. The budget is one
-focused implementation pass plus at most one bounded HOLD correction. A second HOLD is terminal
-STOP/rescope.
+**OPEN / SOL XHIGH FOCUSED PASS / WAITING FOR EXTERNAL FACILITATOR INPUT.** Sol High implemented
+one focused pass and its sole bounded correction; Sol XHigh briefed and adversarially verified both.
+The focused checkpoint is authorized, but no preparation seal, preflight, render, playback or
+listening action or artifact is authorized.
 
-The technical finish line is only **AGENT PREPARATION COMPLETE / READY FOR REAL FACILITATOR**.
-Human playback, identities, responses, observations, conditions, reveal, sign-offs, qualification
-results and audible-quality claims remain outside agent execution. Issue 111 does not complete the
-human listening gate.
+The eventual technical finish line is only agent preparation for a real facilitator; it has not
+been reached. No permissioned 48 kHz stereo source, provenance record or private seed was supplied,
+so this checkpoint does **not** claim agent preparation complete or readiness for a real
+facilitator. Human playback, identities, responses, observations, conditions, reveal, sign-offs,
+qualification results and audible-quality claims remain outside agent execution. Issue 111 does
+not complete the human listening gate.
 
 Remote Issue 111 was read-only confirmed absent/available on 2026-08-22. Root owns GitHub creation,
 body synchronization and eventual state changes after the local docs checkpoint is committed and
@@ -142,3 +144,39 @@ Sol XHigh independently identified the exact missing comparison, confirmed Issue
 two-pass budget with no real execution and `target/issue33` absent, and read-only confirmed remote
 Issue 111 is absent/available. This docs checkpoint performs no Cargo/build, render, playback,
 listening, benchmark, timing, workload, Git mutation or GitHub mutation.
+
+## Focused implementation evidence (2026-08-22)
+
+The successor-script checkpoint is commit `ac5cd0d` with tree `c4781fdc`. Its exact six-path
+authority is:
+
+| Path | SHA-256 |
+| --- | --- |
+| `scripts/check-builtins-listening-111.py` | `07e22c32daf33aece1d26fe69c1e3a70d1f3b6a60c9b7f751db1817b87d28b7a` |
+| `scripts/check-builtins-listening-111.sh` | `350eb43361caa38e5a24c8489049bb00aab11813335b0821221f307edb08c137` |
+| `scripts/test-builtins-listening-111-policy.sh` | `5b43417da6db58ea31b0d09b64842e3b5f7a381631340d4be8a162a558147179` |
+| `scripts/test-builtins-listening-111.sh` | `13d7e7457bf5054c024ca1a77d9b3fb683adb67869c0c2285aa03761c5b9d23c` |
+| `scripts/preflight-builtins-listening-111.sh` | `541e4821ac7eae07440591f1579bc088c5943bae97a6625acf452c943f9dcef3` |
+| `scripts/prepare-builtins-listening-111.sh` | `57eb87fd4ed23f3cf4476350cc9d123a95391761eaaba77e828bba2ffd2ae165` |
+
+Pass 1 received a bounded Sol XHigh HOLD because persistent `preparation.stderr` used an ordinary
+redirection after a prior absence check, leaving a follow-or-truncate race for regular files,
+hardlinks and symlinks. The bounded pass-2 correction creates it once under mode-0600 authority,
+holds and verifies the descriptor/path identity across rendering, and adds hermetic collision rows
+that preserve sentinels, launch no renderer and publish zero-counter prelaunch evidence. Sol XHigh
+returned **STRICT SOL XHIGH FOCUSED PASS**. This verdict authorizes only the clean exact-path
+checkpoint.
+
+Reported focused gates passed: shell syntax for the five successor shell scripts; the successor
+validator self-test with the inherited 21 count rows and 14 linked-authority rejection classes;
+the static checker with all eight real counters at zero; 12 policy mutations; the hermetic
+lifecycle with all eight real counters at zero; and conflict-marker, trailing-whitespace, Python
+cache and target-namespace scans. `target/issue33` and `target/issue111` remained absent. The real
+preflight/preparation/playback/session/trial/response/reveal/result counters remain exactly
+`0/0/0/0/0/0/0/0`.
+
+Issue 111 therefore remains **OPEN / WAITING FOR EXTERNAL FACILITATOR INPUT**. No permissioned
+48 kHz stereo source, provenance record or private seed exists; no Issue-111 preparation seal,
+preflight, render, playback, listening authorization or persistent artifact exists. Root must not
+advance the later authority sequence until those external inputs are supplied and independently
+reviewed.
