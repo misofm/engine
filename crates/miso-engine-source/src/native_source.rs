@@ -506,7 +506,10 @@ impl NativeWorkerAuditGate {
         self.released = true;
         loop {
             match self.resumed.try_pop() {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.released = false;
+                    return Ok(());
+                }
                 Err(QueueEmpty { .. }) => thread::yield_now(),
             }
         }
@@ -541,6 +544,12 @@ struct PendingBlock {
     frames: u32,
     end_of_region: bool,
     native_decoder_sanitized_samples: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSeek {
+    generation: SourceGeneration,
+    frame: SourceFrame,
 }
 
 /// Non-render endpoint for bounded native seek/wake commands and worker events.
@@ -1176,9 +1185,11 @@ fn run_worker<R: Read + Seek>(
     #[allow(unused_mut, unused_variables)] mut audit_gate: Option<WorkerAuditGate>,
 ) -> NativeSourceWorkerExit {
     let mut pending: Option<PendingBlock> = None;
+    let mut pending_seek: Option<PendingSeek> = None;
     let mut end_submitted = false;
     let mut source_ready_sent = false;
     let mut sanitation = 0_u64;
+    let command_capacity = commands.capacity();
     #[cfg(feature = "test-support")]
     let mut audit_resume_after_submit = false;
     #[cfg(feature = "test-support")]
@@ -1187,20 +1198,28 @@ fn run_worker<R: Read + Seek>(
         if stop.try_pop().is_ok() {
             break NativeSourceWorkerExit::Stopped;
         }
-        if let Ok(command) = commands.try_pop() {
-            #[cfg(feature = "test-support")]
-            if matches!(command, WorkerCommand::AuditHold) {
-                audit_hold_after_submit = true;
-                continue;
-            }
-            match apply_command(command, &mut provider, &mut decoder, &mut generation) {
-                Ok(CommandResult::Seek) => {
-                    pending = None;
-                    end_submitted = false;
-                    continue;
+        let mut latest_seek = None;
+        for _ in 0..command_capacity {
+            let Ok(command) = commands.try_pop() else {
+                break;
+            };
+            match command {
+                WorkerCommand::Seek {
+                    generation: requested,
+                    frame,
+                } => {
+                    let observed = PendingSeek {
+                        generation: requested,
+                        frame,
+                    };
+                    if latest_seek
+                        .is_none_or(|latest: PendingSeek| observed.generation > latest.generation)
+                    {
+                        latest_seek = Some(observed);
+                    }
                 }
-                Ok(CommandResult::Wake) => {}
-                Ok(CommandResult::Snapshot) => {
+                WorkerCommand::Wake => {}
+                WorkerCommand::SnapshotSanitation => {
                     publish_worker_event(
                         &mut events,
                         NativeSourceWorkerEvent::SanitationSnapshot {
@@ -1208,7 +1227,34 @@ fn run_worker<R: Read + Seek>(
                         },
                     );
                 }
-                Err(exit) => break exit,
+                #[cfg(feature = "test-support")]
+                WorkerCommand::AuditHold => {
+                    audit_hold_after_submit = true;
+                }
+            }
+        }
+        if let Some(latest) = latest_seek {
+            pending = None;
+            end_submitted = false;
+            if let Err(error) = decoder.seek_to_source_frame(latest.frame) {
+                break NativeSourceWorkerExit::DecodeFailed(error);
+            }
+            pending_seek = Some(latest);
+        }
+        if let Some(seek) = pending_seek {
+            match provider.try_seek(SourceCommand::Seek {
+                generation: seek.generation,
+                frame: seek.frame,
+            }) {
+                Ok(()) => {
+                    generation = seek.generation;
+                    pending_seek = None;
+                }
+                Err(SourceSeekError::Backpressure { .. }) => {
+                    thread::yield_now();
+                    continue;
+                }
+                Err(error) => break NativeSourceWorkerExit::SeekFailed(error),
             }
         }
         if let Some(block) = pending.take() {
@@ -1302,46 +1348,10 @@ fn publish_worker_event(
     }
 }
 
-enum CommandResult {
-    Wake,
-    Seek,
-    Snapshot,
-}
-
-fn apply_command<R: Read + Seek>(
-    command: WorkerCommand,
-    provider: &mut HostChunkProvider,
-    decoder: &mut NativeWaveDecoder<R>,
-    generation: &mut SourceGeneration,
-) -> Result<CommandResult, NativeSourceWorkerExit> {
-    match command {
-        WorkerCommand::Wake => Ok(CommandResult::Wake),
-        WorkerCommand::SnapshotSanitation => Ok(CommandResult::Snapshot),
-        WorkerCommand::Seek {
-            generation: requested,
-            frame,
-        } => {
-            decoder
-                .seek_to_source_frame(frame)
-                .map_err(NativeSourceWorkerExit::DecodeFailed)?;
-            provider
-                .try_seek(SourceCommand::Seek {
-                    generation: requested,
-                    frame,
-                })
-                .map_err(NativeSourceWorkerExit::SeekFailed)?;
-            *generation = requested;
-            Ok(CommandResult::Seek)
-        }
-        #[cfg(feature = "test-support")]
-        WorkerCommand::AuditHold => Err(NativeSourceWorkerExit::Stopped),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, SeekFrom};
 
     use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
     use miso_engine_session::{CompileCaps, StableId, compile_session, parse_session_toml};
@@ -1697,6 +1707,11 @@ mod tests {
         .expect("event queue layout");
         let stop = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))
             .expect("stop queue layout");
+        assert_eq!(
+            size_of::<PendingSeek>(),
+            size_of::<SourceGeneration>() + size_of::<SourceFrame>()
+        );
+        assert!(!core::mem::needs_drop::<PendingSeek>());
         assert_eq!(report.worker_control_queue_bytes, control.total_bytes);
         assert_eq!(
             report.worker_control_queue_largest_allocation_bytes,
@@ -1827,6 +1842,271 @@ mod tests {
         assert_eq!(
             worker.stop_and_join().expect("stop"),
             NativeSourceWorkerExit::Stopped
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn single_worker_seek_resumes_contiguously_at_the_exact_frame() {
+        let samples: Vec<f32> = (0_u16..20).map(f32::from).collect();
+        let mut native_resolver = resolver(&samples, b"exact-identity");
+        let (prepared, mut gate) = prepare_native_source_with_audit_gate(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 20,
+            }),
+            caps(),
+        )
+        .expect("prepare");
+        let PreparedNativeSource {
+            mut controller,
+            mut consumer,
+            mut worker,
+            ..
+        } = prepared;
+        controller.wait_for_event().expect("ready");
+        controller
+            .hold_worker_for_audit()
+            .expect("hold after next submission");
+        let (initial, initial_report) = read_one(&mut consumer);
+        assert_eq!(initial, [0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(initial_report.active_generation, SourceGeneration(1));
+        gate.wait_until_held().expect("worker held");
+
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(12),
+            })
+            .expect("single seek");
+        controller
+            .hold_worker_for_audit()
+            .expect("hold after first seek block");
+        let (while_held, held_report) = read_one(&mut consumer);
+        assert_eq!(while_held, [4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(held_report.active_generation, SourceGeneration(1));
+        gate.release_and_wait().expect("first seek block submitted");
+        gate.wait_until_held().expect("worker held a second time");
+
+        let (first, first_report) = read_one(&mut consumer);
+        assert_eq!(first, [12.0, 13.0, 14.0, 15.0]);
+        assert_eq!(first_report.active_generation, SourceGeneration(2));
+        assert_eq!(first_report.copied_frames, 4);
+        assert!(!first_report.end_of_region);
+        gate.release_and_wait()
+            .expect("second seek block submitted");
+        let (second, second_report) = read_one(&mut consumer);
+        assert_eq!(second, [16.0, 17.0, 18.0, 19.0]);
+        assert_eq!(second_report.copied_frames, 4);
+        assert!(second_report.end_of_region);
+        assert_eq!(
+            worker.stop_and_join().expect("stop"),
+            NativeSourceWorkerExit::Stopped
+        );
+    }
+
+    #[test]
+    fn worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm() {
+        let mut samples: Vec<f32> = (0_u16..28).map(f32::from).collect();
+        samples[13] = f32::NAN;
+        samples[20] = f32::INFINITY;
+        let mut native_resolver = resolver(&samples, b"exact-identity");
+        let mut seek_caps = caps();
+        seek_caps.control_queue_items = NonZeroUsize::new(4).expect("four commands");
+        let (mut controller, mut worker, mut consumer, _) = prepare_native_source_parts(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 28,
+            }),
+            seek_caps,
+        )
+        .expect("prepare");
+        assert!(matches!(
+            controller.wait_for_event().expect("ready"),
+            NativeSourceWorkerEvent::SourceReady { .. }
+        ));
+
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(8),
+            })
+            .expect("occupy provider seek slot");
+        sync_worker(&mut controller);
+        sync_worker(&mut controller);
+
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(3),
+                frame: SourceFrame(13),
+            })
+            .expect("retained intermediate seek");
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(4),
+                frame: SourceFrame(20),
+            })
+            .expect("replacement latest seek");
+        sync_worker(&mut controller);
+        sync_worker(&mut controller);
+        assert!(controller.events.try_pop().is_err());
+        controller.try_wake().expect("worker remains live");
+        sync_worker(&mut controller);
+
+        let (while_pending, pending_report) = read_one(&mut consumer);
+        assert_eq!(while_pending, [0.0; 4]);
+        assert_eq!(pending_report.active_generation, SourceGeneration(2));
+        assert_eq!(pending_report.copied_frames, 0);
+
+        sync_worker(&mut controller);
+        sync_worker(&mut controller);
+        sync_worker(&mut controller);
+        let (latest, latest_report) = read_one(&mut consumer);
+        assert_eq!(latest, [0.0, 21.0, 22.0, 23.0]);
+        assert_eq!(latest_report.active_generation, SourceGeneration(4));
+        assert_eq!(latest_report.copied_frames, 4);
+        assert!(!latest_report.end_of_region);
+
+        sync_worker(&mut controller);
+        let (contiguous, end_report) = read_one(&mut consumer);
+        assert_eq!(contiguous, [24.0, 25.0, 26.0, 27.0]);
+        assert_eq!(end_report.active_generation, SourceGeneration(4));
+        assert_eq!(end_report.copied_frames, 4);
+        assert!(end_report.end_of_region);
+        assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+        assert_eq!(consumer.telemetry().native_decoder_sanitized_samples, 1);
+        assert_eq!(
+            controller
+                .snapshot_native_decoder_sanitized_samples()
+                .expect("latest sanitation"),
+            1
+        );
+        assert_eq!(
+            worker.stop_and_join().expect("stop live worker"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                native_decoder_sanitized_samples: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn pending_seek_stops_without_render_drain_and_controller_backpressure_does_not_advance() {
+        let (command_sender, mut command_receiver) = bounded_spsc(
+            NonZeroUsize::new(1).expect("one command"),
+            QueueGeneration(101),
+        )
+        .expect("command queue");
+        let (_event_sender, event_receiver) = bounded_spsc(
+            NonZeroUsize::new(1).expect("one event"),
+            QueueGeneration(102),
+        )
+        .expect("event queue");
+        let mut bounded_controller = NativeSourceController {
+            commands: command_sender,
+            events: event_receiver,
+            observed_sanitation: 0,
+            terminal_observed: false,
+            next_requested_generation: SourceGeneration(1),
+            region: NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 16,
+            },
+            _not_sync: PhantomData,
+        };
+        bounded_controller.try_wake().expect("fill command queue");
+        assert_eq!(
+            bounded_controller.try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(8),
+            }),
+            Err(NativeSourceWorkerControlError::Backpressure)
+        );
+        assert_eq!(command_receiver.try_pop(), Ok(WorkerCommand::Wake));
+        bounded_controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(8),
+            })
+            .expect("rejected generation was not advanced");
+
+        let mut native_resolver = resolver(&[0.0; 24], b"exact-identity");
+        let mut seek_caps = caps();
+        seek_caps.control_queue_items = NonZeroUsize::new(3).expect("three commands");
+        let (mut controller, mut worker, _consumer, _) = prepare_native_source_parts(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 24,
+            }),
+            seek_caps,
+        )
+        .expect("prepare");
+        controller.wait_for_event().expect("ready");
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(4),
+            })
+            .expect("occupy provider slot");
+        sync_worker(&mut controller);
+        sync_worker(&mut controller);
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(3),
+                frame: SourceFrame(16),
+            })
+            .expect("retained seek");
+        sync_worker(&mut controller);
+        assert_eq!(
+            worker.stop_and_join().expect("pending stop"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal { .. }
+        ));
+    }
+
+    #[test]
+    fn decoder_failure_after_accepted_seek_keeps_typed_terminal() {
+        let wave = float32_wave(&(0_u16..28).map(f32::from).collect::<Vec<_>>());
+        let data_offset = 44_u64;
+        let reader = FailAtRead {
+            cursor: Cursor::new(wave),
+            fail_at: data_offset + 20 * 4,
+        };
+        let mut native_resolver = FailingResolver {
+            asset: Some(NativeResolvedAsset {
+                observed_identity: b"exact-identity".to_vec(),
+                reader,
+            }),
+        };
+        let (mut controller, mut worker, _consumer, _) = prepare_native_source_parts(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 28,
+            }),
+            caps(),
+        )
+        .expect("prepare");
+        controller.wait_for_event().expect("ready");
+        controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(20),
+            })
+            .expect("seek to failing read");
+        sync_worker(&mut controller);
+        assert_eq!(
+            worker.stop_and_join().expect("typed decoder exit"),
+            NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(io::ErrorKind::Other))
         );
     }
 
@@ -2286,6 +2566,49 @@ mod tests {
             consumer.read_block(&mut planes).expect("read")
         };
         (output, report)
+    }
+
+    fn sync_worker(controller: &mut NativeSourceController) {
+        controller
+            .snapshot_native_decoder_sanitized_samples()
+            .expect("worker synchronization");
+    }
+
+    struct FailAtRead {
+        cursor: Cursor<Vec<u8>>,
+        fail_at: u64,
+    }
+
+    impl Read for FailAtRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.cursor.position() >= self.fail_at {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.cursor.read(buffer)
+        }
+    }
+
+    impl Seek for FailAtRead {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    struct FailingResolver {
+        asset: Option<NativeResolvedAsset<FailAtRead>>,
+    }
+
+    impl NativeSourceResolver for FailingResolver {
+        type Asset = FailAtRead;
+
+        fn resolve(
+            &mut self,
+            _opaque_locator: &str,
+        ) -> Result<NativeResolvedAsset<Self::Asset>, NativeSourceResolverError> {
+            self.asset
+                .take()
+                .ok_or(NativeSourceResolverError::Unresolved)
+        }
     }
 
     fn float32_wave(samples: &[f32]) -> Vec<u8> {
