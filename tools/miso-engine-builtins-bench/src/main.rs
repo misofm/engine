@@ -263,16 +263,12 @@ struct RealMeterTapArtifactPair {
 
 fn prepare_real_meter_tap_artifacts(rate_hz: u32) -> RealMeterTapArtifactPair {
     RealMeterTapArtifactPair {
-        success: prepare_real_meter_tap_artifact(rate_hz, 4, 35_001),
-        full: prepare_real_meter_tap_artifact(rate_hz, 1, 35_002),
+        success: prepare_real_meter_tap_artifact(rate_hz),
+        full: prepare_real_meter_tap_artifact(rate_hz),
     }
 }
 
-fn prepare_real_meter_tap_artifact(
-    rate_hz: u32,
-    queue_capacity: usize,
-    plan_id: u64,
-) -> PreparedGraphBuiltinsArtifact {
+fn prepare_real_meter_tap_artifact(rate_hz: u32) -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_toml(SESSION).expect("frozen benchmark session");
     model.sample_rate_hz = rate_hz;
     model.sources[0].sample_rate_hz = rate_hz;
@@ -298,12 +294,12 @@ fn prepare_real_meter_tap_artifact(
         .expect("frozen effects");
     let builtins = prepare_session_builtins(
         &effects.session,
-        &real_meter_tap_requests(&session, queue_capacity),
+        &real_meter_tap_requests(&session),
         unbounded_builtin_caps(),
     )
     .expect("frozen builtin tap requests");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        plan_id,
+        plan_id: ISSUE.into(),
         effects,
         builtins,
         caps: unbounded_graph_caps(),
@@ -434,6 +430,10 @@ impl RealMeterTapRuntime {
         }
     }
 
+    fn begin_measurement(&mut self) {
+        self.output = Sha256::new();
+    }
+
     fn render_one(&mut self, first_sample: u64) {
         self.success.render(first_sample);
         for record in self.success.drain_all() {
@@ -481,16 +481,13 @@ fn hash_meter_snapshot(hash: &mut Sha256, record: MeterConsumerSnapshot) {
     }
 }
 
-fn real_meter_tap_requests(
-    session: &miso_engine_session::CompiledSession,
-    queue_capacity: usize,
-) -> Vec<MeterRequest> {
+fn real_meter_tap_requests(session: &miso_engine_session::CompiledSession) -> Vec<MeterRequest> {
     let config = MeterConfig {
         period_frames: NonZeroU32::new(session.quantum().0).expect("frozen quantum"),
         peak_hold_frames: 0,
         peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(queue_capacity).expect("frozen meter capacity"),
-        reset_generation: 35,
+        queue_capacity: NonZeroUsize::new(1).expect("frozen meter capacity"),
+        reset_generation: 7,
     };
     [
         MeterTap::Input,
@@ -628,6 +625,7 @@ fn prepare_render_round_states() -> Vec<RenderRoundStates> {
 
 fn measure_render(runtime: &mut RenderRuntime) -> Measurement {
     let mut samples_ns = Vec::with_capacity(RENDER_MEASURED_BATCHES);
+    runtime.begin_measurement();
     audit::warm_up();
     audit::reset();
     for batch in 0..RENDER_MEASURED_BATCHES {
@@ -694,6 +692,7 @@ struct RenderRuntime {
     left: [f32; QUANTUM],
     right: [f32; QUANTUM],
     meter_runtime: Option<RealMeterTapRuntime>,
+    output: Sha256,
 }
 impl RenderRuntime {
     fn new(workload: Workload, rate_hz: u32) -> Self {
@@ -734,6 +733,14 @@ impl RenderRuntime {
             left: [0.0; QUANTUM],
             right: [0.0; QUANTUM],
             meter_runtime,
+            output: Sha256::new(),
+        }
+    }
+
+    fn begin_measurement(&mut self) {
+        self.output = Sha256::new();
+        if let Some(meter_runtime) = &mut self.meter_runtime {
+            meter_runtime.begin_measurement();
         }
     }
     fn run_batch(&mut self, batch: u64) {
@@ -759,21 +766,7 @@ impl RenderRuntime {
             return;
         }
         if matches!(self.workload, Workload::MatrixRamp) {
-            let target = if (batch + operation).is_multiple_of(2) {
-                Matrix2x2 {
-                    ll: 0.6,
-                    lr: 0.4,
-                    rl: -0.4,
-                    rr: 0.6,
-                }
-            } else {
-                Matrix2x2 {
-                    ll: 0.9,
-                    lr: -0.1,
-                    rl: 0.2,
-                    rr: 0.8,
-                }
-            };
+            let target = matrix_target_for_operation(batch, operation);
             self.chain
                 .set_matrix_target(target)
                 .expect("frozen matrix target");
@@ -784,6 +777,9 @@ impl RenderRuntime {
                     .expect("fixed block"),
             )
             .expect("frozen process");
+        for value in self.left.iter().chain(&self.right) {
+            self.output.update(value.to_bits().to_le_bytes());
+        }
     }
     fn fill_input(&mut self, batch: u64, operation: u64) {
         let phase = (batch * OPERATIONS_PER_RENDER_BATCH as u64 + operation) as f32 * 0.001;
@@ -797,11 +793,7 @@ impl RenderRuntime {
         if let Some(meter_runtime) = &self.meter_runtime {
             return meter_runtime.output_sha256();
         }
-        let mut hash = Sha256::new();
-        for value in self.left.iter().chain(&self.right) {
-            hash.update(value.to_bits().to_le_bytes());
-        }
-        hex_digest(hash.finalize())
+        hex_digest(self.output.clone().finalize())
     }
     fn shape(&self) -> WorkloadShape {
         WorkloadShape {
@@ -813,6 +805,28 @@ impl RenderRuntime {
             },
             meter_capacity: usize::from(self.meter_runtime.is_some()),
             retained_payload_bytes: 0,
+        }
+    }
+}
+
+fn matrix_target_for_operation(batch: u64, operation: u64) -> Matrix2x2 {
+    let global_operation = batch
+        .checked_mul(OPERATIONS_PER_RENDER_BATCH as u64)
+        .and_then(|value| value.checked_add(operation))
+        .expect("bounded benchmark operation index");
+    if global_operation.is_multiple_of(2) {
+        Matrix2x2 {
+            ll: 0.6,
+            lr: 0.4,
+            rl: -0.4,
+            rr: 0.6,
+        }
+    } else {
+        Matrix2x2 {
+            ll: 0.9,
+            lr: -0.1,
+            rl: 0.2,
+            rr: 0.8,
         }
     }
 }
@@ -1580,6 +1594,26 @@ mod tests {
     }
 
     #[test]
+    fn matrix_targets_alternate_by_global_operation_across_batch_boundaries() {
+        assert_eq!(
+            matrix_target_for_operation(0, 6).ll.to_bits(),
+            0.6_f32.to_bits()
+        );
+        assert_eq!(
+            matrix_target_for_operation(0, 7).ll.to_bits(),
+            0.9_f32.to_bits()
+        );
+        assert_eq!(
+            matrix_target_for_operation(1, 0).ll.to_bits(),
+            0.6_f32.to_bits()
+        );
+        assert_eq!(
+            matrix_target_for_operation(1, 1).ll.to_bits(),
+            0.9_f32.to_bits()
+        );
+    }
+
+    #[test]
     fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
         for plan in measured_record_plans() {
             let input = input_fixture(plan.workload, plan.rate_hz);
@@ -1594,6 +1628,7 @@ mod tests {
     #[test]
     fn real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state() {
         let pair = prepare_real_meter_tap_artifacts(48_000);
+        assert_eq!(pair.success.report(), pair.full.report());
         let mut success = RealMeterTapPlan::bind(pair.success);
         let mut full = RealMeterTapPlan::bind(pair.full);
         let expected_taps = [
@@ -1630,7 +1665,8 @@ mod tests {
         assert!(
             full_windows
                 .iter()
-                .all(|record| record.snapshot.end_sample == QUANTUM as u64)
+                .all(|record| record.snapshot.end_sample == QUANTUM as u64
+                    && record.snapshot.reset_generation == 7)
         );
 
         success.render(QUANTUM as u64);
@@ -1638,7 +1674,8 @@ mod tests {
         assert!(
             success_windows
                 .iter()
-                .all(|record| record.snapshot.end_sample == QUANTUM as u64 * 2)
+                .all(|record| record.snapshot.end_sample == QUANTUM as u64 * 2
+                    && record.snapshot.reset_generation == 7)
         );
     }
 }
