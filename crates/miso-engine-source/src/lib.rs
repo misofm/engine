@@ -49,7 +49,8 @@ pub use native_source::{
     NativeSourcePrepareCaps, NativeSourcePrepareError, NativeSourcePrepareRequest,
     NativeSourceResolver, NativeSourceResolverError, NativeSourceResourceReport,
     NativeSourceWorkerControlError, NativeSourceWorkerEvent, NativeSourceWorkerExit,
-    PreparedNativeSource, prepare_native_session_sources, prepare_native_source,
+    NativeWorkerResourceReport, PreparedNativeSource, prepare_native_session_sources,
+    prepare_native_source,
 };
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]

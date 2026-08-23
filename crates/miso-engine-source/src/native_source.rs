@@ -117,19 +117,57 @@ pub struct NativeSourceResourceReport {
     pub worker_event_queue_largest_allocation_bytes: u64,
     /// Maximum required alignment among worker-event queue allocations.
     pub worker_event_queue_alignment_bytes: u64,
-    /// Exact capacity-one SPSC worker-stop queue header and slot payload bytes.
-    pub worker_stop_queue_bytes: u64,
-    /// Exact worker stop queue item capacity.
-    pub worker_stop_queue_items: u64,
-    /// Largest worker-stop queue allocation request.
-    pub worker_stop_queue_largest_allocation_bytes: u64,
-    /// Maximum required alignment among worker-stop queue allocations.
-    pub worker_stop_queue_alignment_bytes: u64,
+    /// Exact once-per-thread worker allocation accounting folded into this report.
+    pub worker: NativeWorkerResourceReport,
     /// Exact source ring plus fixed decoder/staging allocation total.
     pub total_engine_owned_bytes: u64,
     /// Largest exact allocation among ring, decoder, staging, and native worker queues.
     pub largest_allocation_bytes: u64,
+    base_largest_allocation_bytes: u64,
 }
+
+/// Exact once-per-thread native worker allocation accounting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeWorkerResourceReport {
+    /// Exact capacity-one stop SPSC header and slot payload bytes.
+    pub stop_queue_bytes: u64,
+    /// Exact stop SPSC logical item capacity.
+    pub stop_queue_items: u64,
+    /// Largest stop SPSC allocation request.
+    pub stop_queue_largest_allocation_bytes: u64,
+    /// Maximum required alignment among stop SPSC allocations.
+    pub stop_queue_alignment_bytes: u64,
+    /// Exact one-allocation boxed source-job array bytes.
+    pub job_array_bytes: u64,
+    /// Exact number of source jobs owned by the thread.
+    pub job_count: u64,
+    /// Required alignment of the boxed source-job array.
+    pub job_array_alignment_bytes: u64,
+}
+
+impl NativeWorkerResourceReport {
+    const fn total_engine_owned_bytes(self) -> Option<u64> {
+        self.stop_queue_bytes.checked_add(self.job_array_bytes)
+    }
+
+    const fn largest_allocation_bytes(self) -> u64 {
+        if self.stop_queue_largest_allocation_bytes > self.job_array_bytes {
+            self.stop_queue_largest_allocation_bytes
+        } else {
+            self.job_array_bytes
+        }
+    }
+}
+
+const EMPTY_WORKER_RESOURCE_REPORT: NativeWorkerResourceReport = NativeWorkerResourceReport {
+    stop_queue_bytes: 0,
+    stop_queue_items: 0,
+    stop_queue_largest_allocation_bytes: 0,
+    stop_queue_alignment_bytes: 1,
+    job_array_bytes: 0,
+    job_count: 0,
+    job_array_alignment_bytes: 1,
+};
 
 /// One exact retained allocation request used by the test-support duration audit.
 #[cfg(feature = "test-support")]
@@ -186,7 +224,7 @@ pub fn native_source_allocation_layout(
     let pcm_per_block = samples_per_block
         .checked_mul(u64::try_from(core::mem::size_of::<f32>()).expect("f32 size"))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
-    let mut entries = Vec::with_capacity(15);
+    let mut entries = Vec::with_capacity(16);
     push_queue::<Box<crate::TransferBlock>>(
         &mut entries,
         "ring.data_queue",
@@ -247,8 +285,18 @@ pub fn native_source_allocation_layout(
     push_queue::<()>(
         &mut entries,
         "worker.stop_queue",
-        NonZeroUsize::new(1).expect("one stop"),
+        NonZeroUsize::new(
+            usize::try_from(report.worker.stop_queue_items)
+                .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        )
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?,
     )?;
+    entries.push(NativeSourceAllocationLayoutEntry {
+        category: "worker.job_array",
+        requested_size_bytes: report.worker.job_array_bytes,
+        alignment_bytes: report.worker.job_array_alignment_bytes,
+        count: 1,
+    });
     entries.sort();
     Ok(entries)
 }
@@ -286,6 +334,7 @@ pub struct PreparedNativeSource {
     controller: NativeSourceController,
     consumer: PcmSourceConsumer,
     resources: NativeSourceResourceReport,
+    worker_resources: NativeWorkerResourceReport,
     worker: NativeSourceWorker,
 }
 
@@ -298,8 +347,9 @@ impl PreparedNativeSource {
 
     /// Exact fixed source resource accounting prepared for this source.
     #[must_use]
-    pub const fn resource_report(&self) -> NativeSourceResourceReport {
-        self.resources
+    pub fn resource_report(&self) -> NativeSourceResourceReport {
+        fold_worker_resources(self.resources, self.worker_resources)
+            .expect("accepted worker resources fit the source report")
     }
 
     /// Move the controller and native source into their separate prepared ownership domains.
@@ -309,8 +359,11 @@ impl PreparedNativeSource {
             controller,
             consumer,
             resources,
+            worker_resources,
             worker,
         } = self;
+        let resources = fold_worker_resources(resources, worker_resources)
+            .expect("accepted worker resources fit the source report");
         let additional_overhead_bytes = resources
             .total_engine_owned_bytes
             .checked_sub(resources.ring.total_engine_owned_bytes)
@@ -599,6 +652,7 @@ struct UnstartedNativeSource<R: Read + Seek> {
     job: SourceJob<R>,
     consumer: PcmSourceConsumer,
     resources: NativeSourceResourceReport,
+    caps: NativeSourcePrepareCaps,
     initial_generation: SourceGeneration,
     region: NativeWaveRegion,
 }
@@ -608,7 +662,7 @@ pub struct NativeSourceController {
     commands: Producer<WorkerCommand>,
     events: Consumer<NativeSourceWorkerEvent>,
     observed_sanitation: u64,
-    terminal_observed: bool,
+    terminal_exit: Option<NativeSourceWorkerExit>,
     next_requested_generation: SourceGeneration,
     region: NativeWaveRegion,
     worker: Thread,
@@ -620,6 +674,12 @@ impl NativeSourceController {
     #[must_use]
     pub fn native_decoder_sanitized_samples(&self) -> u64 {
         self.observed_sanitation
+    }
+
+    /// Exact terminal reason after this controller has consumed its job Terminal event.
+    #[must_use]
+    pub const fn worker_exit(&self) -> Option<NativeSourceWorkerExit> {
+        self.terminal_exit
     }
 
     /// Request and wait for a synchronized native decoder sanitation watermark outside render.
@@ -683,7 +743,7 @@ impl NativeSourceController {
                     self.observe_event(event);
                     return Ok(event);
                 }
-                Err(QueueEmpty { .. }) if self.terminal_observed => {
+                Err(QueueEmpty { .. }) if self.terminal_exit.is_some() => {
                     return Err(NativeSourceWorkerControlError::Stopped);
                 }
                 Err(QueueEmpty { .. }) => thread::sleep(CONTROL_POLL_WAIT),
@@ -692,7 +752,7 @@ impl NativeSourceController {
     }
 
     fn try_send(&mut self, command: WorkerCommand) -> Result<(), NativeSourceWorkerControlError> {
-        if self.terminal_observed {
+        if self.terminal_exit.is_some() {
             return Err(NativeSourceWorkerControlError::Stopped);
         }
         match self.commands.try_push(command) {
@@ -718,8 +778,8 @@ impl NativeSourceController {
             } => native_decoder_sanitized_samples,
         };
         self.observed_sanitation = self.observed_sanitation.max(value);
-        if matches!(event, NativeSourceWorkerEvent::Terminal { .. }) {
-            self.terminal_observed = true;
+        if let NativeSourceWorkerEvent::Terminal { exit, .. } = event {
+            self.terminal_exit = Some(exit);
         }
     }
 }
@@ -777,10 +837,13 @@ pub fn prepare_native_source<S: NativeSourceResolver>(
 ) -> Result<PreparedNativeSource, NativeSourcePrepareError> {
     let (controller, worker, consumer, resources) =
         prepare_native_source_parts(resolver, request, caps)?;
+    let worker_resources = resources.worker;
+    let resources = base_source_resources(resources).expect("set-of-one worker fold is reversible");
     Ok(PreparedNativeSource {
         controller,
         consumer,
         resources,
+        worker_resources,
         worker,
     })
 }
@@ -819,11 +882,14 @@ pub fn prepare_native_source_with_audit_gate<S: NativeSourceResolver>(
         }),
     )?;
     let audit_worker = controller.worker.clone();
+    let worker_resources = resources.worker;
+    let resources = base_source_resources(resources).expect("set-of-one worker fold is reversible");
     Ok((
         PreparedNativeSource {
             controller,
             consumer,
             resources,
+            worker_resources,
             worker,
         },
         NativeWorkerAuditGate {
@@ -955,6 +1021,7 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
         },
         consumer,
         resources: report,
+        caps,
         initial_generation,
         region: request.region,
     })
@@ -977,10 +1044,14 @@ fn start_native_worker<R: Read + Seek + Send + 'static>(
         job,
         consumer,
         resources,
+        caps,
         initial_generation,
         region,
     } = prepared;
-    let (worker, worker_thread) = start_native_workers(vec![job])?;
+    let (worker, worker_resources, worker_thread) =
+        start_native_workers(vec![job], Some((resources, caps)))?;
+    let resources = fold_worker_resources(resources, worker_resources)
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     Ok((
         native_source_controller(
             command_sender,
@@ -1006,7 +1077,7 @@ fn native_source_controller(
         commands,
         events,
         observed_sanitation: 0,
-        terminal_observed: false,
+        terminal_exit: None,
         next_requested_generation: initial_generation,
         region,
         worker,
@@ -1016,13 +1087,42 @@ fn native_source_controller(
 
 fn start_native_workers<R: Read + Seek + Send + 'static>(
     jobs: Vec<SourceJob<R>>,
-) -> Result<(NativeSourceWorker, Thread), NativeSourcePrepareError> {
+    limits: Option<(NativeSourceResourceReport, NativeSourcePrepareCaps)>,
+) -> Result<(NativeSourceWorker, NativeWorkerResourceReport, Thread), NativeSourcePrepareError> {
+    if jobs.is_empty() {
+        return Err(NativeSourcePrepareError::ResourceLimit);
+    }
+    let job_count = jobs.len();
+    let job_layout = Layout::array::<SourceJob<R>>(job_count)
+        .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let stop_resources = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))?;
+    let worker_resources = NativeWorkerResourceReport {
+        stop_queue_bytes: stop_resources.total_bytes,
+        stop_queue_items: 1,
+        stop_queue_largest_allocation_bytes: stop_resources.largest_allocation_bytes,
+        stop_queue_alignment_bytes: stop_resources.alignment_bytes,
+        job_array_bytes: u64::try_from(job_layout.size())
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        job_count: u64::try_from(job_count).map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+        job_array_alignment_bytes: u64::try_from(job_layout.align())
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?,
+    };
+    if let Some((base, caps)) = limits {
+        let folded = fold_worker_resources(base, worker_resources)
+            .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+        if folded.total_engine_owned_bytes > caps.max_total_engine_owned_bytes
+            || folded.largest_allocation_bytes > caps.max_largest_allocation_bytes
+        {
+            return Err(NativeSourcePrepareError::ResourceLimit);
+        }
+    }
+    let jobs = jobs.into_boxed_slice();
     let (stop_sender, stop_receiver) =
         bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
-        .spawn(move || run_workers(jobs.into_boxed_slice(), stop_receiver))
+        .spawn(move || run_workers(jobs, stop_receiver))
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
     let worker_thread = join.thread().clone();
     Ok((
@@ -1032,6 +1132,7 @@ fn start_native_workers<R: Read + Seek + Send + 'static>(
             stop: stop_sender,
             _not_sync: PhantomData,
         },
+        worker_resources,
         worker_thread,
     ))
 }
@@ -1210,22 +1311,19 @@ fn source_resource_report(
     let worker_control_queue = exact_queue_resources::<WorkerCommand>(caps.control_queue_items)?;
     let worker_event_queue =
         exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)?;
-    let worker_stop_queue = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))?;
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
         .checked_add(decoder_read_scratch_bytes)
         .and_then(|total| total.checked_add(worker_planar_staging_bytes))
         .and_then(|total| total.checked_add(worker_control_queue.total_bytes))
         .and_then(|total| total.checked_add(worker_event_queue.total_bytes))
-        .and_then(|total| total.checked_add(worker_stop_queue.total_bytes))
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
     let largest_allocation_bytes = ring
         .largest_allocation_bytes
         .max(decoder_read_scratch_bytes)
         .max(worker_planar_staging_bytes)
         .max(worker_control_queue.largest_allocation_bytes)
-        .max(worker_event_queue.largest_allocation_bytes)
-        .max(worker_stop_queue.largest_allocation_bytes);
+        .max(worker_event_queue.largest_allocation_bytes);
     if total_engine_owned_bytes > caps.max_total_engine_owned_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
@@ -1246,13 +1344,36 @@ fn source_resource_report(
             .expect("usize fits u64"),
         worker_event_queue_largest_allocation_bytes: worker_event_queue.largest_allocation_bytes,
         worker_event_queue_alignment_bytes: worker_event_queue.alignment_bytes,
-        worker_stop_queue_bytes: worker_stop_queue.total_bytes,
-        worker_stop_queue_items: 1,
-        worker_stop_queue_largest_allocation_bytes: worker_stop_queue.largest_allocation_bytes,
-        worker_stop_queue_alignment_bytes: worker_stop_queue.alignment_bytes,
+        worker: EMPTY_WORKER_RESOURCE_REPORT,
         total_engine_owned_bytes,
         largest_allocation_bytes,
+        base_largest_allocation_bytes: largest_allocation_bytes,
     })
+}
+
+fn fold_worker_resources(
+    mut base: NativeSourceResourceReport,
+    worker: NativeWorkerResourceReport,
+) -> Option<NativeSourceResourceReport> {
+    base.total_engine_owned_bytes = base
+        .total_engine_owned_bytes
+        .checked_add(worker.total_engine_owned_bytes()?)?;
+    base.largest_allocation_bytes = base
+        .largest_allocation_bytes
+        .max(worker.largest_allocation_bytes());
+    base.worker = worker;
+    Some(base)
+}
+
+fn base_source_resources(
+    mut folded: NativeSourceResourceReport,
+) -> Option<NativeSourceResourceReport> {
+    folded.total_engine_owned_bytes = folded
+        .total_engine_owned_bytes
+        .checked_sub(folded.worker.total_engine_owned_bytes()?)?;
+    folded.worker = EMPTY_WORKER_RESOURCE_REPORT;
+    folded.largest_allocation_bytes = folded.base_largest_allocation_bytes;
+    Some(folded)
 }
 
 fn retained_array_bytes<T>(count: usize) -> Option<u64> {
@@ -1595,6 +1716,11 @@ mod tests {
         assert!(!prepared.job.end_submitted);
         assert!(!prepared.job.source_ready_sent);
         assert_eq!(prepared.job.sanitation, 0);
+        assert_eq!(prepared.resources.worker, EMPTY_WORKER_RESOURCE_REPORT);
+        assert!(matches!(
+            start_native_workers::<Cursor<Vec<u8>>>(Vec::new(), None),
+            Err(NativeSourcePrepareError::ResourceLimit)
+        ));
     }
 
     struct Resolver {
@@ -2023,14 +2149,24 @@ mod tests {
             report.worker_event_queue_alignment_bytes,
             events.alignment_bytes
         );
-        assert_eq!(report.worker_stop_queue_bytes, stop.total_bytes);
+        assert_eq!(report.worker.stop_queue_bytes, stop.total_bytes);
         assert_eq!(
-            report.worker_stop_queue_largest_allocation_bytes,
+            report.worker.stop_queue_largest_allocation_bytes,
             stop.largest_allocation_bytes
         );
         assert_eq!(
-            report.worker_stop_queue_alignment_bytes,
+            report.worker.stop_queue_alignment_bytes,
             stop.alignment_bytes
+        );
+        let job_layout = Layout::array::<SourceJob<Cursor<Vec<u8>>>>(1).expect("one job layout");
+        assert_eq!(report.worker.job_count, 1);
+        assert_eq!(
+            report.worker.job_array_bytes,
+            u64::try_from(job_layout.size()).expect("job bytes")
+        );
+        assert_eq!(
+            report.worker.job_array_alignment_bytes,
+            u64::try_from(job_layout.align()).expect("job alignment")
         );
         let exact_largest = report
             .ring
@@ -2039,8 +2175,41 @@ mod tests {
             .max(report.worker_planar_staging_bytes)
             .max(control.largest_allocation_bytes)
             .max(events.largest_allocation_bytes)
-            .max(stop.largest_allocation_bytes);
+            .max(stop.largest_allocation_bytes)
+            .max(report.worker.job_array_bytes);
         assert_eq!(report.largest_allocation_bytes, exact_largest);
+        #[cfg(feature = "test-support")]
+        {
+            let layout =
+                native_source_allocation_layout(request(region).ring_config, caps(), report)
+                    .expect("exact folded allocation layout");
+            assert_eq!(
+                layout
+                    .iter()
+                    .try_fold(0_u64, |total, entry| {
+                        total.checked_add(
+                            entry
+                                .requested_size_bytes
+                                .checked_mul(entry.count)
+                                .expect("layout category bytes"),
+                        )
+                    })
+                    .expect("layout sum"),
+                report.total_engine_owned_bytes
+            );
+            assert_eq!(
+                layout
+                    .iter()
+                    .map(|entry| entry.requested_size_bytes)
+                    .max()
+                    .unwrap_or(0),
+                report.largest_allocation_bytes
+            );
+            assert!(layout.iter().any(|entry| {
+                entry.category == "worker.job_array"
+                    && entry.alignment_bytes == report.worker.job_array_alignment_bytes
+            }));
+        }
         drop(initial);
 
         let mut exact_caps = caps();
@@ -2382,7 +2551,7 @@ mod tests {
             commands: command_sender,
             events: event_receiver,
             observed_sanitation: 0,
-            terminal_observed: false,
+            terminal_exit: None,
             next_requested_generation: SourceGeneration(1),
             region: NativeWaveRegion {
                 start_frame: SourceFrame(0),
@@ -2537,8 +2706,9 @@ mod tests {
             region,
             ..
         } = healthy;
-        let (mut worker, worker_thread) =
-            start_native_workers(vec![failed_job, healthy_job]).expect("start one set worker");
+        let (mut worker, _worker_resources, worker_thread) =
+            start_native_workers(vec![failed_job, healthy_job], None)
+                .expect("start one set worker");
         let mut failed_controller = native_source_controller(
             failed_commands,
             failed_events,
@@ -2558,6 +2728,7 @@ mod tests {
             healthy_controller.worker.id(),
             "both jobs must be serviced by the same set worker"
         );
+        assert_eq!(failed_controller.worker_exit(), None);
 
         assert!(matches!(
             failed_controller.wait_for_event().expect("failed terminal"),
@@ -2568,6 +2739,12 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            failed_controller.worker_exit(),
+            Some(NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(
+                io::ErrorKind::Other
+            )))
+        );
         assert!(matches!(
             healthy_controller.wait_for_event().expect("healthy ready"),
             NativeSourceWorkerEvent::SourceReady { .. }
@@ -2594,6 +2771,10 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            healthy_controller.worker_exit(),
+            Some(NativeSourceWorkerExit::Stopped)
+        );
     }
 
     #[test]
