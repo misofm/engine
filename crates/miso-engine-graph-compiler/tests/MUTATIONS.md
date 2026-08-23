@@ -152,3 +152,18 @@ it lands here. `direct-route` cannot see this bug: it is a chain with one node p
 * Command: `cargo test -p miso-engine-graph-compiler --lib`
 * Red: `mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes` --
   the level-uniformity assertion, which now checks slot `k` of a chain sits at `level + k`.
+
+### M-18 — the compile path stops lowering
+* Mutation: make `PreparedGraphPlan::new` store `None` instead of the lowered program.
+* Command: `cargo test -p miso-engine-graph-compiler --lib compiled_plans_always_lower`
+* Red: `direct route: compiled plan must lower`.
+
+### M-19 — the arena bound is claimed against the wrong baseline  *(a mistake I made, recorded)*
+* Not a mutation: the first version of `compiled_plans_always_lower_to_a_smaller_executable_program`
+  asserted `program.buffers <= buffer_assignments.max() + 1` and **failed on unmutated code**
+  (`reverse submixes: arena 4 exceeds the 3 coloured outputs`). The colouring counts node outputs
+  only; `GraphExecutor` additionally allocates one contribution buffer per edge and re-buffers
+  every bank member, which is what `audio_buffer_samples` already said
+  (`colored_outputs + logical_edges`). The program legitimately keeps a dedicated buffer where the
+  colouring shared one and the executor un-shared it again at bind time. The assertion now compares
+  against the executor's real model, and the reason is written at the assertion.

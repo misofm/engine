@@ -400,6 +400,14 @@ impl CompensationDelay {
 }
 
 pub struct PreparedGraphPlan {
+    /// The executable form of this plan, derived at construction (#99 F2).
+    ///
+    /// Not yet consumed by either executor -- that is the step this seam exists for, and #98
+    /// owns the executor kernels it feeds. It is validated on every compile (see
+    /// `graph_plans_always_lower_to_an_executable_program`), so the shape both executors will be
+    /// rebuilt against is proven on every session the test corpus compiles, before anything
+    /// depends on it.
+    program: Option<program::ExecutionProgram>,
     plan_id: u64,
     pub spec: GraphSpec,
     pub sequential_schedule: Vec<GraphNodeId>,
@@ -644,13 +652,33 @@ impl PreparedGraphPlan {
         self.builtin_banks = banks;
         Ok(self)
     }
+    /// The lowered executable program, or `None` when the plan's schedule, levels and spec
+    /// disagree (which bind-time structural validation rejects).
+    #[must_use]
+    pub fn program(&self) -> Option<&program::ExecutionProgram> {
+        self.program.as_ref()
+    }
     /// The prepared route transforms, by shared reference (#99 F5).
     #[must_use]
     pub fn routes(&self) -> &[PreparedRoute] {
         &self.routes
     }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
+        // #99 F2: the executable program is *derived* here, from the plan's own spec, schedule,
+        // levels and PDC edges, so it cannot disagree with the semantic graph and no caller has
+        // to supply or maintain it. `None` means those four disagree -- a schedule that is not
+        // the concatenation of the levels, an edge running backwards, an unsorted spec -- which
+        // `has_valid_structural_layout` rejects at bind time anyway. Hand-built plans in tests
+        // are the only things that ever produce it, and they keep working exactly as before.
+        let program = program::lower(
+            &parts.spec,
+            &parts.sequential_schedule,
+            &parts.dependency_levels,
+            &parts.inserted_delays,
+        )
+        .ok();
         Self {
+            program,
             plan_id: parts.plan_id,
             spec: parts.spec,
             sequential_schedule: parts.sequential_schedule,
