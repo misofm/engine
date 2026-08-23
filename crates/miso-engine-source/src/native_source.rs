@@ -1,4 +1,4 @@
-//! Native resolver, preparation, and one-file-per-worker source delivery.
+//! Native resolver, preparation, and one-worker-per-prepared-set source delivery.
 //!
 //! This module is control/worker-only and cfg-excluded from browser Wasm. The started worker owns
 //! the opened reader, decoder, prepared source producer, and all decoded staging storage; it never
