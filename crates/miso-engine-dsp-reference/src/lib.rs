@@ -18,15 +18,6 @@ mod svf;
 mod tpt;
 mod transient_shaper;
 
-#[cfg(test)]
-mod parametric_eq_candidates;
-#[cfg(test)]
-mod parametric_eq_recurrence_proof;
-#[cfg(test)]
-mod parametric_eq_time_domain_candidates;
-#[cfg(test)]
-mod portable_filter_quality;
-
 pub use biquad::{
     ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind, rbj_butterworth_magnitude_db,
 };

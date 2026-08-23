@@ -161,3 +161,5 @@ timing command was run; `timed_benchmark_invocations=0`.
 
 Issue 045, **Launch parametric EQ recurrence derivation and runtime proof**, owns any further
 research. Issue 044 authorizes no production continuation.
+
+2026-08 (#105): harness archived, not compiled, at `dsp-research/archive/issue-044/parametric_eq_time_domain_candidates.rs`.

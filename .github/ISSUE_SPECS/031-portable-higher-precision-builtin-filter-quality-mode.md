@@ -196,3 +196,5 @@ ceiling, zero scratch, zero latency and zero tail.
 Both attempts and the sole matrix authorization are consumed. No production quality mode or
 implementation successor is created, and this issue may close when local/remote evidence is
 synchronized.
+
+2026-08 (#105): harness archived, not compiled, at `dsp-research/archive/issue-031/portable_filter_quality.rs`.

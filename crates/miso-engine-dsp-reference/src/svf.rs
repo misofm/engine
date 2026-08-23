@@ -244,6 +244,7 @@ impl ReferenceSvfStateSpace {
     /// Builds the model from explicit state-space words.
     ///
     /// Test and adapter use only: [`new`](Self::new) is the derivation from realization words.
+    #[cfg(test)]
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_words(

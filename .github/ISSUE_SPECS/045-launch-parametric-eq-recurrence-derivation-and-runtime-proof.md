@@ -100,7 +100,8 @@ and `timed_benchmark_invocations=0`.
 ## Terra attempt 1 — phase-one harness checkpoint (partial)
 
 Added a test-boundary-only, ignored f64 derivation scaffold in
-`crates/miso-engine-dsp-reference/src/parametric_eq_recurrence_proof.rs`. It fixes the frozen
+`dsp-research/archive/issue-045/parametric_eq_recurrence_proof.rs` (archived by #105; it was
+`crates/miso-engine-dsp-reference/src/parametric_eq_recurrence_proof.rs` when this run was made). It fixes the frozen
 candidate order and 1,488-row grid, reconstructs L1/D2/B3 back to normalized RBJ coefficients,
 uses deterministic partial-pivot Lyapunov solves plus canonical balanced-B3 eigenvector signs, and
 contains the required 4,096-sample zero-state impulse comparison against the independent f64 DFI
@@ -186,6 +187,7 @@ The final operator must first prove both output paths absent, enable `pipefail`,
 test ! -e /tmp/engine-v2-issue-045-sol2-transcript.txt
 test ! -e /tmp/engine-v2-issue-045-sol2-stdout.txt
 set -o pipefail
+# archived by #105: the module is no longer compiled; see dsp-research/archive/issue-045/
 MISO_ISSUE_045_TRANSCRIPT=/tmp/engine-v2-issue-045-sol2-transcript.txt cargo test --locked -p miso-engine-dsp-reference parametric_eq_recurrence_proof::issue_045_complete_recurrence_comparison_requires_sol_freeze -- --ignored --exact --nocapture 2>&1 | tee /tmp/engine-v2-issue-045-sol2-stdout.txt
 rg -n '^issue-045 complete=true$' /tmp/engine-v2-issue-045-sol2-transcript.txt
 sha256sum /tmp/engine-v2-issue-045-sol2-transcript.txt /tmp/engine-v2-issue-045-sol2-stdout.txt
@@ -237,3 +239,5 @@ Final record: `passing_candidates=0`, `selected=none`. Persisted artifact SHA-25
 
 Final counters: `matrix_invocations=2`; `timed_benchmark_invocations=0`. Issue 045 has no overall
 PASS and freezes no production scalar/W4/W8 recurrence.
+
+2026-08 (#105): harness archived, not compiled, at `dsp-research/archive/issue-045/parametric_eq_recurrence_proof.rs`.

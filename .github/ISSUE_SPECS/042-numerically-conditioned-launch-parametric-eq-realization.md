@@ -322,3 +322,5 @@ Commands — all PASS:
 - `cargo clippy -p miso-engine-parametric-eq --all-targets -- -D warnings`
 
 `timed_benchmark_invocations=0`.
+
+2026-08 (#105): harness archived, not compiled, at `dsp-research/archive/issue-042/parametric_eq_candidates.rs`.
