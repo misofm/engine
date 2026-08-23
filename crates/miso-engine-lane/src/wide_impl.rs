@@ -74,6 +74,7 @@ macro_rules! impl_lane_for_wide {
 
             #[inline(always)]
             fn sqrt(self) -> Self {
+                // LANE-OP-OK(sqrt): forwards directly, IEEE-exact on every target (§3.3).
                 self.sqrt()
             }
 
@@ -112,6 +113,7 @@ macro_rules! impl_lane_for_wide {
 
             #[inline(always)]
             fn floor(self) -> Self {
+                // LANE-OP-OK(floor): forwards directly, IEEE floor on every target (§3.3).
                 self.floor()
             }
 

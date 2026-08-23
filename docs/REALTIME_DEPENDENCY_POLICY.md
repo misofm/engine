@@ -22,7 +22,12 @@ API is still forbidden in the render-reachable graph.
 The workspace denies unsafe code. If a later approved issue needs a narrow exception, it is limited
 to `crates/miso-engine-core/src/realtime/spsc.rs` for the issue-003 SPSC slot protocol,
 `crates/miso-engine-core/src/arch` for auditable architecture intrinsics or
-`crates/miso-engine-capi/src/ffi` for ABI boundaries. The introducing issue must use a local,
+`crates/miso-engine-capi/src/ffi` for ABI boundaries. Issue 083 adds
+`crates/miso-engine-lane/src/softfma.rs`, the one file of the lane crate that carries unsafe: the
+wasm `simd128` promote/demote intrinsics of the software FMA, and the `x86` MXCSR read/write that
+gate G6 uses to prove hardware flush-to-zero is inert under the D7 flush law (the workspace forbids
+inline assembly, so the deprecated `_mm_getcsr`/`_mm_setcsr` intrinsics are used instead). Neither
+is reachable from a render path, and no `Lane` value or vector type escapes the crate as unsafe. The introducing issue must use a local,
 minimal lint allowance; state the invariant next to the operation; include a `SAFETY` explanation;
 add tests; and obtain explicit review. Unsafe code must not leak through a public API. The SPSC
 exception owns fixed `UnsafeCell<MaybeUninit<T>>` storage and its local `SAFETY` assertions
@@ -61,10 +66,19 @@ probes separately prove the realtime allocator/deallocator and forbidden-operati
 
 ## CPU and Wasm policy
 
-CPU ISA selection is not a Cargo feature and must not be globally enabled. AVX2 and FMA are
-separate x86 runtime capabilities. Browser Wasm baseline and `simd128` are separate artifacts;
-relaxed SIMD is not required and correctness cannot depend on it. Future use of intrinsics must
-preserve the scalar fallback and the session's target-independent semantics.
+CPU ISA selection is not a Cargo feature. Issue 083 (master plan D4) replaces the earlier runtime
+capability model on x86: native `x86_64` builds are pinned to `x86-64-v3` by the workspace
+`.cargo/config.toml` (`-C target-feature=+avx2,+fma`), `crates/miso-engine-lane` refuses to compile
+without both features, and every host and C-ABI entry attests the CPU once at boot through
+`miso_engine_lane::attest_host`, refusing to start rather than falling back silently. That pin is
+the only approved global ISA configuration and `scripts/check-workspace-policy.sh` admits exactly
+it; `-C target-cpu`, a global `[build]` rustflags table and any other feature set stay forbidden.
+NEON is baseline on AArch64. Browser Wasm baseline and `simd128` are separate artifacts; relaxed
+SIMD is forbidden and correctness cannot depend on it (`scripts/check-lane-policy.sh`). Fusion
+exists only where `Lane::fma` is written (D3): hardware FMA on x86 and NEON, and an exact software
+FMA on wasm that gate G3 proves bit-identical to the hardware instruction. Intrinsics live only in
+`crates/miso-engine-lane`; the session's semantics stay target-independent, and cross-backend and
+cross-target equality is `to_bits` identity, not a tolerance (D5).
 
 Issue 003 concurrent queues use only pointer-width atomic loads/stores. Rust guarantees every
 available standard atomic type is lock-free, and the supported native/mobile targets expose

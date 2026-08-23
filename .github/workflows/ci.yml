@@ -49,6 +49,12 @@ jobs:
         run: |
           bash scripts/check-realtime-policy.sh
           bash scripts/test-realtime-policy.sh
+      - name: Lane numeric-boundary policy and mutation tests
+        run: |
+          bash scripts/check-lane-policy.sh
+          bash scripts/test-lane-policy.sh
+      - name: Lane gates G1-G4, G6 and P1 on the AVX2+FMA runner
+        run: cargo test --locked --release -p miso-engine-lane
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit

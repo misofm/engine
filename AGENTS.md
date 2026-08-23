@@ -12,7 +12,7 @@ Never inspect, copy, benchmark against, or inherit an architecture from `misofm/
 - Optimize ruthlessly but simply.  Ship a correct measurable implementation, record diminishing-return work as an issue, and reserve systematic optimization for the weekly performance pass.
 - Make realtime processing allocation-free.  Allocate, parse, compile plans, perform I/O, decode, and load effects only on control/worker threads.
 - Support arbitrary track counts constrained only by configured resources: never introduce a compiled `MAX_TRACKS`.
-- Use SIMD at macro and micro levels: Wasm `simd128` and AArch64 NEON four-lane `f32` banks, AVX2 eight-lane specializations, and scalar/tail fallback; AVX2 and FMA require separate runtime feature dispatch.
+- Use SIMD at macro and micro levels: Wasm `simd128` and AArch64 NEON four-lane `f32` banks, AVX2 eight-lane specializations, and scalar/tail fallback.  Native x86 is x86-64-v3: AVX2 and FMA are pinned at compile time and attested once at boot (issue #83, master plan D4), never dispatched at runtime.
 - Sessions are strict, versioned TOML.  The control schema is expressive; session compilation is transactional.  Protocol mutations update the same typed session model and must be snapshot-able back to canonical TOML.
 - Every Cargo package and crate directory uses the `miso-engine-` prefix.  Rust crate identifiers use the matching `miso_engine_` form; never introduce a bare `engine-*` package.
 
