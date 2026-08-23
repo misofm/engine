@@ -1003,6 +1003,23 @@ pub(crate) fn test_lifecycle_counters() -> crate::runtime::TestOwnerCounters {
 mod tests {
     use super::*;
 
+    struct SendPlanPtr(*mut Plan);
+
+    // SAFETY: This test-only token moves the original pointer without dereferencing or changing its
+    // provenance. The scoped query thread uses it only under E1's documented concurrent-query
+    // contract, joins before destruction, and Miri verifies production's projected accesses.
+    unsafe impl Send for SendPlanPtr {}
+
+    impl SendPlanPtr {
+        fn new(plan: *mut Plan) -> Self {
+            Self(plan)
+        }
+
+        fn into_ptr(self) -> *mut Plan {
+            self.0
+        }
+    }
+
     fn query(out: *mut Capabilities) -> u32 {
         // SAFETY: Tests pass null deliberately or storage for one complete Capabilities value.
         unsafe { miso_engine_v2_query_capabilities(out) }
@@ -1077,6 +1094,40 @@ mod tests {
             maximum_control_frame_bytes: 4_096,
             maximum_replay_bytes: 8_192,
             maximum_replay_entries: 16,
+            reserved: [0; 4],
+        }
+    }
+
+    fn empty_resource_report() -> PlanResourceReport {
+        PlanResourceReport {
+            struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
+            abi_version: 0,
+            sample_rate_hz: 0,
+            quantum_frames: 0,
+            source_count: 0,
+            track_count: 0,
+            latency_samples: 0,
+            tail_kind: 0,
+            tail_samples: 0,
+            graph_session_plus_plan_bytes: 0,
+            graph_incremental_plan_bytes: 0,
+            graph_metadata_bytes: 0,
+            graph_delay_bytes: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            source_pcm_payload_bytes: 0,
+            source_overhead_bytes: 0,
+            source_total_bytes: 0,
+            effect_scalar_state_bytes: 0,
+            effect_scalar_scratch_bytes: 0,
+            builtin_processor_payload_bytes: 0,
+            builtin_meter_payload_bytes: 0,
+            builtin_retained_payload_bytes: 0,
+            capi_retained_bytes: 0,
+            largest_named_allocation_bytes: 0,
             reserved: [0; 4],
         }
     }
@@ -1162,6 +1213,123 @@ mod tests {
         };
         assert_eq!(last_error(engine.cast(), &mut output), RESULT_OK);
         assert_eq!(output.required_bytes, 0);
+        destroy(engine);
+    }
+
+    #[test]
+    fn plan_queries_are_pure_and_concurrent_with_render() {
+        const TOML: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: u64::MAX,
+        };
+        let mut session = ptr::null_mut();
+        let mut plan = ptr::null_mut();
+        assert_eq!(
+            // SAFETY: Every pointer names a complete local ABI value or the immutable fixture
+            // bytes.
+            unsafe {
+                miso_engine_v2_compile_session(
+                    engine,
+                    TOML.as_ptr(),
+                    TOML.len() as u64,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            },
+            RESULT_OK
+        );
+        assert_eq!(diagnostics.required_bytes, 0);
+        assert!(!session.is_null());
+        assert!(!plan.is_null());
+
+        let mut expected_resources = empty_resource_report();
+        assert_eq!(
+            // SAFETY: The plan is live and the report is exact writable ABI storage.
+            unsafe { miso_engine_v2_plan_resources(plan, &mut expected_resources) },
+            RESULT_OK
+        );
+
+        let iterations = if cfg!(miri) { 16 } else { 2_000 };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let query_barrier = std::sync::Arc::clone(&barrier);
+        let query_plan = SendPlanPtr::new(plan);
+        let mut pcm = [0.0_f32; 256];
+        let output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+
+        std::thread::scope(|scope| {
+            let query_handle = scope.spawn(move || {
+                let plan = query_plan.into_ptr();
+                for _ in 0..iterations {
+                    query_barrier.wait();
+
+                    let mut resources = empty_resource_report();
+                    assert_eq!(
+                        // SAFETY: The original live plan pointer retains provenance and the report
+                        // is exact writable ABI storage for the duration of this call.
+                        unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+                        RESULT_OK
+                    );
+                    assert_eq!(resources, expected_resources);
+
+                    let mut error = BytesOut {
+                        struct_size: BYTES_OUT_SIZE,
+                        reserved0: 0,
+                        data: ptr::null_mut(),
+                        capacity_bytes: 0,
+                        required_bytes: u64::MAX,
+                    };
+                    // SAFETY: The original live plan pointer retains provenance and `error` is
+                    // exact writable ABI storage for the duration of this call.
+                    assert_eq!(last_error(plan.cast(), &mut error), RESULT_OK);
+                    assert_eq!(error.required_bytes, 0);
+
+                    query_barrier.wait();
+                }
+            });
+
+            for iteration in 0..iterations {
+                barrier.wait();
+                assert_eq!(
+                    // SAFETY: The original plan is live and output is exact writable planar
+                    // storage.
+                    unsafe {
+                        miso_engine_v2_render_f32_planar(
+                            plan,
+                            u64::try_from(iteration).unwrap() * 128,
+                            &output,
+                        )
+                    },
+                    RESULT_OK
+                );
+                barrier.wait();
+            }
+
+            query_handle.join().expect("query thread");
+        });
+
+        // SAFETY: The scoped query thread is joined, and each live handle is destroyed once.
+        unsafe {
+            miso_engine_v2_session_destroy(session);
+            miso_engine_v2_plan_destroy(plan);
+        }
         destroy(engine);
     }
 

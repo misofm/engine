@@ -7,60 +7,48 @@ must be legal concurrently with the exclusive render owner, and every caller-own
 output region must be rejected before Rust constructs a slice when its length, extent, or alignment
 is invalid.
 
-**OWNER-RESCOPED / READY — SOL XHIGH PASS.** Fresh explicit owner authorization on 2026-08-23
-resumes this slice from synchronized `main` at `3be899f`. The two historical Miri
-preflight/scaffold failures remain immutable evidence, but neither started an implementation
-attempt or changed production. This fresh workflow authorizes one provenance-preserving pre-fix
-Miri qualification and, only after the intended red, one identical corrected Miri run. It does not
-erase history, weaken E1 or authorize any other retry.
+**TERMINAL PRE-IMPLEMENTATION STOP — QUALIFICATION UNPROVEN.** Fresh explicit owner authorization
+on 2026-08-23 resumed this slice from synchronized `main` at `3be899f`, but the sole newly
+authorized pre-fix Miri invocation has now been consumed without a persisted completion result.
+Pinned Miri installed, the build succeeded and the exact E1 reported `running 1 test`; the last
+delivered output showed the test still in progress with no setup or provenance failure. The
+implementer's reporting turn was then interrupted by an external platform safety-classifier error.
+No completion output, exit status or final diagnostic was delivered or persisted, and no
+Cargo/Miri process survived for recovery. The invocation is neither an intended red nor a green.
+No rerun, corrected invocation or production implementation is authorized by this stopped brief.
 
 Issue 103 remains open. After this F2/F3 slice passes, F1 and the later wave-4 CAPI/web facade work
 remain separate scope.
 
-### Fresh owner-authorized qualification budget
+### Consumed owner-rescope qualification budget
 
-Before the fresh qualification begins, cumulative counters remain:
+The immutable terminal counters are:
 
-- `miri_named_invocations_total=2`;
+- `miri_named_invocations_total=3`;
 - `invalid_zero_test_miri_invocations=1`;
 - `unrelated_scaffold_failure_miri_invocations=1`;
+- `incomplete_external_reporting_miri_invocations=1`;
+- `exact_named_miri_invocations=2`;
+- `owner_rescope_pre_fix_invocations_launched=1`;
+- `owner_rescope_pre_fix_slots_consumed=1`;
+- `owner_rescope_pre_fix_red_invocations=0`;
 - `valid_pre_fix_red_invocations=0`;
 - `valid_corrected_green_invocations=0`;
 - `valid_miri_evidence_invocations=0`;
+- `miri_retries_of_valid_workload=0`;
 - `implementation_attempts_started=0`;
 - `failed_implementation_attempts=0`;
-- `preimplementation_qualification_stops=2`.
+- `preimplementation_qualification_stops=3`;
+- `corrected_green_slots_available=0`;
+- `fresh_miri_invocations_authorized=0`.
 
-The owner-authorized rescope adds exactly two possible named invocations: one fresh intended
-pre-fix red, then one corrected green. On full success the cumulative counters must be:
-
-- `miri_named_invocations_total=4`;
-- `invalid_zero_test_miri_invocations=1`;
-- `unrelated_scaffold_failure_miri_invocations=1`;
-- `exact_named_miri_invocations=3`;
-- `owner_rescope_pre_fix_red_invocations=1`;
-- `valid_pre_fix_red_invocations=1`;
-- `valid_corrected_green_invocations=1`;
-- `valid_miri_evidence_invocations=2`;
-- `miri_retries_of_valid_workload=0`;
-- `implementation_attempts_started=1`;
-- `failed_implementation_attempts=0`.
-
-The fresh pre-fix invocation is a new owner-authorized qualification after a terminal rescope, not
-a retry or reclassification of either historical invocation. The historical counters never
-decrease. Implementation attempt 1 starts only after the intended Miri red is captured and the
-first production edit begins. The test-only qualification scaffold is not an implementation
-attempt.
-
-If the fresh pre-fix run is unrelated or unexpectedly green, terminal counters become
-`miri_named_invocations_total=3`, `exact_named_miri_invocations=2`,
-`owner_rescope_pre_fix_red_invocations=0`, `valid_miri_evidence_invocations=0`,
-`implementation_attempts_started=0`, and `failed_implementation_attempts=0`; the corrected slot
-never becomes available. If the intended red succeeds but the sole corrected run fails, terminal
-counters become `miri_named_invocations_total=4`, `exact_named_miri_invocations=3`,
-`valid_pre_fix_red_invocations=1`, `valid_corrected_green_invocations=0`,
-`valid_miri_evidence_invocations=1`, `implementation_attempts_started=1`, and
-`failed_implementation_attempts=1`.
+The command launch consumes the slot under the synchronized one-run law even though the external
+interruption erased its completion evidence. `running 1 test` proves exact selection, not that E1
+completed or reached the intended whole-`Plan` conflict. The absent result cannot be reconstructed
+from the absence of a surviving process. No scaffold edit or rerun occurred after launch.
+Implementation attempt 1 never began because no valid intended red was captured and production was
+never edited. This is the third failed qualification shape in the Issue-103 lineage, not a failed
+implementation attempt and not permission to reset the counters.
 
 ### Historical briefing/preflight correction
 
@@ -290,10 +278,11 @@ still denies every other CAPI warning, including `undocumented_unsafe_blocks` in
 The final stable all-targets Clippy command below remains unchanged, has no allowance, and must pass
 before F2/F3 acceptance.
 
-The output must contain exactly one
+The following command sequence is retained as the consumed owner-rescope authority, not as current
+permission to launch it again. Its output had to contain exactly one
 `ffi::tests::plan_queries_are_pure_and_concurrent_with_render: test` line. Sol must also complete
 and record the qualification-only diff inspection defined above. Only then run the one newly
-authorized pre-fix pinned-Miri qualification:
+authorized pre-fix pinned-Miri qualification. That slot is now consumed:
 
 ```sh
 rustup +nightly-2026-08-20 component add miri
@@ -305,12 +294,16 @@ It must run exactly one test and fail specifically at the retained production wh
 alias/data-race conflict. An unrelated failure or unexpected pass is STOP: preserve the transcript,
 do not edit production, do not invoke Miri again, and synchronize the consumed-slot counters.
 
-After the intended red, begin implementation attempt 1 and retain the identical test name, wrapper,
-filter and iteration count. Once F2/F3 and all non-Miri gates are green, run the exact command above
-once more as the sole corrected invocation. It must run one test and pass. Any corrected-run failure
-is STOP with no retry, alternate filter, toolchain substitution or tuning. A later implementation
-revision may not reuse stale Miri evidence if it changes F2 ownership/projection code; no further
-Miri slot is implicit in the three-attempt rule.
+Had the intended red been captured, implementation attempt 1 would have retained the identical
+test name, wrapper, filter and iteration count. Once F2/F3 and all non-Miri gates are green, run the
+exact command above once more as the sole corrected invocation. It must run one test and pass. Any
+corrected-run failure is STOP with no retry, alternate filter, toolchain substitution or tuning. A
+later implementation revision may not reuse stale Miri evidence if it changes F2 ownership/
+projection code; no further Miri slot is implicit in the three-attempt rule.
+
+Because no intended red was captured, none of those implementation or corrected-run steps are now
+authorized. The command list below is retained only as the acceptance contract for a future
+materially respecified successor.
 
 Then run:
 
@@ -424,3 +417,42 @@ may implementation attempt 1 use the full allowed tracked-path fence.
 
 Issue 125 remains open and Step 1 remains unstarted until Issue-103 F2/F3 has a pushed Sol XHigh
 PASS and green synchronized evidence. No #83 status update is due merely for this rebrief.
+
+## Owner-rescope terminal qualification evidence — 2026-08-23
+
+The pre-Miri checkpoint was HEAD `1b36d7a` with the sole uncommitted candidate
+`crates/miso-engine-capi/src/ffi.rs` at blob
+`d09e3f289e85770a41335fdd0bfdb58a771173da`. Sol XHigh verified the exact test-only fence, one
+exact-name test among 19 listed tests, the opaque provenance-preserving `SendPlanPtr`, barrier,
+join and destruction ordering, retention of the production whole-`Plan`/`RefCell` defect, and
+passing format plus the synchronized bounded Clippy preflight. The candidate remained byte-for-byte
+unchanged after that review and after the Miri launch.
+
+Exactly one synchronized fresh pre-fix Miri command then launched. Pinned Miri was installed, the
+build succeeded and its delivered output reported `running 1 test`. The exact E1 remained in
+progress without any delivered setup/provenance failure when an external platform
+safety-classifier error interrupted the implementer's reporting turn. No completion output, exit
+status or final diagnostic was delivered or persisted. Root subsequently found no surviving
+Cargo/Miri process. No rerun, alternate filter, test edit or production edit occurred. Therefore
+the invocation consumed the sole slot but supplies zero valid Miri evidence. Qualification is
+unproven and the corrected-green slot never opened.
+
+The valid scaffold is candid failed-qualification evidence and must be preserved at its exact blob
+in the stopped-branch checkpoint rather than discarded or represented as accepted implementation.
+This checkpoint must not be merged as an F2/F3 PASS. It leaves the accepted Issue-113–121 behavior,
+production defect, fixtures and implementation-attempt counters unchanged.
+
+The three failed qualification shapes are now: the original zero-test briefing defect, the
+integer/provenance scaffold defect, and this externally interrupted result-delivery shape. Under
+the AGENTS.md three-attempt rule, another amendment granting the same command would be a disguised
+fourth retry. The owner has explicitly directed that work retry rather than move on; that direction
+requires a newly synchronized, materially respecified durable-capture successor and does not
+retroactively reopen this stopped brief.
+
+Before any further Miri launch, the successor must own and preflight a durable capture mechanism
+independent of the reporting turn: a persistent runner, predeclared transcript and exit-status
+destinations, combined stdout/stderr capture, atomic final-status publication, recoverable process
+identity and an explicit interrupted-run classification. It must freeze a new exact invocation
+budget, path fence and stop conditions and receive a fresh Sol XHigh PRE-MIRI review. This terminal
+record itself authorizes no Miri run, scaffold change or production implementation. Issue 103
+remains open and continues to block Issue-125 Step 0.
