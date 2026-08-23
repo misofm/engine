@@ -4,6 +4,7 @@
 //! adapter, or exported C ABI. Its caller-buffer codec is usable by future IPC, shared-memory,
 //! browser-message, and C ABI adapters without retaining any caller pointer.
 
+mod btlv;
 mod conformance;
 mod controller;
 mod message_wire;

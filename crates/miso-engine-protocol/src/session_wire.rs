@@ -210,16 +210,11 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
 use crate::{
     CommandFrame, DecodeError, DecodeScratch, DecodedFrame, EncodeError, ExpectedRevision, Frame,
     MessageId, ProtocolCodec, RequestId, SessionEditV1,
+    btlv::{
+        CountSink, Sink, SliceSink, WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U16, WIRE_U32,
+        WIRE_U64, WIRE_UTF8,
+    },
 };
-
-const WIRE_U8: u8 = 1;
-const WIRE_U16: u8 = 2;
-const WIRE_U32: u8 = 3;
-const WIRE_U64: u8 = 4;
-const WIRE_F32: u8 = 6;
-const WIRE_BOOL: u8 = 8;
-const WIRE_UTF8: u8 = 9;
-const WIRE_MESSAGE: u8 = 11;
 
 /// One typed `SESSION_TRANSACTION_APPLY` command ready for schema-specific BTLV encoding.
 pub struct SessionTransactionFrame<'a> {
@@ -251,10 +246,10 @@ impl ProtocolCodec {
         {
             return Err(EncodeError::MessageKindMismatch);
         }
-        let mut sizing = LengthSink::new(self.limits());
+        let mut sizing = CountSink::new(self.limits());
         encode_transaction_payload_into(&mut sizing, transaction.edits)?;
         let required = crate::OUTER_HEADER_BYTES
-            .checked_add(sizing.len())
+            .checked_add(sizing.written())
             .ok_or(EncodeError::LimitExceeded)?;
         if required > self.limits().max_frame_bytes {
             return Err(EncodeError::LimitExceeded);
@@ -291,12 +286,12 @@ impl ProtocolCodec {
             40,
             u32::try_from(transaction.edits.len()).map_err(|_| EncodeError::LimitExceeded)?,
         );
-        let mut writer = OutputSink::new(
+        let mut writer = SliceSink::new(
             &mut output[crate::OUTER_HEADER_BYTES..required],
             self.limits(),
         );
         encode_transaction_payload_into(&mut writer, transaction.edits)?;
-        debug_assert_eq!(writer.len(), required - crate::OUTER_HEADER_BYTES);
+        debug_assert_eq!(writer.written(), required - crate::OUTER_HEADER_BYTES);
         Ok(required)
     }
 
@@ -1028,166 +1023,56 @@ const fn enum_shape(value: AutomationShape) -> u8 {
     }
 }
 
-/// A transaction-only byte sink used by the sizing and caller-output passes.  It deliberately
-/// has no allocation operation: all dynamic information comes from already-owned edit values.
-trait TransactionSink {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError>;
-    fn len(&self) -> usize;
-    fn limits(&self) -> crate::ProtocolLimits;
-}
-
-struct LengthSink {
-    length: usize,
-    limits: crate::ProtocolLimits,
-}
-
-impl LengthSink {
-    const fn new(limits: crate::ProtocolLimits) -> Self {
-        Self { length: 0, limits }
-    }
-}
-
-impl TransactionSink for LengthSink {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
-        self.length = self
-            .length
-            .checked_add(bytes.len())
-            .ok_or(EncodeError::LimitExceeded)?;
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.length
-    }
-
-    fn limits(&self) -> crate::ProtocolLimits {
-        self.limits
-    }
-}
-
-struct OutputSink<'a> {
-    output: &'a mut [u8],
-    length: usize,
-    limits: crate::ProtocolLimits,
-}
-
-impl<'a> OutputSink<'a> {
-    fn new(output: &'a mut [u8], limits: crate::ProtocolLimits) -> Self {
-        Self {
-            output,
-            length: 0,
-            limits,
-        }
-    }
-}
-
-impl TransactionSink for OutputSink<'_> {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
-        let end = self
-            .length
-            .checked_add(bytes.len())
-            .ok_or(EncodeError::LimitExceeded)?;
-        let target = self
-            .output
-            .get_mut(self.length..end)
-            .ok_or(EncodeError::OutputTooSmall {
-                required: usize::MAX,
-            })?;
-        target.copy_from_slice(bytes);
-        self.length = end;
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.length
-    }
-
-    fn limits(&self) -> crate::ProtocolLimits {
-        self.limits
-    }
-}
-
 fn tx_count(base: u32, repeated: usize) -> Result<u32, EncodeError> {
     base.checked_add(u32::try_from(repeated).map_err(|_| EncodeError::LimitExceeded)?)
         .ok_or(EncodeError::LimitExceeded)
 }
 
-fn tx_start_message(sink: &mut dyn TransactionSink, count: u32) -> Result<(), EncodeError> {
-    if count > sink.limits().max_tlv_count {
-        return Err(EncodeError::LimitExceeded);
-    }
-    sink.write(&count.to_le_bytes())?;
-    sink.write(&0_u32.to_le_bytes())
+fn tx_start_message(sink: &mut dyn Sink, count: u32) -> Result<(), EncodeError> {
+    sink.message_header(count)
 }
 
-fn tx_field(
-    sink: &mut dyn TransactionSink,
-    id: u16,
-    wire: u8,
-    value: &[u8],
-) -> Result<(), EncodeError> {
-    let length = u32::try_from(value.len()).map_err(|_| EncodeError::LimitExceeded)?;
-    let mut prefix = [0_u8; 8];
-    prefix[..2].copy_from_slice(&id.to_le_bytes());
-    prefix[2] = wire;
-    prefix[3] = 1;
-    prefix[4..].copy_from_slice(&length.to_le_bytes());
-    sink.write(&prefix)?;
-    sink.write(value)?;
-    sink.write(&[0_u8; 7][..padding(value.len())])
+fn tx_field(sink: &mut dyn Sink, id: u16, wire: u8, value: &[u8]) -> Result<(), EncodeError> {
+    sink.field(id, wire, value)
 }
 
-fn tx_u8(sink: &mut dyn TransactionSink, id: u16, value: u8) -> Result<(), EncodeError> {
+fn tx_u8(sink: &mut dyn Sink, id: u16, value: u8) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_U8, &[value])
 }
-fn tx_u16(sink: &mut dyn TransactionSink, id: u16, value: u16) -> Result<(), EncodeError> {
+fn tx_u16(sink: &mut dyn Sink, id: u16, value: u16) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_U16, &value.to_le_bytes())
 }
-fn tx_u32(sink: &mut dyn TransactionSink, id: u16, value: u32) -> Result<(), EncodeError> {
+fn tx_u32(sink: &mut dyn Sink, id: u16, value: u32) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_U32, &value.to_le_bytes())
 }
-fn tx_u64(sink: &mut dyn TransactionSink, id: u16, value: u64) -> Result<(), EncodeError> {
+fn tx_u64(sink: &mut dyn Sink, id: u16, value: u64) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_U64, &value.to_le_bytes())
 }
-fn tx_f32(sink: &mut dyn TransactionSink, id: u16, value: f32) -> Result<(), EncodeError> {
+fn tx_f32(sink: &mut dyn Sink, id: u16, value: f32) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_F32, &value.to_le_bytes())
 }
-fn tx_bool(sink: &mut dyn TransactionSink, id: u16, value: bool) -> Result<(), EncodeError> {
+fn tx_bool(sink: &mut dyn Sink, id: u16, value: bool) -> Result<(), EncodeError> {
     tx_field(sink, id, WIRE_BOOL, &[u8::from(value)])
 }
-fn tx_text(sink: &mut dyn TransactionSink, id: u16, value: &str) -> Result<(), EncodeError> {
+fn tx_text(sink: &mut dyn Sink, id: u16, value: &str) -> Result<(), EncodeError> {
     if value.len() > sink.limits().max_string_bytes {
         return Err(EncodeError::LimitExceeded);
     }
     tx_field(sink, id, WIRE_UTF8, value.as_bytes())
 }
-fn tx_id(sink: &mut dyn TransactionSink, id: u16, value: &StableId) -> Result<(), EncodeError> {
+fn tx_id(sink: &mut dyn Sink, id: u16, value: &StableId) -> Result<(), EncodeError> {
     tx_text(sink, id, value.as_str())
 }
 fn tx_message(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     id: u16,
-    encode: impl Fn(&mut dyn TransactionSink) -> Result<(), EncodeError>,
+    mut encode: impl FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<(), EncodeError> {
-    let mut sizing = LengthSink::new(sink.limits());
-    encode(&mut sizing)?;
-    let size = sizing.len();
-    let mut prefix = [0_u8; 8];
-    prefix[..2].copy_from_slice(&id.to_le_bytes());
-    prefix[2] = WIRE_MESSAGE;
-    prefix[3] = 1;
-    prefix[4..].copy_from_slice(
-        &u32::try_from(size)
-            .map_err(|_| EncodeError::LimitExceeded)?
-            .to_le_bytes(),
-    );
-    sink.write(&prefix)?;
-    encode(sink)?;
-    sink.write(&[0_u8; 7][..padding(size)])
+    sink.nested(id, &mut encode)
 }
 
 fn encode_transaction_payload_into(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     edits: &[SessionEditV1],
 ) -> Result<(), EncodeError> {
     if tx_count(0, edits.len())? > sink.limits().max_tlv_count {
@@ -1199,19 +1084,13 @@ fn encode_transaction_payload_into(
     Ok(())
 }
 
-fn tx_edit_message(
-    sink: &mut dyn TransactionSink,
-    edit: &SessionEditV1,
-) -> Result<(), EncodeError> {
+fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_u16(sink, 1, edit.opcode().raw())?;
     tx_message(sink, 2, |nested| tx_edit_payload(nested, edit))
 }
 
-fn tx_edit_payload(
-    sink: &mut dyn TransactionSink,
-    edit: &SessionEditV1,
-) -> Result<(), EncodeError> {
+fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
     let count = match edit {
         SessionEditV1::SetSessionId { .. }
         | SessionEditV1::SetSampleRateHz { .. }
@@ -1469,7 +1348,7 @@ fn tx_edit_payload(
 }
 
 fn tx_effect_edit_prefix(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
@@ -1479,7 +1358,7 @@ fn tx_effect_edit_prefix(
     tx_id(sink, 3, effect_id)
 }
 fn tx_effect_edit_scalar(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
@@ -1489,20 +1368,17 @@ fn tx_effect_edit_scalar(
     tx_u8(sink, 4, value)
 }
 fn tx_effect_edit_message(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
-    encode: impl Fn(&mut dyn TransactionSink) -> Result<(), EncodeError>,
+    encode: impl FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<(), EncodeError> {
     tx_effect_edit_prefix(sink, track_id, rack_name, effect_id)?;
     tx_message(sink, 4, encode)
 }
 
-fn tx_render_profile(
-    sink: &mut dyn TransactionSink,
-    value: &RenderProfile,
-) -> Result<(), EncodeError> {
+fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_id(sink, 1, &value.id)?;
     tx_u8(
@@ -1514,69 +1390,60 @@ fn tx_render_profile(
         },
     )
 }
-fn tx_output_profile(
-    sink: &mut dyn TransactionSink,
-    value: &OutputProfile,
-) -> Result<(), EncodeError> {
+fn tx_output_profile(sink: &mut dyn Sink, value: &OutputProfile) -> Result<(), EncodeError> {
     tx_start_message(sink, 3)?;
     tx_id(sink, 1, &value.id)?;
     tx_u8(sink, 2, value.channels)?;
     tx_u8(sink, 3, 1)
 }
-fn tx_limits(sink: &mut dyn TransactionSink, value: &SessionLimits) -> Result<(), EncodeError> {
+fn tx_limits(sink: &mut dyn Sink, value: &SessionLimits) -> Result<(), EncodeError> {
     tx_start_message(sink, 3)?;
     tx_u64(sink, 1, value.pcm_ring_frames)?;
     tx_u64(sink, 2, value.control_queue_messages)?;
     tx_u64(sink, 3, value.memory_bytes)
 }
-fn tx_content(sink: &mut dyn TransactionSink, value: &SourceContent) -> Result<(), EncodeError> {
+fn tx_content(sink: &mut dyn Sink, value: &SourceContent) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_text(sink, 1, &value.identity)?;
     tx_text(sink, 2, &value.locator)
 }
-fn tx_region(sink: &mut dyn TransactionSink, value: &SourceRegion) -> Result<(), EncodeError> {
+fn tx_region(sink: &mut dyn Sink, value: &SourceRegion) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_u64(sink, 1, value.start_sample)?;
     tx_u64(sink, 2, value.length_samples)
 }
-fn tx_mapping(sink: &mut dyn TransactionSink, value: &SourceMapping) -> Result<(), EncodeError> {
+fn tx_mapping(sink: &mut dyn Sink, value: &SourceMapping) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_u8(sink, 1, value.channel_count)?;
     tx_message(sink, 2, |v| tx_region(v, &value.region))
 }
-fn tx_source(sink: &mut dyn TransactionSink, value: &Source) -> Result<(), EncodeError> {
+fn tx_source(sink: &mut dyn Sink, value: &Source) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
     tx_id(sink, 1, &value.id)?;
     tx_u32(sink, 2, value.sample_rate_hz)?;
     tx_message(sink, 3, |v| tx_content(v, &value.content))?;
     tx_message(sink, 4, |v| tx_mapping(v, &value.mapping))
 }
-fn tx_builtins(
-    sink: &mut dyn TransactionSink,
-    value: &DualMonoBuiltins,
-) -> Result<(), EncodeError> {
+fn tx_builtins(sink: &mut dyn Sink, value: &DualMonoBuiltins) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     tx_message(sink, 1, |v| tx_channel_builtins(v, &value.left))?;
     tx_message(sink, 2, |v| tx_channel_builtins(v, &value.right))
 }
-fn tx_channel_builtins(
-    sink: &mut dyn TransactionSink,
-    value: &ChannelBuiltins,
-) -> Result<(), EncodeError> {
+fn tx_channel_builtins(sink: &mut dyn Sink, value: &ChannelBuiltins) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
     tx_bool(sink, 1, value.polarity_invert)?;
     tx_f32(sink, 2, value.trim_db)?;
     tx_f32(sink, 3, value.hpf_hz)?;
     tx_f32(sink, 4, value.lpf_hz)
 }
-fn tx_rack(sink: &mut dyn TransactionSink, value: &Rack) -> Result<(), EncodeError> {
+fn tx_rack(sink: &mut dyn Sink, value: &Rack) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(0, value.effects.len())?)?;
     for effect in &value.effects {
         tx_message(sink, 1, |v| tx_effect(v, effect))?;
     }
     Ok(())
 }
-fn tx_identity(sink: &mut dyn TransactionSink, value: &EffectIdentity) -> Result<(), EncodeError> {
+fn tx_identity(sink: &mut dyn Sink, value: &EffectIdentity) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     match value {
         EffectIdentity::Native { effect_id } => {
@@ -1589,7 +1456,7 @@ fn tx_identity(sink: &mut dyn TransactionSink, value: &EffectIdentity) -> Result
         }
     }
 }
-fn tx_route_source(sink: &mut dyn TransactionSink, value: &RouteSource) -> Result<(), EncodeError> {
+fn tx_route_source(sink: &mut dyn Sink, value: &RouteSource) -> Result<(), EncodeError> {
     match value {
         RouteSource::Track { track_id, tap } => {
             tx_start_message(sink, 3)?;
@@ -1604,10 +1471,7 @@ fn tx_route_source(sink: &mut dyn TransactionSink, value: &RouteSource) -> Resul
         }
     }
 }
-fn tx_route_destination(
-    sink: &mut dyn TransactionSink,
-    value: &RouteDestination,
-) -> Result<(), EncodeError> {
+fn tx_route_destination(sink: &mut dyn Sink, value: &RouteDestination) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
     match value {
         RouteDestination::SubmixInput { submix_id } => {
@@ -1620,10 +1484,7 @@ fn tx_route_destination(
         }
     }
 }
-fn tx_sidechain(
-    sink: &mut dyn TransactionSink,
-    value: &SidechainDeclaration,
-) -> Result<(), EncodeError> {
+fn tx_sidechain(sink: &mut dyn Sink, value: &SidechainDeclaration) -> Result<(), EncodeError> {
     match value {
         SidechainDeclaration::None => {
             tx_start_message(sink, 1)?;
@@ -1637,14 +1498,14 @@ fn tx_sidechain(
         }
     }
 }
-fn tx_param(sink: &mut dyn TransactionSink, value: &EffectParam) -> Result<(), EncodeError> {
+fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
     tx_u32(sink, 1, value.parameter_id)?;
     tx_u8(sink, 2, enum_channel(value.channel))?;
     tx_u8(sink, 3, enum_unit(value.unit))?;
     tx_f32(sink, 4, value.value)
 }
-fn tx_effect(sink: &mut dyn TransactionSink, value: &Effect) -> Result<(), EncodeError> {
+fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(6, value.params.len())?)?;
     tx_id(sink, 1, &value.id)?;
     tx_message(sink, 2, |v| tx_identity(v, &value.identity))?;
@@ -1656,17 +1517,14 @@ fn tx_effect(sink: &mut dyn TransactionSink, value: &Effect) -> Result<(), Encod
     }
     tx_message(sink, 7, |v| tx_sidechain(v, &value.sidechain))
 }
-fn tx_fader(sink: &mut dyn TransactionSink, value: &DualMonoFader) -> Result<(), EncodeError> {
+fn tx_fader(sink: &mut dyn Sink, value: &DualMonoFader) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
     tx_f32(sink, 1, value.left_db)?;
     tx_f32(sink, 2, value.right_db)?;
     tx_bool(sink, 3, value.left_mute)?;
     tx_bool(sink, 4, value.right_mute)
 }
-fn tx_matrix_or_pan(
-    sink: &mut dyn TransactionSink,
-    value: &MatrixOrPan,
-) -> Result<(), EncodeError> {
+fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), EncodeError> {
     match value {
         MatrixOrPan::Pan {
             left,
@@ -1696,10 +1554,7 @@ fn tx_matrix_or_pan(
         }
     }
 }
-fn tx_track(
-    sink: &mut dyn TransactionSink,
-    value: &miso_engine_session::Track,
-) -> Result<(), EncodeError> {
+fn tx_track(sink: &mut dyn Sink, value: &miso_engine_session::Track) -> Result<(), EncodeError> {
     tx_start_message(sink, 10)?;
     tx_id(sink, 1, &value.id)?;
     tx_id(sink, 2, &value.source_id)?;
@@ -1712,25 +1567,22 @@ fn tx_track(
     tx_message(sink, 9, |v| tx_fader(v, &value.fader))?;
     tx_message(sink, 10, |v| tx_matrix_or_pan(v, &value.matrix_or_pan))
 }
-fn tx_submix(sink: &mut dyn TransactionSink, value: &Submix) -> Result<(), EncodeError> {
+fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
     tx_start_message(sink, 1)?;
     tx_id(sink, 1, &value.id)
 }
-fn tx_output(sink: &mut dyn TransactionSink, value: &Output) -> Result<(), EncodeError> {
+fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
     tx_start_message(sink, 1)?;
     tx_id(sink, 1, &value.id)
 }
-fn tx_channel_matrix(
-    sink: &mut dyn TransactionSink,
-    value: &ChannelMatrix,
-) -> Result<(), EncodeError> {
+fn tx_channel_matrix(sink: &mut dyn Sink, value: &ChannelMatrix) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
     tx_f32(sink, 1, value.ll)?;
     tx_f32(sink, 2, value.lr)?;
     tx_f32(sink, 3, value.rl)?;
     tx_f32(sink, 4, value.rr)
 }
-fn tx_route(sink: &mut dyn TransactionSink, value: &Route) -> Result<(), EncodeError> {
+fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
     tx_start_message(sink, 5)?;
     tx_id(sink, 1, &value.id)?;
     tx_message(sink, 2, |v| tx_route_source(v, &value.source))?;
@@ -1738,10 +1590,7 @@ fn tx_route(sink: &mut dyn TransactionSink, value: &Route) -> Result<(), EncodeE
     tx_message(sink, 4, |v| tx_channel_matrix(v, &value.channel_matrix))?;
     tx_f32(sink, 5, value.gain_db)
 }
-fn tx_automation_target(
-    sink: &mut dyn TransactionSink,
-    value: &AutomationTarget,
-) -> Result<(), EncodeError> {
+fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result<(), EncodeError> {
     tx_start_message(sink, 5)?;
     tx_id(sink, 1, &value.entity_id)?;
     tx_u8(sink, 2, enum_rack(value.rack))?;
@@ -1750,7 +1599,7 @@ fn tx_automation_target(
     tx_u8(sink, 5, enum_channel(value.channel))
 }
 fn tx_automation_segment(
-    sink: &mut dyn TransactionSink,
+    sink: &mut dyn Sink,
     value: &AutomationSegment,
 ) -> Result<(), EncodeError> {
     tx_start_message(sink, 6)?;
@@ -1761,7 +1610,7 @@ fn tx_automation_segment(
     tx_f32(sink, 5, value.end_value)?;
     tx_u8(sink, 6, enum_unit(value.unit))
 }
-fn tx_automation(sink: &mut dyn TransactionSink, value: &Automation) -> Result<(), EncodeError> {
+fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(2, value.segments.len())?)?;
     tx_id(sink, 1, &value.id)?;
     tx_message(sink, 2, |v| tx_automation_target(v, &value.target))?;
@@ -3279,11 +3128,9 @@ mod tests {
             Err(EncodeError::LimitExceeded)
         );
         assert_eq!(tx_count(u32::MAX, 1), Err(EncodeError::LimitExceeded));
-        let mut overflow = LengthSink {
-            length: usize::MAX,
-            limits: crate::ProtocolLimits::default(),
-        };
-        assert_eq!(overflow.write(&[0]), Err(EncodeError::LimitExceeded));
+        let mut overflow =
+            CountSink::with_length_for_test(usize::MAX, crate::ProtocolLimits::default());
+        assert_eq!(overflow.raw(&[0]), Err(EncodeError::LimitExceeded));
     }
 
     #[test]
