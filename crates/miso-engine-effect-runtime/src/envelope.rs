@@ -81,6 +81,83 @@ pub fn peak_follow<L: Lane>(x_abs: L, y: L, c: L) -> L {
     x_abs.max(t)
 }
 
+/// Attack and release coefficients of a switched one-pole follower, with their complements.
+///
+/// The complements are stored because `1 - c` is coefficient-only arithmetic that has no business
+/// in a per-sample loop, and because it is **exact**: every follower in the workspace runs with a
+/// retention coefficient in `[0.5, 1]`, where Sterbenz's lemma makes the subtraction exact, so
+/// precomputing it moves no bits.
+#[derive(Clone, Copy, Debug)]
+pub struct ArCoef<L: Lane> {
+    /// Retention coefficient while the detector is rising.
+    pub attack: L,
+    /// Retention coefficient while the detector is at or below the envelope.
+    pub release: L,
+    /// `1 - attack`, the weight the rising path gives the detector.
+    pub one_minus_attack: L,
+    /// `1 - release`, the weight the falling path gives the detector.
+    pub one_minus_release: L,
+}
+
+impl<L: Lane> ArCoef<L> {
+    /// Builds a coefficient set from a pair of *retention* coefficients
+    /// ([`retention_coefficient`]), computing both complements once.
+    ///
+    /// `1 - c` is exact for `c` in `[0.5, 1]` and is a well-defined `f32` everywhere else, so this
+    /// is a control-plane convenience and never a source of error.
+    #[must_use]
+    pub fn new(attack: L, release: L) -> Self {
+        let one = L::splat(1.0);
+        Self {
+            attack,
+            release,
+            one_minus_attack: one.sub(attack),
+            one_minus_release: one.sub(release),
+        }
+    }
+
+    /// Builds a coefficient set from one scalar pair, broadcast to every lane.
+    #[must_use]
+    pub fn splat(attack: f32, release: f32) -> Self {
+        Self::new(L::splat(attack), L::splat(release))
+    }
+}
+
+/// One sample of a switched attack/release one-pole on a rectified detector.
+///
+/// `e' = flush(c * e + k * u)` with `c` and `k` selected by the direction of travel — the
+/// **two-product** form, deliberately, and the counterpart of [`peak_follow`]'s one-rounding form.
+/// The two exist side by side because they are not the same filter: [`peak_follow`] attacks
+/// instantaneously and only its release is filtered, while this one filters both directions with
+/// two different coefficients, which is what a dual-envelope transient detector needs.
+///
+/// The two-product form is also the numerically correct one *here*. Writing the release as
+/// `e + k * (u - e)` (one rounding) stalls in `f32` when `|u - e| < ulp(e) / (2k)`: at the 100 ms
+/// coefficient of a 96 kHz slow follower that is about `2.7e-4` relative, roughly 0.002 dB, and a
+/// stalled slow envelope is a permanent contrast offset. With `1 - c` exact (see [`ArCoef`]) the
+/// only error left is the rounding of `c` itself.
+///
+/// Frozen operation order, one rounding per line:
+/// 1. `rising = u > e` — **strict**: a detector exactly at the envelope releases, which is the
+///    convention of Giannoulis, Massberg and Reiss (JAES 2012) and of every follower in the
+///    workspace
+/// 2. `c = select(rising, attack, release)`, `k = select(rising, one_minus_attack,
+///    one_minus_release)` — branchless (D10)
+/// 3. `e' = flush(c * e + k * u)` — two rounded products, one rounded sum, then the D7 flush,
+///    because `e` is a recurrence
+#[inline(always)]
+#[must_use]
+pub fn ar_one_pole_step<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
+    let rising = u.gt(e);
+    let c = L::select(rising, coefficients.attack, coefficients.release);
+    let k = L::select(
+        rising,
+        coefficients.one_minus_attack,
+        coefficients.one_minus_release,
+    );
+    miso_engine_lane::flush(c.mul(e).add(k.mul(u)))
+}
+
 /// One sample of a mean-square follower: `y' = fma(c, x2 - y, y)`.
 ///
 /// Frozen operation order: `d = x2 - y`, then `y' = fma(c, d, y)` — one rounding. `x2` is the

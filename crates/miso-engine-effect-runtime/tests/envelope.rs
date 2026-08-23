@@ -1,8 +1,8 @@
 //! Followers, coefficients and the gate hysteresis.
 
 use miso_engine_effect_runtime::envelope::{
-    HysteresisCoef, HysteresisState, attack_release_coefficient, hysteresis_step, peak_follow,
-    retention_coefficient, rms_follow,
+    ArCoef, HysteresisCoef, HysteresisState, ar_one_pole_step, attack_release_coefficient,
+    hysteresis_step, peak_follow, retention_coefficient, rms_follow,
 };
 use miso_engine_lane::Lane;
 
@@ -272,5 +272,146 @@ fn hysteresis_lanes_are_independent() {
             0.0f32.to_bits(),
             1.0f32.to_bits()
         ]
+    );
+}
+
+/// `ArCoef` precomputes an **exact** complement for every coefficient a follower can be given.
+///
+/// Red mutation: `one_minus_attack: one.sub(attack).mul(L::splat(1.0))` is still exact, so the
+/// mutation that matters is arithmetic in the step instead of the constructor — see
+/// `ar_one_pole_step_is_the_two_product_form`.
+#[test]
+fn ar_coefficient_complements_are_exact() {
+    for rate in [44_100u32, 48_000, 88_200, 96_000] {
+        for time_ms in [0.5f32, 10.0, 20.0, 100.0] {
+            let c = retention_coefficient(time_ms, rate);
+            assert!(c >= 0.5, "{time_ms} ms at {rate} Hz retains {c}");
+            let coefficients = ArCoef::<f32>::splat(c, c);
+            assert_eq!(
+                coefficients.one_minus_attack.to_bits(),
+                (1.0f32 - c).to_bits()
+            );
+            // Sterbenz: `1 - c` for c in [0.5, 1] is representable, so the round trip is exact.
+            assert_eq!(
+                (1.0f32 - coefficients.one_minus_attack).to_bits(),
+                c.to_bits()
+            );
+        }
+    }
+}
+
+/// The direction switch is strict: a detector exactly at the envelope releases.
+///
+/// Red mutation: `u.ge(e)` instead of `u.gt(e)` in `ar_one_pole_step`.
+#[test]
+fn ar_one_pole_step_switches_strictly_on_rising() {
+    let coefficients = ArCoef::<f32>::splat(0.75, 0.99);
+    // Rising: the attack coefficient is the one that moves the envelope.
+    let rising = ar_one_pole_step(0.25f32, 1.0, &coefficients);
+    assert_eq!(rising.to_bits(), (0.75f32 * 0.25 + 0.25f32 * 1.0).to_bits());
+    // Falling: the release coefficient.
+    let falling = ar_one_pole_step(1.0f32, 0.25, &coefficients);
+    assert_eq!(
+        falling.to_bits(),
+        (0.99f32 * 1.0 + 0.010000005f32 * 0.25).to_bits()
+    );
+    // Exactly equal: releases. A convex combination of two equal values is that value in exact
+    // arithmetic, so the equal case only distinguishes the two coefficients where the two rounded
+    // products sum differently -- this witness is such a point at the 0.5 ms / 20 ms 44.1 kHz pair.
+    let fast = ArCoef::<f32>::splat(f32::from_bits(0x3f74_a63c), f32::from_bits(0x3f7f_b5bd));
+    let witness = f32::from_bits(0x3c1b_4ffb);
+    let equal = ar_one_pole_step(witness, witness, &fast);
+    let released = fast.release * witness + fast.one_minus_release * witness;
+    let attacked = fast.attack * witness + fast.one_minus_attack * witness;
+    assert_ne!(
+        released.to_bits(),
+        attacked.to_bits(),
+        "the witness must separate the two coefficients"
+    );
+    assert_eq!(equal.to_bits(), released.to_bits());
+}
+
+/// The two-product form does not stall where the one-rounding form does.
+///
+/// At the 100 ms / 96 kHz slow-follower coefficient `k = 1 - c` is about `1.04e-4`, so the
+/// one-rounding release `e + k * (u - e)` has a deadband: the product underflows the addition and
+/// the envelope freezes at `e`. The two-product form `c * e + k * u` rounds the two products
+/// separately, and their sum leaves `e`. A stalled slow envelope is a permanent contrast offset,
+/// which is why the transient shaper's follower is this form and not `peak_follow`'s.
+///
+/// Red mutation: `ar_one_pole_step` rewritten as the one-rounding `c.fma(e.sub(u), u)` — the
+/// witness pair below then returns `e` unchanged and this test goes red.
+#[test]
+fn ar_one_pole_step_is_the_two_product_form() {
+    let c = retention_coefficient(100.0, 96_000);
+    let coefficients = ArCoef::<f32>::splat(c, c);
+    let e = 0.7f32;
+    let u = e - f32::from_bits(0x3870_0000);
+    let k = 1.0f32 - c;
+    let stalled = k.mul_add(u - e, e);
+    assert_eq!(
+        stalled.to_bits(),
+        e.to_bits(),
+        "the one-rounding form must stall on this witness"
+    );
+    let moved = ar_one_pole_step(e, u, &coefficients);
+    assert_ne!(
+        moved.to_bits(),
+        e.to_bits(),
+        "the two-product form must move"
+    );
+    assert!(moved < e && moved > u);
+}
+
+/// A decaying envelope reaches exactly `+0.0`, not a subnormal (D7).
+///
+/// Red mutation: drop `miso_engine_lane::flush` from `ar_one_pole_step`.
+#[test]
+fn ar_one_pole_step_flushes_the_recurrence() {
+    let coefficients = ArCoef::<f32>::splat(0.5, 0.5);
+    let mut e = 1.0e-18f32;
+    for _ in 0..8 {
+        e = ar_one_pole_step(e, 0.0, &coefficients);
+    }
+    assert_eq!(e.to_bits(), 0.0f32.to_bits(), "envelope must flush to +0.0");
+}
+
+/// One body, three widths, identical bits.
+///
+/// A follower is a recurrence, so lane identity is stated the way a bank actually runs it: each
+/// lane is an independent track with its own envelope, stepped once, and the packed result must
+/// equal the scalar results lane for lane.
+///
+/// Red mutation: any width-dependent edit to `ar_one_pole_step`.
+#[test]
+fn ar_one_pole_step_is_width_independent() {
+    let envelopes = [0.0f32, 0.25, 0.5, 0.7, 1.0, 1.0e-19, 0.125, 0.9];
+    let detectors = [0.1f32, 0.9, 0.2, 0.8, 0.3, 0.0, 0.4, 0.6];
+    let coefficients = ArCoef::<f32>::splat(0.9556615, 0.998_866_9);
+    let scalar: Vec<u32> = envelopes
+        .iter()
+        .zip(detectors.iter())
+        .map(|(e, u)| ar_one_pole_step(*e, *u, &coefficients).to_bits())
+        .collect();
+
+    fn packed<L: Lane>(envelopes: &[f32; 8], detectors: &[f32; 8]) -> Vec<u32> {
+        let coefficients = ArCoef::<L>::splat(0.9556615, 0.998_866_9);
+        let mut words = [0u32; 8];
+        let mut result = Vec::new();
+        for (e, u) in envelopes.chunks(L::WIDTH).zip(detectors.chunks(L::WIDTH)) {
+            ar_one_pole_step(L::load(e), L::load(u), &coefficients).store_bits(&mut words);
+            result.extend_from_slice(&words[..L::WIDTH]);
+        }
+        result
+    }
+
+    assert_eq!(packed::<f32>(&envelopes, &detectors), scalar);
+    assert_eq!(
+        packed::<miso_engine_lane::Simd4>(&envelopes, &detectors),
+        scalar
+    );
+    assert_eq!(
+        packed::<miso_engine_lane::Simd8>(&envelopes, &detectors),
+        scalar
     );
 }

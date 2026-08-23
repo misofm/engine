@@ -32,6 +32,9 @@ cargo test --locked -p miso-engine-effect-runtime --test <test binary>
 | 12 | parameter domain becomes exclusive: `>` / `<` instead of `>=` / `<=` | `src/params.rs` | `params` | RED |
 | 13 | the corpus loop becomes width-dependent: `point(index + offset % 2)` | `src/corpus.rs` | `lane_identity` | RED |
 | 15 | the lower knee edge is compared against `+W/2`: `d.le(half_knee_db)` instead of `d.le(-(W/2))` | `src/dynamics.rs` | `dynamics` | RED |
+| 16 | `ar_one_pole_step` switches on `u.ge(e)` instead of `u.gt(e)` | `src/envelope.rs` | `envelope` | RED |
+| 17 | `ar_one_pole_step` uses the one-rounding release `c.fma(e - u, u)` instead of the two-product `c * e + k * u` | `src/envelope.rs` | `envelope` | RED |
+| 18 | `ar_one_pole_step` drops `miso_engine_lane::flush` on the recurrence | `src/envelope.rs` | `envelope` | RED |
 
 ## Recorded failures
 
@@ -195,3 +198,21 @@ T 0 R 1.5 W 1: upper edge 0.5 vs line 0.3333333333333333
 | `lane_identity` | every lane-generic function agrees at `W = 1`, 4 and 8 by `to_bits` |
 | `partition` | P1: a ramp, a follower and the gain computer composed, rendered in blocks of {1, 7, 64, 128, 512}, bit-identical output and state |
 | `determinism` | D1: pinned SHA-256 digests over the nine-case corpus, at all three widths, for 83d's wasm leg |
+
+
+### 16, 17, 18 — the attack/release one-pole step (added by the #92 job)
+
+`ar_one_pole_step` was added to `envelope` from the #92 (transient shaper) job, which needs a
+switched two-coefficient one-pole that `peak_follow` is not. Three mutations, all run on
+`cargo test --locked -p miso-engine-effect-runtime --test envelope`:
+
+* **16** — `u.ge(e)`: `ar_one_pole_step_switches_strictly_on_rising` FAILED. The equal case is a
+  fixed point in exact arithmetic, so the test pins a witness (`e = u = 0x3c1b4ffb` at the
+  0.5 ms / 20 ms 44.1 kHz pair) where the two rounded products sum differently under the two
+  coefficients, and asserts that the two do differ before asserting which one is taken. Without the
+  witness this mutation is equivalent, which is why the assertion pair is there.
+* **17** — the one-rounding form: `ar_one_pole_step_is_the_two_product_form` FAILED. The witness
+  `e = 0.7`, `u = e - 5.7220459e-5` at the 100 ms / 96 kHz coefficient is inside the one-rounding
+  form's deadband, so the mutated step returns `e` unchanged.
+* **18** — no flush: `ar_one_pole_step_flushes_the_recurrence` FAILED, the envelope word decaying
+  into the subnormal range instead of reaching `+0.0`.

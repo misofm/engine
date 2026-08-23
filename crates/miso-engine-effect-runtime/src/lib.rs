@@ -13,7 +13,9 @@
 //!   exists anywhere in the engine.
 //! * [`envelope`] — the peak follower is the one-rounding
 //!   `y = max(|x|, fma(c, y - |x|, |x|))` form, and `max` is the D8 select form, never
-//!   `f32::max`.
+//!   `f32::max`. The switched attack/release one-pole is the two-product
+//!   `e' = flush(c * e + k * u)` form, with `k = 1 - c` precomputed, because the one-rounding form
+//!   has a deadband a slow envelope stalls in.
 //! * [`dynamics`] — the static curve is Giannoulis, Massberg and Reiss (JAES 2012) equation 4,
 //!   evaluated branchlessly in the dB domain through the lane-wide `exp2`/`log2` of
 //!   `miso-engine-math`.
