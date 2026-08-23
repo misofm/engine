@@ -40,6 +40,8 @@ cargo test --locked -p miso-engine-rack -p miso-engine-rack-compiler -p miso-eng
 | P4 | full-program tracks stop filling banks first: `b.active_count().cmp(&a.active_count())` becomes `a.active_count().cmp(&a.active_count())` | `rack-compiler/src/lib.rs` | `longest_program_leads_and_full_programs_fill_first` | RED | ``assertion `left == right` failed: full-program tracks fill the first bank even though their ids are larger`` |
 | P5 | cohort pooling stops being exhaustive: subsequence matching is replaced by program equality | `rack-compiler/src/lib.rs` | `pooling_is_exhaustive_so_no_member_is_stranded` | RED | `case=0: id 4 could have filled a free lane in group 0` |
 | P6 | `order_members` loses its id tie-break, so equal-`active_count` members keep pool order | `rack-compiler/src/lib.rs` | `output_is_input_order_invariant` | RED | ``assertion `left == right` failed`` |
+| P9 | the leader's mask is reused for every member: `subsequence_mask(..)` becomes `subsequence_mask(..).map(|_| vec![true; leader.slots.len()])` | `rack-compiler/src/lib.rs` | `every_slot_cohort_is_homogeneous` | RED | ``assertion `left == right` failed: case=0 lane=0`` |
+| **P10** | **the planner's lane order is reversed (P1's mutation), observed from `miso-engine-builtins-compiler`** | `rack-compiler/src/lib.rs` | `builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back` (#86 phase A's own test) | RED | `assertion failed: groups.iter().all(|members| ...` |
 | P7 | duplicate ids are accepted: the `windows(2).any(..)` guard becomes `if false` | `rack-compiler/src/lib.rs` | `duplicate_ids_are_rejected_across_levels` | RED | `assertion failed: plan_invariants_hold(&plan, lanes)` |
 
 ## `miso-engine-graph-compiler` — the bound plan and the §4.5 law
@@ -80,6 +82,23 @@ Two pieces of the planner survived their mutations because nothing could reach t
   `max_by` over unique ids, `order_members` fixes every group's lane order, and `scalar` is sorted
   on the way out. It is deleted; `output_is_input_order_invariant` (P6) is the gate on that claim,
   and P6 is red under the mutation that actually reintroduces order dependence.
+
+## P10 is the load-bearing row for the #86-A reconciliation
+
+#86 phase A landed padding for the post-input builtin banks against its own `chunks(W)` loop while
+this branch was unmerged. Two padding implementations is the defect this workstream exists to kill,
+so `planned_builtin_bank_members` now delegates to `plan_bank_groups`. **P10 is the proof that the
+delegation is real rather than decorative:** mutating the lane-order rule inside
+`miso-engine-rack-compiler` turns #86-A's own builtins layout test red. A surviving second copy in
+`miso-engine-builtins-compiler` would have kept it green.
+
+Byte-identity of the groups is proven by #86-A's evals staying green **untouched**:
+`banked_tracks_are_bit_identical_to_their_scalar_tails` (E2),
+`track_bits_do_not_depend_on_session_track_count` (E3),
+`builtin_bank_resource_charges_two_planes_and_actual_members` (E7),
+`builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back`,
+`phase_two_allocator_layouts_match_the_checked_resource_report`, and the frozen seeded 100-layout
+transcript in `miso-engine-graph-compiler`.
 
 ## Alignment with the #95 bank-binding semantic
 
