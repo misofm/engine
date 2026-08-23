@@ -2,17 +2,21 @@
 
 ## Decision
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Stopped Issue 113
-proved that its one-call accepted protocol controller and unreserved plan exchange cannot implement
-an atomic C structural transaction in either order. Add exactly the two missing shared capabilities,
-then close their CAPI vertical. Sol High implements; Sol XHigh verifies. One pass plus one bounded
-HOLD correction; a second HOLD stops. Benchmark, timing and real-workload counters remain zero.
+**TERMINAL STOP / TECHNICAL INPUT FOR ISSUE 118 ONLY.** Checkpoint 1 passed at
+`c9bd936673bfe167d783ca6f2a62c495c0928f37`, preserving the accepted two-phase protocol token and
+plan publication/retirement reservation. Checkpoint 2 retained the correct private protocol-commit,
+provider-install, non-fallible-publish, response-last order and additive event ABI, but Sol XHigh
+found double-live CAPI resource under-accounting and a missing cross-component evidence matrix. The
+sole HOLD budget is exhausted. Technical checkpoint
+`e1115750fba8a54e16ec2a0e333b40ce4f187f1c` is preserved, but Issue 117 has no overall PASS.
 
 Direct accepted dependencies are **Transport-neutral binary control protocol** (005), **Real-time
 memory, buffers, queues, and plan lifetime** (003), and **Stable C ABI and host-fed planar PCM
 render** (022). Stopped **Close C ABI control/event transport and transactional plan replacement**
-(113) is readiness evidence only. PASS gates **Optional binary WebSocket sidecar** (025); accepted
-116 + 117 gate **Qualify native C ABI and reference runner target matrix** (114), then 026.
+(113) is readiness evidence only. Successor **Close C ABI replacement resource accounting and
+cross-component evidence** (118) consumes the stopped Issue-117 checkpoint plus accepted 005, 003
+and 022. Accepted 118 gates **Optional binary WebSocket sidecar** (025); accepted 116 + 118 gate
+**Qualify native C ABI and reference runner target matrix** (114), then 026.
 
 ## Frozen seams
 
@@ -42,15 +46,17 @@ off-render reclaim.
 
 ## Evidence and fence
 
-Checkpoint 1 covers protocol token parity/ownership/cancel and core reservation/credit/render
-safety. Checkpoint 2 covers all C commands/six event families, exact buffers/diagnostics/resources,
-source-preserving/changing and serial replacements, old/new boundary output, provider epochs,
-retirement/destroy, exhaustive per-phase and dual-fault atomicity, disposal/allocation accounting,
-C11 ABI smoke and a static no-copied-protocol check. One clean proportional nonbenchmark seal closes
-the issue; Issue-114 target qualification is separate.
+Checkpoint 1 closed protocol token parity/ownership/cancel and core reservation/credit/render
+safety. Checkpoint 2 did not close exact double-live resources, all-command/six-event byte parity,
+source-preserving/changing PCM boundaries, provider epochs, retirement/destroy, exhaustive per-phase
+and dual-fault atomicity, or disposal/allocation accounting. Those omissions move intact to Issue
+118; they are not waived or qualification work for Issue 114.
 
 Allowed: the narrow protocol controller/model/export/tests, core plan exchange/export/tests,
 `miso-engine-capi/**`, minimal manifest/lock, additive event header/docs and exact policy/mutation/
 evidence files. Frozen: protocol bytes, session schema, source decode, graph/DSP/effects, render
 contract, existing ABI behavior, runner/fixtures and hosts. No benchmark, timing, real workload,
 playback, listening, browser/device run or Issue-114 matrix.
+
+Final verdict: **STOPPED**, checkpoint 1 technical PASS only, no overall acceptance. Reported
+benchmark/timing/real-workload/playback/listening/browser/device counters remain zero.

@@ -107,11 +107,16 @@ invocation and sealed portable no-replace publication with Sol XHigh PASS. Issue
 control/event transport and transactional plan replacement**, stopped at architecture readiness:
 the accepted controller has no two-phase token and the accepted plan exchange has no publication/
 retirement reservation, so neither ordering can meet atomicity. Issue 117, **Complete C ABI
-transactions with two-phase protocol and plan reservations**, consumes accepted Issues 005, 003
-and 022 plus that stopped finding and owns the missing protocol/core seams and CAPI completion; it
-gates Issue 025 directly. Issue 114, **Qualify native C ABI and reference runner target matrix**,
-joins accepted Issues 116 and 117 and alone owns native platform/runner qualification before Issue
-026. Issues 101 and 112 change no public/resource shape and defer the
+transactions with two-phase protocol and plan reservations**, then passed its protocol/core
+checkpoint at `c9bd936` and preserved CAPI technical checkpoint `e111575`, but stopped at terminal
+checkpoint-2 review: current-plus-prospective CAPI payloads were under-accounted and the required
+cross-component evidence matrix was incomplete. Issue 118, **Close C ABI replacement resource
+accounting and cross-component evidence**, consumes that stopped checkpoint plus accepted Issues
+005, 003 and 022; it owns exact double-live accounting, bounded CAPI corrections and the complete
+command/event/replay/source-epoch/PCM-boundary/failure/disposal matrix, and gates Issue 025 directly.
+Issue 114, **Qualify native C ABI and reference runner target matrix**, joins accepted Issues 116 and
+118 and alone owns native platform/runner qualification before Issue 026. Issues 101 and 112 change
+no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
 not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, stopped

@@ -6,10 +6,14 @@ Add the two missing control-plane capabilities that made stopped Issue 113 unimp
 use them to complete byte-exact C command/event transport and atomic structural replacement through
 the accepted render-plan lifecycle.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One coherent implementation pass plus one bounded HOLD correction is
-the complete budget. A second HOLD stops. Benchmark, timing and real-workload counters begin at
-`0/0/0` and must remain zero.
+**STOPPED AT TERMINAL CHECKPOINT-2 REVIEW / TECHNICAL INPUT FOR ISSUE 118 ONLY.** Checkpoint 1
+received Sol XHigh PASS at commit `c9bd936673bfe167d783ca6f2a62c495c0928f37`: the shared
+controller-bound two-phase protocol token and plan publication/retirement reservation satisfy their
+focused contracts. Checkpoint 2 preserved the correct C transaction order and additive event ABI,
+but its CAPI accounting omits double-live current-plus-prospective payloads and its focused evidence
+does not close the required cross-component matrix. The bounded HOLD budget is exhausted. Issue 117
+has no overall PASS and gates nothing. Benchmark, timing and real-workload counters remained
+`0/0/0`.
 
 Read-only remote inspection on 2026-08-23 found Issue 117 unallocated. Root must create and
 synchronize it under this exact title after the docs checkpoint is upstream. This record makes no
@@ -28,9 +32,10 @@ readiness evidence only. It proved that the accepted controller's irreversible o
 and the accepted plan exchange's missing reservation seam cannot satisfy the atomic C transaction;
 it is not an accepted product dependency.
 
-Accepted Issue 117 gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and
-117 jointly gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then
-gates Issue 026.
+Successor **Close C ABI replacement resource accounting and cross-component evidence** (Issue 118)
+consumes this stopped technical checkpoint plus accepted Issues 005, 003 and 022. Accepted Issue 118
+gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and 118 jointly gate
+**Qualify native C ABI and reference runner target matrix** (Issue 114), which then gates Issue 026.
 
 ## Smallest closable product vertical
 
@@ -189,8 +194,37 @@ source-provider retirement and cross-component atomicity. Both are tranches with
 implementation pass; Sol High stops after each coherent focused-green tranche for Sol XHigh review
 and root checkpointing.
 
-Overall PASS requires both focused checkpoints plus one clean proportional nonbenchmark seal on an
-immutable candidate. Record exact commits, paths, hashes, test counts and prohibited counters. Do
-not run benchmark, timing, real workload, playback, listening, browser/device workload or broad
-Issue-114 qualification. Accepted completion unblocks Issue 025 and, with accepted Issue 116,
-unblocks Issue 114.
+Overall PASS required both focused checkpoints plus one clean proportional nonbenchmark seal on an
+immutable candidate. Issue 117 stopped before that seal and does not unblock Issue 025 or Issue 114.
+Issue 118 owns the bounded completion without weakening these gates.
+
+## Terminal checkpoint evidence
+
+Checkpoint 1 passed at commit `c9bd936673bfe167d783ca6f2a62c495c0928f37`. It established the
+accepted-semantics-preserving affine protocol prepare/commit/cancel token, controller-generation and
+outstanding-token guards, zero live mutation before commit, queue-owned event reservations, and the
+core publication-slot plus pre-admitted retirement-credit reservation. Its focused reports were 91
+protocol tests and 38 core tests, with strict checks/policies green and prohibited counters zero.
+
+Checkpoint 2 was reviewed as a live seven-path implementation tranche over that commit and was
+preserved as technical checkpoint `e1115750fba8a54e16ec2a0e333b40ce4f187f1c`, tree
+`e256f9101cb211c8bbf459efc8b11d3334785150`:
+
+- `crates/miso-engine-capi/include/miso_engine_v2.h`;
+- `crates/miso-engine-capi/src/abi.rs`;
+- `crates/miso-engine-capi/src/ffi.rs`;
+- `crates/miso-engine-capi/src/runtime.rs`;
+- `crates/miso-engine-capi/tests/c/abi_smoke.c`;
+- `crates/miso-engine-protocol/src/lib.rs`; and
+- `scripts/check-capi-abi.sh`.
+
+Sol XHigh confirmed direct `ProtocolController` preparation, private protocol commit followed by
+bounded provider/report installation, non-fallible reserved plan publication and response exposure;
+the additive reliable/lossy event dequeue ABI also preserved empty/query/one-short non-consumption.
+The terminal review nevertheless stopped because `capi_resources` counted canonical/source-ID/
+`ControlSource` payloads only once while current and prospective epochs coexist, so an exact accepted
+limit can be exceeded during replacement. The added tests dispatched 11 command IDs and decoded six
+event-family IDs but did not prove exact cross-component bytes/state or the required PCM boundary,
+source epoch, full/dual-fault, destroy, disposal and allocation matrix. The reported checkpoint-2
+focused counts were 17 CAPI and 91 protocol tests with policy/mutation gates green and prohibited
+counters zero; those results are technical evidence only and cannot override the missing gates.
