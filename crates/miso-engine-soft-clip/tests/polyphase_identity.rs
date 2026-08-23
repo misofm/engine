@@ -16,6 +16,11 @@ use miso_engine_soft_clip::kernel::{
 };
 
 /// The 63 taps, from the brief's literals. `h[62-k] = h[k]`; odd indices other than 31 are zero.
+///
+/// The literals are copied from `.github/ISSUE_SPECS/BRIEFS/019` character for character, decimal
+/// digits and all, so that this table is genuinely the brief's and not a transcription of the
+/// production one. `f32` rounds them; that is the point of the comparison.
+#[allow(clippy::excessive_precision)]
 fn brief_taps() -> [f32; 63] {
     const LEFT: [(usize, f32); 16] = [
         (0, 0.0),

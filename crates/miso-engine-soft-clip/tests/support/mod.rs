@@ -133,6 +133,7 @@ pub fn prepare_bank(
 }
 
 /// Renders one AoSoA block through a bank.
+#[allow(clippy::too_many_arguments)]
 pub fn process_bank(
     bank: &mut dyn PreparedNativeEffectBank,
     width: BankWidth,

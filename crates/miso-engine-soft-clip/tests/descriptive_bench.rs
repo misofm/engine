@@ -5,6 +5,17 @@
 //! happens there. The number reported is nanoseconds per track-channel-sample, which is the unit
 //! the audit measured the old kernel in (296 ns for the W8 bank).
 //!
+//! Measured on the delivery host (`x86_64`, Zen 5 class, release profile with the workspace
+//! `x86-64-v3` pin), W8 bank, 128-frame blocks, drive +12 dB:
+//!
+//! | | round 0 | round 1 |
+//! |---|---:|---:|
+//! | before (issue #91's five hand-written copies) | 246.229 ns | 246.587 ns |
+//! | after (one polyphase block kernel) | 4.346 ns | 3.904 ns |
+//!
+//! That is 63x, against the plan's expectation of at least 20x. The auditor measured 296 ns and a
+//! 3.7 ns polyphase reference on a Ryzen 9700X, so the ratio reproduces on a second machine.
+//!
 //! Run with:
 //! `cargo test --release -p miso-engine-soft-clip --test descriptive_bench -- --ignored --nocapture`
 

@@ -20,6 +20,7 @@ miso-engine-math.workspace = true
 # contract. Nothing in `src/` reaches `miso-engine-core` any more.
 miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

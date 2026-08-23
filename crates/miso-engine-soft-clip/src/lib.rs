@@ -49,6 +49,7 @@ use miso_engine_lane::kernels::halfband::{
 use miso_engine_lane::{Lane, Simd4, Simd8};
 use miso_engine_math::db_to_gain_f32;
 
+pub mod corpus;
 pub mod kernel;
 
 use kernel::{SoftClipCoef, SoftClipHistory, SoftClipState, soft_clip_block};
