@@ -885,6 +885,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-delay",
  "miso-engine-effect-contract",
+ "miso-engine-gate-expander",
  "miso-engine-graph",
  "miso-engine-parametric-eq",
 ]

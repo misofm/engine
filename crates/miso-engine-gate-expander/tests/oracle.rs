@@ -57,11 +57,16 @@ fn corpus_values() -> Values {
 }
 
 /// DC-free square-wave bursts: the sign flips every eight samples, and the amplitude alternates
-/// between -30 and -60 dBFS every 4 800 samples, in antiphase between the two channels so that
+/// between -30 and -50 dBFS every 4 800 samples, in antiphase between the two channels so that
 /// the three link modes produce three different detector levels.
+///
+/// The quiet level is -50 dBFS rather than something deeper on purpose. At `rho = 4` and
+/// `T = -40` the curve gives `3 * (-50 + 40) = -30 dB`, which is inside the 48 dB range: a level
+/// that saturated the range clamp would make the comparison insensitive to the whole dB
+/// conversion, since every closed sample would read exactly `-R` however the level was computed.
 fn corpus_signals() -> (Vec<f32>, Vec<f32>) {
     let loud = 10.0_f32.powf(-30.0 / 20.0);
-    let quiet = 10.0_f32.powf(-60.0 / 20.0);
+    let quiet = 10.0_f32.powf(-50.0 / 20.0);
     let mut left = vec![0.0; FRAMES];
     let mut right = vec![0.0; FRAMES];
     for frame in 0..FRAMES {
@@ -190,6 +195,15 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
         assert!(
             worst_left.max(worst_right) > 0.0,
             "{link:?}: the corpus never attenuated, so the comparison is vacuous"
+        );
+        // And the attenuation must not be sitting on the range clamp, where the dB conversion
+        // stops being observable at all.
+        assert!(
+            trace
+                .gain_db_left
+                .iter()
+                .any(|gain| *gain < -1.0 && *gain > -f64::from(RANGE) + 1.0),
+            "{link:?}: every attenuated sample is pinned to the range clamp"
         );
         eprintln!(
             "{link:?}: worst deviation from the f64 model {:.3e} dB (limit {TOLERANCE_DB})",

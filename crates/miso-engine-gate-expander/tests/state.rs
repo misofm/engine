@@ -332,6 +332,58 @@ fn a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched() {
 }
 
 #[test]
+fn the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band() {
+    // D7's `flush` is the workspace's one denormal mechanism, and `G` is the gate's one recursive
+    // word. A gate that has been open for thousands of samples after attenuating has a `G` that
+    // has decayed through `1e-20` and on down into the subnormals; without the flush it would sit
+    // there, and a target with hardware FTZ (an AudioWorklet on Chrome) would zero it while a
+    // native render would not. That is the difference the flush removes, and the payload is where
+    // it is observable: the applied gain is `exp2` of a subnormal, which is exactly `1.0` either
+    // way.
+    const FRAMES: usize = 5_000;
+    let mut values = initial_values();
+    values[0].value = -40.0;
+    values[1].value = -40.0;
+    values[8].value = 1.0; // attack 1 ms
+    values[9].value = 1.0;
+    values[10].value = 0.0; // hold 0 ms, so the silent pre-roll closes the gate at once
+    values[11].value = 0.0;
+    let mut left = vec![0.5_f32; FRAMES];
+    let mut right = vec![0.5_f32; FRAMES];
+    let mut effect = prepare(request(&values));
+
+    // The detector is silent for the first `latency - lookahead` samples, so the gate closes and
+    // `G` moves well away from zero before the tone arrives and the attack pulls it back.
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut left[..600],
+        &mut right[..600],
+        None,
+        128,
+        &[],
+        0,
+    );
+    let (_, mid, _) = snapshot(effect.as_ref());
+    assert_ne!(word(&mid, 0), 0, "the gate really did attenuate first");
+
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut left[600..],
+        &mut right[600..],
+        None,
+        128,
+        &[],
+        600,
+    );
+    let (_, payload, _) = snapshot(effect.as_ref());
+    assert_eq!(
+        word(&payload, 0),
+        0,
+        "G decayed through the flush band and was stored as canonical +0"
+    );
+}
+
+#[test]
 fn nonfinite_input_recovers_lane_locally_at_the_block_boundary() {
     const BLOCK: usize = 128;
     const BLOCKS: usize = 8;
