@@ -123,6 +123,32 @@ fn a_hard_knee_is_exact_at_the_threshold() {
     }
 }
 
+/// A knee width at or below zero is a hard knee, not a knee turned inside out.
+///
+/// Red mutation: drop the `knee_db > 0.0` guard in `GainComputerCoef::new` and design the
+/// coefficients unconditionally. A negative width then gives a negative `half_knee_db`, the
+/// `under` arm swallows the first `|W|/2` dB above the threshold, and a signal that should be
+/// compressed is passed through instead.
+#[test]
+fn a_non_positive_knee_is_a_hard_knee() {
+    for threshold in THRESHOLDS {
+        for ratio in RATIOS {
+            let hard = GainComputerCoef::<f32>::new(threshold, ratio, 0.0);
+            for knee in [-0.0f32, -1.0, -6.0, -24.0] {
+                let coefficients = GainComputerCoef::<f32>::new(threshold, ratio, knee);
+                for offset in [-10.0f32, -2.0, -0.5, 0.0, 0.5, 2.0, 10.0] {
+                    let level = threshold + offset;
+                    assert_eq!(
+                        gain_delta_db::<f32>(level, &coefficients).to_bits(),
+                        gain_delta_db::<f32>(level, &hard).to_bits(),
+                        "T {threshold} R {ratio} W {knee} at {level} dB"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Below the knee the curve is the identity, bit for bit — a quiet signal is not "compressed by
 /// zero dB", it is untouched.
 #[test]

@@ -65,6 +65,8 @@ jobs:
         run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p miso-engine-math --test m3_determinism
       - name: Math M1 exhaustive sweep
         run: cargo test --locked --release -p miso-engine-math --features lane --test m1_exhaustive -- --ignored
+      - name: Effect runtime gates (lane identity, partition invariance, D1 digests) in release
+        run: cargo test --locked --release -p miso-engine-effect-runtime
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
@@ -115,7 +117,7 @@ jobs:
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
       - name: AVX2 with FMA compile probe and cfg assertion
         run: |
-          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math
+          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math -p miso-engine-effect-runtime
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
@@ -134,11 +136,11 @@ jobs:
         run: bash scripts/check-wasm-realtime-atomics.sh
       - name: Scalar Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math -p miso-engine-effect-runtime
           ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
       - name: SIMD128 Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math -p miso-engine-effect-runtime
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
       - name: Issue-005 scalar and SIMD protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
@@ -155,7 +157,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 aarch64-linux-android
       - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math
+        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math -p miso-engine-effect-runtime
 
   ios-check:
     name: iOS pure-Rust compile check
@@ -167,7 +169,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 aarch64-apple-ios
       - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math
+        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-math -p miso-engine-effect-runtime
 
   session-fuzz:
     name: bounded session parser and compiler fuzzing
