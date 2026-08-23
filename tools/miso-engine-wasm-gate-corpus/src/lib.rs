@@ -37,6 +37,7 @@ use miso_engine_lane::kernels::{
 };
 use miso_engine_math::corpus as math_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
+use miso_engine_multiband_compressor::corpus as multiband_corpus;
 use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
 
@@ -79,12 +80,21 @@ pub const TRANSIENT_SHAPER_CASE_COUNT: usize = transient_shaper_corpus::CASE_COU
 /// boundary is the six `Lane::fma` sites of its kernel, which on wasm are the software FMA.
 pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_multiband_compressor::corpus`] (audit #94 E5), replayed under
+/// wasm.
+///
+/// Lane generic, and their pins live in that crate: the Linkwitz-Riley split with its fused
+/// all-pass tap and the D7 flush of its four filter words, the band's dB chain through
+/// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link.
+pub const MULTIBAND_CASE_COUNT: usize = multiband_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
     + RUNTIME_CASE_COUNT
     + TRANSIENT_SHAPER_CASE_COUNT
-    + DELAY_CASE_COUNT;
+    + DELAY_CASE_COUNT
+    + MULTIBAND_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -274,6 +284,8 @@ enum Case {
     TransientShaper(usize),
     /// One case of the `miso-engine-delay` G5 corpus.
     Delay(usize),
+    /// One case of the `miso-engine-multiband-compressor` cross-target corpus.
+    Multiband(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -306,7 +318,11 @@ fn case_of(index: usize) -> Case {
     if index < TRANSIENT_SHAPER_CASE_COUNT {
         return Case::TransientShaper(index);
     }
-    Case::Delay(index - TRANSIENT_SHAPER_CASE_COUNT)
+    let index = index - TRANSIENT_SHAPER_CASE_COUNT;
+    if index < DELAY_CASE_COUNT {
+        return Case::Delay(index);
+    }
+    Case::Multiband(index - DELAY_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -352,6 +368,7 @@ pub fn case_name(index: usize) -> String {
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
         Case::Delay(case) => format!("delay/{}", delay_corpus::CASE_NAMES[case]),
+        Case::Multiband(case) => format!("multiband/{}", multiband_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -388,6 +405,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
         Case::Delay(case) => delay_corpus::G5_DIGESTS[case],
+        Case::Multiband(case) => multiband_corpus::DIGESTS[case],
     }
 }
 
@@ -411,6 +429,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
         },
         Case::TransientShaper(case) => digest_transient_shaper(case, width),
         Case::Delay(case) => digest_delay(case),
+        Case::Multiband(case) => match width {
+            0 => digest_multiband::<f32>(case),
+            1 => digest_multiband::<miso_engine_lane::Simd4>(case),
+            _ => digest_multiband::<miso_engine_lane::Simd8>(case),
+        },
     }
 }
 
@@ -468,7 +491,11 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             1 => elementwise_values::<miso_engine_lane::Simd4>(operation, fused),
             _ => elementwise_values::<miso_engine_lane::Simd8>(operation, fused),
         },
-        Case::Math(_) | Case::Runtime(_) | Case::TransientShaper(_) | Case::Delay(_) => {
+        Case::Math(_)
+        | Case::Runtime(_)
+        | Case::TransientShaper(_)
+        | Case::Delay(_)
+        | Case::Multiband(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -802,6 +829,18 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
 fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; runtime_corpus::POINTS];
     runtime_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-multiband-compressor` case, exactly as that crate's
+/// `tests/cross_target_digest.rs` does natively.
+fn digest_multiband<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; multiband_corpus::POINTS];
+    multiband_corpus::run_case::<L>(case, &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

@@ -24,7 +24,6 @@ crates/miso-engine-compressor/src/lib.rs                    4  88
 crates/miso-engine-gate-expander/src/lib.rs                 6  89
 crates/miso-engine-true-peak-limiter/src/lib.rs             3  90
 crates/miso-engine-soft-clip/src/lib.rs                    12  91
-crates/miso-engine-multiband-compressor/src/lib.rs         14  94
 crates/miso-engine-effect-contract/src/lib.rs               4  95
 crates/miso-engine-graph/src/lib.rs                         2  98
 crates/miso-engine-graph-compiler/src/lib.rs                1  99

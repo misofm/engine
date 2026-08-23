@@ -1,12 +1,43 @@
 //! Fixed two-band Linkwitz-Riley multiband compressor.
 //!
-//! Scalar and homogeneous banks own four independent conditioned TPT section histories per lane.
-#![allow(missing_docs)]
+//! One body, every width. The scalar product and the four- and eight-lane homogeneous banks are
+//! the same generic [`Lane`] code instantiated at `WIDTH = 1`, 4 and 8, so agreement between them
+//! is a property of the code and not of a tolerance (master plan for issue #83, D5).
+//!
+//! # Signal path
+//!
+//! Per channel, per track:
+//!
+//! ```text
+//! (v1, lp1) = svf(x)      ap  = x - 2k*v1        <- one TPT state-variable stage, k = sqrt(2)
+//! (_,  low) = svf(lp1)    high = ap - low        <- the second stage
+//! ```
+//!
+//! `low + high` is `ap`, the second-order Butterworth all-pass, because `LP2^2 + HP2^2` is
+//! `D(-s)/D(s)` exactly. That is why the crossover is **two** sections and not four: the audit of
+//! this crate (#94 F4) found sections 0 and 2 of the old four-section form carrying bit-identical
+//! state, and `tests/lr4_two_section_mapping_f64.rs` pins the identity in `f64` against the
+//! independent four-section oracle and against the closed-form all-pass.
+//!
+//! Both bands go through a `Fs/50` ring, which is the declared latency; the detector tap of each
+//! band is read `lookahead` samples earlier in the same ring. Each band then rides a
+//! Giannoulis-Massberg-Reiss static curve with a fixed 6 dB knee and a branching smoother, and the
+//! two gained bands are summed.
+//!
+//! # What this crate does *not* contain
+//!
+//! Parameter ramps, the state-payload codec, the gain computer, the dB conversions, the envelope
+//! smoother, the detector link and the block boundary check all live in `miso-engine-effect-runtime`
+//! and `miso-engine-lane`. The audit found every one of them copied here, and the copies had
+//! already diverged (#94 F6). What is left is this effect's equations, its parameter table and its
+//! state layout.
+//!
+//! # Realtime rules
+//!
+//! No allocation, no locks, no platform transcendentals and no per-value `is_finite` on any render
+//! path. Denormals are handled by `flush` on the six recursive state words, and non-finite output
+//! is caught once per block by `miso_engine_effect_runtime::bank` (D7).
 
-use miso_engine_core::{
-    CompressorGainMixKernelError, PreparedCompressorGainMixKernelV1, PreparedTptBankKernelV1,
-    TptBankKernelError,
-};
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
@@ -16,15 +47,62 @@ use miso_engine_effect_contract::{
     PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
     PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
     ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata, sanitize_sample,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
+use miso_engine_effect_runtime::bank::{self, NonFiniteReport};
+use miso_engine_effect_runtime::dynamics::{
+    GainComputerCoef, gain_delta_db, gain_from_db, level_db,
+};
+use miso_engine_effect_runtime::envelope::retention_coefficient;
+use miso_engine_effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
+use miso_engine_effect_runtime::ramp::LinearRamp;
+use miso_engine_effect_runtime::state_payload::{
+    STATE_LENGTH_CODE, STATE_VERSION_CODE, read_f32, read_u32, write_f32, write_u32,
+};
+use miso_engine_lane::kernels::{SvfState, svf_step};
+use miso_engine_lane::{Lane, Simd4, Simd8, flush};
 
+pub mod corpus;
+mod shim;
+
+use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_levels};
+
+/// Parameters in the frozen V1 order.
 const PARAMETER_COUNT: usize = 12;
+
+/// Ramped parameters: everything but the two preparation-time ones.
 const RAMP_COUNT: usize = 10;
-const STATE_HEADER_WORDS: usize = 43;
+
+/// State-payload words each ramp occupies: current, target, step, remaining.
+const RAMP_WORDS: usize = 4;
+
+/// Fixed scalar words of one channel's state payload, before the two rings.
+const LANE_HEADER_WORDS: usize = 48;
+
+/// State layout version. Version 1 was the four-section, three-ring, three-word-ramp layout; the
+/// audit's F1, F4 and D11 all change it, and pre-launch there is no persisted version-1 state.
+const STATE_LAYOUT_VERSION: u32 = 2;
+
+/// Index of the low band.
 const LOW_BAND: usize = 0;
+
+/// Index of the high band.
 const HIGH_BAND: usize = 1;
+
+/// Knee width of both bands, in dB. Fixed by the product (spec 018).
 const KNEE_DB: f32 = 6.0;
+
+/// Samples a ramped parameter takes to reach its target (`SmoothingRule::Linear`, 64).
+const SMOOTHING_SAMPLES: u32 = 64;
+
+/// Detector floor: the smallest amplitude a band level is measured at, `-160 dB`.
+const DETECTOR_FLOOR: f32 = 1.0e-8;
+
+/// Butterworth damping `k = 1 / Q = sqrt(2)`.
+const BUTTERWORTH_K: f64 = core::f64::consts::SQRT_2;
+
+/// `-2k`, the all-pass tap of the first stage. Rounded once; doubling and negating are exact.
+const NEGATIVE_TWO_K: f32 = -2.0 * (core::f64::consts::SQRT_2 as f32);
 
 const fn effect_id(value: &'static str) -> miso_engine_effect_contract::EffectId {
     match miso_engine_effect_contract::EffectId::new(value) {
@@ -256,9 +334,15 @@ const PORTS: [PortDescriptorV1; 2] = [
     },
 ];
 
+/// Bytes of one channel's state payload at `sample_rate`.
+///
+/// `48` fixed words — crossover, lookahead, two smoother words, ten four-word ramps (D11 adds the
+/// precomputed step) and four filter words — followed by the low and high rings of `Fs/50 + 1`
+/// samples each. Version 1 carried three three-word ramps' worth less, eight filter words and a
+/// third ring for the dry signal, which #94 F1 and F4 removed.
 const fn lane_bytes(sample_rate: u32) -> u32 {
     let ring = sample_rate / 50 + 1;
-    (STATE_HEADER_WORDS as u32 + 3 * ring) * 4
+    (LANE_HEADER_WORDS as u32 + 2 * ring) * 4
 }
 
 const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
@@ -269,11 +353,18 @@ const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescri
         latency: LatencySamples((sample_rate / 50) as u64),
         tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
+            // No common section. The shared codec's two-word versioned header moves `common_bytes`
+            // and therefore descriptor identity, which is a coordinated change: wave-2 decision
+            // W2-D2 on #83 keeps this crate's common section empty and leaves uniform adoption of
+            // the header to #95. The version still arrives out of band, as the contract's
+            // `state_layout_version` argument, and is checked against `STATE_LAYOUT_VERSION`.
             common_bytes: 0,
             left_bytes: bytes,
             right_bytes: bytes,
         },
-        scratch_fixed_bytes: 136,
+        // Nothing in this crate touches scratch; the 136 bytes version 1 reserved were never used
+        // (#94 F12).
+        scratch_fixed_bytes: 0,
         scratch_bytes_per_frame: 0,
     }
 }
@@ -291,399 +382,1148 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescrip
     display_name: "Multiband Compressor",
     contract_major: 1,
     contract_minor: 0,
-    state_layout_version: 1,
+    state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
 };
 
-/// Factory for the fixed two-band scalar implementation.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MultibandCompressorFactory;
-
-#[derive(Clone, Copy, Debug)]
-struct Ramp {
-    current: f32,
-    target: f32,
-    remaining: u32,
+/// The domain of one parameter, in the shared runtime's vocabulary.
+///
+/// Derived from the frozen descriptor rather than written a second time: the mapping is a
+/// control-surface concern and is not used here, so every spec is built as continuous over the
+/// descriptor's own bounds.
+const fn spec(index: usize) -> ParameterSpec {
+    let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS_V1[index];
+    let minimum = match descriptor.minimum {
+        Some(value) => value,
+        None => 0.0,
+    };
+    let maximum = match descriptor.maximum {
+        Some(value) => value,
+        None => 0.0,
+    };
+    ParameterSpec::continuous(minimum, maximum, descriptor.default_value)
 }
 
-impl Ramp {
-    const fn fixed(value: f32) -> Self {
+/// Domains of the twelve parameters, in descriptor order.
+const SPECS: [ParameterSpec; PARAMETER_COUNT] = [
+    spec(0),
+    spec(1),
+    spec(2),
+    spec(3),
+    spec(4),
+    spec(5),
+    spec(6),
+    spec(7),
+    spec(8),
+    spec(9),
+    spec(10),
+    spec(11),
+];
+
+/// `true` if `value` is finite and either zero or normal.
+fn normal_or_zero(value: f32) -> bool {
+    value.is_finite() && (value == 0.0 || value.is_normal())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Crossover
+// ---------------------------------------------------------------------------------------------
+
+/// Coefficients of the two-stage Linkwitz-Riley split, one set per lane.
+///
+/// Both stages are the same Butterworth-Q low-pass design, so one coefficient set serves both
+/// (master plan §4.2 amendment A1 storage: `c1 = t / (1 + t)`). Public so that the two-section
+/// claim of audit #94 F4 can be checked from outside the crate against an independent oracle;
+/// build one with [`lr4_coefficients`].
+#[derive(Clone, Copy)]
+pub struct Lr4Coef<L: Lane> {
+    /// `-c1`, hoisted: a sign-bit flip is exact.
+    pub nc1: L,
+    /// `g * (1 - c1)`.
+    pub a2: L,
+    /// `g * a2`.
+    pub a3: L,
+    /// `-2k`, the all-pass tap. Exact: doubling and negating do not round.
+    pub nk2: L,
+}
+
+/// The four recursive words of the two-stage split, one set per lane.
+///
+/// Public for the same reason as [`Lr4Coef`].
+#[derive(Clone, Copy)]
+pub struct Lr4State<L: Lane> {
+    /// First stage.
+    pub a: SvfState<L>,
+    /// Second stage, fed by the first stage's low-pass tap.
+    pub b: SvfState<L>,
+}
+
+impl<L: Lane> Default for Lr4State<L> {
+    fn default() -> Self {
         Self {
-            current: value,
-            target: value,
-            remaining: 0,
+            a: SvfState::default(),
+            b: SvfState::default(),
         }
     }
-    fn advance(&mut self) {
-        if self.remaining != 0 {
-            self.current += (self.target - self.current) / self.remaining as f32;
-            self.remaining -= 1;
-            if self.remaining == 0 {
-                self.current = self.target;
+}
+
+/// One frame of the split: returns `(low, high)`.
+///
+/// Frozen operation order:
+/// 1. `(v1, lp1) = svf_step(x)` — the first stage, both taps of one state
+/// 2. `ap = fma(-2k, v1, x)` — one rounding; this is `svf_block`'s all-pass mix `(1, -2k, 0)`
+/// 3. `(_, low) = svf_step(lp1)` — the second stage
+/// 4. `high = ap - low`
+///
+/// Step 4 is what makes the band sum the all-pass by construction rather than by accident: the
+/// only rounding between `ap` and `low + high` is the one subtraction.
+#[inline(always)]
+pub fn lr4_step<L: Lane>(x: L, c: &Lr4Coef<L>, s: &mut Lr4State<L>) -> (L, L) {
+    let (v1, lp1) = svf_step(x, c.nc1, c.a2, c.a3, &mut s.a);
+    let ap = c.nk2.fma(v1, x);
+    let (_, low) = svf_step(lp1, c.nc1, c.a2, c.a3, &mut s.b);
+    (low, ap.sub(low))
+}
+
+/// Designs `(c1, a2, a3)` in `f64` for one crossover frequency, rounded once to `f32`.
+///
+/// `g = tan(pi fc / fs)`, `k = sqrt(2)`, `t = g (g + k)`, `c1 = t / (1 + t)`, `a2 = g (1 - c1)`,
+/// `a3 = g a2`. The tangent comes from `miso-engine-math`, never the platform libm (D6).
+///
+/// The rounded triple is then checked *back*: `g` is recovered from `c1` alone, the analytic
+/// second-order low-pass magnitude at the requested crossover is evaluated from it, and it must be
+/// the half-power point to 0.005 dB. That is a test of the `f32` rounding of the damping
+/// coefficient — the thing amendment A1 exists for — and not a restatement of the design.
+fn design_lr4(sample_rate: u32, crossover_hz: f32) -> Option<[f32; 3]> {
+    if sample_rate == 0 || !parameter_value_valid(&SPECS[0], crossover_hz) {
+        return None;
+    }
+    let g = miso_engine_math::tan(
+        core::f64::consts::PI * f64::from(crossover_hz) / f64::from(sample_rate),
+    );
+    let t = g * (g + BUTTERWORTH_K);
+    let c1 = t / (1.0 + t);
+    let a1 = 1.0 - c1;
+    let designed = [c1 as f32, (g * a1) as f32, (g * (g * a1)) as f32];
+    if !designed.into_iter().all(normal_or_zero)
+        || !(0.0..1.0).contains(&designed[0])
+        || designed[1] <= 0.0
+        || designed[2] <= 0.0
+    {
+        return None;
+    }
+    // `t = c1 / (1 - c1)` and `t = g (g + k)`, so `g` is the positive root of `g^2 + kg - t`.
+    let realized_t = f64::from(designed[0]) / (1.0 - f64::from(designed[0]));
+    let realized_g = 0.5
+        * (miso_engine_math::sqrt(BUTTERWORTH_K * BUTTERWORTH_K + 4.0 * realized_t)
+            - BUTTERWORTH_K);
+    if realized_g <= 0.0 {
+        return None;
+    }
+    // `a3 / a2` is `g` too; a triple whose two routes to `g` disagree is not this filter.
+    let ratio_g = f64::from(designed[2]) / f64::from(designed[1]);
+    if (ratio_g - realized_g).abs() > 1.0e-4 * realized_g {
+        return None;
+    }
+    // Analytic |LP2| at the crossover: `1 / |D(j*t_probe)|` with `D(s) = s^2 + k s + 1`.
+    let probe = miso_engine_math::tan(
+        core::f64::consts::PI * f64::from(crossover_hz) / f64::from(sample_rate),
+    ) / realized_g;
+    let real = 1.0 - probe * probe;
+    let imaginary = BUTTERWORTH_K * probe;
+    let magnitude = miso_engine_math::sqrt(real * real + imaginary * imaginary);
+    if magnitude <= 0.0 || !magnitude.is_finite() {
+        return None;
+    }
+    let magnitude_db = -20.0 * miso_engine_math::log10(magnitude);
+    if (magnitude_db + 3.010_299_956_6).abs() > 0.005 {
+        return None;
+    }
+    Some(designed)
+}
+
+/// Designs one lane-wide coefficient set for a crossover at `crossover_hz`.
+///
+/// Every lane gets the same design. Returns `None` outside the frozen 80 Hz to 8 kHz domain, at a
+/// zero sample rate, or if the `f32` rounding of the damping coefficient fails the design's own
+/// half-power self-check.
+#[must_use]
+pub fn lr4_coefficients<L: Lane>(sample_rate: u32, crossover_hz: f32) -> Option<Lr4Coef<L>> {
+    let designed = design_lr4(sample_rate, crossover_hz)?;
+    Some(Lr4Coef {
+        nc1: L::splat(designed[0]).neg(),
+        a2: L::splat(designed[1]),
+        a3: L::splat(designed[2]),
+        nk2: L::splat(NEGATIVE_TWO_K),
+    })
+}
+
+/// The detector tap's offset from the write cursor, in ring slots.
+///
+/// The output tap is one slot ahead of the cursor, which is `ring_len - 1 = Fs/50` samples of
+/// delay: the declared latency. The detector tap is `lookahead` samples earlier still, so its
+/// offset is `1 + lookahead` and lies in `[1, ring_len]` — which is what makes the single
+/// compare-and-subtract wrap in [`Instance::detector`] correct.
+fn detector_offset(lookahead_ms: f32, sample_rate: u32, ring_len: usize) -> Option<usize> {
+    if !parameter_value_valid(&SPECS[1], lookahead_ms) || sample_rate == 0 || ring_len < 2 {
+        return None;
+    }
+    let samples =
+        miso_engine_math::floor(f64::from(lookahead_ms) * f64::from(sample_rate) / 1_000.0 + 0.5);
+    if !samples.is_finite() || samples < 0.0 {
+        return None;
+    }
+    let latency = ring_len - 1;
+    Some(1 + (samples as usize).min(latency))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Instance
+// ---------------------------------------------------------------------------------------------
+
+/// Control-rate values derived from one band's ratio, attack and release.
+///
+/// Keyed by the raw bits of the three ramp values they came from, so a segment recomputes them
+/// only when one of the three has actually moved. `-0.0` never reaches a ramp, so the key is a
+/// faithful identity.
+#[derive(Clone, Copy)]
+struct BandCache {
+    key: [u32; 3],
+    inv_ratio_minus_one: f32,
+    attack: f32,
+    release: f32,
+}
+
+impl BandCache {
+    /// A cache that will always miss on its first use.
+    const fn empty() -> Self {
+        Self {
+            key: [0; 3],
+            inv_ratio_minus_one: 0.0,
+            attack: 0.0,
+            release: 0.0,
+        }
+    }
+
+    /// Refreshes the cache from the three ramps' current values if any of them has changed.
+    fn refresh(&mut self, ratio: f32, attack_ms: f32, release_ms: f32, sample_rate: u32) {
+        let key = [ratio.to_bits(), attack_ms.to_bits(), release_ms.to_bits()];
+        if key == self.key {
+            return;
+        }
+        self.key = key;
+        self.inv_ratio_minus_one = 1.0 / ratio - 1.0;
+        self.attack = retention_coefficient(attack_ms, sample_rate);
+        self.release = retention_coefficient(release_ms, sample_rate);
+    }
+}
+
+/// One band's control-rate lane coefficients for one segment.
+#[derive(Clone, Copy)]
+struct BandCoef<L: Lane> {
+    inv_ratio_minus_one: L,
+    attack: L,
+    release: L,
+}
+
+/// The ten ramps of one channel, as lanes, for the duration of one segment.
+#[derive(Clone, Copy)]
+struct Segment<L: Lane> {
+    current: [L; RAMP_COUNT],
+    step: [L; RAMP_COUNT],
+}
+
+/// Everything one channel of one bank owns.
+struct Side<L: Lane, const W: usize> {
+    coefficients: Lr4Coef<L>,
+    filter: Lr4State<L>,
+    /// The branching smoother's state, in dB, per band.
+    gain_db: [L; 2],
+    ramps: [[LinearRamp; RAMP_COUNT]; W],
+    cache: [[BandCache; 2]; W],
+    /// `(c1, a2, a3)` per track, kept so a reset does not have to redesign (#94 F9).
+    designed: [[f32; 3]; W],
+    crossover_hz: [f32; W],
+    lookahead_ms: [f32; W],
+    detector_offset: [usize; W],
+    /// `ring_len * W` samples, slot-major: slot `s` of lane `l` is at `s * W + l`.
+    low_ring: Box<[f32]>,
+    high_ring: Box<[f32]>,
+    defaults: [[f32; PARAMETER_COUNT]; W],
+}
+
+impl<L: Lane, const W: usize> Side<L, W> {
+    fn new(
+        defaults: [[f32; PARAMETER_COUNT]; W],
+        sample_rate: u32,
+        ring_len: usize,
+    ) -> Option<Self> {
+        let mut designed = [[0.0; 3]; W];
+        let mut crossover_hz = [0.0; W];
+        let mut lookahead_ms = [0.0; W];
+        let mut offsets = [0usize; W];
+        let mut ramps = [[LinearRamp::fixed(0.0); RAMP_COUNT]; W];
+        for track in 0..W {
+            designed[track] = design_lr4(sample_rate, defaults[track][0])?;
+            crossover_hz[track] = defaults[track][0];
+            lookahead_ms[track] = defaults[track][1];
+            offsets[track] = detector_offset(defaults[track][1], sample_rate, ring_len)?;
+            for index in 0..RAMP_COUNT {
+                ramps[track][index] = LinearRamp::fixed(defaults[track][index + 2]);
+            }
+        }
+        Some(Self {
+            coefficients: lane_coefficients::<L, W>(&designed),
+            filter: Lr4State::default(),
+            gain_db: [L::zero(); 2],
+            ramps,
+            cache: [[BandCache::empty(); 2]; W],
+            designed,
+            crossover_hz,
+            lookahead_ms,
+            detector_offset: offsets,
+            low_ring: alloc_ring(ring_len * W),
+            high_ring: alloc_ring(ring_len * W),
+            defaults,
+        })
+    }
+
+    /// Clears history. Coefficients and parameters are deliberately untouched.
+    fn discontinuity_reset(&mut self) {
+        self.filter = Lr4State::default();
+        self.gain_db = [L::zero(); 2];
+        self.low_ring.fill(0.0);
+        self.high_ring.fill(0.0);
+        for track in 0..W {
+            for ramp in &mut self.ramps[track] {
+                ramp.snap();
+            }
+        }
+    }
+
+    /// Returns to the prepared defaults without allocating or redesigning (#94 F9).
+    fn full_reset(&mut self, sample_rate: u32, ring_len: usize) {
+        self.discontinuity_reset();
+        self.coefficients = lane_coefficients::<L, W>(&self.designed);
+        for track in 0..W {
+            self.crossover_hz[track] = self.defaults[track][0];
+            self.lookahead_ms[track] = self.defaults[track][1];
+            self.detector_offset[track] =
+                detector_offset(self.defaults[track][1], sample_rate, ring_len)
+                    .unwrap_or(self.detector_offset[track]);
+            for index in 0..RAMP_COUNT {
+                self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 2]);
+            }
+            self.cache[track] = [BandCache::empty(); 2];
+        }
+    }
+}
+
+/// Allocates one zeroed ring. The only allocation in the crate, and it happens at prepare.
+fn alloc_ring(samples: usize) -> Box<[f32]> {
+    vec![0.0; samples].into_boxed_slice()
+}
+
+/// Splats the per-track designs into one lane coefficient set.
+fn lane_coefficients<L: Lane, const W: usize>(designed: &[[f32; 3]; W]) -> Lr4Coef<L> {
+    let mut c1 = [0.0f32; 8];
+    let mut a2 = [0.0f32; 8];
+    let mut a3 = [0.0f32; 8];
+    for track in 0..W {
+        c1[track] = designed[track][0];
+        a2[track] = designed[track][1];
+        a3[track] = designed[track][2];
+    }
+    Lr4Coef {
+        nc1: L::load(&c1[..W]).neg(),
+        a2: L::load(&a2[..W]),
+        a3: L::load(&a3[..W]),
+        nk2: L::splat(NEGATIVE_TWO_K),
+    }
+}
+
+/// One prepared bank of `W` tracks: the whole effect, at one width.
+struct Instance<L: Lane, const W: usize> {
+    sample_rate: u32,
+    bypass: bool,
+    link: LinkMode,
+    ring_len: usize,
+    cursor: usize,
+    nonfinite: NonFiniteReport,
+    /// Index 0 is the left channel, index 1 the right.
+    sides: [Side<L, W>; 2],
+}
+
+impl<L: Lane, const W: usize> Instance<L, W> {
+    fn new(
+        left: [[f32; PARAMETER_COUNT]; W],
+        right: [[f32; PARAMETER_COUNT]; W],
+        metadata: PreparedEffectMetadata,
+    ) -> Option<Self> {
+        debug_assert_eq!(L::WIDTH, W);
+        let ring_len = usize::try_from(metadata.sample_rate / 50)
+            .ok()?
+            .checked_add(1)?;
+        if ring_len < 2 {
+            return None;
+        }
+        Some(Self {
+            sample_rate: metadata.sample_rate,
+            bypass: metadata.bypass,
+            link: metadata.link_mode,
+            ring_len,
+            cursor: 0,
+            nonfinite: NonFiniteReport::new(),
+            sides: [
+                Side::new(left, metadata.sample_rate, ring_len)?,
+                Side::new(right, metadata.sample_rate, ring_len)?,
+            ],
+        })
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        self.cursor = 0;
+        for side in &mut self.sides {
+            match kind {
+                ResetKind::FullToDefaults => side.full_reset(self.sample_rate, self.ring_len),
+                ResetKind::DiscontinuityKeepParameters => side.discontinuity_reset(),
             }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Coefficients {
-    c1: f32,
-    a2: f32,
-    a3: f32,
-    k: f32,
+// ---------------------------------------------------------------------------------------------
+// Render path
+// ---------------------------------------------------------------------------------------------
+
+/// `index` reduced into `[0, modulus)`, given `index < 2 * modulus`.
+///
+/// One compare and one subtract. The version-1 code used three integer modulos per lane per sample
+/// on a ring length that is never a power of two, each of them a hardware divide (#94 F8).
+#[inline(always)]
+fn wrap(index: usize, modulus: usize) -> usize {
+    debug_assert!(index < 2 * modulus);
+    if index >= modulus {
+        index - modulus
+    } else {
+        index
+    }
 }
 
-impl Coefficients {
-    fn design(sample_rate: u32, crossover_hz: f32) -> Option<Self> {
-        if sample_rate == 0
-            || !parameter_value_valid(&MULTIBAND_COMPRESSOR_PARAMETERS_V1[0], crossover_hz)
-        {
-            return None;
-        }
-        let g = (core::f64::consts::PI * f64::from(crossover_hz) / f64::from(sample_rate)).tan();
-        let k64 = core::f64::consts::SQRT_2;
-        let t1 = g * (g + k64);
-        let den = 1.0 + t1;
-        let values = [t1 / den, g / den, (g * g) / den, k64].map(|value| value as f32);
-        if !values.into_iter().all(normal_or_zero) {
-            return None;
-        }
-        let [c1, a2, a3, k] = values;
-        let a00 = 1.0 - 2.0 * f64::from(c1);
-        let a01 = -2.0 * f64::from(a2);
-        let a10 = 2.0 * f64::from(a2);
-        let a11 = 1.0 - 2.0 * f64::from(a3);
-        let trace = a00 + a11;
-        let determinant = a00 * a11 - a01 * a10;
-        let a1 = -trace;
-        if determinant.abs() >= 1.0
-            || 1.0 + a1 + determinant <= 0.0
-            || 1.0 - a1 + determinant <= 0.0
-        {
-            return None;
-        }
-        let coefficients = Self { c1, a2, a3, k };
-        let low = coefficients.magnitude_db(sample_rate, crossover_hz, false)?;
-        let high = coefficients.magnitude_db(sample_rate, crossover_hz, true)?;
-        if (low + 3.010_299_956_6).abs() > 0.005 || (high + 3.010_299_956_6).abs() > 0.005 {
-            return None;
-        }
-        Some(coefficients)
+/// The per-track detector tap of one ring, gathered into one lane.
+///
+/// The only non-contiguous access on the render path, and it is loads only: lookahead is a
+/// per-track parameter, so each track reads a different slot of the shared ring.
+#[inline(always)]
+fn detector_tap<L: Lane, const W: usize>(
+    ring: &[f32],
+    cursor: usize,
+    offsets: &[usize; W],
+    ring_len: usize,
+) -> L {
+    let mut values = [0.0f32; 8];
+    for track in 0..W {
+        values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
     }
+    L::load(&values[..W])
+}
 
-    fn magnitude_db(self, sample_rate: u32, frequency: f32, high_pass: bool) -> Option<f64> {
-        let (c1, a2, a3, k) = (
-            f64::from(self.c1),
-            f64::from(self.a2),
-            f64::from(self.a3),
-            f64::from(self.k),
+/// One band's amplitude for one frame: detector level, static curve, smoother, makeup.
+///
+/// Frozen operation order:
+/// 1. `level = clamp(level_db(max(detector, 1e-8)), -160, 24)` — the `-160 dB` floor is the
+///    version-1 detector floor, kept so the curve sees the same silence
+/// 2. `target = clamp(gain_delta_db(level), -100, 0)` — Giannoulis et al. equation 4, 6 dB knee
+/// 3. `state = flush(branching_smooth(state, target, attack, release))` — D7 applies: this is a
+///    recurrence
+/// 4. `gain_from_db(state + makeup)`
+///
+/// Every clamp is the D8 select form, so a NaN detector floors at `-160 dB` instead of
+/// propagating into the smoother; a NaN that matters comes from the filter state and reaches the
+/// output, where the once-per-block boundary check catches it.
+#[inline(always)]
+fn band_amplitude<L: Lane>(
+    detector: L,
+    threshold: L,
+    makeup: L,
+    coefficients: &BandCoef<L>,
+    state: &mut L,
+) -> L {
+    let level = level_db(detector.max(L::splat(DETECTOR_FLOOR)))
+        .max(L::splat(-160.0))
+        .min(L::splat(24.0));
+    let curve = GainComputerCoef {
+        threshold_db: threshold,
+        inv_ratio_minus_one: coefficients.inv_ratio_minus_one,
+        half_knee_db: L::splat(0.5 * KNEE_DB),
+        inv_two_knee: L::splat(1.0 / (2.0 * KNEE_DB)),
+    };
+    let target = gain_delta_db(level, &curve)
+        .max(L::splat(-100.0))
+        .min(L::zero());
+    let smoothed = flush(branching_smooth(
+        *state,
+        target,
+        coefficients.attack,
+        coefficients.release,
+    ));
+    *state = smoothed;
+    gain_from_db(smoothed.add(makeup))
+}
+
+/// One segment: `frames` frames over which no ramp arrives at its target.
+///
+/// The whole render path is here. `LINK` and `BYPASS` are compile-time, because both are fixed
+/// when the effect is prepared; a bypassed instance is a pure `Fs/50` delay through the low ring
+/// and runs neither the crossover nor the dynamics, and it still advances its ramps so that its
+/// parameter state does not depend on whether it was bypassed.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
+    sides: &mut [Side<L, W>; 2],
+    cursor: &mut usize,
+    ring_len: usize,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    segments: &mut [Segment<L>; 2],
+    coefficients: &[[BandCoef<L>; 2]; 2],
+) {
+    let (head, tail) = sides.split_at_mut(1);
+    let near = &mut head[0];
+    let far = &mut tail[0];
+    let mut filter_near = near.filter;
+    let mut filter_far = far.filter;
+    let mut gain_near = near.gain_db;
+    let mut gain_far = far.gain_db;
+    let mut position = *cursor;
+    for frame in 0..frames {
+        for index in 0..RAMP_COUNT {
+            segments[0].current[index] = segments[0].current[index].add(segments[0].step[index]);
+            segments[1].current[index] = segments[1].current[index].add(segments[1].step[index]);
+        }
+        let slot = position * W;
+        let delayed = wrap(position + 1, ring_len) * W;
+        let input_near = L::load(&left[frame * W..]);
+        let input_far = L::load(&right[frame * W..]);
+        if BYPASS {
+            input_near.store(&mut near.low_ring[slot..]);
+            input_far.store(&mut far.low_ring[slot..]);
+            L::load(&near.low_ring[delayed..]).store(&mut left[frame * W..]);
+            L::load(&far.low_ring[delayed..]).store(&mut right[frame * W..]);
+            position = wrap(position + 1, ring_len);
+            continue;
+        }
+        let (low_near, high_near) = lr4_step(input_near, &near.coefficients, &mut filter_near);
+        let (low_far, high_far) = lr4_step(input_far, &far.coefficients, &mut filter_far);
+        low_near.store(&mut near.low_ring[slot..]);
+        high_near.store(&mut near.high_ring[slot..]);
+        low_far.store(&mut far.low_ring[slot..]);
+        high_far.store(&mut far.high_ring[slot..]);
+
+        let detector_near_low =
+            detector_tap::<L, W>(&near.low_ring, position, &near.detector_offset, ring_len);
+        let detector_near_high =
+            detector_tap::<L, W>(&near.high_ring, position, &near.detector_offset, ring_len);
+        let detector_far_low =
+            detector_tap::<L, W>(&far.low_ring, position, &far.detector_offset, ring_len);
+        let detector_far_high =
+            detector_tap::<L, W>(&far.high_ring, position, &far.detector_offset, ring_len);
+        let (linked_near_low, linked_far_low) =
+            link_levels::<L, LINK>(detector_near_low, detector_far_low);
+        let (linked_near_high, linked_far_high) =
+            link_levels::<L, LINK>(detector_near_high, detector_far_high);
+
+        let amplitude_near_low = band_amplitude(
+            linked_near_low,
+            segments[0].current[0],
+            segments[0].current[4],
+            &coefficients[0][LOW_BAND],
+            &mut gain_near[LOW_BAND],
         );
-        let a00 = 1.0 - 2.0 * c1;
-        let a01 = -2.0 * a2;
-        let a10 = 2.0 * a2;
-        let a11 = 1.0 - 2.0 * a3;
-        let b0 = 2.0 * a2;
-        let b1 = 2.0 * a3;
-        let (o0, o1, direct) = if high_pass {
-            (-k * (1.0 - c1) - a2, k * a2 - (1.0 - a3), 1.0 - k * a2 - a3)
-        } else {
-            (a2, 1.0 - a3, a3)
-        };
-        let phase = core::f64::consts::TAU * f64::from(frequency) / f64::from(sample_rate);
-        let (zr, zi) = (phase.cos(), phase.sin());
-        let m00r = zr - a00;
-        let m11r = zr - a11;
-        let determinant_r = m00r * m11r - zi * zi - (-a01) * (-a10);
-        let determinant_i = zi * (m00r + m11r);
-        let norm = determinant_r * determinant_r + determinant_i * determinant_i;
-        if norm == 0.0 || !norm.is_finite() {
-            return None;
+        let amplitude_near_high = band_amplitude(
+            linked_near_high,
+            segments[0].current[5],
+            segments[0].current[9],
+            &coefficients[0][HIGH_BAND],
+            &mut gain_near[HIGH_BAND],
+        );
+        let amplitude_far_low = band_amplitude(
+            linked_far_low,
+            segments[1].current[0],
+            segments[1].current[4],
+            &coefficients[1][LOW_BAND],
+            &mut gain_far[LOW_BAND],
+        );
+        let amplitude_far_high = band_amplitude(
+            linked_far_high,
+            segments[1].current[5],
+            segments[1].current[9],
+            &coefficients[1][HIGH_BAND],
+            &mut gain_far[HIGH_BAND],
+        );
+
+        let output_near = L::load(&near.low_ring[delayed..])
+            .mul(amplitude_near_low)
+            .add(L::load(&near.high_ring[delayed..]).mul(amplitude_near_high));
+        let output_far = L::load(&far.low_ring[delayed..])
+            .mul(amplitude_far_low)
+            .add(L::load(&far.high_ring[delayed..]).mul(amplitude_far_high));
+        output_near.store(&mut left[frame * W..]);
+        output_far.store(&mut right[frame * W..]);
+        position = wrap(position + 1, ring_len);
+    }
+    near.filter = filter_near;
+    far.filter = filter_far;
+    near.gain_db = gain_near;
+    far.gain_db = gain_far;
+    *cursor = position;
+}
+
+/// Splits the block at ramp arrivals and runs each segment.
+#[inline(always)]
+fn process_block<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
+    instance: &mut Instance<L, W>,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+) {
+    let sample_rate = instance.sample_rate;
+    let ring_len = instance.ring_len;
+    let mut position = 0;
+    while position < frames {
+        let length = instance.segment_length(frames - position);
+        let mut segments = [instance.sides[0].segment(), instance.sides[1].segment()];
+        let coefficients = [
+            instance.sides[0].band_coefficients(sample_rate),
+            instance.sides[1].band_coefficients(sample_rate),
+        ];
+        run_segment::<L, W, LINK, BYPASS>(
+            &mut instance.sides,
+            &mut instance.cursor,
+            ring_len,
+            &mut left[position * W..(position + length) * W],
+            &mut right[position * W..(position + length) * W],
+            length,
+            &mut segments,
+            &coefficients,
+        );
+        let advanced = length as u32;
+        instance.sides[0].store_segment(&segments[0], advanced);
+        instance.sides[1].store_segment(&segments[1], advanced);
+        position += length;
+    }
+}
+
+/// Dispatches on the two values that are fixed at preparation, once per block.
+#[inline(always)]
+fn render<L: Lane, const W: usize>(
+    instance: &mut Instance<L, W>,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    reports: &mut [ProcessReport],
+) {
+    match (instance.link, instance.bypass) {
+        (LinkMode::DualMono, false) => {
+            process_block::<L, W, LINK_DUAL_MONO, false>(instance, left, right, frames);
         }
-        let divide = |real: f64, imaginary: f64| {
-            (
-                (real * determinant_r + imaginary * determinant_i) / norm,
-                (imaginary * determinant_r - real * determinant_i) / norm,
-            )
-        };
-        let (s0r, s0i) = divide(m11r * b0 + a01 * b1, zi * b0);
-        let (s1r, s1i) = divide(a10 * b0 + m00r * b1, zi * b1);
-        let magnitude = (direct + o0 * s0r + o1 * s1r).hypot(o0 * s0i + o1 * s1i);
-        (magnitude.is_finite() && magnitude > 0.0).then(|| 20.0 * magnitude.log10())
+        (LinkMode::Maximum, false) => {
+            process_block::<L, W, LINK_MAXIMUM, false>(instance, left, right, frames);
+        }
+        (LinkMode::Average, false) => {
+            process_block::<L, W, LINK_AVERAGE, false>(instance, left, right, frames);
+        }
+        (_, true) => {
+            process_block::<L, W, LINK_DUAL_MONO, true>(instance, left, right, frames);
+        }
+    }
+    instance.finish(left, right, frames, reports);
+}
+
+impl<L: Lane, const W: usize> Side<L, W> {
+    /// The ten ramps of every track, as lanes, for one segment.
+    fn segment(&self) -> Segment<L> {
+        let mut current = [L::zero(); RAMP_COUNT];
+        let mut step = [L::zero(); RAMP_COUNT];
+        for index in 0..RAMP_COUNT {
+            let mut values = [0.0f32; 8];
+            let mut steps = [0.0f32; 8];
+            for track in 0..W {
+                values[track] = self.ramps[track][index].current;
+                steps[track] = self.ramps[track][index].step;
+            }
+            current[index] = L::load(&values[..W]);
+            step[index] = L::load(&steps[..W]);
+        }
+        Segment { current, step }
+    }
+
+    /// Writes a finished segment's lane values back into the scalar ramps.
+    ///
+    /// The lane accumulation is `current + step` iterated once per frame, lane by lane, which is
+    /// exactly what `LinearRamp::next_value` does at `remaining >= 2`; the segment split
+    /// guarantees no ramp reaches `remaining == 1` inside a segment, so no snap can be missed and
+    /// the state can be written back instead of replayed.
+    fn store_segment(&mut self, segment: &Segment<L>, advanced: u32) {
+        for index in 0..RAMP_COUNT {
+            let mut values = [0.0f32; 8];
+            segment.current[index].store(&mut values[..W]);
+            for (track, value) in values.iter().enumerate().take(W) {
+                let ramp = &mut self.ramps[track][index];
+                ramp.current = *value;
+                ramp.remaining = ramp.remaining.saturating_sub(advanced);
+            }
+        }
+    }
+
+    /// Control-rate coefficients of both bands, refreshed only where a ramp value moved.
+    fn band_coefficients(&mut self, sample_rate: u32) -> [BandCoef<L>; 2] {
+        let mut bands = [BandCoef {
+            inv_ratio_minus_one: L::zero(),
+            attack: L::zero(),
+            release: L::zero(),
+        }; 2];
+        for (band, coefficients) in bands.iter_mut().enumerate() {
+            let base = band * 5;
+            let mut ratios = [0.0f32; 8];
+            let mut attacks = [0.0f32; 8];
+            let mut releases = [0.0f32; 8];
+            for track in 0..W {
+                let ratio = self.ramps[track][base + 1].current;
+                let attack_ms = self.ramps[track][base + 2].current;
+                let release_ms = self.ramps[track][base + 3].current;
+                let cache = &mut self.cache[track][band];
+                cache.refresh(ratio, attack_ms, release_ms, sample_rate);
+                ratios[track] = cache.inv_ratio_minus_one;
+                attacks[track] = cache.attack;
+                releases[track] = cache.release;
+            }
+            *coefficients = BandCoef {
+                inv_ratio_minus_one: L::load(&ratios[..W]),
+                attack: L::load(&attacks[..W]),
+                release: L::load(&releases[..W]),
+            };
+        }
+        bands
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct TptSection {
-    s1: f32,
-    s2: f32,
-}
+impl<L: Lane, const W: usize> Instance<L, W> {
+    /// Frames until the next ramp arrival, at most `budget`.
+    ///
+    /// D11's snap is an assignment on the final sample, not an addition, so it cannot happen
+    /// inside a vectorised run. Every ramp that is one sample from its target is therefore snapped
+    /// here, at a zero-length segment boundary, and the segment that follows is bounded by the
+    /// nearest remaining arrival. Boundaries depend only on absolute ramp positions, which is what
+    /// makes the result independent of how the caller partitions the block.
+    fn segment_length(&mut self, budget: usize) -> usize {
+        for side in &mut self.sides {
+            for track in 0..W {
+                for ramp in &mut side.ramps[track] {
+                    if ramp.remaining == 1 {
+                        ramp.snap();
+                    }
+                }
+            }
+        }
+        let mut length = budget;
+        for side in &self.sides {
+            for track in 0..W {
+                for ramp in &side.ramps[track] {
+                    if ramp.remaining > 0 {
+                        length = length.min(ramp.remaining as usize - 1);
+                    }
+                }
+            }
+        }
+        length.max(1)
+    }
 
-impl TptSection {
-    fn process(&mut self, input: f32, coefficients: Coefficients) -> Option<(f32, f32)> {
-        self.s1 = flushed(self.s1)?;
-        self.s2 = flushed(self.s2)?;
-        let v3 = input - self.s2;
-        let p1 = coefficients.a2 * v3;
-        let p2 = coefficients.c1 * self.s1;
-        let d1 = p1 - p2;
-        let v1 = self.s1 + d1;
-        let p3 = coefficients.a2 * self.s1;
-        let p4 = coefficients.a3 * v3;
-        let d2 = p3 + p4;
-        let v2 = self.s2 + d2;
-        let n1 = flushed(self.s1 + (d1 + d1))?;
-        let n2 = flushed(self.s2 + (d2 + d2))?;
-        let low = flushed(v2)?;
-        let high = flushed((input - coefficients.k * v1) - v2)?;
-        self.s1 = n1;
-        self.s2 = n2;
-        Some((low, high))
+    /// The once-per-block output boundary check of master plan §4.4.
+    ///
+    /// The scan, the policy and the counters are `miso-engine-effect-runtime`'s; the only thing
+    /// added here is attributing a rejected block to the contract's per-track reports. A bank's
+    /// two channels share a reset, so the lane mask is the union over both and both counters move
+    /// for a failing track.
+    fn finish(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        reports: &mut [ProcessReport],
+    ) {
+        let sides = &mut self.sides;
+        let cursor = &mut self.cursor;
+        let accepted = bank::finish_block::<L>(left, right, &mut self.nonfinite, || {
+            *cursor = 0;
+            for side in sides.iter_mut() {
+                side.discontinuity_reset();
+            }
+        });
+        if accepted {
+            return;
+        }
+        let mask = self.nonfinite.nonfinite_lanes;
+        let samples = frames as u64;
+        for (track, report) in reports.iter_mut().enumerate().take(W) {
+            if mask & (1 << track) != 0 {
+                report.recovered_left_samples =
+                    report.recovered_left_samples.saturating_add(samples);
+                report.recovered_right_samples =
+                    report.recovered_right_samples.saturating_add(samples);
+            }
+        }
+    }
+
+    /// Points one track's ramps at the values a block's automation spans carry.
+    ///
+    /// The spans are `AutomationSpanKind::Point` events landing on the block's first sample, one
+    /// per parameter per channel, in `parameter_index * 2 + channel` order. Anything else is
+    /// counted as an invalid span and ignored; nothing partially applies.
+    fn apply_automation(
+        &mut self,
+        track: usize,
+        spans: &[PreparedAutomationSpan],
+        capacity: u32,
+        first_sample: u64,
+        report: &mut ProcessReport,
+    ) {
+        let mut pending = [[None; RAMP_COUNT]; 2];
+        let mut previous: Option<u32> = None;
+        for (index, span) in spans.iter().enumerate() {
+            let side = match span.channel {
+                ParameterChannel::Left => 0usize,
+                ParameterChannel::Right => 1,
+                ParameterChannel::Both => {
+                    report.invalid_spans = report.invalid_spans.saturating_add(1);
+                    continue;
+                }
+            };
+            let parameter = span.parameter_index as usize;
+            let order = span
+                .parameter_index
+                .checked_mul(2)
+                .and_then(|value| value.checked_add(side as u32));
+            let ramp = parameter
+                .checked_sub(2)
+                .filter(|value| *value < RAMP_COUNT && parameter < PARAMETER_COUNT);
+            let valid = ramp.is_some()
+                && index < capacity as usize
+                && span.kind == AutomationSpanKind::Point
+                && span.start_sample == first_sample
+                && span.end_sample == first_sample
+                && span.start_value.to_bits() == span.end_value.to_bits()
+                && parameter_value_valid(&SPECS[parameter], span.start_value)
+                && order.is_some_and(|value| previous.is_none_or(|earlier| value > earlier))
+                && ramp.is_some_and(|value| pending[side][value].is_none());
+            let Some(ramp) = ramp else {
+                report.invalid_spans = report.invalid_spans.saturating_add(1);
+                continue;
+            };
+            if !valid {
+                report.invalid_spans = report.invalid_spans.saturating_add(1);
+                continue;
+            }
+            previous = order;
+            pending[side][ramp] = Some(normalize_zero(span.start_value));
+        }
+        for (side, targets) in pending.iter().enumerate() {
+            for (index, target) in targets.iter().enumerate() {
+                if let Some(value) = *target {
+                    self.sides[side].ramps[track][index].set_target(value, SMOOTHING_SAMPLES);
+                }
+            }
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Crossover {
-    coefficients: Coefficients,
-    sections: [TptSection; 4],
+// ---------------------------------------------------------------------------------------------
+// State payload, version 2
+// ---------------------------------------------------------------------------------------------
+//
+// Per channel: crossover, lookahead, the two smoother words, ten four-word ramps, the four filter
+// words, then the low and high rings written **oldest first**. Writing the rings in time order
+// rather than in cursor order is what makes a scalar snapshot and a bank-track snapshot of the
+// same history byte-identical, and it is why there is no cursor word: a track restored into a bank
+// whose cursor is elsewhere is rotated into place by the restore itself.
+
+/// Word offset of the first filter word.
+const FILTER_WORD: usize = 4 + RAMP_COUNT * RAMP_WORDS;
+
+/// One lane of a lane-wide value.
+#[inline]
+fn lane_value<L: Lane>(value: L, track: usize) -> f32 {
+    let mut words = [0.0f32; 8];
+    value.store(&mut words[..L::WIDTH]);
+    words[track]
 }
 
-impl Crossover {
-    fn new(sample_rate: u32, crossover_hz: f32) -> Option<Self> {
-        Some(Self {
-            coefficients: Coefficients::design(sample_rate, crossover_hz)?,
-            sections: [TptSection::default(); 4],
-        })
-    }
-    fn process(&mut self, input: f32) -> Option<(f32, f32)> {
-        let (low_a, _) = self.sections[0].process(input, self.coefficients)?;
-        let (low, _) = self.sections[1].process(low_a, self.coefficients)?;
-        let (_, high_a) = self.sections[2].process(input, self.coefficients)?;
-        let (_, high) = self.sections[3].process(high_a, self.coefficients)?;
-        Some((low, high))
-    }
-    fn reset(&mut self) {
-        self.sections = [TptSection::default(); 4];
-    }
+/// `value` with lane `track` replaced.
+#[inline]
+fn set_lane_value<L: Lane>(value: L, track: usize, replacement: f32) -> L {
+    let mut words = [0.0f32; 8];
+    value.store(&mut words[..L::WIDTH]);
+    words[track] = replacement;
+    L::load(&words[..L::WIDTH])
 }
 
-#[derive(Clone, Copy)]
-struct BandFrame {
-    dry: f32,
-    low: f32,
-    high: f32,
-    detector_low: f32,
-    detector_high: f32,
-}
-
-#[derive(Debug)]
-struct Lane {
-    cursor: u32,
+/// One channel's validated state, staged so that a rejected restore changes nothing.
+struct StagedSide {
     crossover_hz: f32,
     lookahead_ms: f32,
-    detector_delay: usize,
+    designed: [f32; 3],
+    detector_offset: usize,
     gains: [f32; 2],
-    ramps: [Ramp; RAMP_COUNT],
-    crossover: Crossover,
-    dry_ring: Box<[f32]>,
-    low_ring: Box<[f32]>,
-    high_ring: Box<[f32]>,
+    ramps: [LinearRamp; RAMP_COUNT],
+    filter: [f32; 4],
 }
 
-impl Lane {
-    fn new(defaults: &[f32; PARAMETER_COUNT], sample_rate: u32) -> Option<Self> {
-        let latency = usize::try_from(sample_rate / 50).ok()?;
-        let ring_length = latency.checked_add(1)?;
-        let crossover = Crossover::new(sample_rate, defaults[0])?;
-        let detector_delay = detector_delay(defaults[1], sample_rate, latency)?;
-        Some(Self {
-            cursor: 0,
-            crossover_hz: defaults[0],
-            lookahead_ms: defaults[1],
-            detector_delay,
-            gains: [0.0; 2],
-            ramps: core::array::from_fn(|index| Ramp::fixed(defaults[index + 2])),
-            crossover,
-            dry_ring: vec![0.0; ring_length].into_boxed_slice(),
-            low_ring: vec![0.0; ring_length].into_boxed_slice(),
-            high_ring: vec![0.0; ring_length].into_boxed_slice(),
-        })
+fn write_side<L: Lane, const W: usize>(
+    bytes: &mut [u8],
+    side: &Side<L, W>,
+    track: usize,
+    cursor: usize,
+    ring_len: usize,
+) {
+    write_f32(bytes, 0, side.crossover_hz[track]);
+    write_f32(bytes, 1, side.lookahead_ms[track]);
+    write_f32(bytes, 2, lane_value(side.gain_db[LOW_BAND], track));
+    write_f32(bytes, 3, lane_value(side.gain_db[HIGH_BAND], track));
+    for index in 0..RAMP_COUNT {
+        let ramp = side.ramps[track][index];
+        let word = 4 + index * RAMP_WORDS;
+        write_f32(bytes, word, ramp.current);
+        write_f32(bytes, word + 1, ramp.target);
+        write_f32(bytes, word + 2, ramp.step);
+        write_u32(bytes, word + 3, ramp.remaining);
     }
-    fn full_reset(&mut self, defaults: &[f32; PARAMETER_COUNT], sample_rate: u32) {
-        *self = Self::new(defaults, sample_rate).expect("validated prepared defaults");
+    let filter = [
+        side.filter.a.ic1,
+        side.filter.a.ic2,
+        side.filter.b.ic1,
+        side.filter.b.ic2,
+    ];
+    for (index, value) in filter.into_iter().enumerate() {
+        write_f32(bytes, FILTER_WORD + index, lane_value(value, track));
     }
-    fn discontinuity_reset(&mut self) {
-        self.cursor = 0;
-        self.gains = [0.0; 2];
-        self.crossover.reset();
-        self.dry_ring.fill(0.0);
-        self.low_ring.fill(0.0);
-        self.high_ring.fill(0.0);
-        for ramp in &mut self.ramps {
-            ramp.current = ramp.target;
-            ramp.remaining = 0;
-        }
-    }
-    fn crossover_frame(&mut self, input: f32) -> Option<BandFrame> {
-        let (low, high) = self.crossover.process(input)?;
-        Some(self.store_band_frame(input, low, high))
-    }
-    fn store_band_frame(&mut self, input: f32, low: f32, high: f32) -> BandFrame {
-        let cursor = self.cursor as usize;
-        let length = self.dry_ring.len();
-        self.dry_ring[cursor] = input;
-        self.low_ring[cursor] = low;
-        self.high_ring[cursor] = high;
-        let delayed = (cursor + 1) % length;
-        let detector = (cursor + length - self.detector_delay) % length;
-        self.cursor = ((cursor + 1) % length) as u32;
-        BandFrame {
-            dry: self.dry_ring[delayed],
-            low: self.low_ring[delayed],
-            high: self.high_ring[delayed],
-            detector_low: self.low_ring[detector],
-            detector_high: self.high_ring[detector],
-        }
-    }
-    fn recover(&mut self, recovered: &mut u64) -> f32 {
-        let delayed = self.dry_ring[(self.cursor as usize + 1) % self.dry_ring.len()];
-        self.crossover.reset();
-        self.gains = [0.0; 2];
-        *recovered = recovered.saturating_add(1);
-        delayed
+    for index in 0..ring_len {
+        let slot = wrap(cursor + 1 + index, ring_len) * W + track;
+        write_f32(bytes, LANE_HEADER_WORDS + index, side.low_ring[slot]);
+        write_f32(
+            bytes,
+            LANE_HEADER_WORDS + ring_len + index,
+            side.high_ring[slot],
+        );
     }
 }
 
-/// Prepared allocation-free scalar multiband compressor.
-#[derive(Debug)]
+/// Validates one channel's fixed words. Ring words are validated separately, in place.
+fn stage_side(
+    bytes: &[u8],
+    sample_rate: u32,
+    ring_len: usize,
+) -> Result<StagedSide, StatePayloadError> {
+    let crossover_hz = read_f32(bytes, 0);
+    let lookahead_ms = read_f32(bytes, 1);
+    if !parameter_state_valid(0, crossover_hz) || !parameter_state_valid(1, lookahead_ms) {
+        return Err(state_error("effect.state.parameter"));
+    }
+    let designed =
+        design_lr4(sample_rate, crossover_hz).ok_or(state_error("effect.state.coefficient"))?;
+    let detector_offset = detector_offset(lookahead_ms, sample_rate, ring_len)
+        .ok_or(state_error("effect.state.parameter"))?;
+    let gains = [read_f32(bytes, 2), read_f32(bytes, 3)];
+    if gains
+        .into_iter()
+        .any(|value| !normal_or_zero(value) || !(-100.0..=0.0).contains(&value))
+    {
+        return Err(state_error("effect.state.gain"));
+    }
+    let mut ramps = [LinearRamp::fixed(0.0); RAMP_COUNT];
+    for (index, ramp) in ramps.iter_mut().enumerate() {
+        let word = 4 + index * RAMP_WORDS;
+        let current = read_f32(bytes, word);
+        let target = read_f32(bytes, word + 1);
+        let step = read_f32(bytes, word + 2);
+        let remaining = read_u32(bytes, word + 3);
+        // `LinearRamp`'s invariant, enforced rather than assumed: a ramp at rest is at its target
+        // and has no increment. A payload that says otherwise would have the segment driver add a
+        // stale step to a resting parameter for ever.
+        if !parameter_state_valid(index + 2, current)
+            || !parameter_state_valid(index + 2, target)
+            || !normal_or_zero(step)
+            || remaining > SMOOTHING_SAMPLES
+            || (remaining == 0 && (step != 0.0 || current.to_bits() != target.to_bits()))
+        {
+            return Err(state_error("effect.state.parameter"));
+        }
+        *ramp = LinearRamp {
+            current: normalize_zero(current),
+            target: normalize_zero(target),
+            step: normalize_zero(step),
+            remaining,
+        };
+    }
+    let mut filter = [0.0f32; 4];
+    for (index, word) in filter.iter_mut().enumerate() {
+        *word = read_f32(bytes, FILTER_WORD + index);
+        if !normal_or_zero(*word) {
+            return Err(state_error("effect.state.filter"));
+        }
+    }
+    for index in 0..2 * ring_len {
+        if !normal_or_zero(read_f32(bytes, LANE_HEADER_WORDS + index)) {
+            return Err(state_error("effect.state.ring"));
+        }
+    }
+    Ok(StagedSide {
+        crossover_hz,
+        lookahead_ms,
+        designed,
+        detector_offset,
+        gains: [normalize_zero(gains[0]), normalize_zero(gains[1])],
+        ramps,
+        filter,
+    })
+}
+
+/// Applies a staged channel. Never allocates: the rings are written in place (#94 F9).
+fn commit_side<L: Lane, const W: usize>(
+    side: &mut Side<L, W>,
+    staged: &StagedSide,
+    bytes: &[u8],
+    track: usize,
+    cursor: usize,
+    ring_len: usize,
+) {
+    side.crossover_hz[track] = staged.crossover_hz;
+    side.lookahead_ms[track] = staged.lookahead_ms;
+    side.designed[track] = staged.designed;
+    side.detector_offset[track] = staged.detector_offset;
+    side.coefficients = lane_coefficients::<L, W>(&side.designed);
+    side.gain_db[LOW_BAND] = set_lane_value(side.gain_db[LOW_BAND], track, staged.gains[LOW_BAND]);
+    side.gain_db[HIGH_BAND] =
+        set_lane_value(side.gain_db[HIGH_BAND], track, staged.gains[HIGH_BAND]);
+    side.ramps[track] = staged.ramps;
+    side.cache[track] = [BandCache::empty(); 2];
+    side.filter.a.ic1 = set_lane_value(side.filter.a.ic1, track, staged.filter[0]);
+    side.filter.a.ic2 = set_lane_value(side.filter.a.ic2, track, staged.filter[1]);
+    side.filter.b.ic1 = set_lane_value(side.filter.b.ic1, track, staged.filter[2]);
+    side.filter.b.ic2 = set_lane_value(side.filter.b.ic2, track, staged.filter[3]);
+    for index in 0..ring_len {
+        let slot = wrap(cursor + 1 + index, ring_len) * W + track;
+        side.low_ring[slot] = read_f32(bytes, LANE_HEADER_WORDS + index);
+        side.high_ring[slot] = read_f32(bytes, LANE_HEADER_WORDS + ring_len + index);
+    }
+}
+
+fn state_error(code: &'static str) -> StatePayloadError {
+    StatePayloadError { code }
+}
+
+fn parameter_state_valid(index: usize, value: f32) -> bool {
+    parameter_value_valid(&SPECS[index], value)
+}
+
+/// Bytes in one payload word. The shared codec's `WORD_BYTES`, named once here.
+const fn state_payload_word_bytes() -> usize {
+    miso_engine_effect_runtime::state_payload::WORD_BYTES
+}
+
+impl<L: Lane, const W: usize> Instance<L, W> {
+    /// The three section lengths a payload of this instance must have.
+    ///
+    /// The shared codec's `validate_lengths` is not used: it derives its sizes from
+    /// `expected_sizes`, which unconditionally reserves the two versioned header words this crate
+    /// does not carry (W2-D2). The word codec itself is the shared one.
+    fn validate_lengths(&self, sections: (usize, usize, usize)) -> Result<(), StatePayloadError> {
+        let lane = (LANE_HEADER_WORDS + 2 * self.ring_len) * state_payload_word_bytes();
+        if sections.0 != 0 || sections.1 != lane || sections.2 != lane {
+            return Err(state_error(STATE_LENGTH_CODE));
+        }
+        Ok(())
+    }
+
+    fn snapshot(
+        &self,
+        track: usize,
+        output: StatePayloadOutput<'_>,
+        sizes: StatePayloadSizes,
+    ) -> Result<(), StatePayloadError> {
+        self.validate_lengths((output.common.len(), output.left.len(), output.right.len()))?;
+        debug_assert_eq!(output.left.len(), sizes.left_bytes as usize);
+        write_side(
+            output.left,
+            &self.sides[0],
+            track,
+            self.cursor,
+            self.ring_len,
+        );
+        write_side(
+            output.right,
+            &self.sides[1],
+            track,
+            self.cursor,
+            self.ring_len,
+        );
+        Ok(())
+    }
+
+    fn restore(
+        &mut self,
+        track: usize,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        if version != STATE_LAYOUT_VERSION {
+            return Err(state_error(STATE_VERSION_CODE));
+        }
+        self.validate_lengths((input.common.len(), input.left.len(), input.right.len()))?;
+        let left = stage_side(input.left, self.sample_rate, self.ring_len)?;
+        let right = stage_side(input.right, self.sample_rate, self.ring_len)?;
+        commit_side(
+            &mut self.sides[0],
+            &left,
+            input.left,
+            track,
+            self.cursor,
+            self.ring_len,
+        );
+        commit_side(
+            &mut self.sides[1],
+            &right,
+            input.right,
+            track,
+            self.cursor,
+            self.ring_len,
+        );
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Contract surface
+// ---------------------------------------------------------------------------------------------
+
+/// Factory for the fixed two-band multiband compressor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MultibandCompressorFactory;
+
+/// A prepared scalar multiband compressor: the `WIDTH = 1` instantiation of the one body.
 pub struct PreparedMultibandCompressor {
     metadata: PreparedEffectMetadata,
-    left_defaults: [f32; PARAMETER_COUNT],
-    right_defaults: [f32; PARAMETER_COUNT],
-    left: Lane,
-    right: Lane,
+    instance: Instance<f32, 1>,
 }
 
-struct PreparedMultibandCompressorBank<const W: usize> {
+/// A prepared homogeneous bank of `W` tracks.
+struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
     metadata: PreparedBankMetadata,
     effect_metadata: PreparedEffectMetadata,
-    tpt_kernel: PreparedTptBankKernelV1,
-    gain_kernel: PreparedCompressorGainMixKernelV1,
-    left_defaults: [[f32; PARAMETER_COUNT]; W],
-    right_defaults: [[f32; PARAMETER_COUNT]; W],
-    left: [Lane; W],
-    right: [Lane; W],
-}
-
-impl NativeEffectFactory for MultibandCompressorFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
-        &MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
-    }
-    fn prepare(
-        &self,
-        request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
-        let left = Lane::new(&left_defaults, metadata.sample_rate).ok_or(EffectPrepareError {
-            code: "effect.prepare.failed",
-        })?;
-        let right = Lane::new(&right_defaults, metadata.sample_rate).ok_or(EffectPrepareError {
-            code: "effect.prepare.failed",
-        })?;
-        Ok(Box::new(PreparedMultibandCompressor {
-            metadata,
-            left_defaults,
-            right_defaults,
-            left,
-            right,
-        }))
-    }
-    fn bind_homogeneous_bank(
-        &self,
-        request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
-        match request.width {
-            BankWidth::Four => prepare_homogeneous_bank::<4>(self, request),
-            BankWidth::Eight => prepare_homogeneous_bank::<8>(self, request),
-        }
-    }
-}
-
-fn prepare_homogeneous_bank<const W: usize>(
-    factory: &MultibandCompressorFactory,
-    request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-    let first = request
-        .requests
-        .first()
-        .copied()
-        .ok_or(EffectPrepareError {
-            code: "effect.bank.requests",
-        })?;
-    let metadata = expected_prepared_metadata(factory.descriptor(), first)?;
-    let (first_left, first_right) = initial_defaults(first.initial_values)?;
-    let mut left_defaults = [first_left; W];
-    let mut right_defaults = [first_right; W];
-    let mut same_program = true;
-    for (track, item) in request.requests.iter().copied().enumerate() {
-        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
-        if candidate.program_key() != metadata.program_key() {
-            same_program = false;
-        }
-        let (left, right) = initial_defaults(item.initial_values)?;
-        left_defaults[track] = left;
-        right_defaults[track] = right;
-    }
-    if !same_program {
-        return Ok(None);
-    }
-    let tpt_kernel = match PreparedTptBankKernelV1::try_new(request.backend) {
-        Ok(kernel) => kernel,
-        Err(TptBankKernelError::BackendUnavailable) => return Ok(None),
-        Err(_) => {
-            return Err(EffectPrepareError {
-                code: "effect.bank.backend",
-            });
-        }
-    };
-    let gain_kernel = match PreparedCompressorGainMixKernelV1::try_new(request.backend) {
-        Ok(kernel) => kernel,
-        Err(CompressorGainMixKernelError::BackendUnavailable) => return Ok(None),
-        Err(_) => {
-            return Err(EffectPrepareError {
-                code: "effect.bank.backend",
-            });
-        }
-    };
-    let left = core::array::from_fn(|track| {
-        Lane::new(&left_defaults[track], metadata.sample_rate).expect("validated bank request")
-    });
-    let right = core::array::from_fn(|track| {
-        Lane::new(&right_defaults[track], metadata.sample_rate).expect("validated bank request")
-    });
-    Ok(Some(Box::new(PreparedMultibandCompressorBank::<W> {
-        metadata: PreparedBankMetadata {
-            width: request.width,
-            program_key: metadata.program_key(),
-        },
-        effect_metadata: metadata,
-        tpt_kernel,
-        gain_kernel,
-        left_defaults,
-        right_defaults,
-        left,
-        right,
-    })))
+    instance: Instance<L, W>,
 }
 
 fn initial_defaults(
@@ -696,143 +1536,100 @@ fn initial_defaults(
     }
     let mut left = [0.0; PARAMETER_COUNT];
     let mut right = [0.0; PARAMETER_COUNT];
-    for (index, parameter) in MULTIBAND_COMPRESSOR_PARAMETERS_V1.iter().enumerate() {
-        let left_value = values[index * 2];
-        let right_value = values[index * 2 + 1];
-        if left_value.parameter_index != index as u32
-            || right_value.parameter_index != index as u32
-            || left_value.channel != ParameterChannel::Left
-            || right_value.channel != ParameterChannel::Right
-            || !parameter_value_valid(parameter, left_value.value)
-            || !parameter_value_valid(parameter, right_value.value)
-            || negative_zero(left_value.value)
-            || negative_zero(right_value.value)
+    for index in 0..PARAMETER_COUNT {
+        let low = values[index * 2];
+        let high = values[index * 2 + 1];
+        if low.parameter_index != index as u32
+            || high.parameter_index != index as u32
+            || low.channel != ParameterChannel::Left
+            || high.channel != ParameterChannel::Right
+            || !parameter_value_valid(&SPECS[index], low.value)
+            || !parameter_value_valid(&SPECS[index], high.value)
         {
             return Err(EffectPrepareError {
                 code: "effect.parameter.initial",
             });
         }
-        left[index] = normalize_zero(left_value.value);
-        right[index] = normalize_zero(right_value.value);
+        left[index] = normalize_zero(low.value);
+        right[index] = normalize_zero(high.value);
     }
     Ok((left, right))
 }
 
-fn parameter_value_valid(parameter: &ParameterDescriptorV1, value: f32) -> bool {
-    value.is_finite()
-        && parameter
-            .minimum
-            .zip(parameter.maximum)
-            .is_some_and(|(minimum, maximum)| value >= minimum && value <= maximum)
-}
-fn negative_zero(value: f32) -> bool {
-    value.to_bits() == (-0.0_f32).to_bits()
-}
-fn normalize_zero(value: f32) -> f32 {
-    if value == 0.0 { 0.0 } else { value }
-}
-fn normal_or_zero(value: f32) -> bool {
-    value.is_finite() && (value == 0.0 || value.is_normal())
-}
-fn flushed(value: f32) -> Option<f32> {
-    if !value.is_finite() {
-        None
-    } else if value.is_subnormal() {
-        Some(0.0)
-    } else {
-        Some(value)
-    }
-}
+const PREPARE_FAILED: EffectPrepareError = EffectPrepareError {
+    code: "effect.prepare.failed",
+};
 
-fn detector_delay(lookahead_ms: f32, sample_rate: u32, latency: usize) -> Option<usize> {
-    if !parameter_value_valid(&MULTIBAND_COMPRESSOR_PARAMETERS_V1[1], lookahead_ms)
-        || sample_rate == 0
-    {
-        return None;
-    }
-    let lookahead = (f64::from(lookahead_ms) * f64::from(sample_rate) / 1_000.0 + 0.5).floor();
-    if !lookahead.is_finite() || lookahead < 0.0 || lookahead > usize::MAX as f64 {
-        return None;
-    }
-    Some(latency - (lookahead as usize).min(latency))
-}
-
-fn linked_levels(link: LinkMode, left: f32, right: f32) -> (f32, f32) {
-    let (left, right) = (left.abs(), right.abs());
-    match link {
-        LinkMode::DualMono => (left, right),
-        LinkMode::Maximum => {
-            let value = left.max(right);
-            (value, value)
+fn prepare_bank<L: Lane, const W: usize>(
+    factory: &MultibandCompressorFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    let first = request
+        .requests
+        .first()
+        .copied()
+        .ok_or(EffectPrepareError {
+            code: "effect.bank.requests",
+        })?;
+    let metadata = expected_prepared_metadata(factory.descriptor(), first)?;
+    let (first_left, first_right) = initial_defaults(first.initial_values)?;
+    let mut left = [first_left; W];
+    let mut right = [first_right; W];
+    let mut same_program = true;
+    // Every request is validated before any fallback: a malformed bank request is an error, not a
+    // reason to fall back to scalar.
+    for (track, item) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
         }
-        LinkMode::Average => {
-            let value = 0.5 * left + 0.5 * right;
-            (value, value)
+        let (track_left, track_right) = initial_defaults(item.initial_values)?;
+        left[track] = track_left;
+        right[track] = track_right;
+    }
+    if !same_program {
+        return Ok(None);
+    }
+    let instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
+    Ok(Some(Box::new(PreparedMultibandCompressorBank::<L, W> {
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+        effect_metadata: metadata,
+        instance,
+    })))
+}
+
+impl NativeEffectFactory for MultibandCompressorFactory {
+    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+        &MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
+    }
+
+    fn prepare(
+        &self,
+        request: PrepareEffectRequest<'_>,
+    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
+        let (left, right) = initial_defaults(request.initial_values)?;
+        let instance = Instance::<f32, 1>::new([left], [right], metadata).ok_or(PREPARE_FAILED)?;
+        Ok(Box::new(PreparedMultibandCompressor { metadata, instance }))
+    }
+
+    fn bind_homogeneous_bank(
+        &self,
+        request: PrepareEffectBankRequest<'_>,
+    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        if !request.has_matching_backend_width()
+            || request.requests.len() != request.width.lanes() as usize
+        {
+            return Err(EffectPrepareError {
+                code: "effect.bank.requests",
+            });
         }
-    }
-}
-
-fn gain_target(detector: f32, threshold: f32, ratio: f32) -> Option<f32> {
-    let level = (20.0 * detector.max(1.0e-8).log10()).clamp(-160.0, 24.0);
-    let half = 0.5 * KNEE_DB;
-    let reciprocal_ratio = 1.0 / ratio;
-    let output = if level < threshold - half {
-        level
-    } else if level > threshold + half {
-        threshold + (level - threshold) * reciprocal_ratio
-    } else {
-        let v = level - threshold + half;
-        level + (reciprocal_ratio - 1.0) * (v * v) / (2.0 * KNEE_DB)
-    };
-    flushed((output - level).clamp(-100.0, 0.0))
-}
-
-fn band_amplitude(lane: &mut Lane, band: usize, detector: f32, sample_rate: u32) -> Option<f32> {
-    let base = if band == LOW_BAND { 0 } else { 5 };
-    let target = gain_target(
-        detector,
-        lane.ramps[base].current,
-        lane.ramps[base + 1].current,
-    )?;
-    let attack_ms = lane.ramps[base + 2].current;
-    let release_ms = lane.ramps[base + 3].current;
-    let attack = flushed((-1.0 / (0.001 * attack_ms * sample_rate as f32)).exp())?;
-    let release = flushed((-1.0 / (0.001 * release_ms * sample_rate as f32)).exp())?;
-    let coefficient = if target < lane.gains[band] {
-        attack
-    } else {
-        release
-    };
-    let updated = flushed(coefficient * lane.gains[band] + (1.0 - coefficient) * target)?;
-    lane.gains[band] = updated;
-    flushed(10.0_f32.powf((updated + lane.ramps[base + 4].current) * 0.05))
-}
-
-fn active_output(
-    frame: BandFrame,
-    detector_low: f32,
-    detector_high: f32,
-    lane: &mut Lane,
-    metadata: PreparedEffectMetadata,
-) -> Option<f32> {
-    let low =
-        flushed(frame.low * band_amplitude(lane, LOW_BAND, detector_low, metadata.sample_rate)?)?;
-    let high = flushed(
-        frame.high * band_amplitude(lane, HIGH_BAND, detector_high, metadata.sample_rate)?,
-    )?;
-    if metadata.bypass {
-        Some(frame.dry)
-    } else {
-        flushed(low + high)
-    }
-}
-
-fn sanitize(value: f32, report: &mut ProcessReport) -> f32 {
-    match sanitize_sample(value) {
-        Some(value) => value,
-        None => {
-            report.sanitized_main_samples = report.sanitized_main_samples.saturating_add(1);
-            0.0
+        match request.width {
+            BankWidth::Four => prepare_bank::<Simd4, 4>(self, request),
+            BankWidth::Eight => prepare_bank::<Simd8, 8>(self, request),
         }
     }
 }
@@ -841,205 +1638,86 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.metadata
     }
+
     fn reset(&mut self, kind: ResetKind) {
-        match kind {
-            ResetKind::FullToDefaults => {
-                self.left
-                    .full_reset(&self.left_defaults, self.metadata.sample_rate);
-                self.right
-                    .full_reset(&self.right_defaults, self.metadata.sample_rate);
-            }
-            ResetKind::DiscontinuityKeepParameters => {
-                self.left.discontinuity_reset();
-                self.right.discontinuity_reset();
-            }
-        }
+        self.instance.reset(kind);
     }
+
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
-        apply_automation(
+        self.instance.apply_automation(
+            0,
             block.automation,
-            self.metadata,
+            self.metadata.automation_capacity,
             block.first_sample,
-            &mut self.left,
-            &mut self.right,
             &mut report,
         );
-        for index in 0..block.left.len() {
-            for ramp in &mut self.left.ramps {
-                ramp.advance();
-            }
-            for ramp in &mut self.right.ramps {
-                ramp.advance();
-            }
-            let left_input = sanitize(block.left[index], &mut report);
-            let right_input = sanitize(block.right[index], &mut report);
-            let left = self.left.crossover_frame(left_input);
-            let right = self.right.crossover_frame(right_input);
-            match (left, right) {
-                (Some(left), Some(right)) => {
-                    let (left_low, right_low) = linked_levels(
-                        self.metadata.link_mode,
-                        left.detector_low,
-                        right.detector_low,
-                    );
-                    let (left_high, right_high) = linked_levels(
-                        self.metadata.link_mode,
-                        left.detector_high,
-                        right.detector_high,
-                    );
-                    block.left[index] =
-                        active_output(left, left_low, left_high, &mut self.left, self.metadata)
-                            .unwrap_or_else(|| {
-                                self.left.recover(&mut report.recovered_left_samples)
-                            });
-                    block.right[index] =
-                        active_output(right, right_low, right_high, &mut self.right, self.metadata)
-                            .unwrap_or_else(|| {
-                                self.right.recover(&mut report.recovered_right_samples)
-                            });
-                }
-                (Some(left), None) => {
-                    // A fault resets only its lane. The valid lane continues from its own
-                    // detector when the other lane cannot contribute to a linked detector.
-                    block.left[index] = active_output(
-                        left,
-                        left.detector_low.abs(),
-                        left.detector_high.abs(),
-                        &mut self.left,
-                        self.metadata,
-                    )
-                    .unwrap_or_else(|| self.left.recover(&mut report.recovered_left_samples));
-                    block.right[index] = self.right.recover(&mut report.recovered_right_samples);
-                }
-                (None, Some(right)) => {
-                    block.left[index] = self.left.recover(&mut report.recovered_left_samples);
-                    block.right[index] = active_output(
-                        right,
-                        right.detector_low.abs(),
-                        right.detector_high.abs(),
-                        &mut self.right,
-                        self.metadata,
-                    )
-                    .unwrap_or_else(|| self.right.recover(&mut report.recovered_right_samples));
-                }
-                (None, None) => {
-                    block.left[index] = self.left.recover(&mut report.recovered_left_samples);
-                    block.right[index] = self.right.recover(&mut report.recovered_right_samples);
-                }
-            }
+        let frames = block.left.len();
+        if frames == 0 || block.right.len() != frames {
+            return report;
         }
-        report
+        let mut reports = [report];
+        render(
+            &mut self.instance,
+            block.left,
+            block.right,
+            frames,
+            &mut reports,
+        );
+        reports[0]
     }
+
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        validate_state_lengths(
-            output.common.len(),
-            output.left.len(),
-            output.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        write_lane(output.left, &self.left);
-        write_lane(output.right, &self.right);
-        Ok(())
+        self.instance.snapshot(0, output, self.metadata.state_sizes)
     }
+
     fn restore_state_payload(
         &mut self,
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        if state_layout_version != 1 {
-            return Err(state_error("effect.state.version"));
-        }
-        validate_state_lengths(
-            input.common.len(),
-            input.left.len(),
-            input.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        let left = read_lane(input.left, self.metadata.sample_rate)?;
-        let right = read_lane(input.right, self.metadata.sample_rate)?;
-        self.left = left;
-        self.right = right;
-        Ok(())
+        self.instance.restore(0, state_layout_version, input)
     }
 }
 
-impl<const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<W> {
+impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        for track in 0..W {
-            match kind {
-                ResetKind::FullToDefaults => {
-                    self.left[track]
-                        .full_reset(&self.left_defaults[track], self.effect_metadata.sample_rate);
-                    self.right[track].full_reset(
-                        &self.right_defaults[track],
-                        self.effect_metadata.sample_rate,
-                    );
-                }
-                ResetKind::DiscontinuityKeepParameters => {
-                    self.left[track].discontinuity_reset();
-                    self.right[track].discontinuity_reset();
-                }
-            }
-        }
+        self.instance.reset(kind);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let mut report = BankProcessReport::empty(self.metadata.width);
-        let expected_samples = (block.frames as usize).checked_mul(W);
-        let offsets_valid = block.automation_offsets.len() == W + 1
-            && block.automation_offsets.first() == Some(&0)
-            && block.automation_offsets.last().copied() == Some(block.automation.len() as u32)
-            && block
-                .automation_offsets
-                .windows(2)
-                .all(|pair| pair[0] <= pair[1]);
-        if block.width != self.metadata.width
-            || W != self.metadata.width.lanes() as usize
-            || block.frames == 0
-            || block.frames > self.effect_metadata.quantum
-            || expected_samples != Some(block.left.len())
-            || expected_samples != Some(block.right.len())
-            || block.sidechain.is_some()
-            || !offsets_valid
-            || block
-                .first_sample
-                .checked_add(u64::from(block.frames))
-                .is_none()
-        {
+        // `EffectBankProcessBlock::new` has already validated the block's shape, its automation
+        // offsets and its frame count against the quantum (#94 F11); what is left is the two
+        // facts that belong to this instance rather than to the block.
+        if block.width != self.metadata.width || block.sidechain.is_some() {
             return report;
         }
         for track in 0..W {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
-            apply_automation(
+            self.instance.apply_automation(
+                track,
                 &block.automation[start..end],
-                self.effect_metadata,
+                self.effect_metadata.automation_capacity,
                 block.first_sample,
-                &mut self.left[track],
-                &mut self.right[track],
                 &mut report.reports[track],
             );
         }
-        for frame in 0..block.frames as usize {
-            process_bank_frame(
-                &mut self.left,
-                &mut self.right,
-                self.tpt_kernel,
-                self.gain_kernel,
-                self.effect_metadata,
-                &mut report,
-                &mut block.left[frame * W..(frame + 1) * W],
-                &mut block.right[frame * W..(frame + 1) * W],
-            );
-        }
+        render(
+            &mut self.instance,
+            block.left,
+            block.right,
+            block.frames as usize,
+            &mut report.reports,
+        );
         report
     }
 
@@ -1049,15 +1727,8 @@ impl<const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBan
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W)?;
-        validate_state_lengths(
-            output.common.len(),
-            output.left.len(),
-            output.right.len(),
-            self.effect_metadata.state_sizes,
-        )?;
-        write_lane(output.left, &self.left[track]);
-        write_lane(output.right, &self.right[track]);
-        Ok(())
+        self.instance
+            .snapshot(track, output, self.effect_metadata.state_sizes)
     }
 
     fn restore_track_state_payload(
@@ -1067,20 +1738,7 @@ impl<const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBan
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W)?;
-        if state_layout_version != 1 {
-            return Err(state_error("effect.state.version"));
-        }
-        validate_state_lengths(
-            input.common.len(),
-            input.left.len(),
-            input.right.len(),
-            self.effect_metadata.state_sizes,
-        )?;
-        let left = read_lane(input.left, self.effect_metadata.sample_rate)?;
-        let right = read_lane(input.right, self.effect_metadata.sample_rate)?;
-        self.left[track] = left;
-        self.right[track] = right;
-        Ok(())
+        self.instance.restore(track, state_layout_version, input)
     }
 }
 
@@ -1090,1302 +1748,4 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
         return Err(state_error("effect.state.track"));
     }
     Ok(track)
-}
-
-fn process_tpt_bank_section<const W: usize>(
-    lanes: &mut [Lane; W],
-    kernel: PreparedTptBankKernelV1,
-    section: usize,
-    high_pass: bool,
-    samples: &mut [f32; W],
-    failed: &mut [bool; W],
-) -> bool {
-    let mut c1 = [0.0; W];
-    let mut a2 = [0.0; W];
-    let mut a3 = [0.0; W];
-    let mut k = [0.0; W];
-    let mut s1 = [0.0; W];
-    let mut s2 = [0.0; W];
-    let mask = [if high_pass { u32::MAX } else { 0 }; W];
-    for track in 0..W {
-        let coefficients = lanes[track].crossover.coefficients;
-        c1[track] = coefficients.c1;
-        a2[track] = coefficients.a2;
-        a3[track] = coefficients.a3;
-        k[track] = coefficients.k;
-        if failed[track] {
-            samples[track] = 0.0;
-            continue;
-        }
-        match (
-            flushed(lanes[track].crossover.sections[section].s1),
-            flushed(lanes[track].crossover.sections[section].s2),
-        ) {
-            (Some(left), Some(right)) => {
-                s1[track] = left;
-                s2[track] = right;
-            }
-            _ => failed[track] = true,
-        }
-    }
-    if kernel
-        .process_tpt(samples, &c1, &a2, &a3, &k, &mut s1, &mut s2, &mask)
-        .is_err()
-    {
-        return false;
-    }
-    for track in 0..W {
-        if failed[track] {
-            continue;
-        }
-        match (
-            flushed(samples[track]),
-            flushed(s1[track]),
-            flushed(s2[track]),
-        ) {
-            (Some(sample), Some(next_s1), Some(next_s2)) => {
-                samples[track] = sample;
-                lanes[track].crossover.sections[section].s1 = next_s1;
-                lanes[track].crossover.sections[section].s2 = next_s2;
-            }
-            _ => failed[track] = true,
-        }
-    }
-    true
-}
-
-fn process_crossover_bank<const W: usize>(
-    lanes: &mut [Lane; W],
-    kernel: PreparedTptBankKernelV1,
-    input: [f32; W],
-) -> Option<([f32; W], [f32; W], [bool; W])> {
-    let mut failed = [false; W];
-    let mut low = input;
-    let mut high = input;
-    if !process_tpt_bank_section(lanes, kernel, 0, false, &mut low, &mut failed)
-        || !process_tpt_bank_section(lanes, kernel, 1, false, &mut low, &mut failed)
-        || !process_tpt_bank_section(lanes, kernel, 2, true, &mut high, &mut failed)
-        || !process_tpt_bank_section(lanes, kernel, 3, true, &mut high, &mut failed)
-    {
-        return None;
-    }
-    Some((low, high, failed))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish_bank_side<const W: usize>(
-    lanes: &mut [Lane; W],
-    frames: [Option<BandFrame>; W],
-    detector_low: [f32; W],
-    detector_high: [f32; W],
-    kernel: PreparedCompressorGainMixKernelV1,
-    metadata: PreparedEffectMetadata,
-    reports: &mut [ProcessReport; 8],
-    left_lane: bool,
-    output: &mut [f32],
-) {
-    let mut low = [0.0; W];
-    let mut high = [0.0; W];
-    let mut low_gain = [1.0; W];
-    let mut high_gain = [1.0; W];
-    let mixes = [1.0; W];
-    let dry_mask = [0_u32; W];
-    let wet_mask = [u32::MAX; W];
-    let mut dry = [0.0; W];
-    let mut recovered = [false; W];
-    for track in 0..W {
-        let counter = if left_lane {
-            &mut reports[track].recovered_left_samples
-        } else {
-            &mut reports[track].recovered_right_samples
-        };
-        let Some(frame) = frames[track] else {
-            output[track] = lanes[track].recover(counter);
-            recovered[track] = true;
-            continue;
-        };
-        dry[track] = frame.dry;
-        low[track] = frame.low;
-        high[track] = frame.high;
-        match (
-            band_amplitude(
-                &mut lanes[track],
-                LOW_BAND,
-                detector_low[track],
-                metadata.sample_rate,
-            ),
-            band_amplitude(
-                &mut lanes[track],
-                HIGH_BAND,
-                detector_high[track],
-                metadata.sample_rate,
-            ),
-        ) {
-            (Some(low_value), Some(high_value)) => {
-                low_gain[track] = low_value;
-                high_gain[track] = high_value;
-            }
-            _ => {
-                output[track] = lanes[track].recover(counter);
-                recovered[track] = true;
-            }
-        }
-    }
-    let kernels_ok = kernel
-        .process_gain_mix(&mut low, &low_gain, &mixes, &dry_mask, &wet_mask)
-        .is_ok()
-        && kernel
-            .process_gain_mix(&mut high, &high_gain, &mixes, &dry_mask, &wet_mask)
-            .is_ok();
-    for track in 0..W {
-        if recovered[track] {
-            continue;
-        }
-        let counter = if left_lane {
-            &mut reports[track].recovered_left_samples
-        } else {
-            &mut reports[track].recovered_right_samples
-        };
-        if !kernels_ok {
-            output[track] = lanes[track].recover(counter);
-        } else if metadata.bypass {
-            output[track] = dry[track];
-        } else if let Some(value) = flushed(low[track] + high[track]) {
-            output[track] = value;
-        } else {
-            output[track] = lanes[track].recover(counter);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_bank_frame<const W: usize>(
-    left_lanes: &mut [Lane; W],
-    right_lanes: &mut [Lane; W],
-    tpt_kernel: PreparedTptBankKernelV1,
-    gain_kernel: PreparedCompressorGainMixKernelV1,
-    metadata: PreparedEffectMetadata,
-    report: &mut BankProcessReport,
-    left_samples: &mut [f32],
-    right_samples: &mut [f32],
-) {
-    let mut left_input = [0.0; W];
-    let mut right_input = [0.0; W];
-    for track in 0..W {
-        for ramp in &mut left_lanes[track].ramps {
-            ramp.advance();
-        }
-        for ramp in &mut right_lanes[track].ramps {
-            ramp.advance();
-        }
-        left_input[track] = sanitize(left_samples[track], &mut report.reports[track]);
-        right_input[track] = sanitize(right_samples[track], &mut report.reports[track]);
-    }
-    let Some((left_low, left_high, left_failed)) =
-        process_crossover_bank(left_lanes, tpt_kernel, left_input)
-    else {
-        return;
-    };
-    let Some((right_low, right_high, right_failed)) =
-        process_crossover_bank(right_lanes, tpt_kernel, right_input)
-    else {
-        return;
-    };
-    let mut left_frames = [None; W];
-    let mut right_frames = [None; W];
-    for track in 0..W {
-        if left_failed[track] {
-            left_lanes[track].crossover.reset();
-            left_lanes[track].gains = [0.0; 2];
-        } else {
-            left_frames[track] = Some(left_lanes[track].store_band_frame(
-                left_input[track],
-                left_low[track],
-                left_high[track],
-            ));
-        }
-        if right_failed[track] {
-            right_lanes[track].crossover.reset();
-            right_lanes[track].gains = [0.0; 2];
-        } else {
-            right_frames[track] = Some(right_lanes[track].store_band_frame(
-                right_input[track],
-                right_low[track],
-                right_high[track],
-            ));
-        }
-    }
-    let mut left_detector_low = [0.0; W];
-    let mut right_detector_low = [0.0; W];
-    let mut left_detector_high = [0.0; W];
-    let mut right_detector_high = [0.0; W];
-    for track in 0..W {
-        match (left_frames[track], right_frames[track]) {
-            (Some(left), Some(right)) => {
-                (left_detector_low[track], right_detector_low[track]) =
-                    linked_levels(metadata.link_mode, left.detector_low, right.detector_low);
-                (left_detector_high[track], right_detector_high[track]) =
-                    linked_levels(metadata.link_mode, left.detector_high, right.detector_high);
-            }
-            (Some(left), None) => {
-                left_detector_low[track] = left.detector_low.abs();
-                left_detector_high[track] = left.detector_high.abs();
-            }
-            (None, Some(right)) => {
-                right_detector_low[track] = right.detector_low.abs();
-                right_detector_high[track] = right.detector_high.abs();
-            }
-            (None, None) => {}
-        }
-    }
-    finish_bank_side(
-        left_lanes,
-        left_frames,
-        left_detector_low,
-        left_detector_high,
-        gain_kernel,
-        metadata,
-        &mut report.reports,
-        true,
-        left_samples,
-    );
-    finish_bank_side(
-        right_lanes,
-        right_frames,
-        right_detector_low,
-        right_detector_high,
-        gain_kernel,
-        metadata,
-        &mut report.reports,
-        false,
-        right_samples,
-    );
-}
-
-fn apply_automation(
-    spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
-    first_sample: u64,
-    left: &mut Lane,
-    right: &mut Lane,
-    report: &mut ProcessReport,
-) {
-    let mut pending = [[None; RAMP_COUNT]; 2];
-    let mut prior = None;
-    for (span_index, span) in spans.iter().enumerate() {
-        let lane = match span.channel {
-            ParameterChannel::Left => 0,
-            ParameterChannel::Right => 1,
-            ParameterChannel::Both => {
-                report.invalid_spans = report.invalid_spans.saturating_add(1);
-                continue;
-            }
-        };
-        let parameter = span.parameter_index as usize;
-        let ramp = parameter.checked_sub(2);
-        let order = span
-            .parameter_index
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(lane as u32));
-        let valid = span_index < metadata.automation_capacity as usize
-            && ramp.is_some_and(|value| value < RAMP_COUNT)
-            && span.kind == AutomationSpanKind::Point
-            && span.start_sample == first_sample
-            && span.end_sample == first_sample
-            && span.start_value.to_bits() == span.end_value.to_bits()
-            && parameter < PARAMETER_COUNT
-            && parameter_value_valid(
-                &MULTIBAND_COMPRESSOR_PARAMETERS_V1[parameter],
-                span.start_value,
-            )
-            && order.is_some_and(|value| prior.is_none_or(|previous| value > previous))
-            && ramp.is_some_and(|value| pending[lane][value].is_none());
-        let Some(ramp) = ramp.filter(|value| *value < RAMP_COUNT) else {
-            report.invalid_spans = report.invalid_spans.saturating_add(1);
-            continue;
-        };
-        if !valid {
-            report.invalid_spans = report.invalid_spans.saturating_add(1);
-            continue;
-        }
-        prior = order;
-        pending[lane][ramp] = Some(normalize_zero(span.start_value));
-    }
-    for (index, (left_pending, right_pending)) in
-        pending[0].iter().zip(pending[1].iter()).enumerate()
-    {
-        if let Some(value) = *left_pending {
-            left.ramps[index].target = value;
-            left.ramps[index].remaining = 64;
-        }
-        if let Some(value) = *right_pending {
-            right.ramps[index].target = value;
-            right.ramps[index].remaining = 64;
-        }
-    }
-}
-
-fn validate_state_lengths(
-    common: usize,
-    left: usize,
-    right: usize,
-    sizes: StatePayloadSizes,
-) -> Result<(), StatePayloadError> {
-    if common != sizes.common_bytes as usize
-        || left != sizes.left_bytes as usize
-        || right != sizes.right_bytes as usize
-    {
-        Err(state_error("effect.state.length"))
-    } else {
-        Ok(())
-    }
-}
-fn state_error(code: &'static str) -> StatePayloadError {
-    StatePayloadError { code }
-}
-fn write_u32(bytes: &mut [u8], word: usize, value: u32) {
-    bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
-}
-fn write_f32(bytes: &mut [u8], word: usize, value: f32) {
-    write_u32(bytes, word, value.to_bits());
-}
-fn read_u32(bytes: &[u8], word: usize) -> u32 {
-    u32::from_le_bytes(
-        bytes[word * 4..word * 4 + 4]
-            .try_into()
-            .expect("validated state bytes"),
-    )
-}
-fn read_f32(bytes: &[u8], word: usize) -> f32 {
-    f32::from_bits(read_u32(bytes, word))
-}
-
-fn write_lane(bytes: &mut [u8], lane: &Lane) {
-    write_u32(bytes, 0, lane.cursor);
-    write_f32(bytes, 1, lane.crossover_hz);
-    write_f32(bytes, 2, lane.lookahead_ms);
-    write_f32(bytes, 3, lane.gains[LOW_BAND]);
-    write_f32(bytes, 4, lane.gains[HIGH_BAND]);
-    for (index, ramp) in lane.ramps.iter().enumerate() {
-        let word = 5 + index * 3;
-        write_f32(bytes, word, ramp.current);
-        write_f32(bytes, word + 1, ramp.target);
-        write_u32(bytes, word + 2, ramp.remaining);
-    }
-    for (index, section) in lane.crossover.sections.iter().enumerate() {
-        let word = 35 + index * 2;
-        write_f32(bytes, word, section.s1);
-        write_f32(bytes, word + 1, section.s2);
-    }
-    let length = lane.dry_ring.len();
-    for (index, value) in lane.dry_ring.iter().enumerate() {
-        write_f32(bytes, STATE_HEADER_WORDS + index, *value);
-    }
-    for (index, value) in lane.low_ring.iter().enumerate() {
-        write_f32(bytes, STATE_HEADER_WORDS + length + index, *value);
-    }
-    for (index, value) in lane.high_ring.iter().enumerate() {
-        write_f32(bytes, STATE_HEADER_WORDS + 2 * length + index, *value);
-    }
-}
-
-fn read_lane(bytes: &[u8], sample_rate: u32) -> Result<Lane, StatePayloadError> {
-    let latency =
-        usize::try_from(sample_rate / 50).map_err(|_| state_error("effect.state.length"))?;
-    let length = latency
-        .checked_add(1)
-        .ok_or(state_error("effect.state.length"))?;
-    if bytes.len() != (STATE_HEADER_WORDS + 3 * length) * 4 {
-        return Err(state_error("effect.state.length"));
-    }
-    let cursor = read_u32(bytes, 0);
-    if cursor as usize >= length {
-        return Err(state_error("effect.state.cursor"));
-    }
-    let crossover_hz = read_f32(bytes, 1);
-    let lookahead_ms = read_f32(bytes, 2);
-    if !parameter_state_valid(0, crossover_hz) || !parameter_state_valid(1, lookahead_ms) {
-        return Err(state_error("effect.state.parameter"));
-    }
-    let gains = [read_f32(bytes, 3), read_f32(bytes, 4)];
-    if gains.into_iter().any(|value| {
-        !normal_or_zero(value) || negative_zero(value) || !(-100.0..=0.0).contains(&value)
-    }) {
-        return Err(state_error("effect.state.gain"));
-    }
-    let mut ramps = [Ramp::fixed(0.0); RAMP_COUNT];
-    for (index, ramp) in ramps.iter_mut().enumerate() {
-        let word = 5 + index * 3;
-        let current = read_f32(bytes, word);
-        let target = read_f32(bytes, word + 1);
-        let remaining = read_u32(bytes, word + 2);
-        if !parameter_state_valid(index + 2, current)
-            || !parameter_state_valid(index + 2, target)
-            || remaining > 64
-        {
-            return Err(state_error("effect.state.parameter"));
-        }
-        *ramp = Ramp {
-            current,
-            target,
-            remaining,
-        };
-    }
-    let mut defaults = [0.0; PARAMETER_COUNT];
-    defaults[0] = crossover_hz;
-    defaults[1] = lookahead_ms;
-    for (index, ramp) in ramps.iter().enumerate() {
-        defaults[index + 2] = ramp.current;
-    }
-    let mut lane =
-        Lane::new(&defaults, sample_rate).ok_or(state_error("effect.state.coefficient"))?;
-    lane.cursor = cursor;
-    lane.gains = gains;
-    lane.ramps = ramps;
-    for (index, section) in lane.crossover.sections.iter_mut().enumerate() {
-        let word = 35 + index * 2;
-        section.s1 = read_f32(bytes, word);
-        section.s2 = read_f32(bytes, word + 1);
-        if !normal_or_zero(section.s1) || !normal_or_zero(section.s2) {
-            return Err(state_error("effect.state.filter"));
-        }
-    }
-    for (index, value) in lane.dry_ring.iter_mut().enumerate() {
-        *value = read_f32(bytes, STATE_HEADER_WORDS + index);
-        if !normal_or_zero(*value) {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
-    for (index, value) in lane.low_ring.iter_mut().enumerate() {
-        *value = read_f32(bytes, STATE_HEADER_WORDS + length + index);
-        if !normal_or_zero(*value) {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
-    for (index, value) in lane.high_ring.iter_mut().enumerate() {
-        *value = read_f32(bytes, STATE_HEADER_WORDS + 2 * length + index);
-        if !normal_or_zero(*value) {
-            return Err(state_error("effect.state.ring"));
-        }
-    }
-    Ok(lane)
-}
-
-fn parameter_state_valid(index: usize, value: f32) -> bool {
-    !negative_zero(value)
-        && parameter_value_valid(&MULTIBAND_COMPRESSOR_PARAMETERS_V1[index], value)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use miso_engine_core::KernelBackendV1;
-    use miso_engine_dsp_reference::ReferenceLr4Crossover;
-    use miso_engine_effect_contract::{
-        EffectBankProcessBlock, EffectProcessBlock, PrepareEffectLimits, PreparedPortsV1,
-        StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
-    };
-
-    fn values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
-        core::array::from_fn(|index| InitialParameterValue {
-            parameter_index: (index / 2) as u32,
-            channel: if index % 2 == 0 {
-                ParameterChannel::Left
-            } else {
-                ParameterChannel::Right
-            },
-            value: MULTIBAND_COMPRESSOR_PARAMETERS_V1[index / 2].default_value,
-        })
-    }
-    fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
-        request_with_link(values, LinkMode::DualMono)
-    }
-    fn request_with_link<'a>(
-        values: &'a [InitialParameterValue],
-        link_mode: LinkMode,
-    ) -> PrepareEffectRequest<'a> {
-        PrepareEffectRequest {
-            sample_rate: 48_000,
-            quantum: 128,
-            quality: EffectQuality::Normal,
-            bypass: false,
-            link_mode,
-            ports: PreparedPortsV1 {
-                sidechain: miso_engine_effect_contract::PreparedSidechainPort::None,
-            },
-            initial_values: values,
-            limits: PrepareEffectLimits {
-                maximum_total_state_bytes: u64::MAX,
-                maximum_scratch_bytes: u64::MAX,
-                maximum_automation_spans_per_block: 32,
-            },
-        }
-    }
-    fn rms(values: &[f32]) -> f64 {
-        (values
-            .iter()
-            .map(|value| f64::from(*value) * f64::from(*value))
-            .sum::<f64>()
-            / values.len() as f64)
-            .sqrt()
-    }
-
-    fn varied_values(track: usize) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
-        let mut prepared = values();
-        for lane in 0..2 {
-            prepared[2 + lane].value = [0.0, 5.0, 20.0][track % 3];
-            match track % 4 {
-                0 => {
-                    prepared[6 + lane].value = 1.0;
-                    prepared[12 + lane].value = 0.25;
-                    prepared[16 + lane].value = 1.0;
-                    prepared[22 + lane].value = 0.25;
-                }
-                1 => {
-                    prepared[4 + lane].value = -45.0;
-                    prepared[6 + lane].value = 20.0;
-                    prepared[8 + lane].value = 0.1;
-                    prepared[10 + lane].value = 5.0;
-                    prepared[16 + lane].value = 1.0;
-                }
-                2 => {
-                    prepared[6 + lane].value = 1.0;
-                    prepared[14 + lane].value = -45.0;
-                    prepared[16 + lane].value = 20.0;
-                    prepared[18 + lane].value = 0.1;
-                    prepared[20 + lane].value = 5.0;
-                }
-                _ => {
-                    prepared[4 + lane].value = -42.0;
-                    prepared[6 + lane].value = 12.0;
-                    prepared[8 + lane].value = 0.2;
-                    prepared[14 + lane].value = -36.0;
-                    prepared[16 + lane].value = 8.0;
-                    prepared[18 + lane].value = 0.3;
-                }
-            }
-        }
-        if track == 7 {
-            for lane in 0..2 {
-                prepared[6 + lane].value = 1.0;
-                prepared[12 + lane].value = 0.0;
-                prepared[16 + lane].value = 1.0;
-                prepared[22 + lane].value = 0.0;
-            }
-        }
-        prepared
-    }
-
-    fn snapshot_effect(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>) {
-        let sizes = effect.metadata().state_sizes;
-        let mut left = vec![0; sizes.left_bytes as usize];
-        let mut right = vec![0; sizes.right_bytes as usize];
-        effect
-            .snapshot_state_payload(
-                StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("payload"),
-            )
-            .expect("snapshot");
-        (left, right)
-    }
-
-    fn snapshot_bank_track(
-        bank: &dyn PreparedNativeEffectBank,
-        track: u32,
-        sizes: StatePayloadSizes,
-    ) -> (Vec<u8>, Vec<u8>) {
-        let mut left = vec![0; sizes.left_bytes as usize];
-        let mut right = vec![0; sizes.right_bytes as usize];
-        bank.snapshot_track_state_payload(
-            track,
-            StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes).expect("payload"),
-        )
-        .expect("snapshot");
-        (left, right)
-    }
-
-    #[test]
-    fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
-        validate_descriptor_v1(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1).expect("descriptor");
-        assert_eq!(MULTIBAND_COMPRESSOR_PARAMETERS_V1.len(), 12);
-        for (rate, bytes) in [
-            (44_100, 10_768),
-            (48_000, 11_704),
-            (88_200, 21_352),
-            (96_000, 23_224),
-        ] {
-            let initial = values();
-            let mut prepared = request(&initial);
-            prepared.sample_rate = rate;
-            let effect = MultibandCompressorFactory
-                .prepare(prepared)
-                .expect("prepare");
-            assert_eq!(
-                effect.metadata().latency,
-                LatencySamples((rate / 50) as u64)
-            );
-            assert_eq!(effect.metadata().state_sizes.left_bytes, bytes);
-            assert_eq!(effect.metadata().state_sizes.right_bytes, bytes);
-            assert_eq!(effect.metadata().scratch_bytes, 136);
-            let mut below = request(&initial);
-            below.sample_rate = rate;
-            below.limits.maximum_total_state_bytes = u64::from(bytes * 2 - 1);
-            assert_eq!(
-                MultibandCompressorFactory.prepare(below).err(),
-                Some(EffectPrepareError {
-                    code: "effect.resource.limit"
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn conditioned_lr4_matches_independent_reference_and_recombines_flat() {
-        for rate in [44_100_u32, 48_000, 88_200, 96_000] {
-            for cutoff in [80.0_f32, 1_000.0, 8_000.0] {
-                let mut production = Crossover::new(rate, cutoff).expect("production crossover");
-                let mut reference = ReferenceLr4Crossover::new(f64::from(rate), f64::from(cutoff))
-                    .expect("reference crossover");
-                let mut input = Vec::new();
-                let mut low = Vec::new();
-                let mut high = Vec::new();
-                let mut sum = Vec::new();
-                for index in 0..8_192 {
-                    let sample =
-                        (core::f32::consts::TAU * cutoff * index as f32 / rate as f32).sin();
-                    let (actual_low, actual_high) =
-                        production.process(sample).expect("finite crossover");
-                    let (expected_low, expected_high) = reference.process_sample(f64::from(sample));
-                    assert!((actual_low - expected_low as f32).abs() < 2.0e-5);
-                    assert!((actual_high - expected_high as f32).abs() < 2.0e-5);
-                    if index >= 4_096 {
-                        input.push(sample);
-                        low.push(actual_low);
-                        high.push(actual_high);
-                        sum.push(actual_low + actual_high);
-                    }
-                }
-                let crossing = 20.0 * (rms(&low) / rms(&input)).log10();
-                assert!(
-                    (crossing + 6.020_599_913).abs() <= 0.02,
-                    "rate={rate} cutoff={cutoff} crossing={crossing}"
-                );
-                let all_pass = 20.0 * (rms(&sum) / rms(&input)).log10();
-                assert!(
-                    all_pass.abs() <= 0.05,
-                    "rate={rate} cutoff={cutoff} sum={all_pass}"
-                );
-            }
-        }
-    }
-
-    /// A settled LR4 all-pass sine at 1 kHz can change by at most 0.065479 per
-    /// sample at 0.5 amplitude and +0.01 dB makeup. The 64-sample makeup ramp
-    /// adds less than 0.000009 and f32 rounding less than 0.000001, so 0.0656
-    /// leaves a conservative bound while rejecting a dry/LR4 phase switch.
-    #[test]
-    fn unity_gain_transition_has_no_step_at_crossover() {
-        let mut initial = values();
-        for lane in 0..2 {
-            initial[2 * 2 + lane].value = 0.0;
-            initial[7 * 2 + lane].value = 0.0;
-        }
-        let mut effect = MultibandCompressorFactory
-            .prepare(request(&initial))
-            .expect("unity-gain effect");
-        let mut left = (0..12_288)
-            .map(|index| 0.5 * (core::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin())
-            .collect::<Vec<_>>();
-        let mut right = left.clone();
-
-        for block in 0..96 {
-            let start = block * 128;
-            let value = match block {
-                40 => Some(0.01),
-                60 => Some(0.0),
-                _ => None,
-            };
-            let spans = value.map(|value| {
-                [
-                    PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
-                        channel: ParameterChannel::Left,
-                        parameter_index: 6,
-                        start_sample: start as u64,
-                        end_sample: start as u64,
-                        start_value: value,
-                        end_value: value,
-                    },
-                    PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
-                        channel: ParameterChannel::Right,
-                        parameter_index: 6,
-                        start_sample: start as u64,
-                        end_sample: start as u64,
-                        start_value: value,
-                        end_value: value,
-                    },
-                    PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
-                        channel: ParameterChannel::Left,
-                        parameter_index: 11,
-                        start_sample: start as u64,
-                        end_sample: start as u64,
-                        start_value: value,
-                        end_value: value,
-                    },
-                    PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
-                        channel: ParameterChannel::Right,
-                        parameter_index: 11,
-                        start_sample: start as u64,
-                        end_sample: start as u64,
-                        start_value: value,
-                        end_value: value,
-                    },
-                ]
-            });
-            effect.process(
-                EffectProcessBlock::new(
-                    &mut left[start..start + 128],
-                    &mut right[start..start + 128],
-                    None,
-                    start as u64,
-                    spans.as_ref().map_or(&[], |spans| &spans[..]),
-                    128,
-                )
-                .expect("unity-gain block"),
-            );
-        }
-
-        for index in 4_800..12_288 {
-            let delta = (left[index] - left[index - 1]).abs();
-            assert!(
-                delta <= 0.0656,
-                "index={index} delta={delta} previous={} output={}",
-                left[index - 1],
-                left[index]
-            );
-        }
-    }
-
-    #[test]
-    fn unity_gain_output_is_the_delayed_lr4_sum() {
-        let mut initial = values();
-        for lane in 0..2 {
-            initial[2 * 2 + lane].value = 0.0;
-            initial[7 * 2 + lane].value = 0.0;
-        }
-        let input = (0..8_192)
-            .map(|index| 0.5 * (core::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin())
-            .collect::<Vec<_>>();
-        let mut left = input.clone();
-        let mut right = input.clone();
-        let mut effect = MultibandCompressorFactory
-            .prepare(request(&initial))
-            .expect("unity-gain effect");
-        for block in 0..64 {
-            let start = block * 128;
-            effect.process(
-                EffectProcessBlock::new(
-                    &mut left[start..start + 128],
-                    &mut right[start..start + 128],
-                    None,
-                    start as u64,
-                    &[],
-                    128,
-                )
-                .expect("unity-gain block"),
-            );
-        }
-
-        let mut reference = ReferenceLr4Crossover::new(48_000.0, 1_000.0).expect("reference");
-        let reference_sum = input
-            .iter()
-            .map(|sample| {
-                let (low, high) = reference.process_sample(f64::from(*sample));
-                low + high
-            })
-            .collect::<Vec<_>>();
-        for index in 4_096..8_192 {
-            let expected = reference_sum[index - 960] as f32;
-            let error = (left[index] - expected).abs();
-            assert!(
-                error <= 2.0e-5,
-                "index={index} error={error} actual={} expected={expected}",
-                left[index]
-            );
-        }
-    }
-
-    #[test]
-    fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
-        for (frequency, active_base) in [(120.0_f32, 0_usize), (4_000.0_f32, 5_usize)] {
-            let mut active_values = values();
-            let mut identity_values = values();
-            for lane in 0..2 {
-                active_values[(active_base + 2) * 2 + lane].value = -45.0;
-                active_values[(active_base + 3) * 2 + lane].value = 20.0;
-                active_values[(active_base + 4) * 2 + lane].value = 0.1;
-                active_values[(active_base + 5) * 2 + lane].value = 5.0;
-                identity_values[(active_base + 3) * 2 + lane].value = 1.0;
-            }
-            let mut active = MultibandCompressorFactory
-                .prepare(request(&active_values))
-                .expect("active");
-            let mut identity = MultibandCompressorFactory
-                .prepare(request(&identity_values))
-                .expect("identity");
-            let mut active_pcm = (0..3_072)
-                .map(|index| {
-                    0.8 * (core::f32::consts::TAU * frequency * index as f32 / 48_000.0).sin()
-                })
-                .collect::<Vec<_>>();
-            let mut identity_pcm = active_pcm.clone();
-            let mut right_active = active_pcm.clone();
-            let mut right_identity = identity_pcm.clone();
-            for block in 0..24 {
-                let start = block * 128;
-                active.process(
-                    EffectProcessBlock::new(
-                        &mut active_pcm[start..start + 128],
-                        &mut right_active[start..start + 128],
-                        None,
-                        start as u64,
-                        &[],
-                        128,
-                    )
-                    .expect("active block"),
-                );
-                identity.process(
-                    EffectProcessBlock::new(
-                        &mut identity_pcm[start..start + 128],
-                        &mut right_identity[start..start + 128],
-                        None,
-                        start as u64,
-                        &[],
-                        128,
-                    )
-                    .expect("identity block"),
-                );
-            }
-            assert!(
-                rms(&active_pcm[1_600..]) < rms(&identity_pcm[1_600..]) * 0.9,
-                "frequency={frequency}"
-            );
-        }
-    }
-
-    #[test]
-    fn bypass_latency_automation_and_restore_are_transactional() {
-        let initial = values();
-        let mut request = request(&initial);
-        request.bypass = true;
-        let mut effect = MultibandCompressorFactory.prepare(request).expect("bypass");
-        let sizes = effect.metadata().state_sizes;
-        let mut left = vec![0.0; 128];
-        let mut right = vec![0.0; 128];
-        left[0] = -0.5;
-        left[1] = -0.0;
-        right[0] = 0.25;
-        let span = PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
-            channel: ParameterChannel::Left,
-            parameter_index: 2,
-            start_sample: 0,
-            end_sample: 0,
-            start_value: -80.0,
-            end_value: -80.0,
-        };
-        let mut output = Vec::new();
-        for block in 0..8 {
-            let spans = if block == 0 {
-                core::slice::from_ref(&span)
-            } else {
-                &[]
-            };
-            effect.process(
-                EffectProcessBlock::new(
-                    &mut left,
-                    &mut right,
-                    None,
-                    (block * 128) as u64,
-                    spans,
-                    128,
-                )
-                .expect("block"),
-            );
-            output.extend_from_slice(&left);
-            left.fill(0.0);
-            right.fill(0.0);
-        }
-        assert!(output[..960].iter().all(|sample| *sample == 0.0));
-        assert_eq!(output[960].to_bits(), (-0.5_f32).to_bits());
-        assert_eq!(output[961].to_bits(), (-0.0_f32).to_bits());
-        let mut saved_left = vec![0_u8; sizes.left_bytes as usize];
-        let mut saved_right = vec![0_u8; sizes.right_bytes as usize];
-        effect
-            .snapshot_state_payload(
-                StatePayloadOutput::new(&mut [], &mut saved_left, &mut saved_right, sizes)
-                    .expect("output"),
-            )
-            .expect("snapshot");
-        let mut malformed = saved_right.clone();
-        malformed[..4].fill(u8::MAX);
-        assert!(
-            effect
-                .restore_state_payload(
-                    1,
-                    StatePayloadInput::new(&[], &saved_left, &malformed, sizes).expect("input")
-                )
-                .is_err()
-        );
-        let mut after_left = vec![0_u8; sizes.left_bytes as usize];
-        let mut after_right = vec![0_u8; sizes.right_bytes as usize];
-        effect
-            .snapshot_state_payload(
-                StatePayloadOutput::new(&mut [], &mut after_left, &mut after_right, sizes)
-                    .expect("output"),
-            )
-            .expect("snapshot");
-        assert_eq!(after_left, saved_left);
-        assert_eq!(after_right, saved_right);
-    }
-
-    #[test]
-    fn bank_request_validation_resources_and_w4_unavailable_fallback_are_exact() {
-        let factory = MultibandCompressorFactory;
-        let value_sets = vec![values(); 4];
-        let requests = value_sets
-            .iter()
-            .map(|initial| request_with_link(initial, LinkMode::DualMono))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            factory
-                .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend: KernelBackendV1::Aarch64Neon,
-                    width: BankWidth::Eight,
-                    requests: &requests,
-                })
-                .err(),
-            Some(EffectPrepareError {
-                code: "effect.bank.requests"
-            })
-        );
-
-        let mut malformed_sets = value_sets.clone();
-        malformed_sets[3][0].value = f32::NAN;
-        let malformed = malformed_sets
-            .iter()
-            .map(|initial| request_with_link(initial, LinkMode::DualMono))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            factory
-                .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend: KernelBackendV1::Aarch64Neon,
-                    width: BankWidth::Four,
-                    requests: &malformed,
-                })
-                .err(),
-            Some(EffectPrepareError {
-                code: "effect.parameter.initial"
-            }),
-            "every request is validated before an unavailable-backend fallback"
-        );
-
-        let tpt_available = PreparedTptBankKernelV1::try_new(KernelBackendV1::Aarch64Neon).is_ok();
-        let gain_available =
-            PreparedCompressorGainMixKernelV1::try_new(KernelBackendV1::Aarch64Neon).is_ok();
-        let prepared = factory
-            .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: KernelBackendV1::Aarch64Neon,
-                width: BankWidth::Four,
-                requests: &requests,
-            })
-            .expect("legal W4 request");
-        assert_eq!(prepared.is_some(), tpt_available && gain_available);
-
-        let quality = MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
-            .qualities
-            .iter()
-            .find(|quality| quality.sample_rate == 48_000)
-            .expect("48 kHz quality");
-        let per_track = quality
-            .maximum_state
-            .total()
-            .expect("state bytes")
-            .checked_add(quality.scratch_fixed_bytes)
-            .expect("prepared bytes");
-        assert_eq!(per_track, 23_544);
-        assert_eq!(per_track * 4, 94_176);
-        assert_eq!(per_track * 8, 188_352);
-    }
-
-    fn run_native_w8_parity(backend: KernelBackendV1, exact: bool, links: &[LinkMode]) {
-        if PreparedTptBankKernelV1::try_new(backend).is_err()
-            || PreparedCompressorGainMixKernelV1::try_new(backend).is_err()
-        {
-            return;
-        }
-        for &link in links {
-            let factory = MultibandCompressorFactory;
-            let value_sets = (0..8).map(varied_values).collect::<Vec<_>>();
-            let requests = value_sets
-                .iter()
-                .map(|initial| request_with_link(initial, link))
-                .collect::<Vec<_>>();
-            let mut bank = factory
-                .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend,
-                    width: BankWidth::Eight,
-                    requests: &requests,
-                })
-                .expect("bank request")
-                .expect("native W8 bank");
-            let mut scalars = requests
-                .iter()
-                .copied()
-                .map(|prepared| factory.prepare(prepared).expect("scalar"))
-                .collect::<Vec<_>>();
-            let sizes = scalars[0].metadata().state_sizes;
-            let automation = [PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
-                channel: ParameterChannel::Left,
-                parameter_index: 2,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: -30.0,
-                end_value: -30.0,
-            }];
-            let automation_offsets = [0_u32, 1, 1, 1, 1, 1, 1, 1, 1];
-            for block_index in 0..12_usize {
-                let first_sample = (block_index * 128) as u64;
-                let mut bank_left = vec![0.0_f32; 128 * 8];
-                let mut bank_right = vec![0.0_f32; 128 * 8];
-                let mut scalar_left = vec![vec![0.0_f32; 128]; 8];
-                let mut scalar_right = vec![vec![0.0_f32; 128]; 8];
-                for frame in 0..128 {
-                    let absolute = block_index * 128 + frame;
-                    for track in 0..8 {
-                        let (left, right) = if track == 7 {
-                            let left = match absolute {
-                                20 => -0.0,
-                                30 => f32::NAN,
-                                31 => f32::MIN_POSITIVE * 0.5,
-                                _ => 0.0,
-                            };
-                            (left, 0.0)
-                        } else {
-                            let phase = core::f32::consts::TAU
-                                * (90.0 + 617.0 * track as f32)
-                                * absolute as f32
-                                / 48_000.0;
-                            (0.65 * phase.sin(), -0.45 * (phase * 1.013).sin())
-                        };
-                        bank_left[frame * 8 + track] = left;
-                        bank_right[frame * 8 + track] = right;
-                        scalar_left[track][frame] = left;
-                        scalar_right[track][frame] = right;
-                    }
-                }
-                let spans = if block_index == 0 {
-                    &automation[..]
-                } else {
-                    &[]
-                };
-                let offsets = if block_index == 0 {
-                    &automation_offsets[..]
-                } else {
-                    &[0_u32; 9][..]
-                };
-                let bank_report = bank.process_bank(
-                    EffectBankProcessBlock::new(
-                        &mut bank_left,
-                        &mut bank_right,
-                        None,
-                        128,
-                        BankWidth::Eight,
-                        first_sample,
-                        spans,
-                        offsets,
-                        128,
-                    )
-                    .expect("bank block"),
-                );
-                for track in 0..8 {
-                    let track_spans = if block_index == 0 && track == 0 {
-                        &automation[..]
-                    } else {
-                        &[]
-                    };
-                    let scalar_report = scalars[track].process(
-                        EffectProcessBlock::new(
-                            &mut scalar_left[track],
-                            &mut scalar_right[track],
-                            None,
-                            first_sample,
-                            track_spans,
-                            128,
-                        )
-                        .expect("scalar block"),
-                    );
-                    assert_eq!(bank_report.reports[track], scalar_report);
-                    for frame in 0..128 {
-                        for (actual, expected) in [
-                            (bank_left[frame * 8 + track], scalar_left[track][frame]),
-                            (bank_right[frame * 8 + track], scalar_right[track][frame]),
-                        ] {
-                            if exact {
-                                assert_eq!(
-                                    actual.to_bits(),
-                                    expected.to_bits(),
-                                    "backend={backend:?} link={link:?} track={track} frame={} ",
-                                    first_sample + frame as u64
-                                );
-                            } else {
-                                assert!(
-                                    (actual - expected).abs() <= 1.0e-6 + 2.0e-5 * expected.abs(),
-                                    "backend={backend:?} link={link:?} track={track} frame={} actual={actual} expected={expected}",
-                                    first_sample + frame as u64
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            if exact {
-                let saved = scalars
-                    .iter()
-                    .enumerate()
-                    .map(|(track, scalar)| {
-                        let scalar_state = snapshot_effect(scalar.as_ref());
-                        let bank_state = snapshot_bank_track(bank.as_ref(), track as u32, sizes);
-                        assert_eq!(bank_state, scalar_state);
-                        scalar_state
-                    })
-                    .collect::<Vec<_>>();
-
-                bank.reset(ResetKind::DiscontinuityKeepParameters);
-                for scalar in &mut scalars {
-                    scalar.reset(ResetKind::DiscontinuityKeepParameters);
-                }
-                for (track, scalar) in scalars.iter().enumerate() {
-                    assert_eq!(
-                        snapshot_bank_track(bank.as_ref(), track as u32, sizes),
-                        snapshot_effect(scalar.as_ref())
-                    );
-                }
-
-                for (track, scalar) in scalars.iter_mut().enumerate() {
-                    let (left, right) = &saved[track];
-                    let payload = StatePayloadInput::new(&[], left, right, sizes).expect("payload");
-                    scalar
-                        .restore_state_payload(1, payload)
-                        .expect("scalar restore");
-                    let payload = StatePayloadInput::new(&[], left, right, sizes).expect("payload");
-                    bank.restore_track_state_payload(track as u32, 1, payload)
-                        .expect("bank restore");
-                }
-                let before = snapshot_bank_track(bank.as_ref(), 3, sizes);
-                let mut malformed = before.0.clone();
-                write_f32(&mut malformed, 35, f32::NAN);
-                assert!(
-                    bank.restore_track_state_payload(
-                        3,
-                        1,
-                        StatePayloadInput::new(&[], &malformed, &before.1, sizes).expect("payload")
-                    )
-                    .is_err()
-                );
-                assert_eq!(snapshot_bank_track(bank.as_ref(), 3, sizes), before);
-
-                bank.reset(ResetKind::FullToDefaults);
-                for scalar in &mut scalars {
-                    scalar.reset(ResetKind::FullToDefaults);
-                }
-                for (track, scalar) in scalars.iter().enumerate() {
-                    assert_eq!(
-                        snapshot_bank_track(bank.as_ref(), track as u32, sizes),
-                        snapshot_effect(scalar.as_ref())
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn native_w8_matches_scalar_for_product_modes_state_and_reports() {
-        run_native_w8_parity(
-            KernelBackendV1::X86Avx2,
-            true,
-            &[LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average],
-        );
-        run_native_w8_parity(KernelBackendV1::X86Avx2Fma, false, &[LinkMode::DualMono]);
-    }
-
-    #[test]
-    fn injected_w8_filter_fault_recovers_only_the_matching_lane() {
-        let backend = KernelBackendV1::X86Avx2;
-        let (Ok(tpt_kernel), Ok(gain_kernel)) = (
-            PreparedTptBankKernelV1::try_new(backend),
-            PreparedCompressorGainMixKernelV1::try_new(backend),
-        ) else {
-            return;
-        };
-        let initial = values();
-        let prepared = request(&initial);
-        let metadata = expected_prepared_metadata(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1, prepared)
-            .expect("metadata");
-        let (left_defaults, right_defaults) = initial_defaults(&initial).expect("defaults");
-        let mut left: [Lane; 8] = core::array::from_fn(|_| {
-            Lane::new(&left_defaults, metadata.sample_rate).expect("left lane")
-        });
-        let mut right: [Lane; 8] = core::array::from_fn(|_| {
-            Lane::new(&right_defaults, metadata.sample_rate).expect("right lane")
-        });
-        let mut scalars: [PreparedMultibandCompressor; 8] =
-            core::array::from_fn(|_| PreparedMultibandCompressor {
-                metadata,
-                left_defaults,
-                right_defaults,
-                left: Lane::new(&left_defaults, metadata.sample_rate).expect("left lane"),
-                right: Lane::new(&right_defaults, metadata.sample_rate).expect("right lane"),
-            });
-        left[3].crossover.sections[0].s1 = f32::NAN;
-        scalars[3].left.crossover.sections[0].s1 = f32::NAN;
-        left[3].dry_ring[1] = 0.375;
-        scalars[3].left.dry_ring[1] = 0.375;
-        let mut bank_left = [0.25_f32; 8];
-        let mut bank_right = [-0.125_f32; 8];
-        let mut report = BankProcessReport::empty(BankWidth::Eight);
-        process_bank_frame(
-            &mut left,
-            &mut right,
-            tpt_kernel,
-            gain_kernel,
-            metadata,
-            &mut report,
-            &mut bank_left,
-            &mut bank_right,
-        );
-        for track in 0..8 {
-            let mut scalar_left = [0.25];
-            let mut scalar_right = [-0.125];
-            let scalar_report = scalars[track].process(
-                EffectProcessBlock::new(&mut scalar_left, &mut scalar_right, None, 0, &[], 128)
-                    .expect("scalar block"),
-            );
-            assert_eq!(report.reports[track], scalar_report);
-            assert_eq!(bank_left[track].to_bits(), scalar_left[0].to_bits());
-            assert_eq!(bank_right[track].to_bits(), scalar_right[0].to_bits());
-            let mut bank_state = vec![0; metadata.state_sizes.left_bytes as usize];
-            let mut scalar_state = vec![0; metadata.state_sizes.left_bytes as usize];
-            write_lane(&mut bank_state, &left[track]);
-            write_lane(&mut scalar_state, &scalars[track].left);
-            assert_eq!(bank_state, scalar_state);
-        }
-        assert_eq!(report.reports[3].recovered_left_samples, 1);
-        assert!(report.reports.iter().enumerate().all(|(track, item)| {
-            track == 3 || (item.recovered_left_samples == 0 && item.recovered_right_samples == 0)
-        }));
-    }
 }

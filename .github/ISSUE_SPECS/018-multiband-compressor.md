@@ -23,11 +23,12 @@ requires a stateless rebrief; no gate may weaken.
 
 ## Scope
 
-- Add `miso.multiband-compressor`, contract 1.0, state layout 1 and Normal quality at all launch
-  rates.
-- Split each lane through one fixed fourth-order Linkwitz-Riley crossover: two cascaded conditioned
-  TPT Butterworth low-pass sections and two independent cascaded high-pass sections. Low plus high
-  is the LR4 all-pass sum: flat magnitude, declared nonlinear phase and zero crossover latency.
+- Add `miso.multiband-compressor`, contract 1.0, state layout **2** (audit #94 wave 2; version 1
+  was the four-section, three-ring, three-word-ramp layout) and Normal quality at all launch rates.
+- Split each lane through one fixed fourth-order Linkwitz-Riley crossover: **two** TPT Butterworth
+  SVF stages, `low = LP2(LP2(x))` and `high = AP2(x) - low` with `AP2(x) = x - 2k*v1` taken from
+  the first stage. Low plus high is the LR4 all-pass sum by construction: flat magnitude, declared
+  nonlinear phase and zero crossover latency.
 - Use exactly two feed-forward instantaneous-peak compressors with Issue 013's gain curve and time
   constants, fixed 6 dB knees, fully wet band processing and no auto gain.
 - Reuse `LinkMode::{DualMono, Maximum, Average}` per corresponding band. Linking shares only the
@@ -116,20 +117,25 @@ coefficients are prepared, never automated. Research authority is `[REISS-COMP]`
 
 1. Descriptor/preparation/resource mutations reject transactionally; exact and one-byte-below
    state/scratch caps pass at every launch rate.
-2. Independent `f64` LP4/HP4 and raw-sum tests at 80/1000/8000 Hz meet 0.05 dB all-pass magnitude
-   and 0.02 dB crossing tolerances.
+2. Independent `f64` LP4/HP4 and raw-sum tests at 80/1000/8000 Hz meet 0.02 dB crossing and, after
+   audit #94 F4, **0.01 dB** all-pass magnitude on the one-sixth-octave grid; the `f64` mapping of
+   the two-stage form meets 0.001 dB magnitude and 0.01 degrees of phase against the closed-form
+   Butterworth all-pass.
 3. Representative ratio-identity, low-only, high-only and both-band fixtures meet 0.01 dB curve,
    0.005 dB envelope and greater-of-one-sample-or-2% time-constant gates.
 4. Lookahead 0/5/20 ms enabled/bypass impulses land at `Fs/50`; link modes distinguish correctly;
    whole-effect bypass returns delayed-dry bits exactly; the enabled unity-gain path returns the
    delayed LR4 sum within the crossover gate and has no step at unity-gain transitions.
 5. Exact 64-update automation, both resets, transactional continuation restore, signed-zero
-   bypass, sanitation, lane-local recovery and L/R/track isolation pass.
-6. Scalar, Wasm/NEON W4 and base-AVX2 W8 TPT/gain paths are bit-exact for finite-normal inputs.
-   Existing AVX2+FMA retains exactly the accepted three TPT contractions and frozen
-   `abs(error) <= 1e-6 + 2e-5*abs(scalar)` tolerance; its compressor gain kernel remains
-   noncontracting. The ten-track graph retains width-correct banks/tails, exact PDC and
-   one-byte-below ownership return.
+   bypass, per-block non-finite recovery (master plan #83 §4.4, superseding the lane-local
+   recovery of version 1) and L/R/track isolation pass. Per-value input sanitation is deleted by
+   D7: input sanitisation is the input stage's, once per track per block.
+6. `Scalar`, `Simd4` and `Simd8` are bit-identical (`to_bits`), and the native and `wasm32`
+   corpus digests agree. The version-1 `X86Avx2Fma` tolerance
+   `abs(error) <= 1e-6 + 2e-5*abs(scalar)` is **deleted**, not loosened: under master plan D4 the
+   backend tokens no longer exist and one generic body serves every width. Block partitions
+   {1, 7, 64, 128, 512} are bit-identical. The ten-track graph retains width-correct banks/tails,
+   exact PDC and one-byte-below ownership return.
 7. Focused format/check/tests/Clippy and relevant policies pass; static scans prove the realtime,
    backend/FMA and no-track-cap contracts.
 
@@ -288,3 +294,69 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
 - PASS: `cargo fmt --all -- --check`; `cargo clippy --locked -p miso-engine-multiband-compressor
   --all-targets -- -D warnings`; `cargo test --locked --release -p miso-engine-multiband-compressor
   --test lr4_two_section_mapping_f64`. `timed_benchmark_invocations=0`.
+
+## Audit #94 wave 2 — the effect re-landed on the #83 foundation
+
+State layout **1 → 2**, by decision (spec scope above). Per-channel bytes, `4 * (48 + 2 * ring)`
+where `ring = Fs/50 + 1`, against version 1's `4 * (43 + 3 * ring)`; `scratch_fixed_bytes` is 0
+instead of the 136 nothing ever used. The common section stays **empty** and the version stays out
+of band as the contract's `state_layout_version` argument: wave-2 decision **W2-D2** on #83 defers
+the shared codec's two-word versioned header to #95, because it moves `common_bytes` and therefore
+descriptor identity.
+
+| rate | v1 lane bytes | v2 lane bytes | v1 per track | v2 per track |
+|---|---|---|---|---|
+| 44 100 | 10 768 | 7 256 | 21 672 | 14 512 |
+| 48 000 | 11 704 | 7 880 | 23 544 | 15 760 |
+| 88 200 | 21 352 | 14 312 | 42 840 | 28 624 |
+| 96 000 | 23 224 | 15 560 | 46 584 | 31 120 |
+
+### Re-pin table (fixture → oracle → maximum deviation)
+
+| fixture | oracle | measured |
+|---|---|---|
+| `f64` two-section mapping (new) | `miso_engine_dsp_reference::lr4`, four sections | low `3.330669e-16`, high `1.332268e-15` |
+| `f64` band sum (new) | closed-form `D(-jt)/D(jt)` | flatness `2.711689e-12` dB, phase `6.131984e-12` deg |
+| `f32` crossover per sample (kept at `2e-5`) | the same four-section `f64` oracle | `1.043081e-6` |
+| `f32` band-sum flatness (tightened `0.05` → `0.01` dB) | closed-form all-pass, demodulated | `5.404191e-6` dB |
+| unity-gain step (wave 0, kept) | analytic `abs(H_AP) = 1` bound `0.0656` | `6.538823e-2` |
+| unity-gain output (wave 0, kept at `2e-5`) | four-section `f64` oracle, delayed 960 | `3.278256e-7` |
+| corpus digests (new) | the scalar `Lane` instantiation on `x86_64` | pinned, replayed at `Simd4`, `Simd8`, wasm scalar and wasm `simd128` |
+| W8-versus-scalar tolerance `1e-6 + 2e-5*abs` | — | **deleted**, replaced by `to_bits` identity |
+
+Corpus pins (SHA-256 over the little-endian result words):
+
+| case | digest |
+|---|---|
+| `lr4_step/low` | `61842bb5ed65b6926e63ae9e5c3c25a7c6b3ca772ae3503267059b00996e0434` |
+| `lr4_step/high` | `9b68bbad8e2c59d3fdd1f2227c544e01f59e61cd9fd5d98646d179fd0d387132` |
+| `band_amplitude` | `0c322d45c3477c3902d6722a10f6b4db04f83ef2b61e4ad6a9e704c1695928ec` |
+| `branching_smooth` | `4af5c5365d017140b3edb4a166fccbf470dfcf889b9e683e14612a1d3266dd57` |
+| `link_levels/maximum` | `179d127464f2804fb087e440daf9e0ea02689a7cc402994919852a84d028fee4` |
+| `link_levels/average` | see `crates/miso-engine-multiband-compressor/src/corpus_digests.in` |
+
+### Descriptive before/after (not a gate; Issue 051 owns benchmark gating)
+
+`cargo test --release -p miso-engine-multiband-compressor --test descriptive_frame_cost --
+--ignored --nocapture`, 48 kHz, 128-frame blocks, 20 s of audio, one warm-up and two measured
+rounds, nothing hashed or checked inside the timed region. Zen 5 class host, `rustc 1.97.1`.
+
+| path | version 1 | version 2 |
+|---|---|---|
+| scalar | 132.2 ns/frame/track | **42.81** |
+| `Simd4` bank | — | **19.66** |
+| `Simd8` bank | 134.9 ns/frame/track | **10.99** |
+
+The W8 bank was *slower* than scalar in version 1 (#94 F2); it is now 3.9 times faster than the new
+scalar path and 12.3 times faster than the old bank, inside the plan's 25 ns target.
+
+### Commands
+
+`cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`;
+`cargo test --locked -p miso-engine-multiband-compressor` (debug and release);
+`cargo test --locked --workspace --all-targets`;
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+every `scripts/check-*.sh` that was green on `origin/main` at branch point;
+`bash scripts/run-wasm-gates.sh`; `wasm32-unknown-unknown` with and without `simd128`,
+`aarch64-linux-android` and `aarch64-apple-ios`. `timed_benchmark_invocations=0` beyond the one
+descriptive run recorded above.

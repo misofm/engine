@@ -216,3 +216,36 @@ Issue 051 owns expanded matrices, long rows, realtime audit, complete targets/in
 benchmark and listening. A third band, alternate topology, new core framework, sidechain, changed
 domain/tolerance or second failed attempt stops Issue 018. Record exact evidence, attempt number,
 strict verdict and `timed_benchmark_invocations=0`.
+
+
+---
+
+## Audit #94 wave 2 (2026-08-23): what this brief no longer describes
+
+The master plan on issue #83 supersedes the frozen text above wherever the two disagree, per
+AGENTS.md. In this brief specifically:
+
+* **Lines 73-91, the four-section graph and "Never share the first LP/HP section".** Superseded.
+  Sharing the first section does not change the transfer: the HP-first and LP-first sections
+  receive the same input and coefficients and carry bit-identical state, and
+  `LP2^2 + HP2^2 = D(-s)/D(s)` exactly. The crossover is two stages, `high = AP2(x) - low` with
+  `AP2(x) = x - 2k*v1`, and the sum is the all-pass by construction (#94 F4; `f64` mapping test,
+  worst band deviation 1.33e-15 against the four-section oracle, sum flatness 2.71e-12 dB).
+  The section body is master plan §4.2's frozen order with `c1 = t/(1+t)` storage and one fused
+  multiply-add per recurrence site, not the separately rounded form above.
+* **Lines 133-135, the identity rule.** Superseded by wave 0: only the prepare-time `bypass` path
+  returns `z_dry`; the enabled path always returns `low + high` (#94 F1).
+* **The sanitizer and lane-local recovery paragraph.** Superseded by D7 and master plan §4.4: no
+  per-value `is_finite`, `sanitize` or `recover` exists on any render path. `flush` handles the six
+  recursive state words; the output is checked once per block per bank, and a failing block is
+  zeroed, the bank is reset and the failure is counted. Signed audio zero still survives bypass.
+* **Lines 187-197, the bank and FMA policy.** Superseded by D3/D4/D10: `PreparedTptBankKernelV1`,
+  `PreparedCompressorGainMixKernelV1` and the `X86Avx2`/`X86Avx2Fma` tokens are gone from this
+  crate, together with the `abs(error) <= 1e-6 + 2e-5*abs(scalar)` tolerance. The three backends
+  are `Scalar`, `Simd4` and `Simd8`, they run one generic body, and they are bit-identical.
+* **The ramp law.** Superseded by D11: one division at event time, iterated additions, an exact
+  assignment of the target on the final sample. The per-sample division is deleted with the type.
+* **The state layout.** Version 2: no dry ring, four filter words instead of eight, four words per
+  ramp instead of three, and both rings written oldest-first so a snapshot carries no cursor. The
+  common section stays empty and the version stays out of band; wave-2 decision W2-D2 on #83
+  defers the shared codec's versioned header to #95.
