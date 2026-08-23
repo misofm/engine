@@ -1532,38 +1532,35 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
-        let frame = codec.decode(input, scratch)?;
-        let header = frame
-            .header
-            .command()
-            .ok_or(DecodeError::MessageKindMismatch)?;
-        let command = match header.message_id {
-            MessageId::CapabilitiesGet => {
-                if header.expected_revision != ExpectedRevision::Any {
-                    return Err(DecodeError::InvalidTlv);
-                }
-                codec.decode_capabilities_request(frame.payload, header.tlv_count)?;
-                ControlCommand::CapabilitiesGet
-            }
-            MessageId::SessionSnapshotGet => {
-                let request = codec.decode_snapshot_request(frame.payload, header.tlv_count)?;
+        let decoded = codec.decode_typed_command_limited(
+            input,
+            scratch,
+            self.config.maximum_transaction_edits,
+        )?;
+        let header = decoded.header;
+        let command = match decoded.payload {
+            DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
+            DecodedCommandPayload::SessionSnapshotGet(request) => {
                 ControlCommand::SessionSnapshotGet {
                     offset: request.offset,
                     max_bytes: request.maximum_bytes,
                 }
             }
-            MessageId::SessionTransactionApply => {
-                return self.process_session_transaction_btlv(&codec, input, scratch);
+            DecodedCommandPayload::SessionTransactionApply(edits) => {
+                return Ok(self.process(ControllerRequest {
+                    request_id: header.request_id,
+                    expected_revision: header.expected_revision,
+                    canonical_bytes: input,
+                    command: ControlCommand::SessionTransactionApply { edits: &edits },
+                }));
             }
-            MessageId::ParameterMetadataGet => ControlCommand::ParameterMetadataGet {
-                request: codec
-                    .decode_parameter_metadata_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::ParameterStateGet => ControlCommand::ParameterStateGet {
-                request: codec.decode_parameter_state_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::AutomationEnqueue => {
-                let decoded = codec.decode_automation_enqueue(frame.payload, header.tlv_count)?;
+            DecodedCommandPayload::ParameterMetadataGet(request) => {
+                ControlCommand::ParameterMetadataGet { request }
+            }
+            DecodedCommandPayload::ParameterStateGet(request) => {
+                ControlCommand::ParameterStateGet { request }
+            }
+            DecodedCommandPayload::AutomationEnqueue(decoded) => {
                 let revision = match header.expected_revision {
                     ExpectedRevision::Exact(revision) => revision,
                     ExpectedRevision::Any => SessionRevision(0),
@@ -1572,24 +1569,17 @@ impl<P: ControlProvider> ProtocolController<P> {
                     batch: decoded.into_batch(revision, header.request_id)?,
                 }
             }
-            MessageId::TransportGet => {
-                codec.decode_transport_get_request(frame.payload, header.tlv_count)?;
-                ControlCommand::TransportGet
+            DecodedCommandPayload::TransportGet => ControlCommand::TransportGet,
+            DecodedCommandPayload::TransportSet(request) => {
+                ControlCommand::TransportSet { request }
             }
-            MessageId::TransportSet => ControlCommand::TransportSet {
-                request: codec.decode_transport_set_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::TelemetryConfigure => ControlCommand::TelemetryConfigure {
-                configuration: codec
-                    .decode_telemetry_configuration(frame.payload, header.tlv_count)?,
-            },
-            MessageId::CountersGet => ControlCommand::CountersGet {
-                request: codec.decode_counters_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::DiagnosticsGet => ControlCommand::DiagnosticsGet {
-                request: codec.decode_diagnostics_request(frame.payload, header.tlv_count)?,
-            },
-            _ => return Err(DecodeError::UnsupportedMessage),
+            DecodedCommandPayload::TelemetryConfigure(configuration) => {
+                ControlCommand::TelemetryConfigure { configuration }
+            }
+            DecodedCommandPayload::CountersGet(request) => ControlCommand::CountersGet { request },
+            DecodedCommandPayload::DiagnosticsGet(request) => {
+                ControlCommand::DiagnosticsGet { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -3769,6 +3759,64 @@ mod tests {
                 &mut DecodeScratch::new(&mut [0_u16; 1024]),
             )
             .expect("public B1b process path accepts the frozen deep transaction");
+    }
+
+    #[test]
+    fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes() {
+        fn assert_single_typed_dispatch(frame_name: &str) {
+            let corpus = crate::complete_schema_corpus();
+            let frame = corpus
+                .iter()
+                .find(|frame| frame.name == frame_name)
+                .expect("frozen command frame");
+            let codec = ProtocolCodec::default();
+
+            crate::btlv::reset_reader_passes();
+            codec
+                .decode_typed_command(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("typed baseline decode");
+            let typed_reader_passes = crate::btlv::reader_passes();
+            assert!(typed_reader_passes > 0);
+
+            let mut controller = controller(8, 1);
+            crate::btlv::reset_reader_passes();
+            let first = controller
+                .process_b1b_btlv(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("single typed dispatch");
+            assert_eq!(
+                crate::btlv::reader_passes(),
+                typed_reader_passes,
+                "controller must add no generic structural walk for {frame_name}"
+            );
+
+            let replay = controller
+                .process_b1b_btlv(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("exact canonical replay");
+            assert_eq!(
+                replay, first,
+                "status and exact bytes replay for {frame_name}"
+            );
+        }
+
+        assert_single_typed_dispatch("command.transport_get");
+        assert_single_typed_dispatch("command.session_transaction_apply");
+
+        let corpus = crate::complete_schema_corpus();
+        let transaction = corpus
+            .iter()
+            .find(|frame| frame.name == "command.session_transaction_apply")
+            .expect("frozen transaction frame");
+        let mut limited = controller(8, 1);
+        limited.config.maximum_transaction_edits = 41;
+        assert_eq!(
+            limited.process_b1b_btlv(
+                &transaction.bytes,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            ),
+            Err(DecodeError::LimitExceeded)
+        );
+        assert_eq!(limited.session().revision(), SessionRevision(7));
+        assert!(limited.replay.is_empty());
     }
 
     fn egress_controller(

@@ -19,6 +19,21 @@ pub(crate) const WIRE_MESSAGE: u8 = 11;
 
 const TLV_PREFIX_BYTES: usize = 8;
 
+#[cfg(test)]
+std::thread_local! {
+    static READER_PASSES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_reader_passes() {
+    READER_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn reader_passes() -> usize {
+    READER_PASSES.with(core::cell::Cell::get)
+}
+
 /// One borrowed field produced by the shared allocation-free TLV reader.
 #[derive(Clone, Copy)]
 pub(crate) struct Field<'a> {
@@ -40,7 +55,9 @@ pub(crate) struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) const fn new(bytes: &'a [u8], declared_count: u32) -> Self {
+    pub(crate) fn new(bytes: &'a [u8], declared_count: u32) -> Self {
+        #[cfg(test)]
+        READER_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
         Self {
             bytes,
             declared_count,

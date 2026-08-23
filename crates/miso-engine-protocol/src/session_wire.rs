@@ -371,7 +371,7 @@ impl ProtocolCodec {
         self.decode_session_transaction_frame_limited(frame, Some(maximum_edits))
     }
 
-    fn decode_session_transaction_frame_limited<'a>(
+    pub(crate) fn decode_session_transaction_frame_limited<'a>(
         &self,
         frame: DecodedFrame<'a>,
         maximum_edits: Option<u32>,

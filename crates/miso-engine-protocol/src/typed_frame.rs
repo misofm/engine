@@ -349,13 +349,38 @@ impl ProtocolCodec {
         input: &'a [u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
+        self.decode_typed_command_with_transaction_limit(input, scratch, None, true)
+    }
+
+    pub(crate) fn decode_typed_command_limited<'a>(
+        &self,
+        input: &'a [u8],
+        scratch: &mut DecodeScratch<'_>,
+        maximum_transaction_edits: u32,
+    ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
+        self.decode_typed_command_with_transaction_limit(
+            input,
+            scratch,
+            Some(maximum_transaction_edits),
+            false,
+        )
+    }
+
+    fn decode_typed_command_with_transaction_limit<'a>(
+        &self,
+        input: &'a [u8],
+        scratch: &mut DecodeScratch<'_>,
+        maximum_transaction_edits: Option<u32>,
+        enforce_exact_revision: bool,
+    ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
         let decoded = self.decode_header(input)?;
         let header = decoded
             .header
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
         scratch.prepare(header.tlv_count)?;
-        if command_message_requires_exact(header.message_id)
+        if enforce_exact_revision
+            && command_message_requires_exact(header.message_id)
             && !matches!(header.expected_revision, crate::ExpectedRevision::Exact(_))
         {
             return Err(DecodeError::InvalidTlv);
@@ -374,7 +399,8 @@ impl ProtocolCodec {
                 self.decode_snapshot_request(decoded.payload, header.tlv_count)?,
             ),
             MessageId::SessionTransactionApply => {
-                let transaction = self.decode_session_transaction_frame(decoded)?;
+                let transaction = self
+                    .decode_session_transaction_frame_limited(decoded, maximum_transaction_edits)?;
                 DecodedCommandPayload::SessionTransactionApply(transaction.edits)
             }
             MessageId::ParameterMetadataGet => DecodedCommandPayload::ParameterMetadataGet(
