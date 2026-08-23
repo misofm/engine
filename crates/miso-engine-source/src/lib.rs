@@ -814,32 +814,24 @@ impl PcmSourceProducer {
 
     fn submit(&mut self, chunk: HostPlanarChunk<'_>) -> Result<SubmitReport, HostChunkError> {
         validate_host_chunk(self, chunk)?;
-        let mut block = self.take_recycled_block()?;
-        block.generation = chunk.generation;
-        block.start_frame = chunk.start_frame;
-        block.frames = chunk.frames;
-        block.end_of_region = chunk.end_of_region;
-        block.native_decoder_sanitized_samples = 0;
-        let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
-        let frames = usize::try_from(chunk.frames).expect("u32 fits usize");
-        for (channel, plane) in chunk.planes.iter().enumerate() {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
-        }
-        self.publish_block(block, chunk.frames, chunk.end_of_region)
+        self.submit_planes(
+            chunk.generation,
+            chunk.start_frame,
+            chunk.frames,
+            chunk.end_of_region,
+            0,
+            chunk.planes.iter().copied(),
+        )
     }
 
-    #[allow(dead_code)]
-    fn submit_contiguous_planar(
+    fn submit_planes<'a, I: Iterator<Item = &'a [f32]>>(
         &mut self,
         generation: SourceGeneration,
         start_frame: SourceFrame,
-        planar_quantum: &[f32],
         frames: u32,
         end_of_region: bool,
         native_decoder_sanitized_samples: u64,
+        planes: I,
     ) -> Result<SubmitReport, HostChunkError> {
         validate_submission_metadata(
             self,
@@ -850,13 +842,6 @@ impl PcmSourceProducer {
             self.channel_count,
         )?;
         let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
-        let expected_samples = usize::try_from(self.channel_count)
-            .expect("u32 fits usize")
-            .checked_mul(quantum)
-            .expect("prepared planar samples");
-        if planar_quantum.len() != expected_samples {
-            return Err(HostChunkError::InternalInvariant);
-        }
         let mut block = self.take_recycled_block()?;
         block.generation = generation;
         block.start_frame = start_frame;
@@ -867,12 +852,11 @@ impl PcmSourceProducer {
             .native_decoder_sanitized_samples
             .max(native_decoder_sanitized_samples);
         let frames = usize::try_from(frames).expect("u32 fits usize");
-        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
+        for (channel, plane) in planes.enumerate() {
             let offset = channel
                 .checked_mul(quantum)
                 .expect("prepared channel offset");
-            block.samples[offset..offset + frames]
-                .copy_from_slice(&planar_quantum[offset..offset + frames]);
+            block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
         }
         self.publish_block(
             block,
@@ -943,7 +927,6 @@ impl HostChunkProvider {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
     pub(crate) fn submit_native_planar(
         &mut self,
         generation: SourceGeneration,
@@ -953,13 +936,22 @@ impl HostChunkProvider {
         end_of_region: bool,
         native_decoder_sanitized_samples: u64,
     ) -> Result<SubmitReport, HostChunkError> {
-        self.producer.submit_contiguous_planar(
+        let quantum =
+            usize::try_from(self.producer.quantum_frames).expect("prepared quantum fits usize");
+        let expected_samples = usize::try_from(self.producer.channel_count)
+            .expect("u32 fits usize")
+            .checked_mul(quantum)
+            .expect("prepared planar samples");
+        if planar_quantum.len() != expected_samples {
+            return Err(HostChunkError::InternalInvariant);
+        }
+        self.producer.submit_planes(
             generation,
             start_frame,
-            planar_quantum,
             frames,
             end_of_region,
             native_decoder_sanitized_samples,
+            planar_quantum.chunks_exact(quantum),
         )
     }
 }
@@ -2052,6 +2044,100 @@ mod tests {
         assert_eq!(report.copied_frames, 4);
         assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(right, [-1.0, -2.0, -3.0, -4.0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn host_and_native_submission_share_exact_short_eof_metadata_and_validation_order() {
+        let (host_producer, mut host_consumer, _) =
+            PcmSourceRing::prepare(config(2, 4, 4)).expect("host ring");
+        let (native_producer, mut native_consumer, _) =
+            PcmSourceRing::prepare(config(2, 4, 4)).expect("native ring");
+        let mut host = host_producer.into_host_chunk_provider(RATE);
+        let mut native = native_producer.into_host_chunk_provider(RATE);
+
+        let invalid_host = [1.0, 2.0, 3.0];
+        let host_before = host.telemetry();
+        assert!(matches!(
+            host.submit(chunk(1, 0, &[&invalid_host, &invalid_host], 4, false)),
+            Err(HostChunkError::PlaneLength { .. })
+        ));
+        assert_eq!(host.telemetry(), host_before);
+
+        let native_before = native.telemetry();
+        assert_eq!(
+            native.submit_native_planar(
+                SourceGeneration(1),
+                SourceFrame(0),
+                &[1.0, 2.0, 3.0],
+                4,
+                false,
+                9,
+            ),
+            Err(HostChunkError::InternalInvariant)
+        );
+        assert_eq!(native.telemetry(), native_before);
+
+        let host_left = [1.0, 2.0];
+        let host_right = [-1.0, -2.0];
+        let host_report = host
+            .submit(chunk(1, 0, &[&host_left, &host_right], 2, true))
+            .expect("host short EOF");
+        let native_quantum = [1.0, 2.0, 99.0, 98.0, -1.0, -2.0, -99.0, -98.0];
+        let native_report = native
+            .submit_native_planar(
+                SourceGeneration(1),
+                SourceFrame(0),
+                &native_quantum,
+                2,
+                true,
+                0,
+            )
+            .expect("native short EOF");
+        assert_eq!(native_report, host_report);
+        assert_eq!(native.telemetry(), host.telemetry());
+
+        let mut host_left_out = [7.0; 4];
+        let mut host_right_out = [7.0; 4];
+        let host_read = host_consumer
+            .read_block(&mut [&mut host_left_out, &mut host_right_out])
+            .expect("host read");
+        let mut native_left_out = [7.0; 4];
+        let mut native_right_out = [7.0; 4];
+        let native_read = native_consumer
+            .read_block(&mut [&mut native_left_out, &mut native_right_out])
+            .expect("native read");
+        assert_eq!(native_read, host_read);
+        assert_eq!(native_consumer.telemetry(), host_consumer.telemetry());
+        assert_eq!(
+            native_left_out.map(f32::to_bits),
+            host_left_out.map(f32::to_bits)
+        );
+        assert_eq!(
+            native_right_out.map(f32::to_bits),
+            host_right_out.map(f32::to_bits)
+        );
+        assert_eq!(native_left_out, [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(native_right_out, [-1.0, -2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn producer_submission_has_one_stamping_and_copy_body() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn submit_planes")
+            .expect("shared submit helper");
+        let end = source[start..]
+            .find("fn publish_block")
+            .map(|offset| start + offset)
+            .expect("publish boundary");
+        let shared = &source[start..end];
+        assert_eq!(shared.matches("block.generation = generation").count(), 1);
+        assert_eq!(shared.matches("block.start_frame = start_frame").count(), 1);
+        assert_eq!(shared.matches("block.frames = frames").count(), 1);
+        assert_eq!(shared.matches("copy_from_slice").count(), 1);
+        assert_eq!(shared.matches("validate_submission_metadata").count(), 1);
+        assert!(!source.contains(&["submit_contiguous", "_planar"].concat()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
