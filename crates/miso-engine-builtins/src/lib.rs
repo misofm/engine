@@ -31,13 +31,12 @@ use miso_engine_effect_contract::BankWidth;
 use miso_engine_lane::{
     Lane, Simd4, Simd8,
     kernels::{
-        SvfCoef, SvfState,
+        SvfCoef,
         builtins::{
-            Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block, lanes_below, mask_from_flags,
-            matrix2x2_block, matrix2x2_ramp_block, no_lanes, nonfinite_lanes_block,
-            sanitize_gain_block, zero_lanes_block,
+            InputChainCoef, InputChainState, Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block,
+            input_chain_block, lanes_below, mask_from_flags, matrix2x2_block, matrix2x2_ramp_block,
+            no_lanes, zero_lanes_block,
         },
-        svf_block,
     },
 };
 
@@ -671,12 +670,11 @@ pub(crate) struct InputStage<L: Lane> {
     members: usize,
     /// Lanes below [`InputStage::members`].
     active: L::Mask,
-    /// Folded trim per channel, `[left, right]`.
-    trim: [L; 2],
-    /// `[channel][section]`, section `0` high-pass, section `1` low-pass.
-    coef: [[SvfCoef<L>; 2]; 2],
-    /// Retained integrator state, indexed like [`InputStage::coef`].
-    state: [[SvfState<L>; 2]; 2],
+    /// Folded trim and the four section coefficient sets; `[channel][section]`, section `0` is
+    /// the high-pass.
+    coef: InputChainCoef<L>,
+    /// Retained integrator state, indexed like [`InputChainCoef::section`].
+    state: InputChainState<L>,
     /// Lifetime boundary-check recoveries per channel.
     lifetime_recovered: [u64; 2],
 }
@@ -700,12 +698,14 @@ impl<L: Lane> InputStage<L> {
         Self {
             members,
             active: lanes_below::<L>(members),
-            trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
-            coef: [
-                [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
-                [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
-            ],
-            state: [[SvfState::default(); 2]; 2],
+            coef: InputChainCoef {
+                trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
+                section: [
+                    [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
+                    [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
+                ],
+            },
+            state: InputChainState::default(),
             lifetime_recovered: [0; 2],
         }
     }
@@ -720,61 +720,52 @@ impl<L: Lane> InputStage<L> {
             .sum()
     }
 
-    /// Runs one channel: sanitise + trim, high-pass, low-pass, boundary check.
-    ///
-    /// Returns `(sanitised inputs, recovered lanes)`, both counted over populated lanes only.
-    fn process_channel(&mut self, channel: usize, io: &mut [f32], frames: usize) -> (u64, u64) {
-        let sanitized = self.members_sum(sanitize_gain_block::<L>(io, frames, self.trim[channel]));
-        svf_block::<L>(
-            io,
-            frames,
-            &self.coef[channel][0],
-            &mut self.state[channel][0],
-        );
-        svf_block::<L>(
-            io,
-            frames,
-            &self.coef[channel][1],
-            &mut self.state[channel][1],
-        );
-        let bad = L::mask_and(nonfinite_lanes_block::<L>(io, frames), self.active);
-        if !L::mask_any(bad) {
-            return (sanitized, 0);
-        }
-        zero_lanes_block::<L>(io, frames, bad);
-        for section in &mut self.state[channel] {
-            section.ic1 = section.ic1.andnot(bad);
-            section.ic2 = section.ic2.andnot(bad);
-        }
-        let recovered = self.members_sum(L::select(bad, L::splat(1.0), L::zero()));
-        self.lifetime_recovered[channel] =
-            self.lifetime_recovered[channel].saturating_add(recovered);
-        (sanitized, recovered)
-    }
-
     /// Renders one block of both channels.
     ///
     /// `left` and `right` are AoSoA blocks of `frames * L::WIDTH` samples; at `L = f32` a planar
-    /// slice is already such a block.
+    /// slice is already such a block. One kernel call does the whole chain — sanitise, trim, both
+    /// sections, both channels, and the boundary scan — in one frame loop, so the four
+    /// independent recurrences overlap instead of serialising.
     fn process(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
         frames: usize,
     ) -> BuiltinProcessReport {
-        let (sanitized_left, recovered_left) = self.process_channel(0, left, frames);
-        let (sanitized_right, recovered_right) = self.process_channel(1, right, frames);
+        let report = input_chain_block::<L>(left, right, frames, &self.coef, &mut self.state);
+        let mut recovered = [0_u64; 2];
+        for (channel, recovered) in recovered.iter_mut().enumerate() {
+            let bad = L::mask_and(report.nonfinite[channel], self.active);
+            if !L::mask_any(bad) {
+                continue;
+            }
+            let io: &mut [f32] = if channel == 0 {
+                &mut *left
+            } else {
+                &mut *right
+            };
+            zero_lanes_block::<L>(io, frames, bad);
+            for section in &mut self.state.section[channel] {
+                section.ic1 = section.ic1.andnot(bad);
+                section.ic2 = section.ic2.andnot(bad);
+            }
+            *recovered = self.members_sum(L::select(bad, L::splat(1.0), L::zero()));
+            self.lifetime_recovered[channel] =
+                self.lifetime_recovered[channel].saturating_add(*recovered);
+        }
         BuiltinProcessReport {
-            sanitized_input: sanitized_left.saturating_add(sanitized_right),
+            sanitized_input: self
+                .members_sum(report.sanitized[0])
+                .saturating_add(self.members_sum(report.sanitized[1])),
             sanitized_output: 0,
-            recovered_left_state: recovered_left,
-            recovered_right_state: recovered_right,
+            recovered_left_state: recovered[0],
+            recovered_right_state: recovered[1],
         }
     }
 
     /// Clears every retained integrator word; prepared coefficients are untouched.
     fn reset(&mut self) {
-        self.state = [[SvfState::default(); 2]; 2];
+        self.state = InputChainState::default();
     }
 
     /// Recovers the prepared record of one lane from the coefficient words.
@@ -785,9 +776,9 @@ impl<L: Lane> InputStage<L> {
     /// would be the defect this crate exists to remove -- and it is what a bank is built from, so
     /// the two would have to agree forever.
     fn lane_track(&self, lane: usize) -> PreparedInputTrack {
-        let trim = self.trim.map(|trim| lane_read::<L>(trim)[lane]);
+        let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
         let section = |channel: usize, index: usize| -> SvfSection {
-            let coef = &self.coef[channel][index];
+            let coef = &self.coef.section[channel][index];
             let (m0, m1, m2) = (
                 lane_read::<L>(coef.m0)[lane],
                 lane_read::<L>(coef.m1)[lane],
@@ -824,7 +815,7 @@ impl<L: Lane> InputStage<L> {
         let mut words = [0_u32; 8];
         for channel in 0..2 {
             for section in 0..2 {
-                let state = &self.state[channel][section];
+                let state = &self.state.section[channel][section];
                 words[channel * 4 + section * 2] = lane_read::<L>(state.ic1)[lane].to_bits();
                 words[channel * 4 + section * 2 + 1] = lane_read::<L>(state.ic2)[lane].to_bits();
             }
@@ -836,7 +827,7 @@ impl<L: Lane> InputStage<L> {
     fn set_lane_state_words(&mut self, lane: usize, words: [u32; 8]) {
         for channel in 0..2 {
             for section in 0..2 {
-                let state = &mut self.state[channel][section];
+                let state = &mut self.state.section[channel][section];
                 let mut ic1 = lane_read::<L>(state.ic1);
                 let mut ic2 = lane_read::<L>(state.ic2);
                 ic1[lane] = f32::from_bits(words[channel * 4 + section * 2]);

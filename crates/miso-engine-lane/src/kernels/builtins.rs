@@ -15,6 +15,7 @@
 //! chain they replace (master plan D3: fusion exists only where `fma` is written).
 
 use crate::Lane;
+use crate::kernels::{SvfCoef, SvfState, svf_step};
 
 /// Magnitude at or above which a sample is treated as non-finite by the D7 boundary policy.
 ///
@@ -255,4 +256,131 @@ pub fn matrix2x2_ramp_block<L: Lane>(
     }
     r.remaining = remaining;
     r.current = current;
+}
+
+/// The prepared coefficients of one dual-mono input chain, for [`input_chain_block`].
+#[derive(Clone, Copy)]
+pub struct InputChainCoef<L: Lane> {
+    /// Trim with the polarity inversion folded in, `[left, right]`.
+    pub trim: [L; 2],
+    /// `[channel][section]`, section `0` applied first.
+    pub section: [[SvfCoef<L>; 2]; 2],
+}
+
+/// The retained integrator state of one dual-mono input chain, indexed like
+/// [`InputChainCoef::section`].
+#[derive(Clone, Copy)]
+pub struct InputChainState<L: Lane> {
+    /// `[channel][section]`.
+    pub section: [[SvfState<L>; 2]; 2],
+}
+
+impl<L: Lane> Default for InputChainState<L> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self {
+            section: [[SvfState::default(); 2]; 2],
+        }
+    }
+}
+
+/// What one [`input_chain_block`] call sanitised and what its output boundary check found.
+pub struct InputChainReport<L: Lane> {
+    /// Per-lane count of sanitised input samples, per channel, as an exact `f32` integer.
+    pub sanitized: [L; 2],
+    /// Per-channel mask of lanes whose output was non-finite anywhere in the block.
+    pub nonfinite: [L::Mask; 2],
+}
+
+/// The whole builtin input chain — sanitise, trim, two cascaded sections, boundary scan — for
+/// both channels, in **one** frame loop.
+///
+/// # Why one loop
+///
+/// The four recurrences (two sections, two channels) are independent, and each is a serial
+/// dependency chain of about twenty-five cycles per sample. Run as four separate block passes they
+/// serialise: the scalar chain costs the sum of four latencies. Interleaved in one frame body they
+/// overlap, and the block is also read and written once instead of six times. The measured effect
+/// at `WIDTH = 1` is better than two to one; at `WIDTH = 8` it is about one and a half to one.
+///
+/// # Why the bits do not move
+///
+/// Every operation, and the order of every operation, is the one the separate kernels use:
+/// [`sanitize_gain_block`] for step 1, [`super::svf_step`] — the single copy of the recurrence,
+/// shared with [`super::svf_block`] — plus that kernel's output mix for steps 2 and 3, and
+/// [`nonfinite_lanes_block`] for step 4. The intermediate value that used
+/// to be stored and reloaded between passes is now kept in a register, which is exact, and the
+/// counter and mask accumulations keep their per-frame order. This is a scheduling change, not a
+/// numeric one (master plan §8 class A).
+///
+/// Frozen operation order, per frame and per channel `ch`:
+/// 1. `x = load(frame)`
+/// 2. `bad = !(|x| < NONFINITE_LIMIT)`; `sanitized[ch] = sanitized[ch] + select(bad, 1.0, 0.0)`
+/// 3. `v = andnot(x, bad) * trim[ch]`
+/// 4. `v = svf_step(v, section[ch][0])`, then `v = svf_step(v, section[ch][1])`
+/// 5. `nonfinite[ch] = nonfinite[ch] | !(|v| < NONFINITE_LIMIT)`
+/// 6. `store(frame, v)`
+///
+/// The left channel's frame is evaluated before the right channel's, as it was when they were
+/// separate passes.
+#[inline(always)]
+pub fn input_chain_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    // The four integrator pairs and the four negated damping coefficients live in registers for the
+    // whole block; `svf_step` documents that its state must be a local copy for exactly this
+    // reason, or it would be reloaded from memory every frame (D10).
+    let mut state = s.section;
+    let mut nc1 = [[zero; 2]; 2];
+    for (channel, coefficients) in c.section.iter().enumerate() {
+        for (section, coefficient) in coefficients.iter().enumerate() {
+            nc1[channel][section] = coefficient.c1.neg();
+        }
+    }
+
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(L::select(bad, one, zero));
+            let mut v = x.andnot(bad).mul(c.trim[channel]);
+            for section in 0..2 {
+                let coefficient = &c.section[channel][section];
+                let v0 = v;
+                let (v1, v2) = svf_step(
+                    v0,
+                    nc1[channel][section],
+                    coefficient.a2,
+                    coefficient.a3,
+                    &mut state[channel][section],
+                );
+                v = coefficient
+                    .m2
+                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+            }
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+
+    s.section = state;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
 }

@@ -108,6 +108,27 @@ fn bench_input_stage_ns_per_track_frame() {
     }
     let bank_ns = start.elapsed().as_secs_f64() * 1e9 / (BLOCKS * FRAMES * 8) as f64;
 
+    // An identity chain: no filters at all. Its two disabled sections still run their arithmetic,
+    // because master plan §4.2 forbids an `enabled` flag at render — a bank slot can hold a
+    // filtered and an unfiltered track in the same section, so the branch could not be per lane.
+    let mut identity = BuiltinChain::new(48_000, BuiltinParameters::default()).expect("prepare");
+    let mut identity_left = signal(FRAMES);
+    let mut identity_right = signal(FRAMES);
+    for _ in 0..256 {
+        identity.process_input(
+            DualMonoBlock::new(&mut identity_left, &mut identity_right, 0).expect("warm-up"),
+        );
+    }
+    let start = Instant::now();
+    for _ in 0..BLOCKS {
+        identity_left.copy_from_slice(&source_left);
+        identity_right.copy_from_slice(&source_right);
+        identity.process_input(
+            DualMonoBlock::new(&mut identity_left, &mut identity_right, 0).expect("block"),
+        );
+    }
+    let identity_ns = start.elapsed().as_secs_f64() * 1e9 / (BLOCKS * FRAMES) as f64;
+
     // The matrix, ramping continuously.
     let mut matrix = BuiltinChain::new(48_000, parameters(0)).expect("prepare");
     let mut matrix_left = signal(FRAMES);
@@ -134,4 +155,7 @@ fn bench_input_stage_ns_per_track_frame() {
     println!("input stage W=1: {scalar:.2} ns per track-frame (audit measured 12.65 before #85)");
     println!("input stage W=8: {bank_ns:.2} ns per track-frame (audit measured 14.30 before #85)");
     println!("matrix ramping:  {matrix_ns:.2} ns per track-frame (audit measured 3.35 before #85)");
+    println!(
+        "identity chain W=1: {identity_ns:.2} ns per track-frame (two disabled sections, §4.2)"
+    );
 }

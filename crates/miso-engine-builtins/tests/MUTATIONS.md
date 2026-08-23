@@ -53,3 +53,16 @@ the last ramping frame changes no lane's coefficients. The only observable diffe
 lane that settles *at the identity matrix* mid-block, which then misses the settled path's identity
 select and its `-0.0` preservation. No corpus case does that today. The off-by-one form (M7) is the
 mutation that binds, and it is red.
+
+## Added with the fused chain kernel (`input_chain_block`)
+
+| # | mutation | file | gate it must break | observed |
+| --- | --- | --- | --- | --- |
+| M13 | the chain evaluates the low-pass before the high-pass (`for section in 0..2` -> `(0..2).rev()`) | `lane/src/kernels/builtins.rs` | T2 `scalar_stage_is_bit_identical_to_reference_recurrence` | FAILED, `rate=44100, signal=0, index=3` |
+| M14 | the boundary scan reads the chain input instead of the section output | `lane/src/kernels/builtins.rs` | T6 `boundary_check_is_lane_local_per_block` | FAILED, `width=4` |
+
+`input_chain_block` is a **scheduling** change, so the gate that matters most for it is the one that
+would notice if it were not: the whole pinned corpus. `every_corpus_case_matches_its_pin_at_every_width`,
+`cargo run -p miso-engine-builtins-fixture -- --check fixtures/builtins/v1` and the one-million-block
+issue-069 audit (`pcm_digest 8d344c7e864545a1`) all pass **unchanged**, and `git status` over
+`fixtures/`, the audit evidence and `corpus.rs` is empty. Nothing was re-pinned for it.
