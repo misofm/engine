@@ -4,6 +4,8 @@
 //! only retains the already-validated immutable result and its preallocated render state.
 #![allow(missing_docs)]
 
+pub mod program;
+
 use core::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
