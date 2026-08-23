@@ -17,10 +17,15 @@ path = "src/parametric_eq_main.rs"
 name = "miso_engine_graph_audit_delay"
 path = "src/delay_main.rs"
 
+[[bin]]
+name = "miso_engine_graph_audit_gate_expander"
+path = "src/gate_expander_main.rs"
+
 [dependencies]
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-delay.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-gate-expander.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-parametric-eq.workspace = true
 
