@@ -1460,8 +1460,7 @@ struct GraphSourceEntry {
 struct SourceGraphSourceSetDriver {
     /// Declared first so native workers stop/join before source consumers are dropped.
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
-    workers: Box<[NativeSourceWorker]>,
+    _retirement_workers: Box<[NativeSourceWorker]>,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -1733,7 +1732,7 @@ pub fn prepare_graph_source_set(
         },
         Box::new(SourceGraphSourceSetDriver {
             #[cfg(not(target_arch = "wasm32"))]
-            workers: workers.into_boxed_slice(),
+            _retirement_workers: workers.into_boxed_slice(),
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
@@ -1755,7 +1754,9 @@ mod tests {
             .find("struct SourceGraphSourceSetDriver")
             .expect("set driver declaration");
         let body = &source[start..];
-        let workers = body.find("workers:").expect("worker token field");
+        let workers = body
+            .find("_retirement_workers:")
+            .expect("worker token field");
         let sources = body.find("sources:").expect("consumer field");
         assert!(
             workers < sources,
