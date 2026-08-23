@@ -448,16 +448,16 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         effect_bank_scratch_bytes: 16_384,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
-        builtin_bank_bytes: 1_536,
+        builtin_bank_bytes: 1_728,
         builtin_bank_scratch_bytes: 16_384,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 3_366,
         source_total_bytes: 11_558,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
-        builtin_processor_payload_bytes: 6_678,
+        builtin_processor_payload_bytes: 7_974,
         builtin_meter_payload_bytes: 0,
-        builtin_retained_payload_bytes: 6_678,
+        builtin_retained_payload_bytes: 7_974,
         capi_retained_bytes,
         largest_named_allocation_bytes: 49_167,
         reserved: [0; 4],
@@ -668,44 +668,43 @@ struct SourceGraphSourceSetDriverMirror {
     quantum_frames: u32,
 }
 
+/// `<f32 as miso_engine_lane::Lane>::Mask`: an all-zero or all-one word.
 #[allow(dead_code)]
-struct TptSvfMirror {
+struct ScalarLaneMaskMirror(u32);
+
+#[allow(dead_code)]
+struct SvfCoefMirror {
     c1: f32,
     a2: f32,
     a3: f32,
-    k: f32,
-    s1: f32,
-    s2: f32,
-    high_pass: bool,
-    enabled: bool,
+    m0: f32,
+    m1: f32,
+    m2: f32,
 }
 
 #[allow(dead_code)]
-struct InputLaneMirror {
-    polarity: bool,
-    trim: f32,
-    hpf: TptSvfMirror,
-    lpf: TptSvfMirror,
+struct SvfStateMirror {
+    ic1: f32,
+    ic2: f32,
 }
 
+/// `InputStage<f32>`: the whole of `InputBuiltins` since #85 -- the prepared record lives in the
+/// coefficient words, not beside them.
 #[allow(dead_code)]
 struct InputBuiltinsMirror {
-    left: InputLaneMirror,
-    right: InputLaneMirror,
-    lifetime_recovered_left: u64,
-    lifetime_recovered_right: u64,
+    members: usize,
+    active: ScalarLaneMaskMirror,
+    trim: [f32; 2],
+    coef: [[SvfCoefMirror; 2]; 2],
+    state: [[SvfStateMirror; 2]; 2],
+    lifetime_recovered: [u64; 2],
 }
 
-#[allow(dead_code)]
-struct FaderLaneMirror {
-    gain: f32,
-    muted: bool,
-}
-
+/// `FaderStage<f32>`.
 #[allow(dead_code)]
 struct FaderBuiltinsMirror {
-    left: FaderLaneMirror,
-    right: FaderLaneMirror,
+    gain: [f32; 2],
+    mute: [ScalarLaneMaskMirror; 2],
 }
 
 #[allow(dead_code)]
@@ -717,11 +716,29 @@ struct Matrix2x2Mirror {
 }
 
 #[allow(dead_code)]
+struct Matrix2x2CoefMirror {
+    ll: f32,
+    lr: f32,
+    rl: f32,
+    rr: f32,
+    identity: ScalarLaneMaskMirror,
+}
+
+#[allow(dead_code)]
+struct Matrix2x2RampMirror {
+    current: [f32; 4],
+    target: [f32; 4],
+    step: [f32; 4],
+    remaining: f32,
+}
+
+/// `MatrixStage<f32>`: the per-lane bookkeeping is sized for the widest bank (#96 banks it).
+#[allow(dead_code)]
 struct MatrixBuiltinsMirror {
-    current: Matrix2x2Mirror,
-    target: Matrix2x2Mirror,
-    smoothing_samples: u32,
-    remaining_updates: u32,
+    coef: Matrix2x2CoefMirror,
+    ramp: Matrix2x2RampMirror,
+    smoothing_samples: [u32; 8],
+    remaining: [u32; 8],
 }
 
 #[allow(dead_code)]
@@ -730,35 +747,56 @@ enum BuiltinTailMirror {
     Infinite,
 }
 
+/// `SvfCoef<Simd8>` / `SvfState<Simd8>`: one `__m256` per word.
 #[allow(dead_code)]
-struct BuiltinFilterBankMirror {
-    coefficients_and_state: [[f32; 8]; 6],
-    high_pass_mask: [u32; 8],
-    enabled: [bool; 8],
+#[repr(align(32))]
+struct SvfCoefEightMirror {
+    words: [[f32; 8]; 6],
 }
 
 #[allow(dead_code)]
-struct BuiltinChannelBankMirror {
-    polarity: [bool; 8],
-    trim: [f32; 8],
-    hpf: BuiltinFilterBankMirror,
-    lpf: BuiltinFilterBankMirror,
+#[repr(align(32))]
+struct SvfStateEightMirror {
+    words: [[f32; 8]; 2],
 }
 
+/// `InputStage<Simd8>`, the eight-lane arm of `InputStageKernel`.
 #[allow(dead_code)]
-struct PreparedTptBankKernelMirror {
-    backend: miso_engine_core::KernelBackendV1,
-    process: fn(),
+#[repr(align(32))]
+struct InputStageEightMirror {
+    members: usize,
+    active: [u32; 8],
+    trim: [[f32; 8]; 2],
+    coef: [[SvfCoefEightMirror; 2]; 2],
+    state: [[SvfStateEightMirror; 2]; 2],
+    lifetime_recovered: [u64; 2],
+}
+
+/// `InputStage<Simd4>`, the four-lane arm.
+#[allow(dead_code)]
+#[repr(align(16))]
+struct InputStageFourMirror {
+    members: usize,
+    active: [u32; 4],
+    trim: [[f32; 4]; 2],
+    coef: [[[f32; 4]; 6]; 4],
+    state: [[[f32; 4]; 2]; 4],
+    lifetime_recovered: [u64; 2],
+}
+
+/// `InputStageKernel`: an enum over the two widths, sized by the larger.
+#[allow(dead_code)]
+enum InputStageKernelMirror {
+    Simd4(InputStageFourMirror),
+    Simd8(InputStageEightMirror),
 }
 
 #[allow(dead_code)]
 struct BuiltinInputBankMirror {
     backend: miso_engine_core::KernelBackendV1,
     width: miso_engine_effect_contract::BankWidth,
-    kernel: PreparedTptBankKernelMirror,
-    left: BuiltinChannelBankMirror,
-    right: BuiltinChannelBankMirror,
-    active: [bool; 8],
+    members: usize,
+    stage: InputStageKernelMirror,
 }
 
 #[allow(dead_code)]
@@ -1215,7 +1253,7 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let effect_bank_plane = quantum * bank_lanes * size_of::<f32>() as u64;
     let builtin_bank_processor = bytes::<BuiltinBankProcessorMirror>(1);
     assert_eq!(
-        builtin_bank_processor, 1_056,
+        builtin_bank_processor, 1_248,
         "primitive builtin bank processor"
     );
     vec![
@@ -1535,10 +1573,10 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     ];
     assert_effective_owner_mutations(&effect_scratch_rows, 432, "double-live effect scratch");
     let builtin = builtin_owners();
-    assert_effective_owner_mutations(&builtin, 6_678, "current builtin payload");
+    assert_effective_owner_mutations(&builtin, 7_974, "current builtin payload");
     let mut double_builtin = builtin.clone();
     double_builtin.extend(builtin);
-    assert_effective_owner_mutations(&double_builtin, 13_356, "double-live builtin payload");
+    assert_effective_owner_mutations(&double_builtin, 15_948, "double-live builtin payload");
 
     let (current_capi, candidate_epoch, prepared_protocol, capi_largest) =
         complete_capi_owners(current.len(), prospective.len());
@@ -1854,7 +1892,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.source_overhead, 6_732);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
-    assert_eq!(oracle.builtin, 13_356);
+    assert_eq!(oracle.builtin, 15_948);
     assert_eq!(oracle.capi, 164_814);
     assert_eq!(oracle.largest, 58_694);
 

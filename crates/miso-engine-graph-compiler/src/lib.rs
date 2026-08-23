@@ -7014,7 +7014,7 @@ mod tests {
         }
         assert_eq!(completed, 100);
         assert_eq!(
-            transcript, 0x4965_aa76_4307_e393,
+            transcript, 0xb1ae_c052_8b29_a148,
             "frozen Issue-037 seeded layout transcript"
         );
     }

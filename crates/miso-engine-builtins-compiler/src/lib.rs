@@ -3326,7 +3326,7 @@ mod tests {
         );
         assert!(classes.into_iter().all(core::convert::identity));
         assert_eq!(
-            transcript_hash, 3_412_855_810_376_736_927,
+            transcript_hash, 13_318_798_872_362_625_111,
             "updated only through a deliberate frozen-case change"
         );
     }
