@@ -1,0 +1,33 @@
+schema_version	1
+static-defined-count	14
+static-undefined-miso-prefix-count	0
+shared-defined-count	14
+shared-undefined-miso-prefix-count	0
+static	DEFINED	miso_engine_v2_abi_version
+static	DEFINED	miso_engine_v2_compile_session
+static	DEFINED	miso_engine_v2_dequeue_event
+static	DEFINED	miso_engine_v2_engine_create
+static	DEFINED	miso_engine_v2_engine_destroy
+static	DEFINED	miso_engine_v2_last_error
+static	DEFINED	miso_engine_v2_plan_destroy
+static	DEFINED	miso_engine_v2_plan_resources
+static	DEFINED	miso_engine_v2_query_capabilities
+static	DEFINED	miso_engine_v2_render_f32_planar
+static	DEFINED	miso_engine_v2_session_destroy
+static	DEFINED	miso_engine_v2_source_seek
+static	DEFINED	miso_engine_v2_source_submit_planar_f32
+static	DEFINED	miso_engine_v2_submit_command
+shared	DEFINED	miso_engine_v2_abi_version
+shared	DEFINED	miso_engine_v2_compile_session
+shared	DEFINED	miso_engine_v2_dequeue_event
+shared	DEFINED	miso_engine_v2_engine_create
+shared	DEFINED	miso_engine_v2_engine_destroy
+shared	DEFINED	miso_engine_v2_last_error
+shared	DEFINED	miso_engine_v2_plan_destroy
+shared	DEFINED	miso_engine_v2_plan_resources
+shared	DEFINED	miso_engine_v2_query_capabilities
+shared	DEFINED	miso_engine_v2_render_f32_planar
+shared	DEFINED	miso_engine_v2_session_destroy
+shared	DEFINED	miso_engine_v2_source_seek
+shared	DEFINED	miso_engine_v2_source_submit_planar_f32
+shared	DEFINED	miso_engine_v2_submit_command

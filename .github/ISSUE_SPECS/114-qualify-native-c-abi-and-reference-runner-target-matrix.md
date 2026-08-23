@@ -152,3 +152,44 @@ shell syntax and clean/static/diff scans. No benchmark target, timer, tuning, li
 device workload is allowed. Sol High hands off one immutable qualification checkpoint; Sol XHigh
 returns strict PASS or the sole bounded HOLD. Overall PASS requires exact candid matrix evidence and
 then unblocks Issue 026.
+
+## Sol High qualification evidence — 2026-08-23
+
+The focused qualification checkpoint changes only this issue record, qualification fixtures,
+qualification scripts, and the qualification report. The accepted C API product/header, protocol,
+Issue-116 runner, Cargo lock, and accepted fixtures remain byte-identical to the authorities pinned
+in `fixtures/capi-qualification/v1/AUTHORITIES.sha256`.
+
+Frozen preflight found a complete Linux x86_64 runtime toolchain and no usable MinGW, MSVC, Apple
+SDK, iOS simulator, or Android NDK link/object-inspection toolchain. The resulting matrix records ten
+Linux rows as `PASS` and seven cross-target rows as candid `UNAVAILABLE`; none of the unavailable
+rows masks an attempted compile or product failure.
+
+One fresh locked release build produced and hashed the installed static and shared C API libraries
+before consumer use. Strict C11 and C++17 consumers each linked and ran against both forms. GNU
+`nm` found exactly the fourteen frozen V1 definitions in each form and zero same-prefix imports.
+The object checker independently distinguishes definitions from imports and rejects a
+synthetic undefined-reference false positive.
+
+The first C11-static consumer launch exposed a new qualification-consumer ordering error (exit 13):
+it sought generation 1 before its initial submission. Only the new consumer was corrected; neither
+library nor any frozen authority was rebuilt or changed. The corrected C11/C++17 static/shared rows
+all passed against the original once-built libraries.
+
+The locked C API/protocol regressions passed 18 C API unit tests, 3 exported-C tests, 93 protocol
+unit tests, and the one-million-case protocol mutation test. The frozen runner corpus was invoked
+exactly once and all 18 tests passed, including four launch-rate RIFF rows, representative RF64,
+exact 8,192-byte output hashes, and atomic failure/no-clobber behavior. It was not retried.
+
+The exported-C render audit completed 100,000 calls with every forbidden-operation counter zero.
+The functional realtime audit completed 1,000,000 render/swap blocks, observed two accepted swaps
+and one full-retirement deferral, and found zero allocation, deallocation, lock, log, I/O, network,
+syscall, or total violations; the armed trace contained zero syscalls. Benchmark, timing, playback,
+listening, browser, and device invocation counts are all zero.
+
+The authoritative human report is `docs/C_ABI_V1_QUALIFICATION.md`. Exact artifact hashes, symbol
+lists, toolchain identities, audit records, execution counts, consumer exit/binary/library bindings,
+raw-stage hashes, strict gates, and the complete target matrix are bound by
+`fixtures/capi-qualification/v1/EVIDENCE.sha256` and independently pinned by the semantic checker.
+Its preserved-stage mode cross-checks those records against the immutable generated manifest, raw
+logs/audit JSON, binaries, libraries, symbols, and armed syscall trace.

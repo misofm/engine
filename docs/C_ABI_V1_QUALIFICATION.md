@@ -1,0 +1,89 @@
+# C ABI V1 native qualification
+
+Issue 114 qualifies the joined, accepted Issue-116 native PCM runner and Issue-121 C ABI product.
+It does not change or reseal either product. The accepted C header, CAPI/protocol implementation,
+runner, runner contract, portability checks, Cargo lock, session fixture, and native runner corpus
+are pinned by `fixtures/capi-qualification/v1/AUTHORITIES.sha256`.
+
+The source authority is clean-main commit `feb039765271ca62b0c905004689b88ad92df65b`, tree
+`e3e11c343c6f6a5b5b380abe03c0431c6fe81579`. Issue 116 is bound to commit/tree
+`45f8f5af8bdd578b5ccb27fdb787f7a663c39818` /
+`7e0a7b7d48362c9b9eaa15b1cfce7180c935c5b5`; Issue 121 is bound to commit/tree
+`a9a975d8f679707701cc60ad102c817eb54c3082` /
+`16728c5ea434dde1a75bdd4500568db8c283a2ca`. The joined header SHA-256 is
+`83880c2fd7b5bc835425a5a64cae19c8a0bba17f49b4802b4033a8e7dfeac37c`, and the joined lock
+SHA-256 is `c89b195f0d31ad21852d0a931023c70e1eb4a0caa534bfd6e1692c1e1178fd52`.
+
+## Frozen preflight
+
+Tool availability was frozen before the qualification build. The Linux x86_64 host has Rust and
+Cargo 1.97.1 with LLVM 22.1.6, GCC/G++ 13.3.0, GNU binutils 2.42, Python 3.12.3, Bash 5.2.21,
+strace 6.8, and jq 1.7. Exact paths and installed Rust targets are in `TOOLCHAINS.tsv`.
+
+Cross-target outcomes are candid `UNAVAILABLE`, not compile failures:
+
+- Windows GNU has an installed Rust standard library but no MinGW C/C++ compiler, linker, or
+  object inspector.
+- Windows MSVC has neither its Rust target nor `cl`, MSVC `link`/`lib`, or `dumpbin`.
+  `/usr/bin/link` is GNU coreutils and was explicitly rejected as an MSVC tool.
+- macOS x86_64/AArch64 and iOS AArch64 device Rust targets are installed, but `xcrun`, Apple SDK
+  linkers, `otool`, and `lipo` are absent.
+- The iOS AArch64 simulator Rust target and Apple SDK tools are absent.
+- Android AArch64 has its Rust standard library but no Android NDK Clang/linker or LLVM object
+  inspectors.
+
+No cross row was executed or relabeled after the preflight. Only the Linux runtime was run.
+
+## Linux artifact and consumer boundary
+
+Fresh `target/capi-qualification/v1` staging was required to be absent. One locked release Cargo
+command produced the static and shared libraries there. The accepted header and both libraries
+were copied into qualification-owned `installed/` staging and hashed before any consumer linked
+them. Existing artifacts elsewhere under `target/` were never inputs.
+
+The same warning-denied source compiled as strict C11 and C++17. Each language linked and ran once
+against each frozen library form. The consumer verifies version/layout constants, reserved-zero
+rejection, engine/session/plan construction, source generation 1 submission, generation 2 seek and
+submission, two render blocks, resource rows, malformed event lane, one-short command canary,
+exact command replay bytes, empty reliable egress, and both plan/session destruction orders.
+The accepted Rust exported-C regressions supply the complete 11-command, six-event, transactional
+replacement, retirement/reclaim, source-preserving/source-changing, failure, replay, and lifecycle
+matrix without copying protocol semantics into the qualification consumer.
+
+The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
+before the initial generation-1 submission and exited 13. No product byte or staged library was
+changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and
+submit generation 2; all four consumer rows passed against the same once-built libraries. This is
+recorded as one consumer-fixture correction in `QUALIFICATION.tsv`.
+
+GNU `nm` found exactly the 14 frozen `miso_engine_v2_*` definitions in both library forms. The
+object parser classifies undefined references separately; a synthetic
+mutation replacing a definition with an identically named undefined reference is rejected.
+
+## Runner and realtime evidence
+
+The frozen runner package test command was invoked exactly once. Its 18 tests passed, including
+the single test that executes all four RIFF launch rates and representative RF64, compares every
+8,192-byte output SHA-256 to the independent manifest, and covers atomic success/failure cleanup
+and no-clobber behavior. The runner, its fixtures, and its exclusive-output-directory contract were
+not modified, retried, or described as a new Issue-116 seal.
+
+The exported C render audit completed 100,000 calls with stable caller storage and zero allocation,
+deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors. A
+separate functional one-million-block render/swap audit observed two accepted swaps, one retirement
+deferral, zero forbidden-operation counters, and zero syscalls between the explicit realtime trace
+markers. Neither audit selected a benchmark mode or recorded durations.
+
+The exact matrix is `fixtures/capi-qualification/v1/MATRIX.tsv`. `ARTIFACTS.tsv`, `SYMBOLS.tsv`,
+`AUDITS.jsonl`, `QUALIFICATION.tsv`, `CONSUMER_RESULTS.tsv`, `RAW_EVIDENCE.tsv`, `GATES.tsv`, and
+`TOOLCHAINS.tsv` contain its independent evidence, and `EVIDENCE.sha256` binds those files. The
+semantic checker independently pins every artifact size/hash, symbol set, audit field, result
+counter, consumer exit/binary/library binding, raw-log hash, and strict gate; updating the checksum
+manifest cannot bless correlated fabricated data. Preserved-stage mode additionally checks the raw
+manifest, logs, audit JSON, binaries, libraries, symbols, and armed syscall trace in place. The
+checker mutations cover each evidence family as well as authority drift, target omissions,
+undefined-reference false positives, fabricated tool availability, timing surfaces, stale staging,
+and generated source-tree artifacts.
+
+Final prohibited counters are: benchmark 0, timing 0, playback 0, listening 0, browser 0, and
+device 0.

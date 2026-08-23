@@ -1,0 +1,23 @@
+schema_version	1
+gate	qualification-preflight	PASS	bash scripts/check-capi-qualification-v1.sh . preflight
+gate	qualification-final	PASS	bash scripts/check-capi-qualification-v1.sh . final
+gate	qualification-preserved	PASS	bash scripts/check-capi-qualification-v1.sh . preserved
+gate	qualification-mutations	PASS	bash scripts/test-capi-qualification-v1-policy.sh .
+gate	shell-syntax	PASS	bash -n qualification shell scripts
+gate	c11-syntax	PASS	cc -std=c11 -Wall -Wextra -Werror -pedantic
+gate	cpp17-syntax	PASS	c++ -std=c++17 -Wall -Wextra -Werror -pedantic
+gate	cargo-fmt	PASS	cargo fmt --all -- --check
+gate	cargo-clippy-deny-warnings	PASS	cargo clippy --locked --all-targets -- -D warnings
+gate	cargo-rustdoc-deny-warnings	PASS	RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps
+gate	capi-abi-check	PASS	bash scripts/check-capi-abi.sh
+gate	capi-abi-mutations	PASS	bash scripts/test-capi-abi.sh
+gate	runner-check	PASS	bash scripts/check-native-pcm-runner-v1.sh
+gate	runner-mutations	PASS	bash scripts/test-native-pcm-runner-v1-policy.sh
+gate	runner-portability-check	PASS	bash scripts/check-native-pcm-runner-portability-v1.sh
+gate	runner-portability-mutations	PASS	bash scripts/test-native-pcm-runner-portability-v1-policy.sh
+gate	realtime-check	PASS	bash scripts/check-realtime-policy.sh
+gate	realtime-mutations	PASS	bash scripts/test-realtime-policy.sh
+gate	workspace-check	PASS	bash scripts/check-workspace-policy.sh
+gate	workspace-mutations	PASS	bash scripts/test-workspace-policy.sh
+gate	diff-check	PASS	git diff --check
+gate	source-artifact-scan	PASS	qualification final checker source-tree scan

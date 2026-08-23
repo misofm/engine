@@ -1,0 +1,20 @@
+schema_version	1
+benchmark_invocations	0
+timing_invocations	0
+linux-c11-static	PASS	GCC 13.3 C11 runtime consumer; frozen static library	fixtures/capi-qualification/v1/ARTIFACTS.tsv	d43abbf7f9630362389c2481019013413158406aef3e7cdd4d39583575dfbd29
+linux-c11-shared	PASS	GCC 13.3 C11 runtime consumer; frozen shared library	fixtures/capi-qualification/v1/ARTIFACTS.tsv	d43abbf7f9630362389c2481019013413158406aef3e7cdd4d39583575dfbd29
+linux-cpp17-static	PASS	G++ 13.3 C++17 runtime consumer; frozen static library	fixtures/capi-qualification/v1/ARTIFACTS.tsv	d43abbf7f9630362389c2481019013413158406aef3e7cdd4d39583575dfbd29
+linux-cpp17-shared	PASS	G++ 13.3 C++17 runtime consumer; frozen shared library	fixtures/capi-qualification/v1/ARTIFACTS.tsv	d43abbf7f9630362389c2481019013413158406aef3e7cdd4d39583575dfbd29
+linux-static-symbols	PASS	GNU nm 2.42; exactly 14 defined V1 symbols and zero prefix imports	fixtures/capi-qualification/v1/SYMBOLS.tsv	83b0dbd98aabcd9ca49afd0652349f65b4ee06e708a864859e024fb40e2c3363
+linux-shared-symbols	PASS	GNU nm 2.42; exactly 14 defined V1 symbols and zero prefix imports	fixtures/capi-qualification/v1/SYMBOLS.tsv	83b0dbd98aabcd9ca49afd0652349f65b4ee06e708a864859e024fb40e2c3363
+linux-capi-regressions	PASS	Locked CAPI/protocol exact vectors, lifecycle, faults, replay, source and replacement rows	fixtures/capi-qualification/v1/QUALIFICATION.tsv	5b465e72e37895bba1430743f5f3cd90325a64e05897848ce6452a9a9cf4e62f
+linux-runner-corpus	PASS	Sole frozen runner invocation; four RIFF rates plus representative RF64 and atomic failure tests	fixtures/capi-qualification/v1/QUALIFICATION.tsv	5b465e72e37895bba1430743f5f3cd90325a64e05897848ce6452a9a9cf4e62f
+linux-capi-render-audit	PASS	100000 exported C render calls; every forbidden-operation counter zero	fixtures/capi-qualification/v1/AUDITS.jsonl	4a4bdb2d221f3632db0a4902945532614b906d04bcb047c7a6e1e8385756177b
+linux-million-swap-syscall-audit	PASS	1000000 render/swap blocks; accepted/deferred swaps; armed trace empty	fixtures/capi-qualification/v1/AUDITS.jsonl	4a4bdb2d221f3632db0a4902945532614b906d04bcb047c7a6e1e8385756177b
+windows-gnu	UNAVAILABLE	MinGW C/C++ compiler, linker and object-inspection tools absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+windows-msvc	UNAVAILABLE	MSVC Rust target, cl, link/lib and dumpbin absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+macos-x86_64	UNAVAILABLE	Apple xcrun, SDK linker, otool and lipo absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+macos-aarch64	UNAVAILABLE	Apple xcrun, SDK linker, otool and lipo absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+ios-aarch64-device	UNAVAILABLE	Apple xcrun, SDK linker, otool and lipo absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+ios-aarch64-simulator	UNAVAILABLE	iOS simulator Rust target and Apple SDK tools absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae
+android-aarch64	UNAVAILABLE	Android NDK Clang, linker and LLVM object-inspection tools absent	fixtures/capi-qualification/v1/TOOLCHAINS.tsv	acfe52d840b533de6243f8889afb8c85a95337a627d5abbfe3ddf5ccf213b1ae

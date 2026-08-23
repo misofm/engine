@@ -1,0 +1,32 @@
+schema_version	1
+host	x86_64-unknown-linux-gnu	PRESENT	rustc 1.97.1 (8bab26f4f 2026-07-14); LLVM 22.1.6
+tool	cc	PRESENT	/usr/bin/cc	cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+tool	c++	PRESENT	/usr/bin/c++	c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+tool	ar	PRESENT	/usr/bin/ar	GNU ar (GNU Binutils for Ubuntu) 2.42
+tool	nm	PRESENT	/usr/bin/nm	GNU nm (GNU Binutils for Ubuntu) 2.42
+tool	readelf	PRESENT	/usr/bin/readelf	GNU readelf (GNU Binutils for Ubuntu) 2.42
+tool	objdump	PRESENT	/usr/bin/objdump	GNU objdump (GNU Binutils for Ubuntu) 2.42
+tool	python3	PRESENT	/usr/bin/python3	Python 3.12.3
+tool	bash	PRESENT	/usr/bin/bash	GNU bash 5.2.21(1)-release
+tool	strace	PRESENT	/usr/bin/strace	strace 6.8
+tool	jq	PRESENT	/usr/bin/jq	jq-1.7
+target	x86_64-unknown-linux-gnu	PRESENT	rust-std installed
+target	x86_64-pc-windows-gnu	PRESENT	rust-std installed; MinGW compiler/linker/object tools absent
+target	x86_64-pc-windows-msvc	ABSENT	rust-std, cl, MSVC link/lib/dumpbin absent; /usr/bin/link is GNU coreutils and is not MSVC
+target	x86_64-apple-darwin	PRESENT	rust-std installed; xcrun/SDK linker/otool/lipo absent
+target	aarch64-apple-darwin	PRESENT	rust-std installed; xcrun/SDK linker/otool/lipo absent
+target	aarch64-apple-ios	PRESENT	rust-std installed; xcrun/SDK linker/otool/lipo absent
+target	aarch64-apple-ios-sim	ABSENT	rust-std and Apple SDK tools absent
+target	aarch64-linux-android	PRESENT	rust-std installed; Android NDK Clang/linker absent
+tool	x86_64-w64-mingw32-gcc	ABSENT	-	MinGW C compiler absent
+tool	x86_64-w64-mingw32-g++	ABSENT	-	MinGW C++ compiler absent
+tool	x86_64-w64-mingw32-nm	ABSENT	-	MinGW object inspector absent
+tool	cl	ABSENT	-	MSVC compiler absent
+tool	dumpbin	ABSENT	-	MSVC object inspector absent
+tool	xcrun	ABSENT	-	Apple SDK dispatcher absent
+tool	otool	ABSENT	-	Apple object inspector absent
+tool	lipo	ABSENT	-	Apple universal binary tool absent
+tool	aarch64-linux-android21-clang	ABSENT	-	Android NDK compiler absent
+tool	llvm-nm	ABSENT	-	LLVM object inspector absent
+tool	llvm-readobj	ABSENT	-	LLVM object inspector absent
+tool	llvm-objdump	ABSENT	-	LLVM object inspector absent
