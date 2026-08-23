@@ -23,8 +23,9 @@ pub use plan::{
     RenderError, RenderIo, RenderReport, RenderTime,
 };
 pub use plan_exchange::{
-    PlanExchangeConfig, PlanPublisher, PlanReplacementReservation, PlanReplacementReservationError,
-    PlanRetirer, PublishError, RealtimePlanOwner, RealtimeRenderReport, SwapOutcome, plan_exchange,
+    PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher, PlanReplacementReservation,
+    PlanReplacementReservationError, PlanRetirer, PublishError, RealtimePlanOwner,
+    RealtimeRenderReport, SwapOutcome, plan_exchange, plan_exchange_resource_report,
 };
 pub use spsc::{
     Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
@@ -66,6 +67,24 @@ mod tests {
         );
         assert_eq!(events.overflow_count(), 1);
         assert_eq!(events.capacity(), 1);
+    }
+
+    #[test]
+    fn plan_exchange_resource_projection_covers_both_queues_and_checks_overflow() {
+        let config = PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::new(1).expect("one"),
+            retirement_capacity: NonZeroUsize::new(1).expect("one"),
+        };
+        let report = plan_exchange_resource_report(config).expect("projection");
+        assert!(report.retained_payload_bytes > report.largest_allocation_bytes);
+        assert!(report.largest_allocation_bytes > 0);
+        assert_eq!(
+            plan_exchange_resource_report(PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
+                ..config
+            }),
+            Err(SpscError::CapacityOverflow)
+        );
     }
 
     #[test]

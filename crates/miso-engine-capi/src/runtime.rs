@@ -11,7 +11,7 @@ use miso_engine_core::{
     SampleRateHz,
     realtime::{
         PlanExchangeConfig, PlanPublisher, PlanRetirer, PlanarBufferMut, PreparedRenderPlan,
-        RealtimePlanOwner, RenderIo, RenderTime, plan_exchange,
+        RealtimePlanOwner, RenderIo, RenderTime, plan_exchange, plan_exchange_resource_report,
     },
 };
 use miso_engine_effect_compiler::{
@@ -94,6 +94,15 @@ struct ProviderEpoch {
     sources: Box<[ControlSource]>,
 }
 
+/// Structural plans own independent source rings; buffered host state never crosses an epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StructuralSourceStatePolicy {
+    ResetAtReplacementBoundary,
+}
+
+const STRUCTURAL_SOURCE_STATE_POLICY: StructuralSourceStatePolicy =
+    StructuralSourceStatePolicy::ResetAtReplacementBoundary;
+
 struct SharedPlanState {
     plan_alive: AtomicBool,
     active_epoch: AtomicU64,
@@ -172,8 +181,50 @@ fn checked_byte_layout(bytes: u64) -> Result<u64, CompileFailure> {
 
 #[derive(Clone, Copy)]
 struct CapiResources {
-    retained: u64,
+    active_retained: u64,
+    epoch_retained: u64,
+    prepared_protocol_retained: u64,
     largest: u64,
+}
+
+#[repr(C)]
+struct SharedArcAllocation<T> {
+    strong: core::sync::atomic::AtomicUsize,
+    weak: core::sync::atomic::AtomicUsize,
+    value: T,
+}
+
+fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
+    rows.iter().try_fold(0_u64, |total, row| {
+        total
+            .checked_add(*row)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))
+    })
+}
+
+fn protocol_queue_config(
+    limits: CompileLimits,
+    quantum_frames: usize,
+) -> Result<ProtocolQueueConfig, CompileFailure> {
+    let one = NonZeroUsize::new(1).expect("one is nonzero");
+    Ok(ProtocolQueueConfig {
+        control_command_slots: one,
+        control_command_bytes: NonZeroUsize::new(
+            usize::try_from(limits.maximum_control_frame_bytes)
+                .map_err(|_| failure("capi.resource.platform"))?,
+        )
+        .ok_or_else(|| failure("capi.resource.limit"))?,
+        automation_batch_slots: one,
+        reliable_response_slots: one,
+        reliable_event_slots: NonZeroUsize::new(2).expect("two is nonzero"),
+        telemetry_slots: one,
+        per_block_automation_density: NonZeroUsize::new(
+            limits.maximum_automation_spans_per_block as usize,
+        )
+        .ok_or_else(|| failure("capi.resource.limit"))?,
+        quantum_frames: NonZeroUsize::new(quantum_frames)
+            .ok_or_else(|| failure("capi.resource.limit"))?,
+    })
 }
 
 fn capi_resources(
@@ -181,32 +232,93 @@ fn capi_resources(
     canonical_bytes: usize,
     source_count: usize,
     source_id_bytes: usize,
+    quantum_frames: usize,
 ) -> Result<CapiResources, CompileFailure> {
-    let rows = [
+    let queue_config = protocol_queue_config(limits, quantum_frames)?;
+    let queue = ProtocolQueues::resource_report_for_config(queue_config)
+        .map_err(|_| failure("capi.resource.arithmetic"))?;
+    let replay_config = ReplayCacheConfig {
+        entries: NonZeroUsize::new(
+            usize::try_from(limits.maximum_replay_entries)
+                .map_err(|_| failure("capi.resource.platform"))?,
+        )
+        .ok_or_else(|| failure("capi.resource.limit"))?,
+        bytes: NonZeroUsize::new(
+            usize::try_from(limits.maximum_replay_bytes)
+                .map_err(|_| failure("capi.resource.platform"))?,
+        )
+        .ok_or_else(|| failure("capi.resource.limit"))?,
+        max_response_bytes: usize::try_from(limits.maximum_control_frame_bytes)
+            .map_err(|_| failure("capi.resource.platform"))?,
+    };
+    let replay = ReplayCache::resource_report_for_config(replay_config)
+        .map_err(|_| failure("capi.resource.arithmetic"))?;
+    let exchange = plan_exchange_resource_report(PlanExchangeConfig {
+        publication_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
+        retirement_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
+    })
+    .map_err(|_| failure("capi.resource.arithmetic"))?;
+    let epoch_rows = [
         checked_layout::<u8>(canonical_bytes)?,
         checked_layout::<ControlSource>(source_count)?,
         checked_layout::<u8>(source_id_bytes)?,
+    ];
+    let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
+        .map_err(|_| failure("capi.resource.platform"))?
+        / size_of::<u16>();
+    let fixed_allocation_rows = [
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
-        checked_byte_layout(limits.maximum_replay_bytes)?,
-        checked_layout::<miso_engine_protocol::ControllerResponse>(
-            usize::try_from(limits.maximum_replay_entries)
-                .map_err(|_| failure("capi.resource.platform"))?,
-        )?,
+        checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
+        checked_layout::<SharedArcAllocation<SharedPlanState>>(1)?,
+        checked_layout::<Option<miso_engine_protocol::Diagnostic>>(2)?,
+        // ProtocolController and MockProvider each retain their own complete telemetry config.
+        checked_layout::<u32>(maximum_configuration_items)?,
+        checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
+        checked_layout::<u32>(maximum_configuration_items)?,
+        checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<ProviderEpoch>(2)?,
         checked_layout::<(u64, PlanResourceReport)>(2)?,
         checked_layout::<crate::Session>(1)?,
         checked_layout::<crate::Plan>(1)?,
     ];
-    let retained = rows.into_iter().try_fold(0_u64, |total, row| {
-        total
-            .checked_add(row)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))
-    })?;
-    let largest = rows.into_iter().max().unwrap_or(0);
-    Ok(CapiResources { retained, largest })
+    let fixed_aggregate_rows = [
+        queue.retained_payload_bytes,
+        replay.retained_payload_bytes,
+        exchange.retained_payload_bytes,
+    ];
+    let prepared_protocol_allocation_rows = [
+        checked_byte_layout(limits.maximum_control_frame_bytes)?,
+        checked_layout::<miso_engine_protocol::PreparedStructuralCommand>(1)?,
+    ];
+    let prepared_protocol_aggregate_rows = [replay.retained_payload_bytes];
+    let epoch_retained = checked_sum(&epoch_rows)?;
+    let active_retained = checked_sum(&fixed_allocation_rows)?
+        .checked_add(checked_sum(&fixed_aggregate_rows)?)
+        .and_then(|value| value.checked_add(epoch_retained))
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
+        .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let largest = epoch_rows
+        .into_iter()
+        .chain(fixed_allocation_rows)
+        .chain(prepared_protocol_allocation_rows)
+        .chain([
+            queue.largest_allocation_bytes,
+            replay.largest_allocation_bytes,
+            exchange.largest_allocation_bytes,
+        ])
+        .max()
+        .unwrap_or(0);
+    Ok(CapiResources {
+        active_retained,
+        epoch_retained,
+        prepared_protocol_retained,
+        largest,
+    })
 }
 
 fn count_effects(model: &miso_engine_session::SessionTomlV1) -> Result<u64, CompileFailure> {
@@ -222,6 +334,95 @@ fn count_effects(model: &miso_engine_session::SessionTomlV1) -> Result<u64, Comp
             .checked_add(u64::try_from(count).map_err(|_| failure("capi.resource.platform"))?)
             .ok_or_else(|| failure("capi.resource.arithmetic"))
     })
+}
+
+fn compiled_capi_resources(
+    compiled: &CompiledSession,
+    limits: CompileLimits,
+) -> Result<(CapiResources, usize), CompileFailure> {
+    let source_id_bytes =
+        compiled
+            .normalized_model()
+            .sources
+            .iter()
+            .try_fold(0_usize, |total, source| {
+                total
+                    .checked_add(source.id.as_str().len())
+                    .ok_or_else(|| failure("capi.resource.arithmetic"))
+            })?;
+    Ok((
+        capi_resources(
+            limits,
+            compiled.canonical_toml().len(),
+            compiled.source_count(),
+            source_id_bytes,
+            compiled.quantum().0 as usize,
+        )?,
+        source_id_bytes,
+    ))
+}
+
+fn validate_replacement_peak(
+    current: PlanResourceReport,
+    prospective: PlanResourceReport,
+    prospective_capi: CapiResources,
+    limits: CompileLimits,
+) -> Result<(), CompileFailure> {
+    let combined = |left: u64, right: u64| {
+        left.checked_add(right)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))
+    };
+    if combined(
+        current.graph_session_plus_plan_bytes,
+        prospective.graph_session_plus_plan_bytes,
+    )? > limits.maximum_graph_session_plus_plan_bytes
+    {
+        return Err(failure("graph.resource.limit"));
+    }
+    if combined(current.source_total_bytes, prospective.source_total_bytes)?
+        > limits.maximum_source_total_bytes
+        || combined(
+            current.source_overhead_bytes,
+            prospective.source_overhead_bytes,
+        )? > limits.maximum_source_overhead_bytes
+    {
+        return Err(failure("source.resource.limit"));
+    }
+    if combined(
+        current.effect_scalar_state_bytes,
+        prospective.effect_scalar_state_bytes,
+    )? > limits.maximum_effect_state_bytes
+        || combined(
+            current.effect_scalar_scratch_bytes,
+            prospective.effect_scalar_scratch_bytes,
+        )? > limits.maximum_effect_scratch_bytes
+    {
+        return Err(failure("effect.resource.limit"));
+    }
+    if combined(
+        current.builtin_retained_payload_bytes,
+        prospective.builtin_retained_payload_bytes,
+    )? > limits.maximum_builtin_retained_bytes
+    {
+        return Err(failure("capi.resource.limit"));
+    }
+    let capi_peak = current
+        .capi_retained_bytes
+        .checked_add(prospective_capi.epoch_retained)
+        .and_then(|value| value.checked_add(prospective_capi.prepared_protocol_retained))
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    if capi_peak > limits.maximum_capi_retained_bytes {
+        return Err(failure("capi.resource.limit"));
+    }
+    if current
+        .largest_named_allocation_bytes
+        .max(prospective.largest_named_allocation_bytes)
+        .max(prospective_capi.largest)
+        > limits.maximum_named_allocation_bytes
+    {
+        return Err(failure("capi.resource.limit"));
+    }
+    Ok(())
 }
 
 fn all_limits_nonzero(limits: CompileLimits) -> bool {
@@ -299,24 +500,8 @@ fn prepare_runtime(
         return Err(failure("capi.source.ring_frames"));
     }
 
-    let canonical_session = compiled.canonical_toml().as_bytes().to_vec();
-    let source_id_bytes =
-        compiled
-            .normalized_model()
-            .sources
-            .iter()
-            .try_fold(0_usize, |total, source| {
-                total
-                    .checked_add(source.id.as_str().len())
-                    .ok_or_else(|| failure("capi.resource.arithmetic"))
-            })?;
-    let capi = capi_resources(
-        limits,
-        canonical_session.len(),
-        compiled.source_count(),
-        source_id_bytes,
-    )?;
-    if capi.retained > limits.maximum_capi_retained_bytes
+    let (capi, source_id_bytes) = compiled_capi_resources(compiled, limits)?;
+    if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
         return Err(failure("capi.resource.limit"));
@@ -498,7 +683,11 @@ fn prepare_runtime(
     })?;
     let graph_report: GraphCompileReport = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
-    if graph_resources.session_plus_plan_bytes > limits.maximum_graph_session_plus_plan_bytes {
+    let graph_session_plus_plan_bytes = graph_resources
+        .session_plus_plan_bytes
+        .checked_add(compiled.resource_estimate().compiled_model_bytes)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    if graph_session_plus_plan_bytes > limits.maximum_graph_session_plus_plan_bytes {
         return Err(failure("graph.resource.limit"));
     }
     let source_set = prepare_graph_source_set(artifact.envelope(), graph_sources, mappings)
@@ -513,6 +702,7 @@ fn prepare_runtime(
         .largest_allocation_bytes
         .max(source_resources.largest_allocation_bytes)
         .max(builtin_resources.maximum_single_allocation_bytes)
+        .max(compiled.resource_estimate().single_allocation_bytes)
         .max(capi.largest);
     if largest_named > limits.maximum_named_allocation_bytes
         || builtin_resources.engine_owned_retained_payload_bytes
@@ -563,7 +753,7 @@ fn prepare_runtime(
         latency_samples: graph_report.output_latency.0,
         tail_kind,
         tail_samples,
-        graph_session_plus_plan_bytes: graph_resources.session_plus_plan_bytes,
+        graph_session_plus_plan_bytes,
         graph_incremental_plan_bytes: graph_resources.incremental_plan_bytes,
         graph_metadata_bytes: graph_resources.graph_metadata_bytes,
         graph_delay_bytes: graph_resources.delay_bytes,
@@ -580,7 +770,7 @@ fn prepare_runtime(
         builtin_processor_payload_bytes: builtin_resources.engine_owned_processor_payload_bytes,
         builtin_meter_payload_bytes: builtin_resources.engine_owned_meter_payload_bytes,
         builtin_retained_payload_bytes: builtin_resources.engine_owned_retained_payload_bytes,
-        capi_retained_bytes: capi.retained,
+        capi_retained_bytes: capi.active_retained,
         largest_named_allocation_bytes: largest_named,
         reserved: [0; 4],
     };
@@ -630,22 +820,8 @@ pub(crate) fn compile_children(
         max_nesting: 4,
     });
     let one = NonZeroUsize::new(1).expect("one is nonzero");
-    let queues = ProtocolQueues::prepare(ProtocolQueueConfig {
-        control_command_slots: one,
-        control_command_bytes: NonZeroUsize::new(control_bytes)
-            .ok_or_else(|| failure("capi.resource.limit"))?,
-        automation_batch_slots: one,
-        reliable_response_slots: one,
-        reliable_event_slots: NonZeroUsize::new(2).expect("two is nonzero"),
-        telemetry_slots: one,
-        per_block_automation_density: NonZeroUsize::new(
-            limits.maximum_automation_spans_per_block as usize,
-        )
-        .ok_or_else(|| failure("capi.resource.limit"))?,
-        quantum_frames: NonZeroUsize::new(quantum_frames)
-            .ok_or_else(|| failure("capi.resource.limit"))?,
-    })
-    .map_err(|_| failure("capi.protocol.queue"))?;
+    let queues = ProtocolQueues::prepare(protocol_queue_config(limits, quantum_frames)?)
+        .map_err(|_| failure("capi.protocol.queue"))?;
     let replay = ReplayCache::new(ReplayCacheConfig {
         entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure("capi.resource.limit"))?,
         bytes: NonZeroUsize::new(replay_bytes).ok_or_else(|| failure("capi.resource.limit"))?,
@@ -849,6 +1025,82 @@ fn map_event_egress_error(error: EventEgressError) -> EventError {
 }
 
 impl SessionState {
+    #[cfg(test)]
+    pub(crate) fn test_state_summary(&self) -> (u64, usize, u64, usize) {
+        (
+            self.controller.session().revision().0,
+            self.controller.replay().len(),
+            self.providers.epoch,
+            self.pending_providers.len(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_enqueue_reliable(
+        &mut self,
+        event: miso_engine_protocol::ReliableSlot,
+    ) -> Result<(), ()> {
+        self.controller
+            .queues_mut()
+            .try_enqueue_event(event)
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_enqueue_diagnostic(
+        &mut self,
+        revision: miso_engine_protocol::SessionRevision,
+        event: miso_engine_protocol::DiagnosticEvent,
+    ) -> Result<(), ()> {
+        self.controller
+            .enqueue_diagnostic_event(revision, event)
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stage_meter(
+        &mut self,
+        revision: miso_engine_protocol::SessionRevision,
+        observed_sample: miso_engine_protocol::SampleTime,
+        records: &[miso_engine_protocol::MeterRecord],
+    ) -> Result<(), ()> {
+        self.controller
+            .stage_meter_batch_event(revision, observed_sample, records)
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stage_counter(
+        &mut self,
+        revision: miso_engine_protocol::SessionRevision,
+        snapshot: &miso_engine_protocol::CounterSnapshot,
+    ) -> Result<(), ()> {
+        self.controller
+            .stage_counter_snapshot_event(revision, snapshot)
+            .map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_telemetry_counters(&self) -> miso_engine_protocol::TelemetryCounters {
+        self.controller.queues().telemetry_counters()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_capi_retained_limit(&mut self, bytes: u64) {
+        self.limits.maximum_capi_retained_bytes = bytes;
+    }
+
+    fn active_resource_report(&self) -> Result<PlanResourceReport, CommandError> {
+        let active = self.shared.active_epoch.load(Ordering::Acquire);
+        self.shared
+            .reports
+            .lock()
+            .map_err(|_| CommandError::Internal)?
+            .iter()
+            .find_map(|(epoch, report)| (*epoch == active).then_some(*report))
+            .ok_or(CommandError::Internal)
+    }
+
     fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
         let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
         if active_epoch != self.providers.epoch {
@@ -922,13 +1174,28 @@ impl SessionState {
                         required: u64::try_from(response_len).unwrap_or(u64::MAX),
                     });
                 }
+                let (prospective_capi, _) =
+                    compiled_capi_resources(prepared.prospective_session().compiled(), self.limits)
+                        .map_err(CommandError::CompileRejected)?;
+                let prepared_runtime = match STRUCTURAL_SOURCE_STATE_POLICY {
+                    StructuralSourceStatePolicy::ResetAtReplacementBoundary => {
+                        prepare_runtime(prepared.prospective_session().compiled(), self.limits)
+                    }
+                }
+                .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     source_ids,
                     sources,
                     plan,
                     resources,
-                } = prepare_runtime(prepared.prospective_session().compiled(), self.limits)
-                    .map_err(CommandError::CompileRejected)?;
+                } = prepared_runtime;
+                validate_replacement_peak(
+                    self.active_resource_report()?,
+                    resources,
+                    prospective_capi,
+                    self.limits,
+                )
+                .map_err(CommandError::CompileRejected)?;
                 if !self.pending_providers.is_empty() {
                     return Err(CommandError::Backpressure);
                 }
@@ -1176,6 +1443,214 @@ mod tests {
         bytes
     }
 
+    fn replacement_projection(
+        children: &mut CompiledChildren,
+        request: &[u8],
+    ) -> (PlanResourceReport, PlanResourceReport, CapiResources) {
+        let current = children.plan.resources();
+        let prepared = children
+            .session
+            .controller
+            .prepare_command_frame(
+                request,
+                &mut DecodeScratch::new(&mut children.session.decode_fields),
+                4_096,
+            )
+            .expect("structural projection");
+        let PreparedCommandFrame::Structural(prepared) = prepared else {
+            panic!("structural replacement projection")
+        };
+        let (production_capi, _) = compiled_capi_resources(
+            prepared.prospective_session().compiled(),
+            children.session.limits,
+        )
+        .expect("prospective CAPI resources");
+        let prospective_capi = independent_capi_resources(
+            prepared.prospective_session().compiled(),
+            children.session.limits,
+        );
+        assert_eq!(
+            production_capi.active_retained,
+            prospective_capi.active_retained
+        );
+        assert_eq!(
+            production_capi.epoch_retained,
+            prospective_capi.epoch_retained
+        );
+        assert_eq!(
+            production_capi.prepared_protocol_retained,
+            prospective_capi.prepared_protocol_retained
+        );
+        assert_eq!(production_capi.largest, prospective_capi.largest);
+        let prospective = prepare_runtime(
+            prepared.prospective_session().compiled(),
+            children.session.limits,
+        )
+        .expect("prospective runtime")
+        .resources;
+        drop(prepared);
+        (current, prospective, prospective_capi)
+    }
+
+    fn independent_capi_resources(
+        compiled: &CompiledSession,
+        limits: CompileLimits,
+    ) -> CapiResources {
+        fn bytes<T>(count: usize) -> u64 {
+            u64::try_from(Layout::array::<T>(count).expect("oracle layout").size())
+                .expect("oracle platform")
+        }
+        fn sum(rows: &[u64]) -> u64 {
+            rows.iter()
+                .try_fold(0_u64, |total, value| total.checked_add(*value))
+                .expect("oracle sum")
+        }
+
+        let control_bytes = usize::try_from(limits.maximum_control_frame_bytes).expect("control");
+        let configuration_items = control_bytes / size_of::<u16>();
+        let source_id_bytes = compiled
+            .normalized_model()
+            .sources
+            .iter()
+            .map(|source| source.id.as_str().len())
+            .sum::<usize>();
+        let queue = ProtocolQueues::resource_report_for_config(ProtocolQueueConfig {
+            control_command_slots: NonZeroUsize::new(1).expect("one"),
+            control_command_bytes: NonZeroUsize::new(control_bytes).expect("control"),
+            automation_batch_slots: NonZeroUsize::new(1).expect("one"),
+            reliable_response_slots: NonZeroUsize::new(1).expect("one"),
+            reliable_event_slots: NonZeroUsize::new(2).expect("two"),
+            telemetry_slots: NonZeroUsize::new(1).expect("one"),
+            per_block_automation_density: NonZeroUsize::new(
+                limits.maximum_automation_spans_per_block as usize,
+            )
+            .expect("density"),
+            quantum_frames: NonZeroUsize::new(compiled.quantum().0 as usize).expect("quantum"),
+        })
+        .expect("queue oracle");
+        let replay = ReplayCache::resource_report_for_config(ReplayCacheConfig {
+            entries: NonZeroUsize::new(limits.maximum_replay_entries as usize).expect("entries"),
+            bytes: NonZeroUsize::new(limits.maximum_replay_bytes as usize).expect("replay"),
+            max_response_bytes: control_bytes,
+        })
+        .expect("replay oracle");
+        let exchange = plan_exchange_resource_report(PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::new(1).expect("one"),
+            retirement_capacity: NonZeroUsize::new(1).expect("one"),
+        })
+        .expect("exchange oracle");
+        let epoch_rows = [
+            bytes::<u8>(compiled.canonical_toml().len()),
+            bytes::<ControlSource>(compiled.source_count()),
+            bytes::<u8>(source_id_bytes),
+        ];
+        let fixed_allocations = [
+            bytes::<u8>(limits.maximum_diagnostic_bytes as usize),
+            bytes::<u8>(limits.maximum_diagnostic_bytes as usize),
+            bytes::<u8>(control_bytes),
+            bytes::<u8>(control_bytes),
+            bytes::<SharedArcAllocation<AtomicU64>>(1),
+            bytes::<SharedArcAllocation<SharedPlanState>>(1),
+            bytes::<Option<miso_engine_protocol::Diagnostic>>(2),
+            bytes::<u32>(configuration_items),
+            bytes::<miso_engine_protocol::CounterId>(configuration_items),
+            bytes::<u32>(configuration_items),
+            bytes::<miso_engine_protocol::CounterId>(configuration_items),
+            bytes::<ProviderEpoch>(2),
+            bytes::<(u64, PlanResourceReport)>(2),
+            bytes::<crate::Session>(1),
+            bytes::<crate::Plan>(1),
+        ];
+        let fixed_aggregates = [
+            queue.retained_payload_bytes,
+            replay.retained_payload_bytes,
+            exchange.retained_payload_bytes,
+        ];
+        let prepared_allocations = [
+            bytes::<u8>(control_bytes),
+            bytes::<miso_engine_protocol::PreparedStructuralCommand>(1),
+        ];
+        let epoch_retained = sum(&epoch_rows);
+        let active_retained = sum(&fixed_allocations)
+            .checked_add(sum(&fixed_aggregates))
+            .and_then(|value| value.checked_add(epoch_retained))
+            .expect("active oracle");
+        let prepared_protocol_retained = sum(&prepared_allocations)
+            .checked_add(replay.retained_payload_bytes)
+            .expect("prepared oracle");
+        let largest = epoch_rows
+            .into_iter()
+            .chain(fixed_allocations)
+            .chain(prepared_allocations)
+            .chain([
+                queue.largest_allocation_bytes,
+                replay.largest_allocation_bytes,
+                exchange.largest_allocation_bytes,
+            ])
+            .max()
+            .expect("largest oracle");
+        CapiResources {
+            active_retained,
+            epoch_retained,
+            prepared_protocol_retained,
+            largest,
+        }
+    }
+
+    fn replacement_requirement(
+        row: &str,
+        current: PlanResourceReport,
+        prospective: PlanResourceReport,
+        capi: CapiResources,
+    ) -> u64 {
+        match row {
+            "graph" => current
+                .graph_session_plus_plan_bytes
+                .checked_add(prospective.graph_session_plus_plan_bytes),
+            "source-total" => current
+                .source_total_bytes
+                .checked_add(prospective.source_total_bytes),
+            "source-overhead" => current
+                .source_overhead_bytes
+                .checked_add(prospective.source_overhead_bytes),
+            "effect-state" => current
+                .effect_scalar_state_bytes
+                .checked_add(prospective.effect_scalar_state_bytes),
+            "effect-scratch" => current
+                .effect_scalar_scratch_bytes
+                .checked_add(prospective.effect_scalar_scratch_bytes),
+            "builtin" => current
+                .builtin_retained_payload_bytes
+                .checked_add(prospective.builtin_retained_payload_bytes),
+            "capi" => current
+                .capi_retained_bytes
+                .checked_add(capi.epoch_retained)
+                .and_then(|value| value.checked_add(capi.prepared_protocol_retained)),
+            "largest" => Some(
+                current
+                    .largest_named_allocation_bytes
+                    .max(prospective.largest_named_allocation_bytes)
+                    .max(capi.largest),
+            ),
+            _ => unreachable!(),
+        }
+        .expect("bounded replacement requirement")
+    }
+
+    fn set_replacement_cap(limits: &mut CompileLimits, row: &str, value: u64) {
+        match row {
+            "graph" => limits.maximum_graph_session_plus_plan_bytes = value,
+            "source-total" => limits.maximum_source_total_bytes = value,
+            "source-overhead" => limits.maximum_source_overhead_bytes = value,
+            "effect-state" => limits.maximum_effect_state_bytes = value,
+            "effect-scratch" => limits.maximum_effect_scratch_bytes = value,
+            "builtin" => limits.maximum_builtin_retained_bytes = value,
+            "capi" => limits.maximum_capi_retained_bytes = value,
+            "largest" => limits.maximum_named_allocation_bytes = value,
+            _ => unreachable!(),
+        }
+    }
+
     fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
         let mut model = parse_session_toml(SESSION).expect("accepted parity base");
         model.sample_rate_hz = sample_rate_hz;
@@ -1242,6 +1717,101 @@ mod tests {
             crate::RESULT_OK
         );
         assert_eq!(report.accepted_frames, left.len() as u64);
+    }
+
+    fn boxed_c_children(session: &str) -> (*mut crate::Session, *mut crate::Plan) {
+        boxed_c_children_with_limits(session, limits())
+    }
+
+    fn boxed_c_children_with_limits(
+        session: &str,
+        limits: CompileLimits,
+    ) -> (*mut crate::Session, *mut crate::Plan) {
+        let children = compile_children(session, limits).expect("C children");
+        (
+            Box::into_raw(Box::new(crate::Session::new(
+                children.session,
+                children.session_error,
+            ))),
+            Box::into_raw(Box::new(crate::Plan::new(
+                children.plan,
+                children.plan_error,
+            ))),
+        )
+    }
+
+    fn command_c(session: *mut crate::Session, request: &[u8]) -> (u32, Vec<u8>) {
+        let (result, _, storage) = command_c_capacity(session, request, 4_096);
+        (result, storage)
+    }
+
+    fn command_c_capacity(
+        session: *mut crate::Session,
+        request: &[u8],
+        capacity: usize,
+    ) -> (u32, u64, Vec<u8>) {
+        let mut storage = vec![0xa5_u8; capacity];
+        let mut output = crate::BytesOut {
+            struct_size: crate::BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: if storage.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                storage.as_mut_ptr()
+            },
+            capacity_bytes: storage.len() as u64,
+            required_bytes: u64::MAX,
+        };
+        let result = crate::ffi::test_submit_command(session, request, &mut output);
+        if result == crate::RESULT_OK && output.required_bytes <= storage.len() as u64 {
+            storage.truncate(output.required_bytes as usize);
+        }
+        (result, output.required_bytes, storage)
+    }
+
+    fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
+        let (result, _, storage) = event_c_capacity(session, lane, 4_096);
+        (result, storage)
+    }
+
+    fn event_c_capacity(
+        session: *mut crate::Session,
+        lane: u32,
+        capacity: usize,
+    ) -> (u32, u64, Vec<u8>) {
+        let mut storage = vec![0xa5_u8; capacity];
+        let mut output = crate::BytesOut {
+            struct_size: crate::BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: if storage.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                storage.as_mut_ptr()
+            },
+            capacity_bytes: storage.len() as u64,
+            required_bytes: u64::MAX,
+        };
+        let result = crate::ffi::test_dequeue_event(session, lane, &mut output);
+        if result == crate::RESULT_OK && output.required_bytes <= storage.len() as u64 {
+            storage.truncate(output.required_bytes as usize);
+        }
+        (result, output.required_bytes, storage)
+    }
+
+    fn event_c_exact_retry(session: *mut crate::Session, lane: u32, oracle: &[u8]) {
+        let (query_result, required, query) = event_c_capacity(session, lane, 0);
+        assert_eq!(query_result, crate::RESULT_BUFFER_TOO_SMALL);
+        assert_eq!(required, oracle.len() as u64);
+        assert!(query.is_empty());
+        let (short_result, short_required, short) =
+            event_c_capacity(session, lane, oracle.len() - 1);
+        assert_eq!(short_result, crate::RESULT_BUFFER_TOO_SMALL);
+        assert_eq!(short_required, oracle.len() as u64);
+        assert!(short.iter().all(|byte| *byte == 0xa5));
+        let (exact_result, exact_required, exact) = event_c_capacity(session, lane, oracle.len());
+        assert_eq!(exact_result, crate::RESULT_OK);
+        assert_eq!(exact_required, oracle.len() as u64);
+        assert_eq!(exact, oracle);
     }
 
     fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
@@ -1501,6 +2071,113 @@ mod tests {
     }
 
     #[test]
+    fn replacement_peak_caps_accept_equal_and_reject_one_below_atomically() {
+        let session = generated_scratch_session();
+        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("double-live-cap").expect("stable ID"),
+        };
+        let request = command_bytes_at_revision(
+            1,
+            ExpectedRevision::Exact(SessionRevision(42)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &edit,
+            )),
+        );
+        let mut projection = compile_children(&session, limits()).expect("projection children");
+        let (current, prospective, capi) = replacement_projection(&mut projection, &request);
+        assert_eq!(
+            projection.session.controller.session().revision(),
+            SessionRevision(42),
+            "dropping the projection token must cancel it"
+        );
+        assert_eq!(projection.session.controller.replay().len(), 0);
+
+        for row in [
+            "graph",
+            "source-total",
+            "source-overhead",
+            "effect-state",
+            "effect-scratch",
+            "builtin",
+            "capi",
+            "largest",
+        ] {
+            let required = replacement_requirement(row, current, prospective, capi);
+            assert!(required > 0, "{row} replacement requirement");
+
+            let mut exact = compile_children(&session, limits()).expect("exact children");
+            set_replacement_cap(&mut exact.session.limits, row, required);
+            let response_len = exact
+                .session
+                .command(&request, 4_096)
+                .unwrap_or_else(|error| panic!("{row} exact replacement cap: {error:?}"));
+            assert!(response_len > 0, "{row} exact response");
+            assert_eq!(
+                exact.session.controller.session().revision(),
+                SessionRevision(43),
+                "{row} exact cap commits"
+            );
+            assert_eq!(exact.session.pending_providers.len(), 1);
+
+            let mut below = compile_children(&session, limits()).expect("one-below children");
+            set_replacement_cap(&mut below.session.limits, row, required - 1);
+            let canonical = below
+                .session
+                .controller
+                .session()
+                .canonical_snapshot()
+                .as_bytes()
+                .to_vec();
+            let error = below
+                .session
+                .command(&request, 4_096)
+                .expect_err("one-below replacement must reject");
+            let CommandError::CompileRejected(failure) = error else {
+                panic!("{row} one-below failure: {error:?}")
+            };
+            let expected_diagnostic = match row {
+                "graph" => b"graph.resource.limit\t$\n".as_slice(),
+                "source-total" | "source-overhead" => b"source.resource.limit\t$\n".as_slice(),
+                "effect-state" | "effect-scratch" => b"effect.resource.limit\t$\n".as_slice(),
+                "builtin" | "capi" => b"capi.resource.limit\t$\n".as_slice(),
+                "largest" => b"capi.resource.limit\t$\n".as_slice(),
+                _ => unreachable!(),
+            };
+            assert_eq!(failure.diagnostics, expected_diagnostic, "{row} diagnostic");
+            assert_eq!(
+                below
+                    .session
+                    .controller
+                    .session()
+                    .canonical_snapshot()
+                    .as_bytes(),
+                canonical,
+                "{row} canonical rollback"
+            );
+            assert_eq!(
+                below.session.controller.session().revision(),
+                SessionRevision(42),
+                "{row} revision rollback"
+            );
+            assert_eq!(below.session.controller.replay().len(), 0, "{row} replay");
+            assert_eq!(below.session.providers.epoch, 0, "{row} provider epoch");
+            assert!(
+                below.session.pending_providers.is_empty(),
+                "{row} providers"
+            );
+            assert_eq!(below.plan.owner.active_epoch().0, 0, "{row} plan epoch");
+            assert_eq!(
+                below
+                    .session
+                    .dequeue_event(EventLane::Reliable, 4_096)
+                    .expect("reliable lane"),
+                None,
+                "{row} reliable events"
+            );
+        }
+    }
+
+    #[test]
     fn controller_command_is_canonical_replayed_and_supports_snapshot() {
         let mut children = compile_children(SESSION, limits()).expect("children");
         let capability = command_bytes(1, miso_engine_protocol::CommandPayload::CapabilitiesGet);
@@ -1573,6 +2250,31 @@ mod tests {
     #[test]
     fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         let mut children = compile_children(SESSION, limits()).expect("children");
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        children
+            .session
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: 0,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .expect("old provider source block");
+        let mut pcm = [0.0_f32; 256];
+        children
+            .plan
+            .render(
+                0,
+                PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("old output"),
+            )
+            .expect("old plan block");
+        assert!(pcm.iter().any(|sample| *sample != 0.0), "old provider PCM");
         let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("capi-replaced").expect("stable ID"),
         };
@@ -1607,6 +2309,20 @@ mod tests {
         assert_eq!(children.session.pending_providers[0].epoch, 1);
         assert_eq!(children.plan.owner.active_epoch().0, 0);
         assert_eq!(children.session.controller.replay().len(), 1);
+        children
+            .session
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: 128,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .expect("submission remains routed to old committed provider before boundary");
 
         let required = match children.session.dequeue_event(EventLane::Reliable, 0) {
             Err(EventError::BufferTooSmall { required }) => required,
@@ -1660,14 +2376,22 @@ mod tests {
         );
         assert_eq!(children.session.controller.replay().len(), 1);
 
-        let mut pcm = [0.0_f32; 256];
+        pcm.fill(f32::NAN);
+        assert_eq!(
+            STRUCTURAL_SOURCE_STATE_POLICY,
+            StructuralSourceStatePolicy::ResetAtReplacementBoundary
+        );
         children
             .plan
             .render(
-                0,
+                128,
                 PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
             )
             .expect("replacement boundary");
+        assert!(
+            pcm.iter().all(|sample| *sample == 0.0),
+            "new provider follows the frozen structural source-state policy"
+        );
         assert_eq!(children.plan.owner.active_epoch().0, 1);
         assert_eq!(children.session.providers.epoch, 0);
         children
@@ -1695,7 +2419,7 @@ mod tests {
         children
             .plan
             .render(
-                128,
+                256,
                 PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
             )
             .expect("second replacement boundary");
@@ -1707,6 +2431,36 @@ mod tests {
         assert_eq!(children.session.providers.sources[0].region_end, 512);
         assert!(children.session.pending_providers.is_empty());
         assert!(children.session.retired_providers.is_empty());
+        children
+            .session
+            .seek(b"fixture-source", 2, 384)
+            .expect("seek new source-changing provider");
+        children
+            .session
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 2,
+                    start_frame: 384,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: true,
+                },
+            )
+            .expect("new source-changing provider PCM");
+        pcm.fill(f32::NAN);
+        children
+            .plan
+            .render(
+                384,
+                PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("new provider output"),
+            )
+            .expect("new provider render");
+        assert!(
+            pcm.iter().any(|sample| *sample != 0.0),
+            "source-changing provider produces submitted PCM"
+        );
 
         let replay_len = children
             .session
@@ -1728,7 +2482,7 @@ mod tests {
         let mut children = compile_children(SESSION, limits()).expect("children");
         let revision = SessionRevision(42);
         let configuration = miso_engine_protocol::TelemetryConfiguration {
-            meter_handles: vec![1],
+            meter_handles: vec![1, 2],
             meter_period_blocks: 1,
             counter_ids: vec![miso_engine_protocol::CounterId::ControlCommandBackpressure],
             counter_period_blocks: 1,
@@ -1909,12 +2663,256 @@ mod tests {
     }
 
     #[test]
+    fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
+        let mut direct = compile_children(SESSION, limits()).expect("direct children");
+        let (c_session, c_plan) = boxed_c_children(SESSION);
+        let revision = SessionRevision(42);
+        let configuration = miso_engine_protocol::TelemetryConfiguration {
+            meter_handles: vec![1, 2],
+            meter_period_blocks: 1,
+            counter_ids: vec![miso_engine_protocol::CounterId::ControlCommandBackpressure],
+            counter_period_blocks: 1,
+            diagnostics_enabled: true,
+            minimum_diagnostic_severity: miso_engine_protocol::DiagnosticSeverity::Info,
+        };
+        let configure = command_bytes_at_revision(
+            1,
+            ExpectedRevision::Exact(revision),
+            miso_engine_protocol::CommandPayload::TelemetryConfigure(&configuration),
+        );
+        let direct_len = direct
+            .session
+            .command(&configure, 4_096)
+            .expect("direct configure");
+        let direct_response = direct.session.command_response(direct_len).to_vec();
+        let (c_result, c_response) = command_c(c_session, &configure);
+        assert_eq!(c_result, crate::RESULT_OK);
+        assert_eq!(c_response, direct_response);
+
+        let request_id = RequestId::new(9).expect("request ID");
+        let reliable = [
+            miso_engine_protocol::ReliableSlot::session_committed(
+                revision,
+                1,
+                request_id,
+                SessionRevision(41),
+                1,
+            ),
+            miso_engine_protocol::ReliableSlot::automation_canceled(
+                revision,
+                2,
+                request_id,
+                3,
+                miso_engine_protocol::AutomationCancellationReason::ExplicitReconfiguration,
+                1,
+                Some(miso_engine_protocol::SampleTime(0)),
+            ),
+            miso_engine_protocol::ReliableSlot::transport_state(
+                revision,
+                3,
+                miso_engine_protocol::TransportState::Playing,
+                miso_engine_protocol::SampleTime(0),
+                miso_engine_protocol::SampleTime(0),
+                Some(request_id),
+            ),
+        ];
+        for pair in [reliable[..2].to_vec(), reliable[2..].to_vec()] {
+            for event in &pair {
+                direct
+                    .session
+                    .test_enqueue_reliable(*event)
+                    .expect("direct reliable fixture");
+                crate::ffi::test_enqueue_reliable(c_session, *event).expect("C reliable fixture");
+            }
+            for _ in pair {
+                let direct_len = direct
+                    .session
+                    .dequeue_event(EventLane::Reliable, 4_096)
+                    .expect("direct reliable")
+                    .expect("direct reliable bytes");
+                let oracle = direct.session.event_response(direct_len).to_vec();
+                event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &oracle);
+            }
+        }
+
+        let diagnostic = miso_engine_protocol::DiagnosticEvent {
+            diagnostic: miso_engine_protocol::Diagnostic {
+                code: "capi.event".to_owned(),
+                severity: miso_engine_protocol::DiagnosticSeverity::Warning,
+                path: Vec::new(),
+                detail: None,
+                operation_index: None,
+                sample_time: Some(0),
+                provider_sequence: Some(1),
+            },
+        };
+        direct
+            .session
+            .test_enqueue_diagnostic(revision, diagnostic.clone())
+            .expect("direct diagnostic");
+        crate::ffi::test_enqueue_diagnostic(c_session, revision, diagnostic).expect("C diagnostic");
+        let direct_len = direct
+            .session
+            .dequeue_event(EventLane::Reliable, 4_096)
+            .expect("direct diagnostic")
+            .expect("direct diagnostic bytes");
+        let oracle = direct.session.event_response(direct_len).to_vec();
+        event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &oracle);
+
+        let meter = [miso_engine_protocol::MeterRecord {
+            handle: 1,
+            component: miso_engine_protocol::MeterComponent::Left,
+            flags: 1,
+            value: 0.5,
+        }];
+        direct
+            .session
+            .test_stage_meter(revision, miso_engine_protocol::SampleTime(4), &meter)
+            .expect("direct meter");
+        crate::ffi::test_stage_meter(
+            c_session,
+            revision,
+            miso_engine_protocol::SampleTime(4),
+            &meter,
+        )
+        .expect("C meter");
+        let replacement = [miso_engine_protocol::MeterRecord {
+            value: 0.75,
+            ..meter[0]
+        }];
+        direct
+            .session
+            .test_stage_meter(revision, miso_engine_protocol::SampleTime(5), &replacement)
+            .expect("direct meter coalesce");
+        crate::ffi::test_stage_meter(
+            c_session,
+            revision,
+            miso_engine_protocol::SampleTime(5),
+            &replacement,
+        )
+        .expect("C meter coalesce");
+        let coalesced = [miso_engine_protocol::MeterRecord {
+            value: 0.875,
+            ..meter[0]
+        }];
+        direct
+            .session
+            .test_stage_meter(revision, miso_engine_protocol::SampleTime(6), &coalesced)
+            .expect("direct meter replacement");
+        crate::ffi::test_stage_meter(
+            c_session,
+            revision,
+            miso_engine_protocol::SampleTime(6),
+            &coalesced,
+        )
+        .expect("C meter replacement");
+        let dropped = [miso_engine_protocol::MeterRecord {
+            handle: 2,
+            ..meter[0]
+        }];
+        direct
+            .session
+            .test_stage_meter(revision, miso_engine_protocol::SampleTime(7), &dropped)
+            .expect("direct meter drop policy");
+        crate::ffi::test_stage_meter(
+            c_session,
+            revision,
+            miso_engine_protocol::SampleTime(7),
+            &dropped,
+        )
+        .expect("C meter drop policy");
+        assert_eq!(
+            direct.session.test_telemetry_counters(),
+            miso_engine_protocol::TelemetryCounters {
+                telemetry_coalesced: 1,
+                telemetry_dropped: 1,
+            }
+        );
+        assert_eq!(
+            crate::ffi::test_telemetry_counters(c_session),
+            direct.session.test_telemetry_counters()
+        );
+        for _ in 0..2 {
+            let direct_len = direct
+                .session
+                .dequeue_event(EventLane::Lossy, 4_096)
+                .expect("direct meter")
+                .expect("direct meter bytes");
+            let oracle = direct.session.event_response(direct_len).to_vec();
+            event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &oracle);
+        }
+
+        let counters = miso_engine_protocol::CounterSnapshot {
+            observed_sample: miso_engine_protocol::SampleTime(4),
+            values: vec![miso_engine_protocol::CounterValue {
+                id: miso_engine_protocol::CounterId::ControlCommandBackpressure,
+                value: 7,
+            }],
+        };
+        direct
+            .session
+            .test_stage_counter(revision, &counters)
+            .expect("direct counters");
+        crate::ffi::test_stage_counter(c_session, revision, &counters).expect("C counters");
+        let direct_len = direct
+            .session
+            .dequeue_event(EventLane::Lossy, 4_096)
+            .expect("direct counters")
+            .expect("direct counter bytes");
+        let oracle = direct.session.event_response(direct_len).to_vec();
+        event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &oracle);
+
+        assert_eq!(
+            event_c(c_session, crate::EVENT_LANE_RELIABLE),
+            (crate::RESULT_OK, Vec::new())
+        );
+        assert_eq!(
+            event_c(c_session, crate::EVENT_LANE_LOSSY),
+            (crate::RESULT_OK, Vec::new())
+        );
+        crate::ffi::test_session_destroy(c_session);
+        crate::ffi::test_plan_destroy(c_plan);
+    }
+
+    #[test]
+    fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
+        let (c_session, c_plan) = boxed_c_children(SESSION);
+        crate::ffi::test_plan_destroy(c_plan);
+        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("destroyed-plan").expect("stable ID"),
+        };
+        let request = command_bytes_at_revision(
+            1,
+            ExpectedRevision::Exact(SessionRevision(42)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &edit,
+            )),
+        );
+        let before = crate::ffi::test_session_state_summary(c_session);
+        let (short_result, required, short_canary) = command_c_capacity(c_session, &request, 0);
+        assert_eq!(short_result, crate::RESULT_BUFFER_TOO_SMALL);
+        assert_eq!(required, 4_096);
+        assert!(short_canary.is_empty());
+        assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+        let (result, canary) = command_c(c_session, &request);
+        assert_eq!(result, crate::RESULT_BACKPRESSURE);
+        assert_eq!(canary, vec![0xa5; 4_096]);
+        assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+        assert_eq!(
+            event_c(c_session, crate::EVENT_LANE_RELIABLE),
+            (crate::RESULT_OK, Vec::new())
+        );
+        crate::ffi::test_session_destroy(c_session);
+    }
+
+    #[test]
     fn capi_controller_dispatches_every_advertised_command_family() {
         let mut children = compile_children(SESSION, limits()).expect("children");
+        let (c_session, c_plan) = boxed_c_children(SESSION);
         let codec = ProtocolCodec::default();
         let mut request_id = 0_u64;
         macro_rules! dispatch {
-            ($expected:expr, $payload:expr) => {{
+            ($expected:expr, $payload:expr, $status:expr, $revision:expr, $events:expr) => {{
                 request_id += 1;
                 let mut request = vec![0_u8; 4_096];
                 let len = codec
@@ -1932,12 +2930,26 @@ mod tests {
                     .session
                     .command(&request, 4_096)
                     .expect("CAPI command dispatch");
+                let direct_bytes = children.session.command_response(response_len).to_vec();
+                let (c_result, c_bytes) = command_c(c_session, &request);
+                assert_eq!(c_result, crate::RESULT_OK, "C command {request_id}");
+                assert_eq!(c_bytes, direct_bytes, "C/direct bytes {request_id}");
+
+                let replay_len = children
+                    .session
+                    .command(&request, 4_096)
+                    .expect("direct exact replay");
+                assert_eq!(
+                    children.session.command_response(replay_len),
+                    direct_bytes,
+                    "direct replay bytes {request_id}"
+                );
+                let (c_replay_result, c_replay) = command_c(c_session, &request);
+                assert_eq!(c_replay_result, crate::RESULT_OK, "C replay {request_id}");
+                assert_eq!(c_replay, direct_bytes, "C replay bytes {request_id}");
                 let mut fields = [0_u16; 512];
                 let response = codec
-                    .decode_typed_response(
-                        children.session.command_response(response_len),
-                        &mut DecodeScratch::new(&mut fields),
-                    )
+                    .decode_typed_response(&direct_bytes, &mut DecodeScratch::new(&mut fields))
                     .expect("typed response");
                 let header = match response {
                     miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
@@ -1945,7 +2957,40 @@ mod tests {
                         header
                     }
                 };
-                assert_ne!(header.status, StatusCode::UnsupportedMessage);
+                assert_eq!(header.status, $status, "accepted status {request_id}");
+                assert_eq!(header.revision, SessionRevision($revision));
+                let mut event_ids = Vec::new();
+                loop {
+                    let direct_event = children
+                        .session
+                        .dequeue_event(EventLane::Reliable, 4_096)
+                        .expect("direct reliable event");
+                    let Some(event_len) = direct_event else {
+                        break;
+                    };
+                    let oracle = children.session.event_response(event_len).to_vec();
+                    let (event_result, c_event) = event_c(c_session, crate::EVENT_LANE_RELIABLE);
+                    assert_eq!(event_result, crate::RESULT_OK);
+                    assert_eq!(c_event, oracle, "event bytes {request_id}");
+                    let mut event_fields = [0_u16; 64];
+                    event_ids.push(
+                        codec
+                            .decode_typed_event(&oracle, &mut DecodeScratch::new(&mut event_fields))
+                            .expect("typed command event")
+                            .header
+                            .message_id,
+                    );
+                }
+                assert_eq!(
+                    event_c(c_session, crate::EVENT_LANE_RELIABLE),
+                    (crate::RESULT_OK, Vec::new())
+                );
+                assert_eq!(event_ids.as_slice(), $events, "events {request_id}");
+                let summary = crate::ffi::test_session_state_summary(c_session);
+                assert_eq!(summary.0, $revision as u64);
+                assert_eq!(summary.1, request_id as usize);
+                assert_eq!(summary.2, children.session.providers.epoch);
+                assert_eq!(summary.3, children.session.pending_providers.len());
                 header.message_id
             }};
         }
@@ -1953,7 +2998,10 @@ mod tests {
         assert_eq!(
             dispatch!(
                 ExpectedRevision::Any,
-                miso_engine_protocol::CommandPayload::CapabilitiesGet
+                miso_engine_protocol::CommandPayload::CapabilitiesGet,
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::CapabilitiesGet
         );
@@ -1965,7 +3013,10 @@ mod tests {
                         offset: 0,
                         maximum_bytes: 1,
                     },
-                )
+                ),
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::SessionSnapshotGet
         );
@@ -1977,7 +3028,10 @@ mod tests {
                         after_handle: 0,
                         limit: 1,
                     },
-                )
+                ),
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::ParameterMetadataGet
         );
@@ -1985,7 +3039,10 @@ mod tests {
         assert_eq!(
             dispatch!(
                 ExpectedRevision::Any,
-                miso_engine_protocol::CommandPayload::ParameterStateGet(&state)
+                miso_engine_protocol::CommandPayload::ParameterStateGet(&state),
+                StatusCode::NotFound,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::ParameterStateGet
         );
@@ -2004,14 +3061,20 @@ mod tests {
                     miso_engine_protocol::AutomationEnqueue {
                         records: &automation,
                     },
-                )
+                ),
+                StatusCode::NotFound,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::AutomationEnqueue
         );
         assert_eq!(
             dispatch!(
                 ExpectedRevision::Any,
-                miso_engine_protocol::CommandPayload::TransportGet
+                miso_engine_protocol::CommandPayload::TransportGet,
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::TransportGet
         );
@@ -2023,7 +3086,10 @@ mod tests {
                         state: miso_engine_protocol::TransportState::Playing,
                         position: Some(miso_engine_protocol::SampleTime(0)),
                     },
-                )
+                ),
+                StatusCode::Ok,
+                42,
+                &[miso_engine_protocol::MessageId::TransportState]
             ),
             miso_engine_protocol::MessageId::TransportSet
         );
@@ -2038,7 +3104,10 @@ mod tests {
         assert_eq!(
             dispatch!(
                 ExpectedRevision::Exact(SessionRevision(42)),
-                miso_engine_protocol::CommandPayload::TelemetryConfigure(&telemetry)
+                miso_engine_protocol::CommandPayload::TelemetryConfigure(&telemetry),
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::TelemetryConfigure
         );
@@ -2049,7 +3118,10 @@ mod tests {
         assert_eq!(
             dispatch!(
                 ExpectedRevision::Any,
-                miso_engine_protocol::CommandPayload::CountersGet(&counters)
+                miso_engine_protocol::CommandPayload::CountersGet(&counters),
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::CountersGet
         );
@@ -2062,7 +3134,10 @@ mod tests {
                         limit: 1,
                         minimum_severity: miso_engine_protocol::DiagnosticSeverity::Info,
                     },
-                )
+                ),
+                StatusCode::Ok,
+                42,
+                &[]
             ),
             miso_engine_protocol::MessageId::DiagnosticsGet
         );
@@ -2075,11 +3150,170 @@ mod tests {
                 ExpectedRevision::Exact(SessionRevision(42)),
                 miso_engine_protocol::CommandPayload::SessionTransactionApply(
                     core::slice::from_ref(&structural),
-                )
+                ),
+                StatusCode::Ok,
+                43,
+                &[miso_engine_protocol::MessageId::SessionCommitted]
             ),
             miso_engine_protocol::MessageId::SessionTransactionApply
         );
         assert_eq!(request_id, 11);
+        let (c_revision, c_replay_len, c_provider_epoch, c_pending_providers) =
+            crate::ffi::test_session_state_summary(c_session);
+        assert_eq!(
+            c_revision,
+            children.session.controller.session().revision().0
+        );
+        assert_eq!(c_replay_len, children.session.controller.replay().len());
+        assert_eq!(c_provider_epoch, children.session.providers.epoch);
+        assert_eq!(
+            c_pending_providers,
+            children.session.pending_providers.len()
+        );
+        crate::ffi::test_plan_destroy(c_plan);
+        crate::ffi::test_session_destroy(c_session);
+    }
+
+    #[test]
+    fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact() {
+        let mut direct = compile_children(SESSION, limits()).expect("direct children");
+        let (c_session, c_plan) = boxed_c_children(SESSION);
+        let codec = ProtocolCodec::default();
+        macro_rules! parity {
+            ($request:expr, $status:expr) => {{
+                let request = $request;
+                let len = direct
+                    .session
+                    .command(&request, 4_096)
+                    .expect("direct decision");
+                let oracle = direct.session.command_response(len).to_vec();
+                let (result, bytes) = command_c(c_session, &request);
+                assert_eq!(result, crate::RESULT_OK);
+                assert_eq!(bytes, oracle);
+                let mut fields = [0_u16; 64];
+                let decoded = codec
+                    .decode_typed_response(&oracle, &mut DecodeScratch::new(&mut fields))
+                    .expect("typed decision");
+                let header = match decoded {
+                    miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
+                    | miso_engine_protocol::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                        header
+                    }
+                };
+                assert_eq!(header.status, $status);
+                oracle
+            }};
+        }
+
+        let first = command_bytes(1, miso_engine_protocol::CommandPayload::CapabilitiesGet);
+        let first_bytes = parity!(first.clone(), StatusCode::Ok);
+        assert_eq!(parity!(first.clone(), StatusCode::Ok), first_bytes);
+        let conflict = command_bytes(1, miso_engine_protocol::CommandPayload::TransportGet);
+        parity!(conflict, StatusCode::RequestIdReuse);
+        for request_id in 2..=18 {
+            parity!(
+                command_bytes(
+                    request_id,
+                    miso_engine_protocol::CommandPayload::CapabilitiesGet
+                ),
+                StatusCode::Ok
+            );
+        }
+        parity!(first, StatusCode::ReplayExpired);
+
+        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("pressure-one").expect("stable ID"),
+        };
+        let stale = command_bytes_at_revision(
+            19,
+            ExpectedRevision::Exact(SessionRevision(41)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &edit,
+            )),
+        );
+        parity!(stale, StatusCode::RevisionConflict);
+
+        for sequence in [1, 2] {
+            let event = miso_engine_protocol::ReliableSlot::transport_state(
+                SessionRevision(42),
+                sequence,
+                miso_engine_protocol::TransportState::Stopped,
+                miso_engine_protocol::SampleTime(0),
+                miso_engine_protocol::SampleTime(0),
+                None,
+            );
+            direct
+                .session
+                .test_enqueue_reliable(event)
+                .expect("fill direct reliable");
+            crate::ffi::test_enqueue_reliable(c_session, event).expect("fill C reliable");
+        }
+        let event_full = command_bytes_at_revision(
+            20,
+            ExpectedRevision::Exact(SessionRevision(42)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &edit,
+            )),
+        );
+        parity!(event_full, StatusCode::Backpressure);
+        for _ in 0..2 {
+            let len = direct
+                .session
+                .dequeue_event(EventLane::Reliable, 4_096)
+                .expect("reliable drain")
+                .expect("retained full event");
+            let oracle = direct.session.event_response(len).to_vec();
+            let (result, bytes) = event_c(c_session, crate::EVENT_LANE_RELIABLE);
+            assert_eq!(result, crate::RESULT_OK);
+            assert_eq!(bytes, oracle, "event-full command did not drop FIFO data");
+        }
+
+        let first_structural = command_bytes_at_revision(
+            21,
+            ExpectedRevision::Exact(SessionRevision(42)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &edit,
+            )),
+        );
+        parity!(first_structural, StatusCode::Ok);
+        let len = direct
+            .session
+            .dequeue_event(EventLane::Reliable, 4_096)
+            .expect("commit event")
+            .expect("commit bytes");
+        let oracle = direct.session.event_response(len).to_vec();
+        assert_eq!(event_c(c_session, crate::EVENT_LANE_RELIABLE).1, oracle);
+
+        let second_edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("pressure-two").expect("stable ID"),
+        };
+        let publication_full = command_bytes_at_revision(
+            22,
+            ExpectedRevision::Exact(SessionRevision(43)),
+            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
+                &second_edit,
+            )),
+        );
+        let before = crate::ffi::test_session_state_summary(c_session);
+        crate::ffi::test_set_capi_retained_limit(c_session, 0);
+        let (resource_result, resource_canary) = command_c(c_session, &publication_full);
+        assert_eq!(resource_result, crate::RESULT_COMPILE_REJECTED);
+        assert_eq!(resource_canary, vec![0xa5; 4_096]);
+        assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+        crate::ffi::test_set_capi_retained_limit(c_session, limits().maximum_capi_retained_bytes);
+        assert!(matches!(
+            direct.session.command(&publication_full, 4_096),
+            Err(CommandError::Backpressure)
+        ));
+        let (result, canary) = command_c(c_session, &publication_full);
+        assert_eq!(result, crate::RESULT_BACKPRESSURE);
+        assert_eq!(canary, vec![0xa5; 4_096]);
+        assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+        assert_eq!(before.0, 43);
+        assert_eq!(before.3, 1);
+
+        crate::ffi::test_plan_destroy(c_plan);
+        crate::ffi::test_session_destroy(c_session);
     }
 
     #[test]

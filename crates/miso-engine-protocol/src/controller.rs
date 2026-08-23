@@ -4,7 +4,7 @@
 //! will construct the same commands after the bounded wire decoder has finished; no decoder calls
 //! a renderer, and this module has no plan-publication capability.
 
-use core::{fmt, num::NonZeroUsize};
+use core::{alloc::Layout, fmt, num::NonZeroUsize};
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
@@ -37,6 +37,15 @@ pub struct ReplayCacheConfig {
     pub bytes: NonZeroUsize,
     /// Maximum response bytes reserved before any new command executes.
     pub max_response_bytes: usize,
+}
+
+/// Exact configured heap-payload budget for one endpoint replay cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplayCacheResourceReport {
+    /// Entry-ring payload plus the configured aggregate canonical request/response byte budget.
+    pub retained_payload_bytes: u64,
+    /// Largest single permitted replay allocation payload.
+    pub largest_allocation_bytes: u64,
 }
 
 /// Endpoint-owned controller bounds that are advertised and enforced before edit allocation.
@@ -133,6 +142,24 @@ pub struct ReplayCache {
 }
 
 impl ReplayCache {
+    /// Project the bounded retained payload budget used by one cache configuration.
+    pub fn resource_report_for_config(
+        config: ReplayCacheConfig,
+    ) -> Result<ReplayCacheResourceReport, ReplayCacheError> {
+        let entries = Layout::array::<ReplayEntry>(config.entries.get())
+            .map_err(|_| ReplayCacheError::ResourceOverflow)?
+            .size();
+        let retained = entries
+            .checked_add(config.bytes.get())
+            .ok_or(ReplayCacheError::ResourceOverflow)?;
+        Ok(ReplayCacheResourceReport {
+            retained_payload_bytes: u64::try_from(retained)
+                .map_err(|_| ReplayCacheError::ResourceOverflow)?,
+            largest_allocation_bytes: u64::try_from(entries.max(config.bytes.get()))
+                .map_err(|_| ReplayCacheError::ResourceOverflow)?,
+        })
+    }
+
     /// Prepare a bounded replay cache off the render plane.
     #[must_use]
     pub fn new(config: ReplayCacheConfig) -> Self {
@@ -270,6 +297,8 @@ pub enum ReplayCacheError {
     ResponseTooLarge,
     /// Completion was called without a sufficient preflight reservation.
     ReservationMissing,
+    /// A configured retained payload layout or checked sum is not representable.
+    ResourceOverflow,
 }
 
 impl fmt::Display for ReplayCacheError {
@@ -3333,6 +3362,26 @@ mod tests {
 
     fn id(value: u64) -> RequestId {
         RequestId::new(value).expect("nonzero")
+    }
+
+    #[test]
+    fn replay_resource_projection_is_bounded_and_overflow_checked() {
+        let config = ReplayCacheConfig {
+            entries: NonZeroUsize::new(4).expect("entries"),
+            bytes: NonZeroUsize::new(1_024).expect("bytes"),
+            max_response_bytes: 256,
+        };
+        let report = ReplayCache::resource_report_for_config(config).expect("projection");
+        assert!(report.retained_payload_bytes > 1_024);
+        assert!(report.largest_allocation_bytes >= 1_024);
+        let overflow = ReplayCacheConfig {
+            entries: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
+            ..config
+        };
+        assert_eq!(
+            ReplayCache::resource_report_for_config(overflow),
+            Err(ReplayCacheError::ResourceOverflow)
+        );
     }
 
     fn controller(

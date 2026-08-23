@@ -34,9 +34,10 @@ pub use model::{
 pub use queue::{
     AutomationBatchError, AutomationBatchSlot, AutomationEnqueueError, AutomationKind,
     AutomationRecord, ControlCommandSlot, CounterTelemetryRecord, ParameterHandle,
-    ProtocolQueueConfig, ProtocolQueueError, ProtocolQueues, QueueKind, QueueReport,
-    ReliableEnqueueError, ReliableEventReservation, ReliableEventReservations, ReliableHeader,
-    ReliablePayload, ReliableSlot, TelemetryCounters, TelemetryKey, TelemetryRecord,
+    ProtocolQueueConfig, ProtocolQueueError, ProtocolQueueResourceReport, ProtocolQueues,
+    QueueKind, QueueReport, ReliableEnqueueError, ReliableEventReservation,
+    ReliableEventReservations, ReliableHeader, ReliablePayload, ReliableSlot, TelemetryCounters,
+    TelemetryKey, TelemetryRecord,
 };
 pub use session_wire::{
     DecodedSessionTransaction, SessionTransactionFrame, complete_all_opcode_fixture,
@@ -73,5 +74,5 @@ pub use controller::{
     ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
     PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
     ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
-    ReplayDecision,
+    ReplayCacheResourceReport, ReplayDecision,
 };

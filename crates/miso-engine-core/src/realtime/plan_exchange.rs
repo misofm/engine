@@ -1,9 +1,10 @@
 //! Bounded block-boundary publication and off-render retirement.
 
-use super::spsc::bounded_spsc_internal;
+use super::spsc::{bounded_spsc_internal, bounded_spsc_retained_payload};
 use super::{Consumer, PlanEpoch, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError};
 use super::{PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime};
 use core::{
+    alloc::Layout,
     cell::Cell,
     fmt,
     num::NonZeroUsize,
@@ -18,6 +19,22 @@ pub struct PlanExchangeConfig {
     pub publication_capacity: NonZeroUsize,
     /// Number of displaced plans that may await off-render reclamation.
     pub retirement_capacity: NonZeroUsize,
+}
+
+/// Exact engine-owned heap payload budget for one prepared plan exchange.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlanExchangeResourceReport {
+    /// Sum of both SPSC headers/backings and the two shared credit-counter allocations.
+    pub retained_payload_bytes: u64,
+    /// Largest single requested heap payload allocation among those rows.
+    pub largest_allocation_bytes: u64,
+}
+
+#[repr(C)]
+struct SharedCounterAllocation {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    value: AtomicUsize,
 }
 /// Result of one render-entry swap attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,11 +136,43 @@ pub struct PlanReplacementReservation<'a> {
     credit_armed: bool,
 }
 
+/// Project the exact heap payloads that [`plan_exchange`] requests for this configuration.
+pub fn plan_exchange_resource_report(
+    config: PlanExchangeConfig,
+) -> Result<PlanExchangeResourceReport, SpscError> {
+    let publication = bounded_spsc_retained_payload::<PublishedPlan>(config.publication_capacity)?;
+    let retirement = bounded_spsc_retained_payload::<RetiredPlan>(config.retirement_capacity)?;
+    let counter = Layout::new::<SharedCounterAllocation>().size();
+    let rows = [
+        publication.ring_header_bytes,
+        publication.slot_payload_bytes,
+        retirement.ring_header_bytes,
+        retirement.slot_payload_bytes,
+        counter,
+        counter,
+    ];
+    let retained = rows.iter().try_fold(0_u64, |total, row| {
+        total
+            .checked_add(u64::try_from(*row).map_err(|_| SpscError::CapacityOverflow)?)
+            .ok_or(SpscError::CapacityOverflow)
+    })?;
+    let largest = rows
+        .into_iter()
+        .max()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(SpscError::CapacityOverflow)?;
+    Ok(PlanExchangeResourceReport {
+        retained_payload_bytes: retained,
+        largest_allocation_bytes: largest,
+    })
+}
+
 /// Prepare bounded publication and retirement queues for plans with one exact envelope.
 pub fn plan_exchange(
     initial: PreparedRenderPlan,
     config: PlanExchangeConfig,
 ) -> Result<(PlanPublisher, RealtimePlanOwner, PlanRetirer), SpscError> {
+    let _resources = plan_exchange_resource_report(config)?;
     let envelope = initial.envelope();
     let retirement_credits = Arc::new(AtomicUsize::new(config.retirement_capacity.get()));
     let legacy_outstanding = Arc::new(AtomicUsize::new(0));

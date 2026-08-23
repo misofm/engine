@@ -871,6 +871,85 @@ pub(crate) fn test_source_submit(
 }
 
 #[cfg(test)]
+pub(crate) fn test_submit_command(
+    session: *mut Session,
+    request: &[u8],
+    output: &mut BytesOut,
+) -> u32 {
+    // SAFETY: Test callers retain the live session, request, and ABI output for this call.
+    unsafe {
+        miso_engine_v2_submit_command(session, request.as_ptr(), request.len() as u64, output)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_dequeue_event(session: *mut Session, lane: u32, output: &mut BytesOut) -> u32 {
+    // SAFETY: Test callers retain the live session and ABI output for this call.
+    unsafe { miso_engine_v2_dequeue_event(session, lane, output) }
+}
+
+#[cfg(test)]
+pub(crate) fn test_session_state_summary(session: *mut Session) -> (u64, usize, u64, usize) {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    let state = unsafe { &(*session).state };
+    state.test_state_summary()
+}
+
+#[cfg(test)]
+pub(crate) fn test_enqueue_reliable(
+    session: *mut Session,
+    event: miso_engine_protocol::ReliableSlot,
+) -> Result<(), ()> {
+    // SAFETY: Test callers retain the exclusively owned live session for this injection.
+    unsafe { &mut (*session).state }.test_enqueue_reliable(event)
+}
+
+#[cfg(test)]
+pub(crate) fn test_enqueue_diagnostic(
+    session: *mut Session,
+    revision: miso_engine_protocol::SessionRevision,
+    event: miso_engine_protocol::DiagnosticEvent,
+) -> Result<(), ()> {
+    // SAFETY: Test callers retain the exclusively owned live session for this injection.
+    unsafe { &mut (*session).state }.test_enqueue_diagnostic(revision, event)
+}
+
+#[cfg(test)]
+pub(crate) fn test_stage_meter(
+    session: *mut Session,
+    revision: miso_engine_protocol::SessionRevision,
+    observed_sample: miso_engine_protocol::SampleTime,
+    records: &[miso_engine_protocol::MeterRecord],
+) -> Result<(), ()> {
+    // SAFETY: Test callers retain the exclusively owned live session for this injection.
+    unsafe { &mut (*session).state }.test_stage_meter(revision, observed_sample, records)
+}
+
+#[cfg(test)]
+pub(crate) fn test_stage_counter(
+    session: *mut Session,
+    revision: miso_engine_protocol::SessionRevision,
+    snapshot: &miso_engine_protocol::CounterSnapshot,
+) -> Result<(), ()> {
+    // SAFETY: Test callers retain the exclusively owned live session for this injection.
+    unsafe { &mut (*session).state }.test_stage_counter(revision, snapshot)
+}
+
+#[cfg(test)]
+pub(crate) fn test_telemetry_counters(
+    session: *mut Session,
+) -> miso_engine_protocol::TelemetryCounters {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).state }.test_telemetry_counters()
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_capi_retained_limit(session: *mut Session, bytes: u64) {
+    // SAFETY: Test callers retain the exclusively owned live session for this fault injection.
+    unsafe { &mut (*session).state }.test_set_capi_retained_limit(bytes);
+}
+
+#[cfg(test)]
 pub(crate) fn test_source_seek(
     session: *mut Session,
     source_id: &[u8],

@@ -5,6 +5,7 @@
 //! compile, publish a plan, or structurally mutate a session.
 
 use core::{
+    alloc::Layout,
     fmt,
     num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 use miso_engine_core::realtime::{
     Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, bounded_spsc,
+    bounded_spsc_retained_payload,
 };
 
 use crate::{
@@ -542,6 +544,23 @@ pub enum ProtocolQueueError {
     CapacityOverflow,
 }
 
+/// Exact engine-owned heap payload budget for one prepared protocol-queue set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolQueueResourceReport {
+    /// Sum of queue headers/backings, staging arrays, automation admission rows, and reservation
+    /// credit storage. Allocator metadata and inline [`ProtocolQueues`] bytes are excluded.
+    pub retained_payload_bytes: u64,
+    /// Largest single requested heap payload allocation among those rows.
+    pub largest_allocation_bytes: u64,
+}
+
+#[repr(C)]
+struct SharedReservationAllocation {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    value: AtomicUsize,
+}
+
 impl From<SpscError> for ProtocolQueueError {
     fn from(_: SpscError) -> Self {
         Self::CapacityOverflow
@@ -660,8 +679,64 @@ impl Default for AutomationIntervalEntry {
 }
 
 impl ProtocolQueues {
+    /// Project the exact heap payloads that [`Self::prepare`] requests for this configuration.
+    pub fn resource_report_for_config(
+        config: ProtocolQueueConfig,
+    ) -> Result<ProtocolQueueResourceReport, ProtocolQueueError> {
+        let density_entries = config
+            .automation_batch_slots
+            .get()
+            .checked_mul(AUTOMATION_BATCH_RECORDS)
+            .ok_or(ProtocolQueueError::CapacityOverflow)?;
+        let mut total = 0_u64;
+        let mut largest = 0_u64;
+        let mut add = |bytes: usize| -> Result<(), ProtocolQueueError> {
+            let bytes = u64::try_from(bytes).map_err(|_| ProtocolQueueError::CapacityOverflow)?;
+            total = total
+                .checked_add(bytes)
+                .ok_or(ProtocolQueueError::CapacityOverflow)?;
+            largest = largest.max(bytes);
+            Ok(())
+        };
+        macro_rules! queue {
+            ($item:ty, $capacity:expr) => {{
+                let payload = bounded_spsc_retained_payload::<$item>($capacity)?;
+                add(payload.ring_header_bytes)?;
+                add(payload.slot_payload_bytes)?;
+            }};
+        }
+        queue!(ControlCommandSlot, config.control_command_slots);
+        queue!(AutomationBatchSlot, config.automation_batch_slots);
+        queue!(ReliableSlot, config.reliable_response_slots);
+        queue!(ReliableSlot, config.reliable_event_slots);
+        queue!(TelemetryRecord, config.telemetry_slots);
+        queue!(CounterTelemetryRecord, config.telemetry_slots);
+        add(
+            Layout::array::<Option<TelemetryRecord>>(config.telemetry_slots.get())
+                .map_err(|_| ProtocolQueueError::CapacityOverflow)?
+                .size(),
+        )?;
+        add(
+            Layout::array::<Option<CounterTelemetryRecord>>(config.telemetry_slots.get())
+                .map_err(|_| ProtocolQueueError::CapacityOverflow)?
+                .size(),
+        )?;
+        add(Layout::array::<AutomationDensityEntry>(density_entries)
+            .map_err(|_| ProtocolQueueError::CapacityOverflow)?
+            .size())?;
+        add(Layout::array::<AutomationIntervalEntry>(density_entries)
+            .map_err(|_| ProtocolQueueError::CapacityOverflow)?
+            .size())?;
+        add(Layout::new::<SharedReservationAllocation>().size())?;
+        Ok(ProtocolQueueResourceReport {
+            retained_payload_bytes: total,
+            largest_allocation_bytes: largest,
+        })
+    }
+
     /// Allocate all bounded queue and telemetry staging storage off render.
     pub fn prepare(config: ProtocolQueueConfig) -> Result<Self, ProtocolQueueError> {
+        let _resources = Self::resource_report_for_config(config)?;
         let density_entries = config
             .automation_batch_slots
             .get()
@@ -1212,6 +1287,28 @@ mod tests {
             start_value: sample as f32,
             end_value: sample as f32,
         }
+    }
+
+    #[test]
+    fn queue_resource_projection_is_nonzero_and_shares_prepare_overflow_rules() {
+        let accepted = config(1, 256);
+        let report = ProtocolQueues::resource_report_for_config(accepted).expect("projection");
+        assert!(report.retained_payload_bytes > report.largest_allocation_bytes);
+        assert!(report.largest_allocation_bytes > 0);
+        ProtocolQueues::prepare(accepted).expect("matching preparation");
+
+        let overflowing = ProtocolQueueConfig {
+            automation_batch_slots: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
+            ..accepted
+        };
+        assert_eq!(
+            ProtocolQueues::resource_report_for_config(overflowing),
+            Err(ProtocolQueueError::CapacityOverflow)
+        );
+        assert!(matches!(
+            ProtocolQueues::prepare(overflowing),
+            Err(ProtocolQueueError::CapacityOverflow)
+        ));
     }
 
     fn batch(request_id: u64, start: u64, records: usize) -> AutomationBatchSlot {
