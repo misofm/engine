@@ -70,6 +70,18 @@ mod wide_impl;
 
 pub use backend::{Backend, HostAttestation, attest_host};
 
+/// The four-lane production width: NEON on AArch64, `v128` on wasm with `simd128`.
+///
+/// Re-exported under a neutral name so that no crate outside this one has to name `wide`
+/// (master plan §4.3: effects are generic over [`Lane`] and never name a vector library or an
+/// intrinsic). `scripts/check-lane-policy.sh` enforces that.
+pub use wide::f32x4 as Simd4;
+
+/// The eight-lane production width: one `__m256` on `x86-64-v3`.
+///
+/// Re-exported under a neutral name, like [`Simd4`].
+pub use wide::f32x8 as Simd8;
+
 /// Magnitude below which a recursive state word is flushed to `+0.0` by [`flush`].
 ///
 /// `1.0e-20` is about `2^-66`; `f32` subnormals start at `2^-126`, so the flush band strictly
