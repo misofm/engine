@@ -157,14 +157,15 @@ pub enum ReplayDecision {
     Backpressure,
 }
 
-/// Opaque location of one exact cached response.
+/// Opaque stable identity of one exact cached response.
 ///
-/// A hit is valid until the cache is mutated. Call [`ReplayCache::cached`] immediately after
-/// [`ReplayCache::preflight`] to borrow the exact response bytes without cloning or allocating.
+/// A hit remains valid while its request entry survives in its originating cache, including
+/// across arena compaction. Cross-cache and evicted hits are rejected by [`ReplayCache::cached`]
+/// and [`ReplayCache::try_cached`] without indexing stale arena offsets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReplayHit {
-    offset: usize,
-    len: usize,
+    cache_id: u64,
+    request_id: RequestId,
 }
 
 /// One cached exact request/response byte pair.
@@ -180,11 +181,15 @@ struct ReplayEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReplayReservation {
     request_id: RequestId,
+    request_offset: usize,
     request_bytes: usize,
 }
 
+static NEXT_REPLAY_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Bounded exact-byte replay cache. It intentionally covers one endpoint lifetime only.
 pub struct ReplayCache {
+    cache_id: u64,
     config: ReplayCacheConfig,
     entries: Box<[ReplayEntry]>,
     len: usize,
@@ -223,6 +228,9 @@ impl ReplayCache {
     /// Fallibly allocate the complete replay metadata and byte arena before endpoint publication.
     pub fn try_new(config: ReplayCacheConfig) -> Result<Self, ReplayCacheError> {
         Self::resource_report_for_config(config)?;
+        let cache_id = NEXT_REPLAY_CACHE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| ReplayCacheError::ResourceOverflow)?;
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(config.entries.get())
@@ -234,6 +242,7 @@ impl ReplayCache {
             .map_err(|_| ReplayCacheError::ResourceAllocation)?;
         storage.resize(config.bytes.get(), 0);
         Ok(Self {
+            cache_id,
             config,
             entries: entries.into_boxed_slice(),
             len: 0,
@@ -289,20 +298,24 @@ impl ReplayCache {
     /// A `Backpressure` result is deliberately **unaccepted**: it neither advances the strictly
     /// increasing new-request frontier nor creates a replay entry. This is the endpoint's one
     /// replay-preflight policy, so the same ID remains reusable if capacity later permits it.
+    /// While an accepted request is pending completion, other new preflights return
+    /// `Backpressure` without replacing its exact-byte reservation.
     pub fn preflight(&mut self, request_id: RequestId, request: &[u8]) -> ReplayDecision {
-        self.reservation = None;
         if let Ok(index) = self.entry_index(request_id) {
             let entry = self.entries[index];
             return if self.storage[entry.request_offset..entry.request_offset + entry.request_bytes]
                 == *request
             {
                 ReplayDecision::Cached(ReplayHit {
-                    offset: entry.response_offset,
-                    len: entry.response_bytes,
+                    cache_id: self.cache_id,
+                    request_id,
                 })
             } else {
                 ReplayDecision::RequestIdReuse
             };
+        }
+        if self.reservation.is_some() {
+            return ReplayDecision::Backpressure;
         }
         if self
             .highest_new_id
@@ -334,8 +347,11 @@ impl ReplayCache {
         }
         self.evict_prefix(evicted, removed_bytes);
         self.highest_new_id = Some(request_id);
+        let request_offset = self.retained_bytes;
+        self.storage[request_offset..request_offset + request.len()].copy_from_slice(request);
         self.reservation = Some(ReplayReservation {
             request_id,
+            request_offset,
             request_bytes: request.len(),
         });
         ReplayDecision::Execute
@@ -352,7 +368,8 @@ impl ReplayCache {
     }
 
     /// Cache the exact bytes from a request that previously received [`ReplayDecision::Execute`].
-    /// The response must fit the fixed reservation made by [`Self::preflight`].
+    /// The response must fit the fixed reservation made by [`Self::preflight`]. An ID, length, or
+    /// byte mismatch leaves the original reservation intact so its exact completion can retry.
     pub fn complete(
         &mut self,
         request_id: RequestId,
@@ -366,10 +383,16 @@ impl ReplayCache {
             .len()
             .checked_add(response.len())
             .ok_or(ReplayCacheError::ResponseTooLarge)?;
-        let Some(reservation) = self.reservation.take() else {
+        let Some(reservation) = self.reservation else {
             return Err(ReplayCacheError::ReservationMissing);
         };
-        if reservation.request_id != request_id || reservation.request_bytes != request.len() {
+        if reservation.request_id != request_id
+            || reservation.request_bytes != request.len()
+            || self
+                .storage
+                .get(reservation.request_offset..reservation.request_offset + request.len())
+                != Some(request)
+        {
             return Err(ReplayCacheError::ReservationMissing);
         }
         if self.len >= self.entries.len()
@@ -377,9 +400,9 @@ impl ReplayCache {
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
-        let request_offset = self.retained_bytes;
+        self.reservation = None;
+        let request_offset = reservation.request_offset;
         let response_offset = request_offset + request.len();
-        self.storage[request_offset..response_offset].copy_from_slice(request);
         self.storage[response_offset..response_offset + response.len()].copy_from_slice(response);
         self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
         self.entries[self.len] = ReplayEntry {
@@ -394,9 +417,23 @@ impl ReplayCache {
     }
 
     /// Borrow the exact cached response bytes represented by a hit from [`Self::preflight`].
+    ///
+    /// Returns an empty slice for a stale or foreign hit. Use [`Self::try_cached`] when an empty
+    /// cached response must be distinguished from invalid handle use.
     #[must_use]
     pub fn cached(&self, hit: ReplayHit) -> &[u8] {
-        &self.storage[hit.offset..hit.offset + hit.len]
+        self.try_cached(hit).unwrap_or_default()
+    }
+
+    /// Fallibly borrow a cached response, rejecting evicted and cross-cache hits.
+    #[must_use]
+    pub fn try_cached(&self, hit: ReplayHit) -> Option<&[u8]> {
+        if hit.cache_id != self.cache_id {
+            return None;
+        }
+        let entry = self.entries.get(self.entry_index(hit.request_id).ok()?)?;
+        self.storage
+            .get(entry.response_offset..entry.response_offset.checked_add(entry.response_bytes)?)
     }
 
     /// Number of complete exact-byte entries currently retained.
@@ -3521,6 +3558,9 @@ mod tests {
 
         assert_eq!(cache.preflight(id(1), b"one"), ReplayDecision::Execute);
         cache.complete(id(1), b"one", b"1111").expect("first");
+        let ReplayDecision::Cached(first_hit) = cache.preflight(id(1), b"one") else {
+            panic!("first request must hit");
+        };
         assert_eq!(cache.preflight(id(2), b"two"), ReplayDecision::Execute);
         cache.complete(id(2), b"two", b"22").expect("second");
 
@@ -3536,6 +3576,13 @@ mod tests {
         assert_eq!(cache.preflight(id(3), b"three"), ReplayDecision::Execute);
         cache.complete(id(3), b"three", b"333").expect("third");
         assert_eq!(cache.len(), 2);
+        assert_eq!(cache.try_cached(first_hit), None, "evicted hit is stale");
+        assert_eq!(cache.cached(first_hit), b"");
+        assert_eq!(
+            cache.cached(second_hit),
+            b"22",
+            "surviving hit resolves after compaction"
+        );
         assert_eq!(
             cache.preflight(id(1), b"one"),
             ReplayDecision::ReplayExpired
@@ -3549,6 +3596,48 @@ mod tests {
         };
         assert_eq!(cache.cached(third_hit), b"333");
         assert_eq!(cache.retained_storage_capacities(), (2, 18));
+
+        let mut other = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(18).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(other.preflight(id(2), b"two"), ReplayDecision::Execute);
+        other
+            .complete(id(2), b"two", b"xx")
+            .expect("foreign same-ID entry");
+        assert_eq!(
+            other.try_cached(second_hit),
+            None,
+            "foreign hit is rejected"
+        );
+        assert_eq!(other.cached(second_hit), b"");
+    }
+
+    #[test]
+    fn replay_reservation_binds_exact_request_bytes() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(1).expect("one entry"),
+            bytes: NonZeroUsize::new(8).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+        assert_eq!(
+            cache.preflight(id(2), b"cc"),
+            ReplayDecision::Backpressure,
+            "pending reservation cannot be overwritten"
+        );
+        assert_eq!(
+            cache.complete(id(1), b"bb", b"ok"),
+            Err(ReplayCacheError::ReservationMissing)
+        );
+        cache
+            .complete(id(1), b"aa", b"ok")
+            .expect("exact pending request remains retryable");
+        let ReplayDecision::Cached(hit) = cache.preflight(id(1), b"aa") else {
+            panic!("exact completed request hits");
+        };
+        assert_eq!(cache.cached(hit), b"ok");
     }
 
     #[test]
