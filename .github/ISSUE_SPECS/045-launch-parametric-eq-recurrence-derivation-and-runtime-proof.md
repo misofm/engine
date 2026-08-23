@@ -1,5 +1,8 @@
 # 045 Launch parametric EQ recurrence derivation and runtime proof
 
+**Superseded by #87 (2026-08-23).** D2's phase-2 result (192,646 probe failures, worst 12.4859 dB) was the first correct measurement of the shipped runtime graph (#87 F1), not a double-single arithmetic defect. The TPT rejection recorded in 042 was an artifact of deriving the output mix from a 3x3 solve over f32-rounded basis impulses (#87 F2); the closed-form Simper mapping has no such step and passes every frozen gate. The three selection harnesses were archived to `dsp-research/archive/issue-04{2,4,5}/` by #105 phase 1, whose `miso-engine-dsp-reference::svf` oracle is now the authority this issue's derivation was reaching for.
+
+
 ## Outcome
 
 Derive and prove one numerically stable `f32`-lane parametric-EQ runtime topology before any further

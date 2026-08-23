@@ -457,3 +457,48 @@ fn word_ramps_are_contractive_on_every_grid_row() {
     assert!(worst <= tolerance, "worst word-ramp norm {worst}");
     eprintln!("issue-087 E5 combinations={combinations} worst_norm={worst:.12}");
 }
+
+/// The exact rows the `native-pcm-runner` session fixtures configure, bounded against the oracle.
+///
+/// Those five PCM digests are re-pinned by issue #87 (master plan §8): the render changed because
+/// this crate's realization changed, and nothing else in the plan moved. This gate is the oracle
+/// side of that re-pin — the coefficient sets the fixture actually uses, at the four launch rates,
+/// held to the same 0.005 dB cookbook tolerance as the whole grid — so the new bits are certified
+/// by an independent model rather than by having been produced.
+#[test]
+fn the_pcm_fixture_rows_are_oracle_bounded() {
+    let mut worst = 0.0_f64;
+    for rate in LAUNCH_RATES {
+        for (frequency, gain) in [(120.0_f32, 6.0_f32), (2_400.0, -9.0)] {
+            let row = GridRow {
+                kind: EqBandKindV1::Bell,
+                rate,
+                frequency,
+                gain,
+                q: 0.70710677,
+                slope: 1.0,
+            };
+            let words = design(row);
+            let reference = oracle(row);
+            for probe in grid_probes(row) {
+                let Ok(reference_magnitude) = reference.magnitude_at_hz(probe) else {
+                    continue;
+                };
+                if reference_magnitude <= 0.0 {
+                    continue;
+                }
+                let reference_db = 20.0 * reference_magnitude.log10();
+                if reference_db < RESPONSE_FLOOR_DB {
+                    continue;
+                }
+                let error = (magnitude_db(words, rate, probe) - reference_db).abs();
+                worst = worst.max(error);
+                assert!(
+                    error <= RESPONSE_TOLERANCE_DB,
+                    "{row:?} probe={probe}: error={error} dB"
+                );
+            }
+        }
+    }
+    eprintln!("issue-087 pcm-fixture rows worst_error_db={worst:.6e}");
+}

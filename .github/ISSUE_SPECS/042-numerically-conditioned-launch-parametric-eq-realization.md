@@ -1,5 +1,8 @@
 # 042 Numerically conditioned launch parametric EQ realization
 
+**Superseded by #87 (2026-08-23).** The endpoint-conditioned delta words and the "retained-word" analytic gate certified a transfer the kernel did not compute (#87 F1: evaluated on the runtime denominator, 483 of these 1,488 rows fail, worst 12.4859 dB at 88.2 kHz / bell / 10 Hz / +24 dB / Q = 18). The 1,488-row grid, the 1,104 frequency searches, the 48 one-second impulses and the 48 million-sample sequences remain the acceptance evals at their frozen thresholds, now evaluated on the implemented state space: measured worst 6.815e-4 dB analytic and 9.502e-3 dB time domain. "Exact 64-update parameter trajectory" is redefined as a 64-sample linear ramp of the six SVF words (#83 D11).
+
+
 ## Outcome
 
 Deliver the four-section dual-mono launch parametric EQ over the unchanged 10–20,000 Hz domain

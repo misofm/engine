@@ -1,5 +1,8 @@
 # 012 Parametric EQ
 
+**Superseded by #87 (2026-08-23).** The five-`f32` direct-form-I realization and its successors are replaced by cascaded TPT state-variable sections designed from the unchanged RBJ transfer (#83 D2, #87). The descriptor, parameter identifiers, automation validator and state-transaction rules from checkpoints `46b4a37`, `7b9c01b` and `cf739ef` are retained as technical input; the numerical contract of this issue is void. State layout version 1 is retired: version 2 stores two integrators, six coefficient words, six ramp increments and the four ramp target parameters per band.
+
+
 ## Status — STOPPED/RESCOPED (2026-08-21)
 
 **STOPPED/RESCOPED; no overall PASS.** The landed scalar contract, automation and architecture

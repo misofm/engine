@@ -177,20 +177,15 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         miso_engine_soft_clip::corpus::CASE_COUNT,
         "the soft-clip block must cover every case that crate pins"
     );
-    // Soft-clip is the last family in the pin order, so its base is everything before it. Reading
-    // it off the counts rather than writing a literal is what keeps this assertion honest when the
-    // next effect crate appends its own family.
+    // Each family's base is everything before it, read off the counts rather than written as a
+    // literal: that is what keeps these assertions honest when the next effect crate appends its
+    // own family, and what makes "appended, never inserted" checkable rather than a convention.
     let soft_clip_base = corpus::LANE_CASE_COUNT
         + corpus::MATH_CASE_COUNT
         + corpus::RUNTIME_CASE_COUNT
         + corpus::TRANSIENT_SHAPER_CASE_COUNT
         + corpus::DELAY_CASE_COUNT
         + corpus::MULTIBAND_CASE_COUNT;
-    assert_eq!(
-        soft_clip_base + corpus::SOFT_CLIP_CASE_COUNT,
-        corpus::CASE_COUNT,
-        "soft-clip must be the last family in the pin order"
-    );
     for case in 0..corpus::SOFT_CLIP_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(soft_clip_base + case),
@@ -204,6 +199,32 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert!(
             corpus::case_name(soft_clip_base + case).starts_with("effect/soft_clip/"),
             "soft-clip cases keep their owning crate's names"
+        );
+    }
+    assert_eq!(
+        corpus::PARAMETRIC_EQ_CASE_COUNT,
+        miso_engine_parametric_eq::corpus::CASE_COUNT,
+        "the parametric-EQ block must cover every case that crate pins"
+    );
+    let parametric_eq_base = soft_clip_base + corpus::SOFT_CLIP_CASE_COUNT;
+    assert_eq!(
+        parametric_eq_base + corpus::PARAMETRIC_EQ_CASE_COUNT,
+        corpus::CASE_COUNT,
+        "parametric-eq must be the last family in the pin order"
+    );
+    for case in 0..corpus::PARAMETRIC_EQ_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(parametric_eq_base + case),
+            miso_engine_parametric_eq::corpus::E9_DIGESTS[case],
+            "parametric-eq case {case} must be pinned by miso-engine-parametric-eq, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(parametric_eq_base + case),
+            "a parametric-EQ case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(parametric_eq_base + case).starts_with("effect/parametric_eq/"),
+            "parametric-eq cases keep their owning crate's names"
         );
     }
 }

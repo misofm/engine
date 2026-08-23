@@ -1508,11 +1508,11 @@ mod tests {
 
     fn expected_output_digest(name: &str) -> &'static str {
         match name {
-            "riff-44100" => "49663d8451e470a7a05511e68388ebff7b4d844db42d38e9632473f897a0b91d",
-            "riff-48000" => "1e856978bbd412daebd2ac9dd81f554e4c3512244ce36b7437bb65cc5f43c99e",
-            "riff-88200" => "bc8aa669d31090d7cc9a0abf740e6c63cf719db47cf5dc071fc724e19dfe6fff",
-            "riff-96000" => "5645de29f441710a3a7b67f2e4a24e93086c9baa34426d8963e3f278ceb9d516",
-            "rf64-48000" => "43fa3c4ed46228d1ee13050b118f379f82a021e85f5dfff6f72593912e298ad0",
+            "riff-44100" => "f468dd547cb9b63fb9c582f5e4388e1e8caa262b39dd9878a892087e28886f50",
+            "riff-48000" => "9e19d4279126b7a6374d8868d8a9741bfb4bd55f6575b6335f5548759d51ed34",
+            "riff-88200" => "aac8064f01239d981951a51fe9b0edc9e44f014dbd1cacc00fbcf5407d6951f7",
+            "riff-96000" => "965aee1857cb901404e849e58a006da39ce8a51d04609dd60fbc7b1028b9339b",
+            "rf64-48000" => "bc5feb6a7706ff56dcb0015c2ebe8f35bd609ba49489f61c894d7248b09d8d29",
             _ => panic!("unknown fixture"),
         }
     }

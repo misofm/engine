@@ -1,36 +1,40 @@
 #!/usr/bin/env bash
-# Prove Issue-042's frozen endpoint-conditioned delta kernels and target surface.
+# Prove the parametric EQ builds for every launch target and keeps the issue-087 render contract.
+#
+# What this replaces: until #87 the EQ ran through `miso_engine_core::arch`'s per-sample
+# `process_delta_*` kernels, and this script disassembled those five symbols to confirm which
+# instructions each target selected. The EQ no longer has a kernel of its own -- it composes
+# `miso_engine_lane::kernels::svf_block`, one generic body per width -- so the instruction
+# assertions now belong to `scripts/check-lane-policy.sh`, which owns that crate. What is left here
+# is what is still this crate's: it builds everywhere, and its render path contains none of the
+# constructs the audit found (issue #87 F1/F3/F4/F5/F10).
+#
+# The script name is unchanged so CI keeps calling it.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-
-# Issue-083 D12 added `[profile.release] lto = "fat"` to the workspace. Under fat LTO, rustc emits
-# LLVM bitcode into the `.o` files this script disassembles, and `objdump` reports "file format not
-# recognized". Turn link-time optimisation off for these single-crate probes only.
-#
-# This does not weaken the check. The probe compiles `-p miso-engine-core --lib` on its own and
-# disassembles one function to see which instructions the target selected; it never links, and LTO
-# is a link-time transform across crates that plays no part in that selection. `lto = false` is the
-# setting these gates were written against, before the workspace had a release profile at all.
-export CARGO_PROFILE_RELEASE_LTO=false
 
 fail() {
     printf 'parametric-EQ target failure: %s\n' "$1" >&2
     exit 1
 }
 
-command -v objdump >/dev/null || fail 'objdump unavailable'
-command -v wasm-objdump >/dev/null || fail 'wasm-objdump unavailable'
+package=miso-engine-parametric-eq
+source=crates/miso-engine-parametric-eq/src
+
+[[ -f "$source/lib.rs" ]] || fail 'crate source is missing'
 
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
-packages=(-p miso-engine-core -p miso-engine-parametric-eq)
 
-RUSTFLAGS='-C target-feature=-avx2,-fma' cargo check --quiet --locked --release "${packages[@]}"
+# Cross-target builds. `miso-engine-lane` refuses to compile on x86 without AVX2+FMA (master plan
+# D4), so the old `-avx2,-fma` probe is gone with the runtime dispatch it protected; the x86 leg is
+# the workspace's own x86-64-v3 pin.
+cargo check --quiet --locked --release -p "$package"
 for target in aarch64-linux-android aarch64-apple-ios; do
     CARGO_TARGET_DIR="$scratch/check-$target" \
-        cargo check --quiet --locked --release --target "$target" "${packages[@]}"
+        cargo check --quiet --locked --release --target "$target" -p "$package"
 done
 for feature in scalar simd128; do
     if [[ "$feature" == scalar ]]; then
@@ -39,106 +43,51 @@ for feature in scalar simd128; do
         flags='-C target-feature=+simd128'
     fi
     CARGO_TARGET_DIR="$scratch/check-wasm-$feature" RUSTFLAGS="$flags" \
-        cargo check --quiet --locked --release --target wasm32-unknown-unknown "${packages[@]}"
+        cargo check --quiet --locked --release --target wasm32-unknown-unknown -p "$package"
 done
 
-native_object() {
-    local name=$1
-    local features=$2
-    local target="$scratch/$name"
-    RUSTFLAGS="-C codegen-units=1 -C target-feature=$features" \
-        CARGO_TARGET_DIR="$target" \
-        cargo rustc --quiet --locked -p miso-engine-core --release --lib -- --emit=obj
-    find "$target/release/deps" -maxdepth 1 -name 'miso_engine_core-*.o' -print -quit
-}
-
-native_symbol() {
-    local object=$1
-    local symbol=$2
-    objdump -Cd "$object" | awk -v symbol="$symbol" '
-        $0 ~ "<miso_engine_core::arch::" && $0 ~ symbol ">:" { emit = 1 }
-        emit && /^Disassembly of section/ { emit = 0 }
-        emit { print }
-    '
-}
-
-baseline_object=$(native_object native-baseline '-avx2,-fma')
-scalar=$(native_symbol "$baseline_object" 'scalar::process_delta_scalar')
-[[ -n "$scalar" ]] || fail 'missing named scalar delta symbol'
-if printf '%s\n' "$scalar" | rg -q '%[yz]mm|\bv[a-z0-9]*ps\b|\bv?fm(add|sub)|\bvfnmadd'; then
-    fail 'baseline delta scalar symbol contains packed AVX or FMA'
-fi
-
-avx2_object=$(native_object native-avx2 '+avx2,-fma')
-avx2=$(native_symbol "$avx2_object" 'x86::process_delta_x86_avx2_inner')
-[[ -n "$avx2" ]] || fail 'missing named AVX2 delta symbol'
-for instruction in vmulps vaddps vsubps vdivps; do
-    printf '%s\n' "$avx2" | rg -q "\\b$instruction\\b" ||
-        fail "AVX2 delta kernel missing $instruction"
+# Render-path constructs the audit removed. Production source only: the acceptance gates in
+# `tests/` legitimately name the bank backend enumeration and the reference oracle.
+forbidden=(
+    'PreparedDeltaBankKernelV1'
+    'DeltaBankKernelError'
+    'KernelBackendV1'
+    'process_delta'
+    'sanitize_sample'
+    'is_normal'
+    'is_subnormal'
+    'mul_add'
+    'core::arch'
+    'std::arch'
+    'is_x86_feature_detected'
+)
+for pattern in "${forbidden[@]}"; do
+    ! rg -n --fixed-strings "$pattern" "$source" \
+        || fail "render path still references $pattern"
 done
-printf '%s\n' "$avx2" | rg -q '%ymm' || fail 'AVX2 delta kernel is not eight-lane'
-if printf '%s\n' "$avx2" | rg -q '\bv?fm(add|sub)|\bvfnmadd'; then
-    fail 'non-FMA AVX2 delta kernel contains a fused instruction'
-fi
 
-fma_object=$(native_object native-avx2-fma '+avx2,+fma')
-fma=$(native_symbol "$fma_object" 'x86::process_delta_x86_avx2_fma_inner')
-[[ -n "$fma" ]] || fail 'missing named AVX2+FMA delta symbol'
-for instruction in vmulps vaddps vsubps vdivps; do
-    printf '%s\n' "$fma" | rg -q "\\b$instruction\\b" ||
-        fail "AVX2+FMA delta kernel missing $instruction"
+# D6: transcendentals come from `miso-engine-math`, never the platform libm. `sqrt` stays legal.
+! rg -n '\.(exp|exp2|ln|log2|log10|powf|powi|sin|cos|tan|atan|atan2|sinh|cosh|tanh)\(' "$source" \
+    || fail 'render path calls a platform transcendental'
+
+# Issue #87 F4: the delta kernel divided once per section per sample (1,024 `vdivps ymm` per W=8
+# bank block). The SVF has no division at all, so the lane division must not be reachable: the only
+# `/` this crate writes is in the f64 control-plane design, which runs at event rate.
+! rg -n --fixed-strings '.div(' "$source" || fail 'a lane division is reachable from the render path'
+! rg -n --fixed-strings 'Lane::div' "$source" || fail 'a lane division is reachable from the render path'
+
+# The frozen acceptance evals must stay in the crate and keep their thresholds and row counts.
+declare -A gates=(
+    ['rows, 1_488']='the 1,488-row analytic grid'
+    ['searches, 1_104']='the 1,104 frequency searches'
+    ['cases, 48']='the 48 one-second impulses'
+    ['sequences, 48']='the 48 million-sample sequences'
+    ['RESPONSE_TOLERANCE_DB: f64 = 0.005']='the 0.005 dB analytic tolerance'
+    ['ONE_SECOND_DFT_TOLERANCE_DB: f64 = 0.05']='the 0.05 dB impulse tolerance'
+)
+for gate in "${!gates[@]}"; do
+    rg -q --fixed-strings "$gate" crates/miso-engine-parametric-eq/tests \
+        || fail "${gates[$gate]} is no longer asserted"
 done
-if printf '%s\n' "$fma" | rg -q '\bv?fm(add|sub)|\bvfnmadd'; then
-    fail 'AVX2+FMA delta kernel contains a contraction; V1 permits zero'
-fi
 
-arm_target="$scratch/aarch64-neon"
-RUSTFLAGS='-C codegen-units=1 -C target-feature=+neon' CARGO_TARGET_DIR="$arm_target" \
-    cargo rustc --quiet --locked -p miso-engine-core --target aarch64-linux-android \
-    --release --lib -- --emit=asm
-arm_assembly=$(find "$arm_target/aarch64-linux-android/release/deps" -maxdepth 1 \
-    -name 'miso_engine_core-*.s' -print -quit)
-neon=$(awk '
-    /process_delta_aarch64_neon_inner:$/ { emit = 1 }
-    emit && /^\.Lfunc_end/ { exit }
-    emit { print }
-' "$arm_assembly")
-[[ -n "$neon" ]] || fail 'missing named AArch64 delta symbol'
-for instruction in fmul fadd fsub fdiv; do
-    printf '%s\n' "$neon" | rg -q "^[[:space:]]*$instruction[[:space:]]+v[0-9]+\\.4s" ||
-        fail "NEON delta kernel missing four-lane $instruction"
-done
-if printf '%s\n' "$neon" | rg -q '^[[:space:]]*fml[as]'; then
-    fail 'NEON delta kernel contains a fused instruction'
-fi
-
-wasm_object() {
-    local name=$1
-    local features=$2
-    local target="$scratch/$name"
-    RUSTFLAGS="-C codegen-units=1 -C target-feature=$features" CARGO_TARGET_DIR="$target" \
-        cargo rustc --quiet --locked -p miso-engine-core --target wasm32-unknown-unknown \
-        --release --lib -- --emit=obj
-    find "$target/wasm32-unknown-unknown/release/deps" -maxdepth 1 \
-        -name 'miso_engine_core-*.o' -print -quit
-}
-
-wasm_scalar=$(wasm_object wasm-scalar '-simd128')
-wasm-objdump -d "$wasm_scalar" >"$scratch/wasm-scalar.txt"
-if rg -q 'f32x4\.|v128\.|relaxed' "$scratch/wasm-scalar.txt"; then
-    fail 'scalar Wasm delta object contains SIMD or relaxed-SIMD opcodes'
-fi
-
-wasm_simd=$(wasm_object wasm-simd '+simd128')
-wasm-objdump -d "$wasm_simd" >"$scratch/wasm-simd.txt"
-rg -q 'process_delta_wasm_simd128_inner' "$scratch/wasm-simd.txt" ||
-    fail 'missing named Wasm simd128 delta symbol'
-for instruction in mul add sub div; do
-    rg -q "f32x4\\.$instruction" "$scratch/wasm-simd.txt" ||
-        fail "Wasm SIMD delta kernel missing f32x4.$instruction"
-done
-if rg -q 'relaxed' "$scratch/wasm-simd.txt"; then
-    fail 'Wasm SIMD delta object contains relaxed-SIMD opcode'
-fi
-
-printf 'parametric-EQ targets: PASS (scalar; AVX2; AVX2+FMA=0; NEON; wasm scalar/simd128)\n'
+printf 'parametric-EQ targets: PASS (x86-64-v3; android/ios; wasm scalar/simd128; render contract)\n'

@@ -1,5 +1,8 @@
 # 044 Conditioned time-domain launch parametric EQ recurrence
 
+**Superseded by #87 (2026-08-23).** The "finite normal-or-zero state and output with zero recovery" predicate made this gate unsatisfiable for any correct filter (#87 F3: a decaying impulse response passes through the subnormal range, and the f64 oracle's own f32 cast carries 2,379 subnormal samples on the 44.1 kHz / 20 kHz / +24 dB / Q = 18 bell — the row that actually "recovered" at sample 39,223, not the 10 Hz row this issue blamed). Subnormal state is flushed inside the kernel (#83 D7) and never counted; finiteness is checked once per block per channel. The finite-window reference correction from attempt 2 is kept and is what #87's 0.05 dB impulse gate measures against.
+
+
 ## Outcome
 
 Replace the stopped Issue-042 direct-history delta recurrence with one bounded `f32` runtime

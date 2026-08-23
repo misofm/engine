@@ -21,11 +21,13 @@
 //!    oracle and only with the change stated in the commit message (master plan §8).
 //!
 //! The rest of the corpus is not redefined here. Cases past [`LANE_CASE_COUNT`] delegate to
-//! [`miso_engine_math::corpus`] (gate M3), [`miso_engine_effect_runtime::corpus`] (gate D1) and
-//! [`miso_engine_soft_clip::corpus`] (issue #91) and are compared against those crates' own pins,
-//! so the wasm run replays exactly what those gates pinned natively rather than a transcription of
-//! them. All of them but the math cases are lane generic — the dB curve a compressor rides, the
-//! followers that ride it, a whole soft-clip block — so they too are digested at every width.
+//! [`miso_engine_math::corpus`] (gate M3), [`miso_engine_effect_runtime::corpus`] (gate D1),
+//! [`miso_engine_soft_clip::corpus`] (issue #91) and [`miso_engine_parametric_eq::corpus`]
+//! (issue #87) and are compared against those crates' own pins, so the wasm run replays exactly
+//! what those gates pinned natively rather than a transcription of them. All of them but the math
+//! and delay cases are lane generic — the dB curve a compressor rides, the followers that ride it,
+//! a whole soft-clip block, a whole four-section EQ cascade — so they too are digested at every
+//! width.
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
@@ -42,6 +44,7 @@ use miso_engine_lane::kernels::{
 use miso_engine_math::corpus as math_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
 use miso_engine_multiband_compressor::corpus as multiband_corpus;
+use miso_engine_parametric_eq::corpus as parametric_eq_corpus;
 use miso_engine_soft_clip::corpus as soft_clip_corpus;
 use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
@@ -101,6 +104,15 @@ pub const MULTIBAND_CASE_COUNT: usize = multiband_corpus::CASE_COUNT;
 /// inside a real render path rather than inside a kernel.
 pub const SOFT_CLIP_CASE_COUNT: usize = soft_clip_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_parametric_eq::corpus`] (issue #87), replayed under wasm.
+///
+/// A whole prepared four-section EQ cascade per case, over 512 frames of eight independent lanes:
+/// the settled cascade, the same cascade with a per-lane D11 word ramp in flight (each lane's ramp
+/// ending on a different frame, so the block-splitting the effect does is inside the digest), and
+/// an impulse into subnormal-seeded integrators, which is where the D7 flush has to remove the same
+/// bits on every target.
+pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -108,7 +120,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + TRANSIENT_SHAPER_CASE_COUNT
     + DELAY_CASE_COUNT
     + MULTIBAND_CASE_COUNT
-    + SOFT_CLIP_CASE_COUNT;
+    + SOFT_CLIP_CASE_COUNT
+    + PARAMETRIC_EQ_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -302,6 +315,8 @@ enum Case {
     Multiband(usize),
     /// One case of the `miso-engine-soft-clip` corpus.
     SoftClip(usize),
+    /// One case of the `miso-engine-parametric-eq` E9 corpus.
+    ParametricEq(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -342,7 +357,11 @@ fn case_of(index: usize) -> Case {
     if index < MULTIBAND_CASE_COUNT {
         return Case::Multiband(index);
     }
-    Case::SoftClip(index - MULTIBAND_CASE_COUNT)
+    let index = index - MULTIBAND_CASE_COUNT;
+    if index < SOFT_CLIP_CASE_COUNT {
+        return Case::SoftClip(index);
+    }
+    Case::ParametricEq(index - SOFT_CLIP_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -393,6 +412,10 @@ pub fn case_name(index: usize) -> String {
         Case::Delay(case) => format!("delay/{}", delay_corpus::CASE_NAMES[case]),
         Case::Multiband(case) => format!("multiband/{}", multiband_corpus::CASE_NAMES[case]),
         Case::SoftClip(case) => format!("effect/{}", soft_clip_corpus::CASE_NAMES[case]),
+        Case::ParametricEq(case) => format!(
+            "effect/parametric_eq/{}",
+            parametric_eq_corpus::CASE_NAMES[case]
+        ),
     }
 }
 
@@ -431,6 +454,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Delay(case) => delay_corpus::G5_DIGESTS[case],
         Case::Multiband(case) => multiband_corpus::DIGESTS[case],
         Case::SoftClip(case) => soft_clip_corpus::SOFT_CLIP_DIGESTS[case],
+        Case::ParametricEq(case) => parametric_eq_corpus::E9_DIGESTS[case],
     }
 }
 
@@ -463,6 +487,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_soft_clip::<f32>(case),
             1 => digest_soft_clip::<miso_engine_lane::Simd4>(case),
             _ => digest_soft_clip::<miso_engine_lane::Simd8>(case),
+        },
+        Case::ParametricEq(case) => match width {
+            0 => digest_parametric_eq::<f32>(case),
+            1 => digest_parametric_eq::<miso_engine_lane::Simd4>(case),
+            _ => digest_parametric_eq::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -526,7 +555,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::TransientShaper(_)
         | Case::Delay(_)
         | Case::Multiband(_)
-        | Case::SoftClip(_) => {
+        | Case::SoftClip(_)
+        | Case::ParametricEq(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -907,6 +937,18 @@ fn digest_delay(case: usize) -> [u8; 32] {
 fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; soft_clip_corpus::POINTS];
     soft_clip_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-parametric-eq` E9 case, exactly as that crate's `tests/determinism.rs`
+/// does natively.
+fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; parametric_eq_corpus::POINTS];
+    parametric_eq_corpus::run_case::<L>(case, &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

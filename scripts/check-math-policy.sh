@@ -23,7 +23,6 @@ set -euo pipefail
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
 crates/miso-engine-builtins/src/lib.rs                     38  85
-crates/miso-engine-parametric-eq/src/lib.rs                22  87
 crates/miso-engine-compressor/src/lib.rs                    4  88
 crates/miso-engine-gate-expander/src/lib.rs                 6  89
 crates/miso-engine-true-peak-limiter/src/lib.rs             3  90
