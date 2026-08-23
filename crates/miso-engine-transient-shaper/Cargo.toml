@@ -9,12 +9,19 @@ publish.workspace = true
 name = "miso_engine_transient_shaper"
 
 [dependencies]
-miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math = { workspace = true, features = ["lane"] }
 
 [dev-dependencies]
 # The f64 oracle is test-only and never reachable from production rendering.
 miso-engine-dsp-reference.workspace = true
+# `PrepareEffectBankRequest::backend` is a `miso_engine_core::KernelBackendV1`, which the contract
+# does not re-export; only the bank gates need to name one. Production no longer depends on core.
+miso-engine-core.workspace = true
+miso-engine-lane.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
