@@ -80,7 +80,9 @@ jobs:
       - name: Parametric EQ gates (oracle grid, impulses, lane identity, partitions, digests) in release
         run: cargo test --locked --release -p miso-engine-parametric-eq
       - name: Parametric EQ target and render-contract seal
-        run: bash scripts/check-parametric-eq-targets.sh
+        run: |
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
+          bash scripts/check-parametric-eq-targets.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
           cargo build --locked --release -p miso-engine-graph-audit --bin miso_engine_graph_audit_parametric_eq
