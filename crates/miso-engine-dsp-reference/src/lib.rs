@@ -27,7 +27,9 @@ mod parametric_eq_time_domain_candidates;
 #[cfg(test)]
 mod portable_filter_quality;
 
-pub use biquad::{ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind};
+pub use biquad::{
+    ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind, rbj_butterworth_magnitude_db,
+};
 pub use block::{F64PlanarBuffer, ReferenceBlockError};
 pub use compressor::{
     ReferenceCompressorError, ReferenceCompressorParameters, ReferencePeakCompressor,
@@ -56,7 +58,7 @@ pub use svf::{
 };
 pub use tpt::{
     ReferenceRetainedTptF32, ReferenceTptOutput, ReferenceTptRetainedAction,
-    ReferenceTptRetainedStep, ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
+    ReferenceTptRetainedStep, ReferenceTptStateSpace,
 };
 pub use transient_shaper::{
     ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,

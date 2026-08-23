@@ -1,6 +1,6 @@
-//! Independent state-space transfer oracle for the issue-007 TPT SVF.
+//! Bit-identity `f32` twin of the issue-007 TPT SVF, and its transfer-model adapter.
 
-use crate::{ReferenceBiquad, ReferenceFilterKind};
+use crate::ReferenceSvfStateSpace;
 
 /// Selects a low-pass or high-pass observation from the TPT state-space model.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,11 +42,13 @@ pub struct ReferenceTptRetainedStep {
     pub output_sanitized: bool,
 }
 
-/// Independent retained-`f32`, non-fused recurrence for the conditioned launch TPT section.
+/// Bit-identity twin of the `miso_engine_core` scalar `process_tpt_scalar` graph (issue 007).
 ///
-/// The coefficient calculation is intentionally repeated here from the stated conditioned
-/// topology, rather than calling an engine production kernel. The recurrence uses the frozen
-/// ascending multiply/add graph and commits only finite normal or canonical positive-zero state.
+/// It is **not** an independent oracle: the coefficient calculation and the frozen ascending
+/// multiply/add graph are the production ones, transcribed word for word. It exists so fixture
+/// bits can be regenerated from a scalar twin (master plan §8.3), and it commits only finite
+/// normal or canonical positive-zero state. The independent oracle for this topology is
+/// [`ReferenceSvfStateSpace`](crate::ReferenceSvfStateSpace).
 #[derive(Clone, Copy, Debug)]
 pub struct ReferenceRetainedTptF32 {
     c1: f32,
@@ -205,22 +207,24 @@ fn canonical_output(value: f32) -> f32 {
     }
 }
 
-/// A separately derived `f64` state-space transfer model built from cast TPT coefficient bits.
-#[derive(Clone, Copy, Debug)]
-pub struct ReferenceTptStateSpace {
-    a00: f64,
-    a01: f64,
-    a10: f64,
-    a11: f64,
-    b0: f64,
-    b1: f64,
-    c0: f64,
-    c1: f64,
-    d: f64,
-}
+/// Transfer of the conditioned `(c1, a2, a3, k)` TPT words.
+///
+/// This is a thin wrapper over [`ReferenceSvfStateSpace`], the single TPT/SVF transfer model in
+/// this crate (`svf.rs`): the conditioned words are exactly the master-plan §4.2 A1 storage form,
+/// so the low-pass mix is `(0, 0, 1)` and the high-pass mix is `(1, -k, -1)`. It survives only to
+/// keep the `(real, imaginary)` tuple response its builtins call sites use; new code should
+/// construct [`ReferenceSvfStateSpace`] directly.
+///
+/// The wrapper is bit-identical to the hand-written model it replaced: with `a1 = 1 - c1`, the
+/// mix `(0, 0, 1)` gives `C = [a2, 1 - a3]`, `D = a3` and the mix `(1, -k, -1)` gives
+/// `C = [-k*a1 - a2, k*a2 - (1 - a3)]`, `D = 1 - k*a2 - a3`, each term in the same operation
+/// order as before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReferenceTptStateSpace(ReferenceSvfStateSpace);
 
 impl ReferenceTptStateSpace {
     /// Derives the selected transfer function from exact cast `f32` TPT coefficients.
+    #[must_use]
     pub fn from_cast_coefficients(
         c1: f32,
         a2: f32,
@@ -228,99 +232,96 @@ impl ReferenceTptStateSpace {
         k: f32,
         output: ReferenceTptOutput,
     ) -> Self {
-        let (c1_coefficient, a2, a3, k) =
-            (f64::from(c1), f64::from(a2), f64::from(a3), f64::from(k));
-        let (c0, output_c1, d) = match output {
-            ReferenceTptOutput::LowPass => (a2, 1.0 - a3, a3),
-            ReferenceTptOutput::HighPass => (
-                -k * (1.0 - c1_coefficient) - a2,
-                k * a2 - (1.0 - a3),
-                1.0 - k * a2 - a3,
-            ),
+        let k = f64::from(k);
+        let mix = match output {
+            ReferenceTptOutput::LowPass => [0.0, 0.0, 1.0],
+            ReferenceTptOutput::HighPass => [1.0, -k, -1.0],
         };
-        Self {
-            a00: 1.0 - 2.0 * c1_coefficient,
-            a01: -2.0 * a2,
-            a10: 2.0 * a2,
-            a11: 1.0 - 2.0 * a3,
-            b0: 2.0 * a2,
-            b1: 2.0 * a3,
-            c0,
-            c1: output_c1,
-            d,
-        }
-    }
-    /// Returns the complex transfer response at a finite frequency inside Nyquist.
-    pub fn response(self, rate_hz: f64, frequency_hz: f64) -> Option<(f64, f64)> {
-        if !rate_hz.is_finite()
-            || !frequency_hz.is_finite()
-            || rate_hz <= 0.0
-            || !(0.0..=rate_hz * 0.5).contains(&frequency_hz)
-        {
-            return None;
-        }
-        let phase = core::f64::consts::TAU * frequency_hz / rate_hz;
-        let (zr, zi) = (phase.cos(), phase.sin());
-        let m00r = zr - self.a00;
-        let m00i = zi;
-        let m01r = -self.a01;
-        let m10r = -self.a10;
-        let m11r = zr - self.a11;
-        let m11i = zi;
-        let detr = m00r * m11r - m00i * m11i - m01r * m10r;
-        let deti = m00r * m11i + m00i * m11r;
-        let denominator = detr * detr + deti * deti;
-        if denominator == 0.0 || !denominator.is_finite() {
-            return None;
-        }
-        let inv00r = (m11r * detr + m11i * deti) / denominator;
-        let inv00i = (m11i * detr - m11r * deti) / denominator;
-        let inv01r = (-m01r * detr) / denominator;
-        let inv01i = (m01r * deti) / denominator;
-        let inv10r = (-m10r * detr) / denominator;
-        let inv10i = (m10r * deti) / denominator;
-        let inv11r = (m00r * detr + m00i * deti) / denominator;
-        let inv11i = (m00i * detr - m00r * deti) / denominator;
-        let state0r = inv00r * self.b0 + inv01r * self.b1;
-        let state0i = inv00i * self.b0 + inv01i * self.b1;
-        let state1r = inv10r * self.b0 + inv11r * self.b1;
-        let state1i = inv10i * self.b0 + inv11i * self.b1;
-        Some((
-            self.d + self.c0 * state0r + self.c1 * state1r,
-            self.c0 * state0i + self.c1 * state1i,
+        Self(ReferenceSvfStateSpace::new(
+            f64::from(c1),
+            f64::from(a2),
+            f64::from(a3),
+            mix,
         ))
     }
+
+    /// Returns the underlying single-model state space.
+    #[must_use]
+    pub const fn state_space(self) -> ReferenceSvfStateSpace {
+        self.0
+    }
+
+    /// Returns the complex transfer response as `(real, imaginary)`.
+    #[must_use]
+    pub fn response(self, rate_hz: f64, frequency_hz: f64) -> Option<(f64, f64)> {
+        let response = self.0.response(rate_hz, frequency_hz)?;
+        Some((response.re, response.im))
+    }
+
     /// Returns response magnitude in dB, floored only by IEEE zero behavior.
+    #[must_use]
     pub fn magnitude_db(self, rate_hz: f64, frequency_hz: f64) -> Option<f64> {
-        let (real, imaginary) = self.response(rate_hz, frequency_hz)?;
-        let magnitude = real.hypot(imaginary);
-        Some(if magnitude == 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            20.0 * magnitude.log10()
-        })
+        self.0.magnitude_db(rate_hz, frequency_hz)
     }
 }
 
-/// Independently derives the RBJ Butterworth magnitude in dB at one frequency.
-pub fn rbj_butterworth_magnitude_db(
-    rate_hz: f64,
-    cutoff_hz: f64,
-    kind: ReferenceFilterKind,
-    frequency_hz: f64,
-) -> Option<f64> {
-    let filter = ReferenceBiquad::rbj_butterworth(rate_hz, cutoff_hz, kind).ok()?;
-    let (b0, b1, b2, a1, a2) = filter.coefficients();
-    let phase = core::f64::consts::TAU * frequency_hz / rate_hz;
-    let (cosine, sine) = (phase.cos(), phase.sin());
-    let (cosine2, sine2) = ((2.0 * phase).cos(), (2.0 * phase).sin());
-    let numerator = (b0 + b1 * cosine + b2 * cosine2).hypot(-b1 * sine - b2 * sine2);
-    let denominator = (1.0 + a1 * cosine + a2 * cosine2).hypot(a1 * sine + a2 * sine2);
-    if numerator == 0.0 {
-        Some(f64::NEG_INFINITY)
-    } else if denominator == 0.0 {
-        None
-    } else {
-        Some(20.0 * (numerator / denominator).log10())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// E5: collapsing the hand-written TPT state space onto the one SVF model moved no bits.
+    ///
+    /// The expected words are the deleted model's own expressions, recomputed inline here from
+    /// the same cast coefficients; `to_bits` equality (not a tolerance) is the gate.
+    #[test]
+    fn cast_coefficient_transfer_is_bit_identical_to_the_replaced_model() {
+        for rate in [44_100_u32, 48_000, 88_200, 96_000] {
+            for cutoff in [10.0_f32, 20.0, 100.0, 1_000.0, 10_000.0] {
+                for output in [ReferenceTptOutput::LowPass, ReferenceTptOutput::HighPass] {
+                    let Some(reference) =
+                        ReferenceRetainedTptF32::conditioned_butterworth(rate, cutoff, output)
+                    else {
+                        continue;
+                    };
+                    let [c1, a2, a3, k] = reference.coefficient_bits().map(f32::from_bits);
+                    let state =
+                        ReferenceTptStateSpace::from_cast_coefficients(c1, a2, a3, k, output);
+                    let (c1, a2, a3, k) =
+                        (f64::from(c1), f64::from(a2), f64::from(a3), f64::from(k));
+                    let (expected_c0, expected_c1, expected_d) = match output {
+                        ReferenceTptOutput::LowPass => (a2, 1.0 - a3, a3),
+                        ReferenceTptOutput::HighPass => {
+                            (-k * (1.0 - c1) - a2, k * a2 - (1.0 - a3), 1.0 - k * a2 - a3)
+                        }
+                    };
+                    let expected = ReferenceSvfStateSpace::from_words(
+                        1.0 - 2.0 * c1,
+                        -2.0 * a2,
+                        2.0 * a2,
+                        1.0 - 2.0 * a3,
+                        2.0 * a2,
+                        2.0 * a3,
+                        expected_c0,
+                        expected_c1,
+                        expected_d,
+                    );
+                    assert_eq!(
+                        state.state_space(),
+                        expected,
+                        "rate={rate} cutoff={cutoff} output={output:?}"
+                    );
+                    for frequency in [0.0, 10.0, cutoff.into(), 0.49 * f64::from(rate)] {
+                        let (actual_re, actual_im) = state
+                            .response(f64::from(rate), frequency)
+                            .expect("response");
+                        let modelled = expected
+                            .response(f64::from(rate), frequency)
+                            .expect("model");
+                        assert_eq!(actual_re.to_bits(), modelled.re.to_bits());
+                        assert_eq!(actual_im.to_bits(), modelled.im.to_bits());
+                    }
+                }
+            }
+        }
     }
 }

@@ -89,3 +89,29 @@ impl ReferenceBiquad {
         (self.b0, self.b1, self.b2, self.a1, self.a2)
     }
 }
+
+/// Independently derives the RBJ Butterworth magnitude in dB at one frequency.
+///
+/// This is the analytic response of [`ReferenceBiquad`] itself: it evaluates the designed
+/// normalized numerator and denominator as polynomials in `z` at `frequency_hz`.
+pub fn rbj_butterworth_magnitude_db(
+    rate_hz: f64,
+    cutoff_hz: f64,
+    kind: ReferenceFilterKind,
+    frequency_hz: f64,
+) -> Option<f64> {
+    let filter = ReferenceBiquad::rbj_butterworth(rate_hz, cutoff_hz, kind).ok()?;
+    let (b0, b1, b2, a1, a2) = filter.coefficients();
+    let phase = core::f64::consts::TAU * frequency_hz / rate_hz;
+    let (cosine, sine) = (phase.cos(), phase.sin());
+    let (cosine2, sine2) = ((2.0 * phase).cos(), (2.0 * phase).sin());
+    let numerator = (b0 + b1 * cosine + b2 * cosine2).hypot(-b1 * sine - b2 * sine2);
+    let denominator = (1.0 + a1 * cosine + a2 * cosine2).hypot(a1 * sine + a2 * sine2);
+    if numerator == 0.0 {
+        Some(f64::NEG_INFINITY)
+    } else if denominator == 0.0 {
+        None
+    } else {
+        Some(20.0 * (numerator / denominator).log10())
+    }
+}

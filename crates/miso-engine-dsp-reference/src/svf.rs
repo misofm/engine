@@ -241,6 +241,35 @@ impl ReferenceSvfStateSpace {
         }
     }
 
+    /// Builds the model from explicit state-space words.
+    ///
+    /// Test and adapter use only: [`new`](Self::new) is the derivation from realization words.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_words(
+        a00: f64,
+        a01: f64,
+        a10: f64,
+        a11: f64,
+        b0: f64,
+        b1: f64,
+        c0: f64,
+        c1: f64,
+        d: f64,
+    ) -> Self {
+        Self {
+            a00,
+            a01,
+            a10,
+            a11,
+            b0,
+            b1,
+            c0,
+            c1,
+            d,
+        }
+    }
+
     /// Returns the complex transfer response at a finite frequency inside Nyquist.
     #[must_use]
     pub fn response(self, rate_hz: f64, frequency_hz: f64) -> Option<Complex64> {
