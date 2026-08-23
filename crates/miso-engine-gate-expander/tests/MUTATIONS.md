@@ -84,6 +84,9 @@ says otherwise. Every row below was applied, run, recorded and reverted in one s
 | 12 | the one-pole rounds twice instead of fusing (D3) | `src/kernel.rs` | `determinism` | RED |
 | 13 | the D7 `flush` is removed from the one recursive word | `src/kernel.rs` | `state` | RED |
 | 14 | the render path allocates one `Vec` per block | `src/lib.rs` | audit bin | RED |
+| 15 | the opening comparison becomes strict: `level_db.gt(threshold)` instead of `.ge(...)` | `src/kernel.rs` | `contract` | RED |
+| 16 | the re-arm comparison becomes strict: `level_db.gt(threshold.sub(hysteresis))` instead of `.ge(...)` | `src/kernel.rs` | `contract` | RED |
+| 17 | the *test's* reconstructed detector level is one ulp off | `tests/contract.rs` | `contract` | RED |
 
 ### 4 — the detector gather takes the partner from the neighbouring lane
 
@@ -200,3 +203,55 @@ redundant `gate/` prefix so that `tools/miso-engine-wasm-gate-corpus` renders th
 `effect/gate_expander/<name>`, matching the convention soft-clip and parametric-EQ established;
 names are not hashed, so **no digest moved** and every row above still reproduces. Row 12's quoted
 output shows the new name.
+
+### 15 — the opening comparison becomes strict
+
+Brief 014: *"Comparisons at both boundaries are inclusive on the opening/re-arm side"* — a closed
+gate opens at `X >= T`. Rows 1-3 pin that in the `f64` oracle, but a corpus of noise, tones and
+bursts never produces an **exact `f32` equality** between `level_db` and a threshold, so on the
+production path `.ge` and `.gt` were indistinguishable and the pinned contract was untested where
+it ships. Found by the #89 verifier; `a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold`
+closes it by constructing the equality deliberately.
+
+At equality the *curve* is no help — `(rho - 1) * (X - T)` is `+0.0` there, so a gate that failed
+to open still applies unity on the trigger sample. The test therefore holds the trigger level long
+enough for the attack to flush `G` to zero, then drops the level into the hysteresis band, where an
+open gate re-arms (unity) and a closed one expands (about -48 dB).
+
+```
+test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... FAILED
+assertion `left == right` failed: threshold exactly equal to the level: the gate opened, so the
+band level is the exact identity
+test result: FAILED. 8 passed; 1 failed
+```
+
+**Eight of the nine `contract` tests, and every other binary, still passed** under this mutation —
+which is the measurement of the gap, not just a footnote.
+
+### 16 — the re-arm comparison becomes strict
+
+The same boundary on the other arm: an open gate re-arms at `X >= T - H`. The comparand is computed
+inside the kernel as one `f32` subtraction, so the test nudges the threshold until `T - H`
+reproduces the level bit for bit rather than assuming one step of `T` is one step of `T - H`.
+
+```
+test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... FAILED
+assertion `left == right` failed: close threshold exactly equal to the level: the gate re-armed, so
+the output is the exact identity
+test result: FAILED. 8 passed; 1 failed
+```
+
+### 17 — the test's reconstructed detector level is one ulp off
+
+A test that constructs a witness by re-deriving what the kernel computes can pass for the wrong
+reason: if the reconstruction drifts, the "equality" is not an equality and the assertion reduces to
+whichever side of the boundary it landed on. Both tests therefore run **three** renders — at the
+constructed comparand, one `f32` step above it and one step below — and assert the behaviour is
+(open, closed, open). This mutation perturbs `detector_level_db` by one ulp to prove that guard
+works: the witness stops being on the boundary and both tests fail.
+
+```
+test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... FAILED
+test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... FAILED
+test result: FAILED. 7 passed; 2 failed
+```
