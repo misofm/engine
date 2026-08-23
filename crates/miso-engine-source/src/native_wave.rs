@@ -159,7 +159,35 @@ pub struct NativeWaveDecoder<R: Read + Seek> {
     next_region_frame: u64,
     max_frames_per_decode: NonZeroUsize,
     scratch: Box<[u8]>,
+    reader_position: Option<u64>,
+    buffer_region_frame: u64,
+    buffer_frames: usize,
+    buffer_cursor: usize,
     sanitized_sample_count: u64,
+}
+
+pub(crate) trait PlanarSink {
+    fn plane(&mut self, channel: usize) -> &mut [f32];
+}
+
+impl PlanarSink for [&mut [f32]] {
+    #[inline(always)]
+    fn plane(&mut self, channel: usize) -> &mut [f32] {
+        self[channel]
+    }
+}
+
+pub(crate) struct Strided<'a> {
+    out: &'a mut [f32],
+    stride: usize,
+}
+
+impl PlanarSink for Strided<'_> {
+    #[inline(always)]
+    fn plane(&mut self, channel: usize) -> &mut [f32] {
+        let start = channel * self.stride;
+        &mut self.out[start..start + self.stride]
+    }
 }
 
 impl<R: Read + Seek> NativeWaveDecoder<R> {
@@ -187,6 +215,10 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
             next_region_frame: 0,
             max_frames_per_decode,
             scratch: scratch.into_boxed_slice(),
+            reader_position: None,
+            buffer_region_frame: 0,
+            buffer_frames: 0,
+            buffer_cursor: 0,
             sanitized_sample_count: 0,
         })
     }
@@ -200,6 +232,14 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         output_planes: &mut [&mut [f32]],
     ) -> Result<NativeDecodeReport, NativeWaveError> {
         let requested_frames = self.validate_output_shape(output_planes)?;
+        self.decode_next(requested_frames, output_planes)
+    }
+
+    fn decode_next<S: PlanarSink + ?Sized>(
+        &mut self,
+        requested_frames: usize,
+        sink: &mut S,
+    ) -> Result<NativeDecodeReport, NativeWaveError> {
         let remaining = self
             .region
             .length_frames
@@ -210,10 +250,34 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         );
         let decoded_frames_usize =
             usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
-        if decoded_frames_usize != 0 {
-            self.read_decoded_frames(decoded_frames_usize)?;
-            self.copy_decoded(output_planes, decoded_frames_usize)?;
-            self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
+        let mut copied = 0;
+        while copied < decoded_frames_usize {
+            if self.buffer_cursor == self.buffer_frames {
+                self.fill_buffer()?;
+            }
+            let chunk = cmp::min(
+                decoded_frames_usize - copied,
+                self.buffer_frames - self.buffer_cursor,
+            );
+            let block_align = usize::from(self.metadata.block_align_bytes);
+            let source_start = self.buffer_cursor * block_align;
+            let source_end = (self.buffer_cursor + chunk) * block_align;
+            let sanitized = convert_frames(
+                self.metadata,
+                &self.scratch[source_start..source_end],
+                block_align,
+                usize::from(self.metadata.channel_count),
+                chunk,
+                sink,
+                copied,
+            );
+            self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(sanitized);
+            self.buffer_cursor += chunk;
+            copied += chunk;
+            self.next_region_frame = self
+                .next_region_frame
+                .checked_add(u64::try_from(chunk).expect("usize fits u64"))
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
         }
         Ok(NativeDecodeReport {
             decoded_frames: u32::try_from(decoded_frames_usize)
@@ -237,7 +301,6 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
 
     /// Return the absolute source frame that the next decode will read.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn next_source_frame(&self) -> SourceFrame {
         SourceFrame(
             self.region
@@ -248,55 +311,52 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
     }
 
     /// Reposition the prepared decoder at a validated absolute source frame in its region.
-    #[allow(dead_code)]
     pub(crate) fn seek_to_source_frame(
         &mut self,
         frame: SourceFrame,
     ) -> Result<(), NativeWaveError> {
-        let region_end = self
-            .region
-            .start_frame
-            .0
-            .checked_add(self.region.length_frames)
+        validate_seek_frame(self.region, frame)?;
+        let target = frame.0 - self.region.start_frame.0;
+        let buffered_end = self
+            .buffer_region_frame
+            .checked_add(u64::try_from(self.buffer_frames).expect("usize fits u64"))
             .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        if frame.0 < self.region.start_frame.0 || frame.0 > region_end {
-            return Err(NativeWaveError::RegionOutOfBounds);
+        if target >= self.buffer_region_frame && target < buffered_end {
+            self.buffer_cursor = usize::try_from(target - self.buffer_region_frame)
+                .map_err(|_| NativeWaveError::ArithmeticOverflow)?;
+        } else {
+            self.buffer_region_frame = target;
+            self.buffer_frames = 0;
+            self.buffer_cursor = 0;
         }
-        self.next_region_frame = frame.0 - self.region.start_frame.0;
+        self.next_region_frame = target;
         Ok(())
     }
 
-    /// Decode one prepared quantum into a contiguous `[channel][quantum]` worker block.
-    #[allow(dead_code)]
-    pub(crate) fn decode_quantum_into_planar(
+    /// Decode into a contiguous `[channel][frames]` worker block.
+    pub(crate) fn decode_planar(
         &mut self,
-        planar_quantum: &mut [f32],
+        out: &mut [f32],
+        frames: usize,
     ) -> Result<NativeDecodeReport, NativeWaveError> {
-        let quantum = self.max_frames_per_decode.get();
-        let expected_samples = usize::from(self.metadata.channel_count)
-            .checked_mul(quantum)
-            .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        if planar_quantum.len() != expected_samples {
+        let channels = usize::from(self.metadata.channel_count);
+        let expected_samples = channels
+            .checked_mul(frames)
+            .ok_or(NativeWaveError::OutputShape)?;
+        if channels == 0
+            || frames == 0
+            || frames > self.max_frames_per_decode.get()
+            || out.len() != expected_samples
+        {
             return Err(NativeWaveError::OutputShape);
         }
-        let remaining = self
-            .region
-            .length_frames
-            .saturating_sub(self.next_region_frame);
-        let decoded_frames = cmp::min(u64::try_from(quantum).expect("usize fits u64"), remaining);
-        let decoded_frames_usize =
-            usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
-        if decoded_frames_usize != 0 {
-            self.read_decoded_frames(decoded_frames_usize)?;
-            self.copy_decoded_to_planar(planar_quantum, decoded_frames_usize)?;
-            self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
-        }
-        Ok(NativeDecodeReport {
-            decoded_frames: u32::try_from(decoded_frames_usize)
-                .map_err(|_| NativeWaveError::ArithmeticOverflow)?,
-            end_of_region: self.next_region_frame == self.region.length_frames,
-            sanitized_sample_count: self.sanitized_sample_count,
-        })
+        self.decode_next(
+            frames,
+            &mut Strided {
+                out,
+                stride: frames,
+            },
+        )
     }
 
     fn validate_output_shape(
@@ -318,40 +378,22 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         Ok(frames)
     }
 
-    fn copy_decoded(
-        &mut self,
-        output_planes: &mut [&mut [f32]],
-        decoded_frames: usize,
-    ) -> Result<(), NativeWaveError> {
-        let sample_bytes = usize::from(self.metadata.encoding.bytes_per_sample());
-        let block_align = usize::from(self.metadata.block_align_bytes);
-        for frame in 0..decoded_frames {
-            let frame_start = frame
-                .checked_mul(block_align)
-                .ok_or(NativeWaveError::ArithmeticOverflow)?;
-            for (channel, output) in output_planes.iter_mut().enumerate() {
-                let offset = frame_start
-                    .checked_add(
-                        channel
-                            .checked_mul(sample_bytes)
-                            .ok_or(NativeWaveError::ArithmeticOverflow)?,
-                    )
-                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
-                let end = offset
-                    .checked_add(sample_bytes)
-                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
-                let (sample, sanitized) =
-                    decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
-                output[frame] = sample;
-                if sanitized {
-                    self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(1);
-                }
-            }
+    fn fill_buffer(&mut self) -> Result<(), NativeWaveError> {
+        let remaining = self
+            .region
+            .length_frames
+            .checked_sub(self.next_region_frame)
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        let decoded_frames = cmp::min(
+            self.max_frames_per_decode.get(),
+            usize::try_from(remaining).unwrap_or(usize::MAX),
+        );
+        if decoded_frames == 0 {
+            self.buffer_region_frame = self.next_region_frame;
+            self.buffer_frames = 0;
+            self.buffer_cursor = 0;
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn read_decoded_frames(&mut self, decoded_frames: usize) -> Result<(), NativeWaveError> {
         let source_frame = self
             .region
             .start_frame
@@ -365,49 +407,24 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         let read_bytes = decoded_frames
             .checked_mul(usize::from(self.metadata.block_align_bytes))
             .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        self.reader
-            .seek(SeekFrom::Start(byte_offset))
-            .map_err(io_error)?;
-        self.reader
-            .read_exact(&mut self.scratch[..read_bytes])
-            .map_err(io_error)
-    }
-
-    fn copy_decoded_to_planar(
-        &mut self,
-        planar_quantum: &mut [f32],
-        decoded_frames: usize,
-    ) -> Result<(), NativeWaveError> {
-        let sample_bytes = usize::from(self.metadata.encoding.bytes_per_sample());
-        let block_align = usize::from(self.metadata.block_align_bytes);
-        let quantum = self.max_frames_per_decode.get();
-        for frame in 0..decoded_frames {
-            let frame_start = frame
-                .checked_mul(block_align)
-                .ok_or(NativeWaveError::ArithmeticOverflow)?;
-            for channel in 0..usize::from(self.metadata.channel_count) {
-                let offset = frame_start
-                    .checked_add(
-                        channel
-                            .checked_mul(sample_bytes)
-                            .ok_or(NativeWaveError::ArithmeticOverflow)?,
-                    )
-                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
-                let end = offset
-                    .checked_add(sample_bytes)
-                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
-                let (sample, sanitized) =
-                    decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
-                let destination = channel
-                    .checked_mul(quantum)
-                    .and_then(|offset| offset.checked_add(frame))
-                    .ok_or(NativeWaveError::ArithmeticOverflow)?;
-                planar_quantum[destination] = sample;
-                if sanitized {
-                    self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(1);
-                }
-            }
+        if self.reader_position != Some(byte_offset)
+            && let Err(error) = self.reader.seek(SeekFrom::Start(byte_offset))
+        {
+            self.reader_position = None;
+            return Err(io_error(error));
         }
+        if let Err(error) = self.reader.read_exact(&mut self.scratch[..read_bytes]) {
+            self.reader_position = None;
+            return Err(io_error(error));
+        }
+        self.reader_position = Some(
+            byte_offset
+                .checked_add(u64::try_from(read_bytes).expect("usize fits u64"))
+                .ok_or(NativeWaveError::ArithmeticOverflow)?,
+        );
+        self.buffer_region_frame = self.next_region_frame;
+        self.buffer_frames = decoded_frames;
+        self.buffer_cursor = 0;
         Ok(())
     }
 }
@@ -585,7 +602,7 @@ pub fn parse_native_wave<R: Read + Seek>(
     })
 }
 
-fn validate_region(
+pub(crate) fn validate_region(
     metadata: NativeWaveMetadata,
     region: NativeWaveRegion,
 ) -> Result<(), NativeWaveError> {
@@ -595,6 +612,21 @@ fn validate_region(
         .checked_add(region.length_frames)
         .ok_or(NativeWaveError::ArithmeticOverflow)?;
     if end > metadata.total_frames {
+        return Err(NativeWaveError::RegionOutOfBounds);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_seek_frame(
+    region: NativeWaveRegion,
+    frame: SourceFrame,
+) -> Result<(), NativeWaveError> {
+    let end = region
+        .start_frame
+        .0
+        .checked_add(region.length_frames)
+        .ok_or(NativeWaveError::ArithmeticOverflow)?;
+    if frame.0 < region.start_frame.0 || frame.0 > end {
         return Err(NativeWaveError::RegionOutOfBounds);
     }
     Ok(())
@@ -736,55 +768,141 @@ fn float_encoding(bits_per_sample: u16) -> Result<NativeWaveEncoding, NativeWave
     }
 }
 
-fn decode_sample(encoding: NativeWaveEncoding, bytes: &[u8]) -> (f32, bool) {
-    match encoding {
-        NativeWaveEncoding::UnsignedPcm8 => ((f32::from(bytes[0]) - 128.0) * 0.007_812_5, false),
-        NativeWaveEncoding::SignedPcm16 => (
-            f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) * (1.0 / 32_768.0),
-            false,
-        ),
+fn convert_frames<S: PlanarSink + ?Sized>(
+    metadata: NativeWaveMetadata,
+    src: &[u8],
+    block_align: usize,
+    channels: usize,
+    frame_count: usize,
+    sink: &mut S,
+    destination_start: usize,
+) -> u64 {
+    debug_assert_eq!(src.len(), frame_count * block_align);
+    let mut sanitized = 0_u64;
+    match metadata.encoding {
+        NativeWaveEncoding::UnsignedPcm8 => {
+            for channel in 0..channels {
+                let sample_offset = channel;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = (f32::from(frame[sample_offset]) - 128.0) * 0.007_812_5;
+                }
+            }
+        }
+        NativeWaveEncoding::SignedPcm16 => {
+            for channel in 0..channels {
+                let sample_offset = channel * 2;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = f32::from(i16::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                    ])) * (1.0 / 32_768.0);
+                }
+            }
+        }
         NativeWaveEncoding::SignedPcm24 => {
-            let raw =
-                i32::from(bytes[0]) | (i32::from(bytes[1]) << 8) | (i32::from(bytes[2]) << 16);
-            let signed = if raw & 0x0080_0000 != 0 {
-                raw | !0x00ff_ffff
-            } else {
-                raw
-            };
-            (signed as f32 * (1.0 / 8_388_608.0), false)
+            for channel in 0..channels {
+                let sample_offset = channel * 3;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    let raw = i32::from(frame[sample_offset])
+                        | (i32::from(frame[sample_offset + 1]) << 8)
+                        | (i32::from(frame[sample_offset + 2]) << 16);
+                    let signed = if raw & 0x0080_0000 != 0 {
+                        raw | !0x00ff_ffff
+                    } else {
+                        raw
+                    };
+                    *output = signed as f32 * (1.0 / 8_388_608.0);
+                }
+            }
         }
-        NativeWaveEncoding::SignedPcm32 => (
-            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32
-                * (1.0 / 2_147_483_648.0),
-            false,
-        ),
+        NativeWaveEncoding::SignedPcm32 => {
+            for channel in 0..channels {
+                let sample_offset = channel * 4;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = i32::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
+                    ]) as f32
+                        * (1.0 / 2_147_483_648.0);
+                }
+            }
+        }
         NativeWaveEncoding::Float32 => {
-            sanitize_f32(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            for channel in 0..channels {
+                let sample_offset = channel * 4;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    let (sample, count) = sanitize_f32(f32::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
+                    ]));
+                    sanitized = sanitized.saturating_add(count);
+                    *output = sample;
+                }
+            }
         }
-        NativeWaveEncoding::Float64 => sanitize_f64(f64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ])),
+        NativeWaveEncoding::Float64 => {
+            for channel in 0..channels {
+                let sample_offset = channel * 8;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    let (sample, count) = sanitize_f64(f64::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
+                        frame[sample_offset + 4],
+                        frame[sample_offset + 5],
+                        frame[sample_offset + 6],
+                        frame[sample_offset + 7],
+                    ]));
+                    sanitized = sanitized.saturating_add(count);
+                    *output = sample;
+                }
+            }
+        }
     }
+    sanitized
 }
 
-fn sanitize_f32(value: f32) -> (f32, bool) {
-    if value.is_finite() && (value.is_normal() || value == 0.0) {
-        (value, false)
-    } else {
-        (0.0, true)
-    }
+#[inline(always)]
+fn sanitize_f32(value: f32) -> (f32, u64) {
+    const EXPONENT: u32 = 0x7f80_0000;
+    const MAGNITUDE: u32 = 0x7fff_ffff;
+
+    let bits = value.to_bits();
+    let magnitude = bits & MAGNITUDE;
+    let exponent = bits & EXPONENT;
+    let accepted = ((exponent != 0) & (exponent != EXPONENT)) | (magnitude == 0);
+    if accepted { (value, 0) } else { (0.0, 1) }
 }
 
-fn sanitize_f64(value: f64) -> (f32, bool) {
-    if !value.is_finite() || (value != 0.0 && !value.is_normal()) {
-        return (0.0, true);
-    }
-    let converted = value as f32;
-    if converted.is_finite() && (converted.is_normal() || converted == 0.0) {
-        (converted, false)
-    } else {
-        (0.0, true)
-    }
+#[inline(always)]
+fn sanitize_f64(value: f64) -> (f32, u64) {
+    const EXPONENT: u64 = 0x7ff0_0000_0000_0000;
+    const MAGNITUDE: u64 = 0x7fff_ffff_ffff_ffff;
+
+    let bits = value.to_bits();
+    let magnitude = bits & MAGNITUDE;
+    let exponent = bits & EXPONENT;
+    let accepted64 = ((exponent != 0) & (exponent != EXPONENT)) | (magnitude == 0);
+    let (converted, rejected32) = sanitize_f32(value as f32);
+    let accepted = accepted64 & (rejected32 == 0);
+    if accepted { (converted, 0) } else { (0.0, 1) }
 }
 
 fn le_u16(bytes: &[u8]) -> u16 {
@@ -808,12 +926,328 @@ fn io_error(error: std::io::Error) -> NativeWaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{self, Cursor};
 
     const CAPS: NativeWaveParseCaps = NativeWaveParseCaps {
         max_chunk_count: 16,
         max_skipped_metadata_bytes: 128,
     };
+
+    struct CountingReader {
+        cursor: Cursor<Vec<u8>>,
+        reads: usize,
+        seeks: usize,
+        fail_next_read: bool,
+        fail_next_seek: bool,
+    }
+
+    impl CountingReader {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                cursor: Cursor::new(bytes),
+                reads: 0,
+                seeks: 0,
+                fail_next_read: false,
+                fail_next_seek: false,
+            }
+        }
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if core::mem::take(&mut self.fail_next_read) {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.cursor.read(buffer)
+        }
+    }
+
+    impl Seek for CountingReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.seeks += 1;
+            if core::mem::take(&mut self.fail_next_seek) {
+                return Err(io::Error::other("injected seek failure"));
+            }
+            self.cursor.seek(position)
+        }
+    }
+
+    fn buffered_float_decoder(frame_count: usize) -> NativeWaveDecoder<CountingReader> {
+        let data: Vec<_> = (0..frame_count)
+            .flat_map(|frame| (frame as f32).to_le_bytes())
+            .collect();
+        let bytes = riff_wave(format_chunk(NativeWaveEncoding::Float32, false), &data, &[]);
+        let mut metadata_cursor = Cursor::new(bytes.clone());
+        let metadata = parse_native_wave(&mut metadata_cursor, CAPS).expect("metadata");
+        NativeWaveDecoder::prepare(
+            CountingReader::new(bytes),
+            metadata,
+            NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: u64::try_from(frame_count).expect("frame count"),
+            },
+            NonZeroUsize::new(16).expect("buffer frames"),
+        )
+        .expect("decoder")
+    }
+
+    #[test]
+    fn buffered_quanta_seek_and_straddled_refill_preserve_exact_pcm() {
+        let mut decoder = buffered_float_decoder(24);
+        for quantum in 0..4 {
+            let mut planar = [0.0; 4];
+            decoder
+                .decode_planar(&mut planar, 4)
+                .expect("buffered quantum");
+            assert_eq!(
+                planar,
+                core::array::from_fn(|frame| (quantum * 4 + frame) as f32)
+            );
+        }
+        assert_eq!(decoder.reader.reads, 1, "four quanta share one fill");
+        assert_eq!(decoder.reader.seeks, 1, "initial fill seeks once");
+
+        decoder
+            .seek_to_source_frame(SourceFrame(3))
+            .expect("in-buffer seek");
+        let mut in_buffer = [0.0; 4];
+        decoder
+            .decode_planar(&mut in_buffer, 4)
+            .expect("in-buffer decode");
+        assert_eq!(in_buffer, [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(decoder.reader.reads, 1);
+        assert_eq!(decoder.reader.seeks, 1);
+
+        decoder
+            .seek_to_source_frame(SourceFrame(14))
+            .expect("nonaligned buffered seek");
+        let mut straddled = [0.0; 4];
+        decoder
+            .decode_planar(&mut straddled, 4)
+            .expect("straddled refill");
+        assert_eq!(straddled, [14.0, 15.0, 16.0, 17.0]);
+        assert_eq!(decoder.reader.reads, 2, "straddle performs one refill");
+        assert_eq!(
+            decoder.reader.seeks, 1,
+            "contiguous refill retains reader position"
+        );
+    }
+
+    #[test]
+    fn failed_io_forgets_reader_position_and_retry_reseeks() {
+        let mut decoder = buffered_float_decoder(24);
+        decoder.reader.fail_next_seek = true;
+        let mut first = [0.0; 4];
+        assert_eq!(
+            decoder.decode_planar(&mut first, 4),
+            Err(NativeWaveError::Io(io::ErrorKind::Other))
+        );
+        assert_eq!(decoder.reader_position, None);
+        decoder
+            .decode_planar(&mut first, 4)
+            .expect("retry after seek failure");
+        assert_eq!(decoder.reader.seeks, 2);
+
+        decoder
+            .seek_to_source_frame(SourceFrame(18))
+            .expect("outside buffer");
+        decoder.reader.fail_next_read = true;
+        let seeks_before_read_failure = decoder.reader.seeks;
+        let mut second = [0.0; 4];
+        assert_eq!(
+            decoder.decode_planar(&mut second, 4),
+            Err(NativeWaveError::Io(io::ErrorKind::Other))
+        );
+        assert_eq!(decoder.reader_position, None);
+        decoder
+            .decode_planar(&mut second, 4)
+            .expect("retry after read failure");
+        assert_eq!(decoder.reader.seeks, seeks_before_read_failure + 2);
+        assert_eq!(second, [18.0, 19.0, 20.0, 21.0]);
+    }
+
+    #[test]
+    fn plane_and_strided_sinks_match_every_encoding_across_chunks_refills_and_seek() {
+        let cases = [
+            (
+                NativeWaveEncoding::UnsignedPcm8,
+                vec![0, 64, 128, 192, 255, 1],
+            ),
+            (
+                NativeWaveEncoding::SignedPcm16,
+                [i16::MIN, -1, 0, 1, i16::MAX, 1234]
+                    .into_iter()
+                    .flat_map(i16::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                NativeWaveEncoding::SignedPcm24,
+                vec![
+                    0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0, 0, 0, 1, 0, 0, 0xff, 0xff, 0x7f, 0x56,
+                    0x34, 0x12,
+                ],
+            ),
+            (
+                NativeWaveEncoding::SignedPcm32,
+                [i32::MIN, -1, 0, 1, i32::MAX, 123_456]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                NativeWaveEncoding::Float32,
+                [0.0_f32, -0.0, 1.0, f32::from_bits(1), f32::INFINITY, -2.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                NativeWaveEncoding::Float64,
+                [0.0_f64, -0.0, 1.0, f64::from_bits(1), f64::INFINITY, -2.0]
+                    .into_iter()
+                    .flat_map(f64::to_le_bytes)
+                    .collect(),
+            ),
+        ];
+
+        for (encoding, data) in cases {
+            let bytes = riff_wave(format_chunk(encoding, false), &data, &[]);
+            let mut metadata_cursor = Cursor::new(bytes.clone());
+            let metadata = parse_native_wave(&mut metadata_cursor, CAPS).expect("metadata");
+            let prepare = || {
+                NativeWaveDecoder::prepare(
+                    Cursor::new(bytes.clone()),
+                    metadata,
+                    NativeWaveRegion {
+                        start_frame: SourceFrame(0),
+                        length_frames: 6,
+                    },
+                    NonZeroUsize::new(4).expect("four-frame buffer"),
+                )
+                .expect("decoder")
+            };
+            let mut planes_decoder = prepare();
+            let mut strided_decoder = prepare();
+
+            for frames in [2, 3] {
+                let mut plane = vec![0.0; frames];
+                let plane_report = planes_decoder
+                    .decode_into(&mut [&mut plane])
+                    .expect("plane decode");
+                let mut strided = vec![0.0; frames];
+                let strided_report = strided_decoder
+                    .decode_planar(&mut strided, frames)
+                    .expect("strided decode");
+                assert_eq!(
+                    plane
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    strided
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "sink bits differ for {encoding:?}"
+                );
+                assert_eq!(plane_report, strided_report);
+                if frames == 2 {
+                    planes_decoder
+                        .seek_to_source_frame(SourceFrame(3))
+                        .expect("plane in-buffer seek");
+                    strided_decoder
+                        .seek_to_source_frame(SourceFrame(3))
+                        .expect("strided in-buffer seek");
+                }
+            }
+
+            planes_decoder
+                .seek_to_source_frame(SourceFrame(0))
+                .expect("plane rewind");
+            strided_decoder
+                .seek_to_source_frame(SourceFrame(0))
+                .expect("strided rewind");
+            for frames in [1, 2, 3] {
+                let mut plane = vec![0.0; frames];
+                let plane_report = planes_decoder
+                    .decode_into(&mut [&mut plane])
+                    .expect("partitioned plane decode");
+                let mut strided = vec![0.0; frames];
+                let strided_report = strided_decoder
+                    .decode_planar(&mut strided, frames)
+                    .expect("partitioned strided decode");
+                assert_eq!(
+                    plane
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    strided
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(plane_report, strided_report);
+            }
+        }
+
+        let source = include_str!("native_wave.rs");
+        let conversion = &source[source.find("fn convert_frames").expect("conversion")
+            ..source.find("fn sanitize_f32").expect("sanitizer")];
+        assert_eq!(conversion.matches("match metadata.encoding").count(), 1);
+        assert!(conversion.contains("sink.plane(channel)"));
+        assert!(conversion.contains("src.chunks_exact(block_align).zip(dst.iter_mut())"));
+        assert!(!conversion.contains(&["sink", ".write"].concat()));
+        assert!(!source.contains(&["fn decode", "_sample"].concat()));
+
+        let sanitizers = &source[source.find("fn sanitize_f32").expect("f32 sanitizer")
+            ..source.find("fn le_u16").expect("post-sanitizer helper")];
+        assert!(sanitizers.contains("(exponent != 0) & (exponent != EXPONENT)"));
+        assert!(sanitizers.contains("accepted64 & (rejected32 == 0)"));
+        assert!(!sanitizers.contains("return "));
+    }
+
+    #[test]
+    fn mask_sanitizers_freeze_float_boundary_bits_and_counts() {
+        let f32_cases = [
+            (0x0000_0000, 0x0000_0000, 0),
+            (0x8000_0000, 0x8000_0000, 0),
+            (0x0000_0001, 0x0000_0000, 1),
+            (0x007f_ffff, 0x0000_0000, 1),
+            (0x8000_0001, 0x0000_0000, 1),
+            (0x807f_ffff, 0x0000_0000, 1),
+            (0x0080_0000, 0x0080_0000, 0),
+            (0x7f7f_ffff, 0x7f7f_ffff, 0),
+            (0x7f80_0000, 0x0000_0000, 1),
+            (0xff80_0000, 0x0000_0000, 1),
+            (0x7fc0_0001, 0x0000_0000, 1),
+            (0xffc0_0001, 0x0000_0000, 1),
+        ];
+        for (input, output, count) in f32_cases {
+            let (sanitized, actual_count) = sanitize_f32(f32::from_bits(input));
+            assert_eq!(sanitized.to_bits(), output);
+            assert_eq!(actual_count, count);
+        }
+
+        let f64_cases = [
+            (0x0000_0000_0000_0000, 0x0000_0000, 0),
+            (0x8000_0000_0000_0000, 0x8000_0000, 0),
+            (0x0000_0000_0000_0001, 0x0000_0000, 1),
+            (0x000f_ffff_ffff_ffff, 0x0000_0000, 1),
+            (0x0010_0000_0000_0000, 0x0000_0000, 0),
+            (0x8010_0000_0000_0000, 0x8000_0000, 0),
+            (0x47ef_ffff_e000_0000, 0x7f7f_ffff, 0),
+            (0x7fef_ffff_ffff_ffff, 0x0000_0000, 1),
+            (0x7ff0_0000_0000_0000, 0x0000_0000, 1),
+            (0xfff0_0000_0000_0000, 0x0000_0000, 1),
+            (0x7ff8_0000_0000_0001, 0x0000_0000, 1),
+            (0xfff8_0000_0000_0001, 0x0000_0000, 1),
+        ];
+        for (input, output, count) in f64_cases {
+            let (sanitized, actual_count) = sanitize_f64(f64::from_bits(input));
+            assert_eq!(sanitized.to_bits(), output, "f64 input {input:#018x}");
+            assert_eq!(actual_count, count, "f64 input {input:#018x}");
+        }
+    }
 
     #[test]
     fn classic_formats_decode_with_exact_pcm_scaling_and_float_sanitation() {
@@ -967,7 +1401,7 @@ mod tests {
         assert_eq!(decoder.next_source_frame(), SourceFrame(0));
         let mut planar = [0.0; 4];
         let report = decoder
-            .decode_quantum_into_planar(&mut planar)
+            .decode_planar(&mut planar, 4)
             .expect("decode quantum");
         assert_eq!(report.decoded_frames, 4);
         assert_eq!(planar, [0.25, -0.5, 0.75, -1.0]);

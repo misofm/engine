@@ -451,8 +451,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         builtin_bank_bytes: 3_027,
         builtin_bank_scratch_bytes: 16_384,
         source_pcm_payload_bytes: 8_192,
-        source_overhead_bytes: 3_366,
-        source_total_bytes: 11_558,
+        source_overhead_bytes: 2_286,
+        source_total_bytes: 10_478,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 7_974,
@@ -653,19 +653,23 @@ struct NativeSourceWorkerMirror {
     not_sync: PhantomData<Cell<()>>,
 }
 
+/// #124: the entry is consumer-only — planes were deleted (graph fan-out copies the retained
+/// block directly) and retirement ownership moved onto the driver so workers stop before
+/// consumers drop.
 #[allow(dead_code)]
 struct GraphSourceEntryMirror {
     consumer: miso_engine_source::PcmSourceConsumer,
-    channel_count: u32,
-    planes: Box<[f32]>,
-    retirement_worker: Option<NativeSourceWorkerMirror>,
 }
 
+/// #124: `_retirement_workers` is declared first for drop order; `copied_claims` is the per-block
+/// copied-claim count the fan-out report exposes.
 #[allow(dead_code)]
 struct SourceGraphSourceSetDriverMirror {
+    retirement_workers: Box<[NativeSourceWorkerMirror]>,
     sources: Box<[GraphSourceEntryMirror]>,
     mappings: Box<[miso_engine_source::SourceGraphTrackMapping]>,
     quantum_frames: u32,
+    copied_claims: usize,
 }
 
 /// `<f32 as miso_engine_lane::Lane>::Mask`: an all-zero or all-one word.
@@ -1409,10 +1413,6 @@ fn source_owners() -> Vec<PrimitiveOwner> {
             bytes: bytes::<SourceGraphSourceSetDriverMirror>(1),
         },
         PrimitiveOwner {
-            name: "graph source coordinator planes",
-            bytes: bytes::<f32>(channels * 128),
-        },
-        PrimitiveOwner {
             name: "graph source mapping stable IDs",
             bytes: (mappings * 2 * 3) as u64,
         },
@@ -1524,17 +1524,17 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     assert_effective_owner_mutations(&graph, 431_336, "double-live graph/model");
 
     let source = source_owners();
-    assert_eq!(owner_total(&source), 11_558, "primitive source total");
+    assert_eq!(owner_total(&source), 10_478, "primitive source total");
     let source_overhead_rows = source[1..].to_vec();
-    assert_effective_owner_mutations(&source_overhead_rows, 3_366, "source overhead");
+    assert_effective_owner_mutations(&source_overhead_rows, 2_286, "source overhead");
     let mut source_total_rows = source.clone();
     source_total_rows.extend(source.clone());
-    assert_effective_owner_mutations(&source_total_rows, 23_116, "double-live source total");
+    assert_effective_owner_mutations(&source_total_rows, 20_956, "double-live source total");
     let mut double_source_overhead = source_overhead_rows.clone();
     double_source_overhead.extend(source_overhead_rows);
     assert_effective_owner_mutations(
         &double_source_overhead,
-        6_732,
+        4_572,
         "double-live source overhead",
     );
 
@@ -1894,8 +1894,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
     assert_eq!(oracle.graph, 431_336);
-    assert_eq!(oracle.source_total, 23_116);
-    assert_eq!(oracle.source_overhead, 6_732);
+    assert_eq!(oracle.source_total, 20_956);
+    assert_eq!(oracle.source_overhead, 4_572);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 15_948);

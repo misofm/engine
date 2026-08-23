@@ -7,12 +7,7 @@
 
 #![allow(missing_docs)]
 
-use core::{
-    alloc::Layout,
-    cmp,
-    mem::{align_of, size_of},
-    num::NonZeroUsize,
-};
+use core::{alloc::Layout, cmp, mem::size_of, num::NonZeroUsize};
 use std::fmt;
 
 use miso_engine_core::{
@@ -49,7 +44,8 @@ pub use native_source::{
     NativeSourcePrepareCaps, NativeSourcePrepareError, NativeSourcePrepareRequest,
     NativeSourceResolver, NativeSourceResolverError, NativeSourceResourceReport,
     NativeSourceWorkerControlError, NativeSourceWorkerEvent, NativeSourceWorkerExit,
-    PreparedNativeSource, prepare_native_session_sources, prepare_native_source,
+    NativeWorkerResourceReport, PreparedNativeSource, prepare_native_session_sources,
+    prepare_native_source,
 };
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]
@@ -137,11 +133,17 @@ impl fmt::Display for SourceDiagnosticCode {
     }
 }
 
-/// A stable source declaration path, including its stable-ID selector.
+/// A stable path to the source collection or to one source declaration selected by stable ID.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SourceDiagnosticPath(String);
 
 impl SourceDiagnosticPath {
+    /// Construct the source-collection diagnostic path.
+    #[must_use]
+    pub fn for_sources_collection() -> Self {
+        Self("$.sources".to_owned())
+    }
+
     /// Construct the required source-ID diagnostic path.
     #[must_use]
     pub fn for_source(source_id: &str) -> Self {
@@ -251,7 +253,7 @@ pub struct SourceSetRetainedResourceReport {
     pub mappings: SourceRetainedAllocation,
     pub claims: SourceRetainedAllocation,
     pub driver: SourceRetainedAllocation,
-    pub source_planes: SourceRetainedAllocation,
+    pub retirement_workers: SourceRetainedAllocation,
     pub owned_stable_id_payloads: SourceRetainedAllocation,
 }
 
@@ -262,7 +264,7 @@ impl SourceSetRetainedResourceReport {
             self.mappings.bytes,
             self.claims.bytes,
             self.driver.bytes,
-            self.source_planes.bytes,
+            self.retirement_workers.bytes,
             self.owned_stable_id_payloads.bytes,
         ]
         .into_iter()
@@ -275,7 +277,7 @@ impl SourceSetRetainedResourceReport {
             self.mappings.largest_allocation_bytes,
             self.claims.largest_allocation_bytes,
             self.driver.largest_allocation_bytes,
-            self.source_planes.largest_allocation_bytes,
+            self.retirement_workers.largest_allocation_bytes,
             self.owned_stable_id_payloads.largest_allocation_bytes,
         ]
         .into_iter()
@@ -616,6 +618,8 @@ impl PcmSourceRing {
             end_frame: None,
             end_of_region: false,
             current: None,
+            played: None,
+            played_frames: 0,
             deferred_recycle: None,
             cumulative_read_frames: 0,
             stale_generation_discard_count: 0,
@@ -804,32 +808,24 @@ impl PcmSourceProducer {
 
     fn submit(&mut self, chunk: HostPlanarChunk<'_>) -> Result<SubmitReport, HostChunkError> {
         validate_host_chunk(self, chunk)?;
-        let mut block = self.take_recycled_block()?;
-        block.generation = chunk.generation;
-        block.start_frame = chunk.start_frame;
-        block.frames = chunk.frames;
-        block.end_of_region = chunk.end_of_region;
-        block.native_decoder_sanitized_samples = 0;
-        let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
-        let frames = usize::try_from(chunk.frames).expect("u32 fits usize");
-        for (channel, plane) in chunk.planes.iter().enumerate() {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
-        }
-        self.publish_block(block, chunk.frames, chunk.end_of_region)
+        self.submit_planes(
+            chunk.generation,
+            chunk.start_frame,
+            chunk.frames,
+            chunk.end_of_region,
+            0,
+            chunk.planes.iter().copied(),
+        )
     }
 
-    #[allow(dead_code)]
-    fn submit_contiguous_planar(
+    fn submit_planes<'a, I: Iterator<Item = &'a [f32]>>(
         &mut self,
         generation: SourceGeneration,
         start_frame: SourceFrame,
-        planar_quantum: &[f32],
         frames: u32,
         end_of_region: bool,
         native_decoder_sanitized_samples: u64,
+        planes: I,
     ) -> Result<SubmitReport, HostChunkError> {
         validate_submission_metadata(
             self,
@@ -840,13 +836,6 @@ impl PcmSourceProducer {
             self.channel_count,
         )?;
         let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
-        let expected_samples = usize::try_from(self.channel_count)
-            .expect("u32 fits usize")
-            .checked_mul(quantum)
-            .expect("prepared planar samples");
-        if planar_quantum.len() != expected_samples {
-            return Err(HostChunkError::InternalInvariant);
-        }
         let mut block = self.take_recycled_block()?;
         block.generation = generation;
         block.start_frame = start_frame;
@@ -857,12 +846,11 @@ impl PcmSourceProducer {
             .native_decoder_sanitized_samples
             .max(native_decoder_sanitized_samples);
         let frames = usize::try_from(frames).expect("u32 fits usize");
-        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
+        for (channel, plane) in planes.enumerate() {
             let offset = channel
                 .checked_mul(quantum)
                 .expect("prepared channel offset");
-            block.samples[offset..offset + frames]
-                .copy_from_slice(&planar_quantum[offset..offset + frames]);
+            block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
         }
         self.publish_block(
             block,
@@ -933,7 +921,6 @@ impl HostChunkProvider {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(dead_code)]
     pub(crate) fn submit_native_planar(
         &mut self,
         generation: SourceGeneration,
@@ -943,13 +930,22 @@ impl HostChunkProvider {
         end_of_region: bool,
         native_decoder_sanitized_samples: u64,
     ) -> Result<SubmitReport, HostChunkError> {
-        self.producer.submit_contiguous_planar(
+        let quantum =
+            usize::try_from(self.producer.quantum_frames).expect("prepared quantum fits usize");
+        let expected_samples = usize::try_from(self.producer.channel_count)
+            .expect("u32 fits usize")
+            .checked_mul(quantum)
+            .expect("prepared planar samples");
+        if planar_quantum.len() != expected_samples {
+            return Err(HostChunkError::InternalInvariant);
+        }
+        self.producer.submit_planes(
             generation,
             start_frame,
-            planar_quantum,
             frames,
             end_of_region,
             native_decoder_sanitized_samples,
+            planar_quantum.chunks_exact(quantum),
         )
     }
 }
@@ -1034,6 +1030,8 @@ pub struct PcmSourceConsumer {
     end_frame: Option<SourceFrame>,
     end_of_region: bool,
     current: Option<Box<TransferBlock>>,
+    played: Option<Box<TransferBlock>>,
+    played_frames: u32,
     deferred_recycle: Option<Box<TransferBlock>>,
     cumulative_read_frames: u64,
     stale_generation_discard_count: u64,
@@ -1055,53 +1053,18 @@ impl PcmSourceConsumer {
         output_planes: &mut [&mut [f32]],
     ) -> Result<SourceReadReport, SourceReadError> {
         self.validate_output_shape(output_planes)?;
-        self.flush_deferred_recycle();
-        self.observe_seek_at_block_boundary();
-        for output in output_planes.iter_mut() {
-            output.fill(0.0);
-        }
-        self.acquire_current_block();
-        let mut copied_frames = 0_u32;
-        let mut underrun_frames = 0_u32;
-        if self.end_reached() {
-            self.end_of_region = true;
-        } else if self.current_matches_next_frame() {
-            copied_frames = self.copy_current_block(output_planes);
-        } else {
-            let available_until_end = self
-                .end_frame
-                .map(|end| end.0.saturating_sub(self.next_frame.0))
-                .unwrap_or(u64::from(self.quantum_frames));
-            underrun_frames = u32::try_from(cmp::min(
-                u64::from(self.quantum_frames),
-                available_until_end,
-            ))
-            .expect("bounded by quantum");
-            self.next_frame = SourceFrame(
-                self.next_frame
-                    .0
-                    .saturating_add(u64::from(self.quantum_frames)),
-            );
-            if underrun_frames != 0 {
-                self.underrun_frames = self
-                    .underrun_frames
-                    .saturating_add(u64::from(underrun_frames));
-                self.underrun_events = self.underrun_events.saturating_add(1);
+        let report = self.begin_block();
+        let copied = (|| {
+            for (channel, output) in output_planes.iter_mut().enumerate() {
+                self.copy_channel(
+                    u32::try_from(channel).expect("prepared channel count fits u32"),
+                    output,
+                )?;
             }
-            if self.end_reached() {
-                self.end_of_region = true;
-            }
-        }
-        Ok(SourceReadReport {
-            copied_frames,
-            underrun_frames,
-            underrun_event: underrun_frames != 0,
-            end_of_region: self.end_of_region,
-            active_generation: self.active_generation,
-            cumulative_read_frames: self.cumulative_read_frames,
-            cumulative_underrun_frames: self.underrun_frames,
-            cumulative_underrun_events: self.underrun_events,
-        })
+            Ok(())
+        })();
+        self.end_block();
+        copied.map(|()| report)
     }
 
     /// Copy one exact render quantum into preallocated contiguous planar storage.
@@ -1121,16 +1084,46 @@ impl PcmSourceConsumer {
                 expected_frames: self.quantum_frames,
             });
         }
+        let report = self.begin_block();
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        let copied = (|| {
+            for channel in 0..self.channel_count {
+                let offset = usize::try_from(channel)
+                    .expect("u32 fits usize")
+                    .checked_mul(quantum)
+                    .expect("prepared channel offset");
+                self.copy_channel(channel, &mut output[offset..offset + quantum])?;
+            }
+            Ok(())
+        })();
+        self.end_block();
+        copied.map(|()| report)
+    }
+
+    /// Advance the source state machine once and retain this quantum for channel fan-out copies.
+    /// This render-path operation allocates nothing and never blocks.
+    pub fn begin_block(&mut self) -> SourceReadReport {
+        self.end_block();
         self.flush_deferred_recycle();
         self.observe_seek_at_block_boundary();
-        output.fill(0.0);
         self.acquire_current_block();
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
         if self.end_reached() {
             self.end_of_region = true;
         } else if self.current_matches_next_frame() {
-            copied_frames = self.copy_current_block_contiguous(output);
+            let block = self.current.take().expect("matching current block");
+            copied_frames = block.frames;
+            self.played_frames = block.frames;
+            self.next_frame =
+                SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
+            self.cumulative_read_frames = self
+                .cumulative_read_frames
+                .saturating_add(u64::from(block.frames));
+            if block.end_of_region {
+                self.end_of_region = true;
+            }
+            self.played = Some(block);
         } else {
             let available_until_end = self
                 .end_frame
@@ -1156,7 +1149,7 @@ impl PcmSourceConsumer {
                 self.end_of_region = true;
             }
         }
-        Ok(SourceReadReport {
+        SourceReadReport {
             copied_frames,
             underrun_frames,
             underrun_event: underrun_frames != 0,
@@ -1165,7 +1158,50 @@ impl PcmSourceConsumer {
             cumulative_read_frames: self.cumulative_read_frames,
             cumulative_underrun_frames: self.underrun_frames,
             cumulative_underrun_events: self.underrun_events,
-        })
+        }
+    }
+
+    /// Copy one retained source channel without consuming the played quantum.
+    /// This render-path operation allocates nothing and never blocks.
+    pub fn copy_channel(
+        &self,
+        channel: u32,
+        destination: &mut [f32],
+    ) -> Result<(), SourceReadError> {
+        if channel >= self.channel_count {
+            return Err(SourceReadError::ChannelCount {
+                expected: self.channel_count,
+                actual: usize::try_from(channel)
+                    .expect("u32 fits usize")
+                    .saturating_add(1),
+            });
+        }
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        if destination.len() != quantum {
+            return Err(SourceReadError::PlaneLength {
+                expected_frames: self.quantum_frames,
+            });
+        }
+        destination.fill(0.0);
+        if let Some(block) = self.played.as_ref() {
+            let frames = usize::try_from(self.played_frames).expect("u32 fits usize");
+            let offset = usize::try_from(channel)
+                .expect("u32 fits usize")
+                .checked_mul(quantum)
+                .expect("prepared channel offset");
+            destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
+        }
+        Ok(())
+    }
+
+    /// Release the retained played quantum back to the producer recycle queue without blocking.
+    pub fn end_block(&mut self) {
+        self.played_frames = 0;
+        let Some(mut block) = self.played.take() else {
+            return;
+        };
+        block.reset_metadata();
+        self.recycle_block(block);
     }
 
     /// Exact source channel count.
@@ -1257,55 +1293,6 @@ impl PcmSourceConsumer {
             .is_some_and(|block| block.start_frame == self.next_frame)
     }
 
-    fn copy_current_block(&mut self, output_planes: &mut [&mut [f32]]) -> u32 {
-        let Some(mut block) = self.current.take() else {
-            return 0;
-        };
-        let frames = usize::try_from(block.frames).expect("u32 fits usize");
-        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
-        for (channel, output) in output_planes.iter_mut().enumerate() {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            output[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
-        }
-        self.next_frame = SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
-        self.cumulative_read_frames = self
-            .cumulative_read_frames
-            .saturating_add(u64::from(block.frames));
-        if block.end_of_region {
-            self.end_of_region = true;
-        }
-        block.reset_metadata();
-        self.recycle_block(block);
-        u32::try_from(frames).expect("source block frame count is u32")
-    }
-
-    fn copy_current_block_contiguous(&mut self, output: &mut [f32]) -> u32 {
-        let Some(mut block) = self.current.take() else {
-            return 0;
-        };
-        let frames = usize::try_from(block.frames).expect("u32 fits usize");
-        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
-        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            output[offset..offset + frames]
-                .copy_from_slice(&block.samples[offset..offset + frames]);
-        }
-        self.next_frame = SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
-        self.cumulative_read_frames = self
-            .cumulative_read_frames
-            .saturating_add(u64::from(block.frames));
-        if block.end_of_region {
-            self.end_of_region = true;
-        }
-        block.reset_metadata();
-        self.recycle_block(block);
-        u32::try_from(frames).expect("source block frame count is u32")
-    }
-
     fn note_end_and_discard(&mut self, block: Box<TransferBlock>) {
         if block.end_of_region && block.generation == self.active_generation {
             self.note_end_frame(&block);
@@ -1383,14 +1370,14 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 
 /// One render-owned source endpoint moved into the graph fan-out wrapper.
 pub struct SourceGraphSource {
+    #[cfg(not(target_arch = "wasm32"))]
+    retirement_worker: Option<NativeSourceWorker>,
     consumer: PcmSourceConsumer,
     resources: SourceResourceReport,
     /// Fixed native worker/decoder bytes not represented by the ring report.
     additional_overhead_bytes: u64,
     /// Largest fixed worker/decoder allocation, if larger than the ring allocation.
     additional_largest_allocation_bytes: u64,
-    #[cfg(not(target_arch = "wasm32"))]
-    retirement_worker: Option<NativeSourceWorker>,
 }
 
 impl SourceGraphSource {
@@ -1450,25 +1437,16 @@ pub enum SourceGraphSourceSetError {
 
 struct GraphSourceEntry {
     consumer: PcmSourceConsumer,
-    channel_count: u32,
-    planes: Box<[f32]>,
-    #[cfg(not(target_arch = "wasm32"))]
-    retirement_worker: Option<NativeSourceWorker>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for GraphSourceEntry {
-    fn drop(&mut self) {
-        // The containing source set is owned by a prepared plan. Its drop therefore performs
-        // native stop/join only during off-render source-set or retired-plan reclamation.
-        drop(self.retirement_worker.take());
-    }
 }
 
 struct SourceGraphSourceSetDriver {
+    /// Declared first so native workers stop/join before source consumers are dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    _retirement_workers: Box<[NativeSourceWorker]>,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
+    copied_claims: usize,
 }
 
 fn allocation_class<T>(
@@ -1490,33 +1468,25 @@ fn allocation_class<T>(
 fn source_set_retained_resources(
     sources: &[SourceGraphSource],
     mappings: &[SourceGraphTrackMapping],
-    quantum: usize,
 ) -> Result<SourceSetRetainedResourceReport, SourceGraphSourceSetError> {
     let source_entries = allocation_class::<GraphSourceEntry>(sources.len())?;
     let mappings_report = allocation_class::<SourceGraphTrackMapping>(mappings.len())?;
     let claims = allocation_class::<GraphSourceInputClaim>(mappings.len())?;
     let driver = allocation_class::<SourceGraphSourceSetDriver>(1)?;
-    let mut planes = SourceRetainedAllocation {
+    #[cfg(not(target_arch = "wasm32"))]
+    let retirement_workers = allocation_class::<NativeSourceWorker>(
+        sources
+            .iter()
+            .filter(|source| source.retirement_worker.is_some())
+            .count(),
+    )?;
+    #[cfg(target_arch = "wasm32")]
+    let retirement_workers = SourceRetainedAllocation {
         item_count: 0,
         bytes: 0,
         largest_allocation_bytes: 0,
-        alignment_bytes: u64::try_from(align_of::<f32>()).expect("alignment fits u64"),
+        alignment_bytes: 1,
     };
-    for source in sources {
-        let samples = usize::try_from(source.consumer.channel_count())
-            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
-            .checked_mul(quantum)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        let class = allocation_class::<f32>(samples)?;
-        planes.item_count = planes.item_count.saturating_add(1);
-        planes.bytes = planes
-            .bytes
-            .checked_add(class.bytes)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        planes.largest_allocation_bytes = planes
-            .largest_allocation_bytes
-            .max(class.largest_allocation_bytes);
-    }
     let mut ids = SourceRetainedAllocation {
         item_count: 0,
         bytes: 0,
@@ -1545,7 +1515,7 @@ fn source_set_retained_resources(
         mappings: mappings_report,
         claims,
         driver,
-        source_planes: planes,
+        retirement_workers,
         owned_stable_id_payloads: ids,
     })
 }
@@ -1564,10 +1534,13 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
         }
         for source in &mut self.sources {
-            source
-                .consumer
-                .read_block_contiguous(&mut source.planes)
-                .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+            source.consumer.begin_block();
+        }
+        self.copied_claims = 0;
+        if self.mappings.is_empty() {
+            for source in &mut self.sources {
+                source.consumer.end_block();
+            }
         }
         Ok(())
     }
@@ -1578,36 +1551,35 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         left: &mut [f32],
         right: &mut [f32],
     ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        let mapping = self
+        let (source_index, left_channel, right_channel) = self
             .mappings
             .get(claim_index)
+            .map(|mapping| {
+                (
+                    mapping.source_index,
+                    mapping.left_channel,
+                    mapping.right_channel,
+                )
+            })
             .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
         let source = self
             .sources
-            .get(mapping.source_index)
+            .get(source_index)
             .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let quantum = usize::try_from(self.quantum_frames)
+        source
+            .consumer
+            .copy_channel(left_channel, left)
             .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        if left.len() != quantum || right.len() != quantum {
-            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
+        source
+            .consumer
+            .copy_channel(right_channel, right)
+            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        self.copied_claims = self.copied_claims.saturating_add(1);
+        if self.copied_claims == self.mappings.len() {
+            for source in &mut self.sources {
+                source.consumer.end_block();
+            }
         }
-        let left_channel = usize::try_from(mapping.left_channel)
-            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let right_channel = usize::try_from(mapping.right_channel)
-            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        if left_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
-            || right_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
-        {
-            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
-        }
-        let left_offset = left_channel
-            .checked_mul(quantum)
-            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let right_offset = right_channel
-            .checked_mul(quantum)
-            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        left.copy_from_slice(&source.planes[left_offset..left_offset + quantum]);
-        right.copy_from_slice(&source.planes[right_offset..right_offset + quantum]);
         Ok(())
     }
 
@@ -1635,9 +1607,9 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
 ///
-/// The wrapper owns exactly one consumer and preallocated contiguous source planes per source.
-/// The graph calls `begin_block` once, then copies each declared mapping without allowing native
-/// workers to observe a consumer or ring.
+/// The wrapper owns exactly one consumer per source. The graph calls `begin_block` once, then each
+/// mapping copies directly from the retained played block before the final claim recycles all
+/// blocks, without allowing native workers to observe a consumer or ring.
 pub fn prepare_graph_source_set(
     envelope: miso_engine_core::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
@@ -1646,19 +1618,19 @@ pub fn prepare_graph_source_set(
     if sources.is_empty() {
         return Err(SourceGraphSourceSetError::EmptySources);
     }
-    let quantum = usize::try_from(envelope.quantum.0)
-        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
-    let retained = source_set_retained_resources(&sources, &mappings, quantum)?;
+    // Until extraction below, SourceGraphSource field order guarantees every early-return path
+    // stops/joins its worker before dropping the paired consumer.
+    let retained = source_set_retained_resources(&sources, &mappings)?;
     let mut pcm_payload = 0_u64;
     let mut overhead = 0_u64;
     let mut largest = 0_u64;
     let mut entries = Vec::with_capacity(sources.len());
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut workers = Vec::with_capacity(
+        usize::try_from(retained.retirement_workers.item_count)
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?,
+    );
     for source in sources {
-        let channel_count = source.consumer.channel_count();
-        let samples = usize::try_from(channel_count)
-            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
-            .checked_mul(quantum)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         pcm_payload = pcm_payload
             .checked_add(source.resources.pcm_payload_already_charged_bytes)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
@@ -1669,12 +1641,12 @@ pub fn prepare_graph_source_set(
         largest = largest
             .max(source.resources.largest_allocation_bytes)
             .max(source.additional_largest_allocation_bytes);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(worker) = source.retirement_worker {
+            workers.push(worker);
+        }
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
-            channel_count,
-            planes: vec![0.0; samples].into_boxed_slice(),
-            #[cfg(not(target_arch = "wasm32"))]
-            retirement_worker: source.retirement_worker,
         });
     }
     overhead = overhead
@@ -1689,8 +1661,8 @@ pub fn prepare_graph_source_set(
         let source = entries
             .get(mapping.source_index)
             .ok_or(SourceGraphSourceSetError::SourceIndex)?;
-        if mapping.left_channel >= source.channel_count
-            || mapping.right_channel >= source.channel_count
+        if mapping.left_channel >= source.consumer.channel_count()
+            || mapping.right_channel >= source.consumer.channel_count()
         {
             return Err(SourceGraphSourceSetError::ChannelIndex);
         }
@@ -1714,9 +1686,12 @@ pub fn prepare_graph_source_set(
             largest_allocation_bytes: largest,
         },
         Box::new(SourceGraphSourceSetDriver {
+            #[cfg(not(target_arch = "wasm32"))]
+            _retirement_workers: workers.into_boxed_slice(),
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
+            copied_claims: 0,
         }),
     ))
 }
@@ -1726,6 +1701,37 @@ mod tests {
     use super::*;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_driver_declares_worker_tokens_before_source_consumers() {
+        let source = include_str!("lib.rs");
+        let carrier_start = source
+            .find("pub struct SourceGraphSource")
+            .expect("pre-sealing source carrier declaration");
+        let carrier = &source[carrier_start..];
+        let carrier_worker = carrier
+            .find("retirement_worker:")
+            .expect("carrier worker token field");
+        let carrier_consumer = carrier.find("consumer:").expect("carrier consumer field");
+        assert!(
+            carrier_worker < carrier_consumer,
+            "pre-sealing worker token must drop before its consumer"
+        );
+
+        let start = source
+            .find("struct SourceGraphSourceSetDriver")
+            .expect("set driver declaration");
+        let body = &source[start..];
+        let workers = body
+            .find("_retirement_workers:")
+            .expect("worker token field");
+        let sources = body.find("sources:").expect("consumer field");
+        assert!(
+            workers < sources,
+            "worker tokens must drop before source consumers"
+        );
+    }
 
     fn config(channels: u32, quantum: u32, capacity: u64) -> PcmSourceRingConfig {
         PcmSourceRingConfig {
@@ -1902,6 +1908,196 @@ mod tests {
     }
 
     #[test]
+    fn retained_played_block_supports_repeat_fanout_and_auto_recycles_once() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 8)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let left_first = [1.0, 2.0, 3.0, 4.0];
+        let right_first = [-1.0, -2.0, -3.0, -4.0];
+        host.submit(chunk(1, 0, &[&left_first, &right_first], 4, false))
+            .expect("first block");
+        let left_final = [5.0, 6.0];
+        let right_final = [-5.0, -6.0];
+        host.submit(chunk(1, 4, &[&left_final, &right_final], 2, true))
+            .expect("short EOF block");
+
+        let first = consumer.begin_block();
+        assert_eq!(first.copied_frames, 4);
+        assert_eq!(first.cumulative_read_frames, 4);
+        let mut left = [0.0; 4];
+        consumer.copy_channel(0, &mut left).expect("left copy");
+        assert_eq!(left, left_first);
+        left.fill(99.0);
+        consumer
+            .copy_channel(0, &mut left)
+            .expect("repeat left copy");
+        assert_eq!(left, left_first);
+        let mut right = [0.0; 4];
+        consumer.copy_channel(1, &mut right).expect("right copy");
+        assert_eq!(right, right_first);
+        assert!(matches!(
+            consumer.copy_channel(2, &mut right),
+            Err(SourceReadError::ChannelCount { .. })
+        ));
+        assert!(matches!(
+            consumer.copy_channel(0, &mut right[..3]),
+            Err(SourceReadError::PlaneLength { .. })
+        ));
+        consumer
+            .copy_channel(1, &mut right)
+            .expect("played block survives invalid copies");
+        assert_eq!(right, right_first);
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 4);
+
+        let final_report = consumer.begin_block();
+        assert_eq!(final_report.copied_frames, 2);
+        assert_eq!(final_report.cumulative_read_frames, 6);
+        assert!(final_report.end_of_region);
+        consumer.copy_channel(0, &mut left).expect("short left");
+        consumer.copy_channel(1, &mut right).expect("short right");
+        assert_eq!(left, [5.0, 6.0, 0.0, 0.0]);
+        assert_eq!(right, [-5.0, -6.0, 0.0, 0.0]);
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
+
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .expect("new generation");
+        host.submit(chunk(2, 100, &[&left_first, &right_first], 4, false))
+            .expect("initial begin of final block auto-recycled prior played block");
+
+        consumer.end_block();
+        assert!(consumer.played.is_none());
+        assert_eq!(consumer.played_frames, 0);
+        consumer.end_block();
+        assert!(consumer.played.is_none());
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
+    }
+
+    fn test_mapping(index: u32) -> SourceGraphTrackMapping {
+        SourceGraphTrackMapping {
+            node: GraphNodeId::TrackStage {
+                track_id: miso_engine_graph::StableGraphId::parse(&format!("track{index}"))
+                    .expect("track ID"),
+                stage: miso_engine_graph::TrackStage::Input,
+            },
+            source_index: 0,
+            left_channel: 0,
+            right_channel: 0,
+        }
+    }
+
+    fn test_driver(
+        consumer: PcmSourceConsumer,
+        mappings: Vec<SourceGraphTrackMapping>,
+    ) -> SourceGraphSourceSetDriver {
+        SourceGraphSourceSetDriver {
+            #[cfg(not(target_arch = "wasm32"))]
+            _retirement_workers: Vec::new().into_boxed_slice(),
+            sources: vec![GraphSourceEntry { consumer }].into_boxed_slice(),
+            mappings: mappings.into_boxed_slice(),
+            quantum_frames: 4,
+            copied_claims: 0,
+        }
+    }
+
+    #[test]
+    fn graph_driver_last_claim_recycles_in_call_and_incomplete_paths_recycle_next_begin() {
+        let samples = [1.0, 2.0, 3.0, 4.0];
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
+        driver.begin_block(0, 4).expect("complete begin");
+        let mut left = [0.0; 4];
+        let mut right = [0.0; 4];
+        driver
+            .copy_track_input(0, &mut left, &mut right)
+            .expect("last claim");
+        assert_eq!(left, samples);
+        assert_eq!(right, samples);
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("last claim recycled within copy call");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0), test_mapping(1)]);
+        driver.begin_block(0, 4).expect("incomplete begin");
+        driver
+            .copy_track_input(0, &mut left, &mut right)
+            .expect("first of two claims");
+        assert!(matches!(
+            host.submit(chunk(1, 4, &[&samples], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
+        driver
+            .begin_block(4, 4)
+            .expect("next begin recycles missing claim block");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("missing claim recycled on next begin");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
+        driver.begin_block(0, 4).expect("error begin");
+        assert_eq!(
+            driver.copy_track_input(0, &mut left[..3], &mut right),
+            Err(miso_engine_core::realtime::RenderError::InvalidEnvelope)
+        );
+        driver
+            .begin_block(4, 4)
+            .expect("next begin recycles error block");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("errored claim recycled on next begin");
+    }
+
+    #[test]
+    fn graph_driver_zero_claims_recycles_in_begin_and_retains_no_plane_class() {
+        let samples = [1.0, 2.0, 3.0, 4.0];
+        let (producer, consumer, resources) =
+            PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let source = SourceGraphSource::new(consumer, resources, 0, 0);
+        let retained = source_set_retained_resources(core::slice::from_ref(&source), &[])
+            .expect("retained report");
+        let expected_overhead = retained
+            .source_entries
+            .bytes
+            .checked_add(retained.mappings.bytes)
+            .and_then(|total| total.checked_add(retained.claims.bytes))
+            .and_then(|total| total.checked_add(retained.driver.bytes))
+            .and_then(|total| total.checked_add(retained.retirement_workers.bytes))
+            .and_then(|total| total.checked_add(retained.owned_stable_id_payloads.bytes))
+            .expect("retained overhead");
+        assert_eq!(retained.overhead_bytes(), Some(expected_overhead));
+
+        let SourceGraphSource { consumer, .. } = source;
+        let mut driver = test_driver(consumer, Vec::new());
+        driver.begin_block(0, 4).expect("zero-claim begin");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("zero claims recycle in begin");
+
+        let source_text = include_str!("lib.rs");
+        assert!(!source_text.contains(&["source", "_planes"].concat()));
+        let entry_start = source_text
+            .find("struct GraphSourceEntry")
+            .expect("graph source entry");
+        let entry_end = source_text[entry_start..]
+            .find("struct SourceGraphSourceSetDriver")
+            .map(|offset| entry_start + offset)
+            .expect("driver declaration");
+        assert!(!source_text[entry_start..entry_end].contains("planes"));
+    }
+
+    #[test]
     fn seek_switches_at_boundary_and_discards_older_queued_audio() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 12)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -1943,6 +2139,10 @@ mod tests {
         assert_eq!(
             SourceDiagnosticPath::for_source("lead.vocal").as_str(),
             "$.sources[id=lead.vocal]"
+        );
+        assert_eq!(
+            SourceDiagnosticPath::for_sources_collection().as_str(),
+            "$.sources"
         );
         let (producer, _consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -1989,6 +2189,100 @@ mod tests {
         assert_eq!(report.copied_frames, 4);
         assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(right, [-1.0, -2.0, -3.0, -4.0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn host_and_native_submission_share_exact_short_eof_metadata_and_validation_order() {
+        let (host_producer, mut host_consumer, _) =
+            PcmSourceRing::prepare(config(2, 4, 4)).expect("host ring");
+        let (native_producer, mut native_consumer, _) =
+            PcmSourceRing::prepare(config(2, 4, 4)).expect("native ring");
+        let mut host = host_producer.into_host_chunk_provider(RATE);
+        let mut native = native_producer.into_host_chunk_provider(RATE);
+
+        let invalid_host = [1.0, 2.0, 3.0];
+        let host_before = host.telemetry();
+        assert!(matches!(
+            host.submit(chunk(1, 0, &[&invalid_host, &invalid_host], 4, false)),
+            Err(HostChunkError::PlaneLength { .. })
+        ));
+        assert_eq!(host.telemetry(), host_before);
+
+        let native_before = native.telemetry();
+        assert_eq!(
+            native.submit_native_planar(
+                SourceGeneration(1),
+                SourceFrame(0),
+                &[1.0, 2.0, 3.0],
+                4,
+                false,
+                9,
+            ),
+            Err(HostChunkError::InternalInvariant)
+        );
+        assert_eq!(native.telemetry(), native_before);
+
+        let host_left = [1.0, 2.0];
+        let host_right = [-1.0, -2.0];
+        let host_report = host
+            .submit(chunk(1, 0, &[&host_left, &host_right], 2, true))
+            .expect("host short EOF");
+        let native_quantum = [1.0, 2.0, 99.0, 98.0, -1.0, -2.0, -99.0, -98.0];
+        let native_report = native
+            .submit_native_planar(
+                SourceGeneration(1),
+                SourceFrame(0),
+                &native_quantum,
+                2,
+                true,
+                0,
+            )
+            .expect("native short EOF");
+        assert_eq!(native_report, host_report);
+        assert_eq!(native.telemetry(), host.telemetry());
+
+        let mut host_left_out = [7.0; 4];
+        let mut host_right_out = [7.0; 4];
+        let host_read = host_consumer
+            .read_block(&mut [&mut host_left_out, &mut host_right_out])
+            .expect("host read");
+        let mut native_left_out = [7.0; 4];
+        let mut native_right_out = [7.0; 4];
+        let native_read = native_consumer
+            .read_block(&mut [&mut native_left_out, &mut native_right_out])
+            .expect("native read");
+        assert_eq!(native_read, host_read);
+        assert_eq!(native_consumer.telemetry(), host_consumer.telemetry());
+        assert_eq!(
+            native_left_out.map(f32::to_bits),
+            host_left_out.map(f32::to_bits)
+        );
+        assert_eq!(
+            native_right_out.map(f32::to_bits),
+            host_right_out.map(f32::to_bits)
+        );
+        assert_eq!(native_left_out, [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(native_right_out, [-1.0, -2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn producer_submission_has_one_stamping_and_copy_body() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn submit_planes")
+            .expect("shared submit helper");
+        let end = source[start..]
+            .find("fn publish_block")
+            .map(|offset| start + offset)
+            .expect("publish boundary");
+        let shared = &source[start..end];
+        assert_eq!(shared.matches("block.generation = generation").count(), 1);
+        assert_eq!(shared.matches("block.start_frame = start_frame").count(), 1);
+        assert_eq!(shared.matches("block.frames = frames").count(), 1);
+        assert_eq!(shared.matches("copy_from_slice").count(), 1);
+        assert_eq!(shared.matches("validate_submission_metadata").count(), 1);
+        assert!(!source.contains(&["submit_contiguous", "_planar"].concat()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
