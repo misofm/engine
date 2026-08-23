@@ -156,11 +156,16 @@ miso_engine_graph_audit_compressor`, all counters zero, with a block-rate automa
    owns the decision: an `f64` `Lane64` family (master plan D2), the two-product form that
    `miso-engine-effect-runtime`'s `ar_one_pole_step` documents (which trades this stall for a
    different one), or a revised gate.
-2. **The timing numbers to beat.** Scalar 21.051 ns/lane-sample and bank W8 5.404 ns/lane-sample on
-   an AMD Ryzen 7 9700X, from `cargo run --release -p miso-engine-compressor --example
-   lane_sample_timing` (before the re-land: 19.396 and 20.707). The scalar path did not improve;
-   `perf` attributes the bank's time overwhelmingly to the `Lane::select` inside
-   `exp2_lane`/`log2_lane`, which is the deterministic dB conversion. If this issue's benchmark is
-   authorised, that is the hot spot to report against.
+2. **The timing numbers to beat, and the reason they need re-taking.** From
+   `cargo run --release -p miso-engine-compressor --example lane_sample_timing` on an AMD Ryzen 7
+   9700X: before the re-land 19.396 (scalar) and 20.707 (bank W8) ns/lane-sample; after it, three
+   observations of the same unchanged binary under different machine loads read 21.051 / 5.404,
+   16.371 / 5.058 and 13.757 / 3.043. **The bank improvement is real** (a factor of 4 to 7, far
+   outside that spread) and **the scalar figure is not resolvable at this precision** — the box was
+   shared with nine parallel jobs and the before/after pairs were not taken under comparable load.
+   This issue owns the authorised benchmark; it should re-take both legs on a quiet machine before
+   any number is quoted as this effect's cost. `perf` attributes the bank's time overwhelmingly to
+   the `Lane::select` inside `exp2_lane`/`log2_lane`, the deterministic dB conversion, which is the
+   hot spot to report against.
 3. **The production-graph audit** remains this issue's, unchanged: #88's audit prepares effects
    directly, not through a compiled graph.

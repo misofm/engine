@@ -322,12 +322,28 @@ frames, one 512-block untimed warmup, two measured rounds, minimum reported.
 | bank W8 | 20.707 ns/lane-sample | **5.404** | **3.83x faster** |
 | bank / scalar | 0.94x | **3.90x** | the bank is finally worth binding |
 
-A second observation taken under `perf stat` on the same host in the same session read 16.371 and
-5.058 (ratio 3.24x); the machine is shared and the spread is the machine, not the code. Neither
-number was tuned toward and the example was not re-run to select one.
+Two further observations of the **same unchanged binary** were taken incidentally, and are reported
+rather than discarded: 16.371 / 5.058 (ratio 3.24x) under `perf stat` during the same session, and
+13.757 / 3.043 (ratio 4.52x) after the rebase onto #90, when the nine parallel wave-2 jobs sharing
+this box had finished. The headline row above is the one taken under the measurement protocol and
+is **not** replaced by the flattering one.
 
-The plan's expectation was scalar `<= 8` ns; it is not met, and the §10 fallback applies: report the
-numbers and the hot spots, do not restructure the kernel in this job. `perf record` attributes 64 %
+What that spread means for the two claims:
+
+- **The scalar regression is not established.** 19.396 (before) and 21.051 (after) are 8 % apart and
+  the same binary varied by 35 % across three observations, so the "after" is inside the noise of
+  the "before". The `before` measurement was also taken under a different machine load from every
+  `after`, which is the real methodological defect here. All that can be said is that the scalar
+  path did not obviously improve, which is what the `perf` profile predicts.
+- **The bank improvement is established.** Every observation of the bank is between 3.0 and
+  5.4 ns/lane-sample against a `before` of 20.707, a factor of 4 to 7 — an order of magnitude
+  outside the spread — and the bank/scalar ratio went from 0.94x to between 3.2x and 4.5x on every
+  observation. A rerun on a quiet machine would be needed to state either number precisely, and
+  that belongs to 046's authorised benchmark, not here.
+
+The plan's expectation was scalar `<= 8` ns; no observation reaches it (13.8 is the best), so the
+§10 fallback applies: report the numbers and the hot spots, do not restructure the kernel in this
+job. `perf record` attributes 64 %
 of the bank's time to `Instance::render` with the largest single leaf being `Lane::select`
 (`bitselect`) inside `exp2_lane`/`log2_lane`. That is the shape of the trade: the dB conversions are
 now portable polynomials rather than platform libm calls, which costs a scalar lane roughly what the
