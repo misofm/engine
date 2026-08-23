@@ -7,15 +7,62 @@ must be legal concurrently with the exclusive render owner, and every caller-own
 output region must be rejected before Rust constructs a slice when its length, extent, or alignment
 is invalid.
 
-**TERMINAL PRE-IMPLEMENTATION STOP.** The original Issue-103 plan predates accepted Issues 113–121.
-Sol XHigh rebriefed this slice on 2026-08-23 against `main` at `97e1a03`, preserving the accepted
-two-phase replacement, active-epoch resource-report transition, lifecycle, event and ownership
-contracts. Two Miri preflight/scaffold failures exhausted the synchronized pre-fix qualification
-budget before production changes began. F2/F3 did not start and have no implementation PASS.
+**OWNER-RESCOPED / READY — SOL XHIGH PASS.** Fresh explicit owner authorization on 2026-08-23
+resumes this slice from synchronized `main` at `3be899f`. The two historical Miri
+preflight/scaffold failures remain immutable evidence, but neither started an implementation
+attempt or changed production. This fresh workflow authorizes one provenance-preserving pre-fix
+Miri qualification and, only after the intended red, one identical corrected Miri run. It does not
+erase history, weaken E1 or authorize any other retry.
 
-Issue 103 remains open after this checkpoint for F1 and the later wave-4 CAPI/web facade work.
+Issue 103 remains open. After this F2/F3 slice passes, F1 and the later wave-4 CAPI/web facade work
+remain separate scope.
 
-### Briefing/preflight correction
+### Fresh owner-authorized qualification budget
+
+Before the fresh qualification begins, cumulative counters remain:
+
+- `miri_named_invocations_total=2`;
+- `invalid_zero_test_miri_invocations=1`;
+- `unrelated_scaffold_failure_miri_invocations=1`;
+- `valid_pre_fix_red_invocations=0`;
+- `valid_corrected_green_invocations=0`;
+- `valid_miri_evidence_invocations=0`;
+- `implementation_attempts_started=0`;
+- `failed_implementation_attempts=0`;
+- `preimplementation_qualification_stops=2`.
+
+The owner-authorized rescope adds exactly two possible named invocations: one fresh intended
+pre-fix red, then one corrected green. On full success the cumulative counters must be:
+
+- `miri_named_invocations_total=4`;
+- `invalid_zero_test_miri_invocations=1`;
+- `unrelated_scaffold_failure_miri_invocations=1`;
+- `exact_named_miri_invocations=3`;
+- `owner_rescope_pre_fix_red_invocations=1`;
+- `valid_pre_fix_red_invocations=1`;
+- `valid_corrected_green_invocations=1`;
+- `valid_miri_evidence_invocations=2`;
+- `miri_retries_of_valid_workload=0`;
+- `implementation_attempts_started=1`;
+- `failed_implementation_attempts=0`.
+
+The fresh pre-fix invocation is a new owner-authorized qualification after a terminal rescope, not
+a retry or reclassification of either historical invocation. The historical counters never
+decrease. Implementation attempt 1 starts only after the intended Miri red is captured and the
+first production edit begins. The test-only qualification scaffold is not an implementation
+attempt.
+
+If the fresh pre-fix run is unrelated or unexpectedly green, terminal counters become
+`miri_named_invocations_total=3`, `exact_named_miri_invocations=2`,
+`owner_rescope_pre_fix_red_invocations=0`, `valid_miri_evidence_invocations=0`,
+`implementation_attempts_started=0`, and `failed_implementation_attempts=0`; the corrected slot
+never becomes available. If the intended red succeeds but the sole corrected run fails, terminal
+counters become `miri_named_invocations_total=4`, `exact_named_miri_invocations=3`,
+`valid_pre_fix_red_invocations=1`, `valid_corrected_green_invocations=0`,
+`valid_miri_evidence_invocations=1`, `implementation_attempts_started=1`, and
+`failed_implementation_attempts=1`.
+
+### Historical briefing/preflight correction
 
 The first Sol High turn stopped before implementation after the originally named pre-fix Miri
 command ran zero tests (`0 passed; 18 filtered out`): E1 had not yet been scaffolded. It exercised
@@ -27,20 +74,15 @@ brief correction without weakening Miri:
 - `tests_executed_by_invalid_invocation=0`;
 - `valid_miri_evidence_invocations=0`.
 
-Before production changes, add only the E1 qualification scaffold in `ffi.rs` while retaining the
-whole-Plan/`RefCell` defect. Freeze its exact name as
-`ffi::tests::plan_queries_are_pure_and_concurrent_with_render`. A non-Miri `--list` preflight must
-find that exact name once. Only then is one replacement valid pre-fix run authorized; it must say
-`running 1 test` and fail for the expected whole-Plan alias/data-race defect. An unrelated failure
-or pass is STOP. After that red, implementation attempt 1 may begin and exactly one identical
-corrected run must execute one test and pass.
+The prior correction required only the E1 qualification scaffold in `ffi.rs` while retaining the
+whole-Plan/`RefCell` defect, froze its exact name as
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render`, and required a non-Miri `--list`
+preflight before one replacement run. That run was required to reach the expected whole-Plan
+alias/data-race defect; an unrelated failure or pass was STOP.
 
-Final successful counters are `miri_named_invocations_total=3`,
-`invalid_zero_test_miri_invocations=1`, `valid_pre_fix_red_invocations=1`,
-`valid_corrected_green_invocations=1`, `valid_miri_evidence_invocations=2`,
-`miri_retries_of_valid_workload=0`, `implementation_attempts_started=1`, and
-`failed_implementation_attempts=0`. No alternate filter, substitute toolchain or extra retry is
-authorized.
+That correction terminated without valid evidence, as recorded in the terminal evidence below.
+Its obsolete projected-success counters are superseded by the cumulative fresh-rescope counters
+above; the underlying invocation history is unchanged.
 
 ## Accepted authority and frozen behavior
 
@@ -145,6 +187,45 @@ Do not place the ABI mutation script's replacement tokens in comments.
 Cargo files, protocol, core, graph, hosts, fixtures, C/C++ fixtures, ABI scripts, symbols and every
 other path are outside the fence.
 
+## Qualification-only scaffold law
+
+Before any production edit, add E1 only inside `ffi.rs`'s existing `#[cfg(test)] mod tests`. The
+test must keep the current production whole-`Plan`/`RefCell` defect intact. Its sole cross-thread
+pointer carrier is this test-local shape:
+
+```rust
+struct SendPlanPtr(*mut Plan);
+
+// SAFETY: This test-only token moves the original pointer without dereferencing or changing its
+// provenance. The scoped query thread uses it only under E1's documented concurrent-query
+// contract, joins before destruction, and Miri verifies production's projected accesses.
+unsafe impl Send for SendPlanPtr {}
+
+impl SendPlanPtr {
+    fn new(plan: *mut Plan) -> Self {
+        Self(plan)
+    }
+
+    fn into_ptr(self) -> *mut Plan {
+        self.0
+    }
+}
+```
+
+Do not derive or implement `Copy`, `Clone` or `Sync`. Construct `SendPlanPtr::new(plan)` from the
+original compile output on the parent thread. Move the opaque wrapper into a closure created by
+`std::thread::scope`; recover the raw pointer only by calling `into_ptr()` inside that closure.
+Keep the render loop on the parent thread, retain the two-boundary barrier protocol, explicitly
+`join()` the query handle inside the scope, and destroy session/plan only after the scope returns.
+
+The scaffold may contain no `plan.addr()`, pointer-to-integer/integer-to-pointer cast,
+`expose_provenance`, `with_exposed_provenance`, `without_provenance` or equivalent reconstruction.
+It may not add any production helper or unsafe trait implementation outside the test-only wrapper.
+Before Miri, Sol must inspect the `ffi.rs` diff and record that every added hunk is inside the test
+module, the exact test name occurs once, production paths are unchanged from the rebrief base, and
+the prohibited provenance operations are absent. A scaffold defect discovered before Miri may be
+corrected without consuming the Miri budget; once Miri launches, that invocation is consumed.
+
 ## Acceptance gates and red mutations
 
 ### E1 — concurrent query/render ownership
@@ -152,7 +233,10 @@ other path are outside the fence.
 Run 2,000 renders while another thread repeatedly calls `plan_resources` and `last_error`; run 16
 iterations under pinned Miri. Every call returns `OK`, the active report is exact and the error is
 empty. Before the fix, and as a red mutation, restore a whole-plan mutable reference: Miri or the
-static gate must fail.
+static gate must fail. The fresh pre-fix transcript is valid only if it reports `running 1 test`
+and reaches the production whole-plan alias/data-race conflict between render and a plan query.
+A failure in the wrapper, handle header, barrier, fixture setup, allocator or toolchain is unrelated
+and consumes the fresh pre-fix slot without satisfying E1.
 
 ### E2 — resource query is diagnostic-pure
 
@@ -186,22 +270,36 @@ the compile-fail example unexpectedly compile.
 
 ## Required commands
 
-After adding only the E1 scaffold with the production defect intact, preflight its exact name:
+After adding only the provenance-preserving E1 scaffold with the production defect intact, first
+format/compile it and preflight its exact name without executing the test:
 
 ```sh
+cargo fmt --all -- --check
+cargo +nightly-2026-08-20 clippy --locked -p miso-engine-capi --lib --tests -- -D warnings
 cargo +nightly-2026-08-20 test --locked -p miso-engine-capi --lib -- --list
 ```
 
 The output must contain exactly one
-`ffi::tests::plan_queries_are_pure_and_concurrent_with_render: test` line. Then run one valid
-pre-fix and one corrected pinned-Miri invocation with the identical exact filter; no other valid-
-workload retry or tuning:
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render: test` line. Sol must also complete
+and record the qualification-only diff inspection defined above. Only then run the one newly
+authorized pre-fix pinned-Miri qualification:
 
 ```sh
 rustup +nightly-2026-08-20 component add miri
 cargo +nightly-2026-08-20 miri test --locked -p miso-engine-capi --lib -- \
   ffi::tests::plan_queries_are_pure_and_concurrent_with_render --exact --nocapture
 ```
+
+It must run exactly one test and fail specifically at the retained production whole-Plan
+alias/data-race conflict. An unrelated failure or unexpected pass is STOP: preserve the transcript,
+do not edit production, do not invoke Miri again, and synchronize the consumed-slot counters.
+
+After the intended red, begin implementation attempt 1 and retain the identical test name, wrapper,
+filter and iteration count. Once F2/F3 and all non-Miri gates are green, run the exact command above
+once more as the sole corrected invocation. It must run one test and pass. Any corrected-run failure
+is STOP with no retry, alternate filter, toolchain substitution or tuning. A later implementation
+revision may not reuse stale Miri evidence if it changes F2 ownership/projection code; no further
+Miri slot is implicit in the three-attempt rule.
 
 Then run:
 
@@ -226,13 +324,15 @@ git diff --check
 git diff --exit-code -- fixtures
 ```
 
-Miri cannot run the C smoke tests. If pinned Miri cannot be installed for an environmental reason,
-record the exact failure and stop before implementation; do not substitute an unpinned toolchain.
+Miri cannot run the C smoke tests. If pinned Miri cannot be installed or the named test cannot run
+for an environmental reason, record the exact failure and stop before implementation; do not
+substitute an unpinned toolchain.
 
 ## Evidence and completion
 
-Record the base/candidate/tree and exact changed paths; the invalid zero-test invocation and final
-Miri counters; old and new Plan ownership; active-report
+Record the base/candidate/tree and exact changed paths; both historical invalid-evidence
+invocations, the fresh owner-rescope authorization, qualification-only diff inspection, exact-name
+preflight and final cumulative Miri counters; old and new Plan ownership; active-report
 transition before/after a committed replacement; all 14 header ownership rows; diagnostic table;
 every cap/alignment site and exact rejection; E1–E6 results; pre-fix and corrected Miri results;
 each red mutation; independent resource-owner totals; format/Clippy/test/doc/policy results; frozen
@@ -249,6 +349,10 @@ keep it open. F1 facade de-duplication and later findings remain separate waves.
 - If removing the diagnostic allocation changes any owner total beyond its independently derived
   delta, stop and report the owner mismatch rather than pinning a production getter.
 - If an alignment/cap check cannot reject before a slice is formed, stop and report the exact site.
+- If the fresh pre-fix run does not reach the intended production whole-Plan conflict, stop; it
+  consumes the new slot and cannot be reframed as E1 evidence.
+- If the sole corrected run fails, stop with implementation attempt 1 failed; the three-attempt
+  limit does not authorize another Miri invocation.
 - Do not weaken Miri, mutation, concurrency, ABI or lifecycle gates.
 
 ## Explicit non-goals
@@ -297,3 +401,15 @@ A future owner-approved rescope must preserve raw-pointer provenance with a test
 that recovers the pointer inside `std::thread::scope`, and a join before destruction. It must use
 no `.addr()`, integer cast or `with_exposed_provenance`. This record does not authorize that edit,
 a fresh Miri run or production implementation. Issue 103 remains open and blocks Issue-125 Step 0.
+
+## Owner-rescope decision — 2026-08-23
+
+The owner subsequently gave explicit autonomous authorization to resume. That fresh decision
+supersedes only the terminal record's prospective no-authorization sentence; it does not rewrite
+the terminal facts or counters. This rebrief checkpoint itself may change only this spec and its
+tracked brief. The subsequent qualification checkpoint may change only test code inside
+`crates/miso-engine-capi/src/ffi.rs` as specified above. Only after the intended pre-fix Miri red
+may implementation attempt 1 use the full allowed tracked-path fence.
+
+Issue 125 remains open and Step 1 remains unstarted until Issue-103 F2/F3 has a pushed Sol XHigh
+PASS and green synchronized evidence. No #83 status update is due merely for this rebrief.

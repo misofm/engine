@@ -2,17 +2,29 @@
 
 ## Decision
 
-**TERMINAL PRE-IMPLEMENTATION STOP.** F2/F3 did not start. The old plan's 13-symbol and frozen-
-initial-report assumptions were rebriefed correctly, but the synchronized Miri qualification
-budget was exhausted by two scaffold/preflight failures before any production change.
+**OWNER-RESCOPED / READY — SOL XHIGH PASS.** Fresh explicit owner authorization resumes F2/F3 from
+`main` at `3be899f`. The two historical invalid-evidence Miri invocations and two qualification
+stops remain counted; production and implementation-attempt counters remain unchanged at zero.
+The fresh workflow authorizes exactly one provenance-preserving pre-fix red and, only after that
+intended red, one identical corrected green. It authorizes no other Miri invocation.
 
-The first Miri command selected zero tests before E1 existed. It is recorded as one invalid
-zero-test invocation and consumed no implementation attempt. Add only the exact E1 scaffold first,
-with the production defect intact; use non-Miri `--list` to prove
-`ffi::tests::plan_queries_are_pure_and_concurrent_with_render` exists once. Then run exactly one
-valid pre-fix Miri command with `--exact --nocapture`, require `running 1 test` and the expected
-alias/data-race red, implement F2/F3, and run exactly one identical corrected green. The invalid
-invocation remains counted; no extra valid-workload retry is authorized.
+Issue 103 remains the final Issue-125 Step-0 gate. Step 1 does not begin merely because this brief
+is READY; F2/F3 still requires pushed implementation, Sol XHigh PASS and green synchronized
+evidence.
+
+## Qualification scaffold
+
+Before production edits, add only
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render` inside `ffi.rs`'s test module. Carry
+the original `*mut Plan` in a test-local opaque `SendPlanPtr`; give only that wrapper an audited
+`unsafe impl Send`, do not implement `Copy`, `Clone` or `Sync`, and recover the pointer through a
+method called inside `std::thread::scope`. Keep render on the parent thread, explicitly join the
+query thread inside the scope, and destroy the handles afterward.
+
+No `.addr()`, pointer/integer round-trip, `expose_provenance`, `with_exposed_provenance`,
+`without_provenance` or equivalent reconstruction is permitted. Sol must inspect the test-only
+diff, format/Clippy-compile it, and prove the exact test name appears once before Miri. The current
+whole-Plan/`RefCell` production defect must remain unchanged for the red run.
 
 ## Exact implementation
 
@@ -32,14 +44,28 @@ claim the synchronized report query can never block.
 
 ## Proof
 
-E1 is the 2,000-render concurrent query test plus the corrected preflight sequence, one valid
-pre-fix red and one corrected pinned-Miri green.
+E1 is the 2,000-render concurrent query test plus one fresh pinned-Miri run at 16 iterations that
+must reach the retained production whole-Plan alias/data-race defect, followed by one identical
+corrected green. A wrapper/header/barrier/setup/toolchain failure or unexpected pass consumes the
+fresh pre-fix slot without satisfying E1 and is STOP. A failure of the sole corrected run is also
+STOP; no retry, alternate filter, substitute toolchain or tuning is authorized.
 E2 proves resource queries preserve the last render diagnostic. E3/E4 prove oversized and
 misaligned dangling inputs reject before reads and aligned retries succeed. E5 forbids whole-plan
 references. E6 proves handles are `Send` while Session/Plan are not `Sync`. Execute and revert every
 named red mutation, then run the complete command list in the issue spec.
 
+Cumulative successful counters are: four named Miri invocations total; one historical zero-test
+invocation; one historical unrelated scaffold failure; one valid fresh pre-fix red; one valid
+corrected green; two valid evidence invocations; zero valid-workload retries; one implementation
+attempt started and zero failed. Implementation attempt 1 begins only after the intended red and
+the first production edit. The historical failures remain preimplementation qualification stops,
+not implementation attempts.
+
 ## Fence and stop conditions
+
+This rebrief checkpoint changes exactly the Issue-103 spec and brief. Relative to that checkpoint,
+the qualification scaffold changes only test code inside `crates/miso-engine-capi/src/ffi.rs`.
+Only after the intended red may implementation attempt 1 use the broader fence below.
 
 Edit only the CAPI implementation/header, the bounded resource-lifecycle evidence, Issue-022's
 single decision amendment, and Issue-103 spec/brief. Do not change Cargo, symbols, scripts,
@@ -47,6 +73,8 @@ fixtures, protocol, core, graph or hosts. No benchmark or timing run.
 
 Stop on a pinned-Miri environment failure, lost active-report transition, whole-Plan reference,
 unexplained resource-owner delta, or any cap/alignment check that cannot precede slice creation.
+Also stop if either fresh Miri invocation misses its required outcome. The three-attempt rule does
+not create extra Miri slots or permit stale Miri evidence after an ownership/projection revision.
 Do not weaken a gate or land a partial F2/F3 checkpoint.
 
 ## Terminal verdict
@@ -57,6 +85,5 @@ the intended whole-Plan alias/data-race red. Sol XHigh returned terminal pre-imp
 two named Miri invocations, zero valid red/green evidence, zero retries of a valid workload, and
 zero implementation attempts. Production is unchanged and the flawed scaffold is not retained.
 
-Any future owner-approved rescope must first replace the integer round-trip with a provenance-
-preserving opaque test-only `SendPlanPtr` and must explicitly authorize new Miri evidence. This
-brief authorizes neither.
+The owner subsequently supplied that explicit fresh authorization. The terminal facts and counters
+remain historical evidence; the READY decision and qualification law above govern the new workflow.
