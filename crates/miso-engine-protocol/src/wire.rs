@@ -595,14 +595,17 @@ impl ProtocolCodec {
             FrameHeader::Response(header) => header.tlv_count,
             FrameHeader::Event(header) => header.tlv_count,
         };
-        crate::btlv::validate_message(
-            decoded.payload,
-            tlv_count,
-            0,
-            self.limits,
-            None,
-            |field_id| scratch.push(field_id),
-        )?;
+        let limits = match decoded.header {
+            FrameHeader::Command(header)
+                if header.message_id == MessageId::SessionTransactionApply =>
+            {
+                crate::session_wire::transaction_envelope_limits(self.limits)
+            }
+            _ => self.limits,
+        };
+        crate::btlv::validate_message(decoded.payload, tlv_count, 0, limits, None, |field_id| {
+            scratch.push(field_id)
+        })?;
         Ok(decoded)
     }
 

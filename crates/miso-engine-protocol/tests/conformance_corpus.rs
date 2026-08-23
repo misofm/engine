@@ -46,6 +46,9 @@ fn frozen_deep_transaction_uses_typed_command_dispatch() {
     assert_eq!(transaction.decoder, ConformanceDecoder::Command);
     let mut fields = [0_u16; 1024];
     codec
+        .decode(&transaction.bytes, &mut DecodeScratch::new(&mut fields))
+        .expect("generic decode honors the transaction envelope allowance");
+    codec
         .decode_typed_command(&transaction.bytes, &mut DecodeScratch::new(&mut fields))
         .expect("typed command dispatch honors the transaction envelope allowance");
 }

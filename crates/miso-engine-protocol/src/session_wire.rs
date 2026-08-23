@@ -490,7 +490,9 @@ fn tx_message(
     sink.nested_spec(spec, &mut encode)
 }
 
-const fn transaction_envelope_limits(limits: crate::ProtocolLimits) -> crate::ProtocolLimits {
+pub(crate) const fn transaction_envelope_limits(
+    limits: crate::ProtocolLimits,
+) -> crate::ProtocolLimits {
     crate::ProtocolLimits {
         max_nesting: limits.max_nesting.saturating_add(3),
         ..limits
@@ -1215,7 +1217,8 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         schema::session::edit::OPCODE
     )?)?)
     .ok_or(DecodeError::InvalidTlv)?;
-    let payload = Message::nested(one_spec!(message, schema::session::edit::PAYLOAD)?)?
+    let payload = message
+        .nested_value(one_spec!(message, schema::session::edit::PAYLOAD)?)?
         .schema_spec(schema::session::payload_spec(opcode))?;
     let fields = schema::session::payload_spec(opcode).fields;
     match opcode {
@@ -1229,16 +1232,20 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
             quantum_frames: read_u32_exact(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::SetRenderProfile => Ok(SessionEditV1::SetRenderProfile {
-            render_profile: parse_render_profile(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            render_profile: parse_render_profile(
+                payload.nested_value(one_spec!(payload, fields[0])?)?,
+            )?,
         }),
         crate::SessionEditOpcode::SetOutputProfile => Ok(SessionEditV1::SetOutputProfile {
-            output_profile: parse_output_profile(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            output_profile: parse_output_profile(
+                payload.nested_value(one_spec!(payload, fields[0])?)?,
+            )?,
         }),
         crate::SessionEditOpcode::SetLimits => Ok(SessionEditV1::SetLimits {
-            limits: parse_limits(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            limits: parse_limits(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEditV1::UpsertSource {
-            source: parse_source(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveSource => Ok(SessionEditV1::RemoveSource {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1251,14 +1258,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetSourceContent => Ok(SessionEditV1::SetSourceContent {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
-            content: parse_content(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            content: parse_content(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetSourceMapping => Ok(SessionEditV1::SetSourceMapping {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
-            mapping: parse_mapping(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            mapping: parse_mapping(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::UpsertTrack => Ok(SessionEditV1::UpsertTrack {
-            track: parse_track(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            track: parse_track(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveTrack => Ok(SessionEditV1::RemoveTrack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1273,14 +1280,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetTrackBuiltins => Ok(SessionEditV1::SetTrackBuiltins {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            builtins: parse_builtins(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            builtins: parse_builtins(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetTrackRack => Ok(SessionEditV1::SetTrackRack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
-            rack: parse_rack_message(Message::nested(one_spec!(payload, fields[2])?)?)?,
+            rack: parse_rack_message(payload.nested_value(one_spec!(payload, fields[2])?)?)?,
         }),
         crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEditV1::PutTrackEffect {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1288,7 +1295,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
                 payload, fields[1]
             )?)?)?,
             final_position: read_u32_exact(one_spec!(payload, fields[2])?)?,
-            effect: parse_effect(Message::nested(one_spec!(payload, fields[3])?)?)?,
+            effect: parse_effect(payload.nested_value(one_spec!(payload, fields[3])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveTrackEffect => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
@@ -1313,7 +1320,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
                 track_id,
                 rack_name,
                 effect_id,
-                identity: parse_identity(Message::nested(one_spec!(payload, fields[3])?)?)?,
+                identity: parse_identity(payload.nested_value(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::SetEffectQuality => {
@@ -1349,7 +1356,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
                 track_id,
                 rack_name,
                 effect_id,
-                sidechain: parse_sidechain(Message::nested(one_spec!(payload, fields[3])?)?)?,
+                sidechain: parse_sidechain(payload.nested_value(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::UpsertEffectParam => {
@@ -1358,7 +1365,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
                 track_id,
                 rack_name,
                 effect_id,
-                param: parse_param(Message::nested(one_spec!(payload, fields[3])?)?)?,
+                param: parse_param(payload.nested_value(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEditV1::RemoveEffectParam {
@@ -1374,44 +1381,48 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }),
         crate::SessionEditOpcode::SetTrackFader => Ok(SessionEditV1::SetTrackFader {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            fader: parse_fader(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetTrackMatrixOrPan => Ok(SessionEditV1::SetTrackMatrixOrPan {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            matrix_or_pan: parse_matrix_or_pan(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            matrix_or_pan: parse_matrix_or_pan(
+                payload.nested_value(one_spec!(payload, fields[1])?)?,
+            )?,
         }),
         crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEditV1::UpsertSubmix {
-            submix: parse_submix(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            submix: parse_submix(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveSubmix => Ok(SessionEditV1::RemoveSubmix {
             submix_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::UpsertOutput => Ok(SessionEditV1::UpsertOutput {
-            output: parse_output(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            output: parse_output(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveOutput => Ok(SessionEditV1::RemoveOutput {
             output_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::UpsertRoute => Ok(SessionEditV1::UpsertRoute {
-            route: parse_route(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            route: parse_route(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveRoute => Ok(SessionEditV1::RemoveRoute {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::SetRouteSource => Ok(SessionEditV1::SetRouteSource {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
-            source: parse_route_source(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            source: parse_route_source(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetRouteDestination => Ok(SessionEditV1::SetRouteDestination {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
-            destination: parse_route_destination(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            destination: parse_route_destination(
+                payload.nested_value(one_spec!(payload, fields[1])?)?,
+            )?,
         }),
         crate::SessionEditOpcode::SetRouteChannelMatrix => {
             Ok(SessionEditV1::SetRouteChannelMatrix {
                 route_id: stable_id(one_spec!(payload, fields[0])?)?,
-                channel_matrix: parse_channel_matrix(Message::nested(one_spec!(
-                    payload, fields[1]
-                )?)?)?,
+                channel_matrix: parse_channel_matrix(
+                    payload.nested_value(one_spec!(payload, fields[1])?)?,
+                )?,
             })
         }
         crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEditV1::SetRouteGainDb {
@@ -1419,20 +1430,20 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
             gain_db: read_f32_exact(one_spec!(payload, fields[1])?)?,
         }),
         crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEditV1::UpsertAutomation {
-            automation: parse_automation(Message::nested(one_spec!(payload, fields[0])?)?)?,
+            automation: parse_automation(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveAutomation => Ok(SessionEditV1::RemoveAutomation {
             automation_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::SetAutomationTarget => Ok(SessionEditV1::SetAutomationTarget {
             automation_id: stable_id(one_spec!(payload, fields[0])?)?,
-            target: parse_automation_target(Message::nested(one_spec!(payload, fields[1])?)?)?,
+            target: parse_automation_target(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetAutomationSegments => {
             Ok(SessionEditV1::SetAutomationSegments {
                 automation_id: stable_id(one_spec!(payload, fields[0])?)?,
                 segments: values_spec!(payload, fields[1])?
-                    .map(|value| parse_automation_segment(Message::nested(value)?))
+                    .map(|value| parse_automation_segment(payload.nested_value(value)?))
                     .collect::<Result<Vec<_>, _>>()?,
             })
         }
@@ -1505,10 +1516,9 @@ fn parse_mapping(message: Message<'_>) -> Result<SourceMapping, DecodeError> {
     let message = message.schema_spec(&schema::session::mapping::SPEC)?;
     Ok(SourceMapping {
         channel_count: read_u8_exact(one_spec!(message, schema::session::mapping::CHANNEL_COUNT)?)?,
-        region: parse_region(Message::nested(one_spec!(
-            message,
-            schema::session::mapping::REGION
-        )?)?)?,
+        region: parse_region(
+            message.nested_value(one_spec!(message, schema::session::mapping::REGION)?)?,
+        )?,
     })
 }
 
@@ -1520,28 +1530,24 @@ fn parse_source(message: Message<'_>) -> Result<Source, DecodeError> {
             message,
             schema::session::source::SAMPLE_RATE_HZ
         )?)?,
-        content: parse_content(Message::nested(one_spec!(
-            message,
-            schema::session::source::CONTENT
-        )?)?)?,
-        mapping: parse_mapping(Message::nested(one_spec!(
-            message,
-            schema::session::source::MAPPING
-        )?)?)?,
+        content: parse_content(
+            message.nested_value(one_spec!(message, schema::session::source::CONTENT)?)?,
+        )?,
+        mapping: parse_mapping(
+            message.nested_value(one_spec!(message, schema::session::source::MAPPING)?)?,
+        )?,
     })
 }
 
 fn parse_builtins(message: Message<'_>) -> Result<DualMonoBuiltins, DecodeError> {
     let message = message.schema_spec(&schema::session::builtins::SPEC)?;
     Ok(DualMonoBuiltins {
-        left: parse_channel_builtins(Message::nested(one_spec!(
-            message,
-            schema::session::builtins::LEFT
-        )?)?)?,
-        right: parse_channel_builtins(Message::nested(one_spec!(
-            message,
-            schema::session::builtins::RIGHT
-        )?)?)?,
+        left: parse_channel_builtins(
+            message.nested_value(one_spec!(message, schema::session::builtins::LEFT)?)?,
+        )?,
+        right: parse_channel_builtins(
+            message.nested_value(one_spec!(message, schema::session::builtins::RIGHT)?)?,
+        )?,
     })
 }
 fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, DecodeError> {
@@ -1578,37 +1584,31 @@ fn parse_track(message: Message<'_>) -> Result<miso_engine_session::Track, Decod
             message,
             schema::session::track::RIGHT_SOURCE_CHANNEL
         )?)?,
-        builtins: parse_builtins(Message::nested(one_spec!(
-            message,
-            schema::session::track::BUILTINS
-        )?)?)?,
-        simd1: parse_rack_message(Message::nested(one_spec!(
-            message,
-            schema::session::track::SIMD1
-        )?)?)?,
-        dynamic: parse_rack_message(Message::nested(one_spec!(
-            message,
-            schema::session::track::DYNAMIC
-        )?)?)?,
-        simd2: parse_rack_message(Message::nested(one_spec!(
-            message,
-            schema::session::track::SIMD2
-        )?)?)?,
-        fader: parse_fader(Message::nested(one_spec!(
-            message,
-            schema::session::track::FADER
-        )?)?)?,
-        matrix_or_pan: parse_matrix_or_pan(Message::nested(one_spec!(
-            message,
-            schema::session::track::MATRIX_OR_PAN
-        )?)?)?,
+        builtins: parse_builtins(
+            message.nested_value(one_spec!(message, schema::session::track::BUILTINS)?)?,
+        )?,
+        simd1: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::track::SIMD1)?)?,
+        )?,
+        dynamic: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::track::DYNAMIC)?)?,
+        )?,
+        simd2: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::track::SIMD2)?)?,
+        )?,
+        fader: parse_fader(
+            message.nested_value(one_spec!(message, schema::session::track::FADER)?)?,
+        )?,
+        matrix_or_pan: parse_matrix_or_pan(
+            message.nested_value(one_spec!(message, schema::session::track::MATRIX_OR_PAN)?)?,
+        )?,
     })
 }
 fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
     let message = message.schema_spec(&schema::session::rack::SPEC)?;
     Ok(Rack {
         effects: values_spec!(message, schema::session::rack::EFFECT)?
-            .map(|value| parse_effect(Message::nested(value)?))
+            .map(|value| parse_effect(message.nested_value(value)?))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -1672,10 +1672,10 @@ fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeE
         1 => Ok(SidechainDeclaration::None),
         2 => Ok(SidechainDeclaration::Routed(
             miso_engine_session::Sidechain {
-                source: parse_route_source(Message::nested(one_spec!(
-                    message,
-                    schema::session::sidechain::SOURCE
-                )?)?)?,
+                source: parse_route_source(
+                    message
+                        .nested_value(one_spec!(message, schema::session::sidechain::SOURCE)?)?,
+                )?,
                 port_id: stable_id(one_spec!(message, schema::session::sidechain::PORT_ID)?)?,
             },
         )),
@@ -1701,10 +1701,9 @@ fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
     let message = message.schema_spec(&schema::session::effect::SPEC)?;
     Ok(Effect {
         id: stable_id(one_spec!(message, schema::session::effect::ID)?)?,
-        identity: parse_identity(Message::nested(one_spec!(
-            message,
-            schema::session::effect::IDENTITY
-        )?)?)?,
+        identity: parse_identity(
+            message.nested_value(one_spec!(message, schema::session::effect::IDENTITY)?)?,
+        )?,
         quality: parse_quality(read_u8_exact(one_spec!(
             message,
             schema::session::effect::QUALITY
@@ -1715,12 +1714,11 @@ fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
             schema::session::effect::LINK_MODE
         )?)?)?,
         params: values_spec!(message, schema::session::effect::PARAM)?
-            .map(|value| parse_param(Message::nested(value)?))
+            .map(|value| parse_param(message.nested_value(value)?))
             .collect::<Result<Vec<_>, _>>()?,
-        sidechain: parse_sidechain(Message::nested(one_spec!(
-            message,
-            schema::session::effect::SIDECHAIN
-        )?)?)?,
+        sidechain: parse_sidechain(
+            message.nested_value(one_spec!(message, schema::session::effect::SIDECHAIN)?)?,
+        )?,
     })
 }
 fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {
@@ -1791,18 +1789,15 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
     let message = message.schema_spec(&schema::session::route::SPEC)?;
     Ok(Route {
         id: stable_id(one_spec!(message, schema::session::route::ID)?)?,
-        source: parse_route_source(Message::nested(one_spec!(
-            message,
-            schema::session::route::SOURCE
-        )?)?)?,
-        destination: parse_route_destination(Message::nested(one_spec!(
-            message,
-            schema::session::route::DESTINATION
-        )?)?)?,
-        channel_matrix: parse_channel_matrix(Message::nested(one_spec!(
-            message,
-            schema::session::route::CHANNEL_MATRIX
-        )?)?)?,
+        source: parse_route_source(
+            message.nested_value(one_spec!(message, schema::session::route::SOURCE)?)?,
+        )?,
+        destination: parse_route_destination(
+            message.nested_value(one_spec!(message, schema::session::route::DESTINATION)?)?,
+        )?,
+        channel_matrix: parse_channel_matrix(
+            message.nested_value(one_spec!(message, schema::session::route::CHANNEL_MATRIX)?)?,
+        )?,
         gain_db: read_f32_exact(one_spec!(message, schema::session::route::GAIN_DB)?)?,
     })
 }
@@ -1864,12 +1859,11 @@ fn parse_automation(message: Message<'_>) -> Result<Automation, DecodeError> {
     let message = message.schema_spec(&schema::session::automation::SPEC)?;
     Ok(Automation {
         id: stable_id(one_spec!(message, schema::session::automation::ID)?)?,
-        target: parse_automation_target(Message::nested(one_spec!(
-            message,
-            schema::session::automation::TARGET
-        )?)?)?,
+        target: parse_automation_target(
+            message.nested_value(one_spec!(message, schema::session::automation::TARGET)?)?,
+        )?,
         segments: values_spec!(message, schema::session::automation::SEGMENT)?
-            .map(|value| parse_automation_segment(Message::nested(value)?))
+            .map(|value| parse_automation_segment(message.nested_value(value)?))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -2467,6 +2461,12 @@ mod tests {
         zero_logical_depth
             .encode_session_transaction(&flat, &mut flat_bytes)
             .expect("flat transaction encodes at zero logical depth");
+        zero_logical_depth
+            .decode(&flat_bytes, &mut DecodeScratch::new(&mut [0_u16; 8]))
+            .expect("generic decode reserves exactly the fixed envelopes");
+        zero_logical_depth
+            .decode_session_transaction(&flat_bytes, &mut DecodeScratch::new(&mut [0_u16; 8]))
+            .expect("typed decode reserves exactly the fixed envelopes");
 
         let deep_edits = complete_all_opcode_fixture();
         let deep = SessionTransactionFrame {
@@ -2474,15 +2474,65 @@ mod tests {
             expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
             edits: &deep_edits,
         };
-        assert!(
-            ProtocolCodec::default()
-                .encoded_session_transaction_len(&deep)
-                .is_ok(),
-            "canonical deep transaction remains encodable"
-        );
+        let codec = ProtocolCodec::default();
+        let deep_len = codec
+            .encoded_session_transaction_len(&deep)
+            .expect("canonical deep transaction remains encodable");
+        let mut deep_bytes = vec![0; deep_len];
+        codec
+            .encode_session_transaction(&deep, &mut deep_bytes)
+            .expect("encode canonical deep transaction");
         assert_eq!(
             zero_logical_depth.encoded_session_transaction_len(&deep),
             Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(
+            zero_logical_depth.decode(&deep_bytes, &mut DecodeScratch::new(&mut [0_u16; 128]),),
+            Err(DecodeError::LimitExceeded)
+        );
+        assert_eq!(
+            zero_logical_depth
+                .decode_session_transaction(
+                    &deep_bytes,
+                    &mut DecodeScratch::new(&mut [0_u16; 128]),
+                )
+                .map(|_| ()),
+            Err(DecodeError::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn transaction_descendants_retain_string_limits() {
+        let edits = [SessionEditV1::SetRenderProfile {
+            render_profile: RenderProfile {
+                id: id("long-render-profile"),
+                mode: RenderMode::SingleThread,
+            },
+        }];
+        let frame = SessionTransactionFrame {
+            request_id: RequestId::new(37).expect("request"),
+            expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+            edits: &edits,
+        };
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_session_transaction_len(&frame)
+                .expect("length")
+        ];
+        codec
+            .encode_session_transaction(&frame, &mut bytes)
+            .expect("encode");
+        let string_limited = ProtocolCodec::new(crate::ProtocolLimits {
+            max_string_bytes: 4,
+            ..crate::ProtocolLimits::default()
+        });
+        assert_eq!(
+            string_limited
+                .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 8]),)
+                .map(|_| ()),
+            Err(DecodeError::LimitExceeded)
         );
     }
 

@@ -130,6 +130,7 @@ pub(crate) struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
+    #[cfg(test)]
     pub(crate) fn nested(bytes: &'a [u8]) -> Result<Self, DecodeError> {
         let header = bytes.get(..8).ok_or(DecodeError::Truncated)?;
         let count = read_u32_at(header, 0)?;

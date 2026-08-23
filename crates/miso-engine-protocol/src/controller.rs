@@ -3756,6 +3756,21 @@ mod tests {
         )
     }
 
+    #[test]
+    fn frozen_deep_transaction_reaches_public_b1b_process_path() {
+        let corpus = crate::complete_schema_corpus();
+        let transaction = corpus
+            .iter()
+            .find(|frame| frame.name == "command.session_transaction_apply")
+            .expect("frozen transaction frame");
+        controller(8, 1)
+            .process_b1b_btlv(
+                &transaction.bytes,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            )
+            .expect("public B1b process path accepts the frozen deep transaction");
+    }
+
     fn egress_controller(
         reliable_event_slots: usize,
         telemetry_slots: usize,
