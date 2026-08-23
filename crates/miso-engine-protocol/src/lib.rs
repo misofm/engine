@@ -75,5 +75,5 @@ pub use controller::{
     ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
     PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
     ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
-    ReplayCacheResourceReport, ReplayDecision,
+    ReplayCacheResourceReport, ReplayDecision, RetainedDiagnosticSlot,
 };

@@ -698,8 +698,10 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         // SAFETY: Scalar validation proved the exact contiguous region required by two planes is
         // within caller capacity and Rust's maximum slice extent. The caller promises this many
         // writable aligned `f32` elements exclusively for the duration of the call.
-        let samples = unsafe { core::slice::from_raw_parts_mut(output.samples, required_samples) };
-        let output = match miso_engine_core::realtime::PlanarBufferMut::try_new(
+        let samples_pointer = output.samples;
+        // SAFETY: The preceding validation proves the pointer is writable for this exact extent.
+        let samples = unsafe { core::slice::from_raw_parts_mut(samples_pointer, required_samples) };
+        let render_output = match miso_engine_core::realtime::PlanarBufferMut::try_new(
             samples,
             2,
             frames as usize,
@@ -711,8 +713,19 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
                 return RESULT_RENDER_REJECTED;
             }
         };
-        match plan.state.render(absolute_sample, output) {
+        match plan.state.render(absolute_sample, render_output) {
             Ok(()) => {
+                let mut peak = 0.0_f32;
+                for channel in 0..2_usize {
+                    let plane = channel * output.plane_stride_samples as usize;
+                    for frame in 0..frames as usize {
+                        // SAFETY: The validated two-plane layout proves this exact sample index is
+                        // initialized and readable after the exclusive render borrow ended.
+                        let sample = unsafe { *samples_pointer.add(plane + frame) };
+                        peak = peak.max(sample.abs());
+                    }
+                }
+                plan.state.publish_render_observation(peak);
                 plan.last_error.borrow_mut().clear();
                 RESULT_OK
             }
@@ -896,22 +909,18 @@ pub(crate) fn test_session_state_summary(session: *mut Session) -> (u64, usize, 
 }
 
 #[cfg(test)]
-pub(crate) fn test_enqueue_reliable(
+pub(crate) fn test_transaction_snapshot(
     session: *mut Session,
-    event: miso_engine_protocol::ReliableSlot,
-) -> Result<(), ()> {
-    // SAFETY: Test callers retain the exclusively owned live session for this injection.
-    unsafe { &mut (*session).state }.test_enqueue_reliable(event)
+) -> crate::runtime::TestTransactionSnapshot {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).state }.test_transaction_snapshot()
 }
 
 #[cfg(test)]
-pub(crate) fn test_install_parameter(
-    session: *mut Session,
-    descriptor: miso_engine_protocol::ParameterDescriptor,
-    state: miso_engine_protocol::ParameterStateRecord,
-) {
-    // SAFETY: Test callers retain the exclusively owned live session for typed provider setup.
-    unsafe { &mut (*session).state }.test_install_parameter(descriptor, state);
+pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
+    // SAFETY: Test callers retain the exclusively owned live plan for this inspection.
+    let plan = unsafe { &(*plan).state };
+    (plan.next_absolute_sample(), plan.resources())
 }
 
 #[cfg(test)]
@@ -923,18 +932,17 @@ pub(crate) fn test_telemetry_counters(
 }
 
 #[cfg(test)]
-pub(crate) fn test_set_capi_retained_limit(session: *mut Session, bytes: u64) {
-    // SAFETY: Test callers retain the exclusively owned live session for this fault injection.
-    unsafe { &mut (*session).state }.test_set_capi_retained_limit(bytes);
-}
-
-#[cfg(test)]
 pub(crate) fn test_set_structural_faults(
     session: *mut Session,
     faults: [Option<crate::runtime::TestStructuralFaultPhase>; 2],
 ) {
     // SAFETY: Test callers retain the exclusively owned live session for deterministic faults.
     unsafe { &mut (*session).state }.test_set_structural_faults(faults);
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_lifecycle_observer() {
+    crate::runtime::test_reset_lifecycle_observer();
 }
 
 #[cfg(test)]
@@ -984,6 +992,11 @@ pub(crate) fn test_session_destroy(session: *mut Session) {
 pub(crate) fn test_plan_destroy(plan: *mut Plan) {
     // SAFETY: Test callers transfer one unique quiescent live plan exactly once.
     unsafe { miso_engine_v2_plan_destroy(plan) }
+}
+
+#[cfg(test)]
+pub(crate) fn test_lifecycle_counters() -> crate::runtime::TestOwnerCounters {
+    crate::runtime::test_lifecycle_counters()
 }
 
 #[cfg(test)]

@@ -520,6 +520,9 @@ pub struct MockProvider {
     current_sample: SampleTime,
     /// Bounded typed metadata fixture catalog.
     parameter_metadata: Vec<crate::ParameterDescriptor>,
+    /// Eager endpoint-owned descriptor used for accepted automation without changing the
+    /// enumerable metadata catalog.
+    automation_parameter: Option<crate::ParameterDescriptor>,
     /// Bounded typed state fixture records.
     parameter_state: ParameterStatePage,
     /// Typed nondestructive registered counter values.
@@ -539,6 +542,7 @@ impl Default for MockProvider {
         Self {
             current_sample: SampleTime(0),
             parameter_metadata: Vec::new(),
+            automation_parameter: None,
             parameter_state: ParameterStatePage {
                 observed_sample: 0,
                 records: Vec::new(),
@@ -591,16 +595,22 @@ impl MockProvider {
         )
     }
 
-    /// Install one bounded typed automation parameter for cross-transport conformance fixtures.
-    fn install_conformance_parameter(
-        &mut self,
+    /// Construct an empty enumerable provider with one eager automation-only descriptor.
+    pub fn try_with_retained_capacity_and_automation(
+        capacity: ControllerRetainedCapacity,
         descriptor: crate::ParameterDescriptor,
-        state: crate::ParameterStateRecord,
-    ) {
-        self.parameter_metadata.clear();
-        self.parameter_metadata.push(descriptor);
-        self.parameter_state.records.clear();
-        self.parameter_state.records.push(state);
+    ) -> Result<Self, ControllerResourceAllocationError> {
+        let codec = ProtocolCodec::default();
+        codec
+            .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
+                last_handle: descriptor.handle,
+                eof: true,
+                descriptors: vec![descriptor.clone()],
+            })
+            .map_err(|_| ControllerResourceAllocationError)?;
+        let mut provider = Self::try_with_retained_capacity(capacity)?;
+        provider.automation_parameter = Some(descriptor);
+        Ok(provider)
     }
 
     /// Construct deterministic typed fixtures only after every configured collection is bounded.
@@ -658,6 +668,7 @@ impl MockProvider {
         Ok(Self {
             current_sample: config.current_sample,
             parameter_metadata: config.parameter_metadata,
+            automation_parameter: None,
             parameter_state: config.parameter_state,
             counter_snapshot: config.counter_snapshot,
             diagnostics: config.diagnostics,
@@ -738,6 +749,11 @@ impl ControlProvider for MockProvider {
         self.parameter_metadata
             .iter()
             .find(|descriptor| descriptor.handle == handle.0)
+            .or_else(|| {
+                self.automation_parameter
+                    .as_ref()
+                    .filter(|descriptor| descriptor.handle == handle.0)
+            })
             .ok_or(ParameterProviderError::NotFound)
     }
     fn counters(
@@ -1167,6 +1183,31 @@ enum PendingTelemetryEvent {
     },
 }
 
+/// One eagerly allocated reliable-diagnostic storage cell.
+///
+/// The render-observation form retains only fixed fields; its diagnostic text is materialized
+/// transiently on the control thread during encoding.
+#[doc(hidden)]
+pub enum RetainedDiagnosticSlot {
+    /// The cell is available.
+    Empty,
+    /// An ordinary provider-owned diagnostic retained until successful egress.
+    Owned(Diagnostic),
+    /// A fixed CAPI render observation retained without heap growth.
+    RenderObservation {
+        /// Endpoint sample observed at the render boundary.
+        observed_sample: SampleTime,
+        /// Monotonic render observation sequence.
+        render_sequence: u64,
+    },
+}
+
+impl RetainedDiagnosticSlot {
+    const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+}
+
 impl fmt::Display for CommandFrameProcessError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{self:?}")
@@ -1185,7 +1226,7 @@ pub struct ProtocolController<P: ControlProvider> {
     config: ProtocolControllerConfig,
     next_reliable_event_sequence: u64,
     telemetry_configuration: TelemetryConfiguration,
-    diagnostic_event_slots: Box<[Option<Diagnostic>]>,
+    diagnostic_event_slots: Box<[RetainedDiagnosticSlot]>,
     pending_reliable_event: Option<ReliableSlot>,
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
@@ -1209,7 +1250,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         diagnostics
             .try_reserve_exact(diagnostic_slots)
             .map_err(|_| ControllerResourceAllocationError)?;
-        diagnostics.resize_with(diagnostic_slots, || None);
+        diagnostics.resize_with(diagnostic_slots, || RetainedDiagnosticSlot::Empty);
         Ok(Self {
             session,
             queues,
@@ -2052,6 +2093,12 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.config.provider_features = features;
     }
 
+    /// Borrow the accepted endpoint telemetry configuration without permitting mutation.
+    #[must_use]
+    pub const fn telemetry_configuration(&self) -> &TelemetryConfiguration {
+        &self.telemetry_configuration
+    }
+
     /// Stage one mock/control-only meter batch for explicitly configured lossy event egress.
     /// This does not create production meters or touch a render plan.
     pub fn stage_meter_batch_event(
@@ -2166,11 +2213,15 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.codec
             .encoded_diagnostic_event_len(&event)
             .map_err(EventEgressError::Encode)?;
-        let Some(index) = self.diagnostic_event_slots.iter().position(Option::is_none) else {
+        let Some(index) = self
+            .diagnostic_event_slots
+            .iter()
+            .position(RetainedDiagnosticSlot::is_empty)
+        else {
             return Err(EventEgressError::DiagnosticStorageFull);
         };
         let slot = u32::try_from(index).map_err(|_| EventEgressError::DiagnosticStorageFull)?;
-        self.diagnostic_event_slots[index] = Some(event.diagnostic);
+        self.diagnostic_event_slots[index] = RetainedDiagnosticSlot::Owned(event.diagnostic);
         let queued = ReliableSlot {
             header: crate::ReliableHeader::Event,
             revision,
@@ -2180,7 +2231,55 @@ impl<P: ControlProvider> ProtocolController<P> {
             },
         };
         if let Err(error) = self.queues.try_enqueue_event(queued) {
-            self.diagnostic_event_slots[index] = None;
+            self.diagnostic_event_slots[index] = RetainedDiagnosticSlot::Empty;
+            return Err(EventEgressError::ReliableQueueFull(error.report));
+        }
+        Ok(())
+    }
+
+    /// Queue one already-constructed fixed retained diagnostic cell.
+    ///
+    /// This is a storage seam: event meaning and production trigger ownership remain with the
+    /// caller, while the controller preserves reliable queue and retry semantics.
+    pub fn enqueue_retained_diagnostic_event(
+        &mut self,
+        revision: SessionRevision,
+        retained: RetainedDiagnosticSlot,
+    ) -> Result<(), EventEgressError> {
+        if !matches!(&retained, RetainedDiagnosticSlot::RenderObservation { .. }) {
+            return Err(EventEgressError::Encode(EncodeError::LimitExceeded));
+        }
+        if self.structural_outstanding() {
+            return Err(EventEgressError::ReliableQueueFull(
+                self.queues.report(crate::QueueKind::ReliableEvent),
+            ));
+        }
+        if !self.config.provider_features.diagnostics
+            || !self.telemetry_configuration.diagnostics_enabled
+            || (crate::DiagnosticSeverity::Info as u8)
+                < (self.telemetry_configuration.minimum_diagnostic_severity as u8)
+        {
+            return Err(EventEgressError::Disabled);
+        }
+        let Some(index) = self
+            .diagnostic_event_slots
+            .iter()
+            .position(RetainedDiagnosticSlot::is_empty)
+        else {
+            return Err(EventEgressError::DiagnosticStorageFull);
+        };
+        let slot = u32::try_from(index).map_err(|_| EventEgressError::DiagnosticStorageFull)?;
+        self.diagnostic_event_slots[index] = retained;
+        let queued = ReliableSlot {
+            header: crate::ReliableHeader::Event,
+            revision,
+            message_id: MessageId::Diagnostic,
+            payload: ReliablePayload::Diagnostic {
+                diagnostic_slot: slot,
+            },
+        };
+        if let Err(error) = self.queues.try_enqueue_event(queued) {
+            self.diagnostic_event_slots[index] = RetainedDiagnosticSlot::Empty;
             return Err(EventEgressError::ReliableQueueFull(error.report));
         }
         Ok(())
@@ -2205,7 +2304,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 && let Ok(index) = usize::try_from(diagnostic_slot)
                 && let Some(storage) = self.diagnostic_event_slots.get_mut(index)
             {
-                *storage = None;
+                *storage = RetainedDiagnosticSlot::Empty;
             }
             self.pending_reliable_event = None;
         }
@@ -2326,15 +2425,28 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReliablePayload::Diagnostic { diagnostic_slot } => {
                 let index = usize::try_from(diagnostic_slot)
                     .map_err(|_| EventEgressError::DiagnosticStorageFull)?;
-                let diagnostic = self
-                    .diagnostic_event_slots
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .ok_or(EventEgressError::DiagnosticStorageFull)?;
+                let diagnostic = match self.diagnostic_event_slots.get(index) {
+                    Some(RetainedDiagnosticSlot::Owned(diagnostic)) => diagnostic.clone(),
+                    Some(RetainedDiagnosticSlot::RenderObservation {
+                        observed_sample,
+                        render_sequence,
+                    }) => Diagnostic {
+                        code: "capi.render.activity".to_owned(),
+                        severity: crate::DiagnosticSeverity::Info,
+                        path: Vec::new(),
+                        detail: None,
+                        operation_index: None,
+                        sample_time: Some(observed_sample.0),
+                        provider_sequence: Some(*render_sequence),
+                    },
+                    Some(RetainedDiagnosticSlot::Empty) | None => {
+                        return Err(EventEgressError::DiagnosticStorageFull);
+                    }
+                };
                 self.codec.encode_event_frame_into(
                     &TypedEventFrame {
                         revision: slot.revision,
-                        payload: EventPayload::Diagnostic(diagnostic),
+                        payload: EventPayload::Diagnostic(&diagnostic),
                     },
                     output,
                 )
@@ -3408,19 +3520,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             self.provider.record_canceled_automation(canceled);
         }
         Ok(canceled)
-    }
-}
-
-impl ProtocolController<MockProvider> {
-    /// Install one bounded typed parameter for external transport conformance evidence.
-    #[doc(hidden)]
-    pub fn install_conformance_parameter(
-        &mut self,
-        descriptor: crate::ParameterDescriptor,
-        state: crate::ParameterStateRecord,
-    ) {
-        self.provider
-            .install_conformance_parameter(descriptor, state);
     }
 }
 

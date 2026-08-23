@@ -3,14 +3,15 @@
 use core::{alloc::Layout, mem::size_of, num::NonZeroUsize};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_core::{
     SampleRateHz,
     realtime::{
-        PlanExchangeConfig, PlanPublisher, PlanRetirer, PlanarBufferMut, PreparedRenderPlan,
+        PlanExchangeConfig, PlanPublisher, PlanReplacementReservation,
+        PlanReplacementReservationError, PlanRetirer, PlanarBufferMut, PreparedRenderPlan,
         RealtimePlanOwner, RenderIo, RenderTime, plan_exchange, plan_exchange_resource_report,
     },
 };
@@ -94,6 +95,43 @@ struct ProviderEpoch {
     sources: Box<[ControlSource]>,
 }
 
+impl ProviderEpoch {
+    fn current(source_ids: Box<[u8]>, sources: Box<[ControlSource]>) -> Self {
+        let owner = Self {
+            epoch: 0,
+            source_ids,
+            sources,
+        };
+        #[cfg(test)]
+        update_test_owners(|owners| owners.current_provider_constructed += 1);
+        owner
+    }
+
+    fn candidate(source_ids: Box<[u8]>, sources: Box<[ControlSource]>) -> Self {
+        let owner = Self {
+            epoch: u64::MAX,
+            source_ids,
+            sources,
+        };
+        #[cfg(test)]
+        update_test_owners(|owners| owners.candidate_provider_constructed += 1);
+        owner
+    }
+}
+
+impl Drop for ProviderEpoch {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        update_test_owners(|owners| {
+            if self.epoch == 0 {
+                owners.current_provider_disposed += 1;
+            } else {
+                owners.candidate_provider_disposed += 1;
+            }
+        });
+    }
+}
+
 /// Structural plans own independent source rings; buffered host state never crosses an epoch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StructuralSourceStatePolicy {
@@ -139,18 +177,98 @@ pub(crate) struct TestOwnerCounters {
     pub(crate) reservation_committed: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TestTransactionSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) canonical: Vec<u8>,
+    pub(crate) model: miso_engine_session::ResourceEstimate,
+    pub(crate) replay_entries: usize,
+    pub(crate) provider_epoch: u64,
+    pub(crate) pending_provider_epochs: Vec<u64>,
+    pub(crate) retired_provider_epochs: Vec<u64>,
+    pub(crate) active_plan_epoch: u64,
+    pub(crate) resource_rows: Vec<(u64, PlanResourceReport)>,
+    pub(crate) reliable_event: miso_engine_protocol::QueueReport,
+    pub(crate) reliable_response: miso_engine_protocol::QueueReport,
+    pub(crate) automation: miso_engine_protocol::QueueReport,
+    pub(crate) telemetry: miso_engine_protocol::QueueReport,
+    pub(crate) telemetry_counters: miso_engine_protocol::TelemetryCounters,
+    pub(crate) retained_capacities: [usize; 7],
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAULT_STATE: core::cell::Cell<([Option<TestStructuralFaultPhase>; 2], usize)> =
+        const { core::cell::Cell::new(([None; 2], 0)) };
+    static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
+        const { core::cell::Cell::new(TestOwnerCounters {
+            current_provider_constructed: 0,
+            current_provider_disposed: 0,
+            candidate_provider_constructed: 0,
+            candidate_provider_disposed: 0,
+            candidate_provider_published: 0,
+            current_plan_constructed: 0,
+            current_plan_disposed: 0,
+            candidate_plan_constructed: 0,
+            candidate_plan_disposed: 0,
+            candidate_plan_published: 0,
+            token_constructed: 0,
+            token_disposed: 0,
+            replay_current_constructed: 0,
+            replay_current_disposed: 0,
+            replay_candidate_constructed: 0,
+            replay_candidate_disposed: 0,
+            replay_candidate_published: 0,
+            reservation_constructed: 0,
+            reservation_canceled: 0,
+            reservation_committed: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn update_test_owners(update: impl FnOnce(&mut TestOwnerCounters)) {
+    TEST_OWNER_STATE.with(|state| {
+        let mut value = state.get();
+        update(&mut value);
+        state.set(value);
+    });
+}
+
+#[cfg(test)]
+fn take_test_fault_state(phase: TestStructuralFaultPhase) -> bool {
+    TEST_FAULT_STATE.with(|state| {
+        let (faults, index) = state.get();
+        let matched = faults.get(index).copied().flatten() == Some(phase);
+        if matched {
+            state.set((faults, index + 1));
+        }
+        matched
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_lifecycle_observer() {
+    TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
+    TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn test_lifecycle_counters() -> TestOwnerCounters {
+    TEST_OWNER_STATE.with(core::cell::Cell::get)
+}
+
 struct SharedPlanState {
     plan_alive: AtomicBool,
     active_epoch: AtomicU64,
     reports: Mutex<Vec<(u64, PlanResourceReport)>>,
-    #[cfg(test)]
     render_sequence: AtomicU64,
-    #[cfg(test)]
     render_sample: AtomicU64,
+    render_peak_bits: AtomicU32,
 }
 
 pub(crate) struct SessionState {
-    controller: ProtocolController<MockProvider>,
+    controller: ObservedController,
     providers: ProviderEpoch,
     pending_providers: Vec<ProviderEpoch>,
     retired_providers: Vec<ProviderEpoch>,
@@ -161,14 +279,7 @@ pub(crate) struct SessionState {
     _decode_tail: Option<Box<[u8]>>,
     response_scratch: Box<[u8]>,
     shared: Arc<SharedPlanState>,
-    #[cfg(test)]
     observed_render_sequence: u64,
-    #[cfg(test)]
-    test_faults: [Option<TestStructuralFaultPhase>; 2],
-    #[cfg(test)]
-    test_fault_index: usize,
-    #[cfg(test)]
-    test_owner_counters: TestOwnerCounters,
 }
 
 pub(crate) struct PlanState {
@@ -176,6 +287,52 @@ pub(crate) struct PlanState {
     shared: Arc<SharedPlanState>,
     quantum_frames: u32,
     next_absolute_sample: u64,
+}
+
+struct ObservedController {
+    inner: ProtocolController<MockProvider>,
+}
+
+impl ObservedController {
+    fn new(inner: ProtocolController<MockProvider>) -> Self {
+        #[cfg(test)]
+        update_test_owners(|owners| owners.replay_current_constructed += 1);
+        Self { inner }
+    }
+}
+
+impl core::ops::Deref for ObservedController {
+    type Target = ProtocolController<MockProvider>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for ObservedController {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for ObservedController {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        update_test_owners(|owners| owners.replay_current_disposed += 1);
+    }
+}
+
+impl PlanState {
+    fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState>, quantum_frames: u32) -> Self {
+        #[cfg(test)]
+        update_test_owners(|owners| owners.current_plan_constructed += 1);
+        Self {
+            owner,
+            shared,
+            quantum_frames,
+            next_absolute_sample: 0,
+        }
+    }
 }
 
 pub(crate) struct CompiledChildren {
@@ -190,6 +347,148 @@ struct PreparedRuntime {
     sources: Box<[ControlSource]>,
     plan: PreparedRenderPlan,
     resources: PlanResourceReport,
+}
+
+struct ObservedPreparedToken {
+    inner: Option<Box<miso_engine_protocol::PreparedStructuralCommand>>,
+}
+
+impl ObservedPreparedToken {
+    fn new(inner: Box<miso_engine_protocol::PreparedStructuralCommand>) -> Self {
+        #[cfg(test)]
+        update_test_owners(|owners| {
+            owners.token_constructed += 1;
+            owners.replay_candidate_constructed += 1;
+        });
+        Self { inner: Some(inner) }
+    }
+
+    fn get(&self) -> &miso_engine_protocol::PreparedStructuralCommand {
+        self.inner.as_deref().expect("observed token is live")
+    }
+
+    fn commit(
+        mut self,
+        controller: &mut ObservedController,
+    ) -> Result<miso_engine_protocol::CommittedCommandFrame, ()> {
+        let prepared = self.inner.take().expect("observed token commits once");
+        let committed = controller.commit_prepared_structural(*prepared);
+        #[cfg(test)]
+        update_test_owners(|owners| {
+            owners.token_disposed += 1;
+            if committed.is_ok() {
+                owners.replay_candidate_published += 1;
+                owners.replay_current_disposed += 1;
+            } else {
+                owners.replay_candidate_disposed += 1;
+            }
+        });
+        committed.map_err(|_| ())
+    }
+}
+
+impl Drop for ObservedPreparedToken {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            drop(inner);
+            #[cfg(test)]
+            update_test_owners(|owners| {
+                owners.token_disposed += 1;
+                owners.replay_candidate_disposed += 1;
+            });
+        }
+    }
+}
+
+struct ObservedCandidatePlan {
+    inner: Option<PreparedRenderPlan>,
+}
+
+struct ObservedRetiredPlan {
+    inner: Option<PreparedRenderPlan>,
+}
+
+impl ObservedRetiredPlan {
+    fn new(plan: PreparedRenderPlan) -> Self {
+        Self { inner: Some(plan) }
+    }
+}
+
+impl Drop for ObservedRetiredPlan {
+    fn drop(&mut self) {
+        if let Some(plan) = self.inner.take() {
+            drop(plan);
+            #[cfg(test)]
+            update_test_owners(|owners| owners.current_plan_disposed += 1);
+        }
+    }
+}
+
+impl ObservedCandidatePlan {
+    fn new(plan: PreparedRenderPlan) -> Self {
+        #[cfg(test)]
+        update_test_owners(|owners| owners.candidate_plan_constructed += 1);
+        Self { inner: Some(plan) }
+    }
+
+    fn take(mut self) -> PreparedRenderPlan {
+        self.inner.take().expect("candidate plan transfers once")
+    }
+
+    fn returned(plan: PreparedRenderPlan) -> Self {
+        Self { inner: Some(plan) }
+    }
+}
+
+impl Drop for ObservedCandidatePlan {
+    fn drop(&mut self) {
+        if let Some(plan) = self.inner.take() {
+            drop(plan);
+            #[cfg(test)]
+            update_test_owners(|owners| owners.candidate_plan_disposed += 1);
+        }
+    }
+}
+
+struct ObservedReservation<'a> {
+    inner: Option<PlanReplacementReservation<'a>>,
+}
+
+impl<'a> ObservedReservation<'a> {
+    fn new(inner: PlanReplacementReservation<'a>) -> Self {
+        #[cfg(test)]
+        update_test_owners(|owners| owners.reservation_constructed += 1);
+        Self { inner: Some(inner) }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.inner.as_ref().expect("reservation is live").epoch().0
+    }
+
+    fn commit(mut self) {
+        self.inner
+            .take()
+            .expect("reservation commits once")
+            .commit();
+        #[cfg(test)]
+        update_test_owners(|owners| {
+            owners.candidate_plan_published += 1;
+            owners.reservation_committed += 1;
+        });
+    }
+}
+
+impl Drop for ObservedReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            drop(inner);
+            #[cfg(test)]
+            update_test_owners(|owners| {
+                owners.candidate_plan_disposed += 1;
+                owners.reservation_canceled += 1;
+            });
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -344,11 +643,14 @@ fn capi_resources(
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState>>(1)?,
-        checked_layout::<Option<miso_engine_protocol::Diagnostic>>(2)?,
+        checked_layout::<miso_engine_protocol::RetainedDiagnosticSlot>(2)?,
         // ProtocolController and MockProvider each retain their own complete telemetry config.
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterValue>(maximum_configuration_items)?,
+        // The automation-only descriptor is inline in the provider; charge its two strings.
+        checked_layout::<u8>(4)?,
+        checked_layout::<u8>(7)?,
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<ProviderEpoch>(2)?,
@@ -909,8 +1211,31 @@ pub(crate) fn compile_children(
         meter_handles: maximum_tlvs as usize,
         counter_ids: maximum_tlvs as usize,
     };
-    let provider = MockProvider::try_with_retained_capacity(retained_capacity)
-        .map_err(|_| failure("capi.resource.allocation"))?;
+    let provider = MockProvider::try_with_retained_capacity_and_automation(
+        retained_capacity,
+        miso_engine_protocol::ParameterDescriptor {
+            handle: u32::MAX,
+            track_id: "capi".to_owned(),
+            rack: miso_engine_protocol::ParameterRack::Dynamic,
+            effect_id: "control".to_owned(),
+            parameter_id: 1,
+            channel: miso_engine_protocol::ParameterChannel::Left,
+            value_kind: miso_engine_protocol::ParameterValueKind::F32,
+            unit: miso_engine_protocol::ParameterUnit::Linear,
+            domain: miso_engine_protocol::ParameterDomain::Continuous,
+            minimum: Some(-1.0),
+            maximum: Some(1.0),
+            default: 0.0,
+            mapping: miso_engine_protocol::ParameterMapping::Linear,
+            automation_rate: miso_engine_protocol::ParameterAutomationRate::Sample,
+            smoothing_samples: 0,
+            flags: 3,
+            display_name: None,
+            display_unit: None,
+            enum_choices: Vec::new(),
+        },
+    )
+    .map_err(|_| failure("capi.resource.allocation"))?;
     let controller = ProtocolController::try_with_config_and_retained_capacity(
         store,
         queues,
@@ -949,10 +1274,9 @@ pub(crate) fn compile_children(
         plan_alive: AtomicBool::new(true),
         active_epoch: AtomicU64::new(0),
         reports: Mutex::new(reports),
-        #[cfg(test)]
         render_sequence: AtomicU64::new(0),
-        #[cfg(test)]
         render_sample: AtomicU64::new(0),
+        render_peak_bits: AtomicU32::new(0),
     });
     let mut pending_providers = Vec::new();
     pending_providers
@@ -976,12 +1300,8 @@ pub(crate) fn compile_children(
 
     Ok(CompiledChildren {
         session: SessionState {
-            controller,
-            providers: ProviderEpoch {
-                epoch: 0,
-                source_ids,
-                sources,
-            },
+            controller: ObservedController::new(controller),
+            providers: ProviderEpoch::current(source_ids, sources),
             pending_providers,
             retired_providers,
             publisher,
@@ -991,27 +1311,10 @@ pub(crate) fn compile_children(
             _decode_tail: decode_tail,
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
             shared: Arc::clone(&shared),
-            #[cfg(test)]
             observed_render_sequence: 0,
-            #[cfg(test)]
-            test_faults: [None; 2],
-            #[cfg(test)]
-            test_fault_index: 0,
-            #[cfg(test)]
-            test_owner_counters: TestOwnerCounters {
-                current_provider_constructed: 1,
-                current_plan_constructed: 1,
-                replay_current_constructed: 1,
-                ..TestOwnerCounters::default()
-            },
         },
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
-        plan: PlanState {
-            owner,
-            shared,
-            quantum_frames: resources.quantum_frames,
-            next_absolute_sample: 0,
-        },
+        plan: PlanState::new(owner, shared, resources.quantum_frames),
         plan_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
     })
 }
@@ -1057,21 +1360,26 @@ impl PlanState {
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
-        #[cfg(test)]
-        {
-            self.shared
-                .render_sample
-                .store(report.render.next_absolute_sample, Ordering::Release);
-            self.shared.render_sequence.fetch_add(1, Ordering::AcqRel);
-        }
         self.next_absolute_sample = report.render.next_absolute_sample;
         Ok(())
+    }
+
+    pub(crate) fn publish_render_observation(&self, peak: f32) {
+        self.shared
+            .render_sample
+            .store(self.next_absolute_sample, Ordering::Release);
+        self.shared
+            .render_peak_bits
+            .store(peak.to_bits(), Ordering::Release);
+        self.shared.render_sequence.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 impl Drop for PlanState {
     fn drop(&mut self) {
         self.shared.plan_alive.store(false, Ordering::Release);
+        #[cfg(test)]
+        update_test_owners(|owners| owners.current_plan_disposed += 1);
     }
 }
 
@@ -1140,45 +1448,22 @@ impl SessionState {
         &mut self,
         faults: [Option<TestStructuralFaultPhase>; 2],
     ) {
-        self.test_faults = faults;
-        self.test_fault_index = 0;
+        let _ = self;
+        TEST_FAULT_STATE.with(|state| state.set((faults, 0)));
     }
 
     #[cfg(test)]
-    pub(crate) const fn test_owner_counters(&self) -> TestOwnerCounters {
-        self.test_owner_counters
+    pub(crate) fn test_owner_counters(&self) -> TestOwnerCounters {
+        let _ = self;
+        TEST_OWNER_STATE.with(core::cell::Cell::get)
     }
 
     #[cfg(test)]
     fn take_test_fault(&mut self, phase: TestStructuralFaultPhase) -> bool {
-        if self
-            .test_faults
-            .get(self.test_fault_index)
-            .copied()
-            .flatten()
-            == Some(phase)
-        {
-            self.test_fault_index += 1;
-            true
-        } else {
-            false
-        }
+        let _ = self;
+        take_test_fault_state(phase)
     }
 
-    #[cfg(test)]
-    fn record_test_candidate_cancel(&mut self, runtime: bool, reservation: bool) {
-        self.test_owner_counters.token_disposed += 1;
-        self.test_owner_counters.replay_candidate_disposed += 1;
-        if runtime {
-            self.test_owner_counters.candidate_provider_disposed += 1;
-            self.test_owner_counters.candidate_plan_disposed += 1;
-        }
-        if reservation {
-            self.test_owner_counters.reservation_canceled += 1;
-        }
-    }
-
-    #[cfg(test)]
     fn collect_render_activity(&mut self) {
         let sequence = self.shared.render_sequence.load(Ordering::Acquire);
         if sequence == self.observed_render_sequence {
@@ -1186,53 +1471,55 @@ impl SessionState {
         }
         self.observed_render_sequence = sequence;
         let sample = self.shared.render_sample.load(Ordering::Acquire);
+        let peak = f32::from_bits(self.shared.render_peak_bits.load(Ordering::Acquire));
+        let observed_sample = miso_engine_protocol::SampleTime(sample);
         let revision = self.controller.session().revision();
-        for (index, handle) in [1_u32, 2].into_iter().enumerate() {
+        let meter_len = self
+            .controller
+            .telemetry_configuration()
+            .meter_handles
+            .len();
+        for index in 0..meter_len {
+            let handle = self.controller.telemetry_configuration().meter_handles[index];
             let _ = self.controller.stage_meter_batch_event(
                 revision,
-                miso_engine_protocol::SampleTime(sample),
+                observed_sample,
                 &[miso_engine_protocol::MeterRecord {
                     handle,
                     component: miso_engine_protocol::MeterComponent::Left,
                     flags: 1,
-                    value: sequence as f32 + index as f32 * 0.25,
+                    value: peak,
                 }],
             );
         }
-        let _ = self.controller.stage_counter_snapshot_event(
-            revision,
-            &miso_engine_protocol::CounterSnapshot {
-                observed_sample: miso_engine_protocol::SampleTime(sample),
-                values: vec![miso_engine_protocol::CounterValue {
-                    id: miso_engine_protocol::CounterId::ControlCommandBackpressure,
+        let counter_ids = self
+            .controller
+            .telemetry_configuration()
+            .counter_ids
+            .clone();
+        if !counter_ids.is_empty() {
+            let values = counter_ids
+                .into_iter()
+                .map(|id| miso_engine_protocol::CounterValue {
+                    id,
                     value: sequence,
-                }],
-            },
-        );
-        let _ = self.controller.enqueue_diagnostic_event(
-            revision,
-            miso_engine_protocol::DiagnosticEvent {
-                diagnostic: miso_engine_protocol::Diagnostic {
-                    code: "capi.render.activity".to_owned(),
-                    severity: miso_engine_protocol::DiagnosticSeverity::Info,
-                    path: Vec::new(),
-                    detail: None,
-                    operation_index: None,
-                    sample_time: Some(sample),
-                    provider_sequence: Some(sequence),
+                })
+                .collect();
+            let _ = self.controller.stage_counter_snapshot_event(
+                revision,
+                &miso_engine_protocol::CounterSnapshot {
+                    observed_sample,
+                    values,
                 },
+            );
+        }
+        let _ = self.controller.enqueue_retained_diagnostic_event(
+            revision,
+            miso_engine_protocol::RetainedDiagnosticSlot::RenderObservation {
+                observed_sample,
+                render_sequence: sequence,
             },
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_install_parameter(
-        &mut self,
-        descriptor: miso_engine_protocol::ParameterDescriptor,
-        state: miso_engine_protocol::ParameterStateRecord,
-    ) {
-        self.controller
-            .install_conformance_parameter(descriptor, state);
     }
 
     #[cfg(test)]
@@ -1246,24 +1533,70 @@ impl SessionState {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_enqueue_reliable(
-        &mut self,
-        event: miso_engine_protocol::ReliableSlot,
-    ) -> Result<(), ()> {
-        self.controller
-            .queues_mut()
-            .try_enqueue_event(event)
-            .map_err(|_| ())
+    pub(crate) fn test_transaction_snapshot(&self) -> TestTransactionSnapshot {
+        let controller = self.controller.retained_configuration_capacity();
+        let (provider, provider_counters) = self.controller.provider().retained_capacities();
+        let replay = self.controller.replay().retained_storage_capacities();
+        TestTransactionSnapshot {
+            revision: self.controller.session().revision().0,
+            canonical: self
+                .controller
+                .session()
+                .canonical_snapshot()
+                .as_bytes()
+                .to_vec(),
+            model: self.controller.session().compiled().resource_estimate(),
+            replay_entries: self.controller.replay().len(),
+            provider_epoch: self.providers.epoch,
+            pending_provider_epochs: self
+                .pending_providers
+                .iter()
+                .map(|provider| provider.epoch)
+                .collect(),
+            retired_provider_epochs: self
+                .retired_providers
+                .iter()
+                .map(|provider| provider.epoch)
+                .collect(),
+            active_plan_epoch: self.shared.active_epoch.load(Ordering::Acquire),
+            resource_rows: self
+                .shared
+                .reports
+                .lock()
+                .expect("test report lock")
+                .clone(),
+            reliable_event: self
+                .controller
+                .queues()
+                .report(miso_engine_protocol::QueueKind::ReliableEvent),
+            reliable_response: self
+                .controller
+                .queues()
+                .report(miso_engine_protocol::QueueKind::ReliableResponse),
+            automation: self
+                .controller
+                .queues()
+                .report(miso_engine_protocol::QueueKind::Automation),
+            telemetry: self
+                .controller
+                .queues()
+                .report(miso_engine_protocol::QueueKind::Telemetry),
+            telemetry_counters: self.controller.queues().telemetry_counters(),
+            retained_capacities: [
+                controller.meter_handles,
+                controller.counter_ids,
+                provider.meter_handles,
+                provider.counter_ids,
+                provider_counters,
+                replay.0,
+                replay.1,
+            ],
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn test_telemetry_counters(&self) -> miso_engine_protocol::TelemetryCounters {
         self.controller.queues().telemetry_counters()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_set_capi_retained_limit(&mut self, bytes: u64) {
-        self.limits.maximum_capi_retained_bytes = bytes;
     }
 
     #[cfg(test)]
@@ -1310,21 +1643,13 @@ impl SessionState {
         }
 
         while let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
-            drop(retired_plan);
-            #[cfg(test)]
-            {
-                self.test_owner_counters.current_plan_disposed += 1;
-            }
+            drop(ObservedRetiredPlan::new(retired_plan));
             if let Some(index) = self
                 .retired_providers
                 .iter()
                 .position(|provider| provider.epoch == retired_epoch.0)
             {
                 self.retired_providers.remove(index);
-                #[cfg(test)]
-                {
-                    self.test_owner_counters.current_provider_disposed += 1;
-                }
             } else {
                 return Err(CommandError::Internal);
             }
@@ -1351,7 +1676,6 @@ impl SessionState {
         output_capacity: u64,
     ) -> Result<usize, CommandError> {
         self.synchronize_plan_epochs()?;
-        #[cfg(test)]
         self.collect_render_activity();
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
         let prepared = self
@@ -1367,50 +1691,54 @@ impl SessionState {
                 .write_into(&mut self.response_scratch)
                 .map_err(map_encode_error),
             PreparedCommandFrame::Structural(prepared) => {
+                let prepared = ObservedPreparedToken::new(prepared);
                 #[cfg(test)]
                 {
-                    self.test_owner_counters.token_constructed += 1;
-                    self.test_owner_counters.replay_candidate_constructed += 1;
                     if self.take_test_fault(TestStructuralFaultPhase::AfterProtocolPrepare) {
-                        self.record_test_candidate_cancel(false, false);
+                        drop(prepared);
                         return Err(CommandError::Backpressure);
                     }
                 }
                 if !self.shared.plan_alive.load(Ordering::Acquire) {
                     return Err(CommandError::Backpressure);
                 }
-                let response_len = prepared.response_len();
+                let response_len = prepared.get().response_len();
                 if response_len > self.response_scratch.len() || response_len > output_capacity {
                     return Err(CommandError::BufferTooSmall {
                         required: u64::try_from(response_len).unwrap_or(u64::MAX),
                     });
                 }
-                let (prospective_capi, _) =
-                    compiled_capi_resources(prepared.prospective_session().compiled(), self.limits)
-                        .map_err(CommandError::CompileRejected)?;
+                let (prospective_capi, _) = compiled_capi_resources(
+                    prepared.get().prospective_session().compiled(),
+                    self.limits,
+                )
+                .map_err(CommandError::CompileRejected)?;
                 #[cfg(test)]
                 if self.take_test_fault(TestStructuralFaultPhase::AfterResourceProjection) {
-                    self.record_test_candidate_cancel(false, false);
+                    drop(prepared);
                     return Err(CommandError::Backpressure);
                 }
                 let prepared_runtime = match STRUCTURAL_SOURCE_STATE_POLICY {
-                    StructuralSourceStatePolicy::ResetAtReplacementBoundary => {
-                        prepare_runtime(prepared.prospective_session().compiled(), self.limits)
-                    }
+                    StructuralSourceStatePolicy::ResetAtReplacementBoundary => prepare_runtime(
+                        prepared.get().prospective_session().compiled(),
+                        self.limits,
+                    ),
                 }
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     source_ids,
                     sources,
-                    plan,
+                    plan: candidate_plan,
                     resources,
                 } = prepared_runtime;
+                let mut candidate_provider = ProviderEpoch::candidate(source_ids, sources);
+                let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]
                 {
-                    self.test_owner_counters.candidate_provider_constructed += 1;
-                    self.test_owner_counters.candidate_plan_constructed += 1;
                     if self.take_test_fault(TestStructuralFaultPhase::AfterRuntimePrepare) {
-                        self.record_test_candidate_cancel(true, false);
+                        drop(candidate_plan);
+                        drop(candidate_provider);
+                        drop(prepared);
                         return Err(CommandError::Backpressure);
                     }
                 }
@@ -1420,7 +1748,7 @@ impl SessionState {
                     prospective_capi,
                     compiled_model_admission(
                         self.controller.session().compiled(),
-                        prepared.prospective_session().compiled(),
+                        prepared.get().prospective_session().compiled(),
                     )
                     .map_err(CommandError::CompileRejected)?,
                     self.limits,
@@ -1428,36 +1756,39 @@ impl SessionState {
                 .map_err(CommandError::CompileRejected)?;
                 #[cfg(test)]
                 if self.take_test_fault(TestStructuralFaultPhase::AfterAdmission) {
-                    self.record_test_candidate_cancel(true, false);
+                    drop(candidate_plan);
+                    drop(candidate_provider);
+                    drop(prepared);
                     return Err(CommandError::Backpressure);
                 }
                 if !self.pending_providers.is_empty() {
                     return Err(CommandError::Backpressure);
                 }
-                let reservation = self
-                    .publisher
-                    .reserve_replacement(plan)
-                    .map_err(|_| CommandError::Backpressure)?;
+                let reservation = match self.publisher.reserve_replacement(candidate_plan.take()) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let returned = match error {
+                            PlanReplacementReservationError::PublicationFull(plan)
+                            | PlanReplacementReservationError::RetirementFull(plan)
+                            | PlanReplacementReservationError::Incompatible(plan)
+                            | PlanReplacementReservationError::EpochExhausted(plan) => plan,
+                        };
+                        drop(ObservedCandidatePlan::returned(returned));
+                        return Err(CommandError::Backpressure);
+                    }
+                };
+                let reservation = ObservedReservation::new(reservation);
                 #[cfg(test)]
                 {
-                    self.test_owner_counters.reservation_constructed += 1;
-                    if self
-                        .test_faults
-                        .get(self.test_fault_index)
-                        .copied()
-                        .flatten()
-                        == Some(TestStructuralFaultPhase::AfterPlanReservation)
-                    {
-                        self.test_fault_index += 1;
-                        self.test_owner_counters.token_disposed += 1;
-                        self.test_owner_counters.replay_candidate_disposed += 1;
-                        self.test_owner_counters.candidate_provider_disposed += 1;
-                        self.test_owner_counters.candidate_plan_disposed += 1;
-                        self.test_owner_counters.reservation_canceled += 1;
+                    if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
+                        drop(reservation);
+                        drop(candidate_provider);
+                        drop(prepared);
                         return Err(CommandError::Backpressure);
                     }
                 }
-                let epoch = reservation.epoch().0;
+                let epoch = reservation.epoch();
+                candidate_provider.epoch = epoch;
                 let mut reports = self
                     .shared
                     .reports
@@ -1470,41 +1801,25 @@ impl SessionState {
                 }
 
                 #[cfg(test)]
-                if self
-                    .test_faults
-                    .get(self.test_fault_index)
-                    .copied()
-                    .flatten()
-                    == Some(TestStructuralFaultPhase::BeforeProtocolCommit)
-                {
-                    self.test_fault_index += 1;
-                    self.test_owner_counters.token_disposed += 1;
-                    self.test_owner_counters.replay_candidate_disposed += 1;
-                    self.test_owner_counters.candidate_provider_disposed += 1;
-                    self.test_owner_counters.candidate_plan_disposed += 1;
-                    self.test_owner_counters.reservation_canceled += 1;
+                if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
+                    drop(reports);
+                    drop(reservation);
+                    drop(candidate_provider);
+                    drop(prepared);
                     return Err(CommandError::Backpressure);
                 }
 
-                let committed = self
-                    .controller
-                    .commit_prepared_structural(*prepared)
+                let committed = prepared
+                    .commit(&mut self.controller)
                     .map_err(|_| CommandError::Internal)?;
-                self.pending_providers.push(ProviderEpoch {
-                    epoch,
-                    source_ids,
-                    sources,
-                });
+                self.pending_providers.push(candidate_provider);
                 reports.push((epoch, resources));
                 reservation.commit();
                 #[cfg(test)]
                 {
-                    self.test_owner_counters.token_disposed += 1;
-                    self.test_owner_counters.replay_candidate_published += 1;
-                    self.test_owner_counters.replay_current_disposed += 1;
-                    self.test_owner_counters.candidate_provider_published += 1;
-                    self.test_owner_counters.candidate_plan_published += 1;
-                    self.test_owner_counters.reservation_committed += 1;
+                    update_test_owners(|owners| {
+                        owners.candidate_provider_published += 1;
+                    });
                 }
                 Ok(committed
                     .write_into(&mut self.response_scratch)
@@ -1527,7 +1842,6 @@ impl SessionState {
                 CommandError::Backpressure => EventError::Backpressure,
                 _ => EventError::Internal,
             })?;
-        #[cfg(test)]
         self.collect_render_activity();
         let capacity = usize::try_from(output_capacity)
             .unwrap_or(usize::MAX)
@@ -1635,9 +1949,7 @@ pub(crate) struct SourceSubmission<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_protocol::{
-        CapabilityFlags, ExpectedRevision, RequestId, SessionRevision, StatusCode,
-    };
+    use miso_engine_protocol::{ExpectedRevision, RequestId, SessionRevision, StatusCode};
 
     const SESSION: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
@@ -1672,33 +1984,6 @@ mod tests {
         }
     }
 
-    fn generated_scratch_session() -> String {
-        let mut model = parse_session_toml(SESSION).expect("accepted base session");
-        for track in &mut model.tracks {
-            let effect = &mut track.simd1.effects[0];
-            effect.id = miso_engine_session::StableId::parse("soft-clip").expect("effect slot");
-            effect.identity = miso_engine_session::EffectIdentity::Native {
-                effect_id: miso_engine_session::StableId::parse("miso.soft-clip")
-                    .expect("effect id"),
-            };
-            effect.params = vec![
-                miso_engine_session::EffectParam {
-                    parameter_id: 1,
-                    channel: miso_engine_session::ParameterChannel::Left,
-                    unit: miso_engine_session::ParameterUnit::Db,
-                    value: -6.0,
-                },
-                miso_engine_session::EffectParam {
-                    parameter_id: 1,
-                    channel: miso_engine_session::ParameterChannel::Right,
-                    unit: miso_engine_session::ParameterUnit::Db,
-                    value: -6.0,
-                },
-            ];
-        }
-        miso_engine_session::canonical_session_toml(&model).expect("generated canonical session")
-    }
-
     fn command_bytes(
         request_id: u64,
         payload: miso_engine_protocol::CommandPayload<'_>,
@@ -1721,16 +2006,6 @@ mod tests {
         let len = codec
             .encode_command_frame_into(&frame, &mut bytes)
             .expect("typed command");
-        bytes.truncate(len);
-        bytes
-    }
-
-    fn typed_event_bytes(frame: &miso_engine_protocol::TypedEventFrame<'_>) -> Vec<u8> {
-        let codec = ProtocolCodec::default();
-        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
-        let len = codec
-            .encode_event_frame_into(frame, &mut bytes)
-            .expect("manual typed event oracle");
         bytes.truncate(len);
         bytes
     }
@@ -1764,334 +2039,6 @@ mod tests {
         "4d49534f43544c0001000000300002000b000000200000000a000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
         "4d49534f43544c00010000003000020003000000100000000b000000000000002b00000000000000010000000000000001000301040000000100000000000000",
     ];
-
-    fn replacement_projection(
-        children: &mut CompiledChildren,
-        request: &[u8],
-    ) -> (
-        PlanResourceReport,
-        PlanResourceReport,
-        CapiResources,
-        CompiledModelAdmission,
-    ) {
-        let current = children.plan.resources();
-        let prepared = children
-            .session
-            .controller
-            .prepare_command_frame(
-                request,
-                &mut DecodeScratch::new(&mut children.session.decode_fields),
-                4_096,
-            )
-            .expect("structural projection");
-        let PreparedCommandFrame::Structural(prepared) = prepared else {
-            panic!("structural replacement projection")
-        };
-        let (production_capi, _) = compiled_capi_resources(
-            prepared.prospective_session().compiled(),
-            children.session.limits,
-        )
-        .expect("prospective CAPI resources");
-        let prospective_capi = independent_capi_resources(
-            prepared.prospective_session().compiled(),
-            children.session.limits,
-        );
-        assert_eq!(
-            production_capi.active_retained,
-            prospective_capi.active_retained
-        );
-        assert_eq!(
-            production_capi.epoch_retained,
-            prospective_capi.epoch_retained
-        );
-        assert_eq!(
-            production_capi.prepared_protocol_retained,
-            prospective_capi.prepared_protocol_retained
-        );
-        assert_eq!(production_capi.largest, prospective_capi.largest);
-        let prospective = prepare_runtime(
-            prepared.prospective_session().compiled(),
-            children.session.limits,
-        )
-        .expect("prospective runtime")
-        .resources;
-        let current_model = children
-            .session
-            .controller
-            .session()
-            .compiled()
-            .resource_estimate();
-        let prospective_model = prepared
-            .prospective_session()
-            .compiled()
-            .resource_estimate();
-        let models = CompiledModelAdmission {
-            retained_bytes: current_model
-                .compiled_model_bytes
-                .checked_add(prospective_model.compiled_model_bytes)
-                .expect("manual double-live model aggregate"),
-            largest_allocation_bytes: current_model
-                .single_allocation_bytes
-                .max(prospective_model.single_allocation_bytes),
-        };
-        let production_models = compiled_model_admission(
-            children.session.controller.session().compiled(),
-            prepared.prospective_session().compiled(),
-        )
-        .expect("production compiled-model admission");
-        assert_eq!(models.retained_bytes, production_models.retained_bytes);
-        assert_eq!(
-            models.largest_allocation_bytes,
-            production_models.largest_allocation_bytes
-        );
-        drop(prepared);
-        (current, prospective, prospective_capi, models)
-    }
-
-    fn independent_capi_resources(
-        compiled: &CompiledSession,
-        limits: CompileLimits,
-    ) -> CapiResources {
-        use core::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::AtomicUsize};
-
-        #[repr(C)]
-        struct RingMirror<T> {
-            slots: Box<[UnsafeCell<MaybeUninit<T>>]>,
-            slots_len: usize,
-            logical_capacity: usize,
-            generation: miso_engine_core::realtime::QueueGeneration,
-            producer: AtomicUsize,
-            consumer: AtomicUsize,
-        }
-        #[repr(C)]
-        struct SharedRingMirror<T> {
-            strong: AtomicUsize,
-            weak: AtomicUsize,
-            ring: RingMirror<T>,
-        }
-        #[repr(C)]
-        struct SharedCounterMirror {
-            strong: AtomicUsize,
-            weak: AtomicUsize,
-            value: AtomicUsize,
-        }
-        #[allow(dead_code)]
-        struct SharedPlanStateMirror {
-            plan_alive: AtomicBool,
-            active_epoch: AtomicU64,
-            reports: Mutex<Vec<(u64, PlanResourceReport)>>,
-            render_sequence: AtomicU64,
-            render_sample: AtomicU64,
-        }
-        #[repr(C)]
-        struct DensityMirror {
-            block: u64,
-            starts: usize,
-            occupied: bool,
-        }
-        #[repr(C)]
-        struct IntervalMirror {
-            record: miso_engine_protocol::AutomationRecord,
-            occupied: bool,
-        }
-        #[allow(dead_code)]
-        struct ReplayEntryMirror {
-            request_id: RequestId,
-            request_offset: usize,
-            request_bytes: usize,
-            response_offset: usize,
-            response_bytes: usize,
-            response_status: StatusCode,
-            response_revision: SessionRevision,
-            framed: bool,
-        }
-        #[allow(dead_code)]
-        struct PublishedPlanMirror {
-            epoch: miso_engine_core::realtime::PlanEpoch,
-            plan: PreparedRenderPlan,
-            retirement_reserved: bool,
-        }
-        #[allow(dead_code)]
-        struct RetiredPlanMirror {
-            epoch: miso_engine_core::realtime::PlanEpoch,
-            plan: PreparedRenderPlan,
-        }
-
-        fn bytes<T>(count: usize) -> u64 {
-            u64::try_from(Layout::array::<T>(count).expect("oracle layout").size())
-                .expect("oracle platform")
-        }
-        fn sum(rows: &[u64]) -> u64 {
-            rows.iter()
-                .try_fold(0_u64, |total, value| total.checked_add(*value))
-                .expect("oracle sum")
-        }
-        fn spsc<T>(capacity: usize) -> (u64, u64) {
-            let header = bytes::<SharedRingMirror<T>>(1);
-            let slots = bytes::<UnsafeCell<MaybeUninit<T>>>(
-                capacity.checked_add(1).expect("oracle sentinel"),
-            );
-            (
-                header.checked_add(slots).expect("oracle SPSC"),
-                header.max(slots),
-            )
-        }
-
-        let control_bytes = usize::try_from(limits.maximum_control_frame_bytes).expect("control");
-        let configuration_items = control_bytes / size_of::<u16>();
-        let source_id_bytes = compiled
-            .normalized_model()
-            .sources
-            .iter()
-            .map(|source| source.id.as_str().len())
-            .sum::<usize>();
-        let queue_pairs = [
-            spsc::<miso_engine_protocol::ControlCommandSlot>(1),
-            spsc::<miso_engine_protocol::AutomationBatchSlot>(1),
-            spsc::<miso_engine_protocol::ReliableSlot>(1),
-            spsc::<miso_engine_protocol::ReliableSlot>(2),
-            spsc::<miso_engine_protocol::TelemetryRecord>(1),
-            spsc::<miso_engine_protocol::CounterTelemetryRecord>(1),
-        ];
-        let queue_extra = [
-            bytes::<Option<miso_engine_protocol::TelemetryRecord>>(1),
-            bytes::<Option<miso_engine_protocol::CounterTelemetryRecord>>(1),
-            bytes::<DensityMirror>(miso_engine_protocol::AUTOMATION_BATCH_RECORDS),
-            bytes::<IntervalMirror>(miso_engine_protocol::AUTOMATION_BATCH_RECORDS),
-            bytes::<SharedCounterMirror>(1),
-        ];
-        let queue_retained = queue_pairs
-            .iter()
-            .map(|pair| pair.0)
-            .chain(queue_extra)
-            .sum::<u64>();
-        let queue_largest = queue_pairs
-            .iter()
-            .map(|pair| pair.1)
-            .chain(queue_extra)
-            .max()
-            .expect("queue largest");
-        let replay_entries = bytes::<ReplayEntryMirror>(limits.maximum_replay_entries as usize);
-        let replay_retained = replay_entries
-            .checked_add(limits.maximum_replay_bytes)
-            .expect("replay aggregate");
-        let replay_largest = replay_entries.max(limits.maximum_replay_bytes);
-        let publication = spsc::<PublishedPlanMirror>(1);
-        let retirement = spsc::<RetiredPlanMirror>(1);
-        let counter = bytes::<SharedCounterMirror>(1);
-        let exchange_retained = publication
-            .0
-            .checked_add(retirement.0)
-            .and_then(|value| value.checked_add(counter.checked_mul(2)?))
-            .expect("exchange aggregate");
-        let exchange_largest = publication.1.max(retirement.1).max(counter);
-        let epoch_rows = [
-            bytes::<u8>(compiled.canonical_toml().len()),
-            bytes::<ControlSource>(compiled.source_count()),
-            bytes::<u8>(source_id_bytes),
-        ];
-        let fixed_allocations = [
-            bytes::<u8>(limits.maximum_diagnostic_bytes as usize),
-            bytes::<u8>(limits.maximum_diagnostic_bytes as usize),
-            bytes::<u8>(control_bytes),
-            bytes::<u8>(control_bytes),
-            bytes::<SharedArcAllocation<AtomicU64>>(1),
-            bytes::<SharedArcAllocation<SharedPlanStateMirror>>(1),
-            bytes::<Option<miso_engine_protocol::Diagnostic>>(2),
-            bytes::<u32>(configuration_items),
-            bytes::<miso_engine_protocol::CounterId>(configuration_items),
-            bytes::<u32>(configuration_items),
-            bytes::<miso_engine_protocol::CounterId>(configuration_items),
-            bytes::<miso_engine_protocol::CounterValue>(configuration_items),
-            bytes::<ProviderEpoch>(2),
-            bytes::<(u64, PlanResourceReport)>(2),
-            bytes::<crate::Session>(1),
-            bytes::<crate::Plan>(1),
-        ];
-        let fixed_aggregates = [queue_retained, replay_retained, exchange_retained];
-        let prepared_allocations = [
-            bytes::<u8>(control_bytes),
-            bytes::<miso_engine_protocol::PreparedStructuralCommand>(1),
-        ];
-        let epoch_retained = sum(&epoch_rows);
-        let active_retained = sum(&fixed_allocations)
-            .checked_add(sum(&fixed_aggregates))
-            .and_then(|value| value.checked_add(epoch_retained))
-            .expect("active oracle");
-        let prepared_protocol_retained = sum(&prepared_allocations)
-            .checked_add(replay_retained)
-            .expect("prepared oracle");
-        let largest = epoch_rows
-            .into_iter()
-            .chain(fixed_allocations)
-            .chain(prepared_allocations)
-            .chain([queue_largest, replay_largest, exchange_largest])
-            .max()
-            .expect("largest oracle");
-        CapiResources {
-            active_retained,
-            epoch_retained,
-            prepared_protocol_retained,
-            largest,
-        }
-    }
-
-    fn replacement_requirement(
-        row: &str,
-        current: PlanResourceReport,
-        prospective: PlanResourceReport,
-        capi: CapiResources,
-        models: CompiledModelAdmission,
-    ) -> u64 {
-        match row {
-            "graph" => current
-                .graph_session_plus_plan_bytes
-                .checked_add(prospective.graph_session_plus_plan_bytes)
-                .and_then(|value| value.checked_add(models.retained_bytes)),
-            "source-total" => current
-                .source_total_bytes
-                .checked_add(prospective.source_total_bytes),
-            "source-overhead" => current
-                .source_overhead_bytes
-                .checked_add(prospective.source_overhead_bytes),
-            "effect-state" => current
-                .effect_scalar_state_bytes
-                .checked_add(prospective.effect_scalar_state_bytes),
-            "effect-scratch" => current
-                .effect_scalar_scratch_bytes
-                .checked_add(prospective.effect_scalar_scratch_bytes),
-            "builtin" => current
-                .builtin_retained_payload_bytes
-                .checked_add(prospective.builtin_retained_payload_bytes),
-            "capi" => current
-                .capi_retained_bytes
-                .checked_add(capi.epoch_retained)
-                .and_then(|value| value.checked_add(capi.prepared_protocol_retained)),
-            "largest" => Some(
-                current
-                    .largest_named_allocation_bytes
-                    .max(prospective.largest_named_allocation_bytes)
-                    .max(capi.largest)
-                    .max(models.largest_allocation_bytes),
-            ),
-            _ => unreachable!(),
-        }
-        .expect("bounded replacement requirement")
-    }
-
-    fn set_replacement_cap(limits: &mut CompileLimits, row: &str, value: u64) {
-        match row {
-            "graph" => limits.maximum_graph_session_plus_plan_bytes = value,
-            "source-total" => limits.maximum_source_total_bytes = value,
-            "source-overhead" => limits.maximum_source_overhead_bytes = value,
-            "effect-state" => limits.maximum_effect_state_bytes = value,
-            "effect-scratch" => limits.maximum_effect_scratch_bytes = value,
-            "builtin" => limits.maximum_builtin_retained_bytes = value,
-            "capi" => limits.maximum_capi_retained_bytes = value,
-            "largest" => limits.maximum_named_allocation_bytes = value,
-            _ => unreachable!(),
-        }
-    }
 
     fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
         let mut model = parse_session_toml(SESSION).expect("accepted parity base");
@@ -2445,269 +2392,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_report_caps_accept_equal_and_reject_one_below() {
-        let baseline = compile_children(SESSION, limits()).expect("baseline");
-        let report = baseline.plan.resources();
-        let model = baseline
-            .session
-            .controller
-            .session()
-            .compiled()
-            .resource_estimate();
-
-        for below in [
-            (
-                "graph",
-                report
-                    .graph_session_plus_plan_bytes
-                    .checked_add(model.compiled_model_bytes)
-                    .expect("active graph/model aggregate"),
-            ),
-            ("source-total", report.source_total_bytes),
-            ("source-overhead", report.source_overhead_bytes),
-            ("effect-state", report.effect_scalar_state_bytes),
-            ("builtin", report.builtin_retained_payload_bytes),
-            ("capi", report.capi_retained_bytes),
-            (
-                "largest",
-                report
-                    .largest_named_allocation_bytes
-                    .max(model.single_allocation_bytes),
-            ),
-        ] {
-            assert!(below.1 > 0, "{} row must be nonzero", below.0);
-            let mut equal = limits();
-            match below.0 {
-                "graph" => equal.maximum_graph_session_plus_plan_bytes = below.1,
-                "source-total" => equal.maximum_source_total_bytes = below.1,
-                "source-overhead" => equal.maximum_source_overhead_bytes = below.1,
-                "effect-state" => equal.maximum_effect_state_bytes = below.1,
-                "builtin" => equal.maximum_builtin_retained_bytes = below.1,
-                "capi" => equal.maximum_capi_retained_bytes = below.1,
-                "largest" => equal.maximum_named_allocation_bytes = below.1,
-                _ => unreachable!(),
-            }
-            compile_children(SESSION, equal).unwrap_or_else(|failure| {
-                panic!(
-                    "{} equal cap: {}",
-                    below.0,
-                    String::from_utf8_lossy(&failure.diagnostics)
-                )
-            });
-            let mut constrained = limits();
-            match below.0 {
-                "graph" => constrained.maximum_graph_session_plus_plan_bytes = below.1 - 1,
-                "source-total" => constrained.maximum_source_total_bytes = below.1 - 1,
-                "source-overhead" => constrained.maximum_source_overhead_bytes = below.1 - 1,
-                "effect-state" => constrained.maximum_effect_state_bytes = below.1 - 1,
-                "builtin" => constrained.maximum_builtin_retained_bytes = below.1 - 1,
-                "capi" => constrained.maximum_capi_retained_bytes = below.1 - 1,
-                "largest" => constrained.maximum_named_allocation_bytes = below.1 - 1,
-                _ => unreachable!(),
-            }
-            assert!(
-                compile_children(SESSION, constrained).is_err(),
-                "{} one-below cap must reject",
-                below.0
-            );
-        }
-
-        let scratch_session = generated_scratch_session();
-        let scratch_report = compile_children(&scratch_session, limits())
-            .expect("scratch baseline")
-            .plan
-            .resources();
-        assert!(scratch_report.effect_scalar_scratch_bytes > 0);
-        let mut equal = limits();
-        equal.maximum_effect_scratch_bytes = scratch_report.effect_scalar_scratch_bytes;
-        compile_children(&scratch_session, equal).expect("effect scratch equal cap");
-        let mut below = limits();
-        below.maximum_effect_scratch_bytes = scratch_report.effect_scalar_scratch_bytes - 1;
-        assert!(
-            compile_children(&scratch_session, below).is_err(),
-            "effect scratch one-below cap must reject"
-        );
-    }
-
-    #[test]
-    fn replacement_peak_caps_accept_equal_and_reject_one_below_atomically() {
-        let session = generated_scratch_session();
-        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
-            session_id: miso_engine_session::StableId::parse("double-live-cap").expect("stable ID"),
-        };
-        let request = command_bytes_at_revision(
-            1,
-            ExpectedRevision::Exact(SessionRevision(42)),
-            miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
-                &edit,
-            )),
-        );
-        let mut projection = compile_children(&session, limits()).expect("projection children");
-        let (current, prospective, capi, models) =
-            replacement_projection(&mut projection, &request);
-        assert_eq!(
-            projection.session.controller.session().revision(),
-            SessionRevision(42),
-            "dropping the projection token must cancel it"
-        );
-        assert_eq!(projection.session.controller.replay().len(), 0);
-
-        for row in [
-            "graph",
-            "source-total",
-            "source-overhead",
-            "effect-state",
-            "effect-scratch",
-            "builtin",
-            "capi",
-            "largest",
-        ] {
-            let required = replacement_requirement(row, current, prospective, capi, models);
-            assert!(required > 0, "{row} replacement requirement");
-
-            let mut exact = compile_children(&session, limits()).expect("exact children");
-            set_replacement_cap(&mut exact.session.limits, row, required);
-            let response_len = exact
-                .session
-                .command(&request, 4_096)
-                .unwrap_or_else(|error| panic!("{row} exact replacement cap: {error:?}"));
-            assert!(response_len > 0, "{row} exact response");
-            assert_eq!(
-                exact.session.controller.session().revision(),
-                SessionRevision(43),
-                "{row} exact cap commits"
-            );
-            assert_eq!(exact.session.pending_providers.len(), 1);
-
-            let mut below = compile_children(&session, limits()).expect("one-below children");
-            set_replacement_cap(&mut below.session.limits, row, required - 1);
-            let canonical = below
-                .session
-                .controller
-                .session()
-                .canonical_snapshot()
-                .as_bytes()
-                .to_vec();
-            let error = below
-                .session
-                .command(&request, 4_096)
-                .expect_err("one-below replacement must reject");
-            let CommandError::CompileRejected(failure) = error else {
-                panic!("{row} one-below failure: {error:?}")
-            };
-            let expected_diagnostic = match row {
-                "graph" => b"graph.resource.limit\t$\n".as_slice(),
-                "source-total" | "source-overhead" => b"source.resource.limit\t$\n".as_slice(),
-                "effect-state" | "effect-scratch" => b"effect.resource.limit\t$\n".as_slice(),
-                "builtin" | "capi" => b"capi.resource.limit\t$\n".as_slice(),
-                "largest" => b"capi.resource.limit\t$\n".as_slice(),
-                _ => unreachable!(),
-            };
-            assert_eq!(failure.diagnostics, expected_diagnostic, "{row} diagnostic");
-            assert_eq!(
-                below
-                    .session
-                    .controller
-                    .session()
-                    .canonical_snapshot()
-                    .as_bytes(),
-                canonical,
-                "{row} canonical rollback"
-            );
-            assert_eq!(
-                below.session.controller.session().revision(),
-                SessionRevision(42),
-                "{row} revision rollback"
-            );
-            assert_eq!(below.session.controller.replay().len(), 0, "{row} replay");
-            assert_eq!(below.session.providers.epoch, 0, "{row} provider epoch");
-            assert!(
-                below.session.pending_providers.is_empty(),
-                "{row} providers"
-            );
-            assert_eq!(below.plan.owner.active_epoch().0, 0, "{row} plan epoch");
-            assert_eq!(
-                below
-                    .session
-                    .dequeue_event(EventLane::Reliable, 4_096)
-                    .expect("reliable lane"),
-                None,
-                "{row} reliable events"
-            );
-        }
-    }
-
-    #[test]
-    fn controller_command_is_canonical_replayed_and_supports_snapshot() {
-        let mut children = compile_children(SESSION, limits()).expect("children");
-        let capability = command_bytes(1, miso_engine_protocol::CommandPayload::CapabilitiesGet);
-        assert!(matches!(
-            children.session.command(&capability, 0),
-            Err(CommandError::BufferTooSmall { required: 4_096 })
-        ));
-        assert!(children.session.controller.replay().is_empty());
-
-        let first_len = children
-            .session
-            .command(&capability, 4_096)
-            .expect("capability response");
-        let first = children.session.command_response(first_len).to_vec();
-        let mut fields = [0_u16; 64];
-        match ProtocolCodec::default()
-            .decode_typed_response(&first, &mut DecodeScratch::new(&mut fields))
-            .expect("typed capability response")
-        {
-            miso_engine_protocol::DecodedTypedResponseFrame::Success {
-                header, payload, ..
-            } => {
-                assert_eq!(header.request_id.get(), 1);
-                assert_eq!(header.revision, SessionRevision(42));
-                let miso_engine_protocol::DecodedSuccessResponsePayload::Capabilities(value) =
-                    payload
-                else {
-                    panic!("capability payload")
-                };
-                assert_eq!(value.supported_commands.len(), 22);
-                assert_eq!(value.supported_events.len(), 12);
-                assert_eq!(value.flags, CapabilityFlags((1 << 14) - 1));
-                assert_eq!(value.replay_entries, 16);
-                assert_eq!(value.replay_bytes, 8_192);
-                assert_eq!(value.maximum_cached_response_bytes, 4_096);
-            }
-            _ => panic!("success response"),
-        }
-        let replay_len = children
-            .session
-            .command(&capability, first_len as u64)
-            .expect("exact replay");
-        assert_eq!(children.session.command_response(replay_len), first);
-        assert_eq!(children.session.controller.replay().len(), 1);
-
-        let snapshot = command_bytes(
-            2,
-            miso_engine_protocol::CommandPayload::SessionSnapshotGet(
-                miso_engine_protocol::SessionSnapshotRequest {
-                    offset: 0,
-                    maximum_bytes: 1,
-                },
-            ),
-        );
-        let snapshot_len = children
-            .session
-            .command(&snapshot, 4_096)
-            .expect("typed snapshot response");
-        let snapshot = children.session.command_response(snapshot_len);
-        let mut fields = [0_u16; 8];
-        assert!(matches!(
-            ProtocolCodec::default()
-                .decode_typed_response(snapshot, &mut DecodeScratch::new(&mut fields))
-                .expect("typed snapshot"),
-            miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
-                if header.status == StatusCode::Ok && header.request_id.get() == 2
-        ));
-    }
-
-    #[test]
     fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         let mut children = compile_children(SESSION, limits()).expect("children");
         let left = [0.25_f32; 128];
@@ -2938,224 +2622,29 @@ mod tests {
     }
 
     #[test]
-    fn capi_event_selector_encodes_all_six_protocol_event_families() {
-        let mut children = compile_children(SESSION, limits()).expect("children");
-        let revision = SessionRevision(42);
-        let configuration = miso_engine_protocol::TelemetryConfiguration {
-            meter_handles: vec![1, 2],
-            meter_period_blocks: 1,
-            counter_ids: vec![miso_engine_protocol::CounterId::ControlCommandBackpressure],
-            counter_period_blocks: 1,
-            diagnostics_enabled: true,
-            minimum_diagnostic_severity: miso_engine_protocol::DiagnosticSeverity::Info,
-        };
-        let configure = command_bytes_at_revision(
-            1,
-            ExpectedRevision::Exact(revision),
-            miso_engine_protocol::CommandPayload::TelemetryConfigure(&configuration),
-        );
-        children
-            .session
-            .command(&configure, 4_096)
-            .expect("telemetry configuration");
-
-        let request_id = RequestId::new(9).expect("request ID");
-        let reliable = [
-            miso_engine_protocol::ReliableSlot::session_committed(
-                revision,
-                1,
-                request_id,
-                SessionRevision(41),
-                1,
-            ),
-            miso_engine_protocol::ReliableSlot::automation_canceled(
-                revision,
-                2,
-                request_id,
-                3,
-                miso_engine_protocol::AutomationCancellationReason::ExplicitReconfiguration,
-                1,
-                Some(miso_engine_protocol::SampleTime(0)),
-            ),
-            miso_engine_protocol::ReliableSlot::transport_state(
-                revision,
-                3,
-                miso_engine_protocol::TransportState::Playing,
-                miso_engine_protocol::SampleTime(0),
-                miso_engine_protocol::SampleTime(0),
-                Some(request_id),
-            ),
-        ];
-        let mut observed = Vec::new();
-        for event in reliable {
-            children
-                .session
-                .controller
-                .queues_mut()
-                .try_enqueue_event(event)
-                .expect("reliable fixture event");
-            let len = children
-                .session
-                .dequeue_event(EventLane::Reliable, 4_096)
-                .expect("reliable egress")
-                .expect("reliable event");
-            let mut fields = [0_u16; 64];
-            observed.push(
-                ProtocolCodec::default()
-                    .decode_typed_event(
-                        children.session.event_response(len),
-                        &mut DecodeScratch::new(&mut fields),
-                    )
-                    .expect("typed reliable event")
-                    .header
-                    .message_id,
-            );
-        }
-
-        children
-            .session
-            .controller
-            .enqueue_diagnostic_event(
-                revision,
-                miso_engine_protocol::DiagnosticEvent {
-                    diagnostic: miso_engine_protocol::Diagnostic {
-                        code: "capi.event".to_owned(),
-                        severity: miso_engine_protocol::DiagnosticSeverity::Warning,
-                        path: Vec::new(),
-                        detail: None,
-                        operation_index: None,
-                        sample_time: Some(0),
-                        provider_sequence: Some(1),
-                    },
-                },
-            )
-            .expect("diagnostic fixture");
-        let diagnostic_len = children
-            .session
-            .dequeue_event(EventLane::Reliable, 4_096)
-            .expect("diagnostic egress")
-            .expect("diagnostic event");
-        let mut fields = [0_u16; 64];
-        observed.push(
-            ProtocolCodec::default()
-                .decode_typed_event(
-                    children.session.event_response(diagnostic_len),
-                    &mut DecodeScratch::new(&mut fields),
-                )
-                .expect("typed diagnostic")
-                .header
-                .message_id,
-        );
-
-        children
-            .session
-            .controller
-            .stage_meter_batch_event(
-                revision,
-                miso_engine_protocol::SampleTime(4),
-                &[miso_engine_protocol::MeterRecord {
-                    handle: 1,
-                    component: miso_engine_protocol::MeterComponent::Left,
-                    flags: 1,
-                    value: 0.5,
-                }],
-            )
-            .expect("meter fixture");
-        let meter_len = children
-            .session
-            .dequeue_event(EventLane::Lossy, 4_096)
-            .expect("meter egress")
-            .expect("meter event");
-        let mut fields = [0_u16; 64];
-        observed.push(
-            ProtocolCodec::default()
-                .decode_typed_event(
-                    children.session.event_response(meter_len),
-                    &mut DecodeScratch::new(&mut fields),
-                )
-                .expect("typed meter")
-                .header
-                .message_id,
-        );
-
-        children
-            .session
-            .controller
-            .stage_counter_snapshot_event(
-                revision,
-                &miso_engine_protocol::CounterSnapshot {
-                    observed_sample: miso_engine_protocol::SampleTime(4),
-                    values: vec![miso_engine_protocol::CounterValue {
-                        id: miso_engine_protocol::CounterId::ControlCommandBackpressure,
-                        value: 7,
-                    }],
-                },
-            )
-            .expect("counter fixture");
-        let counter_len = children
-            .session
-            .dequeue_event(EventLane::Lossy, 4_096)
-            .expect("counter egress")
-            .expect("counter event");
-        let mut fields = [0_u16; 64];
-        observed.push(
-            ProtocolCodec::default()
-                .decode_typed_event(
-                    children.session.event_response(counter_len),
-                    &mut DecodeScratch::new(&mut fields),
-                )
-                .expect("typed counter")
-                .header
-                .message_id,
-        );
-
-        assert_eq!(
-            observed,
-            [
-                miso_engine_protocol::MessageId::SessionCommitted,
-                miso_engine_protocol::MessageId::AutomationCanceled,
-                miso_engine_protocol::MessageId::TransportState,
-                miso_engine_protocol::MessageId::Diagnostic,
-                miso_engine_protocol::MessageId::MeterBatch,
-                miso_engine_protocol::MessageId::CounterSnapshot,
-            ]
-        );
-    }
-
-    #[test]
     fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
+        const RESPONSES: [&str; 8] = [
+            "4d49534f43544c000100000030000200090000005800000001000000000000002a00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000010000000000000006000101010000000100000000000000",
+            "4d49534f43544c000100000030000200080000003000000002000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
+            "4d49534f43544c000100000030000200060000004000000003000000000000002a00000000000000040000000000000001000201020000000100000000000000020004010800000001000000000000000300040108000000010000000000000004000401080000000200000000000000",
+            "4d49534f43544c000100000030000200030000001000000004000000000000002b00000000000000010000000000000001000301040000000100000000000000",
+            "4d49534f43544c000100000030000200090000005800000005000000000000002b00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
+            "4d49534f43544c000100000030000200090000005800000006000000000000002b00000000000000060000000000000001000d010800000001000000020000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
+            "4d49534f43544c00010000003000020001000000c801000007000000000000002b000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
+            "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000100000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
+        ];
+        const EVENTS: [&str; 7] = [
+            "4d49534f43544c000100000030000300108000005000000000000000000000002a0000000000000005000000000000000100040108000000010000000000000002000101010000000200000000000000030004010800000000000000000000000400040108000000000000000000000005000400080000000200000000000000",
+            "4d49534f43544c000100000030000300018000004000000000000000000000002b000000000000000400000000000000010004010800000002000000000000000200040108000000040000000000000003000401080000002a0000000000000004000301040000000100000000000000",
+            "4d49534f43544c000100000030000300028000006000000000000000000000002b000000000000000600000000000000010004010800000003000000000000000200040108000000030000000000000003000201020000000100000000000000040001010100000001000000000000000500040108000000020000000000000006000400080000000000000000000000",
+            "4d49534f43544c000100000030000300308000006000000000000000000000002b00000000000000010000000000000001000b015800000004000000000000000100090114000000636170692e72656e6465722e616374697669747900000000020001010100000001000000000000000600040008000000800000000000000007000400080000000100000000000000",
+            "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
+            "4d49534f43544c000100000030000300208000004800000000000000000000002b00000000000000040000000000000001000401080000008001000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010001000000000000000000",
+            "4d49534f43544c000100000030000300218000004000000000000000000000002b0000000000000002000000000000000100040108000000000200000000000002000b012800000002000000000000000100030104000000010000000000000002000401080000000400000000000000",
+        ];
         let (c_session, c_plan) = boxed_c_children(SESSION);
         let eager_capacities = crate::ffi::test_retained_capacities(c_session);
         let revision = SessionRevision(42);
-        crate::ffi::test_install_parameter(
-            c_session,
-            miso_engine_protocol::ParameterDescriptor {
-                handle: 1,
-                track_id: "fixture".to_owned(),
-                rack: miso_engine_protocol::ParameterRack::Dynamic,
-                effect_id: "fixture".to_owned(),
-                parameter_id: 1,
-                channel: miso_engine_protocol::ParameterChannel::Left,
-                value_kind: miso_engine_protocol::ParameterValueKind::F32,
-                unit: miso_engine_protocol::ParameterUnit::Linear,
-                domain: miso_engine_protocol::ParameterDomain::Continuous,
-                minimum: Some(-1.0),
-                maximum: Some(1.0),
-                default: 0.0,
-                mapping: miso_engine_protocol::ParameterMapping::Linear,
-                automation_rate: miso_engine_protocol::ParameterAutomationRate::Sample,
-                smoothing_samples: 0,
-                flags: 3,
-                display_name: None,
-                display_unit: None,
-                enum_choices: Vec::new(),
-            },
-            miso_engine_protocol::ParameterStateRecord {
-                handle: 1,
-                flags: 0,
-                value: 0.0,
-            },
-        );
         let configuration = miso_engine_protocol::TelemetryConfiguration {
             meter_handles: vec![1],
             meter_period_blocks: 1,
@@ -3171,7 +2660,7 @@ mod tests {
         );
         let (c_result, c_response) = command_c(c_session, &configure);
         assert_eq!(c_result, crate::RESULT_OK);
-        assert!(!c_response.is_empty());
+        assert_eq!(c_response, pinned_hex(RESPONSES[0]));
 
         let transport = command_bytes_at_revision(
             2,
@@ -3183,24 +2672,19 @@ mod tests {
                 },
             ),
         );
-        assert_eq!(command_c(c_session, &transport).0, crate::RESULT_OK);
-        let oracle = typed_event_bytes(&miso_engine_protocol::TypedEventFrame {
-            revision,
-            payload: miso_engine_protocol::EventPayload::TransportState(
-                miso_engine_protocol::TransportStateEvent {
-                    event_sequence: 1,
-                    state: miso_engine_protocol::TransportState::Playing,
-                    position: miso_engine_protocol::SampleTime(0),
-                    effective_sample: miso_engine_protocol::SampleTime(0),
-                    origin_request_id: Some(RequestId::new(2).expect("request")),
-                },
-            ),
-        });
-        event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &oracle);
+        assert_eq!(
+            command_c(c_session, &transport),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[1]))
+        );
+        event_c_exact_retry(
+            c_session,
+            crate::EVENT_LANE_RELIABLE,
+            &pinned_hex(EVENTS[0]),
+        );
 
         let record = miso_engine_protocol::AutomationRecord {
             kind: miso_engine_protocol::AutomationKind::Point,
-            handle: miso_engine_protocol::ParameterHandle(1),
+            handle: miso_engine_protocol::ParameterHandle(u32::MAX),
             start: miso_engine_protocol::SampleTime(1),
             end: miso_engine_protocol::SampleTime(1),
             start_value: 0.0,
@@ -3217,18 +2701,7 @@ mod tests {
         );
         let (automation_result, automation_response) = command_c(c_session, &automation);
         assert_eq!(automation_result, crate::RESULT_OK);
-        let mut automation_fields = [0_u16; 64];
-        let automation_decoded = ProtocolCodec::default()
-            .decode_typed_response(
-                &automation_response,
-                &mut DecodeScratch::new(&mut automation_fields),
-            )
-            .expect("accepted automation response");
-        assert!(matches!(
-            automation_decoded,
-            miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
-                if header.status == StatusCode::Ok
-        ));
+        assert_eq!(automation_response, pinned_hex(RESPONSES[2]));
         let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("event-origin").expect("stable ID"),
         };
@@ -3239,36 +2712,12 @@ mod tests {
                 &edit,
             )),
         );
-        assert_eq!(command_c(c_session, &structural).0, crate::RESULT_OK);
-        let expected_events = [
-            miso_engine_protocol::TypedEventFrame {
-                revision: SessionRevision(43),
-                payload: miso_engine_protocol::EventPayload::SessionCommitted(
-                    miso_engine_protocol::SessionCommitted {
-                        event_sequence: 2,
-                        origin_request_id: RequestId::new(4).expect("request"),
-                        previous_revision: revision,
-                        applied_operations: 1,
-                    },
-                ),
-            },
-            miso_engine_protocol::TypedEventFrame {
-                revision: SessionRevision(43),
-                payload: miso_engine_protocol::EventPayload::AutomationCanceled(
-                    miso_engine_protocol::AutomationCanceled {
-                        event_sequence: 3,
-                        origin_request_id: RequestId::new(3).expect("request"),
-                        canceled_records: 1,
-                        reason: miso_engine_protocol::AutomationCancellationReason::RevisionChanged,
-                        queue_generation: 2,
-                        effective_sample: Some(miso_engine_protocol::SampleTime(0)),
-                    },
-                ),
-            },
-        ];
-        for expected in &expected_events {
-            let oracle = typed_event_bytes(expected);
-            event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &oracle);
+        assert_eq!(
+            command_c(c_session, &structural),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[3]))
+        );
+        for event in &EVENTS[1..=2] {
+            event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &pinned_hex(event));
         }
 
         let mut pcm = [f32::NAN; 256];
@@ -3285,20 +2734,11 @@ mod tests {
             crate::ffi::test_render(c_plan, 0, &output),
             crate::RESULT_OK
         );
-        let diagnostic = miso_engine_protocol::Diagnostic {
-            code: "capi.render.activity".to_owned(),
-            severity: miso_engine_protocol::DiagnosticSeverity::Info,
-            path: Vec::new(),
-            detail: None,
-            operation_index: None,
-            sample_time: Some(128),
-            provider_sequence: Some(1),
-        };
-        let expected_diagnostic = typed_event_bytes(&miso_engine_protocol::TypedEventFrame {
-            revision: SessionRevision(43),
-            payload: miso_engine_protocol::EventPayload::Diagnostic(&diagnostic),
-        });
-        event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &expected_diagnostic);
+        event_c_exact_retry(
+            c_session,
+            crate::EVENT_LANE_RELIABLE,
+            &pinned_hex(EVENTS[3]),
+        );
 
         let quiet_meter_configuration = miso_engine_protocol::TelemetryConfiguration {
             meter_handles: vec![1],
@@ -3314,8 +2754,8 @@ mod tests {
             miso_engine_protocol::CommandPayload::TelemetryConfigure(&quiet_meter_configuration),
         );
         assert_eq!(
-            command_c(c_session, &disable_diagnostics).0,
-            crate::RESULT_OK
+            command_c(c_session, &disable_diagnostics),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[4]))
         );
         assert_eq!(
             crate::ffi::test_render(c_plan, 128, &output),
@@ -3334,7 +2774,10 @@ mod tests {
             ExpectedRevision::Exact(SessionRevision(43)),
             miso_engine_protocol::CommandPayload::TelemetryConfigure(&expanded_meter_configuration),
         );
-        assert_eq!(command_c(c_session, &expand_meters).0, crate::RESULT_OK);
+        assert_eq!(
+            command_c(c_session, &expand_meters),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[5]))
+        );
         assert_eq!(
             crate::ffi::test_render(c_plan, 256, &output),
             crate::RESULT_OK
@@ -3342,8 +2785,8 @@ mod tests {
         let collect_third_render =
             command_bytes(7, miso_engine_protocol::CommandPayload::CapabilitiesGet);
         assert_eq!(
-            command_c(c_session, &collect_third_render).0,
-            crate::RESULT_OK
+            command_c(c_session, &collect_third_render),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[6]))
         );
         assert_eq!(
             crate::ffi::test_telemetry_counters(c_session),
@@ -3352,23 +2795,8 @@ mod tests {
                 telemetry_dropped: 1,
             }
         );
-        for (sample, value) in [(128, 1.0), (384, 3.0)] {
-            let record = miso_engine_protocol::MeterRecord {
-                handle: 1,
-                component: miso_engine_protocol::MeterComponent::Left,
-                flags: 1,
-                value,
-            };
-            let oracle = typed_event_bytes(&miso_engine_protocol::TypedEventFrame {
-                revision: SessionRevision(43),
-                payload: miso_engine_protocol::EventPayload::MeterBatch(
-                    miso_engine_protocol::MeterBatch {
-                        observed_sample: miso_engine_protocol::SampleTime(sample),
-                        records: core::slice::from_ref(&record),
-                    },
-                ),
-            });
-            event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &oracle);
+        for event in &EVENTS[4..=5] {
+            event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &pinned_hex(event));
         }
 
         let counter_configuration = miso_engine_protocol::TelemetryConfiguration {
@@ -3385,30 +2813,14 @@ mod tests {
             miso_engine_protocol::CommandPayload::TelemetryConfigure(&counter_configuration),
         );
         assert_eq!(
-            command_c(c_session, &configure_counters).0,
-            crate::RESULT_OK
+            command_c(c_session, &configure_counters),
+            (crate::RESULT_OK, pinned_hex(RESPONSES[7]))
         );
         assert_eq!(
             crate::ffi::test_render(c_plan, 384, &output),
             crate::RESULT_OK
         );
-        let counters = miso_engine_protocol::CounterSnapshot {
-            observed_sample: miso_engine_protocol::SampleTime(512),
-            values: vec![miso_engine_protocol::CounterValue {
-                id: miso_engine_protocol::CounterId::ControlCommandBackpressure,
-                value: 4,
-            }],
-        };
-        let oracle = typed_event_bytes(&miso_engine_protocol::TypedEventFrame {
-            revision: SessionRevision(43),
-            payload: miso_engine_protocol::EventPayload::CounterSnapshot(
-                miso_engine_protocol::CounterSnapshotRef {
-                    observed_sample: counters.observed_sample,
-                    values: &counters.values,
-                },
-            ),
-        });
-        event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &oracle);
+        event_c_exact_retry(c_session, crate::EVENT_LANE_LOSSY, &pinned_hex(EVENTS[6]));
 
         assert_eq!(
             event_c(c_session, crate::EVENT_LANE_RELIABLE),
@@ -3507,6 +2919,7 @@ mod tests {
 
         for first in PHASES {
             for second in PHASES {
+                crate::ffi::test_reset_lifecycle_observer();
                 let (c_session, c_plan) = boxed_c_children(SESSION);
                 crate::ffi::test_set_structural_faults(c_session, [Some(first), Some(second)]);
                 let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
@@ -3520,7 +2933,8 @@ mod tests {
                         core::slice::from_ref(&edit),
                     ),
                 );
-                let before = crate::ffi::test_session_state_summary(c_session);
+                let before = crate::ffi::test_transaction_snapshot(c_session);
+                let plan_before = crate::ffi::test_plan_snapshot(c_plan);
                 let mut expected = TestOwnerCounters {
                     current_provider_constructed: 1,
                     current_plan_constructed: 1,
@@ -3531,7 +2945,16 @@ mod tests {
                     let (result, canary) = command_c(c_session, &request);
                     assert_eq!(result, crate::RESULT_BACKPRESSURE, "{first:?}/{second:?}");
                     assert_eq!(canary, vec![0xa5; 4_096]);
-                    assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+                    assert_eq!(
+                        crate::ffi::test_transaction_snapshot(c_session),
+                        before,
+                        "canonical/model/epochs/replay/events/resources/credits {first:?}/{second:?}"
+                    );
+                    assert_eq!(
+                        crate::ffi::test_plan_snapshot(c_plan),
+                        plan_before,
+                        "PCM boundary and plan resources {first:?}/{second:?}"
+                    );
                     assert_eq!(
                         event_c(c_session, crate::EVENT_LANE_RELIABLE),
                         (crate::RESULT_OK, Vec::new())
@@ -3584,13 +3007,29 @@ mod tests {
                     ),
                 );
                 assert_eq!(command_c(c_session, &retry).0, crate::RESULT_OK);
+                accumulate_success(&mut expected);
+                assert_eq!(crate::ffi::test_owner_counters(c_session), expected);
                 assert_eq!(
                     crate::ffi::test_session_state_summary(c_session),
                     (44, 2, 1, 1),
                     "reclaim released publication and retirement credit"
                 );
+                assert_eq!(
+                    crate::ffi::test_render(c_plan, 128, &output),
+                    crate::RESULT_OK
+                );
+                let collect =
+                    command_bytes(3, miso_engine_protocol::CommandPayload::CapabilitiesGet);
+                assert_eq!(command_c(c_session, &collect).0, crate::RESULT_OK);
+                expected.current_plan_disposed += 1;
+                expected.candidate_provider_disposed += 1;
+                assert_eq!(crate::ffi::test_owner_counters(c_session), expected);
                 crate::ffi::test_plan_destroy(c_plan);
+                expected.current_plan_disposed += 1;
                 crate::ffi::test_session_destroy(c_session);
+                expected.candidate_provider_disposed += 1;
+                expected.replay_current_disposed += 1;
+                assert_eq!(crate::ffi::test_lifecycle_counters(), expected);
             }
         }
     }
@@ -3852,23 +3291,34 @@ mod tests {
 
     #[test]
     fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact() {
-        let mut direct = compile_children(SESSION, limits()).expect("direct children");
+        const REUSE: &str = "4d49534f43544c000100000030000200070009004800000001000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000";
+        const EXPIRED: &str = "4d49534f43544c00010000003000020001000a004800000001000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000";
+        const STALE: &str = "4d49534f43544c000100000030000200030007004800000013000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000";
+        const TRANSPORT_20: &str = "4d49534f43544c000100000030000200080000003000000014000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000";
+        const TRANSPORT_21: &str = "4d49534f43544c000100000030000200080000003000000015000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000";
+        const EVENT_FULL: &str = "4d49534f43544c00010000003000020003000b00b000000016000000000000002a00000000000000030000000000000001000b01380000000200000000000000010009011500000070726f746f636f6c2e6261636b7072657373757265000000020001010100000003000000000000000200030104000000000000000000000003000b005800000005000000000000000100010101000000040000000000000002000401080000000200000000000000030004010800000002000000000000000400020102000000010000000000000005000400080000000400000000000000";
+        const TRANSPORT_EVENT_20: &str = "4d49534f43544c000100000030000300108000005000000000000000000000002a0000000000000005000000000000000100040108000000010000000000000002000101010000000100000000000000030004010800000000000000000000000400040108000000000000000000000005000400080000001400000000000000";
+        const TRANSPORT_EVENT_21: &str = "4d49534f43544c000100000030000300108000005000000000000000000000002a0000000000000005000000000000000100040108000000020000000000000002000101010000000200000000000000030004010800000000000000000000000400040108000000000000000000000005000400080000001500000000000000";
+        const STRUCTURAL_23: &str = "4d49534f43544c000100000030000200030000001000000017000000000000002b00000000000000010000000000000001000301040000000100000000000000";
+        const COMMIT_EVENT: &str = "4d49534f43544c000100000030000300018000004000000000000000000000002b000000000000000400000000000000010004010800000003000000000000000200040108000000170000000000000003000401080000002a0000000000000004000301040000000100000000000000";
+        const RETRY_24: &str = "4d49534f43544c000100000030000200030000001000000018000000000000002c00000000000000010000000000000001000301040000000100000000000000";
+        crate::ffi::test_reset_lifecycle_observer();
         let (c_session, c_plan) = boxed_c_children(SESSION);
         let codec = ProtocolCodec::default();
-        macro_rules! parity {
-            ($request:expr, $status:expr) => {{
+        let capabilities_response = |request_id: u64| {
+            let mut bytes = pinned_hex(ALL_COMMAND_RESPONSE_VECTORS[0]);
+            bytes[24..32].copy_from_slice(&request_id.to_le_bytes());
+            bytes
+        };
+        macro_rules! dispatch {
+            ($request:expr, $status:expr, $expected:expr) => {{
                 let request = $request;
-                let len = direct
-                    .session
-                    .command(&request, 4_096)
-                    .expect("direct decision");
-                let oracle = direct.session.command_response(len).to_vec();
                 let (result, bytes) = command_c(c_session, &request);
                 assert_eq!(result, crate::RESULT_OK);
-                assert_eq!(bytes, oracle);
+                assert_eq!(bytes, $expected);
                 let mut fields = [0_u16; 64];
                 let decoded = codec
-                    .decode_typed_response(&oracle, &mut DecodeScratch::new(&mut fields))
+                    .decode_typed_response(&bytes, &mut DecodeScratch::new(&mut fields))
                     .expect("typed decision");
                 let header = match decoded {
                     miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
@@ -3877,25 +3327,29 @@ mod tests {
                     }
                 };
                 assert_eq!(header.status, $status);
-                oracle
+                bytes
             }};
         }
 
         let first = command_bytes(1, miso_engine_protocol::CommandPayload::CapabilitiesGet);
-        let first_bytes = parity!(first.clone(), StatusCode::Ok);
-        assert_eq!(parity!(first.clone(), StatusCode::Ok), first_bytes);
+        let first_bytes = dispatch!(first.clone(), StatusCode::Ok, capabilities_response(1));
+        assert_eq!(
+            dispatch!(first.clone(), StatusCode::Ok, capabilities_response(1)),
+            first_bytes
+        );
         let conflict = command_bytes(1, miso_engine_protocol::CommandPayload::TransportGet);
-        parity!(conflict, StatusCode::RequestIdReuse);
+        dispatch!(conflict, StatusCode::RequestIdReuse, pinned_hex(REUSE));
         for request_id in 2..=18 {
-            parity!(
+            dispatch!(
                 command_bytes(
                     request_id,
                     miso_engine_protocol::CommandPayload::CapabilitiesGet
                 ),
-                StatusCode::Ok
+                StatusCode::Ok,
+                capabilities_response(request_id)
             );
         }
-        parity!(first, StatusCode::ReplayExpired);
+        dispatch!(first, StatusCode::ReplayExpired, pinned_hex(EXPIRED));
 
         let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("pressure-one").expect("stable ID"),
@@ -3907,96 +3361,90 @@ mod tests {
                 &edit,
             )),
         );
-        parity!(stale, StatusCode::RevisionConflict);
+        dispatch!(stale, StatusCode::RevisionConflict, pinned_hex(STALE));
 
-        for sequence in [1, 2] {
-            let event = miso_engine_protocol::ReliableSlot::transport_state(
-                SessionRevision(42),
-                sequence,
+        for (request_id, state, expected) in [
+            (
+                20,
                 miso_engine_protocol::TransportState::Stopped,
-                miso_engine_protocol::SampleTime(0),
-                miso_engine_protocol::SampleTime(0),
-                None,
+                TRANSPORT_20,
+            ),
+            (
+                21,
+                miso_engine_protocol::TransportState::Playing,
+                TRANSPORT_21,
+            ),
+        ] {
+            dispatch!(
+                command_bytes_at_revision(
+                    request_id,
+                    ExpectedRevision::Exact(SessionRevision(42)),
+                    miso_engine_protocol::CommandPayload::TransportSet(
+                        miso_engine_protocol::TransportSetRequest {
+                            state,
+                            position: Some(miso_engine_protocol::SampleTime(0)),
+                        },
+                    ),
+                ),
+                StatusCode::Ok,
+                pinned_hex(expected)
             );
-            direct
-                .session
-                .test_enqueue_reliable(event)
-                .expect("fill direct reliable");
-            crate::ffi::test_enqueue_reliable(c_session, event).expect("fill C reliable");
         }
         let event_full = command_bytes_at_revision(
-            20,
+            22,
             ExpectedRevision::Exact(SessionRevision(42)),
             miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
                 &edit,
             )),
         );
-        parity!(event_full, StatusCode::Backpressure);
-        for _ in 0..2 {
-            let len = direct
-                .session
-                .dequeue_event(EventLane::Reliable, 4_096)
-                .expect("reliable drain")
-                .expect("retained full event");
-            let oracle = direct.session.event_response(len).to_vec();
+        dispatch!(event_full, StatusCode::Backpressure, pinned_hex(EVENT_FULL));
+        for expected in [TRANSPORT_EVENT_20, TRANSPORT_EVENT_21] {
             let (result, bytes) = event_c(c_session, crate::EVENT_LANE_RELIABLE);
             assert_eq!(result, crate::RESULT_OK);
-            assert_eq!(bytes, oracle, "event-full command did not drop FIFO data");
+            assert_eq!(bytes, pinned_hex(expected));
         }
 
         let first_structural = command_bytes_at_revision(
-            21,
+            23,
             ExpectedRevision::Exact(SessionRevision(42)),
             miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
                 &edit,
             )),
         );
-        parity!(first_structural, StatusCode::Ok);
-        let len = direct
-            .session
-            .dequeue_event(EventLane::Reliable, 4_096)
-            .expect("commit event")
-            .expect("commit bytes");
-        let oracle = direct.session.event_response(len).to_vec();
-        assert_eq!(event_c(c_session, crate::EVENT_LANE_RELIABLE).1, oracle);
+        dispatch!(first_structural, StatusCode::Ok, pinned_hex(STRUCTURAL_23));
+        let commit_event = event_c(c_session, crate::EVENT_LANE_RELIABLE);
+        assert_eq!(commit_event.0, crate::RESULT_OK);
+        assert_eq!(commit_event.1, pinned_hex(COMMIT_EVENT));
 
         let second_edit = miso_engine_protocol::SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("pressure-two").expect("stable ID"),
         };
         let publication_full = command_bytes_at_revision(
-            22,
+            24,
             ExpectedRevision::Exact(SessionRevision(43)),
             miso_engine_protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(
                 &second_edit,
             )),
         );
         let before = crate::ffi::test_session_state_summary(c_session);
-        crate::ffi::test_set_capi_retained_limit(c_session, 0);
-        let (resource_result, resource_canary) = command_c(c_session, &publication_full);
-        assert_eq!(resource_result, crate::RESULT_COMPILE_REJECTED);
-        assert_eq!(resource_canary, vec![0xa5; 4_096]);
-        assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
-        crate::ffi::test_set_capi_retained_limit(c_session, limits().maximum_capi_retained_bytes);
-        assert!(matches!(
-            direct.session.command(&publication_full, 4_096),
-            Err(CommandError::Backpressure)
-        ));
+        let before_owners = crate::ffi::test_owner_counters(c_session);
         let (result, canary) = command_c(c_session, &publication_full);
         assert_eq!(result, crate::RESULT_BACKPRESSURE);
         assert_eq!(canary, vec![0xa5; 4_096]);
         assert_eq!(crate::ffi::test_session_state_summary(c_session), before);
+        let mut canceled = before_owners;
+        canceled.token_constructed += 1;
+        canceled.token_disposed += 1;
+        canceled.replay_candidate_constructed += 1;
+        canceled.replay_candidate_disposed += 1;
+        canceled.candidate_provider_constructed += 1;
+        canceled.candidate_provider_disposed += 1;
+        canceled.candidate_plan_constructed += 1;
+        canceled.candidate_plan_disposed += 1;
+        assert_eq!(crate::ffi::test_owner_counters(c_session), canceled);
         assert_eq!(before.0, 43);
         assert_eq!(before.3, 1);
 
-        let mut direct_pcm = [f32::NAN; 256];
-        direct
-            .plan
-            .render(
-                0,
-                PlanarBufferMut::try_new(&mut direct_pcm, 2, 128, 128)
-                    .expect("direct boundary output"),
-            )
-            .expect("direct boundary");
         let mut c_pcm = [f32::NAN; 256];
         let output = crate::PlanarOutput {
             struct_size: crate::PLANAR_OUTPUT_SIZE,
@@ -4011,18 +3459,23 @@ mod tests {
             crate::ffi::test_render(c_plan, 0, &output),
             crate::RESULT_OK
         );
-        assert_eq!(
-            c_pcm
-                .iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>(),
-            direct_pcm
-                .iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>()
-        );
-        let retry = parity!(publication_full, StatusCode::Ok);
+        assert!(c_pcm.iter().all(|sample| sample.to_bits() == 0));
+        let retry = dispatch!(publication_full, StatusCode::Ok, pinned_hex(RETRY_24));
         assert!(!retry.is_empty());
+        canceled.token_constructed += 1;
+        canceled.token_disposed += 1;
+        canceled.replay_candidate_constructed += 1;
+        canceled.replay_candidate_published += 1;
+        canceled.replay_current_disposed += 1;
+        canceled.candidate_provider_constructed += 1;
+        canceled.candidate_provider_published += 1;
+        canceled.candidate_plan_constructed += 1;
+        canceled.candidate_plan_published += 1;
+        canceled.reservation_constructed += 1;
+        canceled.reservation_committed += 1;
+        canceled.current_provider_disposed += 1;
+        canceled.current_plan_disposed += 1;
+        assert_eq!(crate::ffi::test_owner_counters(c_session), canceled);
         let after_retry = crate::ffi::test_session_state_summary(c_session);
         assert_eq!(after_retry.0, 44);
         assert_eq!(after_retry.2, 1);
