@@ -758,11 +758,9 @@ impl NonOkResponse {
 impl ProtocolCodec {
     /// Return the exact direct-caller-buffer length for one common non-OK response payload.
     pub fn encoded_non_ok_payload_len(&self, value: &NonOkResponse) -> Result<usize, EncodeError> {
-        let length = non_ok_len(self, value)?;
-        if length > self.limits().max_frame_bytes {
-            return Err(EncodeError::LimitExceeded);
-        }
-        Ok(length)
+        let mut sink = CountSink::new(self.limits());
+        write_non_ok(self, &mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode one canonical common non-OK response payload into caller output.
@@ -778,9 +776,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
+        let mut writer = SliceSink::new(output, self.limits());
         write_non_ok(self, &mut writer, value)?;
-        debug_assert_eq!(writer.position, required);
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -799,7 +797,9 @@ impl ProtocolCodec {
 
     /// Return the exact canonical nested-message length for one typed diagnostic.
     pub fn encoded_diagnostic_message_len(&self, value: &Diagnostic) -> Result<usize, EncodeError> {
-        diagnostic_message_len(self, value)
+        let mut sink = CountSink::new(self.limits());
+        write_diagnostic_message(self, &mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Decode one nested typed diagnostic payload.
@@ -1787,14 +1787,9 @@ impl ProtocolCodec {
         &self,
         diagnostic: &Diagnostic,
     ) -> Result<usize, EncodeError> {
-        if diagnostic.provider_sequence.is_none() {
-            return Err(EncodeError::LimitExceeded);
-        }
-        let required_nesting = if diagnostic.path.is_empty() { 1 } else { 2 };
-        if self.limits().max_nesting < required_nesting {
-            return Err(EncodeError::LimitExceeded);
-        }
-        tlv_len(self.encoded_diagnostic_message_len(diagnostic)?)
+        let mut sink = CountSink::new(self.limits());
+        write_diagnostic_event(self, &mut sink, diagnostic)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode one reliable typed diagnostic event directly into caller output without allocation.
@@ -1816,13 +1811,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_diagnostic_field(
-            self,
-            &mut writer,
-            schema::diagnostic_event::DIAGNOSTIC,
-            diagnostic,
-        )?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_diagnostic_event(self, &mut writer, diagnostic)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -2169,32 +2160,9 @@ impl ProtocolCodec {
         &self,
         value: &DiagnosticsPage,
     ) -> Result<usize, EncodeError> {
-        validate_diagnostics_page(value)?;
-        check_field_count(
-            self,
-            2_u32
-                .checked_add(
-                    u32::try_from(value.diagnostics.len())
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                )
-                .ok_or(EncodeError::LimitExceeded)?,
-        )?;
-        let nested_path = value
-            .diagnostics
-            .iter()
-            .any(|diagnostic| !diagnostic.path.is_empty());
-        let required_nesting = if nested_path { 2 } else { 1 };
-        if self.limits().max_nesting < required_nesting {
-            return Err(EncodeError::LimitExceeded);
-        }
-        let mut result = checked_add(tlv_len(8)?, tlv_len(1)?)?;
-        for diagnostic in &value.diagnostics {
-            result = checked_add(
-                result,
-                tlv_len(self.encoded_diagnostic_message_len(diagnostic)?)?,
-            )?;
-        }
-        Ok(result)
+        let mut sink = CountSink::new(self.limits());
+        write_diagnostics_page(self, &mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a typed diagnostics page directly into caller output without allocation.
@@ -2207,25 +2175,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::diagnostics_page::LAST_SEQUENCE,
-            &value.last_sequence.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::diagnostics_page::EOF,
-            &[u8::from(value.eof)]
-        )?;
-        for diagnostic in &value.diagnostics {
-            write_diagnostic_field(
-                self,
-                &mut writer,
-                schema::diagnostics_page::DIAGNOSTIC,
-                diagnostic,
-            )?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_diagnostics_page(self, &mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -2743,19 +2695,28 @@ impl<'a> PayloadWriter<'a> {
 
 fn write_non_ok(
     codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     value: &NonOkResponse,
 ) -> Result<(), EncodeError> {
+    check_non_ok_nesting(codec, value)?;
+    let count = schema::non_ok::SPEC.field_count(&[
+        (schema::non_ok::DIAGNOSTIC, value.diagnostics.len()),
+        (
+            schema::non_ok::BACKPRESSURE,
+            usize::from(value.backpressure.is_some()),
+        ),
+    ])?;
+    sink.check_field_count(count)?;
     for diagnostic in &value.diagnostics {
-        write_diagnostic_field(codec, writer, schema::non_ok::DIAGNOSTIC, diagnostic)?;
+        write_diagnostic_field(codec, sink, schema::non_ok::DIAGNOSTIC, diagnostic)?;
     }
     write_spec!(
-        writer,
+        sink,
         schema::non_ok::OMITTED_DIAGNOSTICS,
         &value.omitted_diagnostics.to_le_bytes()
     )?;
     if let Some(backpressure) = value.backpressure {
-        write_backpressure_field(codec, writer, schema::non_ok::BACKPRESSURE, backpressure)?;
+        write_backpressure_field(sink, schema::non_ok::BACKPRESSURE, backpressure)?;
     }
     Ok(())
 }
@@ -3526,51 +3487,62 @@ fn allocated_id(id: u16, event: bool) -> bool {
 
 fn write_diagnostic_field(
     codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     value: &Diagnostic,
 ) -> Result<(), EncodeError> {
-    let body_len = diagnostic_body_len(codec, value)?;
-    writer.nested_start_spec(spec, body_len, diagnostic_field_count(value)?)?;
-    write_diagnostic_body(codec, writer, value)?;
-    writer.finish_nested(body_len)
+    sink.nested_spec(spec, &mut |sink| {
+        write_diagnostic_message(codec, sink, value)
+    })
 }
 
-fn write_diagnostic_body(
+fn write_diagnostic_message(
     codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     value: &Diagnostic,
 ) -> Result<(), EncodeError> {
     check_diagnostic(codec, value)?;
-    write_spec!(writer, schema::diagnostic::CODE, value.code.as_bytes())?;
-    write_spec!(
-        writer,
-        schema::diagnostic::SEVERITY,
-        &[value.severity as u8]
-    )?;
+    let count = schema::diagnostic::SPEC.field_count(&[
+        (schema::diagnostic::PATH, value.path.len()),
+        (
+            schema::diagnostic::DETAIL,
+            usize::from(value.detail.is_some()),
+        ),
+        (
+            schema::diagnostic::OPERATION_INDEX,
+            usize::from(value.operation_index.is_some()),
+        ),
+        (
+            schema::diagnostic::SAMPLE_TIME,
+            usize::from(value.sample_time.is_some()),
+        ),
+        (
+            schema::diagnostic::PROVIDER_SEQUENCE,
+            usize::from(value.provider_sequence.is_some()),
+        ),
+    ])?;
+    sink.message_header(count)?;
+    write_spec!(sink, schema::diagnostic::CODE, value.code.as_bytes())?;
+    write_spec!(sink, schema::diagnostic::SEVERITY, &[value.severity as u8])?;
     for segment in &value.path {
-        write_path_segment_field(codec, writer, schema::diagnostic::PATH, segment)?;
+        write_path_segment_field(codec, sink, schema::diagnostic::PATH, segment)?;
     }
     if let Some(detail) = &value.detail {
-        write_spec!(writer, schema::diagnostic::DETAIL, detail.as_bytes())?;
+        write_spec!(sink, schema::diagnostic::DETAIL, detail.as_bytes())?;
     }
     if let Some(index) = value.operation_index {
         write_spec!(
-            writer,
+            sink,
             schema::diagnostic::OPERATION_INDEX,
             &index.to_le_bytes()
         )?;
     }
     if let Some(sample) = value.sample_time {
-        write_spec!(
-            writer,
-            schema::diagnostic::SAMPLE_TIME,
-            &sample.to_le_bytes()
-        )?;
+        write_spec!(sink, schema::diagnostic::SAMPLE_TIME, &sample.to_le_bytes())?;
     }
     if let Some(sequence) = value.provider_sequence {
         write_spec!(
-            writer,
+            sink,
             schema::diagnostic::PROVIDER_SEQUENCE,
             &sequence.to_le_bytes()
         )?;
@@ -3580,211 +3552,195 @@ fn write_diagnostic_body(
 
 fn write_path_segment_field(
     codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     value: &PathSegment,
 ) -> Result<(), EncodeError> {
-    let body_len = path_segment_body_len(codec, value)?;
-    writer.nested_start_spec(spec, body_len, 2)?;
-    write_spec!(
-        writer,
-        schema::path_segment::TAG,
-        &[path_segment_tag(value)]
-    )?;
+    sink.nested_spec(spec, &mut |sink| {
+        write_path_segment_message(codec, sink, value)
+    })
+}
+
+fn write_path_segment_message(
+    codec: &ProtocolCodec,
+    sink: &mut dyn Sink,
+    value: &PathSegment,
+) -> Result<(), EncodeError> {
+    check_path_segment(codec, value)?;
+    let variant = match value {
+        PathSegment::Field(_) => schema::path_segment::FIELD,
+        PathSegment::Index(_) => schema::path_segment::INDEX,
+        PathSegment::StableId(_) => schema::path_segment::STABLE_ID,
+    };
+    sink.message_header(schema::path_segment::SPEC.field_count(&[(variant, 1)])?)?;
+    write_spec!(sink, schema::path_segment::TAG, &[path_segment_tag(value)])?;
     match value {
         PathSegment::Field(field) => {
-            write_spec!(writer, schema::path_segment::FIELD, field.as_bytes())?
+            write_spec!(sink, schema::path_segment::FIELD, field.as_bytes())?
         }
         PathSegment::Index(index) => {
-            write_spec!(writer, schema::path_segment::INDEX, &index.to_le_bytes())?
+            write_spec!(sink, schema::path_segment::INDEX, &index.to_le_bytes())?
         }
         PathSegment::StableId(id) => {
-            write_spec!(writer, schema::path_segment::STABLE_ID, id.as_bytes())?
+            write_spec!(sink, schema::path_segment::STABLE_ID, id.as_bytes())?
         }
     }
-    writer.finish_nested(body_len)
+    Ok(())
 }
 
 fn write_backpressure_field(
-    codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     value: Backpressure,
 ) -> Result<(), EncodeError> {
-    let body_len = backpressure_body_len(codec, value)?;
-    writer.nested_start_spec(spec, body_len, backpressure_field_count(value)?)?;
+    sink.nested_spec(spec, &mut |sink| write_backpressure_message(sink, value))
+}
+
+fn write_backpressure_message(sink: &mut dyn Sink, value: Backpressure) -> Result<(), EncodeError> {
+    check_backpressure(value)?;
+    let count = schema::backpressure::SPEC.field_count(&[
+        (
+            schema::backpressure::GENERATION,
+            usize::from(value.generation.is_some()),
+        ),
+        (
+            schema::backpressure::RETRY_BOUNDARY,
+            usize::from(value.retry_boundary.is_some()),
+        ),
+        (
+            schema::backpressure::REQUESTED_BYTES,
+            usize::from(value.requested_bytes.is_some()),
+        ),
+        (
+            schema::backpressure::AVAILABLE_BYTES,
+            usize::from(value.available_bytes.is_some()),
+        ),
+    ])?;
+    sink.message_header(count)?;
     write_spec!(
-        writer,
+        sink,
         schema::backpressure::QUEUE_KIND,
         &[value.queue_kind as u8]
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::backpressure::CAPACITY,
         &value.capacity.to_le_bytes()
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::backpressure::OCCUPANCY,
         &value.occupancy.to_le_bytes()
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::backpressure::REQUESTED_ITEMS,
         &value.requested_items.to_le_bytes()
     )?;
     if let Some(generation) = value.generation {
         write_spec!(
-            writer,
+            sink,
             schema::backpressure::GENERATION,
             &generation.to_le_bytes()
         )?;
     }
     if let Some(boundary) = value.retry_boundary {
         write_spec!(
-            writer,
+            sink,
             schema::backpressure::RETRY_BOUNDARY,
             &boundary.to_le_bytes()
         )?;
     }
     if let Some(bytes) = value.requested_bytes {
         write_spec!(
-            writer,
+            sink,
             schema::backpressure::REQUESTED_BYTES,
             &bytes.to_le_bytes()
         )?;
     }
     if let Some(bytes) = value.available_bytes {
         write_spec!(
-            writer,
+            sink,
             schema::backpressure::AVAILABLE_BYTES,
             &bytes.to_le_bytes()
         )?;
     }
-    writer.finish_nested(body_len)
+    Ok(())
 }
 
-fn non_ok_len(codec: &ProtocolCodec, value: &NonOkResponse) -> Result<usize, EncodeError> {
-    let count = non_ok_field_count(value)?;
-    check_field_count(codec, count)?;
-    check_non_ok_nesting(codec, value)?;
-    let mut result = tlv_len(4)?;
-    for diagnostic in &value.diagnostics {
-        result = checked_add(result, tlv_len(diagnostic_message_len(codec, diagnostic)?)?)?;
+fn write_diagnostic_event(
+    codec: &ProtocolCodec,
+    sink: &mut dyn Sink,
+    diagnostic: &Diagnostic,
+) -> Result<(), EncodeError> {
+    if diagnostic.provider_sequence.is_none() {
+        return Err(EncodeError::LimitExceeded);
     }
-    if let Some(backpressure) = value.backpressure {
-        result = checked_add(
-            result,
-            tlv_len(backpressure_message_len(codec, backpressure)?)?,
+    let required_nesting = if diagnostic.path.is_empty() { 1 } else { 2 };
+    if codec.limits().max_nesting < required_nesting {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::diagnostic_event::SPEC.field_count(&[])?)?;
+    write_diagnostic_field(
+        codec,
+        sink,
+        schema::diagnostic_event::DIAGNOSTIC,
+        diagnostic,
+    )
+}
+
+fn write_diagnostics_page(
+    codec: &ProtocolCodec,
+    sink: &mut dyn Sink,
+    value: &DiagnosticsPage,
+) -> Result<(), EncodeError> {
+    validate_diagnostics_page(value)?;
+    let required_nesting = if value
+        .diagnostics
+        .iter()
+        .any(|diagnostic| !diagnostic.path.is_empty())
+    {
+        2
+    } else {
+        1
+    };
+    if codec.limits().max_nesting < required_nesting {
+        return Err(EncodeError::LimitExceeded);
+    }
+    let count = schema::diagnostics_page::SPEC.field_count(&[(
+        schema::diagnostics_page::DIAGNOSTIC,
+        value.diagnostics.len(),
+    )])?;
+    sink.check_field_count(count)?;
+    write_spec!(
+        sink,
+        schema::diagnostics_page::LAST_SEQUENCE,
+        &value.last_sequence.to_le_bytes()
+    )?;
+    write_spec!(sink, schema::diagnostics_page::EOF, &[u8::from(value.eof)])?;
+    for diagnostic in &value.diagnostics {
+        write_diagnostic_field(
+            codec,
+            sink,
+            schema::diagnostics_page::DIAGNOSTIC,
+            diagnostic,
         )?;
     }
-    Ok(result)
+    Ok(())
 }
 
-fn diagnostic_message_len(codec: &ProtocolCodec, value: &Diagnostic) -> Result<usize, EncodeError> {
-    checked_add(NESTED_HEADER_BYTES, diagnostic_body_len(codec, value)?)
-}
-
-fn diagnostic_body_len(codec: &ProtocolCodec, value: &Diagnostic) -> Result<usize, EncodeError> {
-    check_diagnostic(codec, value)?;
-    check_field_count(codec, diagnostic_field_count(value)?)?;
-    let mut result = checked_add(tlv_len(value.code.len())?, tlv_len(1)?)?;
-    for segment in &value.path {
-        result = checked_add(result, tlv_len(path_segment_message_len(codec, segment)?)?)?;
-    }
-    if let Some(detail) = &value.detail {
-        result = checked_add(result, tlv_len(detail.len())?)?;
-    }
-    if value.operation_index.is_some() {
-        result = checked_add(result, tlv_len(4)?)?;
-    }
-    if value.sample_time.is_some() {
-        result = checked_add(result, tlv_len(8)?)?;
-    }
-    if value.provider_sequence.is_some() {
-        result = checked_add(result, tlv_len(8)?)?;
-    }
-    Ok(result)
-}
-
-fn path_segment_message_len(
-    codec: &ProtocolCodec,
-    value: &PathSegment,
-) -> Result<usize, EncodeError> {
-    checked_add(NESTED_HEADER_BYTES, path_segment_body_len(codec, value)?)
-}
-
-fn path_segment_body_len(codec: &ProtocolCodec, value: &PathSegment) -> Result<usize, EncodeError> {
-    let value_len = match value {
-        PathSegment::Field(field) => {
-            check_string(codec, field)?;
-            field.len()
-        }
-        PathSegment::Index(_) => 8,
+fn check_path_segment(codec: &ProtocolCodec, value: &PathSegment) -> Result<(), EncodeError> {
+    match value {
+        PathSegment::Field(field) => check_string(codec, field),
+        PathSegment::Index(_) => Ok(()),
         PathSegment::StableId(id) => {
             check_string(codec, id)?;
             if !valid_stable_id(id) {
                 return Err(EncodeError::LimitExceeded);
             }
-            id.len()
-        }
-    };
-    checked_add(tlv_len(1)?, tlv_len(value_len)?)
-}
-
-fn backpressure_message_len(
-    codec: &ProtocolCodec,
-    value: Backpressure,
-) -> Result<usize, EncodeError> {
-    checked_add(NESTED_HEADER_BYTES, backpressure_body_len(codec, value)?)
-}
-
-fn backpressure_body_len(codec: &ProtocolCodec, value: Backpressure) -> Result<usize, EncodeError> {
-    check_backpressure(value)?;
-    check_field_count(codec, backpressure_field_count(value)?)?;
-    let mut result = checked_add(
-        tlv_len(1)?,
-        checked_add(tlv_len(8)?, checked_add(tlv_len(8)?, tlv_len(2)?)?)?,
-    )?;
-    for present in [
-        value.generation.is_some(),
-        value.retry_boundary.is_some(),
-        value.requested_bytes.is_some(),
-        value.available_bytes.is_some(),
-    ] {
-        if present {
-            result = checked_add(result, tlv_len(8)?)?;
+            Ok(())
         }
     }
-    Ok(result)
-}
-
-fn non_ok_field_count(value: &NonOkResponse) -> Result<u32, EncodeError> {
-    u32::try_from(value.diagnostics.len())
-        .map_err(|_| EncodeError::LimitExceeded)?
-        .checked_add(1)
-        .and_then(|count| count.checked_add(u32::from(value.backpressure.is_some())))
-        .ok_or(EncodeError::LimitExceeded)
-}
-
-fn diagnostic_field_count(value: &Diagnostic) -> Result<u32, EncodeError> {
-    u32::try_from(value.path.len())
-        .map_err(|_| EncodeError::LimitExceeded)?
-        .checked_add(2)
-        .and_then(|count| count.checked_add(u32::from(value.detail.is_some())))
-        .and_then(|count| count.checked_add(u32::from(value.operation_index.is_some())))
-        .and_then(|count| count.checked_add(u32::from(value.sample_time.is_some())))
-        .and_then(|count| count.checked_add(u32::from(value.provider_sequence.is_some())))
-        .ok_or(EncodeError::LimitExceeded)
-}
-
-fn backpressure_field_count(value: Backpressure) -> Result<u32, EncodeError> {
-    4_u32
-        .checked_add(u32::from(value.generation.is_some()))
-        .and_then(|count| count.checked_add(u32::from(value.retry_boundary.is_some())))
-        .and_then(|count| count.checked_add(u32::from(value.requested_bytes.is_some())))
-        .and_then(|count| count.checked_add(u32::from(value.available_bytes.is_some())))
-        .ok_or(EncodeError::LimitExceeded)
 }
 
 fn check_diagnostic(codec: &ProtocolCodec, value: &Diagnostic) -> Result<(), EncodeError> {
@@ -3794,9 +3750,6 @@ fn check_diagnostic(codec: &ProtocolCodec, value: &Diagnostic) -> Result<(), Enc
     }
     if let Some(detail) = &value.detail {
         check_string(codec, detail)?;
-    }
-    for segment in &value.path {
-        let _ = path_segment_body_len(codec, segment)?;
     }
     Ok(())
 }
@@ -3835,13 +3788,6 @@ fn check_backpressure(value: Backpressure) -> Result<(), EncodeError> {
 
 fn check_string(codec: &ProtocolCodec, value: &str) -> Result<(), EncodeError> {
     if value.len() > codec.limits().max_string_bytes {
-        return Err(EncodeError::LimitExceeded);
-    }
-    Ok(())
-}
-
-fn check_field_count(codec: &ProtocolCodec, count: u32) -> Result<(), EncodeError> {
-    if count > codec.limits().max_tlv_count {
         return Err(EncodeError::LimitExceeded);
     }
     Ok(())
