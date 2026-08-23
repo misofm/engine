@@ -14,7 +14,8 @@
 
 mod support;
 
-use miso_engine_lane::{Lane, Simd4, Simd8};
+use miso_engine_lane::kernels::{SvfState, svf_step};
+use miso_engine_lane::{Lane, Simd4, Simd8, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
 };
@@ -142,4 +143,93 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
             );
         }
     }
+}
+
+/// [`svf_step`] delivers both taps of **one** state.
+///
+/// The audit of the multiband compressor (#94 F4) found four SVF sections where two suffice,
+/// because the section that produces the low-pass tap also produces the band-pass tap that forms
+/// the all-pass `x - 2k*v1`. This gate is that claim, stated as bits.
+///
+/// The oracle is a transcription of Simper's recurrence written here, in the test, from the
+/// equations — not `svf_block`, which is *defined* by [`svf_step`] and would therefore agree with
+/// any mutation of it. It runs one lane at a time, so it also proves that neither tap depends on
+/// the width. Non-vacuity is asserted too: the two taps must actually differ, or a body that
+/// returned the same value twice would pass.
+///
+/// Red mutation: return `(v2, v1)` from `svf_step`; swap `a2` and `a3` in its `d2`; drop one of
+/// the two `flush` calls.
+#[test]
+fn g2_svf_step_yields_both_taps_of_one_state() {
+    // A 1 kHz Butterworth low-pass at 48 kHz: g = tan(pi * 1000 / 48000), k = sqrt(2),
+    // t = g * (g + k), c1 = t / (1 + t), a2 = g * (1 - c1), a3 = g * a2.
+    const C1: f32 = 0.086_269_25;
+    const A2: f32 = 0.059_915_63;
+    const A3: f32 = 0.003_927_913_5;
+    const FRAMES: usize = 4_096;
+
+    /// Simper's recurrence, transcribed from the equations, one scalar lane at a time.
+    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>) {
+        let (mut ic1, mut ic2) = (0.0f32, 0.0f32);
+        let mut band = Vec::with_capacity(FRAMES);
+        let mut low = Vec::with_capacity(FRAMES);
+        for frame in 0..FRAMES {
+            let v0 = input[frame * stride + lane];
+            let v3 = v0 - ic2;
+            let d1 = <f32 as Lane>::fma(-C1, ic1, A2 * v3);
+            let v1 = ic1 + d1;
+            let d2 = <f32 as Lane>::fma(A3, v3, A2 * ic1);
+            let v2 = ic2 + d2;
+            ic1 = flush(ic1 + (d1 + d1));
+            ic2 = flush(ic2 + (d2 + d2));
+            band.push(v1.to_bits());
+            low.push(v2.to_bits());
+        }
+        (band, low)
+    }
+
+    fn check<L: Lane>() {
+        let mut input = vec![0.0f32; FRAMES * L::WIDTH];
+        Signal::Noise.fill(&mut input, 0x5F5F_0001);
+        let mut state = SvfState::<L>::default();
+        let nc1 = L::splat(C1).neg();
+        let (a2, a3) = (L::splat(A2), L::splat(A3));
+        let mut band = vec![0u32; FRAMES * L::WIDTH];
+        let mut low = vec![0u32; FRAMES * L::WIDTH];
+        for frame in 0..FRAMES {
+            let (v1, v2) =
+                svf_step::<L>(L::load(&input[frame * L::WIDTH..]), nc1, a2, a3, &mut state);
+            v1.store_bits(&mut band[frame * L::WIDTH..]);
+            v2.store_bits(&mut low[frame * L::WIDTH..]);
+        }
+        for lane in 0..L::WIDTH {
+            let (expected_band, expected_low) = oracle(&input, L::WIDTH, lane);
+            let mut differing = 0usize;
+            for frame in 0..FRAMES {
+                assert_eq!(
+                    band[frame * L::WIDTH + lane],
+                    expected_band[frame],
+                    "svf_step band-pass tap at width {}, lane {lane}, frame {frame}",
+                    L::WIDTH
+                );
+                assert_eq!(
+                    low[frame * L::WIDTH + lane],
+                    expected_low[frame],
+                    "svf_step low-pass tap at width {}, lane {lane}, frame {frame}",
+                    L::WIDTH
+                );
+                if expected_band[frame] != expected_low[frame] {
+                    differing += 1;
+                }
+            }
+            assert!(
+                differing > FRAMES / 2,
+                "the two taps must differ: only {differing} of {FRAMES} frames do"
+            );
+        }
+    }
+
+    check::<f32>();
+    check::<Simd4>();
+    check::<Simd8>();
 }

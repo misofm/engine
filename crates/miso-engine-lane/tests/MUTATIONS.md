@@ -28,6 +28,8 @@ cargo test --locked -p miso-engine-lane --test <test binary>
 | 8 | `flush` compares with `le` instead of `lt` | `src/lib.rs` | `g4_flush` | RED |
 | 9 | `FLUSH_EPS` drops to `1e-40`, below the top of the subnormal range | `src/lib.rs` | `g6_ftz_inert` | RED |
 | 10 | `svf_block` drops the `s.ic1 = ic1` state write-back | `src/kernels.rs` | `p1_partition` | RED |
+| 11 | `svf_step` returns its taps swapped: `(v2, v1)` instead of `(v1, v2)` | `src/kernels.rs` | `g2_kernel_identity` | RED |
+| 12 | `svf_step` swaps `a2` and `a3` in `d2`: `fma(a2, v3, a3 * ic1)` | `src/kernels.rs` | `g2_kernel_identity` | RED |
 
 ## Recorded failures
 
@@ -149,3 +151,24 @@ inside the lane crate, a lockfile with an unpinned `wide`, and a lane dependency
   crate, which is job 83d. Its scalar twin is the code G3 proves, and the vector body is the same
   operations in the same order.
 * Cross-target digests (G5) and the AArch64 leg of G1 are 83d/CI-runner work for the same reason.
+
+### 11 — `svf_step` returns its taps swapped
+
+```
+thread 'g2_svf_step_yields_both_taps_of_one_state' panicked at
+  crates/miso-engine-lane/tests/g2_kernel_identity.rs:214:17:
+assertion `left == right` failed: svf_step band-pass tap at width 1, lane 0, frame 0
+```
+
+The gate's oracle is a transcription of Simper's recurrence written inside the test, not
+`svf_block`: `svf_block` is now *defined* by `svf_step`, so comparing the two would agree with any
+mutation of `svf_step` and prove nothing. The first version of this gate did exactly that and
+survived this mutation; the transcription is what makes it red.
+
+### 12 — `svf_step` swaps `a2` and `a3` in `d2`
+
+```
+thread 'g2_svf_step_yields_both_taps_of_one_state' panicked at
+  crates/miso-engine-lane/tests/g2_kernel_identity.rs:220:17:
+assertion `left == right` failed: svf_step low-pass tap at width 1, lane 0, frame 0
+```

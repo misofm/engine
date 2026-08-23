@@ -126,22 +126,74 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 #[inline(always)]
 pub fn svf_block<L: Lane>(io: &mut [f32], frames: usize, c: &SvfCoef<L>, s: &mut SvfState<L>) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let (mut ic1, mut ic2) = (s.ic1, s.ic2);
+    let mut state = *s;
     let nc1 = c.c1.neg();
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let v0 = L::load(frame);
-        let v3 = v0.sub(ic2);
-        let d1 = nc1.fma(ic1, c.a2.mul(v3));
-        let v1 = ic1.add(d1);
-        let d2 = c.a3.fma(v3, c.a2.mul(ic1));
-        let v2 = ic2.add(d2);
-        ic1 = flush(ic1.add(d1.add(d1)));
-        ic2 = flush(ic2.add(d2.add(d2)));
+        let (v1, v2) = svf_step(v0, nc1, c.a2, c.a3, &mut state);
         let y = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         y.store(frame);
     }
-    s.ic1 = ic1;
-    s.ic2 = ic2;
+    *s = state;
+}
+
+/// One frame of [`svf_block`]'s recurrence, returning the band-pass and low-pass taps.
+///
+/// **It is a per-frame step helper for a caller that owns its own frame loop, and it duplicates
+/// nothing.** [`svf_block_ramped`] is the *other* thing: a whole-block kernel whose coefficients
+/// move per sample. The two are orthogonal — this one takes constant coefficients and hands back
+/// both taps, that one takes moving coefficients and hands back one mixed output — and both are
+/// the same recurrence, because `svf_block`, `svf_block_ramped` and every caller of `svf_step` run
+/// the body written once below. A crossover embedded in a segment driver, where the filter output
+/// feeds a ring in the same frame, cannot call either block kernel; it calls this.
+///
+/// Steps 2 to 8 of [`svf_block`]'s frozen order, in that order — everything except the load, the
+/// output mix and the store. `nc1` is `-c1`, hoisted out of the caller's frame loop because a
+/// sign-bit flip is exact and a filter whose coefficients do not move should not recompute it per
+/// sample; [`svf_block_ramped`] recomputes it per frame because its coefficients do move.
+///
+/// This is **not** a per-sample entry point in the sense D10 forbids: it is `#[inline(always)]`,
+/// generic, takes no slices, validates nothing and returns no `Result`, and it is the body
+/// [`svf_block`] itself runs. What D10 deletes is the opposite thing — a validated, dynamically
+/// dispatched, `#[inline(never)]` one-sample call across a crate boundary. Nor is it
+/// [`svf_block_ramped`]'s job: that kernel exists for per-sample *coefficient* ramps, and a
+/// crossover's coefficients never move.
+///
+/// This exists because a filter whose two taps are *both* wanted cannot go through
+/// [`svf_block`]'s single output mix. The Linkwitz-Riley crossover of the multiband compressor is
+/// the case that motivates it (audit #94 F4): one stage yields the low-pass tap that feeds the
+/// second stage *and* the band-pass tap that forms the all-pass `x - 2k*v1`, from which the high
+/// band is a subtraction. Writing a second SVF body for that would be exactly the duplication the
+/// #83 audit is about, so [`svf_block`] is expressed through this function and there is one
+/// recurrence in the workspace.
+///
+/// Expressing that with [`svf_block`] would need two passes with two mixes over two *separate*
+/// state sets — which is the four-section crossover the audit proved redundant — plus a scratch
+/// buffer per band, and it cannot express a frame-serial graph at all: the multiband's crossover
+/// output feeds a ring, the ring feeds a per-track detector tap, and the detector's gain
+/// multiplies the *delayed* band, all inside one frame.
+///
+/// The caller owns the frame loop, so `s` must be a local copy of the state for the duration of a
+/// block — passing the caller's stored state straight in would reload it from memory every frame.
+///
+/// Frozen operation order, matching [`svf_block`] step for step:
+/// 1. `v3 = v0 - ic2`
+/// 2. `d1 = fma(nc1, ic1, a2 * v3)`
+/// 3. `v1 = ic1 + d1`
+/// 4. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
+/// 5. `v2 = ic2 + d2`
+/// 6. `ic1 = flush(ic1 + (d1 + d1))` — `d1 + d1` is exact
+/// 7. `ic2 = flush(ic2 + (d2 + d2))`
+#[inline(always)]
+pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, s: &mut SvfState<L>) -> (L, L) {
+    let v3 = v0.sub(s.ic2);
+    let d1 = nc1.fma(s.ic1, a2.mul(v3));
+    let v1 = s.ic1.add(d1);
+    let d2 = a3.fma(v3, a2.mul(s.ic1));
+    let v2 = s.ic2.add(d2);
+    s.ic1 = flush(s.ic1.add(d1.add(d1)));
+    s.ic2 = flush(s.ic2.add(d2.add(d2)));
+    (v1, v2)
 }
 
 /// [`svf_block`] with per-lane, per-sample coefficient ramps (amendment A2).
@@ -164,17 +216,11 @@ pub fn svf_block_ramped<L: Lane>(
     s: &mut SvfState<L>,
 ) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let (mut ic1, mut ic2) = (s.ic1, s.ic2);
+    let mut state = *s;
     for (index, frame) in io.chunks_exact_mut(L::WIDTH).enumerate() {
         let nc1 = c.c1.neg();
         let v0 = L::load(frame);
-        let v3 = v0.sub(ic2);
-        let d1 = nc1.fma(ic1, c.a2.mul(v3));
-        let v1 = ic1.add(d1);
-        let d2 = c.a3.fma(v3, c.a2.mul(ic1));
-        let v2 = ic2.add(d2);
-        ic1 = flush(ic1.add(d1.add(d1)));
-        ic2 = flush(ic2.add(d2.add(d2)));
+        let (v1, v2) = svf_step(v0, nc1, c.a2, c.a3, &mut state);
         let y = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         y.store(frame);
         if index < ramp_frames {
@@ -186,8 +232,7 @@ pub fn svf_block_ramped<L: Lane>(
             c.m2 = c.m2.add(step.m2);
         }
     }
-    s.ic1 = ic1;
-    s.ic2 = ic2;
+    *s = state;
 }
 
 /// Coefficient of a one-pole TPT smoother or envelope follower, one per lane.
