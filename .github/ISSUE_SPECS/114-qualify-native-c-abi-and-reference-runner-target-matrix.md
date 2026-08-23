@@ -5,11 +5,11 @@
 Qualify the completed native C ABI control/render product and WAV/RF64 reference runner across the
 launch native target boundary without changing product bytes or rerunning descriptive benchmarks.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1.** Issues 116 and 121 are closed with strict
-Sol XHigh PASS, so their joined qualification dependency is satisfied. Sol High implements; Sol
-XHigh briefs and verifies. One pass plus one bounded HOLD correction is the complete budget. A
-second material HOLD stops. Benchmark and timing invocation counts are zero and must remain zero.
-Remote issue synchronization remains root-owned; this rebrief makes no GitHub change.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE AFTER UPSTREAM AND CI SYNCHRONIZATION.** Issues 116
+and 121 were qualified as one frozen candidate. Sol High completed the qualification-only pass and
+the sole bounded correction; Sol XHigh returned strict terminal PASS. Benchmark and timing
+invocation counts remained zero. Remote evidence synchronization and closure remain root-owned;
+this record makes no GitHub change.
 
 ## Dependencies by exact title
 
@@ -193,3 +193,46 @@ raw-stage hashes, strict gates, and the complete target matrix are bound by
 `fixtures/capi-qualification/v1/EVIDENCE.sha256` and independently pinned by the semantic checker.
 Its preserved-stage mode cross-checks those records against the immutable generated manifest, raw
 logs/audit JSON, binaries, libraries, symbols, and armed syscall trace.
+
+## Sol XHigh review and terminal verdict
+
+Pass 1 received the sole bounded **HOLD**. The first checker bound evidence-file hashes and matrix
+shape but did not semantically validate the artifact, symbol, audit, execution-counter or strict-
+gate records. The corrected consumers were not durably tied to their final binaries and libraries,
+the report overstated unparsed `readelf` output, and the remaining strict gate results were not part
+of the evidence seal.
+
+Sol High corrected only qualification evidence and checker surfaces without rebuilding the product
+or rerunning any consumer, runner, CAPI audit or realtime workload. The immutable technical
+checkpoint is commit `7a7b3c1862cacf1387471f64209a0994261e7262`, tree
+`d00b08ed41641f11ce08a9edd8d828cd3dcf2430`. Its final semantic authority includes:
+
+- evidence manifest `6719a5027046695becd74696564d59392c8572faa4c6f6e003e5de943f1fac42`;
+- semantic evidence checker `6c36bdc4188cf24003c6d36e99ffa9c1c20d71ecdfafdc7897cbeaf4725c51fc`;
+- final qualification checker `5c9c50a662b500ef0ef05b50dd2de0ff51c892bac0edf3bb224d4ba2f2ccfe69`;
+  and
+- correlated mutation suite `e67d09a79e372133ff995f2054251d762427b7c609e9ac4607006e94c2d0d759`.
+
+The semantic checker independently pins every artifact size/hash; both exact 14-symbol GNU `nm`
+definition sets with zero same-prefix imports; both complete audit objects; all qualification,
+execution and prohibited counters; each corrected consumer's source/header/library/binary/log and
+zero exit; the preserved raw manifest/log/audit/binary/library/symbol/trace inventory; and all 22
+strict gates. Correlated mutations recompute the checksum manifest after altering each artifact,
+symbol, audit, count, prohibited-count, consumer, raw-stage, strict-gate and matrix family, and each
+is rejected. The unsupported `readelf` independence claim was narrowed to the exact validated `nm`
+claim.
+
+The final matrix remains exactly ten Linux `PASS` rows and seven candid cross-target `UNAVAILABLE`
+rows. Execution counters are exactly: one product build, one consumer-fixture correction after the
+recorded initial C11-static exit 13, four corrected consumer passes, one combined CAPI/protocol test
+invocation, one frozen runner-corpus invocation, one 100,000-call exported-C audit and one
+1,000,000-block render/swap audit. The product build, runner corpus, consumers and functional audits
+were not rerun during the correction. Benchmark, timing, playback, listening, browser and device
+invocation counts are all zero.
+
+Sol XHigh's terminal read-only review returned strict **PASS**. The accepted C API product/header,
+protocol, runner, runner contract, Cargo lock and accepted fixtures remained byte-identical; the
+allowed qualification-only fence and candid tool identities are exact. Issue 114 is therefore
+complete and ready to close after this evidence is upstream, required CI is green and the GitHub
+issue is synchronized. At that point it unblocks **End-to-end release, performance, and listening
+qualification** (Issue 026).

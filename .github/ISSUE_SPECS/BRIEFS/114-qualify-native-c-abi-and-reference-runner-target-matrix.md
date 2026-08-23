@@ -2,10 +2,10 @@
 
 ## Decision
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1.** Issues 116 and 121 are closed with strict
-PASS. Qualify their joined frozen bytes; do not repair them inside this issue. Sol High implements
-and Sol XHigh verifies with one pass plus one bounded HOLD correction. A second material HOLD stops.
-Timing and benchmark invocation counts remain exactly zero.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE AFTER UPSTREAM AND CI SYNCHRONIZATION.** Issues 116
+and 121 were qualified as one frozen candidate without product repair. Sol High completed the
+qualification-only pass and sole bounded correction; Sol XHigh returned strict terminal PASS.
+Timing and benchmark invocation counts remained exactly zero.
 
 Direct dependencies are **Seal portable native PCM runner under an explicit output-directory
 ownership contract** (116) and **Close CAPI-owned render events and primitive replacement resource
@@ -56,3 +56,35 @@ may change. CAPI/source/protocol/session/graph/DSP/header, the runner accepted b
 fixtures are immutable. Run
 no benchmark, timing, tuning, browser/device workload or listening. Sol High stops at the complete
 focused checkpoint for strict Sol XHigh verdict.
+
+## Final evidence and verdict
+
+Pass 1 received the sole bounded **HOLD** because the checksum-bound evidence was not yet
+semantically sealed: artifact/symbol/audit/count/gate records could be changed together with the
+manifest, corrected consumer exits were not tied to final binaries/libraries, `readelf` was claimed
+without validation, and strict gate results were not recorded.
+
+The sole correction changed qualification evidence/checkers only and performed no product build,
+consumer, runner, CAPI-audit or realtime-workload rerun. The final technical checkpoint is commit
+`7a7b3c1862cacf1387471f64209a0994261e7262`, tree
+`d00b08ed41641f11ce08a9edd8d828cd3dcf2430`. Evidence manifest
+`6719a5027046695becd74696564d59392c8572faa4c6f6e003e5de943f1fac42` is independently enforced by
+semantic checker `6c36bdc4188cf24003c6d36e99ffa9c1c20d71ecdfafdc7897cbeaf4725c51fc` and final checker
+`5c9c50a662b500ef0ef05b50dd2de0ff51c892bac0edf3bb224d4ba2f2ccfe69`; correlated mutation suite
+`e67d09a79e372133ff995f2054251d762427b7c609e9ac4607006e94c2d0d759` proves that recomputing the
+manifest cannot bless altered artifact, symbol, audit, counter, consumer, raw-stage, gate or matrix
+evidence.
+
+The final matrix is exactly ten Linux `PASS` rows and seven candid `UNAVAILABLE` rows. The semantic
+seal binds both 14-symbol GNU `nm` definition sets with zero prefix imports, corrected C11/C++17
+static/shared exits and source/header/library/binary identities, raw logs and audits, armed syscall
+trace, all execution/prohibited counters and 22 strict gates. The unsupported independent
+`readelf` claim was removed.
+
+One-shot counters are one product build, one consumer-fixture correction with initial exit 13,
+four corrected consumer passes, one CAPI/protocol test invocation, one frozen runner-corpus
+invocation, one 100,000-call C audit and one 1,000,000-block render/swap audit. Benchmark, timing,
+playback, listening, browser and device invocations are zero. Sol XHigh returned strict terminal
+**PASS** with the product/header/runner/accepted-fixture fence unchanged. Issue 114 is complete and
+ready to close after upstream evidence, green required CI and GitHub synchronization; then Issue
+026 is unblocked.
