@@ -1023,8 +1023,7 @@ impl RenderRuntime {
             return;
         }
         self.chain.process_dual_mono(
-            DualMonoBlock::new(&mut self.left, &mut self.right, first_sample)
-                .expect("fixed block"),
+            DualMonoBlock::new(&mut self.left, &mut self.right, first_sample).expect("fixed block"),
         );
     }
     fn collect_operation_evidence(&mut self, retain: bool) -> usize {

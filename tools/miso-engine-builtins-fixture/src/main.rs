@@ -857,11 +857,10 @@ fn measure_response(
             left[0] = 1.0;
             right[0] = 1.0;
         }
-        let report = chain
-            .process_dual_mono(
-                DualMonoBlock::new(&mut left[..frames], &mut right[..frames], start as u64)
-                    .expect("block"),
-            );
+        let report = chain.process_dual_mono(
+            DualMonoBlock::new(&mut left[..frames], &mut right[..frames], start as u64)
+                .expect("block"),
+        );
         recoveries += report.recovered_left_state + report.recovered_right_state;
         impulse.extend_from_slice(&left[..frames]);
     }
@@ -943,11 +942,10 @@ fn sustained_metrics(
                 input_energy += f64::from(input).powi(2);
             }
         }
-        chain
-            .process_dual_mono(
-                DualMonoBlock::new(&mut left[..count], &mut right[..count], start as u64)
-                    .expect("block"),
-            );
+        chain.process_dual_mono(
+            DualMonoBlock::new(&mut left[..count], &mut right[..count], start as u64)
+                .expect("block"),
+        );
         for index in 0..count {
             if start + index >= settle {
                 samples.push(f64::from(left[index]));
@@ -1546,8 +1544,7 @@ fn render_pcm(parameters: BuiltinParameters) -> Vec<u8> {
     let mut chain = BuiltinChain::new(48_000, parameters).expect("fixture parameters");
     let mut left = [0.0_f32, -0.0, 0.25, -0.5, 1.0, -1.0, 0.125, -0.25];
     let mut right = [-0.0_f32, 0.0, -0.125, 0.5, -1.0, 1.0, -0.25, 0.25];
-    chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("fixture block"));
+    chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("fixture block"));
     left.into_iter()
         .chain(right)
         .flat_map(f32::to_le_bytes)
@@ -1581,8 +1578,7 @@ fn render_matrix_ramp(updates: u32) -> Vec<u8> {
         .expect("ramp target");
     let mut left = [1.0_f32; 128];
     let mut right = [-0.5_f32; 128];
-    chain
-        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("ramp block"));
+    chain.process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("ramp block"));
     pack_pcm(&left, &right)
 }
 
@@ -1605,17 +1601,15 @@ fn render_matrix_retarget() -> Vec<u8> {
         .expect("first target");
     let mut left = vec![1.0_f32; 4];
     let mut right = vec![-0.5_f32; 4];
-    chain
-        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("first block"));
+    chain.process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("first block"));
     chain
         .set_matrix_target(Matrix2x2::IDENTITY)
         .expect("second target");
     let mut tail_left = [1.0_f32; 8];
     let mut tail_right = [-0.5_f32; 8];
-    chain
-        .process_matrix(
-            DualMonoBlock::new(&mut tail_left, &mut tail_right, 4).expect("second block"),
-        );
+    chain.process_matrix(
+        DualMonoBlock::new(&mut tail_left, &mut tail_right, 4).expect("second block"),
+    );
     left.extend(tail_left);
     right.extend(tail_right);
     pack_pcm(&left, &right)
@@ -1649,24 +1643,21 @@ fn render_reset_fixture_v1() -> ResetFixtureV1 {
     let mut chain = BuiltinChain::new(48_000, parameters).expect("reset fixture");
     let mut left = vec![1.0_f32, 0.0, 0.0, 0.0];
     let mut right = vec![0.0_f32; 4];
-    chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("pre-reset"));
+    chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("pre-reset"));
     let discontinuity = BuiltinResetKind::DiscontinuityKeepTargets;
     chain.reset(discontinuity);
     let mut post_left = [1.0_f32, 0.0, 0.0, 0.0];
     let mut post_right = [0.0_f32; 4];
-    chain
-        .process_dual_mono(
-            DualMonoBlock::new(&mut post_left, &mut post_right, 4).expect("post-reset"),
-        );
+    chain.process_dual_mono(
+        DualMonoBlock::new(&mut post_left, &mut post_right, 4).expect("post-reset"),
+    );
     let full = BuiltinResetKind::FullToPrepared;
     chain.reset(full);
     let mut full_left = [1.0_f32, 0.0, 0.0, 0.0];
     let mut full_right = [0.0_f32; 4];
-    chain
-        .process_dual_mono(
-            DualMonoBlock::new(&mut full_left, &mut full_right, 8).expect("full-reset"),
-        );
+    chain.process_dual_mono(
+        DualMonoBlock::new(&mut full_left, &mut full_right, 8).expect("full-reset"),
+    );
     left.extend(post_left);
     right.extend(post_right);
     left.extend(full_left);
@@ -1695,8 +1686,7 @@ fn render_lr_isolation() -> Vec<u8> {
     .expect("isolation fixture");
     let mut left = [1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let mut right = [0.0_f32, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("isolation block"));
+    chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("isolation block"));
     pack_pcm(&left, &right)
 }
 
@@ -1716,15 +1706,14 @@ fn render_partition() -> Vec<u8> {
     let mut left = [1.0_f32, 0.0, -0.5, 0.25, 0.0, 0.0, 0.75, -0.25];
     let mut right = [-0.5_f32, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25];
     for (offset, width) in [(0, 1), (1, 2), (3, 1), (4, 4)] {
-        chain
-            .process_dual_mono(
-                DualMonoBlock::new(
-                    &mut left[offset..offset + width],
-                    &mut right[offset..offset + width],
-                    offset as u64,
-                )
-                .expect("partition block"),
-            );
+        chain.process_dual_mono(
+            DualMonoBlock::new(
+                &mut left[offset..offset + width],
+                &mut right[offset..offset + width],
+                offset as u64,
+            )
+            .expect("partition block"),
+        );
     }
     pack_pcm(&left, &right)
 }
@@ -4541,11 +4530,12 @@ impl IndependentResponseProcessorV1 {
         }
     }
 
+    /// Returns the output sample. There is no per-sample recovery any more (D7): a non-finite
+    /// output is caught once per block by the caller, which counts blocks, not samples.
     fn process(&mut self, input: f32) -> (f32, u64) {
         match self {
             Self::HighPass(section) | Self::LowPass(section) => {
-                let step = section.process(input);
-                (f32::from_bits(step.output_bits), step.recovery_delta)
+                (f32::from_bits(section.process(input).output_bits), 0)
             }
             Self::Cascade {
                 high_pass,
@@ -4553,10 +4543,7 @@ impl IndependentResponseProcessorV1 {
             } => {
                 let high = high_pass.process(input);
                 let low = low_pass.process(f32::from_bits(high.output_bits));
-                (
-                    f32::from_bits(low.output_bits),
-                    high.recovery_delta.saturating_add(low.recovery_delta),
-                )
+                (f32::from_bits(low.output_bits), 0)
             }
         }
     }

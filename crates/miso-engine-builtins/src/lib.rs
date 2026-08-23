@@ -714,8 +714,18 @@ impl<L: Lane> InputStage<L> {
     /// Returns `(sanitised inputs, recovered lanes)`, both counted over populated lanes only.
     fn process_channel(&mut self, channel: usize, io: &mut [f32], frames: usize) -> (u64, u64) {
         let sanitized = self.members_sum(sanitize_gain_block::<L>(io, frames, self.trim[channel]));
-        svf_block::<L>(io, frames, &self.coef[channel][0], &mut self.state[channel][0]);
-        svf_block::<L>(io, frames, &self.coef[channel][1], &mut self.state[channel][1]);
+        svf_block::<L>(
+            io,
+            frames,
+            &self.coef[channel][0],
+            &mut self.state[channel][0],
+        );
+        svf_block::<L>(
+            io,
+            frames,
+            &self.coef[channel][1],
+            &mut self.state[channel][1],
+        );
         let bad = L::mask_and(nonfinite_lanes_block::<L>(io, frames), self.active);
         if !L::mask_any(bad) {
             return (sanitized, 0);
@@ -735,7 +745,12 @@ impl<L: Lane> InputStage<L> {
     ///
     /// `left` and `right` are AoSoA blocks of `frames * L::WIDTH` samples; at `L = f32` a planar
     /// slice is already such a block.
-    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> BuiltinProcessReport {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) -> BuiltinProcessReport {
         let (sanitized_left, recovered_left) = self.process_channel(0, left, frames);
         let (sanitized_right, recovered_right) = self.process_channel(1, right, frames);
         BuiltinProcessReport {
@@ -757,10 +772,8 @@ impl<L: Lane> InputStage<L> {
         for channel in 0..2 {
             for section in 0..2 {
                 let state = &self.state[channel][section];
-                words[channel * 4 + section * 2] =
-                    lane_read::<L>(state.ic1)[lane].to_bits();
-                words[channel * 4 + section * 2 + 1] =
-                    lane_read::<L>(state.ic2)[lane].to_bits();
+                words[channel * 4 + section * 2] = lane_read::<L>(state.ic1)[lane].to_bits();
+                words[channel * 4 + section * 2 + 1] = lane_read::<L>(state.ic2)[lane].to_bits();
             }
         }
         words
@@ -983,13 +996,13 @@ impl<L: Lane> MatrixStage<L> {
             ramp_frames,
             &mut self.ramp,
         );
-        for lane in 0..L::WIDTH {
-            self.remaining[lane] = self.remaining[lane].saturating_sub(ramp_frames as u32);
+        for remaining in self.remaining.iter_mut().take(L::WIDTH) {
+            *remaining = remaining.saturating_sub(ramp_frames as u32);
         }
         let mut current = self.read_current();
-        for lane in 0..L::WIDTH {
+        for (lane, current) in current.iter_mut().enumerate().take(L::WIDTH) {
             if self.remaining[lane] == 0 {
-                current[lane] = self.target[lane];
+                *current = self.target[lane];
             }
         }
         self.write_current(&current);
@@ -1201,6 +1214,13 @@ pub const fn builtin_bank_width(backend: KernelBackendV1) -> Option<BankWidth> {
 }
 
 /// The input stage of a bank at the width its backend selected.
+///
+/// The two variants differ in size because their lane words do: an eight-lane coefficient set is
+/// twice a four-lane one. Boxing the larger one -- which is what `large_enum_variant` suggests --
+/// would put every coefficient the render loop loads behind a pointer it has to chase once per
+/// bank per block, to save about 560 bytes on a structure there is one of per cohort and which is
+/// allocated once at preparation. The space is not worth the indirection.
+#[allow(clippy::large_enum_variant)]
 enum InputStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(InputStage<Simd4>),
@@ -1454,7 +1474,6 @@ pub struct PreparedMeter {
     pub accumulator: MeterAccumulator,
     pub consumer: Consumer<MeterSnapshot>,
 }
-
 
 impl MeterAccumulator {
     pub fn prepare(
@@ -1808,11 +1827,7 @@ pub mod test_support {
     }
 
     /// Overwrites the retained state words of one bank lane.
-    pub fn set_bank_lane_state_words(
-        bank: &mut BuiltinInputBankV1,
-        lane: usize,
-        words: [u32; 8],
-    ) {
+    pub fn set_bank_lane_state_words(bank: &mut BuiltinInputBankV1, lane: usize, words: [u32; 8]) {
         match &mut bank.stage {
             InputStageKernel::Simd4(stage) => stage.set_lane_state_words(lane, words),
             InputStageKernel::Simd8(stage) => stage.set_lane_state_words(lane, words),

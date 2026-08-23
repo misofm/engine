@@ -138,10 +138,9 @@ fn run_audit() {
             let first_sample = block
                 .checked_mul(QUANTUM as u64)
                 .expect("bounded audit sample time");
-            let report = chain
-                .process_dual_mono(
-                    DualMonoBlock::new(&mut left, &mut right, first_sample).expect("fixed block"),
-                );
+            let report = chain.process_dual_mono(
+                DualMonoBlock::new(&mut left, &mut right, first_sample).expect("fixed block"),
+            );
             add_report(&mut total, report);
             fold_pcm(&mut digest, &left, &right);
         }
@@ -224,10 +223,9 @@ fn traced_process(
 ) -> BuiltinProcessReport {
     eprintln!("MISO_ISSUE069_DIRECT_RT_BEGIN");
     let report = audit::in_render_scope(|| {
-        chain
-            .process_dual_mono(
-                DualMonoBlock::new(left, right, block * QUANTUM as u64).expect("fixed block"),
-            )
+        chain.process_dual_mono(
+            DualMonoBlock::new(left, right, block * QUANTUM as u64).expect("fixed block"),
+        )
     });
     eprintln!("MISO_ISSUE069_DIRECT_RT_END");
     report

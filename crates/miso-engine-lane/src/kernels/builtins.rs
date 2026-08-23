@@ -243,8 +243,8 @@ pub fn matrix2x2_ramp_block<L: Lane>(
     {
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
-        for index in 0..4 {
-            current[index] = L::select(done, r.target[index], current[index].add(r.step[index]));
+        for ((current, target), step) in current.iter_mut().zip(&r.target).zip(&r.step) {
+            *current = L::select(done, *target, current.add(*step));
         }
         let l = L::load(left_frame);
         let right_sample = L::load(right_frame);

@@ -68,6 +68,7 @@ struct ReferenceChain {
     right_lpf: ReferenceRetainedTptF32,
     matrix_current: [f32; 4],
     matrix_target: [f32; 4],
+    matrix_step: [f32; 4],
     remaining: u32,
     lifetime: [u64; 2],
     inject_left_hpf: bool,
@@ -87,6 +88,7 @@ impl ReferenceChain {
             right_lpf: filter(2_000.0, ReferenceTptOutput::LowPass),
             matrix_current: [1.0, 0.0, 0.0, 1.0],
             matrix_target: [1.0, 0.0, 0.0, 1.0],
+            matrix_step: [0.0; 4],
             remaining: 0,
             lifetime: [0, 0],
             inject_left_hpf: false,
@@ -95,8 +97,17 @@ impl ReferenceChain {
     }
 
     fn set_target(&mut self, target: [f32; 4]) {
+        const SAMPLES: u32 = 257;
         self.matrix_target = target;
-        self.remaining = 257;
+        for ((step, target), current) in self
+            .matrix_step
+            .iter_mut()
+            .zip(target)
+            .zip(self.matrix_current)
+        {
+            *step = (target - current) / SAMPLES as f32;
+        }
+        self.remaining = SAMPLES;
     }
 
     fn reset(&mut self) {
@@ -113,6 +124,32 @@ impl ReferenceChain {
         self.inject_right_lpf = true;
     }
 
+    /// The D7 input stage of one channel: sanitise once, cascade the two sections, then check
+    /// finiteness once for the whole block.
+    ///
+    /// A failing block is zeroed, both of that channel's sections are reset and one recovery is
+    /// counted -- per block, not per sample. There is no output sanitisation any more: a finite
+    /// block needs none, and a non-finite one is caught here.
+    fn process_channel(
+        samples: &mut [f32; QUANTUM],
+        high: &mut ReferenceRetainedTptF32,
+        low: &mut ReferenceRetainedTptF32,
+        sanitized_input: &mut u64,
+    ) -> u64 {
+        for sample in samples.iter_mut() {
+            let input = sanitize(*sample, sanitized_input);
+            let high_output = f32::from_bits(high.process(input).output_bits);
+            *sample = f32::from_bits(low.process(high_output).output_bits);
+        }
+        if samples.iter().all(|sample| sample.abs() < NONFINITE_LIMIT) {
+            return 0;
+        }
+        samples.fill(0.0);
+        high.reset();
+        low.reset();
+        1
+    }
+
     fn process_block(
         &mut self,
         first_left: Option<f32>,
@@ -127,76 +164,55 @@ impl ReferenceChain {
             right[0] = value;
         }
         let mut counts = Counts::default();
+
+        if self.inject_left_hpf {
+            self.inject_left_hpf = false;
+            self.left_hpf.set_state_bits([f32::NAN.to_bits(), 0]);
+        }
+        if self.inject_right_lpf {
+            self.inject_right_lpf = false;
+            self.right_lpf.set_state_bits([f32::NAN.to_bits(), 0]);
+        }
+
+        counts.recovered_left = Self::process_channel(
+            &mut left,
+            &mut self.left_hpf,
+            &mut self.left_lpf,
+            &mut counts.sanitized_input,
+        );
+        self.lifetime[0] += counts.recovered_left;
+        counts.recovered_right = Self::process_channel(
+            &mut right,
+            &mut self.right_hpf,
+            &mut self.right_lpf,
+            &mut counts.sanitized_input,
+        );
+        self.lifetime[1] += counts.recovered_right;
+
         for index in 0..QUANTUM {
-            let left_input = sanitize(left[index], &mut counts.sanitized_input);
-            let right_input = sanitize(right[index], &mut counts.sanitized_input);
-
-            let left_high_step = if index == 0 && self.inject_left_hpf {
-                self.left_hpf.reset();
-                self.inject_left_hpf = false;
-                counts.recovered_left += 1;
-                self.lifetime[0] += 1;
-                self.left_hpf.process(left_input)
-            } else {
-                let step = self.left_hpf.process(left_input);
-                counts.recovered_left += step.recovery_delta;
-                self.lifetime[0] += step.recovery_delta;
-                step
-            };
-            counts.sanitized_output += u64::from(left_high_step.output_sanitized);
-            let left_low = self
-                .left_lpf
-                .process(f32::from_bits(left_high_step.output_bits));
-            counts.recovered_left += left_low.recovery_delta;
-            self.lifetime[0] += left_low.recovery_delta;
-            counts.sanitized_output += u64::from(left_low.output_sanitized);
-
-            let right_high = self.right_hpf.process(right_input);
-            counts.recovered_right += right_high.recovery_delta;
-            self.lifetime[1] += right_high.recovery_delta;
-            counts.sanitized_output += u64::from(right_high.output_sanitized);
-            let right_low_step = if index == 0 && self.inject_right_lpf {
-                self.right_lpf.reset();
-                self.inject_right_lpf = false;
-                counts.recovered_right += 1;
-                self.lifetime[1] += 1;
-                self.right_lpf
-                    .process(f32::from_bits(right_high.output_bits))
-            } else {
-                let step = self
-                    .right_lpf
-                    .process(f32::from_bits(right_high.output_bits));
-                counts.recovered_right += step.recovery_delta;
-                self.lifetime[1] += step.recovery_delta;
-                step
-            };
-            counts.sanitized_output += u64::from(right_low_step.output_sanitized);
-            let right_low = f32::from_bits(right_low_step.output_bits);
-
             self.advance_matrix();
-            let filtered_left = f32::from_bits(left_low.output_bits);
-            let output_left =
-                self.matrix_current[0] * filtered_left + self.matrix_current[1] * right_low;
-            let output_right =
-                self.matrix_current[2] * filtered_left + self.matrix_current[3] * right_low;
-            left[index] = sanitize(output_left, &mut counts.sanitized_output);
-            right[index] = sanitize(output_right, &mut counts.sanitized_output);
+            let (in_left, in_right) = (left[index], right[index]);
+            if self.matrix_current == [1.0, 0.0, 0.0, 1.0] && self.remaining == 0 {
+                continue;
+            }
+            left[index] = self.matrix_current[0] * in_left + self.matrix_current[1] * in_right;
+            right[index] = self.matrix_current[2] * in_left + self.matrix_current[3] * in_right;
         }
         (left, right, counts)
     }
 
+    /// D11: one division at the event, iterated additions, an exact assignment at the end.
     fn advance_matrix(&mut self) {
         if self.remaining == 0 {
             return;
         }
-        let remaining = self.remaining as f32;
-        for index in 0..4 {
-            self.matrix_current[index] +=
-                (self.matrix_target[index] - self.matrix_current[index]) / remaining;
-        }
         self.remaining -= 1;
         if self.remaining == 0 {
             self.matrix_current = self.matrix_target;
+            return;
+        }
+        for (current, step) in self.matrix_current.iter_mut().zip(self.matrix_step) {
+            *current += step;
         }
     }
 
@@ -227,8 +243,15 @@ impl ReferenceChain {
     }
 }
 
+/// Magnitude at or above which a sample is non-finite under D7. `!(|x| < 1e30)` covers NaN.
+const NONFINITE_LIMIT: f32 = 1.0e30;
+
+/// The D7 input sanitisation: exactly the kernel's one-compare form, written out here.
+///
+/// A subnormal input is no longer sanitised: it is a legal finite sample, and the only denormal
+/// mechanism that remains is the in-kernel flush of the recursive state words.
 fn sanitize(value: f32, count: &mut u64) -> f32 {
-    if value.is_finite() && !value.is_subnormal() {
+    if value.abs() < NONFINITE_LIMIT {
         value
     } else {
         *count += 1;

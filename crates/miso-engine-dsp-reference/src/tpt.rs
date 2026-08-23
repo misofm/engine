@@ -215,7 +215,11 @@ fn below_flush_epsilon(value: f32) -> bool {
 
 /// `flush(x)`: exactly `+0.0` inside the band, unchanged outside it, NaN untouched.
 fn flush(value: f32) -> f32 {
-    if below_flush_epsilon(value) { 0.0 } else { value }
+    if below_flush_epsilon(value) {
+        0.0
+    } else {
+        value
+    }
 }
 
 /// Transfer of the conditioned `(c1, a2, a3, k)` TPT words.

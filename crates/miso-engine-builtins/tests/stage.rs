@@ -1,0 +1,605 @@
+//! The input stage: coefficients, the recurrence, lane identity, the boundary check, partition
+//! invariance and the signed-zero laws.
+//!
+//! Master plan #83 D5 is the claim these gates make together: for a given session, sample rate and
+//! quantum the rendered bits are the same at every width, on every target, and under every block
+//! partition. The oracle for the coefficients and the recurrence is
+//! `miso_engine_dsp_reference::ReferenceRetainedTptF32`, hand-written from the equations and
+//! never calling `miso-engine-lane`; the oracle for lane identity is the scalar `Lane`
+//! instantiation, which is the same body at `WIDTH = 1` (D4).
+
+use miso_engine_builtins::*;
+use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, KernelBackendV1, LAUNCH_SAMPLE_RATES};
+use miso_engine_dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
+use miso_engine_effect_contract::BankWidth;
+
+/// Both bank widths, exercised on every host: `wide` implements four and eight lanes everywhere,
+/// so a width difference cannot hide behind a target difference.
+const BANKS: [(KernelBackendV1, BankWidth); 2] = [
+    (KernelBackendV1::WasmSimd128, BankWidth::Four),
+    (KernelBackendV1::X86Avx2Fma, BankWidth::Eight),
+];
+
+fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
+    LAUNCH_SAMPLE_RATES
+        .into_iter()
+        .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
+        .map(|rate| rate.0)
+}
+
+/// Xorshift64\*: seeded and portable, so a gate's corpus never depends on a system generator.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
+    }
+
+    /// A finite sample in `[-1, 1)`, exactly representable and never subnormal.
+    fn next_sample(&mut self) -> f32 {
+        (self.next_u32() as i32 as f32) / 2_147_483_648.0
+    }
+}
+
+fn parameters_for(index: usize) -> BuiltinParameters {
+    BuiltinParameters {
+        left: ChannelParameters {
+            polarity_invert: index % 2 == 1,
+            trim_db: index as f32 - 2.0,
+            hpf_hz: 80.0 + index as f32 * 11.0,
+            lpf_hz: 2_000.0 + index as f32 * 101.0,
+            fader_db: 1.0 - index as f32,
+            muted: index % 5 == 4,
+        },
+        right: ChannelParameters {
+            polarity_invert: index % 3 == 1,
+            trim_db: 2.0 - index as f32,
+            hpf_hz: 120.0 + index as f32 * 13.0,
+            lpf_hz: 3_000.0 + index as f32 * 97.0,
+            fader_db: index as f32 - 1.0,
+            muted: false,
+        },
+        matrix: Matrix2x2::IDENTITY,
+        smoothing_samples: 0,
+    }
+}
+
+fn prepared_input(rate: u32, parameters: BuiltinParameters) -> InputBuiltins {
+    BuiltinChain::new(rate, parameters)
+        .expect("accepted input builtins")
+        .into_input_builtins()
+}
+
+/// T1: the prepared section words are the reference design's words, bit for bit.
+///
+/// The reference computes the design from the equations, not from production, and its `tan` is the
+/// platform's while production's is `miso_engine_math`'s. That difference is measured separately
+/// below and is invisible in the cast words.
+#[test]
+fn prepared_sections_match_reference_coefficients() {
+    for rate in launch_and_extended_compatibility_rates() {
+        let mut cutoffs = vec![10.0_f32, 100.0, 1_000.0, 0.45 * rate as f32];
+        if let Some(maximum) = builtin_filter_cutoff_maximum_hz_v1(rate) {
+            cutoffs.push(maximum);
+        }
+        for cutoff in cutoffs {
+            for (high_pass, output) in [
+                (true, ReferenceTptOutput::HighPass),
+                (false, ReferenceTptOutput::LowPass),
+            ] {
+                let actual =
+                    test_support::section_words(rate, cutoff, high_pass).expect("prepared section");
+                let reference =
+                    ReferenceRetainedTptF32::conditioned_butterworth(rate, cutoff, output)
+                        .expect("reference section");
+                assert_eq!(
+                    actual,
+                    reference.section_words(),
+                    "rate={rate}, cutoff={cutoff}, high_pass={high_pass}"
+                );
+            }
+        }
+    }
+}
+
+/// D6: the engine's own `tan` agrees with the platform's to one unit in the last place.
+///
+/// The engine never calls the platform's, because it is not specified to agree across targets;
+/// this measures how far the two are apart on the whole prepared cutoff domain, which is what
+/// makes T1's bit equality a fact about the algebra rather than a coincidence.
+#[test]
+fn engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain() {
+    let mut worst = 0_i64;
+    for rate in launch_and_extended_compatibility_rates() {
+        let maximum = 0.45 * rate as f32;
+        let mut bits = 10.0_f32.to_bits();
+        while f32::from_bits(bits) <= maximum {
+            let x = core::f64::consts::PI * f64::from(f32::from_bits(bits)) / f64::from(rate);
+            let difference =
+                (miso_engine_math::tan(x).to_bits() as i64 - x.tan().to_bits() as i64).abs();
+            assert!(
+                difference <= 1,
+                "rate={rate}, cutoff={}",
+                f32::from_bits(bits)
+            );
+            worst = worst.max(difference);
+            bits += 4_096;
+        }
+    }
+    assert_eq!(worst, 1, "the sweep must actually contain a disagreement");
+}
+
+/// T2: the scalar stage is the reference recurrence, sample for sample and word for word.
+#[test]
+fn scalar_stage_is_bit_identical_to_reference_recurrence() {
+    for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
+        for signal in 0..3 {
+            let frames = rate as usize / 4;
+            let mut rng = Rng(0x51ED_0007 ^ u64::from(rate) ^ signal);
+            let input: Vec<f32> = (0..frames)
+                .map(|index| match signal {
+                    0 => rng.next_sample(),
+                    1 => f32::from(u8::from(index == 0)),
+                    _ => 0.25,
+                })
+                .collect();
+
+            let parameters = BuiltinParameters {
+                left: ChannelParameters {
+                    hpf_hz: 100.0,
+                    lpf_hz: 1_000.0,
+                    ..ChannelParameters::default()
+                },
+                right: ChannelParameters {
+                    hpf_hz: 100.0,
+                    lpf_hz: 1_000.0,
+                    ..ChannelParameters::default()
+                },
+                ..BuiltinParameters::default()
+            };
+            let mut input_builtins = prepared_input(rate, parameters);
+            let mut left = input.clone();
+            let mut right = input.clone();
+            input_builtins.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+
+            let mut high = ReferenceRetainedTptF32::conditioned_butterworth(
+                rate,
+                100.0,
+                ReferenceTptOutput::HighPass,
+            )
+            .expect("reference high");
+            let mut low = ReferenceRetainedTptF32::conditioned_butterworth(
+                rate,
+                1_000.0,
+                ReferenceTptOutput::LowPass,
+            )
+            .expect("reference low");
+            for (index, sample) in input.iter().copied().enumerate() {
+                let high_bits = high.process(sample).output_bits;
+                let expected = low.process(f32::from_bits(high_bits)).output_bits;
+                assert_eq!(
+                    left[index].to_bits(),
+                    expected,
+                    "rate={rate}, signal={signal}, index={index}"
+                );
+                assert_eq!(right[index].to_bits(), expected);
+            }
+            let state = test_support::input_state_words(&input_builtins);
+            let [high_ic1, high_ic2] = high.state_bits();
+            let [low_ic1, low_ic2] = low.state_bits();
+            assert_eq!(
+                state,
+                [
+                    high_ic1, high_ic2, low_ic1, low_ic2, high_ic1, high_ic2, low_ic1, low_ic2
+                ],
+                "rate={rate}, signal={signal}"
+            );
+        }
+    }
+}
+
+/// T3: a bank is the scalar stage at another width, and a padding lane changes nothing.
+#[test]
+fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        for members in [1, lanes - 1, lanes] {
+            let mut scalar: Vec<InputBuiltins> = (0..members)
+                .map(|index| prepared_input(48_000, parameters_for(index)))
+                .collect();
+            let bank_inputs: Vec<InputBuiltins> = (0..members)
+                .map(|index| prepared_input(48_000, parameters_for(index)))
+                .collect();
+            let mut bank = BuiltinInputBankV1::new(backend, width, bank_inputs).expect("bank");
+            assert_eq!(bank.active_lanes(), members);
+
+            const FRAMES: usize = 257;
+            let mut rng = Rng(0xB00B_5EED ^ members as u64 ^ lanes as u64);
+            let planar: Vec<Vec<f32>> = (0..members)
+                .map(|_| (0..FRAMES * 2).map(|_| rng.next_sample()).collect())
+                .collect();
+
+            // Padding lanes are pre-filled with the bit patterns that would poison a recurrence.
+            const POISON: [u32; 4] = [0x7FC0_0000, 0x7F80_0000, 0x8000_0000, 0x0000_0001];
+            let mut left = vec![0.0_f32; FRAMES * lanes];
+            let mut right = vec![0.0_f32; FRAMES * lanes];
+            for frame in 0..FRAMES {
+                for lane in 0..lanes {
+                    let (l, r) = if lane < members {
+                        (planar[lane][frame], planar[lane][FRAMES + frame])
+                    } else {
+                        let poison = f32::from_bits(POISON[(frame + lane) % POISON.len()]);
+                        (poison, poison)
+                    };
+                    left[frame * lanes + lane] = l;
+                    right[frame * lanes + lane] = r;
+                }
+            }
+            let bank_report = bank.process(&mut left, &mut right, FRAMES as u32);
+
+            let mut scalar_report = BuiltinProcessReport::default();
+            for (lane, input) in scalar.iter_mut().enumerate() {
+                let mut scalar_left = planar[lane][..FRAMES].to_vec();
+                let mut scalar_right = planar[lane][FRAMES..].to_vec();
+                let report = input.process(
+                    DualMonoBlock::new(&mut scalar_left, &mut scalar_right, 0).expect("block"),
+                );
+                scalar_report.sanitized_input += report.sanitized_input;
+                scalar_report.recovered_left_state += report.recovered_left_state;
+                scalar_report.recovered_right_state += report.recovered_right_state;
+                for frame in 0..FRAMES {
+                    assert_eq!(
+                        left[frame * lanes + lane].to_bits(),
+                        scalar_left[frame].to_bits(),
+                        "width={lanes}, members={members}, lane={lane}, frame={frame}, left"
+                    );
+                    assert_eq!(
+                        right[frame * lanes + lane].to_bits(),
+                        scalar_right[frame].to_bits(),
+                        "width={lanes}, members={members}, lane={lane}, frame={frame}, right"
+                    );
+                }
+                assert_eq!(
+                    test_support::bank_lane_state_words(&bank, lane),
+                    test_support::input_state_words(input),
+                    "width={lanes}, members={members}, lane={lane}, state"
+                );
+            }
+            assert_eq!(
+                bank_report, scalar_report,
+                "width={lanes}, members={members}"
+            );
+
+            // Padding lanes stay exactly `+0.0` in state, whatever was left in the scratch.
+            for lane in members..lanes {
+                assert_eq!(
+                    test_support::bank_lane_state_words(&bank, lane),
+                    [0; 8],
+                    "width={lanes}, members={members}, padding lane={lane}"
+                );
+            }
+        }
+    }
+}
+
+/// T6: the block boundary check is per lane and per block, and it never crosses lanes.
+#[test]
+fn boundary_check_is_lane_local_per_block() {
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        let build = || {
+            let inputs: Vec<InputBuiltins> = (0..lanes)
+                .map(|index| prepared_input(48_000, parameters_for(index)))
+                .collect();
+            BuiltinInputBankV1::new(backend, width, inputs).expect("bank")
+        };
+        let mut bank = build();
+        let mut control = build();
+        const FRAMES: usize = 64;
+        let signal: Vec<f32> = {
+            let mut rng = Rng(0x0BAD_F00D ^ lanes as u64);
+            (0..FRAMES * lanes).map(|_| rng.next_sample()).collect()
+        };
+
+        let mut poisoned = test_support::bank_lane_state_words(&bank, 2);
+        poisoned[0] = f32::NAN.to_bits();
+        test_support::set_bank_lane_state_words(&mut bank, 2, poisoned);
+
+        let (mut left, mut right) = (signal.clone(), signal.clone());
+        let (mut control_left, mut control_right) = (signal.clone(), signal.clone());
+        let report = bank.process(&mut left, &mut right, FRAMES as u32);
+        let control_report = control.process(&mut control_left, &mut control_right, FRAMES as u32);
+        assert_eq!(report.recovered_left_state, 1, "width={lanes}");
+        assert_eq!(report.recovered_right_state, 0, "width={lanes}");
+        assert_eq!(control_report.recovered_left_state, 0);
+        for frame in 0..FRAMES {
+            for lane in 0..lanes {
+                let index = frame * lanes + lane;
+                if lane == 2 {
+                    assert_eq!(left[index].to_bits(), 0, "zeroed lane, frame={frame}");
+                } else {
+                    assert_eq!(
+                        left[index].to_bits(),
+                        control_left[index].to_bits(),
+                        "width={lanes}, lane={lane}, frame={frame}"
+                    );
+                }
+                assert_eq!(right[index].to_bits(), control_right[index].to_bits());
+            }
+        }
+        // The second block recovers from a reset state and reports nothing.
+        let (mut left, mut right) = (signal.clone(), signal.clone());
+        let second = bank.process(&mut left, &mut right, FRAMES as u32);
+        assert_eq!(second.recovered_left_state, 0, "width={lanes}");
+        assert_eq!(second.recovered_right_state, 0);
+    }
+
+    // The same law at W = 1, through the lifetime counters.
+    let mut chain = BuiltinChain::new(
+        48_000,
+        BuiltinParameters {
+            left: ChannelParameters {
+                hpf_hz: 100.0,
+                ..ChannelParameters::default()
+            },
+            ..BuiltinParameters::default()
+        },
+    )
+    .expect("prepare");
+    let input = test_support::chain_input_mut(&mut chain);
+    let mut words = test_support::input_state_words(input);
+    words[0] = f32::NAN.to_bits();
+    test_support::set_input_state_words(input, words);
+    let mut left = [0.5_f32];
+    let mut right = [0.0_f32];
+    let first = chain.process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(first.recovered_left_state, 1);
+    assert_eq!(first.recovered_right_state, 0);
+    assert_eq!(left[0].to_bits(), 0);
+    assert_eq!(
+        test_support::chain_input(&chain).lifetime_recovered_state(),
+        (1, 0)
+    );
+    let mut left = [0.5_f32];
+    let mut right = [0.0_f32];
+    let second = chain.process_input(DualMonoBlock::new(&mut left, &mut right, 1).expect("block"));
+    assert_eq!(second.recovered_left_state, 0);
+    assert_eq!(
+        test_support::chain_input(&chain).lifetime_recovered_state(),
+        (1, 0)
+    );
+}
+
+/// T7: block partition changes nothing -- not the samples, not the state, not the counters.
+#[test]
+fn partition_invariance_over_master_plan_quanta() {
+    const FRAMES: usize = 1_536;
+    let signal: Vec<f32> = {
+        let mut rng = Rng(0xD15E_A5E5);
+        (0..FRAMES * 2).map(|_| rng.next_sample()).collect()
+    };
+    let parameters = BuiltinParameters {
+        smoothing_samples: 257,
+        ..parameters_for(3)
+    };
+
+    /// Everything one render of the corpus produces: both channels, the retained state words,
+    /// the lifetime recovery counters and the settled matrix.
+    struct Rendered {
+        left: Vec<f32>,
+        right: Vec<f32>,
+        state: [u32; 8],
+        recovered: (u64, u64),
+        matrix: Matrix2x2,
+    }
+
+    let render = |quantum: usize| -> Rendered {
+        let mut chain = BuiltinChain::new(48_000, parameters).expect("prepare");
+        chain
+            .set_matrix_target(Matrix2x2 {
+                ll: 0.25,
+                lr: -0.5,
+                rl: 0.75,
+                rr: -0.125,
+            })
+            .expect("target");
+        let mut left = signal[..FRAMES].to_vec();
+        let mut right = signal[FRAMES..].to_vec();
+        // The retarget is a control event at sample 128. A block never spans an event, so the
+        // partition is bounded by the event as well as by the quantum -- which is exactly what
+        // the graph executor does, and what makes the comparison meaningful.
+        const RETARGET_AT: usize = 128;
+        let mut start = 0;
+        while start < FRAMES {
+            let next_event = if start < RETARGET_AT {
+                RETARGET_AT
+            } else {
+                FRAMES
+            };
+            let end = (start + quantum).min(next_event).min(FRAMES);
+            chain.process_dual_mono(
+                DualMonoBlock::new(&mut left[start..end], &mut right[start..end], start as u64)
+                    .expect("block"),
+            );
+            start = end;
+            if start == RETARGET_AT {
+                chain
+                    .set_matrix_target(Matrix2x2 {
+                        ll: -1.0,
+                        lr: 0.0,
+                        rl: 0.0,
+                        rr: 1.0,
+                    })
+                    .expect("retarget");
+            }
+        }
+        let input = test_support::chain_input(&chain);
+        Rendered {
+            left,
+            right,
+            state: test_support::input_state_words(input),
+            recovered: input.lifetime_recovered_state(),
+            matrix: test_support::matrix_current(test_support::chain_matrix(&chain)),
+        }
+    };
+
+    let oracle = render(FRAMES);
+    for quantum in [1, 7, 64, 127, 128, 255, 512, 1_024] {
+        let actual = render(quantum);
+        for frame in 0..FRAMES {
+            assert_eq!(
+                actual.left[frame].to_bits(),
+                oracle.left[frame].to_bits(),
+                "quantum={quantum}, frame={frame}, left"
+            );
+            assert_eq!(
+                actual.right[frame].to_bits(),
+                oracle.right[frame].to_bits(),
+                "quantum={quantum}, frame={frame}, right"
+            );
+        }
+        assert_eq!(actual.state, oracle.state, "quantum={quantum}, state");
+        assert_eq!(
+            actual.recovered, oracle.recovered,
+            "quantum={quantum}, counters"
+        );
+        assert_eq!(actual.matrix, oracle.matrix, "quantum={quantum}, matrix");
+    }
+}
+
+/// T9: signed zero, mute and the disabled-section identity.
+#[test]
+fn signed_zero_and_mute_laws() {
+    // Fader at unity keeps `-0.0`; a muted lane is exactly `+0.0` even for a negative input.
+    let mut chain = BuiltinChain::new(
+        48_000,
+        BuiltinParameters {
+            right: ChannelParameters {
+                muted: true,
+                ..ChannelParameters::default()
+            },
+            ..BuiltinParameters::default()
+        },
+    )
+    .expect("prepare");
+    let mut left = [-0.0_f32, 0.25];
+    let mut right = [-1.0_f32, -0.0];
+    let report =
+        chain.process_fader_mute(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+    assert_eq!(left[1].to_bits(), 0.25_f32.to_bits());
+    assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(right[1].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(report, BuiltinProcessReport::default());
+
+    // Trim with polarity: `-0.0` becomes `+0.0` through the disabled sections, and a finite input
+    // is the exact product of the folded trim.
+    let mut chain = BuiltinChain::new(
+        48_000,
+        BuiltinParameters {
+            left: ChannelParameters {
+                polarity_invert: true,
+                trim_db: 6.0206,
+                ..ChannelParameters::default()
+            },
+            ..BuiltinParameters::default()
+        },
+    )
+    .expect("prepare");
+    let trim = f32::from_bits(test_support::input_trim_words(test_support::chain_input(&chain))[0]);
+    assert!(trim < 0.0, "polarity is folded into the trim");
+    let mut left = [-0.0_f32, 0.25];
+    let mut right = [-0.0_f32, 0.25];
+    chain.process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(left[0].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(left[1].to_bits(), (0.25_f32 * trim).to_bits());
+    assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
+
+    // The input stage sanitises once, and only there.
+    let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).expect("prepare");
+    let mut left = [f32::NAN, 1.0e31];
+    let mut right = [f32::INFINITY, 1.0];
+    let report = chain.process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(report.sanitized_input, 3);
+    assert_eq!(report.sanitized_output, 0);
+    assert_eq!(left[0].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(left[1].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(right[1].to_bits(), 1.0_f32.to_bits());
+
+    // A subnormal input is no longer sanitised: it is a legal, finite sample (D7).
+    let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).expect("prepare");
+    let mut left = [f32::from_bits(1)];
+    let mut right = [0.0_f32];
+    let report = chain.process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert_eq!(report.sanitized_input, 0);
+    assert_eq!(left[0].to_bits(), 1);
+}
+
+/// The whole chain end to end, at the tolerance the pre-#83 gate used.
+#[test]
+fn polarity_trim_fader_and_matrix_are_exact() {
+    let mut chain = BuiltinChain::new(
+        48_000,
+        BuiltinParameters {
+            left: ChannelParameters {
+                polarity_invert: true,
+                trim_db: 6.0206,
+                fader_db: 0.0,
+                ..ChannelParameters::default()
+            },
+            right: ChannelParameters::default(),
+            matrix: Matrix2x2::IDENTITY,
+            smoothing_samples: 0,
+        },
+    )
+    .expect("prepare");
+    let mut left = [0.5_f32];
+    let mut right = [0.0_f32];
+    chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+    assert!((left[0] + 1.0).abs() < 2e-5);
+    assert_eq!(right, [0.0]);
+}
+
+/// The bank constructor contract owned by this crate and consumed by #86.
+#[test]
+fn bank_construction_accepts_one_to_width_members_only() {
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        let inputs = |count: usize| -> Vec<InputBuiltins> {
+            (0..count)
+                .map(|index| prepared_input(48_000, parameters_for(index)))
+                .collect()
+        };
+        assert!(BuiltinInputBankV1::new(backend, width, inputs(0)).is_err());
+        assert!(BuiltinInputBankV1::new(backend, width, inputs(lanes + 1)).is_err());
+        for members in 1..=lanes {
+            let bank = BuiltinInputBankV1::new(backend, width, inputs(members)).expect("bank");
+            assert_eq!(bank.active_lanes(), members);
+            assert_eq!(bank.backend(), backend);
+            assert_eq!(bank.width(), width);
+        }
+        // A backend without a bank width is refused whatever width is asked for.
+        assert!(BuiltinInputBankV1::new(KernelBackendV1::Scalar, width, inputs(1)).is_err());
+        assert!(BuiltinInputBankV1::new(KernelBackendV1::X86Avx2, width, inputs(1)).is_err());
+    }
+    assert_eq!(builtin_bank_width(KernelBackendV1::Scalar), None);
+    assert_eq!(builtin_bank_width(KernelBackendV1::X86Avx2), None);
+    assert_eq!(
+        builtin_bank_width(KernelBackendV1::X86Avx2Fma),
+        Some(BankWidth::Eight)
+    );
+    assert_eq!(
+        builtin_bank_width(KernelBackendV1::Aarch64Neon),
+        Some(BankWidth::Four)
+    );
+    assert_eq!(
+        builtin_bank_width(KernelBackendV1::WasmSimd128),
+        Some(BankWidth::Four)
+    );
+}
