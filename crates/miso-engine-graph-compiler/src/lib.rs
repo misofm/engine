@@ -1917,6 +1917,131 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
     }
 
+    /// #99 F2: every plan this crate compiles lowers to an executable program, and that program
+    /// is strictly smaller than the per-edge model both executors run today.
+    ///
+    /// The program is derived inside `PreparedGraphPlan::new`, so this runs over whatever the
+    /// compiler actually produced rather than over a hand-built spec. It is the gate that proves
+    /// the seam is real before either executor is rebuilt against it (#98 owns the kernels).
+    #[test]
+    fn compiled_plans_always_lower_to_a_smaller_executable_program() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        let cases: Vec<(&str, PreparedGraphArtifact)> = vec![
+            ("direct route", compile_fixture(9_100)),
+            (
+                "reverse submixes",
+                compile_reverse_route_submix_fixture(9_101),
+            ),
+            ("twelve-track banks", {
+                let (_, _, effects) = twelve_track_bank_fixture();
+                GraphCompiler::compile(GraphCompileRequest {
+                    plan_id: 9_102,
+                    effects,
+                    caps: integration_caps(),
+                    dispatch: host_dispatch(),
+                })
+                .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics))
+            }),
+            ("two-slot rack chains", {
+                let (_, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+                compile_chain_fixture(effects)
+            }),
+        ];
+        let mut measured = Vec::new();
+        for (label, artifact) in cases {
+            let graph = &artifact.graph;
+            let program = graph
+                .program()
+                .unwrap_or_else(|| panic!("{label}: compiled plan must lower"));
+
+            // Every node is an op or an alias, never both and never neither.
+            assert_eq!(
+                program.ops.len() + program.taps.len(),
+                graph.spec.nodes.len(),
+                "{label}: op/alias partition"
+            );
+            // Ops stay level-major and id-sorted within a level -- the order both executors
+            // consume, and the order the native blueprint's layout check requires.
+            assert!(
+                program
+                    .ops
+                    .windows(2)
+                    .all(|pair| (pair[0].level, pair[0].node) < (pair[1].level, pair[1].node)),
+                "{label}: ops are not level-major"
+            );
+            // The arena is smaller than what the executors allocate today.
+            //
+            // The comparison is deliberately against the *executor's* model, not against
+            // `buffer_assignments` alone: that colouring only counts node outputs, while
+            // `GraphExecutor` additionally allocates one contribution `StereoBuffer` per edge and
+            // then re-buffers every bank member on top (`audio_buffer_samples` says as much --
+            // `colored_outputs + logical_edges`). Comparing against the colouring alone would
+            // flatter the program in some graphs and defame it in others: the program keeps a
+            // dedicated buffer for each bank-eligible node where the colouring shared one and the
+            // executor un-shared it again at bind time.
+            let coloured = graph
+                .buffer_assignments
+                .iter()
+                .map(|assignment| assignment.buffer_index)
+                .max()
+                .map_or(0, |maximum| maximum + 1) as usize;
+            let bank_members: usize = graph.prepared_bank_count();
+            let executor_buffers = coloured + graph.spec.edges.len() + bank_members;
+            assert!(
+                (program.buffers as usize) < executor_buffers,
+                "{label}: arena {} is not smaller than the {executor_buffers} buffers the \
+                 executor allocates ({coloured} coloured + {} edges + {bank_members} bank members)",
+                program.buffers,
+                graph.spec.edges.len()
+            );
+            // Identity stage boundaries really do disappear from the schedule.
+            assert!(
+                program.ops.len() < graph.sequential_schedule.len(),
+                "{label}: no schedule item was elided"
+            );
+            // A bank member's output is never written again once defined: a homogeneous bank
+            // keeps every member live from the first gather to the last scatter.
+            let mut open = std::collections::BTreeSet::new();
+            for op in &program.ops {
+                assert!(
+                    !open.contains(&op.output),
+                    "{label}: an op writes open bank storage"
+                );
+                if matches!(
+                    graph.spec.nodes[op.node as usize].id,
+                    GraphNodeId::Effect(ref id) if !matches!(id.rack, RackId::Dynamic)
+                ) || matches!(
+                    graph.spec.nodes[op.node as usize].id,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins,
+                        ..
+                    }
+                ) {
+                    open.insert(op.output);
+                }
+            }
+            measured.push((
+                label,
+                graph.sequential_schedule.len(),
+                program.ops.len(),
+                program.taps.len(),
+                coloured + graph.spec.edges.len() + bank_members,
+                program.buffers,
+                program.reduction_count(),
+            ));
+        }
+        // Descriptive, printed under `--nocapture`: what lowering actually buys per fixture.
+        for (label, nodes, ops, taps, executor_buffers, arena, reductions) in measured {
+            println!(
+                "{label}: {nodes} schedule items -> {ops} ops + {taps} aliases; \
+                 {executor_buffers} executor buffers -> {arena} arena; {reductions} reductions"
+            );
+        }
+    }
+
     /// #99 F3: a **multi-slot** rack chain forms one cohort and binds a bank at every slot.
     ///
     /// This is the case #96 could not express. Its planner takes one candidate per effect with a
