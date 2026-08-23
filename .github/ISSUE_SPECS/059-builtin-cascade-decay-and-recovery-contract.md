@@ -129,3 +129,23 @@ pre-existing ignored); warning-denied all-target Clippy for builtins, DSP refere
 and `git diff --check`. No corpus validator, audit, target, object, workload, benchmark or timing
 command ran. Sol verdict: **PASS**. `workload_invocations=0`;
 `timed_benchmark_invocations=0`.
+
+## Note (2026-08-23, issue #85 / master plan #83)
+
+Superseded **in part**: "recovery" is now per lane-block, not per sample.
+
+Master plan D7 replaced the per-value classification this spec describes with one mechanism. Each
+recursive state word is flushed to positive zero below `1e-20` inside the kernel; output finiteness
+is checked once per block, per lane, on the output of the recursive stage. A failing lane has its
+block zeroed and both of its sections reset, and increments `recovered_left_state` or
+`recovered_right_state` — so those counters now count **lane-blocks**. `sanitized_output` is
+retained for API stability and is always zero, and a subnormal *input* is no longer sanitised: it is
+a legal finite sample.
+
+The decay contract is unchanged: an enabled section still declares an infinite tail, and the frozen
+impulse and sustained-response gates (0.05 dB, `-100 dB` and `-88 dB` residual limits) pass with the
+new kernel at their original tolerances.
+
+The seam-derivation test this spec relied on is replaced by
+`boundary_check_is_lane_local_per_block` and `partition_invariance_over_master_plan_quanta` in
+`crates/miso-engine-builtins/tests/stage.rs`.

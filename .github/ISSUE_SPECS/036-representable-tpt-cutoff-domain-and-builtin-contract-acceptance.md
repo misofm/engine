@@ -182,3 +182,24 @@ process determinism and target matrix also pass. Final source SHA-256 values are
 `c0a3dd80c4ddd4e27304e5e5b83832aa98f16004211ed270fd10ddf395dc3027`
 (`crates/miso-engine-builtins-compiler/src/lib.rs`). `timed_benchmark_invocations=0`; no benchmark
 command ran and no benchmark artifact was created. **Sol verdict: PASS.**
+
+## Note (2026-08-23, issue #85 / master plan #83)
+
+Superseded **in part**. The table itself — `builtin_filter_cutoff_maximum_hz_v1`,
+`validate_builtin_filter_cutoff_v1` and the four launch-rate maxima — is a contract fixture under
+master plan §8.2 and is unchanged: the same values prepare, the same successors are rejected, and
+`representable_cutoff_domain_is_shared_by_descriptors_and_preparation` still passes verbatim.
+
+What is superseded is the *derivation of the seam*. The pre-#83 maximum was the first cutoff whose
+cast coefficients failed a preparation-time Jury stability check, and that seam was set by the
+`1 - c1` quantisation the check was fed. The kernel now stores `c1` directly and casts
+`a2 = g / (1 + t)` and `a3 = g * g / (1 + t)` (master plan §4.2, amendment A1), so it is better
+conditioned near Nyquist and every value through the table maximum — and beyond it — prepares. The
+Jury check and the preparation-time cutoff-response gate are deleted; the public domain is enforced
+by the table alone.
+
+The replacement derivation is `representable_cutoff_domain_prepares_everywhere_and_rejects_successor`
+in `crates/miso-engine-builtins/tests/response.rs`: every representable cutoff from `0.45 * fs`
+through the maximum designs a section, its cast state-space transfer is `-3.0103 dB` at its own
+cutoff to the frozen 0.005 dB tolerance, and the successor is rejected with `FilterCutoff` by the
+domain. The table is not widened, no new maximum is computed, and no stability gate is re-added.
