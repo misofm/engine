@@ -66,9 +66,20 @@ pub(crate) fn request_with<'a>(
     bypass: bool,
     link_mode: LinkMode,
 ) -> PrepareEffectRequest<'a> {
+    request_full(values, sample_rate, 128, bypass, link_mode)
+}
+
+/// A prepare request with the quantum spelled out as well.
+pub(crate) fn request_full<'a>(
+    values: &'a [InitialParameterValue],
+    sample_rate: u32,
+    quantum: u32,
+    bypass: bool,
+    link_mode: LinkMode,
+) -> PrepareEffectRequest<'a> {
     PrepareEffectRequest {
         sample_rate,
-        quantum: 128,
+        quantum,
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
@@ -222,11 +233,20 @@ pub(crate) fn bind_native_bank(
     values: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
     link_mode: LinkMode,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    bind_native_bank_quantum(values, link_mode, 128)
+}
+
+/// Binds a bank at the native width with the quantum spelled out.
+pub(crate) fn bind_native_bank_quantum(
+    values: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+    link_mode: LinkMode,
+    quantum: u32,
+) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let (backend, width) = native_bank()?;
     assert_eq!(values.len(), width.lanes() as usize);
     let requests = values
         .iter()
-        .map(|values| request_with(values, 48_000, false, link_mode))
+        .map(|values| request_full(values, 48_000, quantum, false, link_mode))
         .collect::<Vec<_>>();
     Some(
         TransientShaperFactory
