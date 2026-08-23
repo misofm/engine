@@ -5,7 +5,7 @@
 //!
 //! Every sample loop in this crate is a `miso_engine_lane::kernels` block kernel, generic over
 //! [`Lane`] and instantiated at `f32`, `Simd4` and `Simd8` from one source. A scalar track is
-//! [`InputStage<f32>`] over planar slices; a bank is the same type at four or eight lanes over an
+//! `InputStage<f32>` over planar slices; a bank is the same type at four or eight lanes over an
 //! AoSoA block. There is no second arithmetic graph, so a track's bits do not depend on its cohort
 //! membership or on the host (master plan #83 D5, §4).
 //!
@@ -1584,7 +1584,7 @@ impl MeterAccumulator {
     /// The split is computed once per segment instead of testing the period after every sample,
     /// and the whole per-sample configuration — hold length, decay multiplier, whether decay is
     /// enabled at all — is hoisted into locals before the loop; [`MeterConfig`] is never passed by
-    /// value per sample (F7). `sqrt` runs once per emitted window, in [`lane_snapshot`].
+    /// value per sample (F7). `sqrt` runs once per emitted window, when a snapshot is built.
     ///
     /// # Errors
     ///
