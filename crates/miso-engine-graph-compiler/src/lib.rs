@@ -3902,6 +3902,147 @@ mod tests {
         }
     }
 
+    /// Records every rendered sample of one observed node, bit for bit.
+    struct BitRecorder(Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
+    impl GraphRuntimeObserver for BitRecorder {
+        fn observe(
+            &mut self,
+            block: GraphObservationBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            let mut sink = self.0.lock().expect("observer sink");
+            for (left, right) in block.left.iter().zip(block.right.iter()) {
+                sink.push((left.to_bits(), right.to_bits()));
+            }
+            Ok(())
+        }
+    }
+
+    /// G3 + G5. Adding a ninth track moves the cohort boundary (eight lanes are full, the ninth
+    /// track becomes a padded, unbound group) without changing one bit of the eight tracks already
+    /// in the bank, and the chain performs exactly one planar/AoSoA round-trip per block.
+    #[test]
+    fn add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain() {
+        const BLOCKS: u64 = 32;
+        let nine = parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
+            .expect("accepted parametric-EQ fixture");
+        let mut eight = nine.clone();
+        eight.tracks.retain(|track| track.id.as_str() != "eq8");
+        eight.routes.retain(|route| {
+            !matches!(
+                &route.source,
+                RouteSource::Track { track_id, .. } if track_id.as_str() == "eq8"
+            )
+        });
+
+        let mut observed = Vec::new();
+        for model in [&eight, &nine] {
+            let session = compile_session(
+                model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("compiled cohort-boundary fixture");
+            let registry = launch_native_effect_registry_v1().expect("launch registry");
+            let effects = prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 20,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("prepared cohort-boundary effects");
+            let artifact = GraphCompiler::compile(GraphCompileRequest {
+                plan_id: 1_096,
+                effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("cohort-boundary graph: {:?}", failure.diagnostics));
+            let bank_count =
+                artifact.graph.prepared_bank_count() + artifact.graph.prepared_builtin_bank_count();
+            let PreparedGraphArtifact { graph, report: _ } = artifact;
+            let envelope = graph.envelope;
+            let frames = envelope.quantum.0 as usize;
+            let nodes = graph
+                .required_bindings
+                .iter()
+                .cloned()
+                .map(|node| {
+                    let processor = parametric_eq_input_binding(&node);
+                    GraphNodeBinding::new(node, processor)
+                })
+                .collect();
+            let sinks: Vec<_> = (0..8)
+                .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+                .collect();
+            let observers = sinks
+                .iter()
+                .enumerate()
+                .map(|(index, sink)| {
+                    GraphNodeObserverBinding::new(
+                        track_node(&format!("eq{index}"), TrackStage::PostSimd1),
+                        index as u64,
+                        Box::new(BitRecorder(Arc::clone(sink))),
+                    )
+                })
+                .collect();
+            let mut plan = graph
+                .bind(GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers,
+                })
+                .unwrap_or_else(|failure| panic!("cohort-boundary bind: {}", failure.code));
+            let mut pcm = vec![0.0_f32; frames * 2];
+            for block in 0..BLOCKS {
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("cohort-boundary output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("cohort-boundary render");
+            }
+            // G5: master plan §4.5 -- exactly one transpose per bank chain per block.
+            assert_eq!(
+                plan.bank_transposes(),
+                BLOCKS * bank_count as u64,
+                "one planar/AoSoA round-trip per chain per block"
+            );
+            assert!(bank_count > 0, "the eight-lane cohort must actually bank");
+            observed.push(
+                sinks
+                    .iter()
+                    .map(|sink| sink.lock().expect("observer sink").clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        // G3: the ninth track changes the cohort boundary, not the bits of its eight neighbours.
+        for track in 0..8 {
+            assert_eq!(
+                observed[0][track].len(),
+                BLOCKS as usize * 128,
+                "every block was observed"
+            );
+            assert_eq!(
+                observed[0][track], observed[1][track],
+                "eq{track} bits changed when a ninth track was added"
+            );
+        }
+    }
+
     #[test]
     fn launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks() {
         let model = parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)

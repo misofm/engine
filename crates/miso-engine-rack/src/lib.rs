@@ -709,6 +709,91 @@ mod tests {
         );
     }
 
+    /// T6: `BankChain::run` is partition invariant over the master plan's block sizes. The chain
+    /// is the block API #96 introduces, so the gate lives here: a stateful stage driven in blocks
+    /// of {1, 7, 64, 128, 512} produces bit-identical output to one 512-frame block.
+    #[test]
+    fn chain_run_is_partition_invariant() {
+        /// Per-lane running sum over the resident AoSoA block: state must live in the stage, never
+        /// in a per-block local.
+        struct RunningSum {
+            left: [f32; 8],
+            right: [f32; 8],
+        }
+        impl BankStage for RunningSum {
+            fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+                for frame in 0..block.frames as usize {
+                    for lane in 0..block.lanes {
+                        let index = frame * block.lanes + lane;
+                        self.left[lane] += block.left[index];
+                        block.left[index] = self.left[lane];
+                        self.right[lane] += block.right[index];
+                        block.right[index] = self.right[lane];
+                    }
+                }
+                Ok(())
+            }
+        }
+        let frames = 512_usize;
+        let lanes = 8_usize;
+        let mut state = 0x0bad_c0de_u64;
+        let source: Vec<Vec<f32>> = (0..lanes)
+            .map(|_| {
+                (0..frames)
+                    .map(|_| f32::from_bits(seeded(&mut state).to_bits() & 0x3f7f_ffff))
+                    .collect()
+            })
+            .collect();
+        let render = |partition: usize| -> Vec<Vec<f32>> {
+            let mut chain = BankChain::new(
+                AoSoaScratch::new(BankWidth::Eight, 512).expect("scratch"),
+                vec![true; lanes].into_boxed_slice(),
+                vec![slot(
+                    vec![true; lanes],
+                    Box::new(RunningSum {
+                        left: [0.0; 8],
+                        right: [0.0; 8],
+                    }),
+                )],
+            )
+            .expect("chain");
+            let mut out: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); lanes];
+            let mut first = 0_usize;
+            while first < frames {
+                let count = partition.min(frames - first);
+                let mut planes = Planes {
+                    left: (0..lanes)
+                        .map(|lane| source[lane][first..first + count].to_vec())
+                        .collect(),
+                    right: (0..lanes)
+                        .map(|lane| source[lane][first..first + count].to_vec())
+                        .collect(),
+                };
+                chain
+                    .run(&mut planes, count as u32, first as u64)
+                    .expect("run");
+                for lane in 0..lanes {
+                    out[lane].extend_from_slice(&planes.left[lane]);
+                }
+                first += count;
+            }
+            out
+        };
+        let oracle = render(512);
+        for partition in [1_usize, 7, 64, 128, 512] {
+            let observed = render(partition);
+            for lane in 0..lanes {
+                for frame in 0..frames {
+                    assert_eq!(
+                        observed[lane][frame].to_bits(),
+                        oracle[lane][frame].to_bits(),
+                        "partition={partition} lane={lane} frame={frame}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The chain never gathers into or scatters from an inactive lane, so a padded group cannot
     /// disturb an inactive member's planar buffer even when a stage writes the whole block.
     #[test]
