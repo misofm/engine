@@ -278,7 +278,12 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
     quality(96_000, 960),
 ];
 
-/// State payload layout version. Bumped from 1 by #89; see [`quality`].
+/// State payload layout version.
+///
+/// Bumped from 1 to 2 by #89: the payload is cursor-normalised, the phase and hold words are the
+/// `f32` lane words the kernel holds, each ramp carries its precomputed D11 step, and the common
+/// section carries the runtime codec's two-word header. `maximum_state` moves in the same change,
+/// which is why the two are one bump and not two.
 pub const STATE_LAYOUT_VERSION: u32 = 2;
 
 /// Immutable descriptor for the launch gate/expander contract.
