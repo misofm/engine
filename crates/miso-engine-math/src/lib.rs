@@ -13,7 +13,7 @@
 //!   musl port, with every target-conditional path and intrinsic fast path removed. Accuracy is
 //!   musl's, at or below 1 ulp for the functions in this set. Used by the control plane (filter
 //!   coefficient design, dB conversions at event rate) and by scalar render paths.
-//! * **Lane** ([`exp2_lane`], [`log2_lane`], behind the `lane` feature) — `2^x` and `log2(x)`
+//! * **Lane** (`exp2_lane`, `log2_lane`, behind the `lane` feature) — `2^x` and `log2(x)`
 //!   evaluated with `miso_engine_lane::Lane` basic operations only, for per-sample dB↔gain work
 //!   inside a SIMD bank. Maximum error is proven below 2 ulp by an exhaustive sweep of all
 //!   2^32 `f32` inputs (gate M1).
