@@ -167,17 +167,13 @@ pub struct NativeWaveDecoder<R: Read + Seek> {
 }
 
 pub(crate) trait PlanarSink {
-    fn write(&mut self, channel: usize, frame: usize, sample: f32);
+    fn plane(&mut self, channel: usize) -> &mut [f32];
 }
 
-pub(crate) struct PlaneSlices<'a, 'b> {
-    out: &'a mut [&'b mut [f32]],
-}
-
-impl PlanarSink for PlaneSlices<'_, '_> {
+impl PlanarSink for [&mut [f32]] {
     #[inline(always)]
-    fn write(&mut self, channel: usize, frame: usize, sample: f32) {
-        self.out[channel][frame] = sample;
+    fn plane(&mut self, channel: usize) -> &mut [f32] {
+        self[channel]
     }
 }
 
@@ -188,8 +184,9 @@ pub(crate) struct Strided<'a> {
 
 impl PlanarSink for Strided<'_> {
     #[inline(always)]
-    fn write(&mut self, channel: usize, frame: usize, sample: f32) {
-        self.out[channel * self.stride + frame] = sample;
+    fn plane(&mut self, channel: usize) -> &mut [f32] {
+        let start = channel * self.stride;
+        &mut self.out[start..start + self.stride]
     }
 }
 
@@ -235,7 +232,7 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         output_planes: &mut [&mut [f32]],
     ) -> Result<NativeDecodeReport, NativeWaveError> {
         let requested_frames = self.validate_output_shape(output_planes)?;
-        self.decode_next(requested_frames, &mut PlaneSlices { out: output_planes })
+        self.decode_next(requested_frames, output_planes)
     }
 
     fn decode_next<S: PlanarSink + ?Sized>(
@@ -262,13 +259,17 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
                 decoded_frames_usize - copied,
                 self.buffer_frames - self.buffer_cursor,
             );
+            let block_align = usize::from(self.metadata.block_align_bytes);
+            let source_start = self.buffer_cursor * block_align;
+            let source_end = (self.buffer_cursor + chunk) * block_align;
             let sanitized = convert_frames(
                 self.metadata,
-                &self.scratch,
-                self.buffer_cursor,
-                copied,
+                &self.scratch[source_start..source_end],
+                block_align,
+                usize::from(self.metadata.channel_count),
                 chunk,
                 sink,
+                copied,
             );
             self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(sanitized);
             self.buffer_cursor += chunk;
@@ -769,101 +770,108 @@ fn float_encoding(bits_per_sample: u16) -> Result<NativeWaveEncoding, NativeWave
 
 fn convert_frames<S: PlanarSink + ?Sized>(
     metadata: NativeWaveMetadata,
-    bytes: &[u8],
-    source_start: usize,
-    destination_start: usize,
+    src: &[u8],
+    block_align: usize,
+    channels: usize,
     frame_count: usize,
     sink: &mut S,
+    destination_start: usize,
 ) -> u64 {
-    let channels = usize::from(metadata.channel_count);
-    let block_align = usize::from(metadata.block_align_bytes);
+    debug_assert_eq!(src.len(), frame_count * block_align);
     let mut sanitized = 0_u64;
     match metadata.encoding {
         NativeWaveEncoding::UnsignedPcm8 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel;
-                    let sample = (f32::from(bytes[offset]) - 128.0) * 0.007_812_5;
-                    sink.write(channel, destination_start + frame, sample);
+                let sample_offset = channel;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = (f32::from(frame[sample_offset]) - 128.0) * 0.007_812_5;
                 }
             }
         }
         NativeWaveEncoding::SignedPcm16 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel * 2;
-                    let sample = f32::from(i16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
-                        * (1.0 / 32_768.0);
-                    sink.write(channel, destination_start + frame, sample);
+                let sample_offset = channel * 2;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = f32::from(i16::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                    ])) * (1.0 / 32_768.0);
                 }
             }
         }
         NativeWaveEncoding::SignedPcm24 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel * 3;
-                    let raw = i32::from(bytes[offset])
-                        | (i32::from(bytes[offset + 1]) << 8)
-                        | (i32::from(bytes[offset + 2]) << 16);
+                let sample_offset = channel * 3;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    let raw = i32::from(frame[sample_offset])
+                        | (i32::from(frame[sample_offset + 1]) << 8)
+                        | (i32::from(frame[sample_offset + 2]) << 16);
                     let signed = if raw & 0x0080_0000 != 0 {
                         raw | !0x00ff_ffff
                     } else {
                         raw
                     };
-                    sink.write(
-                        channel,
-                        destination_start + frame,
-                        signed as f32 * (1.0 / 8_388_608.0),
-                    );
+                    *output = signed as f32 * (1.0 / 8_388_608.0);
                 }
             }
         }
         NativeWaveEncoding::SignedPcm32 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel * 4;
-                    let sample = i32::from_le_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
+                let sample_offset = channel * 4;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
+                    *output = i32::from_le_bytes([
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
                     ]) as f32
                         * (1.0 / 2_147_483_648.0);
-                    sink.write(channel, destination_start + frame, sample);
                 }
             }
         }
         NativeWaveEncoding::Float32 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel * 4;
+                let sample_offset = channel * 4;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
                     let (sample, count) = sanitize_f32(f32::from_le_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
                     ]));
                     sanitized = sanitized.saturating_add(count);
-                    sink.write(channel, destination_start + frame, sample);
+                    *output = sample;
                 }
             }
         }
         NativeWaveEncoding::Float64 => {
             for channel in 0..channels {
-                for frame in 0..frame_count {
-                    let offset = (source_start + frame) * block_align + channel * 8;
+                let sample_offset = channel * 8;
+                let dst =
+                    &mut sink.plane(channel)[destination_start..destination_start + frame_count];
+                for (frame, output) in src.chunks_exact(block_align).zip(dst.iter_mut()) {
                     let (sample, count) = sanitize_f64(f64::from_le_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
-                        bytes[offset + 4],
-                        bytes[offset + 5],
-                        bytes[offset + 6],
-                        bytes[offset + 7],
+                        frame[sample_offset],
+                        frame[sample_offset + 1],
+                        frame[sample_offset + 2],
+                        frame[sample_offset + 3],
+                        frame[sample_offset + 4],
+                        frame[sample_offset + 5],
+                        frame[sample_offset + 6],
+                        frame[sample_offset + 7],
                     ]));
                     sanitized = sanitized.saturating_add(count);
-                    sink.write(channel, destination_start + frame, sample);
+                    *output = sample;
                 }
             }
         }
@@ -879,11 +887,8 @@ fn sanitize_f32(value: f32) -> (f32, u64) {
     let bits = value.to_bits();
     let magnitude = bits & MAGNITUDE;
     let exponent = bits & EXPONENT;
-    if magnitude == 0 || (exponent != 0 && exponent != EXPONENT) {
-        (value, 0)
-    } else {
-        (0.0, 1)
-    }
+    let accepted = ((exponent != 0) & (exponent != EXPONENT)) | (magnitude == 0);
+    if accepted { (value, 0) } else { (0.0, 1) }
 }
 
 #[inline(always)]
@@ -894,15 +899,10 @@ fn sanitize_f64(value: f64) -> (f32, u64) {
     let bits = value.to_bits();
     let magnitude = bits & MAGNITUDE;
     let exponent = bits & EXPONENT;
-    if magnitude != 0 && (exponent == 0 || exponent == EXPONENT) {
-        return (0.0, 1);
-    }
-    let (converted, rejected) = sanitize_f32(value as f32);
-    if rejected == 0 {
-        (converted, 0)
-    } else {
-        (0.0, 1)
-    }
+    let accepted64 = ((exponent != 0) & (exponent != EXPONENT)) | (magnitude == 0);
+    let (converted, rejected32) = sanitize_f32(value as f32);
+    let accepted = accepted64 & (rejected32 == 0);
+    if accepted { (converted, 0) } else { (0.0, 1) }
 }
 
 fn le_u16(bytes: &[u8]) -> u16 {
@@ -1194,7 +1194,16 @@ mod tests {
         let conversion = &source[source.find("fn convert_frames").expect("conversion")
             ..source.find("fn sanitize_f32").expect("sanitizer")];
         assert_eq!(conversion.matches("match metadata.encoding").count(), 1);
+        assert!(conversion.contains("sink.plane(channel)"));
+        assert!(conversion.contains("src.chunks_exact(block_align).zip(dst.iter_mut())"));
+        assert!(!conversion.contains(&["sink", ".write"].concat()));
         assert!(!source.contains(&["fn decode", "_sample"].concat()));
+
+        let sanitizers = &source[source.find("fn sanitize_f32").expect("f32 sanitizer")
+            ..source.find("fn le_u16").expect("post-sanitizer helper")];
+        assert!(sanitizers.contains("(exponent != 0) & (exponent != EXPONENT)"));
+        assert!(sanitizers.contains("accepted64 & (rejected32 == 0)"));
+        assert!(!sanitizers.contains("return "));
     }
 
     #[test]
