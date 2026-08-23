@@ -10,19 +10,8 @@ use miso_engine_builtins::*;
 use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
 use miso_engine_dsp_reference::{
     ReferenceBiquad, ReferenceFilterKind, ReferenceSvfStateSpace, ReferenceTptOutput,
-    ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
+    rbj_butterworth_magnitude_db,
 };
-
-/// The prepared `(c1, a2, a3, k)` words of one section, read from the production design.
-fn designed(rate: u32, cutoff: f32, high_pass: bool) -> (f32, f32, f32, f32) {
-    let words = test_support::section_words(rate, cutoff, high_pass).expect("valid section");
-    (
-        f32::from_bits(words[0]),
-        f32::from_bits(words[1]),
-        f32::from_bits(words[2]),
-        f32::from_bits(words[3]),
-    )
-}
 
 /// The state-space model of a prepared section, built from **all seven** of its cast words.
 ///
@@ -238,9 +227,8 @@ fn cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates(
             ),
         ] {
             for cutoff in &cutoffs {
-                let (c1, a2, a3, k) = designed(rate, *cutoff as f32, high_pass);
-                let state = ReferenceTptStateSpace::from_cast_coefficients(c1, a2, a3, k, output);
                 let _ = output;
+                let state = state_space(rate, *cutoff, high_pass);
                 assert_tpt_limits_and_monotonic(state, rate, high_pass, *cutoff);
                 let mut probes = coherent_probes(rate, *cutoff);
                 probes.extend([*cutoff, 0.49 * f64::from(rate)]);
@@ -685,17 +673,17 @@ fn solve_three_by_three(mut augmented: [[f64; 4]; 3]) -> [f64; 3] {
 }
 
 fn assert_tpt_limits_and_monotonic(
-    state: ReferenceTptStateSpace,
+    state: ReferenceSvfStateSpace,
     rate: u32,
     high_pass: bool,
     cutoff: f64,
 ) {
     let nyquist = 0.5 * f64::from(rate);
     let magnitude = |frequency| {
-        let (real, imaginary) = state
+        let response = state
             .response(f64::from(rate), frequency)
             .expect("finite state-space response");
-        real.hypot(imaginary)
+        response.re.hypot(response.im)
     };
     let (dc, at_nyquist) = (magnitude(0.0), magnitude(nyquist));
     if high_pass {
