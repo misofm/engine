@@ -279,3 +279,24 @@ Final verdict: **PASS** for the bounded stable C ABI and host-fed planar PCM ren
 `capi_audit_main_invocations=1`, `benchmark_workload_invocations=0`, and
 `timed_benchmark_invocations=0`. No retry, direct audit-binary run, benchmark, timing, trace, target,
 or Issue-073 qualification workload occurred.
+
+## Thread-ownership decision record — 2026-08-23 (#103 wave 0, F2/F3)
+
+The ABI's control/render split was previously a convention in prose: `miso_engine_v2_plan_resources`
+and `miso_engine_v2_last_error` take a `const` plan yet reached it as `&*plan` and cleared a
+`RefCell` diagnostic the render thread also wrote through `&mut *plan`, so a host that followed the
+documented "query while rendering" contract had undefined behaviour. It is now a property of the
+code: `Plan` is split into an immutable resource-query projection, one relaxed `AtomicU32`
+diagnostic word, and the render-thread-exclusive plan state, and `ffi.rs` reaches those fields only
+through `&raw const`/`&raw mut` projections — no path forms a reference to the whole `Plan`, which a
+source-scan regression test enforces. `plan_resources` is pure; the plan's fixed diagnostic table
+replaces its retained `FixedBytes` buffer, lowering `capi_retained_bytes` on the pinned nine-track
+fixture from 144537 to 140425 with no reported diagnostic string changed. The header now carries the
+frozen "Thread ownership" block naming, per handle, which thread may call each symbol, that plan
+queries are any-thread and concurrent with render, that `*_destroy` requires quiescence, and that no
+borrowed pointer is retained. Alongside it, every raw slice at the boundary is now preceded by null,
+alignment, and `PTRDIFF_MAX` checks that return `MISO_ENGINE_V2_INVALID_ARGUMENT` before any access.
+The 13 exported symbols, 8 structs, and result-code values are unchanged; no rendered bit moves.
+Open question 1 (plan exchange and retirement under the frozen ABI, finding F9) is unchanged and
+stands as recorded: V1 is an immutable session, a new session means new handles, and the host
+crossfades.
