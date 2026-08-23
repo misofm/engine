@@ -83,9 +83,11 @@ pub struct NativeSourcePrepareCaps {
     pub parser: NativeWaveParseCaps,
     /// Maximum fixed native decoder interleaved read scratch bytes.
     pub max_worker_read_scratch_bytes: u64,
-    /// Maximum exact base source plus once-per-thread stop queue and job-array total.
+    /// Maximum exact set-of-one source plus worker total; session preparation applies it to each
+    /// base source and applies shared-worker limits through [`NativeSessionSourcePrepareCaps`].
     pub max_total_engine_owned_bytes: u64,
-    /// Maximum exact ring, decoder, staging, queue, or typed boxed job-array allocation.
+    /// Maximum set-of-one allocation; sessions apply this to base-source allocations and their
+    /// session cap to the one shared typed boxed job array.
     pub max_largest_allocation_bytes: u64,
     /// Bounded worker command queue item count.
     pub control_queue_items: NonZeroUsize,
@@ -320,6 +322,8 @@ pub struct NativeSessionSourceResourceReport {
     pub source_overhead_bytes: u64,
     /// Exact vector allocation retaining one non-render controller per native source.
     pub controller_records_bytes: u64,
+    /// Exact once-per-session worker stop queue plus typed boxed job-array bytes.
+    pub worker_bytes: u64,
     pub combined_runtime_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
@@ -1145,9 +1149,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
 ) -> Result<NativeSessionPreparedSources, NativeSessionSourcePrepareFailure> {
     let model = session.normalized_model();
     let mut diagnostics = Vec::new();
-    let mut controllers = Vec::with_capacity(model.sources.len());
-    let mut graph_sources = Vec::with_capacity(model.sources.len());
-    let mut reports = Vec::with_capacity(model.sources.len());
+    let mut prepared_sources = Vec::with_capacity(model.sources.len());
 
     for source in &model.sources {
         let request = NativeSourcePrepareRequest {
@@ -1167,14 +1169,8 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
                 initial_generation: SourceGeneration(1),
             },
         };
-        match prepare_native_source(resolver, request, caps.source) {
-            Ok(prepared) => {
-                let report = prepared.resource_report();
-                let (controller, graph_source) = prepared.into_graph_source();
-                graph_sources.push(graph_source);
-                reports.push(report);
-                controllers.push(controller);
-            }
+        match prepare_native_source_job(resolver, request, caps.source, None) {
+            Ok(prepared) => prepared_sources.push(prepared),
             Err(error) => diagnostics.push(native_prepare_diagnostic(source.id.as_str(), error)),
         }
     }
@@ -1182,6 +1178,79 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         sort_diagnostics(&mut diagnostics);
         return Err(NativeSessionSourcePrepareFailure { diagnostics });
     }
+
+    let source_count =
+        u64::try_from(prepared_sources.len()).expect("source vector length fits u64");
+    let mut jobs = Vec::with_capacity(prepared_sources.len());
+    let mut endpoints = Vec::with_capacity(prepared_sources.len());
+    for prepared in prepared_sources {
+        let UnstartedNativeSource {
+            command_sender,
+            event_receiver,
+            job,
+            consumer,
+            resources,
+            initial_generation,
+            region,
+            ..
+        } = prepared;
+        debug_assert_eq!(resources.worker, EMPTY_WORKER_RESOURCE_REPORT);
+        jobs.push(job);
+        endpoints.push((
+            command_sender,
+            event_receiver,
+            consumer,
+            resources,
+            initial_generation,
+            region,
+        ));
+    }
+    let (worker, worker_resources, worker_thread) = match start_native_workers(jobs, None) {
+        Ok(started) => started,
+        Err(error) => {
+            return Err(NativeSessionSourcePrepareFailure {
+                diagnostics: vec![native_prepare_diagnostic(
+                    model.sources[0].id.as_str(),
+                    error,
+                )],
+            });
+        }
+    };
+    let mut worker = Some(worker);
+    let mut controllers = Vec::with_capacity(endpoints.len());
+    let mut graph_sources = Vec::with_capacity(endpoints.len());
+    for (index, (commands, events, consumer, resources, initial_generation, region)) in
+        endpoints.into_iter().enumerate()
+    {
+        controllers.push(native_source_controller(
+            commands,
+            events,
+            initial_generation,
+            region,
+            worker_thread.clone(),
+        ));
+        let additional_overhead_bytes = resources
+            .total_engine_owned_bytes
+            .checked_sub(resources.ring.total_engine_owned_bytes)
+            .expect("base source report includes ring");
+        if index == 0 {
+            graph_sources.push(SourceGraphSource::with_native_worker(
+                consumer,
+                resources.ring,
+                additional_overhead_bytes,
+                resources.largest_allocation_bytes,
+                worker.take().expect("first source owns set worker"),
+            ));
+        } else {
+            graph_sources.push(SourceGraphSource::new(
+                consumer,
+                resources.ring,
+                additional_overhead_bytes,
+                resources.largest_allocation_bytes,
+            ));
+        }
+    }
+    debug_assert!(worker.is_none());
 
     let source_indexes: std::collections::BTreeMap<_, _> = model
         .sources
@@ -1228,9 +1297,13 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         retained_array_bytes::<NativeSourceController>(controllers.len())
             .ok_or_else(|| resource_failure(model.sources[0].id.as_str()))?;
     let session_runtime_bytes = session.resource_estimate().requested_runtime_bytes;
+    let worker_bytes = worker_resources
+        .total_engine_owned_bytes()
+        .ok_or_else(|| resource_failure(model.sources[0].id.as_str()))?;
     let combined_runtime_bytes = match session_runtime_bytes
         .checked_add(graph_resources.overhead_bytes)
         .and_then(|total| total.checked_add(controller_records_bytes))
+        .and_then(|total| total.checked_add(worker_bytes))
     {
         Some(total) => total,
         None => {
@@ -1241,7 +1314,8 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         .resource_estimate()
         .single_allocation_bytes
         .max(graph_resources.largest_allocation_bytes)
-        .max(controller_records_bytes);
+        .max(controller_records_bytes)
+        .max(worker_resources.largest_allocation_bytes());
     if graph_resources.pcm_payload_already_charged_bytes
         != session.resource_estimate().source_ring_bytes
         || combined_runtime_bytes > model.limits.memory_bytes
@@ -1250,7 +1324,6 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     {
         return Err(resource_failure(model.sources[0].id.as_str()));
     }
-    let source_count = u64::try_from(reports.len()).expect("source vector length fits u64");
     Ok(NativeSessionPreparedSources {
         source_set,
         controllers,
@@ -1260,6 +1333,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
             source_pcm_already_charged_bytes: graph_resources.pcm_payload_already_charged_bytes,
             source_overhead_bytes: graph_resources.overhead_bytes,
             controller_records_bytes,
+            worker_bytes,
             combined_runtime_bytes,
             largest_allocation_bytes,
         },
@@ -2805,6 +2879,90 @@ mod tests {
     }
 
     #[test]
+    fn compiled_multi_source_session_uses_one_exact_shared_worker() {
+        let mut session_toml =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("session");
+        session_toml.sources[0].mapping.region.length_samples = 4;
+        let mut second = session_toml.sources[0].clone();
+        second.id = StableId::parse("voice2").expect("second source ID");
+        second.content.locator = "host:voice2".to_owned();
+        session_toml.sources.push(second);
+        let session = compile_session(
+            &session_toml,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled two-source session");
+        let asset = || NativeResolvedAsset {
+            observed_identity: b"sha256:demo".to_vec(),
+            reader: Cursor::new(stereo_float32_wave(&[0.0; 8])),
+        };
+        let mut resolver = SessionResolver {
+            assets: vec![asset(), asset()],
+            calls: 0,
+        };
+        let prepared = prepare_native_session_sources(&session, &mut resolver, session_caps())
+            .expect("prepare one shared session worker");
+        assert_eq!(resolver.calls, 2);
+        assert_eq!(prepared.resources.source_count, 2);
+        assert_eq!(prepared.controllers.len(), 2);
+        assert_eq!(
+            prepared.controllers[0].worker.id(),
+            prepared.controllers[1].worker.id(),
+            "all session controllers must target one shared worker"
+        );
+        let stop = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))
+            .expect("shared stop resources");
+        let jobs = Layout::array::<SourceJob<Cursor<Vec<u8>>>>(2).expect("two-job array");
+        let expected_worker_bytes = stop
+            .total_bytes
+            .checked_add(u64::try_from(jobs.size()).expect("job-array bytes"))
+            .expect("worker bytes");
+        assert_eq!(prepared.resources.worker_bytes, expected_worker_bytes);
+        assert_eq!(
+            prepared.resources.combined_runtime_bytes,
+            prepared
+                .resources
+                .session_runtime_bytes
+                .checked_add(prepared.resources.source_overhead_bytes)
+                .and_then(|total| {
+                    total.checked_add(prepared.resources.controller_records_bytes)
+                })
+                .and_then(|total| total.checked_add(prepared.resources.worker_bytes))
+                .expect("combined runtime")
+        );
+
+        let (source_set, mut controllers, _) = prepared.into_parts();
+        for controller in &mut controllers {
+            assert!(matches!(
+                controller.wait_for_event().expect("shared worker ready"),
+                NativeSourceWorkerEvent::SourceReady { .. }
+            ));
+        }
+        drop(source_set);
+        for controller in &mut controllers {
+            assert!(matches!(
+                controller.wait_for_event().expect("shared worker terminal"),
+                NativeSourceWorkerEvent::Terminal {
+                    exit: NativeSourceWorkerExit::Stopped,
+                    ..
+                }
+            ));
+            assert_eq!(
+                controller.try_wake(),
+                Err(NativeSourceWorkerControlError::Stopped)
+            );
+        }
+    }
+
+    #[test]
     fn native_sanitation_reaches_after_disarm_source_set_telemetry_and_drop_retires_worker() {
         use core::num::NonZeroUsize;
         use miso_engine_core::realtime::RenderEnvelope;
@@ -3326,7 +3484,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_session_source_rollback_stops_earlier_worker() {
+    fn compiled_session_source_failure_collects_sorted_diagnostics_before_worker_start() {
         let mut session_toml =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("session");
@@ -3334,7 +3492,11 @@ mod tests {
         let mut second = session_toml.sources[0].clone();
         second.id = StableId::parse("voice2").expect("ID");
         second.content.locator = "host:voice2".to_owned();
+        let mut third = second.clone();
+        third.id = StableId::parse("alpha").expect("ID");
+        third.content.locator = "host:alpha".to_owned();
         session_toml.sources.push(second);
+        session_toml.sources.push(third);
         let session = compile_session(
             &session_toml,
             CompileCaps {
@@ -3353,13 +3515,33 @@ mod tests {
             Ok(_) => panic!("second resolver call unexpectedly prepared"),
             Err(failure) => failure,
         };
-        assert_eq!(resolver.calls, 2);
-        assert_eq!(failure.diagnostics.len(), 1);
-        assert_eq!(
-            failure.diagnostics[0].code,
-            SourceDiagnosticCode::AssetUnresolved
+        assert_eq!(resolver.calls, 3);
+        assert_eq!(failure.diagnostics.len(), 2);
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == SourceDiagnosticCode::AssetUnresolved)
         );
         assert_eq!(failure.diagnostics[0].path.as_str(), "$.sources[id=voice2]");
+        assert_eq!(failure.diagnostics[1].path.as_str(), "$.sources[id=voice]");
+
+        let source = include_str!("native_source.rs");
+        let start = source
+            .find("pub fn prepare_native_session_sources")
+            .expect("session preparation function");
+        let body = &source[start..];
+        let inert = body
+            .find("prepare_native_source_job")
+            .expect("inert job preparation");
+        let reject = body
+            .find("if !diagnostics.is_empty()")
+            .expect("diagnostic rejection");
+        let spawn = body.find("start_native_workers").expect("single set start");
+        assert!(
+            inert < reject && reject < spawn,
+            "all inert jobs must reject before the sole worker start"
+        );
     }
 
     fn read_one(consumer: &mut PcmSourceConsumer) -> ([f32; 4], SourceReadReport) {
