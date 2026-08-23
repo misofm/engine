@@ -11,10 +11,15 @@ name = "miso_engine_parametric_eq"
 [dependencies]
 miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math.workspace = true
 
 [dev-dependencies]
 # Test-only independent f64 oracle; production code has no dependency on this crate.
 miso-engine-dsp-reference.workspace = true
+miso-engine-lane.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
