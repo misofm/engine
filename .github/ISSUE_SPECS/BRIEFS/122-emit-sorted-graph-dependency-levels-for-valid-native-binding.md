@@ -2,11 +2,11 @@
 
 ## Decision
 
-**READY FOR SOL HIGH PASS 1.** Implement only the deterministic ordering correction required for a
-valid compiled graph to satisfy the accepted native binder. Sol High implements and freezes one
-checkpoint; Sol XHigh performs the read-only adversarial review. One bounded HOLD correction is
-the entire remaining budget, and a second material HOLD is terminal STOP. Benchmark, timing and
-workload counters remain zero.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE AFTER UPSTREAM AND CI SYNCHRONIZATION.** The
+deterministic ordering correction passed the first read-only Sol XHigh review strictly, so the
+bounded HOLD was not consumed. Benchmark, timing and workload counters remained zero. After the
+final evidence is upstream, CI passes and GitHub is synchronized, Issue 122 may close and its
+dependency edge into Issue 026 is unblocked.
 
 Accepted Issue-006 authority is implementation checkpoint
 `40f0a2f3f5057e725e80715da18afb0e5f4d6bb3` plus accepted product rescope
@@ -86,3 +86,42 @@ counters. Fixture changes must be none. Sol XHigh returns PASS or the sole HOLD.
 
 PASS gates **End-to-end release, performance, and listening qualification**. It does not close
 Issue 099's other findings or Issue 098.
+
+## Final evidence and verdict
+
+The bounded pre-handoff docs amendment at
+`d985a5191b0a6402dbe28c545cc7780fb0c27552` (tree
+`da6b67975a814c49914685dcae2991f474ed79b4`) pinned the pre-existing resource-zero fixture drift.
+It was a briefing correction before immutable handoff, not a HOLD, and it changed neither product
+code nor the required Issue-122 behavior. Sol XHigh subsequently returned strict PASS on pass 1;
+no HOLD was issued or consumed.
+
+The immutable technical checkpoint is
+`776e2cbbc7d68fd7ac3dc95825dfe99651df5be1`, tree
+`f032193af3ff11499003c6bc91e71dcb828acc07`. Its exact two changed paths are the issue spec at
+SHA-256 `124b9db78be5d0c2d5fdd638fbe2608ca9f8b3d7f4c36044812948392105a00c`
+and `crates/miso-engine-graph-compiler/src/lib.rs` at SHA-256
+`269f1a0300e4756104164ee0ed2b60ab1868dfd9ea74caf187f06642f2e9e87f`.
+The sole production delta sorts completed dependency-level member vectors; the remaining compiler
+delta is focused `#[cfg(test)]` evidence.
+
+The reverse-route-ID regression proves the old ready-pop level 9
+`[route:z-downstream, route:a-downstream]` is genuinely unsorted and the corrected production row
+is `[route:a-downstream, route:z-downstream]`. Level, membership, edge and canonical invariants
+pass, and ready-pop, reversed, omitted, duplicated, schedule and canonical mutations reject. The
+pre-correction/corrected canonical hashes are
+`6676779806af8bb20c9abb287a39488512fc7c0972e96f6cd300f469539bd770` and
+`3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce`;
+their non-level bytes are identical. Both native modes bind and preserve exact PCM, PDC and
+observer ordering. Sequential scheduling, executors, buffer assignment, timing/PDC/resource
+logic, graph runtime, native scheduler, fixtures, Cargo files and Issue-098 scope are frozen.
+
+All focused tests, corruption checks, warning-denied package checks, formatting, policies,
+mutations and diff/static gates passed. The full fixture check reproduced only its pinned exit-1
+`graph fixture manifest mismatch`: the same two resource-zero-derived path hashes, unchanged
+level/schedule and other payload bytes, and no new or missing paths; fixtures, generator and
+manifest were not edited. Final counters are exactly `benchmark_invocations=0`,
+`timed_benchmark_invocations=0`, and `workload_invocations=0`.
+
+Verdict: **strict Sol XHigh PASS, no HOLD; COMPLETE and READY TO CLOSE after upstream/CI/GitHub
+synchronization.** That synchronization unblocks the Issue-122 dependency of Issue 026.
