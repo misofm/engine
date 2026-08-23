@@ -1,7 +1,7 @@
 //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
 #![allow(missing_docs)]
 
-use miso_engine_core::TargetCapabilities;
+use miso_engine_core::target_capabilities;
 use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     env,
@@ -283,9 +283,10 @@ fn run_once(fixture: &Fixture) -> Sample {
     let effect_prepare_ns = prepare_started.elapsed().as_nanos();
     let compile_started = Instant::now();
     let artifact = GraphCompiler::compile(GraphCompileRequest {
-        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
-            false, false, false, false,
-        )),
+        // The host's dispatch, deliberately: bank planning and `bind_homogeneous_bank` are part
+        // of compile, so a scalar dispatch would quietly remove them from the timed workload and
+        // make the number incomparable with every earlier run (#99 F6).
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: 6,
         effects,
         caps: unlimited_graph_caps(),
@@ -610,9 +611,8 @@ mod tests {
         assert_eq!(fixture.effects, 64);
         assert_eq!(fixture.sidechains, 32);
         let artifact = GraphCompiler::compile(GraphCompileRequest {
-            dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
-                false, false, false, false,
-            )),
+            // See above: the timed workload keeps the host's banks.
+            dispatch: KernelDispatch::select(target_capabilities()),
             plan_id: 6,
             effects: prepared_effects(&fixture),
             caps: unlimited_graph_caps(),

@@ -36,6 +36,41 @@ Feedback processing, implicit sends, fractional/implicit PDC, track count ceilin
 
 Track chain is exactly input→builtins→SIMD1→dynamic→SIMD2→fader/mute→matrix→routes. Sends must name their tap; graph stays acyclic. VST latency reference: https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IAudioProcessor.html.
 
+**Dependency levels are emitted in ascending node-ID order, and the canonical sequential schedule
+is the concatenation of the levels** (level-major, ID-sorted within a level). Decided in audit #99
+F1 (2026-08-22, landed by #122/#123); `NativeGraphBlueprint::prepare` rejects any other level
+order with `graph.scheduler.layout`, for both native render modes, so an unsorted level makes a
+valid multi-submix session unbindable. #98 relies on this ordering.
+`random_dags_have_strictly_ascending_levels_and_level_major_schedule` gates it over graphs where
+node-ID order and topological order are unrelated; the `direct-route` fixture cannot -- it is a
+chain with exactly one node per level.
+
+**Kernel dispatch is an explicit compile input, not a host read.** `GraphCompileRequest` and
+`GraphBuiltinsCompileRequest` carry `dispatch: KernelDispatch` (audit #99 F6, 2026-08-23).
+Compile is a pure function of its inputs; the host CPU is read once by the caller that owns the
+render target. The semantic graph -- schedule, levels, PDC, reductions, canonical bytes and
+SHA-256 -- is independent of that value; only the bank overlay and the bank half of the resource
+estimate depend on it.
+
+**Route gain is `miso_engine_math::db_to_gain_f32`,** never a platform transcendental (audit #99
+F4, master plan #83 D6). The coefficient reaches both the render multiply and the
+`route-transform` canonical line, so a host libm there would break the cross-target bit-identity
+claim (D5). `db_to_gain_f32(0) == 1.0` exactly, so 0 dB routes keep `0x3f80_0000` and no checked-in
+fixture moved; a session with a non-zero route gain took a one-time semantic-hash change at that
+commit.
+
+**The executed schedule is a derived `ExecutionProgram`, not the semantic graph** (audit #99 F2,
+`miso_engine_graph::program`). `GraphSpec` keeps its seven `TrackStage` nodes per track and one
+edge per hop -- that is the vocabulary sends, taps, PDC and diagnostics need -- and
+`program::lower` derives the executable form from it: interned node ids, pure pass-through stage
+boundaries as buffer aliases with no schedule item, single-reader inputs consumed in place, a
+pairwise reduction only where fan-in exceeds one, and an arena liveness-coloured over ops. It is a
+pure function of `(spec, schedule, levels, delays)`, so it cannot disagree with the graph. Two
+invariants it owes: a bank-eligible node's output buffer is never written again once defined (a
+homogeneous bank keeps every member live from the first gather to the last scatter), and a tap is
+not a reader (an edge into an elided node is an alias, and an observer there fires before any
+consumer).
+
 ## Acceptance gates with objective measurements
 
 Same graph compiles to identical semantic order/hash across 100 fresh-process runs; PDC impulses on direct, send, submix and sidechain paths align exactly to the sample, including latency-preserving bypass; every cycle reports its full stable-ID path; invalid taps/ports fail with diagnostics; generated validation/estimation graphs beyond 65,536 tracks fail only for configured resources, never a compiled track ceiling; the frozen deterministic production summation strategy publishes absolute/RMS residual against an independent `f64` reduction on representative and adversarial cancellation fixtures.
