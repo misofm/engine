@@ -69,7 +69,7 @@ expect_failure ln-in-the-effect-runtime \
 expect_failure sin-in-a-host \
     'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >>"$root/hosts/miso-engine-host-native/src/lib.rs"'
 expect_failure new-file-next-to-an-allowlisted-one \
-    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-true-peak-limiter/src/other.rs"'
+    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-effect-contract/src/other.rs"'
 expect_failure allowlisted-file-gains-a-call \
     'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-compressor/src/lib.rs"'
 expect_failure allowlist-entry-gone-stale \
@@ -100,6 +100,6 @@ expect_pass tests-may-use-the-platform \
 expect_pass sqrt-stays-legal \
     'printf "%s\n" "pub fn ok(x: f64) -> f64 { x.sqrt() }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
 expect_pass allowlisted-file-may-shrink \
-    'sed -i "1a // migrated one call site" "$root/crates/miso-engine-true-peak-limiter/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { miso_engine_math::exp(x) }/" "$root/crates/miso-engine-true-peak-limiter/src/lib.rs"'
+    'sed -i "1a // migrated one call site" "$root/crates/miso-engine-effect-contract/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { miso_engine_math::exp(x) }/" "$root/crates/miso-engine-effect-contract/src/lib.rs"'
 
 printf 'math policy mutation tests: ok\n'
