@@ -36,6 +36,7 @@ use miso_engine_effect_runtime::dynamics::{
 };
 use miso_engine_effect_runtime::envelope::rms_follow;
 use miso_engine_effect_runtime::ramp::LinearRamp;
+use miso_engine_lane::kernels::gain_mix_step;
 use miso_engine_lane::{Lane, flush};
 
 use crate::design::{
@@ -496,8 +497,13 @@ fn one_frame<L: Lane>(
     let gain = gain_from_db(smoothed.add(coef.makeup));
 
     // 8. gain and mix, then the identities.
+    //
+    // `gain_mix_step` is the lane crate's frozen `w = x * g; d = w - x; y = fma(mix, d, x)` — the
+    // body of `gain_mix_block`, factored out for exactly this case, where `g` comes out of a
+    // detector rather than out of a prepared coefficient. Using it rather than writing the three
+    // lines again is what makes a compressor slot and a static gain/mix slot the same law.
     let wet = delayed.mul(gain);
-    let mixed = coef.mix.fma(wet.sub(delayed), delayed);
+    let mixed = gain_mix_step(delayed, gain, coef.mix);
     let wet_identity = coef.mix.eq(one);
     let dry_identity = L::mask_or(
         bypassed,
@@ -510,24 +516,12 @@ fn one_frame<L: Lane>(
     L::select(dry_identity, delayed, output)
 }
 
-/// The master plan §4.4 boundary check for one channel of one block.
+/// The master plan section 4.4 boundary check for one channel of one block.
 ///
-/// Returns the bitmask of lanes that were out of bounds, `0` when the block is clean. On rejection
-/// the whole channel block is zeroed and the channel's recursive state is cleared — the failing
-/// lane cannot be zeroed alone, because the check is a block-level policy and a bank's lanes share
-/// a cursor.
-///
-/// The two channels are checked **independently**, unlike `bank::finish_block`, because this
-/// effect keeps a separate ring, cursor and recursive word per channel; a `DualMono` instance
-/// whose right channel diverged has a left channel that is still exactly correct, and zeroing it
-/// would destroy evidence rather than protect anything. With a linked detector the two fail
-/// together anyway, because the level that diverged reaches both.
+/// Returns the bitmask of lanes that were out of bounds, `0` when the block is clean, and on
+/// rejection zeroes the channel's block and clears its recursive state. The policy itself is
+/// `miso_engine_effect_runtime::bank::finish_channel`; what belongs to this crate is only *which*
+/// state a rejected block resets.
 pub(crate) fn finish_channel<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
-    if bank::check_block::<L>(io) {
-        return 0;
-    }
-    let mask = bank::nonfinite_lane_mask::<L>(io);
-    io.fill(0.0);
-    channel.clear_state();
-    mask
+    bank::finish_channel::<L>(io, || channel.clear_state())
 }
