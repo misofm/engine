@@ -2753,15 +2753,19 @@ mod tests {
             })
             .expect("seek to failing read");
         sync_worker(&mut controller);
-        assert!(matches!(
-            controller.wait_for_event().expect("typed decoder terminal"),
-            NativeSourceWorkerEvent::Terminal {
-                exit: NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(
-                    io::ErrorKind::Other
-                )),
-                ..
+        // The synchronous snapshot may itself consume Terminal and retain its exact exit.
+        let exit = if let Some(exit) = controller.worker_exit() {
+            exit
+        } else {
+            match controller.wait_for_event().expect("typed decoder terminal") {
+                NativeSourceWorkerEvent::Terminal { exit, .. } => exit,
+                event => panic!("expected typed decoder terminal, got {event:?}"),
             }
-        ));
+        };
+        assert_eq!(
+            exit,
+            NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(io::ErrorKind::Other))
+        );
         assert_eq!(
             worker.stop_and_join().expect("stop isolated decoder job"),
             NativeSourceWorkerExit::Stopped
