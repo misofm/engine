@@ -406,9 +406,10 @@ pub enum NativeSourceWorkerEvent {
     SanitationSnapshot {
         native_decoder_sanitized_samples: u64,
     },
-    /// Final worker-local sanitation watermark, published before the worker exits.
+    /// Final job-local sanitation watermark and exact terminal reason.
     Terminal {
         native_decoder_sanitized_samples: u64,
+        exit: NativeSourceWorkerExit,
     },
 }
 
@@ -580,6 +581,7 @@ struct SourceJob<R: Read + Seek> {
     source_ready_sent: bool,
     sanitation: u64,
     render_wait: Duration,
+    terminated: Option<NativeSourceWorkerExit>,
     audit_gate: Option<WorkerAuditGate>,
     #[cfg(feature = "test-support")]
     audit_resume_after_submit: bool,
@@ -708,6 +710,7 @@ impl NativeSourceController {
             }
             | NativeSourceWorkerEvent::Terminal {
                 native_decoder_sanitized_samples,
+                ..
             } => native_decoder_sanitized_samples,
         };
         self.observed_sanitation = self.observed_sanitation.max(value);
@@ -936,6 +939,7 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
             source_ready_sent: false,
             sanitation: 0,
             render_wait,
+            terminated: None,
             audit_gate,
             #[cfg(feature = "test-support")]
             audit_resume_after_submit: false,
@@ -969,33 +973,59 @@ fn start_native_worker<R: Read + Seek + Send + 'static>(
         initial_generation,
         region,
     } = prepared;
+    let (worker, worker_thread) = start_native_workers(vec![job])?;
+    Ok((
+        native_source_controller(
+            command_sender,
+            event_receiver,
+            initial_generation,
+            region,
+            worker_thread,
+        ),
+        worker,
+        consumer,
+        resources,
+    ))
+}
+
+fn native_source_controller(
+    commands: Producer<WorkerCommand>,
+    events: Consumer<NativeSourceWorkerEvent>,
+    initial_generation: SourceGeneration,
+    region: NativeWaveRegion,
+    worker: Thread,
+) -> NativeSourceController {
+    NativeSourceController {
+        commands,
+        events,
+        observed_sanitation: 0,
+        terminal_observed: false,
+        next_requested_generation: initial_generation,
+        region,
+        worker,
+        _not_sync: PhantomData,
+    }
+}
+
+fn start_native_workers<R: Read + Seek + Send + 'static>(
+    jobs: Vec<SourceJob<R>>,
+) -> Result<(NativeSourceWorker, Thread), NativeSourcePrepareError> {
     let (stop_sender, stop_receiver) =
         bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
-        .spawn(move || run_worker(job, stop_receiver))
+        .spawn(move || run_workers(jobs.into_boxed_slice(), stop_receiver))
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
     let worker_thread = join.thread().clone();
     Ok((
-        NativeSourceController {
-            commands: command_sender,
-            events: event_receiver,
-            observed_sanitation: 0,
-            terminal_observed: false,
-            next_requested_generation: initial_generation,
-            region,
-            worker: worker_thread,
-            _not_sync: PhantomData,
-        },
         NativeSourceWorker {
             join: Some(join),
             stopped: false,
             stop: stop_sender,
             _not_sync: PhantomData,
         },
-        consumer,
-        resources,
+        worker_thread,
     ))
 }
 
@@ -1298,183 +1328,199 @@ fn worker_render_wait(
     Duration::from_nanos(u64::try_from(bounded_nanos).expect("bounded render wait fits u64"))
 }
 
-fn wait_for_worker(idle: Idle, render_wait: Duration) {
-    match idle {
-        Idle::Progress => {}
-        Idle::WaitingForRender => thread::park_timeout(render_wait),
-        Idle::WaitingForCommand => thread::park(),
-    }
-}
-
-fn run_worker<R: Read + Seek>(job: SourceJob<R>, mut stop: Consumer<()>) -> NativeSourceWorkerExit {
-    let SourceJob {
-        mut commands,
-        mut events,
-        mut provider,
-        mut decoder,
-        mut planar_staging,
-        mut generation,
-        mut pending,
-        mut pending_seek,
-        mut end_submitted,
-        mut source_ready_sent,
-        mut sanitation,
-        render_wait,
-        mut audit_gate,
-        #[cfg(feature = "test-support")]
-        mut audit_resume_after_submit,
-        #[cfg(feature = "test-support")]
-        mut audit_hold_after_submit,
-    } = job;
-    #[cfg(not(feature = "test-support"))]
-    let _ = &mut audit_gate;
-    let command_capacity = commands.capacity();
-    let exit = loop {
-        if stop.try_pop().is_ok() {
-            break NativeSourceWorkerExit::Stopped;
-        }
-        let mut idle = Idle::WaitingForCommand;
-        let mut latest_seek = None;
-        for _ in 0..command_capacity {
-            let Ok(command) = commands.try_pop() else {
-                break;
-            };
-            idle = Idle::Progress;
-            match command {
-                WorkerCommand::Seek {
+fn service_job<R: Read + Seek>(
+    job: &mut SourceJob<R>,
+    stop: &mut Consumer<()>,
+) -> Result<Idle, NativeSourceWorkerExit> {
+    let mut idle = Idle::WaitingForCommand;
+    let mut latest_seek = None;
+    for _ in 0..job.commands.capacity() {
+        let Ok(command) = job.commands.try_pop() else {
+            break;
+        };
+        idle = Idle::Progress;
+        match command {
+            WorkerCommand::Seek {
+                generation: requested,
+                frame,
+            } => {
+                let observed = PendingSeek {
                     generation: requested,
                     frame,
-                } => {
-                    let observed = PendingSeek {
-                        generation: requested,
-                        frame,
-                    };
-                    if latest_seek
-                        .is_none_or(|latest: PendingSeek| observed.generation > latest.generation)
-                    {
-                        latest_seek = Some(observed);
-                    }
+                };
+                if latest_seek
+                    .is_none_or(|latest: PendingSeek| observed.generation > latest.generation)
+                {
+                    latest_seek = Some(observed);
                 }
-                WorkerCommand::Wake => {}
-                WorkerCommand::SnapshotSanitation => {
-                    publish_worker_event(
-                        &mut events,
-                        NativeSourceWorkerEvent::SanitationSnapshot {
-                            native_decoder_sanitized_samples: sanitation,
-                        },
-                    );
+            }
+            WorkerCommand::Wake => {}
+            WorkerCommand::SnapshotSanitation => publish_worker_event(
+                &mut job.events,
+                NativeSourceWorkerEvent::SanitationSnapshot {
+                    native_decoder_sanitized_samples: job.sanitation,
+                },
+            ),
+            #[cfg(feature = "test-support")]
+            WorkerCommand::AuditHold => job.audit_hold_after_submit = true,
+        }
+    }
+    if let Some(latest) = latest_seek {
+        job.pending = None;
+        job.end_submitted = false;
+        job.decoder
+            .seek_to_source_frame(latest.frame)
+            .map_err(NativeSourceWorkerExit::DecodeFailed)?;
+        job.pending_seek = Some(latest);
+    }
+    if let Some(seek) = job.pending_seek {
+        match job.provider.try_seek(SourceCommand::Seek {
+            generation: seek.generation,
+            frame: seek.frame,
+        }) {
+            Ok(()) => {
+                job.generation = seek.generation;
+                job.pending_seek = None;
+            }
+            Err(SourceSeekError::Backpressure { .. }) => {
+                return Ok(if idle == Idle::Progress {
+                    Idle::Progress
+                } else {
+                    Idle::WaitingForRender
+                });
+            }
+            Err(error) => return Err(NativeSourceWorkerExit::SeekFailed(error)),
+        }
+    }
+    if let Some(block) = job.pending.take() {
+        match job.provider.submit_native_planar(
+            block.generation,
+            block.start_frame,
+            &job.planar_staging,
+            block.frames,
+            block.end_of_region,
+            block.native_decoder_sanitized_samples,
+        ) {
+            Ok(_) => {
+                #[cfg(feature = "test-support")]
+                if job.audit_resume_after_submit {
+                    if let Some(gate) = job.audit_gate.as_mut() {
+                        gate.acknowledge_resumed();
+                    }
+                    job.audit_resume_after_submit = false;
                 }
                 #[cfg(feature = "test-support")]
-                WorkerCommand::AuditHold => {
-                    audit_hold_after_submit = true;
+                if job.audit_hold_after_submit {
+                    let Some(gate) = job.audit_gate.as_mut() else {
+                        return Err(NativeSourceWorkerExit::Stopped);
+                    };
+                    if !gate.hold(stop) {
+                        return Err(NativeSourceWorkerExit::Stopped);
+                    }
+                    job.audit_hold_after_submit = false;
+                    job.audit_resume_after_submit = true;
                 }
+                job.end_submitted = block.end_of_region;
+                if !job.source_ready_sent {
+                    publish_worker_event(
+                        &mut job.events,
+                        NativeSourceWorkerEvent::SourceReady {
+                            native_decoder_sanitized_samples: job.sanitation,
+                        },
+                    );
+                    job.source_ready_sent = true;
+                }
+                return Ok(Idle::Progress);
             }
-        }
-        if let Some(latest) = latest_seek {
-            pending = None;
-            end_submitted = false;
-            if let Err(error) = decoder.seek_to_source_frame(latest.frame) {
-                break NativeSourceWorkerExit::DecodeFailed(error);
+            Err(HostChunkError::Full { .. }) => {
+                job.pending = Some(block);
+                return Ok(if idle == Idle::Progress {
+                    Idle::Progress
+                } else {
+                    Idle::WaitingForRender
+                });
             }
-            pending_seek = Some(latest);
+            Err(error) => return Err(NativeSourceWorkerExit::SubmitFailed(error)),
         }
-        if let Some(seek) = pending_seek {
-            match provider.try_seek(SourceCommand::Seek {
-                generation: seek.generation,
-                frame: seek.frame,
-            }) {
-                Ok(()) => {
-                    generation = seek.generation;
-                    pending_seek = None;
-                }
-                Err(SourceSeekError::Backpressure { .. }) => {
-                    if idle != Idle::Progress {
-                        idle = Idle::WaitingForRender;
-                    }
-                    wait_for_worker(idle, render_wait);
-                    continue;
-                }
-                Err(error) => break NativeSourceWorkerExit::SeekFailed(error),
-            }
-        }
-        if let Some(block) = pending.take() {
-            match provider.submit_native_planar(
-                block.generation,
-                block.start_frame,
-                &planar_staging,
-                block.frames,
-                block.end_of_region,
-                block.native_decoder_sanitized_samples,
-            ) {
-                Ok(_) => {
-                    #[cfg(feature = "test-support")]
-                    if audit_resume_after_submit {
-                        if let Some(gate) = audit_gate.as_mut() {
-                            gate.acknowledge_resumed();
-                        }
-                        audit_resume_after_submit = false;
-                    }
-                    #[cfg(feature = "test-support")]
-                    if audit_hold_after_submit {
-                        let Some(gate) = audit_gate.as_mut() else {
-                            break NativeSourceWorkerExit::Stopped;
-                        };
-                        if !gate.hold(&mut stop) {
-                            break NativeSourceWorkerExit::Stopped;
-                        }
-                        audit_hold_after_submit = false;
-                        audit_resume_after_submit = true;
-                    }
-                    end_submitted = block.end_of_region;
-                    if !source_ready_sent {
-                        publish_worker_event(
-                            &mut events,
-                            NativeSourceWorkerEvent::SourceReady {
-                                native_decoder_sanitized_samples: sanitation,
-                            },
-                        );
-                        source_ready_sent = true;
-                    }
-                    continue;
-                }
-                Err(HostChunkError::Full { .. }) => {
-                    pending = Some(block);
-                    if idle != Idle::Progress {
-                        idle = Idle::WaitingForRender;
-                    }
-                    wait_for_worker(idle, render_wait);
-                    continue;
-                }
-                Err(error) => break NativeSourceWorkerExit::SubmitFailed(error),
-            }
-        }
-        if end_submitted {
-            wait_for_worker(idle, render_wait);
-            continue;
-        }
-        let start_frame = decoder.next_source_frame();
-        let decoded = match decoder.decode_quantum_into_planar(&mut planar_staging) {
-            Ok(report) => report,
-            Err(error) => break NativeSourceWorkerExit::DecodeFailed(error),
-        };
-        // The decoder report is already cumulative across decodes and seeks. Preserve that
-        // watermark directly; adding successive reports would double-count earlier blocks.
-        sanitation = sanitation.max(decoded.sanitized_sample_count);
-        pending = Some(PendingBlock {
-            generation,
-            start_frame,
-            frames: decoded.decoded_frames,
-            end_of_region: decoded.end_of_region,
-            native_decoder_sanitized_samples: sanitation,
-        });
-    };
+    }
+    if job.end_submitted {
+        return Ok(idle);
+    }
+    let start_frame = job.decoder.next_source_frame();
+    let decoded = job
+        .decoder
+        .decode_quantum_into_planar(&mut job.planar_staging)
+        .map_err(NativeSourceWorkerExit::DecodeFailed)?;
+    job.sanitation = job.sanitation.max(decoded.sanitized_sample_count);
+    job.pending = Some(PendingBlock {
+        generation: job.generation,
+        start_frame,
+        frames: decoded.decoded_frames,
+        end_of_region: decoded.end_of_region,
+        native_decoder_sanitized_samples: job.sanitation,
+    });
+    Ok(Idle::Progress)
+}
+
+fn publish_terminal<R: Read + Seek>(job: &mut SourceJob<R>, exit: NativeSourceWorkerExit) {
     publish_worker_event(
-        &mut events,
+        &mut job.events,
         NativeSourceWorkerEvent::Terminal {
-            native_decoder_sanitized_samples: sanitation,
+            native_decoder_sanitized_samples: job.sanitation,
+            exit,
         },
     );
-    exit
+    job.terminated = Some(exit);
+}
+
+fn run_workers<R: Read + Seek>(
+    mut jobs: Box<[SourceJob<R>]>,
+    mut stop: Consumer<()>,
+) -> NativeSourceWorkerExit {
+    loop {
+        if stop.try_pop().is_ok() {
+            for job in &mut jobs {
+                if job.terminated.is_none() {
+                    publish_terminal(job, NativeSourceWorkerExit::Stopped);
+                }
+            }
+            return NativeSourceWorkerExit::Stopped;
+        }
+        let mut idle = Idle::WaitingForCommand;
+        let mut render_wait = Duration::MAX;
+        for job in &mut jobs {
+            if job.terminated.is_some() {
+                continue;
+            }
+            match service_job(job, &mut stop) {
+                Ok(Idle::Progress) => idle = Idle::Progress,
+                Ok(Idle::WaitingForRender) => {
+                    if idle != Idle::Progress {
+                        idle = Idle::WaitingForRender;
+                    }
+                    render_wait = render_wait.min(job.render_wait);
+                }
+                Ok(Idle::WaitingForCommand) => {}
+                Err(NativeSourceWorkerExit::Stopped) => {
+                    for live in &mut jobs {
+                        if live.terminated.is_none() {
+                            publish_terminal(live, NativeSourceWorkerExit::Stopped);
+                        }
+                    }
+                    return NativeSourceWorkerExit::Stopped;
+                }
+                Err(exit) => {
+                    publish_terminal(job, exit);
+                    idle = Idle::Progress;
+                }
+            }
+        }
+        match idle {
+            Idle::Progress => {}
+            Idle::WaitingForRender => thread::park_timeout(render_wait),
+            Idle::WaitingForCommand => thread::park(),
+        }
+    }
 }
 
 fn publish_worker_event(
@@ -1826,7 +1872,8 @@ mod tests {
         assert!(matches!(
             controller.wait_for_event().expect("terminal"),
             NativeSourceWorkerEvent::Terminal {
-                native_decoder_sanitized_samples: 2
+                native_decoder_sanitized_samples: 2,
+                exit: NativeSourceWorkerExit::Stopped,
             }
         ));
         assert_eq!(controller.native_decoder_sanitized_samples(), 2);
@@ -1923,7 +1970,8 @@ mod tests {
         assert!(matches!(
             controller.wait_for_event().expect("terminal"),
             NativeSourceWorkerEvent::Terminal {
-                native_decoder_sanitized_samples: 3
+                native_decoder_sanitized_samples: 3,
+                exit: NativeSourceWorkerExit::Stopped,
             }
         ));
     }
@@ -2240,7 +2288,8 @@ mod tests {
         assert!(matches!(
             controller.wait_for_event().expect("terminal"),
             NativeSourceWorkerEvent::Terminal {
-                native_decoder_sanitized_samples: 1
+                native_decoder_sanitized_samples: 1,
+                exit: NativeSourceWorkerExit::Stopped,
             }
         ));
     }
@@ -2420,10 +2469,124 @@ mod tests {
             })
             .expect("seek to failing read");
         sync_worker(&mut controller);
+        assert!(matches!(
+            controller.wait_for_event().expect("typed decoder terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(
+                    io::ErrorKind::Other
+                )),
+                ..
+            }
+        ));
         assert_eq!(
-            worker.stop_and_join().expect("typed decoder exit"),
-            NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(io::ErrorKind::Other))
+            worker.stop_and_join().expect("stop isolated decoder job"),
+            NativeSourceWorkerExit::Stopped
         );
+    }
+
+    #[test]
+    fn one_failed_job_is_terminal_while_its_set_peer_keeps_progressing() {
+        let samples: Vec<f32> = (0_u16..20).map(f32::from).collect();
+        let wave = float32_wave(&samples);
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 20,
+        };
+        let mut failed_resolver = FailingResolver {
+            asset: Some(NativeResolvedAsset {
+                observed_identity: b"exact-identity".to_vec(),
+                reader: FailAtRead {
+                    cursor: Cursor::new(wave.clone()),
+                    fail_at: 44,
+                },
+            }),
+        };
+        let mut healthy_resolver = FailingResolver {
+            asset: Some(NativeResolvedAsset {
+                observed_identity: b"exact-identity".to_vec(),
+                reader: FailAtRead {
+                    cursor: Cursor::new(wave),
+                    fail_at: u64::MAX,
+                },
+            }),
+        };
+        let failed = prepare_native_source_job(&mut failed_resolver, request(region), caps(), None)
+            .expect("prepare failing job without starting");
+        let healthy =
+            prepare_native_source_job(&mut healthy_resolver, request(region), caps(), None)
+                .expect("prepare healthy job without starting");
+        let UnstartedNativeSource {
+            command_sender: failed_commands,
+            event_receiver: failed_events,
+            job: failed_job,
+            ..
+        } = failed;
+        let UnstartedNativeSource {
+            command_sender: healthy_commands,
+            event_receiver: healthy_events,
+            job: healthy_job,
+            mut consumer,
+            initial_generation,
+            region,
+            ..
+        } = healthy;
+        let (mut worker, worker_thread) =
+            start_native_workers(vec![failed_job, healthy_job]).expect("start one set worker");
+        let mut failed_controller = native_source_controller(
+            failed_commands,
+            failed_events,
+            SourceGeneration(1),
+            region,
+            worker_thread.clone(),
+        );
+        let mut healthy_controller = native_source_controller(
+            healthy_commands,
+            healthy_events,
+            initial_generation,
+            region,
+            worker_thread,
+        );
+        assert_eq!(
+            failed_controller.worker.id(),
+            healthy_controller.worker.id(),
+            "both jobs must be serviced by the same set worker"
+        );
+
+        assert!(matches!(
+            failed_controller.wait_for_event().expect("failed terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::DecodeFailed(NativeWaveError::Io(
+                    io::ErrorKind::Other
+                )),
+                ..
+            }
+        ));
+        assert!(matches!(
+            healthy_controller.wait_for_event().expect("healthy ready"),
+            NativeSourceWorkerEvent::SourceReady { .. }
+        ));
+        let _ = read_one(&mut consumer);
+        healthy_controller
+            .try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(4),
+            })
+            .expect("healthy peer remains seekable");
+        sync_worker(&mut healthy_controller);
+
+        assert_eq!(
+            worker.stop_and_join().expect("stop set worker"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            healthy_controller
+                .wait_for_event()
+                .expect("healthy terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::Stopped,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2502,7 +2665,8 @@ mod tests {
         assert!(matches!(
             controller.wait_for_event().expect("terminal"),
             NativeSourceWorkerEvent::Terminal {
-                native_decoder_sanitized_samples: 2
+                native_decoder_sanitized_samples: 2,
+                exit: NativeSourceWorkerExit::Stopped,
             }
         ));
         assert_eq!(
