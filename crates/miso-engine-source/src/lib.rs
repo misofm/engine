@@ -626,6 +626,8 @@ impl PcmSourceRing {
             end_frame: None,
             end_of_region: false,
             current: None,
+            played: None,
+            played_frames: 0,
             deferred_recycle: None,
             cumulative_read_frames: 0,
             stale_generation_discard_count: 0,
@@ -1036,6 +1038,8 @@ pub struct PcmSourceConsumer {
     end_frame: Option<SourceFrame>,
     end_of_region: bool,
     current: Option<Box<TransferBlock>>,
+    played: Option<Box<TransferBlock>>,
+    played_frames: u32,
     deferred_recycle: Option<Box<TransferBlock>>,
     cumulative_read_frames: u64,
     stale_generation_discard_count: u64,
@@ -1057,53 +1061,18 @@ impl PcmSourceConsumer {
         output_planes: &mut [&mut [f32]],
     ) -> Result<SourceReadReport, SourceReadError> {
         self.validate_output_shape(output_planes)?;
-        self.flush_deferred_recycle();
-        self.observe_seek_at_block_boundary();
-        for output in output_planes.iter_mut() {
-            output.fill(0.0);
-        }
-        self.acquire_current_block();
-        let mut copied_frames = 0_u32;
-        let mut underrun_frames = 0_u32;
-        if self.end_reached() {
-            self.end_of_region = true;
-        } else if self.current_matches_next_frame() {
-            copied_frames = self.copy_current_block(output_planes);
-        } else {
-            let available_until_end = self
-                .end_frame
-                .map(|end| end.0.saturating_sub(self.next_frame.0))
-                .unwrap_or(u64::from(self.quantum_frames));
-            underrun_frames = u32::try_from(cmp::min(
-                u64::from(self.quantum_frames),
-                available_until_end,
-            ))
-            .expect("bounded by quantum");
-            self.next_frame = SourceFrame(
-                self.next_frame
-                    .0
-                    .saturating_add(u64::from(self.quantum_frames)),
-            );
-            if underrun_frames != 0 {
-                self.underrun_frames = self
-                    .underrun_frames
-                    .saturating_add(u64::from(underrun_frames));
-                self.underrun_events = self.underrun_events.saturating_add(1);
+        let report = self.begin_block();
+        let copied = (|| {
+            for (channel, output) in output_planes.iter_mut().enumerate() {
+                self.copy_channel(
+                    u32::try_from(channel).expect("prepared channel count fits u32"),
+                    output,
+                )?;
             }
-            if self.end_reached() {
-                self.end_of_region = true;
-            }
-        }
-        Ok(SourceReadReport {
-            copied_frames,
-            underrun_frames,
-            underrun_event: underrun_frames != 0,
-            end_of_region: self.end_of_region,
-            active_generation: self.active_generation,
-            cumulative_read_frames: self.cumulative_read_frames,
-            cumulative_underrun_frames: self.underrun_frames,
-            cumulative_underrun_events: self.underrun_events,
-        })
+            Ok(())
+        })();
+        self.end_block();
+        copied.map(|()| report)
     }
 
     /// Copy one exact render quantum into preallocated contiguous planar storage.
@@ -1123,16 +1092,46 @@ impl PcmSourceConsumer {
                 expected_frames: self.quantum_frames,
             });
         }
+        let report = self.begin_block();
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        let copied = (|| {
+            for channel in 0..self.channel_count {
+                let offset = usize::try_from(channel)
+                    .expect("u32 fits usize")
+                    .checked_mul(quantum)
+                    .expect("prepared channel offset");
+                self.copy_channel(channel, &mut output[offset..offset + quantum])?;
+            }
+            Ok(())
+        })();
+        self.end_block();
+        copied.map(|()| report)
+    }
+
+    /// Advance the source state machine once and retain this quantum for channel fan-out copies.
+    /// This render-path operation allocates nothing and never blocks.
+    pub fn begin_block(&mut self) -> SourceReadReport {
+        self.end_block();
         self.flush_deferred_recycle();
         self.observe_seek_at_block_boundary();
-        output.fill(0.0);
         self.acquire_current_block();
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
         if self.end_reached() {
             self.end_of_region = true;
         } else if self.current_matches_next_frame() {
-            copied_frames = self.copy_current_block_contiguous(output);
+            let block = self.current.take().expect("matching current block");
+            copied_frames = block.frames;
+            self.played_frames = block.frames;
+            self.next_frame =
+                SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
+            self.cumulative_read_frames = self
+                .cumulative_read_frames
+                .saturating_add(u64::from(block.frames));
+            if block.end_of_region {
+                self.end_of_region = true;
+            }
+            self.played = Some(block);
         } else {
             let available_until_end = self
                 .end_frame
@@ -1158,7 +1157,7 @@ impl PcmSourceConsumer {
                 self.end_of_region = true;
             }
         }
-        Ok(SourceReadReport {
+        SourceReadReport {
             copied_frames,
             underrun_frames,
             underrun_event: underrun_frames != 0,
@@ -1167,7 +1166,50 @@ impl PcmSourceConsumer {
             cumulative_read_frames: self.cumulative_read_frames,
             cumulative_underrun_frames: self.underrun_frames,
             cumulative_underrun_events: self.underrun_events,
-        })
+        }
+    }
+
+    /// Copy one retained source channel without consuming the played quantum.
+    /// This render-path operation allocates nothing and never blocks.
+    pub fn copy_channel(
+        &self,
+        channel: u32,
+        destination: &mut [f32],
+    ) -> Result<(), SourceReadError> {
+        if channel >= self.channel_count {
+            return Err(SourceReadError::ChannelCount {
+                expected: self.channel_count,
+                actual: usize::try_from(channel)
+                    .expect("u32 fits usize")
+                    .saturating_add(1),
+            });
+        }
+        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
+        if destination.len() != quantum {
+            return Err(SourceReadError::PlaneLength {
+                expected_frames: self.quantum_frames,
+            });
+        }
+        destination.fill(0.0);
+        if let Some(block) = self.played.as_ref() {
+            let frames = usize::try_from(self.played_frames).expect("u32 fits usize");
+            let offset = usize::try_from(channel)
+                .expect("u32 fits usize")
+                .checked_mul(quantum)
+                .expect("prepared channel offset");
+            destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
+        }
+        Ok(())
+    }
+
+    /// Release the retained played quantum back to the producer recycle queue without blocking.
+    pub fn end_block(&mut self) {
+        self.played_frames = 0;
+        let Some(mut block) = self.played.take() else {
+            return;
+        };
+        block.reset_metadata();
+        self.recycle_block(block);
     }
 
     /// Exact source channel count.
@@ -1257,55 +1299,6 @@ impl PcmSourceConsumer {
         self.current
             .as_ref()
             .is_some_and(|block| block.start_frame == self.next_frame)
-    }
-
-    fn copy_current_block(&mut self, output_planes: &mut [&mut [f32]]) -> u32 {
-        let Some(mut block) = self.current.take() else {
-            return 0;
-        };
-        let frames = usize::try_from(block.frames).expect("u32 fits usize");
-        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
-        for (channel, output) in output_planes.iter_mut().enumerate() {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            output[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
-        }
-        self.next_frame = SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
-        self.cumulative_read_frames = self
-            .cumulative_read_frames
-            .saturating_add(u64::from(block.frames));
-        if block.end_of_region {
-            self.end_of_region = true;
-        }
-        block.reset_metadata();
-        self.recycle_block(block);
-        u32::try_from(frames).expect("source block frame count is u32")
-    }
-
-    fn copy_current_block_contiguous(&mut self, output: &mut [f32]) -> u32 {
-        let Some(mut block) = self.current.take() else {
-            return 0;
-        };
-        let frames = usize::try_from(block.frames).expect("u32 fits usize");
-        let quantum = usize::try_from(self.quantum_frames).expect("u32 fits usize");
-        for channel in 0..usize::try_from(self.channel_count).expect("u32 fits usize") {
-            let offset = channel
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            output[offset..offset + frames]
-                .copy_from_slice(&block.samples[offset..offset + frames]);
-        }
-        self.next_frame = SourceFrame(self.next_frame.0.saturating_add(u64::from(block.frames)));
-        self.cumulative_read_frames = self
-            .cumulative_read_frames
-            .saturating_add(u64::from(block.frames));
-        if block.end_of_region {
-            self.end_of_region = true;
-        }
-        block.reset_metadata();
-        self.recycle_block(block);
-        u32::try_from(frames).expect("source block frame count is u32")
     }
 
     fn note_end_and_discard(&mut self, block: Box<TransferBlock>) {
@@ -1950,6 +1943,73 @@ mod tests {
         };
         assert_eq!(after_eof.underrun_frames, 0);
         assert_eq!(after_eof.cumulative_underrun_events, 1);
+    }
+
+    #[test]
+    fn retained_played_block_supports_repeat_fanout_and_auto_recycles_once() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 8)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let left_first = [1.0, 2.0, 3.0, 4.0];
+        let right_first = [-1.0, -2.0, -3.0, -4.0];
+        host.submit(chunk(1, 0, &[&left_first, &right_first], 4, false))
+            .expect("first block");
+        let left_final = [5.0, 6.0];
+        let right_final = [-5.0, -6.0];
+        host.submit(chunk(1, 4, &[&left_final, &right_final], 2, true))
+            .expect("short EOF block");
+
+        let first = consumer.begin_block();
+        assert_eq!(first.copied_frames, 4);
+        assert_eq!(first.cumulative_read_frames, 4);
+        let mut left = [0.0; 4];
+        consumer.copy_channel(0, &mut left).expect("left copy");
+        assert_eq!(left, left_first);
+        left.fill(99.0);
+        consumer
+            .copy_channel(0, &mut left)
+            .expect("repeat left copy");
+        assert_eq!(left, left_first);
+        let mut right = [0.0; 4];
+        consumer.copy_channel(1, &mut right).expect("right copy");
+        assert_eq!(right, right_first);
+        assert!(matches!(
+            consumer.copy_channel(2, &mut right),
+            Err(SourceReadError::ChannelCount { .. })
+        ));
+        assert!(matches!(
+            consumer.copy_channel(0, &mut right[..3]),
+            Err(SourceReadError::PlaneLength { .. })
+        ));
+        consumer
+            .copy_channel(1, &mut right)
+            .expect("played block survives invalid copies");
+        assert_eq!(right, right_first);
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 4);
+
+        let final_report = consumer.begin_block();
+        assert_eq!(final_report.copied_frames, 2);
+        assert_eq!(final_report.cumulative_read_frames, 6);
+        assert!(final_report.end_of_region);
+        consumer.copy_channel(0, &mut left).expect("short left");
+        consumer.copy_channel(1, &mut right).expect("short right");
+        assert_eq!(left, [5.0, 6.0, 0.0, 0.0]);
+        assert_eq!(right, [-5.0, -6.0, 0.0, 0.0]);
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
+
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .expect("new generation");
+        host.submit(chunk(2, 100, &[&left_first, &right_first], 4, false))
+            .expect("initial begin of final block auto-recycled prior played block");
+
+        consumer.end_block();
+        assert!(consumer.played.is_none());
+        assert_eq!(consumer.played_frames, 0);
+        consumer.end_block();
+        assert!(consumer.played.is_none());
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
     }
 
     #[test]
