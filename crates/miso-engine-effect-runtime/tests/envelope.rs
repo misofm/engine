@@ -348,7 +348,8 @@ fn ar_one_pole_step_is_the_two_product_form() {
     let e = 0.7f32;
     let u = e - f32::from_bits(0x3870_0000);
     let k = 1.0f32 - c;
-    let stalled = k.mul_add(u - e, e);
+    // The one-rounding release, written with the trait `fma` (D3: fusion is the lane crate's).
+    let stalled = k.fma(u - e, e);
     assert_eq!(
         stalled.to_bits(),
         e.to_bits(),
