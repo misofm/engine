@@ -187,80 +187,111 @@ impl<'a> Fields<'a> {
         }
         let mut reader = Reader::new(self.bytes, self.count);
         while let Some(field) = reader.next_field()? {
-            let position = spec
-                .fields
-                .binary_search_by_key(&field.id, |candidate| candidate.id)
-                .ok();
-            if let Some((limits, depth)) = self.validation {
-                let recurse_nested = position
-                    .and_then(|index| spec.fields[index].nested)
-                    .is_none();
-                validate_value(field.wire, field.value, depth, limits, recurse_nested)?;
-            }
-            match position.map(|index| spec.fields[index]) {
-                Some(field_spec)
-                    if field.mandatory != field_spec.mandatory
-                        || crate::schema::Wire::from_raw(field.wire) != Some(field_spec.wire)
-                        || (field_spec.wire == crate::schema::Wire::Message)
-                            != field_spec.nested.is_some() =>
-                {
-                    return Err(DecodeError::InvalidTlv);
-                }
-                Some(field_spec) => {
-                    let position = position.ok_or(DecodeError::InvalidTlv)?;
-                    if let Some(slot) = self.slots[position].as_mut() {
-                        if !field_spec.repeated {
-                            return Err(DecodeError::InvalidTlv);
-                        }
-                        slot.count = slot
-                            .count
-                            .checked_add(1)
-                            .ok_or(DecodeError::LimitExceeded)?;
-                        slot.span = self
-                            .bytes
-                            .get(slot.start..field.end)
-                            .ok_or(DecodeError::InvalidTlv)?;
-                    } else {
-                        self.slots[position] = Some(FieldSlot {
-                            wire: field.wire,
-                            value: field.value,
-                            count: 1,
-                            span: self
-                                .bytes
-                                .get(field.start..field.end)
-                                .ok_or(DecodeError::InvalidTlv)?,
-                            start: field.start,
-                        });
-                    }
-                }
-                None if field.mandatory => return Err(DecodeError::UnknownRequiredField),
-                _ => {}
-            }
+            self.consume_schema_field(spec, None, field)?;
         }
         self.spec = Some(spec);
         Ok(self)
     }
 
-    pub(crate) fn tagged_schema_spec(
-        self,
-        spec: &'static MessageSpec,
+    /// Read a canonical leading tag, select its schema, and fill the selected fixed slots without
+    /// restarting the structural reader.
+    pub(crate) fn tagged_schema(
+        mut self,
+        tag: FieldSpec,
+        alternatives: &[(u8, &'static MessageSpec)],
         known: &'static MessageSpec,
-    ) -> Result<Self, DecodeError> {
-        let bytes = self.bytes;
-        let count = self.count;
-        let message = self.schema_spec(spec)?;
-        let mut reader = Reader::new(bytes, count);
-        while let Some(field) = reader.next_field()? {
-            if known
-                .fields
-                .iter()
-                .any(|candidate| candidate.id == field.id)
-                && !spec.fields.iter().any(|candidate| candidate.id == field.id)
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
+    ) -> Result<(u8, Self), DecodeError> {
+        let mut reader = Reader::new(self.bytes, self.count);
+        let first = reader.next_field()?.ok_or(DecodeError::InvalidTlv)?;
+        if first.id != tag.id
+            || first.wire != tag.wire.raw()
+            || first.mandatory != tag.mandatory
+            || tag.repeated
+            || tag.nested.is_some()
+        {
+            return Err(DecodeError::InvalidTlv);
         }
-        Ok(message)
+        let tag_value = read_u8(first.value)?;
+        let spec = alternatives
+            .iter()
+            .find_map(|(value, spec)| (*value == tag_value).then_some(*spec))
+            .ok_or(DecodeError::InvalidTlv)?;
+        debug_assert!(!spec.name.is_empty());
+        if spec.fields.len() > self.slots.len() {
+            return Err(DecodeError::LimitExceeded);
+        }
+        self.consume_schema_field(spec, Some(known), first)?;
+        while let Some(field) = reader.next_field()? {
+            self.consume_schema_field(spec, Some(known), field)?;
+        }
+        self.spec = Some(spec);
+        Ok((tag_value, self))
+    }
+
+    fn consume_schema_field(
+        &mut self,
+        spec: &'static MessageSpec,
+        known: Option<&'static MessageSpec>,
+        field: Field<'a>,
+    ) -> Result<(), DecodeError> {
+        let position = spec
+            .fields
+            .binary_search_by_key(&field.id, |candidate| candidate.id)
+            .ok();
+        if let Some((limits, depth)) = self.validation {
+            let recurse_nested = position
+                .and_then(|index| spec.fields[index].nested)
+                .is_none();
+            validate_value(field.wire, field.value, depth, limits, recurse_nested)?;
+        }
+        match position.map(|index| spec.fields[index]) {
+            Some(field_spec)
+                if field.mandatory != field_spec.mandatory
+                    || Wire::from_raw(field.wire) != Some(field_spec.wire)
+                    || (field_spec.wire == Wire::Message) != field_spec.nested.is_some() =>
+            {
+                Err(DecodeError::InvalidTlv)
+            }
+            Some(field_spec) => {
+                let position = position.ok_or(DecodeError::InvalidTlv)?;
+                if let Some(slot) = self.slots[position].as_mut() {
+                    if !field_spec.repeated {
+                        return Err(DecodeError::InvalidTlv);
+                    }
+                    slot.count = slot
+                        .count
+                        .checked_add(1)
+                        .ok_or(DecodeError::LimitExceeded)?;
+                    slot.span = self
+                        .bytes
+                        .get(slot.start..field.end)
+                        .ok_or(DecodeError::InvalidTlv)?;
+                } else {
+                    self.slots[position] = Some(FieldSlot {
+                        wire: field.wire,
+                        value: field.value,
+                        count: 1,
+                        span: self
+                            .bytes
+                            .get(field.start..field.end)
+                            .ok_or(DecodeError::InvalidTlv)?,
+                        start: field.start,
+                    });
+                }
+                Ok(())
+            }
+            None if field.mandatory => Err(DecodeError::UnknownRequiredField),
+            None if known.is_some_and(|known| {
+                known
+                    .fields
+                    .binary_search_by_key(&field.id, |candidate| candidate.id)
+                    .is_ok()
+            }) =>
+            {
+                Err(DecodeError::InvalidTlv)
+            }
+            None => Ok(()),
+        }
     }
 
     fn slot(&self, id: u16) -> Option<FieldSlot<'a>> {
@@ -270,15 +301,6 @@ impl<'a> Fields<'a> {
             .binary_search_by_key(&id, |candidate| candidate.id)
             .ok()?;
         self.slots[position]
-    }
-
-    pub(crate) fn tag(&self, id: u16, wire: u8) -> Result<&'a [u8], DecodeError> {
-        let mut reader = Reader::new(self.bytes, self.count);
-        let field = reader.next_field()?.ok_or(DecodeError::InvalidTlv)?;
-        if field.id != id || field.wire != wire {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(field.value)
     }
 
     pub(crate) fn one(&self, id: u16, wire: u8) -> Result<&'a [u8], DecodeError> {

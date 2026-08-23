@@ -1658,33 +1658,25 @@ fn parse_identity(message: Message<'_>) -> Result<EffectIdentity, DecodeError> {
     }
 }
 fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> {
-    let tag = read_u8_exact(message.tag(
-        schema::session::route_source::TAG.id,
-        schema::session::route_source::TAG.wire.raw(),
-    )?)?;
+    let (tag, message) = message.tagged_schema(
+        schema::session::route_source::TAG,
+        &[
+            (1, &schema::session::route_source::TRACK),
+            (2, &schema::session::route_source::SUBMIX),
+        ],
+        &schema::session::route_source::KNOWN,
+    )?;
     match tag {
-        1 => {
-            let message = message.tagged_schema_spec(
-                &schema::session::route_source::TRACK,
-                &schema::session::route_source::KNOWN,
-            )?;
-            Ok(RouteSource::Track {
-                track_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
-                tap: parse_tap(read_u8_exact(one_spec!(
-                    message,
-                    schema::session::route_source::TAP
-                )?)?)?,
-            })
-        }
-        2 => {
-            let message = message.tagged_schema_spec(
-                &schema::session::route_source::SUBMIX,
-                &schema::session::route_source::KNOWN,
-            )?;
-            Ok(RouteSource::SubmixOutput {
-                submix_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
-            })
-        }
+        1 => Ok(RouteSource::Track {
+            track_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
+            tap: parse_tap(read_u8_exact(one_spec!(
+                message,
+                schema::session::route_source::TAP
+            )?)?)?,
+        }),
+        2 => Ok(RouteSource::SubmixOutput {
+            submix_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
+        }),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
@@ -1701,33 +1693,25 @@ fn parse_route_destination(message: Message<'_>) -> Result<RouteDestination, Dec
     }
 }
 fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeError> {
-    let tag = read_u8_exact(message.tag(
-        schema::session::sidechain::TAG.id,
-        schema::session::sidechain::TAG.wire.raw(),
-    )?)?;
+    let (tag, message) = message.tagged_schema(
+        schema::session::sidechain::TAG,
+        &[
+            (1, &schema::session::sidechain::NONE),
+            (2, &schema::session::sidechain::ROUTED),
+        ],
+        &schema::session::sidechain::KNOWN,
+    )?;
     match tag {
-        1 => {
-            let _message = message.tagged_schema_spec(
-                &schema::session::sidechain::NONE,
-                &schema::session::sidechain::KNOWN,
-            )?;
-            Ok(SidechainDeclaration::None)
-        }
-        2 => {
-            let message = message.tagged_schema_spec(
-                &schema::session::sidechain::ROUTED,
-                &schema::session::sidechain::KNOWN,
-            )?;
-            Ok(SidechainDeclaration::Routed(
-                miso_engine_session::Sidechain {
-                    source: parse_route_source(Message::nested(one_spec!(
-                        message,
-                        schema::session::sidechain::SOURCE
-                    )?)?)?,
-                    port_id: stable_id(one_spec!(message, schema::session::sidechain::PORT_ID)?)?,
-                },
-            ))
-        }
+        1 => Ok(SidechainDeclaration::None),
+        2 => Ok(SidechainDeclaration::Routed(
+            miso_engine_session::Sidechain {
+                source: parse_route_source(Message::nested(one_spec!(
+                    message,
+                    schema::session::sidechain::SOURCE
+                )?)?)?,
+                port_id: stable_id(one_spec!(message, schema::session::sidechain::PORT_ID)?)?,
+            },
+        )),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
@@ -1782,44 +1766,36 @@ fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {
     })
 }
 fn parse_matrix_or_pan(message: Message<'_>) -> Result<MatrixOrPan, DecodeError> {
-    let tag = read_u8_exact(message.tag(
-        schema::session::matrix_or_pan::TAG.id,
-        schema::session::matrix_or_pan::TAG.wire.raw(),
-    )?)?;
+    let (tag, message) = message.tagged_schema(
+        schema::session::matrix_or_pan::TAG,
+        &[
+            (1, &schema::session::matrix_or_pan::PAN),
+            (2, &schema::session::matrix_or_pan::MATRIX),
+        ],
+        &schema::session::matrix_or_pan::KNOWN,
+    )?;
     match tag {
-        1 => {
-            let message = message.tagged_schema_spec(
-                &schema::session::matrix_or_pan::PAN,
-                &schema::session::matrix_or_pan::KNOWN,
-            )?;
-            Ok(MatrixOrPan::Pan {
-                left: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
-                right: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
-                smoothing_samples: read_u32_exact(one_spec!(
-                    message,
-                    schema::session::matrix_or_pan::PAN_SMOOTHING
-                )?)?,
-            })
-        }
-        2 => {
-            let message = message.tagged_schema_spec(
-                &schema::session::matrix_or_pan::MATRIX,
-                &schema::session::matrix_or_pan::KNOWN,
-            )?;
-            Ok(MatrixOrPan::Matrix {
-                ll: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
-                lr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
-                rl: read_f32_exact(one_spec!(
-                    message,
-                    schema::session::matrix_or_pan::C_OR_SMOOTHING
-                )?)?,
-                rr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::D)?)?,
-                smoothing_samples: read_u32_exact(one_spec!(
-                    message,
-                    schema::session::matrix_or_pan::SMOOTHING
-                )?)?,
-            })
-        }
+        1 => Ok(MatrixOrPan::Pan {
+            left: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
+            right: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
+            smoothing_samples: read_u32_exact(one_spec!(
+                message,
+                schema::session::matrix_or_pan::PAN_SMOOTHING
+            )?)?,
+        }),
+        2 => Ok(MatrixOrPan::Matrix {
+            ll: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
+            lr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
+            rl: read_f32_exact(one_spec!(
+                message,
+                schema::session::matrix_or_pan::C_OR_SMOOTHING
+            )?)?,
+            rr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::D)?)?,
+            smoothing_samples: read_u32_exact(one_spec!(
+                message,
+                schema::session::matrix_or_pan::SMOOTHING
+            )?)?,
+        }),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
@@ -2839,6 +2815,21 @@ mod tests {
                 .schema_spec(&schema::session::sidechain::ROUTED)
                 .err(),
             Some(DecodeError::InvalidTlv)
+        );
+    }
+
+    #[test]
+    fn tagged_pan_rejects_optional_field_known_only_to_matrix_variant() {
+        let pan_with_matrix_field = raw_message(vec![
+            (1, WIRE_U8, true, vec![1]),
+            (2, WIRE_F32, true, 0.25_f32.to_le_bytes().to_vec()),
+            (3, WIRE_F32, true, 0.75_f32.to_le_bytes().to_vec()),
+            (4, WIRE_U32, true, 32_u32.to_le_bytes().to_vec()),
+            (5, WIRE_F32, false, 1.0_f32.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(
+            parse_matrix_or_pan(Message::nested(&pan_with_matrix_field).expect("nested")),
+            Err(DecodeError::InvalidTlv)
         );
     }
 
