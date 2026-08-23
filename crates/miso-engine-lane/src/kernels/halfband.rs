@@ -153,7 +153,7 @@ pub const fn history_advance(pos: usize) -> usize {
 #[inline(always)]
 #[must_use]
 pub fn halfband2x_interp_even<L: Lane>(history: &[f32], base: usize) -> L {
-    debug_assert!(base >= HALFBAND63_EVEN_TAPS + 1);
+    debug_assert!(base > HALFBAND63_EVEN_TAPS);
     debug_assert!(base * L::WIDTH <= history.len());
     let width = L::WIDTH;
     let window = &history[(base - HALFBAND63_EVEN_TAPS) * width..base * width];
@@ -180,7 +180,7 @@ pub fn halfband2x_interp_even<L: Lane>(history: &[f32], base: usize) -> L {
 #[inline(always)]
 #[must_use]
 pub fn halfband2x_decim_even<L: Lane>(history: &[f32], base: usize, odd: L) -> L {
-    debug_assert!(base >= HALFBAND63_EVEN_TAPS + 1);
+    debug_assert!(base > HALFBAND63_EVEN_TAPS);
     debug_assert!(base * L::WIDTH <= history.len());
     let width = L::WIDTH;
     let window = &history[(base - HALFBAND63_EVEN_TAPS) * width..base * width];

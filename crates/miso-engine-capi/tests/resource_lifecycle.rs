@@ -441,8 +441,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         latency_samples: 31,
         tail_kind: TAIL_INFINITE,
         tail_samples: 0,
-        graph_session_plus_plan_bytes: 210_331,
-        graph_incremental_plan_bytes: 198_043,
+        graph_session_plus_plan_bytes: 205_723,
+        graph_incremental_plan_bytes: 193_435,
         graph_metadata_bytes: 49_943,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 16_384,
@@ -453,7 +453,7 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 3_366,
         source_total_bytes: 11_558,
-        effect_scalar_state_bytes: 12_168,
+        effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 6_678,
         builtin_meter_payload_bytes: 0,
@@ -1208,7 +1208,10 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         + "output:main-out".len() as u64
         + "$.routes[id=eq0-main].destination".len() as u64;
     let audio_samples = (colored_outputs + edges) * 2 * quantum + maximum_inputs;
-    let effect_lane_state = 169_u64 * size_of::<f32>() as u64;
+    // Soft-clip state layout 2 (issue #91): 104 effect-owned words per channel, plus the two
+    // header words the shared payload codec stamps into the common section.
+    let effect_lane_state = 104_u64 * size_of::<f32>() as u64;
+    let effect_common_state = 2_u64 * size_of::<f32>() as u64;
     let effect_bank_plane = quantum * bank_lanes * size_of::<f32>() as u64;
     let builtin_bank_processor = bytes::<BuiltinBankProcessorMirror>(1);
     assert_eq!(
@@ -1235,6 +1238,10 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "effect right state words",
             bytes: tracks * effect_lane_state,
+        },
+        PrimitiveOwner {
+            name: "effect common state words",
+            bytes: tracks * effect_common_state,
         },
         PrimitiveOwner {
             name: "effect fixed scratch",
@@ -1470,7 +1477,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     let prospective_model = compiled_model_owners("double-live-cap", prospective);
     graph.extend(current_model);
     graph.extend(prospective_model);
-    assert_effective_owner_mutations(&graph, 453_906, "double-live graph/model");
+    assert_effective_owner_mutations(&graph, 444_690, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_558, "primitive source total");
@@ -1487,25 +1494,35 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         "double-live source overhead",
     );
 
+    // Soft-clip state layout 2 (issue #91): 104 effect-owned words per channel, plus the two
+    // header words `miso-engine-effect-runtime`'s payload codec stamps into the common section.
     let effect_state_rows = vec![
         PrimitiveOwner {
             name: "current effect left state",
-            bytes: 9 * 169 * size_of::<f32>() as u64,
+            bytes: 9 * 104 * size_of::<f32>() as u64,
         },
         PrimitiveOwner {
             name: "current effect right state",
-            bytes: 9 * 169 * size_of::<f32>() as u64,
+            bytes: 9 * 104 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "current effect common state",
+            bytes: 9 * 2 * size_of::<f32>() as u64,
         },
         PrimitiveOwner {
             name: "prospective effect left state",
-            bytes: 9 * 169 * size_of::<f32>() as u64,
+            bytes: 9 * 104 * size_of::<f32>() as u64,
         },
         PrimitiveOwner {
             name: "prospective effect right state",
-            bytes: 9 * 169 * size_of::<f32>() as u64,
+            bytes: 9 * 104 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "prospective effect common state",
+            bytes: 9 * 2 * size_of::<f32>() as u64,
         },
     ];
-    assert_effective_owner_mutations(&effect_state_rows, 24_336, "double-live effect state");
+    assert_effective_owner_mutations(&effect_state_rows, 15_120, "double-live effect state");
     let effect_scratch_rows = vec![
         PrimitiveOwner {
             name: "current effect fixed scratch",
@@ -1542,7 +1559,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     assert_effective_owner_mutations(&capi_rows, 164_814, "double-live CAPI");
 
     let graph_rows = graph_owners();
-    let graph_largest = owner_total(&graph_rows[6..14]);
+    let graph_largest = owner_total(&graph_rows[7..15]);
     assert_eq!(graph_largest, 49_167, "primitive graph metadata allocation");
     let source_largest = source
         .iter()
@@ -1832,10 +1849,10 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
-    assert_eq!(oracle.graph, 453_906);
+    assert_eq!(oracle.graph, 444_690);
     assert_eq!(oracle.source_total, 23_116);
     assert_eq!(oracle.source_overhead, 6_732);
-    assert_eq!(oracle.effect_state, 24_336);
+    assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 13_356);
     assert_eq!(oracle.capi, 164_814);

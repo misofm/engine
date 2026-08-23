@@ -10,10 +10,15 @@ name = "miso_engine_soft_clip"
 path = "src/lib.rs"
 
 [dependencies]
-miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math.workspace = true
 
 [dev-dependencies]
+# The bank request the contract takes still names `KernelBackendV1`; issue #84 removes it from the
+# contract. Nothing in `src/` reaches `miso-engine-core` any more.
+miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
 
 [lints]
