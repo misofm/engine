@@ -626,6 +626,9 @@ fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
 /// Widest bank this crate builds. `BankWidth` is four or eight (D4).
 const MAX_BANK_LANES: usize = 8;
 
+/// The damping of every builtin section: Butterworth, `k = 1 / Q = sqrt(2)`, rounded once.
+const BUTTERWORTH_K: f32 = core::f64::consts::SQRT_2 as f32;
+
 /// Builds the kernel coefficient set of one section from one [`SvfSection`] per lane.
 fn svf_coef<L: Lane>(sections: &[SvfSection; MAX_BANK_LANES]) -> SvfCoef<L> {
     let pick = |select: fn(&SvfSection) -> f32| -> L {
@@ -766,6 +769,48 @@ impl<L: Lane> InputStage<L> {
         self.state = [[SvfState::default(); 2]; 2];
     }
 
+    /// Recovers the prepared record of one lane from the coefficient words.
+    ///
+    /// The words are the only copy of the design: a section is disabled exactly when its output
+    /// mix is the identity `(1, 0, 0)`, it is a high-pass exactly when its mix is `(1, -k, -1)`,
+    /// and `k` is Butterworth throughout. Keeping a second, structured copy next to the lane words
+    /// would be the defect this crate exists to remove -- and it is what a bank is built from, so
+    /// the two would have to agree forever.
+    fn lane_track(&self, lane: usize) -> PreparedInputTrack {
+        let trim = self.trim.map(|trim| lane_read::<L>(trim)[lane]);
+        let section = |channel: usize, index: usize| -> SvfSection {
+            let coef = &self.coef[channel][index];
+            let (m0, m1, m2) = (
+                lane_read::<L>(coef.m0)[lane],
+                lane_read::<L>(coef.m1)[lane],
+                lane_read::<L>(coef.m2)[lane],
+            );
+            let enabled = !(m0 == 1.0 && m1 == 0.0 && m2 == 0.0);
+            SvfSection {
+                c1: lane_read::<L>(coef.c1)[lane],
+                a2: lane_read::<L>(coef.a2)[lane],
+                a3: lane_read::<L>(coef.a3)[lane],
+                k: if enabled { BUTTERWORTH_K } else { 0.0 },
+                m0,
+                m1,
+                m2,
+                enabled,
+            }
+        };
+        PreparedInputTrack {
+            left: InputLane {
+                trim_signed: trim[0],
+                hpf: section(0, 0),
+                lpf: section(0, 1),
+            },
+            right: InputLane {
+                trim_signed: trim[1],
+                hpf: section(1, 0),
+                lpf: section(1, 1),
+            },
+        }
+    }
+
     /// The eight retained words of one lane: `[l_hpf_ic1, l_hpf_ic2, l_lpf_ic1, l_lpf_ic2, r..]`.
     fn lane_state_words(&self, lane: usize) -> [u32; 8] {
         let mut words = [0_u32; 8];
@@ -838,10 +883,9 @@ impl<L: Lane> FaderStage<L> {
 pub(crate) struct MatrixStage<L: Lane> {
     /// Settled coefficients and the per-lane identity mask.
     coef: Matrix2x2Coef<L>,
-    /// Ramp words; `ramp.current` is the same value as [`MatrixStage::coef`] between events.
+    /// Ramp words; `ramp.current` is the same value as [`MatrixStage::coef`] between events, and
+    /// `ramp.target` is the per-lane target -- there is no scalar copy of it.
     ramp: Matrix2x2Ramp<L>,
-    /// Per-lane target.
-    target: [Matrix2x2; MAX_BANK_LANES],
     /// Per-lane smoothing window, in sample updates.
     smoothing_samples: [u32; MAX_BANK_LANES],
     /// Per-lane frames left in the current ramp.
@@ -864,6 +908,7 @@ impl<L: Lane> MatrixStage<L> {
             target[lane] = *matrix;
             smoothing_samples[lane] = *samples;
         }
+
         let mut stage = Self {
             coef: Matrix2x2Coef {
                 ll: L::zero(),
@@ -878,7 +923,6 @@ impl<L: Lane> MatrixStage<L> {
                 step: [L::zero(); 4],
                 remaining: L::zero(),
             },
-            target,
             smoothing_samples,
             remaining: [0; MAX_BANK_LANES],
         };
@@ -886,6 +930,21 @@ impl<L: Lane> MatrixStage<L> {
         stage.ramp.target = stage.ramp.current;
         stage.sync_settled();
         stage
+    }
+
+    /// Reads the per-lane targets back out of the ramp words.
+    fn read_target(&self) -> [Matrix2x2; MAX_BANK_LANES] {
+        let words = self.ramp.target.map(lane_read::<L>);
+        let mut values = [Matrix2x2::IDENTITY; MAX_BANK_LANES];
+        for (lane, matrix) in values.iter_mut().enumerate() {
+            *matrix = Matrix2x2 {
+                ll: words[0][lane],
+                lr: words[1][lane],
+                rl: words[2][lane],
+                rr: words[3][lane],
+            };
+        }
+        values
     }
 
     /// Writes one matrix per lane into the ramp's current words.
@@ -941,7 +1000,6 @@ impl<L: Lane> MatrixStage<L> {
         if lane >= L::WIDTH {
             return Err(BuiltinParameterError::LaneLength);
         }
-        self.target[lane] = target;
         let samples = self.smoothing_samples[lane];
         let current = self.read_current()[lane];
         let mut targets = self.ramp.target.map(lane_read::<L>);
@@ -1000,9 +1058,10 @@ impl<L: Lane> MatrixStage<L> {
             *remaining = remaining.saturating_sub(ramp_frames as u32);
         }
         let mut current = self.read_current();
+        let target = self.read_target();
         for (lane, current) in current.iter_mut().enumerate().take(L::WIDTH) {
             if self.remaining[lane] == 0 {
-                *current = self.target[lane];
+                *current = target[lane];
             }
         }
         self.write_current(&current);
@@ -1019,7 +1078,7 @@ impl<L: Lane> MatrixStage<L> {
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     fn reset(&mut self) {
-        let target = self.target;
+        let target = self.read_target();
         self.write_current(&target);
         self.remaining = [0; MAX_BANK_LANES];
         self.sync_settled();
@@ -1028,7 +1087,6 @@ impl<L: Lane> MatrixStage<L> {
 
 /// The scalar builtin input section of one track.
 pub struct InputBuiltins {
-    track: PreparedInputTrack,
     stage: InputStage<f32>,
 }
 
@@ -1155,7 +1213,6 @@ fn prepare_sections(
     let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
     Ok((
         InputBuiltins {
-            track,
             stage: InputStage::<f32>::new(&[track]),
         },
         FaderMuteBuiltins {
@@ -1177,10 +1234,11 @@ impl InputBuiltins {
         self.stage.reset();
     }
     pub fn tail(&self) -> BuiltinTail {
-        if self.track.left.hpf.enabled
-            || self.track.left.lpf.enabled
-            || self.track.right.hpf.enabled
-            || self.track.right.lpf.enabled
+        let track = self.stage.lane_track(0);
+        if track.left.hpf.enabled
+            || track.left.lpf.enabled
+            || track.right.hpf.enabled
+            || track.right.lpf.enabled
         {
             BuiltinTail::Infinite
         } else {
@@ -1264,7 +1322,10 @@ impl BuiltinInputBankV1 {
             return Err(BuiltinParameterError::LaneLength);
         }
         let members = inputs.len();
-        let tracks: Vec<PreparedInputTrack> = inputs.iter().map(|input| input.track).collect();
+        let tracks: Vec<PreparedInputTrack> = inputs
+            .iter()
+            .map(|input| input.stage.lane_track(0))
+            .collect();
         let stage = match width {
             BankWidth::Four => InputStageKernel::Simd4(InputStage::<Simd4>::new(&tracks)),
             BankWidth::Eight => InputStageKernel::Simd8(InputStage::<Simd8>::new(&tracks)),
@@ -1789,20 +1850,22 @@ pub mod test_support {
     /// The four prepared sections of one input chain, `[l_hpf, l_lpf, r_hpf, r_lpf]`.
     #[must_use]
     pub fn input_section_words(input: &InputBuiltins) -> [[u32; 7]; 4] {
+        let track = input.stage.lane_track(0);
         [
-            input.track.left.hpf.words(),
-            input.track.left.lpf.words(),
-            input.track.right.hpf.words(),
-            input.track.right.lpf.words(),
+            track.left.hpf.words(),
+            track.left.lpf.words(),
+            track.right.hpf.words(),
+            track.right.lpf.words(),
         ]
     }
 
     /// The folded trim words of one input chain, `[left, right]`.
     #[must_use]
     pub fn input_trim_words(input: &InputBuiltins) -> [u32; 2] {
+        let track = input.stage.lane_track(0);
         [
-            input.track.left.trim_signed.to_bits(),
-            input.track.right.trim_signed.to_bits(),
+            track.left.trim_signed.to_bits(),
+            track.right.trim_signed.to_bits(),
         ]
     }
 

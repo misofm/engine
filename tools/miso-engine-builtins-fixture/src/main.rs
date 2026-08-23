@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 /// The checked graph fixture identity pinned by the two meter benchmark inputs.
 const GRAPH_TAP_PCM_SHA256_V1: &str =
-    "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
+    "e6294eba78adcb3b09ae20dbf7ca7b322f81c8d39455b45ab5034e25e8493049";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
 const CASE_COUNT_V1: usize = 1_652;
@@ -318,13 +318,13 @@ struct ReferenceMeterV1 {
 // These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi_v1`
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES_V1: u64 = 72;
-const BOXED_INPUT_ENTRY_BYTES_V1: u64 = 160;
+const BOXED_INPUT_ENTRY_BYTES_V1: u64 = 184;
 const BOXED_TAIL_ENTRY_BYTES_V1: u64 = 24;
 const BOXED_STR_BYTES_V1: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES_V1: u64 = 24;
-const INPUT_PROCESSOR_BYTES_V1: u64 = 144;
+const INPUT_PROCESSOR_BYTES_V1: u64 = 168;
 const FADER_PROCESSOR_BYTES_V1: u64 = 16;
-const MATRIX_PROCESSOR_BYTES_V1: u64 = 40;
+const MATRIX_PROCESSOR_BYTES_V1: u64 = 136;
 const GRAPH_OBSERVER_BINDING_BYTES_V1: u64 = 80;
 const METER_CONSUMER_BYTES_V1: u64 = 64;
 const METER_REQUEST_SEAL_BYTES_V1: u64 = 56;
@@ -2233,22 +2233,25 @@ fn verify_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     verify_pcm_words_v1(
         root,
         "pcm/identity-signed-zero.f32le",
-        &pcm_words_v1(&PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+        &pcm_words_v1(
+            &identity_input_stage_v1(&PCM_INPUT_LEFT_V1),
+            &identity_input_stage_v1(&PCM_INPUT_RIGHT_V1),
+        ),
     )?;
 
     let polarity_gain_left: Vec<_> = PCM_INPUT_LEFT_V1
         .iter()
         .copied()
         .map(|sample| {
-            let signed = -sample;
-            let trimmed = signed * independent_db_gain_v1(-6.0);
-            trimmed * independent_db_gain_v1(-3.0)
+            // The polarity is folded into the trim at preparation: `x * -trim`, one multiply.
+            let trimmed = sample * -independent_db_gain_v1(-6.0);
+            identity_section_v1(trimmed) * independent_db_gain_v1(-3.0)
         })
         .collect();
     let polarity_gain_right: Vec<_> = PCM_INPUT_RIGHT_V1
         .iter()
         .copied()
-        .map(|sample| sample * independent_db_gain_v1(3.0))
+        .map(|sample| identity_section_v1(sample * independent_db_gain_v1(3.0)))
         .collect();
     verify_pcm_words_v1(
         root,
@@ -2262,15 +2265,37 @@ fn verify_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A disabled filter section is the arithmetic identity `y = fma(0, v2, fma(0, v1, 1 * v0))`.
+///
+/// It is exact for every finite input except a negative zero, which the trailing `+0.0` addition
+/// turns into a positive zero. That is the one bit #85 changed on a bypassed chain, and it is
+/// uniform across every width and target -- which is the property D5 buys.
+fn identity_section_v1(sample: f32) -> f32 {
+    if sample == 0.0 { 0.0 } else { sample }
+}
+
+/// The input stage of a chain whose sections are both disabled: trim by one, then two identities.
+fn identity_input_stage_v1(samples: &[f32]) -> Vec<f32> {
+    samples.iter().copied().map(identity_section_v1).collect()
+}
+
 fn independent_db_gain_v1(db: f32) -> f32 {
     10.0_f64.powf(f64::from(db) / 20.0) as f32
 }
 
 fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
-    let filters_left =
-        retained_tpt_outputs_v1(&PCM_INPUT_LEFT_V1, 100.0, ReferenceTptOutput::HighPass)?;
-    let filters_right =
-        retained_tpt_outputs_v1(&PCM_INPUT_RIGHT_V1, 1_000.0, ReferenceTptOutput::LowPass)?;
+    // The chain is high-pass then low-pass: the left channel's low-pass is disabled and the
+    // right channel's high-pass is, so each carries one identity section on the other side.
+    let filters_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
+        &PCM_INPUT_LEFT_V1,
+        100.0,
+        ReferenceTptOutput::HighPass,
+    )?);
+    let filters_right = retained_tpt_outputs_v1(
+        &identity_input_stage_v1(&PCM_INPUT_RIGHT_V1),
+        1_000.0,
+        ReferenceTptOutput::LowPass,
+    )?;
     verify_pcm_words_v1(
         root,
         "pcm/filters-asymmetric.f32le",
@@ -2278,7 +2303,11 @@ fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     )?;
 
     let reset_input = [1.0, 0.0, 0.0, 0.0];
-    let reset_segment = retained_tpt_outputs_v1(&reset_input, 100.0, ReferenceTptOutput::HighPass)?;
+    let reset_segment = identity_input_stage_v1(&retained_tpt_outputs_v1(
+        &reset_input,
+        100.0,
+        ReferenceTptOutput::HighPass,
+    )?);
     let mut reset_left = reset_segment.clone();
     // Both reset modes clear retained filter state for this prepared nonidentity chain.  The
     // dedicated authoring test verifies that the fixture invokes both enum variants; the payload
@@ -2291,13 +2320,13 @@ fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
         &pcm_words_v1(&reset_left, &[0.0; 12]),
     )?;
 
-    let isolation_left = retained_tpt_outputs_v1(
+    let isolation_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
         &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         100.0,
         ReferenceTptOutput::HighPass,
-    )?;
+    )?);
     let isolation_right = retained_tpt_outputs_v1(
-        &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        &identity_input_stage_v1(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         1_000.0,
         ReferenceTptOutput::LowPass,
     )?;
@@ -2307,13 +2336,13 @@ fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
         &pcm_words_v1(&isolation_left, &isolation_right),
     )?;
 
-    let partition_left = retained_tpt_outputs_v1(
+    let partition_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
         &[1.0, 0.0, -0.5, 0.25, 0.0, 0.0, 0.75, -0.25],
         100.0,
         ReferenceTptOutput::HighPass,
-    )?;
+    )?);
     let partition_right = retained_tpt_outputs_v1(
-        &[-0.5, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25],
+        &identity_input_stage_v1(&[-0.5, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25]),
         1_000.0,
         ReferenceTptOutput::LowPass,
     )?;
@@ -2341,18 +2370,22 @@ fn retained_tpt_outputs_v1(
 }
 
 fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+    // Every `render_pcm` matrix case runs the whole chain, so the samples reaching the matrix
+    // have already passed the two identity sections of the input stage.
+    let staged_left = identity_input_stage_v1(&PCM_INPUT_LEFT_V1);
+    let staged_right = identity_input_stage_v1(&PCM_INPUT_RIGHT_V1);
     let swap = [0.0, 1.0, 1.0, 0.0];
     verify_pcm_words_v1(
         root,
         "pcm/matrix-corner.f32le",
-        &matrix_pcm_words_v1(swap, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+        &matrix_pcm_words_v1(swap, &staged_left, &staged_right),
     )?;
     // The unsuffixed payload is the prepared 64-byte swap-matrix case, not one of the
     // 128-frame target-update ramps.  It must equal the matching matrix-corner payload.
     verify_pcm_words_v1(
         root,
         "pcm/matrix-ramp.f32le",
-        &matrix_pcm_words_v1(swap, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+        &matrix_pcm_words_v1(swap, &staged_left, &staged_right),
     )?;
     for bits in 0_u8..16 {
         let matrix = [
@@ -2364,7 +2397,7 @@ fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
         verify_pcm_words_v1(
             root,
             &format!("pcm/matrix-corner-{bits:02}.f32le"),
-            &matrix_pcm_words_v1(matrix, &PCM_INPUT_LEFT_V1, &PCM_INPUT_RIGHT_V1),
+            &matrix_pcm_words_v1(matrix, &staged_left, &staged_right),
         )?;
     }
     for updates in [0_u32, 1, 2, 127, 128, u32::MAX] {
@@ -2390,7 +2423,18 @@ fn matrix_pcm_words_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> Vec<u32
 }
 
 fn matrix_outputs_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
-    if matrix == [1.0, 0.0, 0.0, 1.0] {
+    matrix_outputs_v1_at(matrix, true, left, right)
+}
+
+/// The matrix arithmetic. The identity pass-through applies only to a **settled** lane: a ramping
+/// lane keeps running the arithmetic even where it passes through the identity matrix.
+fn matrix_outputs_v1_at(
+    matrix: [f32; 4],
+    settled: bool,
+    left: &[f32],
+    right: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    if settled && matrix == [1.0, 0.0, 0.0, 1.0] {
         return (left.to_vec(), right.to_vec());
     }
     let mut output_left = Vec::with_capacity(left.len());
@@ -2402,18 +2446,65 @@ fn matrix_outputs_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> (Vec<f32>
     (output_left, output_right)
 }
 
-fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
-    let target = [0.0, 1.0, 1.0, 0.0];
-    let mut current = [1.0, 0.0, 0.0, 1.0];
-    let mut remaining = updates;
-    if remaining == 0 {
-        current = target;
+/// The D11 matrix ramp, written out independently of the kernel.
+struct MatrixRampV1 {
+    current: [f32; 4],
+    target: [f32; 4],
+    step: [f32; 4],
+    remaining: u32,
+}
+
+impl MatrixRampV1 {
+    fn settled(current: [f32; 4]) -> Self {
+        Self {
+            current,
+            target: current,
+            step: [0.0; 4],
+            remaining: 0,
+        }
     }
+
+    /// One division per coefficient per event, never per sample.
+    fn set_target(&mut self, target: [f32; 4], samples: u32) {
+        self.target = target;
+        if samples == 0 {
+            self.current = target;
+            self.step = [0.0; 4];
+            self.remaining = 0;
+            return;
+        }
+        for ((step, target), current) in self.step.iter_mut().zip(target).zip(self.current) {
+            *step = (target - current) / samples as f32;
+        }
+        self.remaining = samples;
+    }
+
+    /// Advances one sample and returns `(coefficients, settled)`.
+    fn advance(&mut self) -> ([f32; 4], bool) {
+        if self.remaining == 0 {
+            return (self.current, true);
+        }
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.current = self.target;
+            return (self.current, true);
+        }
+        for (current, step) in self.current.iter_mut().zip(self.step) {
+            *current += step;
+        }
+        (self.current, false)
+    }
+}
+
+fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
+    let mut ramp = MatrixRampV1::settled([1.0, 0.0, 0.0, 1.0]);
+    ramp.set_target([0.0, 1.0, 1.0, 0.0], updates);
     let mut left = Vec::with_capacity(128);
     let mut right = Vec::with_capacity(128);
     for _ in 0..128 {
-        advance_matrix_v1(&mut current, target, &mut remaining);
-        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        let (current, settled) = ramp.advance();
+        let (output_left, output_right) =
+            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
@@ -2423,38 +2514,26 @@ fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
 fn matrix_retarget_outputs_v1() -> (Vec<f32>, Vec<f32>) {
     let swap = [0.0, 1.0, 1.0, 0.0];
     let identity = [1.0, 0.0, 0.0, 1.0];
-    let mut current = identity;
-    let mut remaining = 8;
+    let mut ramp = MatrixRampV1::settled(identity);
+    ramp.set_target(swap, 8);
     let mut left = Vec::with_capacity(12);
     let mut right = Vec::with_capacity(12);
     for _ in 0..4 {
-        advance_matrix_v1(&mut current, swap, &mut remaining);
-        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        let (current, settled) = ramp.advance();
+        let (output_left, output_right) =
+            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
-    remaining = 8;
+    ramp.set_target(identity, 8);
     for _ in 0..8 {
-        advance_matrix_v1(&mut current, identity, &mut remaining);
-        let (output_left, output_right) = matrix_outputs_v1(current, &[1.0], &[-0.5]);
+        let (current, settled) = ramp.advance();
+        let (output_left, output_right) =
+            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
     (left, right)
-}
-
-fn advance_matrix_v1(current: &mut [f32; 4], target: [f32; 4], remaining: &mut u32) {
-    if *remaining == 0 {
-        return;
-    }
-    let divisor = *remaining as f32;
-    for (current, target) in current.iter_mut().zip(target) {
-        *current += (target - *current) / divisor;
-    }
-    *remaining -= 1;
-    if *remaining == 0 {
-        *current = target;
-    }
 }
 
 fn pcm_words_v1(left: &[f32], right: &[f32]) -> Vec<u32> {
@@ -4908,7 +4987,7 @@ fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(Str
             benchmark_field_pair_v1("meter_queue_capacity", "0"),
             benchmark_field_pair_v1("state_mode", "\"continuous\""),
             benchmark_field_pair_v1("input_pcm_path", "\"pcm/filters-asymmetric.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"7b78746567c4c36d221643d359840968e832925661354009cb0b31e45d914fa3\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"a1f1d4830b83413e7012d70a67f1b19624a3a78a92666bfc034e4bb5d2396cb4\""),
             benchmark_field_pair_v1("left_hpf_hz", "100.0"),
             benchmark_field_pair_v1("right_hpf_hz", "200.0"),
             benchmark_field_pair_v1("left_lpf_hz", "1000.0"),
@@ -4928,7 +5007,7 @@ fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(Str
             benchmark_field_pair_v1("meter_queue_capacity", "0"),
             benchmark_field_pair_v1("state_mode", "\"continuous\""),
             benchmark_field_pair_v1("input_pcm_path", "\"pcm/identity-signed-zero.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"602eb824699c16d5c423a0196bc71b02d207783d0007fcfd7ed9566784709e99\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"6bf5968e626491089468fe9289c4891116c9c5e3f159238cb2bbb3f37fdf6572\""),
             benchmark_field_pair_v1("left_hpf_hz", "0.0"),
             benchmark_field_pair_v1("right_hpf_hz", "0.0"),
             benchmark_field_pair_v1("left_lpf_hz", "0.0"),
@@ -5548,7 +5627,7 @@ mod tests {
             (
                 "declared_pcm_hash",
                 benchmark_text_mutation_v1(
-                    "input_pcm_sha256 = \"7b78746567c4c36d221643d359840968e832925661354009cb0b31e45d914fa3\"",
+                    "input_pcm_sha256 = \"a1f1d4830b83413e7012d70a67f1b19624a3a78a92666bfc034e4bb5d2396cb4\"",
                     "input_pcm_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
                 ),
             ),
