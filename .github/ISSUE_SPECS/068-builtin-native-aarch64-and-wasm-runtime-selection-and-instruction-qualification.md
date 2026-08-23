@@ -1,5 +1,25 @@
 # 068 Builtin native, AArch64, and Wasm runtime-selection and instruction qualification
 
+## Amendment — verifier decision W2-D1, 2026-08-23
+
+The **native-scalar release-closure leg** of `scripts/check-builtins-target-instructions.sh` is
+scoped to the packages that do not reach `miso-engine-lane`: `miso-engine-core`,
+`miso-engine-builtins`, `miso-engine-builtins-compiler` and `miso-engine-graph`. From wave 2 the
+effect crates reach the lane crate and `miso-engine-graph-compiler` reaches them through
+`miso-engine-effect-compiler`, and master plan #83 D4 makes an x86 build without AVX2+FMA a
+**`compile_error!`** rather than a silent scalar fallback — so a `-C target-feature=-avx2,-fma`
+check of that package probes a configuration the workspace has deliberately abolished. Every other
+leg (Android AArch64, iOS AArch64, Wasm scalar, Wasm `simd128`) keeps the full five-package
+closure; those targets have no such pin.
+
+What this leg is for is unchanged and is still proved: that `miso-engine-core`'s own TPT graph
+selects no packed AVX or FMA instruction. That is the `native-scalar-object` leg, which compiles
+`-p miso-engine-core` alone and disassembles the symbol.
+
+Retiring the leg outright belongs to the #104 evidence triage, together with the rest of the
+issue-068 seal; issue #84's deletion of `crates/miso-engine-core/src/arch/` removes its subject.
+No job may weaken the `compile_error!` guard to keep a script green.
+
 ## Outcome
 
 Qualify the realtime-audited sealed builtin candidate across the launch native/AArch64/Wasm build,
