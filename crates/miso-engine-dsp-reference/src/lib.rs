@@ -18,6 +18,7 @@ mod spectrum;
 mod svf;
 mod tpt;
 mod transient_shaper;
+mod true_peak_limiter;
 
 pub use biquad::{
     ReferenceBiquad, ReferenceBiquadError, ReferenceFilterKind, rbj_butterworth_magnitude_db,
@@ -57,6 +58,12 @@ pub use tpt::{
 pub use transient_shaper::{
     ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,
     reference_transient_shaper_coefficient,
+};
+pub use true_peak_limiter::{
+    REFERENCE_BOX_GRID, REFERENCE_FIR_ALIGNMENT, REFERENCE_MINIMUM_RAMP_WINDOW,
+    ReferenceTruePeakLimiter, ReferenceTruePeakLimiterError, ReferenceTruePeakLimiterParameters,
+    reference_annex2_phases, reference_release_coefficient, reference_true_peak_estimate,
+    reference_true_peak_limit,
 };
 
 #[cfg(test)]
