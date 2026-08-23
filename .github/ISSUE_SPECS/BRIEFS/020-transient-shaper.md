@@ -91,9 +91,8 @@ s0 = as*sp
 s1 = (1-as)*u
 s  = s0+s1
 
-lf = 20*log10(max(f,1.0e-8))
-ls = 20*log10(max(s,1.0e-8))
-c0 = lf-ls
+r  = max(f,1.0e-8)/max(s,1.0e-8)
+c0 = log2_lane(r)*DB_PER_OCTAVE          # DB_PER_OCTAVE = 20*log10(2) = 0x40c0a8c1
 c  = clamp(c0,-24,24)
 ta = max(c,0)
 ts = max(-c,0)
@@ -101,8 +100,8 @@ p0 = A*ta
 p1 = S*ts
 q0 = p0+p1
 q  = clamp(q0,-18,18); normalize numeric zero to +0
-g0 = q*0.05
-g  = 10^g0
+g0 = q*OCTAVES_PER_DB                    # OCTAVES_PER_DB = log2(10)/20 = 0x3e2a152d
+g  = exp2_lane(g0)                       # = 10^(q/20)
 wet = x*g
 delta = wet-x
 scaled = M*delta
@@ -110,12 +109,38 @@ mixed = x+scaled
 ```
 
 Every shown multiply/add/subtract is a separately rounded `f32` operation. Comparisons are strict;
-equality selects release. `log10` and `powf` are bounded standard `f32` calls; production imports no
-reference code. Positive attack amount boosts positive contrast, positive sustain amount boosts
+equality selects release.
+
+**Amended by audit #92 (master plan #83, D6).** The original text read "`log10` and `powf` are
+bounded standard `f32` calls". They are not bounded in the way that sentence needed: `f32::log10`
+and `f32::powf` lower to whatever libm the target links — glibc, Apple libm, bionic, or the wasm
+`compiler-builtins` port — none of them correctly rounded and none of them the same codebase, so
+the "frozen bits" of this contract were frozen *per platform only*. D6 forbids them, and the two
+lines above are now `miso_engine_math::log2_lane` and `miso_engine_math::exp2_lane`: fixed-degree
+Cephes polynomials built from IEEE add/sub/mul/div/compare/select and exponent-field construction,
+with gate M1 pinning both to <= 2 ulp by an exhaustive 2^32 sweep. The contrast is one `log2` of
+the **ratio** rather than two logs and a subtraction — algebraically identical, one rounding fewer
+and one polynomial instead of two.
+
+This moves bits. It is a class-B change: derived tolerance `<= 1.7e-6 * |x| * max(1, g)`, i.e.
+`<= 1.5e-5` dB through the two clamps and about 15 ulp of the output; measured old-to-new deviation
+**4.7e-6 dB, 8 ulp** over four launch rates, three link modes, twelve parameter points, an impulse,
+a step and a long decay. The frozen `2.0e-5` oracle row and the `0.01` dB issue-020 gate 2 are
+unchanged and green. The old bits were target-specific libm results (audit finding F1); the new
+bits are IEEE-only and identical on x86_64, aarch64 and wasm32, which is what the contract said it
+wanted in the first place.
+
+`normalize numeric zero to +0` on `q` is no longer a separate operation: the identity select tests
+`q == 0`, which is already true for `-0.0`. `Mix one returns wet bits exactly` is likewise gone --
+`mixed = fma(M, wet - x, x)` at `M = 1` is within one ulp of `wet`, no test pinned the special case,
+and the master plan's gain/mix law (§4.2) does not have it. The bypass, `M == 0` and `q == 0`
+identity selects stay: they are the signed-zero contract.
+
+Production imports no reference code. Positive attack amount boosts positive contrast, positive sustain amount boosts
 negative contrast; negative values cut the corresponding region. There is no output clipping.
 
 Prepared bypass, numeric-zero mix or numeric-zero `q` returns `x` bits exactly while still updating
-ramps and both followers. Mix one returns `wet` bits exactly. Otherwise return `mixed`. Thus default
+ramps and both followers. Otherwise return `mixed`. Thus default
 amounts, silence and signed-zero identity are exact. Latency is zero. Because the processor only
 multiplies current input and produces exact zero for zero input, the audio tail is `Finite(0)` even
 though follower state decays internally.

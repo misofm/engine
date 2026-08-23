@@ -35,6 +35,7 @@ use miso_engine_lane::kernels::{
     svf_block_ramped,
 };
 use miso_engine_math::corpus as math_corpus;
+use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
 use sha2::{Digest, Sha256};
 
@@ -62,8 +63,17 @@ pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
 /// level conversions between them — so unlike the math cases they are digested at every width.
 pub const RUNTIME_CASE_COUNT: usize = runtime_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_transient_shaper::corpus`], replayed under wasm.
+///
+/// The first effect crate to join this gate. Its cases are whole rendered blocks of the production
+/// effect — followers, the `log2`/`exp2` dB chain, the D11 ramp prefix and the identity selects —
+/// so they exercise the composition the lane and runtime cases only cover a piece at a time. They
+/// are lane generic, and their pins live in that crate.
+pub const TRANSIENT_SHAPER_CASE_COUNT: usize = transient_shaper_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
-pub const CASE_COUNT: usize = LANE_CASE_COUNT + MATH_CASE_COUNT + RUNTIME_CASE_COUNT;
+pub const CASE_COUNT: usize =
+    LANE_CASE_COUNT + MATH_CASE_COUNT + RUNTIME_CASE_COUNT + TRANSIENT_SHAPER_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -249,6 +259,8 @@ enum Case {
     Math(usize),
     /// One case of the `miso-engine-effect-runtime` D1 corpus.
     Runtime(usize),
+    /// One case of the `miso-engine-transient-shaper` cross-target corpus.
+    TransientShaper(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -273,7 +285,11 @@ fn case_of(index: usize) -> Case {
     if index < MATH_CASE_COUNT {
         return Case::Math(index);
     }
-    Case::Runtime(index - MATH_CASE_COUNT)
+    let index = index - MATH_CASE_COUNT;
+    if index < RUNTIME_CASE_COUNT {
+        return Case::Runtime(index);
+    }
+    Case::TransientShaper(index - RUNTIME_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -316,6 +332,7 @@ pub fn case_name(index: usize) -> String {
         Case::Elementwise(operation) => operation.name().to_string(),
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
+        Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
     }
 }
 
@@ -350,6 +367,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Kernel(..) | Case::Elementwise(_) => LANE_DIGESTS[index],
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
+        Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
     }
 }
 
@@ -371,6 +389,7 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             1 => digest_runtime::<miso_engine_lane::Simd4>(case),
             _ => digest_runtime::<miso_engine_lane::Simd8>(case),
         },
+        Case::TransientShaper(case) => digest_transient_shaper(case, width),
     }
 }
 
@@ -428,7 +447,9 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             1 => elementwise_values::<miso_engine_lane::Simd4>(operation, fused),
             _ => elementwise_values::<miso_engine_lane::Simd8>(operation, fused),
         },
-        Case::Math(_) | Case::Runtime(_) => panic!("case {index} is not a lane-kernel case"),
+        Case::Math(_) | Case::Runtime(_) | Case::TransientShaper(_) => {
+            panic!("case {index} is not a lane-kernel case")
+        }
     }
 }
 
@@ -760,6 +781,18 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
 fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; runtime_corpus::POINTS];
     runtime_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-transient-shaper` case, exactly as that crate's `tests/cross_target.rs`
+/// does natively.
+fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; transient_shaper_corpus::WORDS];
+    transient_shaper_corpus::run_case(case, transient_shaper_corpus::WIDTHS[width], &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

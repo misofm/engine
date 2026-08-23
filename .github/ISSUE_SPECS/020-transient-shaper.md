@@ -264,3 +264,103 @@ scalar, W4/W8 bank, launch registry/effect compiler and ten-track graph/PDC/reso
 vertical in the second and final authorized attempt. Issue 054 remains the sole owner of deferred
 corpus expansion, large deterministic rows, realtime audit, target/instruction evidence,
 descriptive benchmark and listening handoff.
+
+## Audit #92 re-land (2026-08-23) — evidence record
+
+The crate was re-landed on the wave-1 foundation (`miso-engine-lane`, `miso-engine-math`,
+`miso-engine-effect-runtime`) per the #92 plan and master plan #83 §6/D6/D7/D10/D11. Branch
+`audit-092-shaper`.
+
+### Changes by bit-safety class (master plan §1.8)
+
+| change | class | evidence |
+|---|---|---|
+| Followers moved to `effect-runtime::envelope::ar_one_pole_step` (two-product form, `1 - c` precomputed by `ArCoef`) | **A** — no bits move | `1 - c` is exact for c in [0.5, 1] (Sterbenz); the coefficient table is bit-identical to `retention_coefficient`, asserted for all 16 rows |
+| Detector linking monomorphised over `const LINK` | **A** | same three rounding sites; `link_modes_drive_the_detector_as_specified` reads the detector off the envelope word |
+| `f32::max`/`clamp` replaced by the `Lane` select forms (D8) | **A** on finite inputs | inputs are finite by the boundary check; ±0 and NaN behaviour is now the packed semantics, which is what a bank executes |
+| `normalize_zero` on the render path deleted | **A** | `q == 0` is already true for `-0.0`; the identity select is unchanged |
+| Contrast: `20log10(f) - 20log10(s)` → `DB_PER_OCTAVE * log2_lane(f/s)` | **B** | derived bound below |
+| Gain: `10^(q*0.05)` → `exp2_lane(q * OCTAVES_PER_DB)` | **B** | derived bound below |
+| `wet_identity` (`mix == 1` returns `x*g` exactly) dropped | **B**, <= 1 ulp | no test pinned it; the master plan §4.2 mix law has no such select |
+| Ramps: per-sample division → D11 precomputed step (`effect-runtime::ramp::LinearRamp`) | **B**, exact on every pinned row | `automation_updates_...` pins 1/64, 63/64, 1.0, 0.96875 and the mid-ramp restore, all unchanged |
+| D7: per-value `sanitize`/`flush`/`recover` deleted; one flush per envelope word, one boundary check per block | behavioural | see "What changed for a caller" |
+
+### Derived tolerance for the class-B transcendental swap
+
+With gate M1's `<= 2 ulp` on `log2_lane` and `exp2_lane`: the ratio rounds at `2^-24`; only
+`|log2 r| <= 24 / 6.0206 = 3.99` survives the ±24 dB clamp, where `delta(log2) <= 5.6e-7`; scaling
+by `DB_PER_OCTAVE` gives `5.8e-6` dB; the shape law's three roundings give `8.7e-6` dB; both clamps
+are 1-Lipschitz; `exp2_lane` contributes `1.45e-6` relative (`1.26e-5` dB); the mix adds three
+roundings. Total: `|y_new - y_exact| <= 1.7e-6 * |x| * max(1, g)`, about **1.5e-5 dB**, about 15
+ulp of the output.
+
+**Measured old-to-new deviation: 4.7e-6 dB, 8 ulp** (worst over four launch rates x three link
+modes x twelve parameter points, plus an impulse, a step and a 5,312-sample decay; the pre-audit
+scalar chain was transcribed and proven bit-exact against `ae02d2a` before it was used as the
+reference). The plan's stop condition was 1e-4 dB.
+
+The old bits were target-specific libm results (audit finding F1: `f32::log10` and `f32::powf` are
+whatever the target links). The new bits are IEEE-only and identical across `Scalar`/`Simd4`/`Simd8`
+and across `x86_64`/`aarch64`/`wasm32`.
+
+### Re-pin table
+
+| fixture | oracle | result |
+|---|---|---|
+| `descriptor_coefficients_..._are_frozen` (id, parameters, qualities, 16 coefficient bits, 88/24-byte caps) | contract | **not re-pinned** |
+| `independent_coefficients_...` (each coefficient bit) | `dsp-reference` f64 `exp`, **and** `effect-runtime::envelope::retention_coefficient` | **not re-pinned**; both agree on all 16 bits |
+| `automation_updates_...` (1/64, 63/64, 1.0, 0.96875, remaining 63/1/0/63, restored continuation) | contract | **not re-pinned** |
+| `both_resets_...` (word-exact payloads) | contract | **not re-pinned** |
+| identity rows (defaults / bypass / mix 0, signed zero) | contract | **not re-pinned** |
+| `scalar_matches_the_independent_f64_oracle` (tolerance `2.0e-5`) | `ReferenceTransientShaper` (f64) | tolerance **unchanged**; worst 1.67e-5 |
+| `impulse_step_and_decay_...` (gate 2, `0.01` dB) | `ReferenceTransientShaper` (f64) | tolerance **unchanged** |
+| `corpus::CROSS_TARGET_DIGESTS` (3 cases) | **new**; pinned from the scalar `Lane` instantiation (§8) | new fixture, no old value |
+
+State layout is unchanged: 11 words / 44 bytes per lane, `state_layout_version = 1`, common section
+0 bytes. The D11 `step` is derived on restore rather than persisted, which is what keeps it at 11.
+
+### What changed for a caller
+
+* `ProcessReport::sanitized_main_samples` and `recovered_left/right_samples` are now always `0`.
+  D7 deletes per-value sanitisation and per-value recovery; a non-finite or out-of-range block is
+  instead zeroed as a unit, the envelopes are reset, and the runtime's `nonfinite_blocks` counter
+  is incremented. A subnormal input sample is no longer replaced by zero — it renders, and cannot
+  reach the recurrence because `miso_engine_lane::flush` clears anything below `1e-20`.
+* A bank binding is `Ok(None)` for any width this build does not render (D4: no runtime dispatch).
+  Previously the same answer came from `PreparedCompressorGainMixKernelV1::try_new`.
+
+### Deferred
+
+* `scratch_fixed_bytes = 24` re-accounting (finding F9) → **#95**: it moves the canonical descriptor
+  bytes and therefore the Issue-082 effect identity.
+* The runtime `state_payload`'s two-word versioned header (83c decision 2) is **not** adopted: it
+  would move `maximum_state.common_bytes` from 0 to 8, which is a contract fixture and a descriptor
+  identity change → **#95**, with the layout version bump.
+* `-0.0` initial values are still rejected at prepare. That rejection is the *contract*'s
+  (`validate_initial_values`), not this crate's, so 83c decision 3's lenient rule is #95's to apply.
+* `miso_engine_core::KernelBackendV1` is still named by the crate's **tests** (the contract's
+  `PrepareEffectBankRequest::backend` is that type and the contract does not re-export it).
+  Production no longer depends on `miso-engine-core`.
+
+### Commands run
+
+`cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`;
+`cargo test --locked -p miso-engine-transient-shaper` debug and release; `cargo test --locked
+--workspace`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; every
+`scripts/check-*.sh` that was green on `origin/main` at the branch point; `cargo check` for
+`wasm32-unknown-unknown` +/-`simd128`, `aarch64-linux-android` and `aarch64-apple-ios`;
+`bash scripts/run-wasm-gates.sh`.
+
+### Descriptive before/after (not a gate)
+
+Release profile, 48 kHz, 128-frame blocks, 20,000 blocks, one warm-up plus two timed rounds,
+through the public factory; ns per lane-frame counting both channels.
+
+| path | before (`ae02d2a`) | after | ratio |
+|---|---|---|---|
+| `W = 1` `process` | 41.97 ns | 20.47 ns | 2.05x |
+| `W = 8` `process_bank` | 58.86 ns | 4.96 ns | 11.9x |
+
+The W8 bank was *slower per lane-frame than the scalar product* before this change, which is what
+finding F2 predicted: the pre-audit "bank" did over 95% of its work in a scalar per-track loop and
+called into the SIMD kernel per sample for four operations.

@@ -23,7 +23,7 @@
 //!
 //! so `|y_new - y_exact| <= 1.7e-6 * |x| * max(1, g)`, about `1.5e-5` dB and about 15 ulp of the
 //! output. The pre-audit `log10f`/`powf` path sat inside a similar envelope around the same exact
-//! value, so the old and the new bits differ by at most about `3e-5` dB — measured at `3.6e-6` dB
+//! value, so the old and the new bits differ by at most about `3e-5` dB — measured at `4.7e-6` dB (8 ulp) over a corpus of four launch rates, three link modes, twelve parameter points, impulse, step and decay
 //! on the corpora of these gates. The `2.0e-5` row tolerance and the `0.01` dB gate below are the
 //! pre-audit ones, unchanged.
 

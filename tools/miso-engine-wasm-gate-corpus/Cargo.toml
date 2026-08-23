@@ -16,6 +16,7 @@ name = "miso_engine_wasm_gate_corpus"
 miso-engine-effect-runtime.workspace = true
 miso-engine-lane.workspace = true
 miso-engine-math = { workspace = true, features = ["lane"] }
+miso-engine-transient-shaper.workspace = true
 sha2.workspace = true
 
 [lints]
