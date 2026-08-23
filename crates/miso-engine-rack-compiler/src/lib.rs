@@ -678,6 +678,69 @@ mod tests {
         }
     }
 
+    /// P9: every slot cohort the planner emits is **homogeneous** -- the lanes active at slot `s`
+    /// all run the leader's key at `s`. This is the invariant the effect contract's
+    /// `bind_homogeneous_bank` relies on ("`graph-compiler` groups candidates by
+    /// `metadata.program_key()` before it ever calls this method"), and #95 froze the answer to a
+    /// heterogeneous cohort as `Ok(None)` precisely because the planner is where it is gated.
+    #[test]
+    fn every_slot_cohort_is_homogeneous() {
+        let mut state = 0x9500_0096_u64;
+        for case in 0..200u32 {
+            let width = if case.is_multiple_of(2) {
+                BankWidth::Four
+            } else {
+                BankWidth::Eight
+            };
+            let count = 1 + (splitmix(&mut state) % 25) as u32;
+            let mut candidates = Vec::new();
+            for id in 0..count {
+                let length = 1 + (splitmix(&mut state) % 3) as usize;
+                let slots: Vec<usize> = (0..length)
+                    .map(|_| (splitmix(&mut state) % 3) as usize)
+                    .collect();
+                candidates.push(CohortCandidate {
+                    id,
+                    program: RackProgramV1::new(
+                        RackLocationV1::Simd1,
+                        slots.into_iter().map(key).collect(),
+                    ),
+                });
+            }
+            let by_id: BTreeMap<u32, RackProgramV1> = candidates
+                .iter()
+                .map(|candidate| (candidate.id, candidate.program.clone()))
+                .collect();
+            let plan = plan_bank_groups(&one_level(candidates), width).expect("plan");
+            for group in &plan.groups {
+                for (lane, member) in group.members.iter().enumerate() {
+                    let Some(id) = member else { continue };
+                    // The lane's own program, read off in leader-slot order, is exactly the leader
+                    // keys at the positions the lane is active on.
+                    let run: Vec<&EffectProgramKeyV1> = group.active_slots[lane]
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, active)| **active)
+                        .map(|(slot, _)| &group.program[slot])
+                        .collect();
+                    let own: Vec<&EffectProgramKeyV1> = by_id[id].slots.iter().collect();
+                    assert_eq!(run, own, "case={case} lane={lane}");
+                }
+                for slot in 0..group.program.len() {
+                    if group.slot_is_identity_everywhere(slot) {
+                        continue;
+                    }
+                    for (lane, active) in group.active_slots.iter().enumerate() {
+                        assert!(
+                            !active[slot] || group.members[lane].is_some(),
+                            "a padding lane may never be active on a slot"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// P6: the plan depends only on the multiset of candidates, never on input order.
     #[test]
     fn output_is_input_order_invariant() {

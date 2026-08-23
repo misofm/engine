@@ -80,3 +80,21 @@ Two pieces of the planner survived their mutations because nothing could reach t
   `max_by` over unique ids, `order_members` fixes every group's lane order, and `scalar` is sorted
   on the way out. It is deleted; `output_is_input_order_invariant` (P6) is the gate on that claim,
   and P6 is red under the mutation that actually reintroduces order dependence.
+
+## Alignment with the #95 bank-binding semantic
+
+`plan_bank_groups` is the place the effect contract's `bind_homogeneous_bank` doc names as the
+gate on cohort homogeneity ("`graph-compiler` groups candidates by `metadata.program_key()` before
+it ever calls this method"). `every_slot_cohort_is_homogeneous` (P9) is that gate, over a seeded
+corpus: for every group and every lane, the leader keys the lane is active on are exactly the
+lane's own program, in order.
+
+| # | mutation | file | test | result | first failure line |
+|---|---|---|---|---|---|
+| P9 | the leader's mask is reused for every member: `subsequence_mask(&leader_program)` becomes `Some(vec![true; leader_program.slots.len()].into_boxed_slice())` | `rack-compiler/src/lib.rs` | `every_slot_cohort_is_homogeneous` | RED | ``assertion `left == right` failed: case=0 lane=0`` |
+
+`bind_rack_banks` matches the frozen outcome table exactly: `Err(code)` becomes a transactional
+graph-compile diagnostic (`id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_is_reusable`,
+`fixture.bank.bind_failure`), `Ok(None)` marks the group unbound and its members render on the
+per-node scalar path (`launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks`
+asserts every planned group is reported unbound and all nine members appear in `scalar_in`).
