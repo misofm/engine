@@ -15,8 +15,7 @@
 //!   dense spread of significands), adds the anchors and the neighbourhood of the measured worst
 //!   points, and runs in the default `cargo test`.
 //!
-//! **Measured on the delivery host**, exhaustively, with exactly the operation order frozen in
-//! `lane_math.rs`:
+//! **Measured on the delivery host**, exhaustively, through the real `impl Lane for f32`:
 //!
 //! | function | max error | at | inputs checked | monotone |
 //! |---|---|---|---|---|
@@ -34,6 +33,10 @@
 //! | `LOG2_P[8]` + 1e-5 | `log2_lane` 35.61 ulp at `x = 1.4136208`, 64 decreasing steps — over the gate |
 //! | Cephes fold removed (reduce to `[0, 1)` keeping the same coefficients) | `exp2_lane` 95.01 ulp at `x = -0.00026169422` — over the gate |
 //! | Cephes summation reassociated to `(y + x) * LOG2EA + (y + x)` | `log2_lane` 1.938 ulp — still inside the gate, but two thirds of the margin gone, which is why the summation order is frozen above |
+//!
+//! The first of those is also caught by `m1_measured_worst_points`, which runs in the default
+//! `cargo test` (2.072 ulp in the recorded neighbourhood) — the exhaustive sweep is the proof, not
+//! the tripwire.
 //!
 //! `LOG2_P[8]` + 1e-6 reaches only 1.722 ulp and stays inside the gate; that is a property of the
 //! polynomial, not a hole in the sweep, and it is why the gate is a bound rather than a pin.

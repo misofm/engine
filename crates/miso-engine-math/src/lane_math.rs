@@ -34,6 +34,11 @@
 //! `x = 1.4082463`, over all 2,130,706,432 positive normals). Both are monotone, and
 //! `exp2_lane(0) == 1.0`, `exp2_lane(1) == 2.0`, `log2_lane(1) == 0.0`, `log2_lane(2) == 1.0`,
 //! `log2_lane(0.5) == -1.0` exactly. `tests/m1_exhaustive.rs` is the gate.
+//!
+//! **Width independence (gate M2).** `tests/m2_lane_identity.rs` checks that `Simd4` and `Simd8`
+//! produce the scalar oracle's bits exactly, over a corpus that reaches both sides of the `exp2`
+//! fold, both clamp rails, the `sqrt(2)` mantissa split and the NaN and subnormal inputs the
+//! clamps have to absorb.
 
 use miso_engine_lane::Lane;
 

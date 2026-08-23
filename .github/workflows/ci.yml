@@ -49,20 +49,22 @@ jobs:
         run: |
           bash scripts/check-realtime-policy.sh
           bash scripts/test-realtime-policy.sh
-      - name: Deterministic math policy and mutation tests
-        run: |
-          bash scripts/check-math-policy.sh
-          bash scripts/test-math-policy.sh
-      - name: Math gates M1 and M3 in release
-        run: cargo test --locked --release -p miso-engine-math
-      - name: Math M3 digests on an FMA-enabled build
-        run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p miso-engine-math --test m3_determinism
       - name: Lane numeric-boundary policy and mutation tests
         run: |
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
       - name: Lane gates G1-G4, G6 and P1 on the AVX2+FMA runner
         run: cargo test --locked --release -p miso-engine-lane
+      - name: Deterministic math policy and mutation tests
+        run: |
+          bash scripts/check-math-policy.sh
+          bash scripts/test-math-policy.sh
+      - name: Math gates M1, M2 and M3 in release
+        run: cargo test --locked --release -p miso-engine-math --features lane
+      - name: Math M3 digests on an FMA-enabled build
+        run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p miso-engine-math --test m3_determinism
+      - name: Math M1 exhaustive sweep
+        run: cargo test --locked --release -p miso-engine-math --features lane --test m1_exhaustive -- --ignored
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
