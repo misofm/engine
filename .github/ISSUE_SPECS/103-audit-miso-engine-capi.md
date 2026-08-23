@@ -275,9 +275,20 @@ format/compile it and preflight its exact name without executing the test:
 
 ```sh
 cargo fmt --all -- --check
-cargo +nightly-2026-08-20 clippy --locked -p miso-engine-capi --lib --tests -- -D warnings
+cargo +nightly-2026-08-20 clippy --locked --no-deps \
+  -p miso-engine-capi --lib --tests -- \
+  -D warnings -A clippy::chunks_exact_to_as_chunks
 cargo +nightly-2026-08-20 test --locked -p miso-engine-capi --lib -- --list
 ```
+
+This is a qualification-only command correction. `--no-deps` prevents the pinned nightly from
+turning six pre-existing `miso-engine-protocol` diagnostics outside Issue 103's path fence into a
+CAPI scaffold failure. The single named allowance applies only to the pinned nightly's pre-existing
+`miso-engine-capi/src/runtime.rs` `chunks_exact(2)` occurrence; that production occurrence predates
+the scaffold and cannot be changed during the test-only qualification checkpoint. `-D warnings`
+still denies every other CAPI warning, including `undocumented_unsafe_blocks` in the new scaffold.
+The final stable all-targets Clippy command below remains unchanged, has no allowance, and must pass
+before F2/F3 acceptance.
 
 The output must contain exactly one
 `ffi::tests::plan_queries_are_pure_and_concurrent_with_render: test` line. Sol must also complete

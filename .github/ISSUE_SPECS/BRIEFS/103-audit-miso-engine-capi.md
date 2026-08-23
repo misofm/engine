@@ -26,6 +26,19 @@ No `.addr()`, pointer/integer round-trip, `expose_provenance`, `with_exposed_pro
 diff, format/Clippy-compile it, and prove the exact test name appears once before Miri. The current
 whole-Plan/`RefCell` production defect must remain unchanged for the red run.
 
+Use this exact pinned-nightly scaffold lint command:
+
+```sh
+cargo +nightly-2026-08-20 clippy --locked --no-deps \
+  -p miso-engine-capi --lib --tests -- \
+  -D warnings -A clippy::chunks_exact_to_as_chunks
+```
+
+`--no-deps` excludes six pre-existing protocol diagnostics outside the fence. The sole named
+allowance covers only the pre-existing CAPI runtime `chunks_exact(2)` occurrence; all other CAPI
+warnings remain denied, including scaffold unsafe-documentation failures. This qualification-only
+allowance does not alter the final stable all-targets `-D warnings` gate, which retains no allowance.
+
 ## Exact implementation
 
 Split `Plan` into a raw-projectable `PlanResourceView` over an `Arc<SharedPlanState>`, one
