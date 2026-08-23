@@ -14,6 +14,7 @@ use std::sync::{
 std::thread_local! {
     static PREPARED_IMMEDIATE_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static PROSPECTIVE_REPLAY_CLONES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static RESPONSE_STAGING_VECS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 use crate::{
@@ -376,6 +377,16 @@ impl ReplayCache {
             Ok(plan) => plan,
             Err(decision) => return decision,
         };
+        self.apply_preflight_plan(request_id, request, plan);
+        ReplayDecision::Execute
+    }
+
+    fn apply_preflight_plan(
+        &mut self,
+        request_id: RequestId,
+        request: &[u8],
+        plan: ReplayPreflightPlan,
+    ) {
         self.evict_prefix(plan.evicted, plan.removed_bytes);
         self.highest_new_id = Some(request_id);
         let request_offset = self.retained_bytes;
@@ -385,7 +396,6 @@ impl ReplayCache {
             request_offset,
             request_bytes: request.len(),
         });
-        ReplayDecision::Execute
     }
 
     /// Whether this ID would reach new-request admission rather than an already-known replay
@@ -1214,6 +1224,18 @@ impl PreparedImmediateCommandFrame {
     }
 }
 
+struct StructuralCommandPlan {
+    request_id: RequestId,
+    previous_revision: SessionRevision,
+    prospective_session: PreparedSessionTransaction,
+    replay_plan: ReplayPreflightPlan,
+    event_sequence: u64,
+    cancellation_batches: usize,
+    required_events: usize,
+    applied_operations: u32,
+    response_len: usize,
+}
+
 /// Opaque affine structural preparation bound to one exact controller identity and generation.
 /// It is deliberately neither `Clone` nor publicly constructible.
 pub struct PreparedStructuralCommand {
@@ -1657,16 +1679,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        match self.prepare_structural_command(input, scratch, output.len(), header)? {
+        match self.process_structural_command_into(input, scratch, output, header)? {
+            Some(written) => Ok(written),
             None => self.process_command_frame_into_legacy(input, scratch, output),
-            Some(prepared) => {
-                let committed = self
-                    .commit_prepared_structural(prepared)
-                    .map_err(|_| CommandFrameProcessError::Internal)?;
-                committed
-                    .write_into(output)
-                    .map_err(CommandFrameProcessError::Encode)
-            }
         }
     }
 
@@ -1698,6 +1713,76 @@ impl<P: ControlProvider> ProtocolController<P> {
         output_capacity: usize,
         header: CommandHeader,
     ) -> Result<Option<PreparedStructuralCommand>, CommandFrameProcessError> {
+        let Some(plan) = self.plan_structural_command(input, scratch, output_capacity, header)?
+        else {
+            return Ok(None);
+        };
+        let revision = plan.prospective_session.revision();
+        let frame = self
+            .encode_outcome_frame(
+                header.message_id,
+                header.request_id,
+                self.ok_at_revision(
+                    revision,
+                    Body::TransactionApplied(TransactionApplied {
+                        applied_operations: plan.applied_operations,
+                    }),
+                ),
+            )
+            .map_err(CommandFrameProcessError::Encode)?;
+        debug_assert_eq!(frame.len(), plan.response_len);
+        let response = ControllerResponse::from_complete_frame(
+            header.request_id,
+            StatusCode::Ok,
+            revision,
+            frame,
+        );
+        let mut prospective_replay = self
+            .replay
+            .try_clone_eager()
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
+            return Ok(None);
+        }
+        prospective_replay
+            .complete(header.request_id, input, response.complete_frame())
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
+            Ok(reservations) => reservations,
+            Err(_) => return Ok(None),
+        };
+
+        let current = self.structural_generation.load(Ordering::Acquire);
+        let generation = current
+            .checked_add(1)
+            .filter(|generation| generation & 1 == 1)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        self.structural_generation
+            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        Ok(Some(PreparedStructuralCommand {
+            owner: Arc::clone(&self.structural_generation),
+            generation,
+            request_id: plan.request_id,
+            previous_revision: plan.previous_revision,
+            prospective_session: Some(plan.prospective_session),
+            prospective_replay: Some(prospective_replay),
+            response: Some(response),
+            event_reservations: Some(event_reservations),
+            event_sequence: plan.event_sequence,
+            cancellation_batches: plan.cancellation_batches,
+            applied_operations: plan.applied_operations,
+            armed: true,
+        }))
+    }
+
+    fn plan_structural_command(
+        &self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        header: CommandHeader,
+    ) -> Result<Option<StructuralCommandPlan>, CommandFrameProcessError> {
         if header.message_id != MessageId::SessionTransactionApply {
             return Ok(None);
         }
@@ -1720,13 +1805,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             return Ok(None);
         }
-        if self
-            .replay
-            .plan_preflight(header.request_id, input)
-            .is_err()
-        {
-            return Ok(None);
-        }
+        let replay_plan = match self.replay.plan_preflight(header.request_id, input) {
+            Ok(plan) => plan,
+            Err(_) => return Ok(None),
+        };
 
         let decoded = match self.codec.decode_typed_command(input, scratch) {
             Ok(decoded) => decoded,
@@ -1769,67 +1851,102 @@ impl<P: ControlProvider> ProtocolController<P> {
             Err(_) => return Ok(None),
         };
         let revision = prospective_session.revision();
-        let frame = match self.encode_outcome_frame(
+        let response_len = match self.encode_outcome_into(
             header.message_id,
             header.request_id,
             self.ok_at_revision(
                 revision,
                 Body::TransactionApplied(TransactionApplied { applied_operations }),
             ),
+            &mut [],
         ) {
-            Ok(frame) => frame,
+            Ok(written) => written,
+            Err(EncodeError::OutputTooSmall { required }) => required,
             Err(_) => return Ok(None),
         };
-        if frame.len() > output_capacity {
+        if response_len > self.replay.config().max_response_bytes {
+            return Ok(None);
+        }
+        if response_len > output_capacity {
             return Err(CommandFrameProcessError::Encode(
                 EncodeError::OutputTooSmall {
-                    required: frame.len(),
+                    required: response_len,
                 },
             ));
         }
-        let response = ControllerResponse::from_complete_frame(
-            header.request_id,
-            StatusCode::Ok,
-            revision,
-            frame,
-        );
-        let mut prospective_replay = self
-            .replay
-            .try_clone_eager()
-            .map_err(|_| CommandFrameProcessError::Internal)?;
-        if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
-            return Ok(None);
-        }
-        prospective_replay
-            .complete(header.request_id, input, response.complete_frame())
-            .map_err(|_| CommandFrameProcessError::Internal)?;
-        let event_reservations = match self.queues.reserve_reliable_events(required_events) {
-            Ok(reservations) => reservations,
-            Err(_) => return Ok(None),
-        };
-
-        let current = self.structural_generation.load(Ordering::Acquire);
-        let generation = current
-            .checked_add(1)
-            .filter(|generation| generation & 1 == 1)
-            .ok_or(CommandFrameProcessError::Internal)?;
-        self.structural_generation
-            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
-        Ok(Some(PreparedStructuralCommand {
-            owner: Arc::clone(&self.structural_generation),
-            generation,
+        Ok(Some(StructuralCommandPlan {
             request_id: header.request_id,
             previous_revision: self.session.revision(),
-            prospective_session: Some(prospective_session),
-            prospective_replay: Some(prospective_replay),
-            response: Some(response),
-            event_reservations: Some(event_reservations),
+            prospective_session,
+            replay_plan,
             event_sequence,
             cancellation_batches,
+            required_events,
             applied_operations,
-            armed: true,
+            response_len,
         }))
+    }
+
+    fn process_structural_command_into(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+        header: CommandHeader,
+    ) -> Result<Option<usize>, CommandFrameProcessError> {
+        let Some(plan) = self.plan_structural_command(input, scratch, output.len(), header)? else {
+            return Ok(None);
+        };
+        let revision = plan.prospective_session.revision();
+        let written = self
+            .encode_outcome_into(
+                header.message_id,
+                header.request_id,
+                self.ok_at_revision(
+                    revision,
+                    Body::TransactionApplied(TransactionApplied {
+                        applied_operations: plan.applied_operations,
+                    }),
+                ),
+                output,
+            )
+            .map_err(CommandFrameProcessError::Encode)?;
+        debug_assert_eq!(written, plan.response_len);
+
+        // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
+        // above. Exclusive `&mut self` ownership makes these exact reservations invariant from
+        // this point through the session/event/replay commit.
+        let mut event_reservations = self
+            .queues
+            .reserve_reliable_events(plan.required_events)
+            .expect("read-only structural plan reserved exact reliable-event capacity");
+        let effective_sample = self.provider.current_sample();
+        self.replay
+            .apply_preflight_plan(plan.request_id, input, plan.replay_plan);
+        self.replay
+            .complete(plan.request_id, input, &output[..written])
+            .expect("planned replay reservation accepts the measured direct response");
+
+        let commit = self.session.commit_prepared(plan.prospective_session);
+        debug_assert_eq!(commit.applied_operations, plan.applied_operations as usize);
+        self.queues.commit_reserved_reliable_event(
+            &mut event_reservations,
+            ReliableSlot::session_committed(
+                commit.revision,
+                plan.event_sequence,
+                plan.request_id,
+                plan.previous_revision,
+                plan.applied_operations,
+            ),
+        );
+        self.next_reliable_event_sequence = plan.event_sequence.saturating_add(1);
+        self.cancel_queued_automation_reserved(
+            &mut event_reservations,
+            AutomationCancellationReason::RevisionChanged,
+            Some(effective_sample),
+        )
+        .expect("planned cancellation events retain their exact reservations");
+        Ok(Some(written))
     }
 
     fn process_immediate_command(
@@ -2159,6 +2276,10 @@ impl<P: ControlProvider> ProtocolController<P> {
         request_id: RequestId,
         outcome: Outcome,
     ) -> Result<Vec<u8>, EncodeError> {
+        #[cfg(test)]
+        RESPONSE_STAGING_VECS.with(|allocations| {
+            allocations.set(allocations.get().saturating_add(1));
+        });
         let mut output = vec![0_u8; self.replay.config.max_response_bytes];
         let written = self.encode_outcome_into(message_id, request_id, outcome, &mut output)?;
         output.truncate(written);
@@ -4272,7 +4393,7 @@ mod tests {
     }
 
     #[test]
-    fn one_call_transaction_fallbacks_never_build_prepared_immediate_bytes() {
+    fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
         fn status(bytes: &[u8]) -> StatusCode {
             match ProtocolCodec::default()
                 .decode_typed_response(bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
@@ -4285,6 +4406,7 @@ mod tests {
 
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
         PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
         let first_edits = [SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("direct-transaction").expect("ID"),
         }];
@@ -4296,7 +4418,8 @@ mod tests {
         let mut endpoint = controller(1, 2);
         let committed = process_full_command(&mut endpoint, &first);
         assert_eq!(status(&committed), StatusCode::Ok);
-        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 1));
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
         let committed_snapshot = endpoint.session().canonical_snapshot().to_owned();
         let committed_events = endpoint.queues().report(crate::QueueKind::ReliableEvent);
 
@@ -4306,6 +4429,15 @@ mod tests {
         assert_eq!(
             endpoint.queues().report(crate::QueueKind::ReliableEvent),
             committed_events
+        );
+        let event = endpoint
+            .queues_mut()
+            .try_dequeue_event()
+            .expect("one committed event");
+        assert_eq!(event.message_id, MessageId::SessionCommitted);
+        assert!(
+            endpoint.queues_mut().try_dequeue_event().is_err(),
+            "one-call commit and exact replay emit one event total"
         );
 
         let changed_edits = [SessionEditV1::SetSessionId {
@@ -4324,7 +4456,7 @@ mod tests {
         PROSPECTIVE_REPLAY_CLONES.with(|clones| {
             assert_eq!(
                 clones.get(),
-                1,
+                0,
                 "cached and reuse IDs bypass prospective replay allocation"
             );
         });
@@ -4346,7 +4478,7 @@ mod tests {
         PROSPECTIVE_REPLAY_CLONES.with(|clones| {
             assert_eq!(
                 clones.get(),
-                1,
+                0,
                 "expired IDs bypass prospective replay allocation"
             );
         });
@@ -4451,6 +4583,8 @@ mod tests {
             crate::CommandPayload::SessionTransactionApply(&transaction),
         );
         let mut endpoint = controller(8, 2);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
         let mut short = [0xa5_u8; 32];
         let mut fields = [0_u16; 16];
         assert_eq!(
@@ -4464,6 +4598,15 @@ mod tests {
         assert_eq!(short, [0xa5; 32]);
         assert_eq!(endpoint.session().revision(), SessionRevision(7));
         assert!(endpoint.replay().is_empty());
+        assert_eq!(
+            endpoint
+                .queues()
+                .report(crate::QueueKind::ReliableEvent)
+                .occupancy,
+            0
+        );
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
 
         let mut malformed = full_command(
             2,
@@ -4535,7 +4678,7 @@ mod tests {
         let mut accepted = controller(8, 2);
         let mut accepted_output = [0_u8; 2048];
         let accepted_len = accepted
-            .process_command_frame_into_legacy(
+            .process_command_frame_into(
                 &input,
                 &mut DecodeScratch::new(&mut [0_u16; 1024]),
                 &mut accepted_output,
@@ -4548,6 +4691,8 @@ mod tests {
         let before_event = endpoint
             .queues_mut()
             .report(crate::QueueKind::ReliableEvent);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
         let prepared = match endpoint
             .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
             .expect("prepare")
@@ -4555,6 +4700,8 @@ mod tests {
             PreparedCommandFrame::Structural(prepared) => *prepared,
             PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
         };
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 1));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 1));
         assert_eq!(endpoint.session().revision(), SessionRevision(7));
         assert_eq!(endpoint.session().canonical_snapshot(), before_snapshot);
         assert!(endpoint.replay().is_empty());
