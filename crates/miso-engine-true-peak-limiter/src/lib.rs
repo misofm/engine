@@ -1544,13 +1544,7 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         let first = request
             .requests
             .first()
@@ -1561,21 +1555,27 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         let metadata = expected_prepared_metadata(self.descriptor(), first)?;
         let mut left_defaults = Vec::with_capacity(request.requests.len());
         let mut right_defaults = Vec::with_capacity(request.requests.len());
+        let mut same_program = true;
         for member in request.requests.iter().copied() {
             let candidate = expected_prepared_metadata(self.descriptor(), member)?;
             if candidate.program_key() != metadata.program_key() {
-                return Err(EffectPrepareError {
-                    code: "effect.bank.program",
-                });
+                same_program = false;
             }
             let (left, right) = initial_defaults(member.initial_values)?;
             left_defaults.push(left);
             right_defaults.push(right);
         }
-        // Decision D4: the backend is a compile-time constant, so "unavailable" means this artifact
-        // was built for a narrower width than the cohort asks for. Every member has already been
-        // validated, so the fallback is transactional.
-        if Backend::current().width() < request.width.lanes() as usize {
+        // Issue #95: a cohort whose members do not share one program key is a *cohort* this
+        // artifact cannot bank, not a malformed request. It declines with `Ok(None)` and the
+        // tracks render as scalar instances, which is the contract's frozen rule for every
+        // effect (`NativeEffectFactory::bind_homogeneous_bank`). This crate used to be the one
+        // that answered `Err("effect.bank.program")`, which would have cost the user the whole
+        // session compile for a planner bug.
+        //
+        // Decision D4: the backend is a compile-time constant, so "unavailable" means this
+        // artifact was built for a narrower width than the cohort asks for. Every member has
+        // already been validated in both cases, so the fallback is transactional.
+        if !same_program || Backend::current().width() < request.width.lanes() as usize {
             return Ok(None);
         }
         let bank_metadata = PreparedBankMetadata {
@@ -2547,8 +2547,11 @@ mod tests {
             Some("effect.bank.requests")
         );
 
-        // A heterogeneous cohort is a planner bug, not a capability gap: it rejects rather than
-        // silently falling back to scalar tails.
+        // Issue #95 unification: a heterogeneous cohort is a cohort this artifact cannot bank,
+        // not a malformed request. Every member is still validated first — the `Ok` proves the
+        // decline happened after validation, not instead of it — and the answer is the same
+        // `Ok(None)` every other effect gives, so the tracks render as scalar instances instead
+        // of failing the session compile.
         let mut heterogeneous: Vec<PrepareEffectRequest<'_>> = requests.clone();
         heterogeneous[3].link_mode = LinkMode::Maximum;
         let heterogeneous =
@@ -2557,9 +2560,26 @@ mod tests {
                 width: BankWidth::Eight,
                 requests: &heterogeneous,
             });
+        assert!(
+            heterogeneous
+                .expect("a heterogeneous cohort is declined, never an error")
+                .is_none()
+        );
+
+        // A member that would fail `prepare` on its own is still a typed error, and it is the
+        // diagnostic `prepare` would have returned — an absent capability must never hide it.
+        let mut malformed: Vec<PrepareEffectRequest<'_>> = requests.clone();
+        malformed[5].quality = EffectQuality::Draft;
         assert_eq!(
-            heterogeneous.err().map(|error| error.code),
-            Some("effect.bank.program")
+            TruePeakLimiterFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::X86Avx2Fma,
+                    width: BankWidth::Eight,
+                    requests: &malformed,
+                })
+                .err()
+                .map(|error| error.code),
+            Some("effect.quality.unsupported")
         );
     }
 

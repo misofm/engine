@@ -5,7 +5,8 @@ fail() { printf 'effect runtime policy failure: %s\n' "$1" >&2; exit 1; }
 dependencies() {
     awk '/^\[dependencies\]$/ { in_deps=1; next } /^\[/ { in_deps=0 } in_deps && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ { line=$0; sub(/[[:space:]]*=.*/, "", line); sub(/\.workspace$/, "", line); print line }' "$1" | sort
 }
-[[ "$(dependencies crates/miso-engine-effect-contract/Cargo.toml)" == 'miso-engine-core' ]] || fail 'effect-contract dependency boundary changed'
+expected_contract=$'miso-engine-core\nmiso-engine-math'
+[[ "$(dependencies crates/miso-engine-effect-contract/Cargo.toml)" == "$expected_contract" ]] || fail 'effect-contract dependency boundary changed'
 expected_compiler=$'miso-engine-compressor\nmiso-engine-core\nmiso-engine-delay\nmiso-engine-effect-contract\nmiso-engine-effect-package\nmiso-engine-gate-expander\nmiso-engine-multiband-compressor\nmiso-engine-parametric-eq\nmiso-engine-session\nmiso-engine-soft-clip\nmiso-engine-transient-shaper\nmiso-engine-true-peak-limiter'
 [[ "$(dependencies crates/miso-engine-effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi

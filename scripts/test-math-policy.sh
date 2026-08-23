@@ -69,9 +69,13 @@ expect_failure ln-in-the-effect-runtime \
 expect_failure sin-in-a-host \
     'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >>"$root/hosts/miso-engine-host-native/src/lib.rs"'
 expect_failure new-file-next-to-an-allowlisted-one \
-    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-effect-contract/src/other.rs"'
+    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-graph/src/other.rs"'
 expect_failure allowlisted-file-gains-a-call \
-    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-effect-contract/src/lib.rs"'
+    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-graph/src/lib.rs"'
+# Issue #95 cleared the `miso-engine-effect-contract` row. A platform call coming back to it must
+# now be rejected as an unallowlisted file, not merely ratcheted.
+expect_failure the-cleared-contract-row-cannot-come-back \
+    'mkdir -p "$root/crates/miso-engine-effect-contract/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.powf(2.0) }" >"$root/crates/miso-engine-effect-contract/src/lib.rs"'
 expect_failure allowlist-entry-gone-stale \
     'printf "%s\n" "pub fn migrated(x: f64) -> f64 { miso_engine_math::exp(x) }" >"$root/crates/miso-engine-graph-compiler/src/lib.rs"'
 expect_failure allowlisted-file-deleted \
@@ -100,6 +104,6 @@ expect_pass tests-may-use-the-platform \
 expect_pass sqrt-stays-legal \
     'printf "%s\n" "pub fn ok(x: f64) -> f64 { x.sqrt() }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
 expect_pass allowlisted-file-may-shrink \
-    'sed -i "1a // migrated one call site" "$root/crates/miso-engine-effect-contract/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { miso_engine_math::exp(x) }/" "$root/crates/miso-engine-effect-contract/src/lib.rs"'
+    'sed -i "1a // migrated one call site" "$root/crates/miso-engine-graph/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { miso_engine_math::exp(x) }/" "$root/crates/miso-engine-graph/src/lib.rs"'
 
 printf 'math policy mutation tests: ok\n'

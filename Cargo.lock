@@ -813,6 +813,7 @@ name = "miso-engine-effect-contract"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-math",
 ]
 
 [[package]]

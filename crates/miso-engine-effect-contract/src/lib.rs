@@ -328,8 +328,13 @@ pub fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
             .minimum
             .zip(p.maximum)
             .is_some_and(|(a, b)| v >= a && v <= b),
-        ParameterDomain::Boolean => canonical_bits(v) == canonical_bits(0.0) || canonical_bits(v) == canonical_bits(1.0),
-        ParameterDomain::Enumeration => p.enum_choices.iter().any(|c| canonical_bits(c.value) == canonical_bits(v)),
+        ParameterDomain::Boolean => {
+            canonical_bits(v) == canonical_bits(0.0) || canonical_bits(v) == canonical_bits(1.0)
+        }
+        ParameterDomain::Enumeration => p
+            .enum_choices
+            .iter()
+            .any(|c| canonical_bits(c.value) == canonical_bits(v)),
     }
 }
 fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
@@ -551,7 +556,7 @@ pub fn map_normalized(m: ParameterMapping, a: f32, b: f32, x: f32) -> Option<f32
     }
     match m {
         ParameterMapping::Linear => Some(a + x * (b - a)),
-        ParameterMapping::Logarithmic if a > 0.0 => Some(a * (b / a).powf(x)),
+        ParameterMapping::Logarithmic if a > 0.0 => Some(a * miso_engine_math::powf(b / a, x)),
         ParameterMapping::Exponential => Some(a + (b - a) * x * x),
         _ => None,
     }
@@ -568,7 +573,9 @@ pub fn inverse_map_normalized(m: ParameterMapping, a: f32, b: f32, v: f32) -> Op
     }
     match m {
         ParameterMapping::Linear => Some((v - a) / (b - a)),
-        ParameterMapping::Logarithmic if a > 0.0 => Some((v / a).ln() / (b / a).ln()),
+        ParameterMapping::Logarithmic if a > 0.0 => {
+            Some(miso_engine_math::logf(v / a) / miso_engine_math::logf(b / a))
+        }
         ParameterMapping::Exponential => Some(((v - a) / (b - a)).sqrt()),
         _ => None,
     }
@@ -650,6 +657,29 @@ impl PrepareEffectBankRequest<'_> {
     #[must_use]
     pub const fn has_matching_backend_width(self) -> bool {
         self.width.matches_backend(self.backend)
+    }
+
+    /// The **contract-violation** half of the `bind_homogeneous_bank` rule (issue #95).
+    ///
+    /// A bank request is malformed — and therefore a typed `Err`, not a fallback — when its
+    /// declared backend and width disagree about the lane count, or when it does not carry
+    /// exactly one member request per lane. Neither can arise from a correct planner, so a caller
+    /// that sees `effect.bank.requests` has a bug to fix, not a slower path to take.
+    ///
+    /// Every `bind_homogeneous_bank` implementation calls this **before** it inspects a member,
+    /// so that a malformed request can never be hidden behind an absent capability.
+    ///
+    /// # Errors
+    ///
+    /// `effect.bank.requests` if the request's shape is not the one its own fields declare.
+    pub const fn validate_shape(self) -> Result<(), EffectPrepareError> {
+        if !self.has_matching_backend_width() || self.requests.len() != self.width.lanes() as usize
+        {
+            return Err(EffectPrepareError {
+                code: "effect.bank.requests",
+            });
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -872,7 +902,8 @@ pub fn valid_runtime_span(
     }
     match s.kind {
         AutomationSpanKind::Point => {
-            s.start_sample == s.end_sample && canonical_bits(s.start_value) == canonical_bits(s.end_value)
+            s.start_sample == s.end_sample
+                && canonical_bits(s.start_value) == canonical_bits(s.end_value)
         }
         AutomationSpanKind::Step | AutomationSpanKind::Linear => s.end_sample > s.start_sample,
         AutomationSpanKind::Exponential => {
@@ -963,7 +994,7 @@ impl ParameterSmoother {
             return None;
         }
         let one_pole_a = if rule == SmoothingRule::OnePole99 {
-            (0.01_f32.ln() / samples as f32).exp()
+            miso_engine_math::expf(miso_engine_math::logf(0.01) / samples as f32)
         } else {
             0.0
         };
@@ -1063,7 +1094,7 @@ pub fn automation_segment_value(span: PreparedAutomationSpan, sample: u64) -> Op
                 && span.end_value != 0.0
                 && span.start_value.is_sign_positive() == span.end_value.is_sign_positive() =>
         {
-            Some(span.start_value * (span.end_value / span.start_value).powf(x))
+            Some(span.start_value * miso_engine_math::powf(span.end_value / span.start_value, x))
         }
         _ => None,
     }
@@ -1130,6 +1161,51 @@ pub trait NativeEffectFactory: Send + Sync {
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError>;
+
+    /// Binds `width` tracks into one homogeneous bank, or declines.
+    ///
+    /// # The three-outcome rule (issue #95; frozen for every implementation)
+    ///
+    /// Wave 2 left this method meaning two different things: eight crates declined a cohort whose
+    /// members did not share a program key with `Ok(None)`, one rejected it with
+    /// `Err("effect.bank.program")`, and one answered a malformed *shape* with `Ok(None)` where
+    /// the others answered `Err("effect.bank.requests")`. One semantic now applies everywhere,
+    /// decided from what the consumer actually does with each answer:
+    ///
+    /// | outcome | meaning | `graph-compiler` | `effect-compiler` restore |
+    /// |---|---|---|---|
+    /// | `Err(code)` | **the request violates this contract** | fails the whole graph compile with `code` | `effect.state.unavailable` |
+    /// | `Ok(None)` | the request is well formed, but this artifact cannot bank it | skips the cohort; the tracks run as scalar instances | `effect.state.unavailable` |
+    /// | `Ok(Some(bank))` | bound | uses the bank | uses the bank |
+    ///
+    /// `Err` is therefore reserved for what a correct planner cannot produce:
+    ///
+    /// * a shape that contradicts itself — [`PrepareEffectBankRequest::validate_shape`];
+    /// * a **member** request that would fail [`NativeEffectFactory::prepare`] on its own, which
+    ///   is the same diagnostic `prepare` would have returned (`effect.quality.unsupported`,
+    ///   `effect.parameter.initial`, …).
+    ///
+    /// `Ok(None)` covers every remaining "no bank here", because each one is a legal session that
+    /// must still render:
+    ///
+    /// * a width this build does not execute (decision D4 makes that a compile-time constant, so
+    ///   it is a property of the artifact and not of the request);
+    /// * a **heterogeneous cohort** — members that do not all share one `EffectProgramKeyV1`;
+    /// * a port or link configuration this effect has no bank kernel for.
+    ///
+    /// The heterogeneous case is the one that moved. `graph-compiler` groups candidates by
+    /// `metadata.program_key()` before it ever calls this method, so a mixed cohort is
+    /// unreachable from the production planner; the choice is about what happens if a *future*
+    /// planner produces one. `Err` would turn that into "the session does not compile at all",
+    /// `Ok(None)` into "the session renders, one bank slower". A planner bug must not cost the
+    /// user their session, so `Ok(None)` wins, and the cohort-grouping invariant is gated where
+    /// it is decided — in the planner — rather than by making every effect crate a second,
+    /// fatal check of it.
+    ///
+    /// # Errors
+    ///
+    /// See the table above. Every implementation validates **every** member before it decides the
+    /// shape, so an absent capability can never hide a malformed member.
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,

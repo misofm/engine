@@ -1258,11 +1258,13 @@ impl NativeEffectFactory for ParametricEqFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        // Issue #95: a self-contradicting shape is a contract violation and a typed error; a
+        // width this build does not execute is a capability gap and a legal `Ok(None)`. This
+        // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
+        // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
+        request.validate_shape()?;
         let lanes = request.width.lanes() as usize;
-        if !request.has_matching_backend_width()
-            || request.requests.len() != lanes
-            || lanes != Backend::current().width()
-        {
+        if lanes != Backend::current().width() {
             return Ok(None);
         }
         let first = request

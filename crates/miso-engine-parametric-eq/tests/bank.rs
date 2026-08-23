@@ -354,36 +354,55 @@ fn bank_rendering_is_partition_invariant() {
     }
 }
 
-/// A malformed shape and a width this build cannot execute are both a legal non-bank, never an
-/// error and never a silent fallback to a different width.
+/// Issue #95's frozen split: a malformed shape is a typed error, a width this build cannot
+/// execute is a legal non-bank, and neither is ever a silent fallback to a different width.
+///
+/// Before #95 this crate answered `Ok(None)` to all three, which was the half of the wave-2
+/// divergence that hid planner bugs; every other effect answered `effect.bank.requests` to the
+/// first two. Red mutation: replace `request.validate_shape()?` in `bind_homogeneous_bank` with
+/// the old combined `return Ok(None)` and the two `Err` cases below fail.
 #[test]
 fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
     let factory = ParametricEqFactory;
     let values = values();
     let request = request(&values, false);
-    let (foreign_width, foreign_backend) = foreign_bank();
+
+    // A backend and a width that disagree about the lane count, and a member count that does not
+    // match the declared width: both contradict the request's own fields.
     for (width, backend, count) in [
         (BankWidth::Four, KernelBackendV1::X86Avx2Fma, 4),
         (BankWidth::Eight, KernelBackendV1::X86Avx2Fma, 4),
-        (
-            foreign_width,
-            foreign_backend,
-            foreign_width.lanes() as usize,
-        ),
     ] {
         let requests = vec![request; count];
-        assert!(
+        assert_eq!(
             factory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
                     backend,
                     width,
                     requests: &requests,
                 })
-                .expect("a declined bank is not an error")
-                .is_none(),
-            "{width:?} {backend:?} must decline"
+                .err()
+                .map(|error| error.code),
+            Some("effect.bank.requests"),
+            "{width:?} {backend:?} is a malformed shape, not a capability gap"
         );
     }
+
+    // A width this artifact was not built for is a capability gap: well formed, not bankable
+    // here, and the tracks render as scalar instances.
+    let (foreign_width, foreign_backend) = foreign_bank();
+    let requests = vec![request; foreign_width.lanes() as usize];
+    assert!(
+        factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: foreign_backend,
+                width: foreign_width,
+                requests: &requests,
+            })
+            .expect("a declined bank is not an error")
+            .is_none(),
+        "{foreign_width:?} {foreign_backend:?} must decline"
+    );
 }
 
 /// A bank whose tracks do not share a program key is not a bank.

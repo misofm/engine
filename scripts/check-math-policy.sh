@@ -19,10 +19,15 @@ set -euo pipefail
 # and its tests out of `src/`, and `miso-engine-core/src/arch/mod.rs`'s single site was inside the
 # soft-clip kernel test that #91 deleted (the kernel's last consumer had moved).
 #
+# Issue #95 removed the four `miso-engine-effect-contract` sites and deleted its row: the
+# logarithmic parameter mapping and its inverse, the `OnePole99` coefficient, and the exponential
+# automation segment now call `miso_engine_math::{powf, logf, expf}`. The contract took a
+# `miso-engine-math` dependency in the same commit, which
+# `scripts/check-effect-runtime-policy.sh` pins.
+#
 #   path                                                  max  owner
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
-crates/miso-engine-effect-contract/src/lib.rs               4  95
 crates/miso-engine-graph/src/lib.rs                         2  98
 crates/miso-engine-graph-compiler/src/lib.rs                1  99
 crates/miso-engine-conformance/src/compare.rs               1 105
