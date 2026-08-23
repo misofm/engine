@@ -34,6 +34,15 @@ functional evidence and the already measured validator-valid raw descriptive ben
 owns only benchmark-wrapper operational hardening and promotion of those exact bytes. It is not a
 dependency of issues 007–010 and does not authorize another issue-006 benchmark run.
 
+Open audit Issue 099 identified one bounded native-binding correctness defect: dependency-level
+members retain Kahn ready-pop order even though the accepted native binder requires strict node-ID
+order. Issue 122, **Emit sorted graph dependency levels for valid native binding**, owns only the
+deterministic level-member reconstruction, reverse-route-ID parallel-submix regression and exact
+native single-thread/dependency-wave proof. It preserves the sequential schedule and defers open
+Issue 098's executor/buffer-coloring correction. Issue 122 follows accepted Issues 006 and 039,
+uses Sol High/Sol XHigh with one pass plus one HOLD, prohibits benchmark/timing/workload execution
+and gates Issue 026.
+
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
 launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;
 176,400/192,000/352,800/384,000 Hz remain extended compatibility evidence only. Dependency order
@@ -127,8 +136,8 @@ verified technical input, but a new public mutable protocol event producer remai
 source oracle inputs were still high-level pins with ineffective mutations. Accepted Issue 121,
 **Close CAPI-owned render events and primitive replacement resource authority**, closed those two
 residuals with strict Sol XHigh PASS and gates Issue 025 directly. Issue 114, **Qualify native C ABI
-and reference runner target matrix**, is ready for Sol High pass 1 from accepted Issues 116 and 121
-and alone owns native platform/runner qualification before Issue 026. Issues 101
+and reference runner target matrix**, completed with strict Sol XHigh PASS from accepted Issues 116
+and 121 and supplies the native platform/runner qualification required by Issue 026. Issues 101
 and 112 change
 no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,

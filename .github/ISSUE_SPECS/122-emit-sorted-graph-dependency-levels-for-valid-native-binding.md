@@ -1,0 +1,147 @@
+# 122 Emit sorted graph dependency levels for valid native binding
+
+## Outcome and readiness
+
+Repair only the graph compiler's dependency-level member ordering so every valid compiled graph
+binds through the accepted native single-thread and dependency-wave paths with deterministic,
+strictly node-ID-sorted levels.
+
+**READY FOR SOL HIGH PASS 1.** Sol High implements and Sol XHigh briefs/verifies. The complete
+budget is one implementation pass plus one bounded HOLD correction; a second material HOLD is
+terminal STOP. Benchmark, timing and workload invocations are forbidden and remain zero.
+
+Remote Issue 122 was read-only confirmed unallocated on 2026-08-23. Root owns GitHub creation,
+body synchronization and state changes after this docs checkpoint is committed and upstream. This
+record authorizes no GitHub mutation.
+
+## Accepted authorities and technical input
+
+Accepted product authority comes from **Deterministic graph compiler, sends, submixes, sidechains,
+and PDC** (Issue 006): implementation checkpoint
+`40f0a2f3f5057e725e80715da18afb0e5f4d6bb3` (tree
+`d8898cde03e4a7d12314e707369f67551607ea3b`) and its accepted product rescope
+`e1211bba07d680a0a97dcfccc87ce0a167dbca50` (tree
+`f31db1e03beed6c1b2b16f77a4c7093ae2338d18`). Preserve its graph semantics, deterministic
+reduction, PDC, resource accounting, ownership and no-track-ceiling contract. Its historical
+exactly-once runner failure and consumed benchmark authority remain closed history; Issue 122 does
+not reopen or rerun them.
+
+Accepted native execution authority comes from **Native graph scheduler qualification and
+benchmark** (Issue 039): sealed candidate
+`290037ccebc64204a743cd13f93e240a84f93040` (tree
+`cb732a6def7516e8dac71f7f745df76ba321b028`) and final evidence commit
+`157b3eae11d500a6d1bdc4cea37a36827461b8ac` (tree
+`1caa1873fbe38674dd751ed38dde35479a86ca40`). Preserve its native single-thread/dependency-wave
+ownership, partition, reduction, observer and realtime contracts. No scheduler benchmark or
+qualification workload may be repeated.
+
+Open audit **099 Audit: miso-engine-graph-compiler (level-order bug, plan lowering, cohort
+duplication)** is technical input only. Its finding F1 was recorded against commit
+`ae02d2abd9bd5e3e97b33152cfc943013325045e` (tree
+`8fa639d0212171570e790bc2626bb622370a3fca`): `topo` appends each dependency-level member in
+Kahn ready-pop order, while native binding requires each `DependencyLevel.nodes` list to be
+strictly ascending by `GraphNodeId`. A valid parallel-submix graph can therefore compile but fail
+native binding solely because route IDs become ready in reverse lexical order. Issue 099 supplies
+no implementation authority or overall PASS and its other findings are out of scope.
+
+The live briefing baseline is clean `main`
+`9e489502d381d8b8c191882e1cf8018d748747e0`, tree
+`2994a4a4e0c91e7b4cdba0bc70c1dcd47e531fbf`. At that baseline the defect remains present in
+`crates/miso-engine-graph-compiler/src/lib.rs`: level members are pushed during the ready-pop loop,
+and `NativeGraphBlueprint::prepare` still rejects non-ascending members as
+`graph.scheduler.layout`.
+
+## Smallest closable correction
+
+Change only dependency-level construction in the graph compiler. Derive or sort each level's
+members into strict `GraphNodeId` order after topological levels are known. The result must be
+independent of the order in which nodes become ready and must retain the existing level number for
+every node.
+
+Add one focused valid session with a track feeding parallel submixes whose downstream route IDs
+sort opposite to their readiness order. Compile it through the accepted public graph-compiler
+path, then bind the resulting plan through both native `SingleThread` and `DependencyWaves`
+configurations. The exact small regression proves both paths accept and produce the same expected
+PCM, PDC and stable observer order. It is a focused correctness test, not a workload or benchmark.
+
+Prove for the regression and existing deterministic graph fixtures that:
+
+- dependency levels are ordered by increasing level number;
+- every level is nonempty and its node IDs are strictly ascending;
+- every compiled node appears in exactly one dependency level and exactly once in the canonical
+  sequential schedule;
+- every edge's source level is strictly lower than its destination level;
+- fresh compilations emit byte-identical canonical graph bytes and SHA-256; and
+- native single-thread and dependency-wave binding accept the valid graph without renaming IDs.
+
+## Frozen boundaries
+
+The canonical sequential schedule is frozen byte-for-byte and must continue to use its existing
+Kahn schedule. Do not concatenate dependency levels into a replacement schedule, change buffer
+coloring, move bank execution, change reduction order or alter either executor. Open audit Issue
+098's stale/zero bank-lane defect, level-major schedule proposal and executor/buffer-coloring work
+are explicitly deferred to a separate stateless successor.
+
+Freeze graph node/port/edge meanings, topology, level-number calculation, PDC/latency/tail laws,
+buffer/resource estimates, canonical field grammar, DOT/report semantics, diagnostics, plan
+ownership, scheduler configuration and every public interface. No core, graph-runtime, scheduler,
+session, source, effect, builtin, protocol, C ABI, host, runner or benchmark behavior may change.
+
+## Allowed tracked paths
+
+- `crates/miso-engine-graph-compiler/src/lib.rs`;
+- its existing focused graph-compiler tests and, only if the deterministic level row changes an
+  existing checked fixture, the existing graph fixture generator plus the exact affected
+  `fixtures/graph/**` payloads and manifest;
+- this issue spec and its tracked brief; and
+- minimal Issue-122 routing in `.github/ISSUE_SPECS/README.md`,
+  `docs/IMPLEMENTATION_PLAN.md` and the Issue-026 dependency list.
+
+Any edit to `crates/miso-engine-graph/**`, `crates/miso-engine-native-scheduler/**`, Cargo
+manifests/lock, accepted benchmark artifacts, unrelated fixtures or another production crate is
+STOP and requires a new issue or amended brief before implementation.
+
+## Dependencies by exact title
+
+- **Deterministic graph compiler, sends, submixes, sidechains, and PDC**
+- **Native graph scheduler qualification and benchmark**
+
+Issue 122 gates **End-to-end release, performance, and listening qualification**. It does not
+reopen Issues 006 or 039 and does not depend on Issue 098's broader executor correction.
+
+## Acceptance gates
+
+1. The reverse-route-ID parallel-submix regression reproduces the pre-correction unsorted level
+   structurally, then passes through production compile and both native binding modes after the
+   correction. Exact PCM, PDC and observer order match between modes.
+2. Independent assertions prove node-once membership, strict level/member order and strict
+   source-level-before-destination-level for every edge. A mutation that restores ready-pop member
+   order or reverses one level must fail before binding evidence can pass.
+3. The existing sequential schedule is byte-identical to the baseline for the regression and
+   checked fixtures. Existing buffer-color assignments, canonical grammar, graph diagnostics,
+   PDC/reduction results and resource rows remain unchanged except an explicitly identified
+   dependency-level member row whose corrected order is independently derived.
+4. Repeated fresh compilations of the focused graph have one canonical identity. Existing focused
+   graph-compiler tests, graph fixture check/corruption tests, locked package tests, warning-denied
+   package Clippy/rustdoc, format, graph/realtime policies and applicable mutation checks pass.
+5. Exact-path diff/static scans prove the allowed fence, no Issue-098 executor/schedule work, no
+   generated artifacts and counters of `benchmark_invocations=0`,
+   `timed_benchmark_invocations=0`, `workload_invocations=0`.
+6. Sol High freezes one clean exact-path checkpoint. Sol XHigh performs a read-only adversarial
+   review and returns strict PASS or the sole bounded HOLD. After a HOLD, the one correction is
+   terminal PASS or STOP; gates may not be weakened.
+
+## Target matrix and evidence
+
+Run focused native Linux correctness only. Cross-compilation, browser/device execution, long-run
+audits and target qualification remain outside this issue because no target-specific code changes.
+Record the clean candidate and tree; exact changed-path hashes; accepted authority hashes; the
+reverse-ID graph topology; ordered level transcript; node/edge invariants; sequential schedule and
+canonical before/after identities; native mode PCM/PDC/observer identities; mutation outcomes;
+strict gate results; zero prohibited counters; and Sol High/Sol XHigh verdicts.
+
+## Explicit non-goals
+
+Issue-098 executor or buffer-coloring correction; plan lowering; bank/cohort unification; graph or
+scheduler optimization; new features or APIs; fixture expansion; target/browser/device matrix;
+benchmark, timing, workload, soak or listening execution; or V1/legacy inspection.
