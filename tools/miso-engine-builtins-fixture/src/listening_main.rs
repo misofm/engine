@@ -429,16 +429,14 @@ fn process_blocks(
             frames
         };
         let end = first.saturating_add(QUANTUM).min(frames).min(next_event);
-        chain
-            .process_dual_mono(
-                DualMonoBlock::new(
-                    &mut output.left[first..end],
-                    &mut output.right[first..end],
-                    first as u64,
-                )
-                .map_err(|error| format!("block construction failed: {error:?}"))?,
+        chain.process_dual_mono(
+            DualMonoBlock::new(
+                &mut output.left[first..end],
+                &mut output.right[first..end],
+                first as u64,
             )
-            .map_err(|error| format!("render failed: {error:?}"))?;
+            .map_err(|error| format!("block construction failed: {error:?}"))?,
+        );
         first = end;
     }
     Ok(output)

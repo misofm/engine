@@ -1022,12 +1022,10 @@ impl RenderRuntime {
             meter_runtime.render_one(first_sample);
             return;
         }
-        self.chain
-            .process_dual_mono(
-                DualMonoBlock::new(&mut self.left, &mut self.right, first_sample)
-                    .expect("fixed block"),
-            )
-            .expect("frozen process");
+        self.chain.process_dual_mono(
+            DualMonoBlock::new(&mut self.left, &mut self.right, first_sample)
+                .expect("fixed block"),
+        );
     }
     fn collect_operation_evidence(&mut self, retain: bool) -> usize {
         assert!(

@@ -1,13 +1,43 @@
-//! Scalar fixed track processors and transparent meter state for issue 007.
+//! The builtin track chain — polarity/trim, high-pass, low-pass, fader/mute, 2x2 matrix — and the
+//! transparent meter taps around it (issues 007 and 085).
+//!
+//! # One body per pass
+//!
+//! Every sample loop in this crate is a `miso_engine_lane::kernels` block kernel, generic over
+//! [`Lane`] and instantiated at `f32`, `Simd4` and `Simd8` from one source. A scalar track is
+//! [`InputStage<f32>`] over planar slices; a bank is the same type at four or eight lanes over an
+//! AoSoA block. There is no second arithmetic graph, so a track's bits do not depend on its cohort
+//! membership or on the host (master plan #83 D5, §4).
+//!
+//! # Where the checks are (D7)
+//!
+//! Input is sanitised once per channel per block, here, because this crate *is* the input stage.
+//! The two recursive state words of each filter section are flushed in-kernel. Output finiteness
+//! is checked once per block, per lane, on the output of the recursive stage; a failing lane is
+//! zeroed and its state reset, and no other lane's bits move. Fader, trim and matrix are
+//! feed-forward with bounded coefficients, so finite in implies finite out and they carry no
+//! checks at all.
 #![allow(missing_docs)]
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use miso_engine_core::{
-    KernelBackendV1, PreparedTptBankKernelV1, SampleRateHz, is_extended_compatibility_sample_rate,
+    KernelBackendV1, SampleRateHz, is_extended_compatibility_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
 use miso_engine_effect_contract::BankWidth;
+use miso_engine_lane::{
+    Lane, Simd4, Simd8,
+    kernels::{
+        SvfCoef, SvfState,
+        builtins::{
+            Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block, lanes_below, mask_from_flags,
+            matrix2x2_block, matrix2x2_ramp_block, no_lanes, nonfinite_lanes_block,
+            sanitize_gain_block, zero_lanes_block,
+        },
+        svf_block,
+    },
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelLinkMode {
@@ -81,19 +111,6 @@ pub struct BuiltinProcessReport {
     /// Finite subnormal retained values are canonicalized to positive zero before they can be
     /// committed; they do not increment this counter.
     pub recovered_right_state: u64,
-}
-
-impl BuiltinProcessReport {
-    fn add(&mut self, other: Self) {
-        self.sanitized_input = self.sanitized_input.saturating_add(other.sanitized_input);
-        self.sanitized_output = self.sanitized_output.saturating_add(other.sanitized_output);
-        self.recovered_left_state = self
-            .recovered_left_state
-            .saturating_add(other.recovered_left_state);
-        self.recovered_right_state = self
-            .recovered_right_state
-            .saturating_add(other.recovered_right_state);
-    }
 }
 
 /// A shape-validated dual-mono render block.
@@ -465,36 +482,61 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
     },
 ];
 
-#[derive(Clone, Copy)]
-struct TptSvf {
-    c1: f32,
-    a2: f32,
-    a3: f32,
-    k: f32,
-    s1: f32,
-    s2: f32,
-    high_pass: bool,
-    enabled: bool,
+/// One prepared second-order TPT state-variable section, in the master-plan §4.2 A1 storage form.
+///
+/// The stored damping coefficient is `c1 = t / (1 + t)` with `t = g * (g + k)`, never
+/// `a1 = 1 / (1 + t)`: at a low cutoff and a high Q, `a1` rounded to `f32` carries about 0.6 %
+/// relative error in the pole damping while `c1` carries about 6e-8 (#87, amendment A1). The
+/// output selection is the `(m0, m1, m2)` mix of the shared kernel — high-pass `(1, -k, -1)`,
+/// low-pass `(0, 0, 1)` — so a bank does not need a per-lane high-pass mask, and a disabled
+/// section is the arithmetic identity `(1, 0, 0)` with zero coefficients rather than a branch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SvfSection {
+    /// `t / (1 + t)`, the damping coefficient.
+    pub c1: f32,
+    /// `g * (1 - c1)`.
+    pub a2: f32,
+    /// `g * a2`.
+    pub a3: f32,
+    /// `1 / Q`; Butterworth throughout, so `sqrt(2)`.
+    pub k: f32,
+    /// Direct output mix.
+    pub m0: f32,
+    /// Band output mix.
+    pub m1: f32,
+    /// Low output mix.
+    pub m2: f32,
+    /// Whether a cutoff was designed; a disabled section is the arithmetic identity.
+    pub enabled: bool,
 }
 
-impl TptSvf {
-    fn identity() -> Self {
-        Self {
-            c1: 0.0,
-            a2: 0.0,
-            a3: 0.0,
-            k: 0.0,
-            s1: 0.0,
-            s2: 0.0,
-            high_pass: false,
-            enabled: false,
-        }
-    }
+impl SvfSection {
+    /// The disabled section: zero coefficients and the direct mix, so `y = 1 * v0 + 0 + 0`.
+    pub(crate) const IDENTITY: Self = Self {
+        c1: 0.0,
+        a2: 0.0,
+        a3: 0.0,
+        k: 0.0,
+        m0: 1.0,
+        m1: 0.0,
+        m2: 0.0,
+        enabled: false,
+    };
+
+    /// Designs the Butterworth (`k = sqrt(2)`) section for a cutoff; `0.0` is the identity.
+    ///
+    /// The design is `f64` throughout in the frozen operation order below, with exactly one cast
+    /// per stored word. Rejection is coefficient representability only: the public cutoff domain
+    /// is the issue-036 table, enforced before preparation by
+    /// [`validate_builtin_filter_cutoff_v1`].
     fn design(rate: u32, cutoff: f32, high_pass: bool) -> Result<Self, BuiltinParameterError> {
         if cutoff == 0.0 {
-            return Ok(Self::identity());
+            return Ok(Self::IDENTITY);
         }
-        let g = (core::f64::consts::PI * f64::from(cutoff) / f64::from(rate)).tan();
+        if rate == 0 {
+            return Err(BuiltinParameterError::FilterCoefficients);
+        }
+        let g = miso_engine_math::tan(core::f64::consts::PI * f64::from(cutoff) / f64::from(rate));
         let k64 = core::f64::consts::SQRT_2;
         let t0 = g + k64;
         let t1 = g * t0;
@@ -508,183 +550,486 @@ impl TptSvf {
             return Err(BuiltinParameterError::FilterCoefficients);
         }
         let [c1, a2, a3, k] = values;
-        let transition_00 = 1.0 - 2.0_f64 * f64::from(c1);
-        let transition_01 = -2.0_f64 * f64::from(a2);
-        let transition_10 = 2.0_f64 * f64::from(a2);
-        let transition_11 = 1.0 - 2.0_f64 * f64::from(a3);
-        let trace = transition_00 + transition_11;
-        let determinant = transition_00 * transition_11 - transition_01 * transition_10;
-        let denominator_a1 = -trace;
-        let denominator_a2 = determinant;
-        if denominator_a2.abs() >= 1.0
-            || 1.0 + denominator_a1 + denominator_a2 <= 0.0
-            || 1.0 - denominator_a1 + denominator_a2 <= 0.0
-        {
-            return Err(BuiltinParameterError::FilterCoefficients);
-        }
-        let cutoff_db = cast_tpt_magnitude_db(rate, cutoff, c1, a2, a3, k, high_pass)
-            .ok_or(BuiltinParameterError::FilterCoefficients)?;
-        if (cutoff_db + 3.010_299_956_6).abs() > 0.005 {
-            return Err(BuiltinParameterError::FilterCoefficients);
-        }
+        let (m0, m1, m2) = if high_pass {
+            (1.0, -k, -1.0)
+        } else {
+            (0.0, 0.0, 1.0)
+        };
         Ok(Self {
             c1,
             a2,
             a3,
             k,
-            s1: 0.0,
-            s2: 0.0,
-            high_pass,
+            m0,
+            m1,
+            m2,
             enabled: true,
         })
     }
-    fn reset(&mut self) {
-        self.s1 = 0.0;
-        self.s2 = 0.0;
-    }
-    fn process(
-        &mut self,
-        input: f32,
-        recovered: &mut u64,
-        report: &mut BuiltinProcessReport,
-    ) -> f32 {
-        if !self.enabled {
-            return input;
-        }
-        if !self.s1.is_finite() || !self.s2.is_finite() {
-            self.reset();
-            *recovered = recovered.saturating_add(1);
-        } else {
-            self.s1 = canonicalize_retained_state(self.s1);
-            self.s2 = canonicalize_retained_state(self.s2);
-        }
-        let v3 = input - self.s2;
-        let p1 = self.a2 * v3;
-        let p2 = self.c1 * self.s1;
-        let d1 = p1 - p2;
-        let v1 = self.s1 + d1;
-        let p3 = self.a2 * self.s1;
-        let p4 = self.a3 * v3;
-        let d2 = p3 + p4;
-        let v2 = self.s2 + d2;
-        let q1 = d1 + d1;
-        let n1 = self.s1 + q1;
-        let q2 = d2 + d2;
-        let n2 = self.s2 + q2;
-        let low = v2;
-        let kh = self.k * v1;
-        let th = input - kh;
-        let high = th - v2;
-        if !n1.is_finite() || !n2.is_finite() {
-            self.reset();
-            *recovered = recovered.saturating_add(1);
-            return 0.0;
-        }
-        self.s1 = canonicalize_retained_state(n1);
-        self.s2 = canonicalize_retained_state(n2);
-        sanitize(
-            if self.high_pass { high } else { low },
-            &mut report.sanitized_output,
-        )
+
+    /// The seven stored words, in the order the evidence and fixture tools read them.
+    const fn words(self) -> [u32; 7] {
+        [
+            self.c1.to_bits(),
+            self.a2.to_bits(),
+            self.a3.to_bits(),
+            self.k.to_bits(),
+            self.m0.to_bits(),
+            self.m1.to_bits(),
+            self.m2.to_bits(),
+        ]
     }
 }
 
-/// Evaluate the exact-real state-space response implied by the stored `f32` coefficient bits.
-///
-/// This runs only during preparation.  It deliberately does not call the test/reference crate:
-/// the production compiler must reject a cast coefficient set that misses the frozen cutoff gate
-/// even when conformance tests are not linked into the host.
-#[allow(clippy::too_many_arguments)]
-fn cast_tpt_magnitude_db(
-    rate: u32,
-    frequency: f32,
-    c1: f32,
-    a2: f32,
-    a3: f32,
-    k: f32,
-    high_pass: bool,
-) -> Option<f64> {
-    let (c1, a2, a3, k) = (f64::from(c1), f64::from(a2), f64::from(a3), f64::from(k));
-    let a00 = 1.0 - 2.0 * c1;
-    let a01 = -2.0 * a2;
-    let a10 = 2.0 * a2;
-    let a11 = 1.0 - 2.0 * a3;
-    let b0 = 2.0 * a2;
-    let b1 = 2.0 * a3;
-    let (output_c0, output_c1, direct) = if high_pass {
-        (-k * (1.0 - c1) - a2, k * a2 - (1.0 - a3), 1.0 - k * a2 - a3)
-    } else {
-        (a2, 1.0 - a3, a3)
-    };
-
-    let phase = core::f64::consts::TAU * f64::from(frequency) / f64::from(rate);
-    let (z_real, z_imaginary) = (phase.cos(), phase.sin());
-    let m00_real = z_real - a00;
-    let m11_real = z_real - a11;
-    let m01_real = -a01;
-    let m10_real = -a10;
-    let determinant_real = m00_real * m11_real - z_imaginary * z_imaginary - m01_real * m10_real;
-    let determinant_imaginary = z_imaginary * (m00_real + m11_real);
-    let determinant_norm =
-        determinant_real * determinant_real + determinant_imaginary * determinant_imaginary;
-    if determinant_norm == 0.0 || !determinant_norm.is_finite() {
-        return None;
-    }
-
-    let state0_numerator_real = m11_real * b0 - m01_real * b1;
-    let state0_numerator_imaginary = z_imaginary * b0;
-    let state1_numerator_real = -m10_real * b0 + m00_real * b1;
-    let state1_numerator_imaginary = z_imaginary * b1;
-    let divide = |numerator_real: f64, numerator_imaginary: f64| {
-        (
-            (numerator_real * determinant_real + numerator_imaginary * determinant_imaginary)
-                / determinant_norm,
-            (numerator_imaginary * determinant_real - numerator_real * determinant_imaginary)
-                / determinant_norm,
-        )
-    };
-    let (state0_real, state0_imaginary) = divide(state0_numerator_real, state0_numerator_imaginary);
-    let (state1_real, state1_imaginary) = divide(state1_numerator_real, state1_numerator_imaginary);
-    let response_real = direct + output_c0 * state0_real + output_c1 * state1_real;
-    let response_imaginary = output_c0 * state0_imaginary + output_c1 * state1_imaginary;
-    let magnitude = response_real.hypot(response_imaginary);
-    if magnitude.is_finite() && magnitude > 0.0 {
-        Some(20.0 * magnitude.log10())
-    } else {
-        None
-    }
+/// One prepared input channel: the folded trim and its two cascaded sections.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InputLane {
+    /// Trim with the polarity inversion folded in, so the render path has no per-sample branch.
+    pub trim_signed: f32,
+    /// High-pass section, applied first.
+    pub hpf: SvfSection,
+    /// Low-pass section, applied second.
+    pub lpf: SvfSection,
 }
 
-#[derive(Clone, Copy)]
-struct InputLane {
-    polarity: bool,
-    trim: f32,
-    hpf: TptSvf,
-    lpf: TptSvf,
+/// The prepared input record of one track, both channels. Plain data: this is what a bank is
+/// built from, and it is the only thing preparation produces for the input section.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreparedInputTrack {
+    /// Left channel.
+    pub left: InputLane,
+    /// Right channel.
+    pub right: InputLane,
 }
+
 #[derive(Clone, Copy)]
 struct FaderLane {
     gain: f32,
     muted: bool,
 }
 
-pub struct InputBuiltins {
-    left: InputLane,
-    right: InputLane,
-    lifetime_recovered_left: u64,
-    lifetime_recovered_right: u64,
-}
-pub struct FaderMuteBuiltins {
-    left: FaderLane,
-    right: FaderLane,
-}
-pub struct MatrixBuiltins {
-    current: Matrix2x2,
-    target: Matrix2x2,
-    smoothing_samples: u32,
-    remaining_updates: u32,
+/// Broadcasts one `f32` per lane into a [`Lane`] value.
+#[inline]
+fn lane_words<L: Lane>(words: &[f32; MAX_BANK_LANES]) -> L {
+    debug_assert!(L::WIDTH <= MAX_BANK_LANES);
+    L::load(&words[..L::WIDTH])
 }
 
+/// Reads a [`Lane`] value back into one `f32` per lane.
+#[inline]
+fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
+    let mut words = [0.0_f32; MAX_BANK_LANES];
+    value.store(&mut words[..L::WIDTH]);
+    words
+}
+
+/// Widest bank this crate builds. `BankWidth` is four or eight (D4).
+const MAX_BANK_LANES: usize = 8;
+
+/// Builds the kernel coefficient set of one section from one [`SvfSection`] per lane.
+fn svf_coef<L: Lane>(sections: &[SvfSection; MAX_BANK_LANES]) -> SvfCoef<L> {
+    let pick = |select: fn(&SvfSection) -> f32| -> L {
+        let mut words = [0.0_f32; MAX_BANK_LANES];
+        for (word, section) in words.iter_mut().zip(sections.iter()) {
+            *word = select(section);
+        }
+        lane_words::<L>(&words)
+    };
+    SvfCoef {
+        c1: pick(|section| section.c1),
+        a2: pick(|section| section.a2),
+        a3: pick(|section| section.a3),
+        m0: pick(|section| section.m0),
+        m1: pick(|section| section.m1),
+        m2: pick(|section| section.m2),
+    }
+}
+
+/// The builtin input stage — sanitise, trim, high-pass, low-pass, boundary check — at one width.
+///
+/// There is exactly one body: a scalar track is `InputStage<f32>` over planar slices, and a bank
+/// is the same type at `Simd4` or `Simd8` over AoSoA blocks (master plan §4.1). Lane identity is
+/// therefore a property of the code.
+///
+/// Lanes at or above [`InputStage::members`] are **padding lanes**. They carry
+/// [`SvfSection::IDENTITY`] coefficients and unit trim, so they are arithmetically inert; they run
+/// through every pass, and they are excluded from every counter and from the boundary check by
+/// [`InputStage::active`]. Their samples are never observed.
+pub(crate) struct InputStage<L: Lane> {
+    /// Populated lanes, `1..=L::WIDTH`.
+    members: usize,
+    /// Lanes below [`InputStage::members`].
+    active: L::Mask,
+    /// Folded trim per channel, `[left, right]`.
+    trim: [L; 2],
+    /// `[channel][section]`, section `0` high-pass, section `1` low-pass.
+    coef: [[SvfCoef<L>; 2]; 2],
+    /// Retained integrator state, indexed like [`InputStage::coef`].
+    state: [[SvfState<L>; 2]; 2],
+    /// Lifetime boundary-check recoveries per channel.
+    lifetime_recovered: [u64; 2],
+}
+
+impl<L: Lane> InputStage<L> {
+    /// Builds the stage from one prepared track per populated lane.
+    ///
+    /// `tracks.len()` must be in `1..=L::WIDTH`; the remaining lanes become padding lanes.
+    fn new(tracks: &[PreparedInputTrack]) -> Self {
+        debug_assert!(!tracks.is_empty() && tracks.len() <= L::WIDTH);
+        let members = tracks.len().min(L::WIDTH).max(1);
+        let mut trim = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut sections = [[SvfSection::IDENTITY; MAX_BANK_LANES]; 4];
+        for (lane, track) in tracks.iter().enumerate().take(L::WIDTH) {
+            for (channel, input) in [track.left, track.right].into_iter().enumerate() {
+                trim[channel][lane] = input.trim_signed;
+                sections[channel * 2][lane] = input.hpf;
+                sections[channel * 2 + 1][lane] = input.lpf;
+            }
+        }
+        Self {
+            members,
+            active: lanes_below::<L>(members),
+            trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
+            coef: [
+                [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
+                [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
+            ],
+            state: [[SvfState::default(); 2]; 2],
+            lifetime_recovered: [0; 2],
+        }
+    }
+
+    /// Sums the populated lanes of an exact-integer lane word.
+    fn members_sum(&self, value: L) -> u64 {
+        let words = lane_read::<L>(value);
+        words
+            .iter()
+            .take(self.members)
+            .map(|word| *word as u64)
+            .sum()
+    }
+
+    /// Runs one channel: sanitise + trim, high-pass, low-pass, boundary check.
+    ///
+    /// Returns `(sanitised inputs, recovered lanes)`, both counted over populated lanes only.
+    fn process_channel(&mut self, channel: usize, io: &mut [f32], frames: usize) -> (u64, u64) {
+        let sanitized = self.members_sum(sanitize_gain_block::<L>(io, frames, self.trim[channel]));
+        svf_block::<L>(io, frames, &self.coef[channel][0], &mut self.state[channel][0]);
+        svf_block::<L>(io, frames, &self.coef[channel][1], &mut self.state[channel][1]);
+        let bad = L::mask_and(nonfinite_lanes_block::<L>(io, frames), self.active);
+        if !L::mask_any(bad) {
+            return (sanitized, 0);
+        }
+        zero_lanes_block::<L>(io, frames, bad);
+        for section in &mut self.state[channel] {
+            section.ic1 = section.ic1.andnot(bad);
+            section.ic2 = section.ic2.andnot(bad);
+        }
+        let recovered = self.members_sum(L::select(bad, L::splat(1.0), L::zero()));
+        self.lifetime_recovered[channel] =
+            self.lifetime_recovered[channel].saturating_add(recovered);
+        (sanitized, recovered)
+    }
+
+    /// Renders one block of both channels.
+    ///
+    /// `left` and `right` are AoSoA blocks of `frames * L::WIDTH` samples; at `L = f32` a planar
+    /// slice is already such a block.
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> BuiltinProcessReport {
+        let (sanitized_left, recovered_left) = self.process_channel(0, left, frames);
+        let (sanitized_right, recovered_right) = self.process_channel(1, right, frames);
+        BuiltinProcessReport {
+            sanitized_input: sanitized_left.saturating_add(sanitized_right),
+            sanitized_output: 0,
+            recovered_left_state: recovered_left,
+            recovered_right_state: recovered_right,
+        }
+    }
+
+    /// Clears every retained integrator word; prepared coefficients are untouched.
+    fn reset(&mut self) {
+        self.state = [[SvfState::default(); 2]; 2];
+    }
+
+    /// The eight retained words of one lane: `[l_hpf_ic1, l_hpf_ic2, l_lpf_ic1, l_lpf_ic2, r..]`.
+    fn lane_state_words(&self, lane: usize) -> [u32; 8] {
+        let mut words = [0_u32; 8];
+        for channel in 0..2 {
+            for section in 0..2 {
+                let state = &self.state[channel][section];
+                words[channel * 4 + section * 2] =
+                    lane_read::<L>(state.ic1)[lane].to_bits();
+                words[channel * 4 + section * 2 + 1] =
+                    lane_read::<L>(state.ic2)[lane].to_bits();
+            }
+        }
+        words
+    }
+
+    /// Overwrites the eight retained words of one lane. Evidence and fault-injection only.
+    fn set_lane_state_words(&mut self, lane: usize, words: [u32; 8]) {
+        for channel in 0..2 {
+            for section in 0..2 {
+                let state = &mut self.state[channel][section];
+                let mut ic1 = lane_read::<L>(state.ic1);
+                let mut ic2 = lane_read::<L>(state.ic2);
+                ic1[lane] = f32::from_bits(words[channel * 4 + section * 2]);
+                ic2[lane] = f32::from_bits(words[channel * 4 + section * 2 + 1]);
+                state.ic1 = lane_words::<L>(&ic1);
+                state.ic2 = lane_words::<L>(&ic2);
+            }
+        }
+    }
+}
+
+/// The fader and mute stage at one width: one multiply and one mask clear per sample.
+pub(crate) struct FaderStage<L: Lane> {
+    /// Prepared gain per channel, `[left, right]`.
+    gain: [L; 2],
+    /// Muted lanes per channel; a muted lane is exactly `+0.0`.
+    mute: [L::Mask; 2],
+}
+
+impl<L: Lane> FaderStage<L> {
+    /// Builds the stage from one prepared fader per populated lane and channel.
+    fn new(lanes: &[(FaderLane, FaderLane)]) -> Self {
+        let mut gain = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut mute = [[0.0_f32; MAX_BANK_LANES]; 2];
+        for (lane, pair) in lanes.iter().enumerate().take(L::WIDTH) {
+            for (channel, fader) in [pair.0, pair.1].into_iter().enumerate() {
+                gain[channel][lane] = fader.gain;
+                mute[channel][lane] = f32::from(u8::from(fader.muted));
+            }
+        }
+        Self {
+            gain: [lane_words::<L>(&gain[0]), lane_words::<L>(&gain[1])],
+            mute: [
+                mask_from_flags::<L>(&mute[0][..L::WIDTH]),
+                mask_from_flags::<L>(&mute[1][..L::WIDTH]),
+            ],
+        }
+    }
+
+    /// Renders one block of both channels. Feed-forward, so it carries no counters and no checks.
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+        gain_mute_block::<L>(left, frames, self.gain[0], self.mute[0]);
+        gain_mute_block::<L>(right, frames, self.gain[1], self.mute[1]);
+    }
+}
+
+/// The smoothed 2x2 channel matrix at one width (D11 ramps, master plan §4.2).
+///
+/// The lane words are authoritative for the coefficient values; the scalar arrays carry the
+/// control-plane bookkeeping (target, window length, frames left) that decides which kernel a
+/// block runs.
+pub(crate) struct MatrixStage<L: Lane> {
+    /// Settled coefficients and the per-lane identity mask.
+    coef: Matrix2x2Coef<L>,
+    /// Ramp words; `ramp.current` is the same value as [`MatrixStage::coef`] between events.
+    ramp: Matrix2x2Ramp<L>,
+    /// Per-lane target.
+    target: [Matrix2x2; MAX_BANK_LANES],
+    /// Per-lane smoothing window, in sample updates.
+    smoothing_samples: [u32; MAX_BANK_LANES],
+    /// Per-lane frames left in the current ramp.
+    remaining: [u32; MAX_BANK_LANES],
+}
+
+/// Largest ramp countdown that is exact in `f32`.
+///
+/// A window may be up to `u32::MAX` updates. The in-kernel countdown is an `f32` integer, so it is
+/// clamped here; the clamp is invisible, because a lane can only reach zero inside a block when
+/// its remaining count is at most the block length.
+const MATRIX_RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
+
+impl<L: Lane> MatrixStage<L> {
+    /// Builds a settled stage from one prepared matrix and window per populated lane.
+    fn new(lanes: &[(Matrix2x2, u32)]) -> Self {
+        let mut target = [Matrix2x2::IDENTITY; MAX_BANK_LANES];
+        let mut smoothing_samples = [0_u32; MAX_BANK_LANES];
+        for (lane, (matrix, samples)) in lanes.iter().enumerate().take(L::WIDTH) {
+            target[lane] = *matrix;
+            smoothing_samples[lane] = *samples;
+        }
+        let mut stage = Self {
+            coef: Matrix2x2Coef {
+                ll: L::zero(),
+                lr: L::zero(),
+                rl: L::zero(),
+                rr: L::zero(),
+                identity: no_lanes::<L>(),
+            },
+            ramp: Matrix2x2Ramp {
+                current: [L::zero(); 4],
+                target: [L::zero(); 4],
+                step: [L::zero(); 4],
+                remaining: L::zero(),
+            },
+            target,
+            smoothing_samples,
+            remaining: [0; MAX_BANK_LANES],
+        };
+        stage.write_current(&target);
+        stage.ramp.target = stage.ramp.current;
+        stage.sync_settled();
+        stage
+    }
+
+    /// Writes one matrix per lane into the ramp's current words.
+    fn write_current(&mut self, values: &[Matrix2x2; MAX_BANK_LANES]) {
+        let mut words = [[0.0_f32; MAX_BANK_LANES]; 4];
+        for (lane, matrix) in values.iter().enumerate() {
+            words[0][lane] = matrix.ll;
+            words[1][lane] = matrix.lr;
+            words[2][lane] = matrix.rl;
+            words[3][lane] = matrix.rr;
+        }
+        for (slot, word) in self.ramp.current.iter_mut().zip(words.iter()) {
+            *slot = lane_words::<L>(word);
+        }
+    }
+
+    /// Reads the ramp's current words back as one matrix per lane.
+    fn read_current(&self) -> [Matrix2x2; MAX_BANK_LANES] {
+        let words = self.ramp.current.map(lane_read::<L>);
+        let mut values = [Matrix2x2::IDENTITY; MAX_BANK_LANES];
+        for (lane, matrix) in values.iter_mut().enumerate() {
+            *matrix = Matrix2x2 {
+                ll: words[0][lane],
+                lr: words[1][lane],
+                rl: words[2][lane],
+                rr: words[3][lane],
+            };
+        }
+        values
+    }
+
+    /// Copies the current words into the settled coefficients and recomputes the identity mask.
+    ///
+    /// A lane is an identity lane only when it is settled: a ramping lane must keep running the
+    /// ramp arithmetic even if it passes through the identity matrix on the way.
+    fn sync_settled(&mut self) {
+        self.coef.ll = self.ramp.current[0];
+        self.coef.lr = self.ramp.current[1];
+        self.coef.rl = self.ramp.current[2];
+        self.coef.rr = self.ramp.current[3];
+        let current = self.read_current();
+        let mut flags = [0.0_f32; MAX_BANK_LANES];
+        for (lane, flag) in flags.iter_mut().enumerate() {
+            let settled = self.remaining[lane] == 0 && current[lane] == Matrix2x2::IDENTITY;
+            *flag = f32::from(u8::from(settled));
+        }
+        self.coef.identity = mask_from_flags::<L>(&flags[..L::WIDTH]);
+    }
+
+    /// Retargets one lane. D11: one division per coefficient per event, never per sample.
+    fn set_target(&mut self, lane: usize, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
+        let target = target.checked()?;
+        if lane >= L::WIDTH {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        self.target[lane] = target;
+        let samples = self.smoothing_samples[lane];
+        let current = self.read_current()[lane];
+        let mut targets = self.ramp.target.map(lane_read::<L>);
+        let mut steps = self.ramp.step.map(lane_read::<L>);
+        let target_words = [target.ll, target.lr, target.rl, target.rr];
+        let current_words = [current.ll, current.lr, current.rl, current.rr];
+        for index in 0..4 {
+            targets[index][lane] = target_words[index];
+            steps[index][lane] = if samples == 0 {
+                0.0
+            } else {
+                (target_words[index] - current_words[index]) / samples as f32
+            };
+        }
+        for index in 0..4 {
+            self.ramp.target[index] = lane_words::<L>(&targets[index]);
+            self.ramp.step[index] = lane_words::<L>(&steps[index]);
+        }
+        self.remaining[lane] = samples;
+        if samples == 0 {
+            let mut current = self.read_current();
+            current[lane] = target;
+            self.write_current(&current);
+        }
+        self.sync_settled();
+        Ok(())
+    }
+
+    /// Renders one block of both channels.
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+        let maximum = self
+            .remaining
+            .iter()
+            .take(L::WIDTH)
+            .copied()
+            .max()
+            .unwrap_or(0);
+        if maximum == 0 {
+            matrix2x2_block::<L>(left, right, frames, &self.coef);
+            return;
+        }
+        let ramp_frames = (maximum as usize).min(frames);
+        let mut countdown = [0.0_f32; MAX_BANK_LANES];
+        for (lane, word) in countdown.iter_mut().enumerate() {
+            *word = self.remaining[lane].min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32;
+        }
+        self.ramp.remaining = lane_words::<L>(&countdown);
+        let split = ramp_frames * L::WIDTH;
+        matrix2x2_ramp_block::<L>(
+            &mut left[..split],
+            &mut right[..split],
+            ramp_frames,
+            &mut self.ramp,
+        );
+        for lane in 0..L::WIDTH {
+            self.remaining[lane] = self.remaining[lane].saturating_sub(ramp_frames as u32);
+        }
+        let mut current = self.read_current();
+        for lane in 0..L::WIDTH {
+            if self.remaining[lane] == 0 {
+                current[lane] = self.target[lane];
+            }
+        }
+        self.write_current(&current);
+        self.sync_settled();
+        if ramp_frames < frames {
+            matrix2x2_block::<L>(
+                &mut left[split..],
+                &mut right[split..],
+                frames - ramp_frames,
+                &self.coef,
+            );
+        }
+    }
+
+    /// Snaps every lane to its target and cancels any ramp in flight.
+    fn reset(&mut self) {
+        let target = self.target;
+        self.write_current(&target);
+        self.remaining = [0; MAX_BANK_LANES];
+        self.sync_settled();
+    }
+}
+
+/// The scalar builtin input section of one track.
+pub struct InputBuiltins {
+    track: PreparedInputTrack,
+    stage: InputStage<f32>,
+}
+
+/// The scalar fader and mute section of one track.
+pub struct FaderMuteBuiltins {
+    stage: FaderStage<f32>,
+}
+
+/// The scalar 2x2 channel matrix section of one track.
+pub struct MatrixBuiltins {
+    stage: MatrixStage<f32>,
+}
+
+/// The full builtin chain of one track: input, fader/mute, matrix.
 pub struct BuiltinChain {
     input: InputBuiltins,
     fader_mute: FaderMuteBuiltins,
@@ -703,50 +1048,31 @@ impl BuiltinChain {
             matrix,
         })
     }
-    pub fn process_input(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
+    pub fn process_input(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         self.input.process(block)
     }
-    pub fn process_fader_mute(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
+    pub fn process_fader_mute(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         self.fader_mute.process(block)
     }
-    pub fn process_matrix(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
+    pub fn process_matrix(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         self.matrix.process(block)
     }
-    pub fn process_dual_mono(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
-        block.checked_len()?;
+    /// Runs the whole chain over one already-validated block.
+    ///
+    /// The block was validated by [`DualMonoBlock::new`]; nothing revalidates it here (F8).
+    pub fn process_dual_mono(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         let DualMonoBlock {
             left,
             right,
             first_sample,
         } = block;
-        let mut report = self.input.process(DualMonoBlock {
-            left,
-            right,
-            first_sample,
-        })?;
-        report.add(self.fader_mute.process(DualMonoBlock {
-            left,
-            right,
-            first_sample,
-        })?);
-        report.add(self.matrix.process(DualMonoBlock {
-            left,
-            right,
-            first_sample,
-        })?);
-        Ok(report)
+        let frames = left.len();
+        let mut report = self.input.stage.process(left, right, frames);
+        self.fader_mute.stage.process(left, right, frames);
+        self.matrix.stage.process(left, right, frames);
+        let _ = first_sample;
+        report.sanitized_output = 0;
+        report
     }
     pub fn set_matrix_target(&mut self, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
         self.matrix.set_target(target)
@@ -768,8 +1094,6 @@ impl BuiltinChain {
         (self.input, self.fader_mute, self.matrix)
     }
     /// Consume the chain and retain only its bankable post-input section.
-    ///
-    /// Fader/mute and matrix intentionally remain scalar graph processors.
     pub fn into_input_builtins(self) -> InputBuiltins {
         self.input
     }
@@ -782,7 +1106,7 @@ fn prepare_sections(
     if sample_rate == 0 {
         return Err(BuiltinParameterError::FilterCutoff);
     }
-    parameters.matrix.checked()?;
+    let matrix = parameters.matrix.checked()?;
     for lane in [parameters.left, parameters.right] {
         if !lane.trim_db.is_finite()
             || !(-144.0..=24.0).contains(&lane.trim_db)
@@ -798,11 +1122,11 @@ fn prepare_sections(
         }
     }
     let lane = |params: ChannelParameters| -> Result<InputLane, BuiltinParameterError> {
+        let trim = db_gain(params.trim_db)?;
         Ok(InputLane {
-            polarity: params.polarity_invert,
-            trim: db_gain(params.trim_db)?,
-            hpf: TptSvf::design(sample_rate, zero(params.hpf_hz), true)?,
-            lpf: TptSvf::design(sample_rate, zero(params.lpf_hz), false)?,
+            trim_signed: if params.polarity_invert { -trim } else { trim },
+            hpf: SvfSection::design(sample_rate, zero(params.hpf_hz), true)?,
+            lpf: SvfSection::design(sample_rate, zero(params.lpf_hz), false)?,
         })
     };
     let fader = |params: ChannelParameters| -> Result<FaderLane, BuiltinParameterError> {
@@ -811,58 +1135,39 @@ fn prepare_sections(
             muted: params.muted,
         })
     };
+    let track = PreparedInputTrack {
+        left: lane(parameters.left)?,
+        right: lane(parameters.right)?,
+    };
+    let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
     Ok((
         InputBuiltins {
-            left: lane(parameters.left)?,
-            right: lane(parameters.right)?,
-            lifetime_recovered_left: 0,
-            lifetime_recovered_right: 0,
+            track,
+            stage: InputStage::<f32>::new(&[track]),
         },
         FaderMuteBuiltins {
-            left: fader(parameters.left)?,
-            right: fader(parameters.right)?,
+            stage: FaderStage::<f32>::new(&faders),
         },
         MatrixBuiltins {
-            current: parameters.matrix,
-            target: parameters.matrix,
-            smoothing_samples: parameters.smoothing_samples,
-            remaining_updates: 0,
+            stage: MatrixStage::<f32>::new(&[(matrix, parameters.smoothing_samples)]),
         },
     ))
 }
 
 impl InputBuiltins {
-    pub fn process(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
-        let mut report = BuiltinProcessReport::default();
-        block.checked_len()?;
-        let mut recovered_left = 0;
-        let mut recovered_right = 0;
-        for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
-            *left = process_input_lane(&mut self.left, *left, &mut recovered_left, &mut report);
-            *right = process_input_lane(&mut self.right, *right, &mut recovered_right, &mut report);
-        }
-        self.lifetime_recovered_left = self.lifetime_recovered_left.saturating_add(recovered_left);
-        self.lifetime_recovered_right = self
-            .lifetime_recovered_right
-            .saturating_add(recovered_right);
-        report.recovered_left_state = recovered_left;
-        report.recovered_right_state = recovered_right;
-        Ok(report)
+    /// Renders one already-validated block. Infallible: the block shape was checked once (F9).
+    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+        let frames = block.left.len();
+        self.stage.process(block.left, block.right, frames)
     }
     pub fn reset(&mut self) {
-        self.left.hpf.reset();
-        self.left.lpf.reset();
-        self.right.hpf.reset();
-        self.right.lpf.reset();
+        self.stage.reset();
     }
     pub fn tail(&self) -> BuiltinTail {
-        if self.left.hpf.enabled
-            || self.left.lpf.enabled
-            || self.right.hpf.enabled
-            || self.right.lpf.enabled
+        if self.track.left.hpf.enabled
+            || self.track.left.lpf.enabled
+            || self.track.right.hpf.enabled
+            || self.track.right.lpf.enabled
         {
             BuiltinTail::Infinite
         } else {
@@ -870,214 +1175,85 @@ impl InputBuiltins {
         }
     }
     pub fn lifetime_recovered_state(&self) -> (u64, u64) {
-        (self.lifetime_recovered_left, self.lifetime_recovered_right)
+        (
+            self.stage.lifetime_recovered[0],
+            self.stage.lifetime_recovered[1],
+        )
     }
     pub fn reset_lifetime_recovered_state(&mut self) {
-        self.lifetime_recovered_left = 0;
-        self.lifetime_recovered_right = 0;
+        self.stage.lifetime_recovered = [0; 2];
     }
 }
 
-/// Prepared homogeneous adapter for the post-input-builtins TPT section.
+/// The bank width the builtins accept for a selected core backend.
 ///
-/// It contains independent L/R HPF/LPF state for every lane. The storage is fixed at eight
-/// lanes, while `width` is always exactly four or eight; no scalar one-lane bank exists.
+/// D4: there is one arithmetic graph everywhere and fusion is written, not inferred, so a backend
+/// without FMA has no eight-lane bank — those tracks render through the scalar `Lane`, which is
+/// bit-identical to every other width.
+#[must_use]
+pub const fn builtin_bank_width(backend: KernelBackendV1) -> Option<BankWidth> {
+    match backend {
+        KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon => Some(BankWidth::Four),
+        KernelBackendV1::X86Avx2Fma => Some(BankWidth::Eight),
+        KernelBackendV1::Scalar | KernelBackendV1::X86Avx2 => None,
+        _ => None,
+    }
+}
+
+/// The input stage of a bank at the width its backend selected.
+enum InputStageKernel {
+    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    Simd4(InputStage<Simd4>),
+    /// Eight lanes: `x86-64-v3`.
+    Simd8(InputStage<Simd8>),
+}
+
+/// A homogeneous input-builtins bank over one AoSoA cohort.
+///
+/// # Lane semantics (owned by this crate; consumed by #86)
+///
+/// `inputs.len()` is in `1..=width.lanes()`. Lanes at or above that count are **padding lanes**:
+/// they carry identity coefficients and unit trim, they are sanitised like any other lane so no
+/// bit pattern left in the scratch buffer can poison the recurrence, they are excluded from every
+/// report counter and from the block boundary check, and their samples are never observed. The
+/// caller assigns lanes in sorted member order and is responsible for never gathering into or
+/// scattering from a padding lane; there is no `&[bool]` argument and no stored mask copy.
 pub struct BuiltinInputBankV1 {
     backend: KernelBackendV1,
     width: BankWidth,
-    kernel: PreparedTptBankKernelV1,
-    left: BuiltinChannelBank,
-    right: BuiltinChannelBank,
-    active: [bool; 8],
-}
-
-#[derive(Clone, Copy)]
-struct BuiltinChannelBank {
-    polarity: [bool; 8],
-    trim: [f32; 8],
-    hpf: BuiltinFilterBank,
-    lpf: BuiltinFilterBank,
-}
-
-#[derive(Clone, Copy)]
-struct BuiltinFilterBank {
-    c1: [f32; 8],
-    a2: [f32; 8],
-    a3: [f32; 8],
-    k: [f32; 8],
-    s1: [f32; 8],
-    s2: [f32; 8],
-    high_pass_mask: [u32; 8],
-    enabled: [bool; 8],
-}
-
-impl BuiltinFilterBank {
-    const fn identity() -> Self {
-        Self {
-            c1: [0.0; 8],
-            a2: [0.0; 8],
-            a3: [0.0; 8],
-            k: [0.0; 8],
-            s1: [0.0; 8],
-            s2: [0.0; 8],
-            // Disabled filters are explicitly restored after the vector call. Selecting high here
-            // also makes their zero-coefficient arithmetic the identity for ordinary finite data.
-            high_pass_mask: [u32::MAX; 8],
-            enabled: [false; 8],
-        }
-    }
-
-    fn set(&mut self, lane: usize, filter: TptSvf) {
-        self.c1[lane] = filter.c1;
-        self.a2[lane] = filter.a2;
-        self.a3[lane] = filter.a3;
-        self.k[lane] = filter.k;
-        self.s1[lane] = filter.s1;
-        self.s2[lane] = filter.s2;
-        self.high_pass_mask[lane] = if filter.high_pass { u32::MAX } else { 0 };
-        self.enabled[lane] = filter.enabled;
-    }
-
-    fn reset(&mut self) {
-        self.s1.fill(0.0);
-        self.s2.fill(0.0);
-    }
-
-    fn process(
-        &mut self,
-        kernel: PreparedTptBankKernelV1,
-        samples: &mut [f32; 8],
-        lanes: usize,
-        recovered: &mut [u64; 8],
-        report: &mut BuiltinProcessReport,
-    ) -> Result<(), BuiltinParameterError> {
-        let dry = *samples;
-        for (lane, recovered) in recovered.iter_mut().enumerate().take(lanes) {
-            if !self.enabled[lane] {
-                // Disabled/identity lanes must not feed arbitrary payload bits into the vector
-                // recurrence.  The dry bit pattern is restored below; zeroing only the internal
-                // operand keeps their retained state exactly unchanged, including for NaN,
-                // infinity, subnormal and signed-zero input payloads.
-                samples[lane] = 0.0;
-            } else if !self.s1[lane].is_finite() || !self.s2[lane].is_finite() {
-                self.s1[lane] = 0.0;
-                self.s2[lane] = 0.0;
-                *recovered = recovered.saturating_add(1);
-            } else {
-                self.s1[lane] = canonicalize_retained_state(self.s1[lane]);
-                self.s2[lane] = canonicalize_retained_state(self.s2[lane]);
-            }
-        }
-        kernel
-            .process_tpt(
-                &mut samples[..lanes],
-                &self.c1[..lanes],
-                &self.a2[..lanes],
-                &self.a3[..lanes],
-                &self.k[..lanes],
-                &mut self.s1[..lanes],
-                &mut self.s2[..lanes],
-                &self.high_pass_mask[..lanes],
-            )
-            .map_err(|_| BuiltinParameterError::LaneLength)?;
-        for (lane, recovered) in recovered.iter_mut().enumerate().take(lanes) {
-            if !self.enabled[lane] {
-                samples[lane] = dry[lane];
-                continue;
-            }
-            if !self.s1[lane].is_finite() || !self.s2[lane].is_finite() {
-                self.s1[lane] = 0.0;
-                self.s2[lane] = 0.0;
-                *recovered = recovered.saturating_add(1);
-                samples[lane] = 0.0;
-            } else {
-                self.s1[lane] = canonicalize_retained_state(self.s1[lane]);
-                self.s2[lane] = canonicalize_retained_state(self.s2[lane]);
-                samples[lane] = sanitize(samples[lane], &mut report.sanitized_output);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl BuiltinChannelBank {
-    const fn identity() -> Self {
-        Self {
-            polarity: [false; 8],
-            trim: [1.0; 8],
-            hpf: BuiltinFilterBank::identity(),
-            lpf: BuiltinFilterBank::identity(),
-        }
-    }
-
-    fn set(&mut self, lane: usize, input: InputLane) {
-        self.polarity[lane] = input.polarity;
-        self.trim[lane] = input.trim;
-        self.hpf.set(lane, input.hpf);
-        self.lpf.set(lane, input.lpf);
-    }
-
-    fn process(
-        &mut self,
-        kernel: PreparedTptBankKernelV1,
-        samples: &mut [f32; 8],
-        lanes: usize,
-        active: &[bool; 8],
-        recovered: &mut [u64; 8],
-        report: &mut BuiltinProcessReport,
-    ) -> Result<(), BuiltinParameterError> {
-        for lane in 0..lanes {
-            if !active[lane] {
-                continue;
-            }
-            let sample = sanitize_input(samples[lane], &mut report.sanitized_input);
-            let signed = if self.polarity[lane] { -sample } else { sample };
-            samples[lane] = sanitize(signed * self.trim[lane], &mut report.sanitized_output);
-        }
-        self.hpf
-            .process(kernel, samples, lanes, recovered, report)?;
-        self.lpf.process(kernel, samples, lanes, recovered, report)
-    }
-
-    fn reset(&mut self) {
-        self.hpf.reset();
-        self.lpf.reset();
-    }
+    members: usize,
+    stage: InputStageKernel,
 }
 
 impl BuiltinInputBankV1 {
-    /// Build a complete four/eight-lane input bank from independently prepared tracks.
+    /// Builds a bank from one to `width.lanes()` independently prepared tracks.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] if `backend` has no bank width, if `width` is not the
+    /// width that backend selects, or if `inputs.len()` is outside `1..=width.lanes()`.
     pub fn new(
         backend: KernelBackendV1,
         width: BankWidth,
         inputs: Vec<InputBuiltins>,
-        active: &[bool],
     ) -> Result<Self, BuiltinParameterError> {
-        if !width.matches_backend(backend)
-            || inputs.len() != width.lanes() as usize
-            || active.len() != width.lanes() as usize
+        if builtin_bank_width(backend) != Some(width)
+            || inputs.is_empty()
+            || inputs.len() > width.lanes() as usize
         {
             return Err(BuiltinParameterError::LaneLength);
         }
-        let kernel = PreparedTptBankKernelV1::try_new(backend)
-            .map_err(|_| BuiltinParameterError::LaneLength)?;
-        let mut left = BuiltinChannelBank::identity();
-        let mut right = BuiltinChannelBank::identity();
-        for (index, input) in inputs.into_iter().enumerate() {
-            if active[index] {
-                left.set(index, input.left);
-                right.set(index, input.right);
-            }
-        }
-        let mut active_lanes = [false; 8];
-        active_lanes[..active.len()].copy_from_slice(active);
+        let members = inputs.len();
+        let tracks: Vec<PreparedInputTrack> = inputs.iter().map(|input| input.track).collect();
+        let stage = match width {
+            BankWidth::Four => InputStageKernel::Simd4(InputStage::<Simd4>::new(&tracks)),
+            BankWidth::Eight => InputStageKernel::Simd8(InputStage::<Simd8>::new(&tracks)),
+        };
         Ok(Self {
             backend,
             width,
-            kernel,
-            left,
-            right,
-            active: active_lanes,
+            members,
+            stage,
         })
     }
 
@@ -1089,162 +1265,65 @@ impl BuiltinInputBankV1 {
     pub const fn width(&self) -> BankWidth {
         self.width
     }
+    /// Populated lanes; lanes at or above this index are padding lanes.
+    #[must_use]
+    pub const fn active_lanes(&self) -> usize {
+        self.members
+    }
 
-    /// Process sample-major AoSoA L/R slices with the frozen nonfused or FMA TPT graph.
+    /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
+    ///
+    /// The shape is fixed by the prepared plan and validated there, so it is a `debug_assert`
+    /// here and never a render-path branch (master plan §4.3).
     pub fn process(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
         frames: u32,
-        first_sample: u64,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
-        let lanes = self.width.lanes() as usize;
-        let expected = (frames as usize)
-            .checked_mul(lanes)
-            .ok_or(BuiltinParameterError::LaneLength)?;
-        if frames == 0
-            || left.len() != expected
-            || right.len() != expected
-            || first_sample.checked_add(u64::from(frames)).is_none()
-        {
-            return Err(BuiltinParameterError::LaneLength);
+    ) -> BuiltinProcessReport {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => stage.process(left, right, frames),
+            InputStageKernel::Simd8(stage) => stage.process(left, right, frames),
         }
-        let mut report = BuiltinProcessReport::default();
-        let mut recovered_left = [0_u64; 8];
-        let mut recovered_right = [0_u64; 8];
-        for sample in 0..frames as usize {
-            let mut left_bank = [0.0; 8];
-            let mut right_bank = [0.0; 8];
-            for lane in 0..lanes {
-                let index = sample * lanes + lane;
-                left_bank[lane] = left[index];
-                right_bank[lane] = right[index];
-            }
-            self.left.process(
-                self.kernel,
-                &mut left_bank,
-                lanes,
-                &self.active,
-                &mut recovered_left,
-                &mut report,
-            )?;
-            self.right.process(
-                self.kernel,
-                &mut right_bank,
-                lanes,
-                &self.active,
-                &mut recovered_right,
-                &mut report,
-            )?;
-            for lane in 0..lanes {
-                let index = sample * lanes + lane;
-                left[index] = left_bank[lane];
-                right[index] = right_bank[lane];
-            }
-        }
-        report.recovered_left_state = recovered_left[..lanes].iter().copied().sum();
-        report.recovered_right_state = recovered_right[..lanes].iter().copied().sum();
-        Ok(report)
     }
 
-    /// Reset only the per-lane filter state; preparation-time parameters remain unchanged.
+    /// Resets only the per-lane filter state; prepared coefficients remain unchanged.
     pub fn reset(&mut self) {
-        self.left.reset();
-        self.right.reset();
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => stage.reset(),
+            InputStageKernel::Simd8(stage) => stage.reset(),
+        }
     }
-}
-
-fn process_input_lane(
-    lane: &mut InputLane,
-    sample: f32,
-    recovered: &mut u64,
-    report: &mut BuiltinProcessReport,
-) -> f32 {
-    let sample = sanitize_input(sample, &mut report.sanitized_input);
-    let signed = if lane.polarity { -sample } else { sample };
-    let trimmed = sanitize(signed * lane.trim, &mut report.sanitized_output);
-    let high = lane.hpf.process(trimmed, recovered, report);
-    lane.lpf.process(high, recovered, report)
 }
 
 impl FaderMuteBuiltins {
-    pub fn process(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
-        let mut report = BuiltinProcessReport::default();
-        block.checked_len()?;
-        for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
-            let left_input = sanitize_input(*left, &mut report.sanitized_input);
-            let right_input = sanitize_input(*right, &mut report.sanitized_input);
-            *left = if self.left.muted {
-                0.0
-            } else {
-                sanitize(left_input * self.left.gain, &mut report.sanitized_output)
-            };
-            *right = if self.right.muted {
-                0.0
-            } else {
-                sanitize(right_input * self.right.gain, &mut report.sanitized_output)
-            };
-        }
-        Ok(report)
+    /// Renders one already-validated block.
+    ///
+    /// Feed-forward with `|gain| <= 15.85`, so finite in implies finite out: no sanitisation, no
+    /// boundary check and no counters (D7). The report is always the default.
+    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+        let frames = block.left.len();
+        self.stage.process(block.left, block.right, frames);
+        BuiltinProcessReport::default()
     }
     fn reset(&mut self) {}
 }
 
 impl MatrixBuiltins {
     pub fn set_target(&mut self, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
-        self.target = target.checked()?;
-        self.remaining_updates = self.smoothing_samples;
-        if self.remaining_updates == 0 {
-            self.current = self.target;
-        }
-        Ok(())
+        self.stage.set_target(0, target)
     }
-    pub fn process(
-        &mut self,
-        block: DualMonoBlock<'_>,
-    ) -> Result<BuiltinProcessReport, BuiltinParameterError> {
-        let mut report = BuiltinProcessReport::default();
-        block.checked_len()?;
-        for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
-            self.advance();
-            let in_left = sanitize_input(*left, &mut report.sanitized_input);
-            let in_right = sanitize_input(*right, &mut report.sanitized_input);
-            if self.current == Matrix2x2::IDENTITY {
-                *left = in_left;
-                *right = in_right;
-            } else {
-                *left = sanitize(
-                    self.current.ll * in_left + self.current.lr * in_right,
-                    &mut report.sanitized_output,
-                );
-                *right = sanitize(
-                    self.current.rl * in_left + self.current.rr * in_right,
-                    &mut report.sanitized_output,
-                );
-            }
-        }
-        Ok(report)
-    }
-    fn advance(&mut self) {
-        if self.remaining_updates == 0 {
-            return;
-        }
-        let remaining = self.remaining_updates as f32;
-        self.current.ll += (self.target.ll - self.current.ll) / remaining;
-        self.current.lr += (self.target.lr - self.current.lr) / remaining;
-        self.current.rl += (self.target.rl - self.current.rl) / remaining;
-        self.current.rr += (self.target.rr - self.current.rr) / remaining;
-        self.remaining_updates -= 1;
-        if self.remaining_updates == 0 {
-            self.current = self.target;
-        }
+    /// Renders one already-validated block. Feed-forward with `|m| <= 1`: no checks, no counters.
+    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+        let frames = block.left.len();
+        self.stage.process(block.left, block.right, frames);
+        BuiltinProcessReport::default()
     }
     pub fn reset(&mut self) {
-        self.current = self.target;
-        self.remaining_updates = 0;
+        self.stage.reset();
     }
 }
 
@@ -1258,7 +1337,10 @@ pub fn pan_matrix(left: f32, right: f32) -> Result<Matrix2x2, BuiltinParameterEr
     }
     let gains = |position: f32| {
         let theta = (f64::from(position) + 1.0) * core::f64::consts::FRAC_PI_4;
-        (theta.cos() as f32, theta.sin() as f32)
+        (
+            miso_engine_math::cos(theta) as f32,
+            miso_engine_math::sin(theta) as f32,
+        )
     };
     let (ll, rl) = gains(left);
     let (lr, rr) = gains(right);
@@ -1269,7 +1351,8 @@ pub fn balance_matrix(balance: f32) -> Result<Matrix2x2, BuiltinParameterError> 
     if !balance.is_finite() || !(-1.0..=1.0).contains(&balance) {
         return Err(BuiltinParameterError::MatrixCoefficient);
     }
-    let gain = (f64::from(balance.abs()) * core::f64::consts::FRAC_PI_2).cos() as f32;
+    let gain =
+        miso_engine_math::cos(f64::from(balance.abs()) * core::f64::consts::FRAC_PI_2) as f32;
     if balance >= 0.0 {
         Ok(Matrix2x2 {
             ll: gain,
@@ -1372,6 +1455,7 @@ pub struct PreparedMeter {
     pub consumer: Consumer<MeterSnapshot>,
 }
 
+
 impl MeterAccumulator {
     pub fn prepare(
         handle: MeterHandle,
@@ -1389,9 +1473,10 @@ impl MeterAccumulator {
             QueueGeneration(config.reset_generation),
         )
         .map_err(|_| MeterConfigError::Queue)?;
-        let decay = 10.0_f64
-            .powf(-f64::from(config.peak_decay_db_per_second) / (20.0 * f64::from(sample_rate)))
-            as f32;
+        let decay = miso_engine_math::pow(
+            10.0,
+            -f64::from(config.peak_decay_db_per_second) / (20.0 * f64::from(sample_rate)),
+        ) as f32;
         Ok(PreparedMeter {
             accumulator: Self {
                 handle,
@@ -1411,6 +1496,18 @@ impl MeterAccumulator {
             consumer,
         })
     }
+
+    /// Observes one block, split at the window boundaries it crosses.
+    ///
+    /// The split is computed once per segment instead of testing the period after every sample,
+    /// and the whole per-sample configuration — hold length, decay multiplier, whether decay is
+    /// enabled at all — is hoisted into locals before the loop; [`MeterConfig`] is never passed by
+    /// value per sample (F7). `sqrt` runs once per emitted window, in [`lane_snapshot`].
+    ///
+    /// # Errors
+    ///
+    /// [`MeterObservationError::LaneLength`] if the channels differ in length, and
+    /// [`MeterObservationError::SampleTimeOverflow`] if the block would run past `u64::MAX`.
     pub fn observe(
         &mut self,
         left: &[f32],
@@ -1436,25 +1533,33 @@ impl MeterAccumulator {
         if self.start.is_none() {
             self.start = Some(first_sample);
         }
-        for index in 0..len {
-            observe_lane(
+        let period = self.config.period_frames.get();
+        let window = MeterWindow {
+            hold_frames: self.config.peak_hold_frames,
+            decay: self.decay,
+            decay_enabled: self.config.peak_decay_db_per_second != 0.0,
+        };
+        let mut offset = 0;
+        while offset < len {
+            let take = ((period - self.frames) as usize).min(len - offset);
+            let end = offset + take;
+            observe_segment(
                 &mut self.left,
-                left[index],
-                self.config,
-                self.decay,
+                &left[offset..end],
+                window,
                 &mut self.cumulative_clipped,
                 &mut self.cumulative_sanitized,
             );
-            observe_lane(
+            observe_segment(
                 &mut self.right,
-                right[index],
-                self.config,
-                self.decay,
+                &right[offset..end],
+                window,
                 &mut self.cumulative_clipped,
                 &mut self.cumulative_sanitized,
             );
-            self.frames = self.frames.saturating_add(1);
-            if self.frames == self.config.period_frames.get() {
+            self.frames = self.frames.saturating_add(take as u32);
+            offset = end;
+            if self.frames == period {
                 self.emit();
             }
         }
@@ -1523,6 +1628,17 @@ impl MeterAccumulator {
     }
 }
 
+/// The per-sample meter configuration, hoisted out of [`MeterConfig`] once per block.
+#[derive(Clone, Copy)]
+struct MeterWindow {
+    /// Frames a new peak is held for before it may decay.
+    hold_frames: u32,
+    /// Precomputed per-sample decay multiplier.
+    decay: f32,
+    /// Whether decay is enabled at all.
+    decay_enabled: bool,
+}
+
 fn meter_lane() -> MeterLane {
     MeterLane {
         peak: 0.0,
@@ -1539,36 +1655,53 @@ fn clear_interval(lane: &mut MeterLane) {
     lane.clipped = 0;
     lane.sanitized = 0;
 }
-fn observe_lane(
+
+/// Accumulates one lane over a segment that lies entirely inside one meter window.
+///
+/// Branch-free per sample except for the held-peak state machine, which is a three-way scalar
+/// choice on counters rather than on sample values. `peak` is the D8 select form
+/// `select(a > p, a, p)`, never `f32::max`: the two disagree on `+/-0.0` ordering, and `f32::max`
+/// is forbidden on any path whose bits are pinned.
+fn observe_segment(
     lane: &mut MeterLane,
-    sample: f32,
-    config: MeterConfig,
-    decay: f32,
+    samples: &[f32],
+    window: MeterWindow,
     cumulative_clipped: &mut u64,
     cumulative_sanitized: &mut u64,
 ) {
-    let sanitized = !normal_or_zero(sample);
-    let sample = if sanitized { 0.0 } else { sample };
-    if sanitized {
-        lane.sanitized = lane.sanitized.saturating_add(1);
-        *cumulative_sanitized = cumulative_sanitized.saturating_add(1);
+    let mut peak = lane.peak;
+    let mut energy = lane.energy;
+    let mut held = lane.held;
+    let mut hold_remaining = lane.hold_remaining;
+    let mut clipped = 0_u64;
+    let mut sanitized = 0_u64;
+    for sample in samples.iter().copied() {
+        let invalid = !normal_or_zero(sample);
+        let sample = if invalid { 0.0 } else { sample };
+        sanitized += u64::from(invalid);
+        let absolute = sample.abs();
+        peak = if absolute > peak { absolute } else { peak };
+        energy += f64::from(sample) * f64::from(sample);
+        clipped += u64::from(absolute >= 1.0);
+        if absolute >= held {
+            held = absolute;
+            hold_remaining = window.hold_frames;
+        } else if hold_remaining > 0 {
+            hold_remaining -= 1;
+        } else if window.decay_enabled {
+            held = flush_subnormal(held * window.decay);
+        }
     }
-    let absolute = sample.abs();
-    lane.peak = lane.peak.max(absolute);
-    lane.energy += f64::from(sample) * f64::from(sample);
-    if absolute >= 1.0 {
-        lane.clipped = lane.clipped.saturating_add(1);
-        *cumulative_clipped = cumulative_clipped.saturating_add(1);
-    }
-    if absolute >= lane.held {
-        lane.held = absolute;
-        lane.hold_remaining = config.peak_hold_frames;
-    } else if lane.hold_remaining > 0 {
-        lane.hold_remaining -= 1;
-    } else if config.peak_decay_db_per_second != 0.0 {
-        lane.held = sanitize(lane.held * decay, &mut 0);
-    }
+    lane.peak = peak;
+    lane.energy = energy;
+    lane.held = held;
+    lane.hold_remaining = hold_remaining;
+    lane.clipped = lane.clipped.saturating_add(clipped);
+    lane.sanitized = lane.sanitized.saturating_add(sanitized);
+    *cumulative_clipped = cumulative_clipped.saturating_add(clipped);
+    *cumulative_sanitized = cumulative_sanitized.saturating_add(sanitized);
 }
+
 fn lane_snapshot(lane: &MeterLane, frames: u32) -> MeterLaneSnapshot {
     MeterLaneSnapshot {
         sample_peak: lane.peak,
@@ -1580,2802 +1713,137 @@ fn lane_snapshot(lane: &MeterLane, frames: u32) -> MeterLaneSnapshot {
     }
 }
 
+/// `10^(dB / 20)` designed in `f64` through [`miso_engine_math`] and rounded once.
 fn db_gain(db: f32) -> Result<f32, BuiltinParameterError> {
-    let value = 10.0_f64.powf(f64::from(db) / 20.0) as f32;
+    let value = miso_engine_math::pow(10.0, f64::from(db) / 20.0) as f32;
     if normal_or_zero(value) {
         Ok(zero(value))
     } else {
         Err(BuiltinParameterError::GainDomain)
     }
 }
+
+/// Preparation-time coefficient representability: finite and not subnormal.
+///
+/// This is control-plane classification, not a render-path check: D7 replaced every per-value
+/// render check with the in-kernel flush and the once-per-block boundary scan.
 fn normal_or_zero(value: f32) -> bool {
     value.is_finite() && !value.is_subnormal()
 }
-/// Canonicalize legal finite filter-state underflow without reporting invalid-state recovery.
-fn canonicalize_retained_state(value: f32) -> f32 {
-    if value.is_subnormal() { 0.0 } else { value }
+
+/// Maps a finite subnormal or non-finite value to `+0.0`; used by the meter's held-peak decay.
+fn flush_subnormal(value: f32) -> f32 {
+    if normal_or_zero(value) { value } else { 0.0 }
 }
+
+/// Normalises `-0.0` to `+0.0` in a prepared control value.
 fn zero(value: f32) -> f32 {
     if value == 0.0 { 0.0 } else { value }
 }
-fn sanitize_input(value: f32, count: &mut u64) -> f32 {
-    if normal_or_zero(value) {
-        value
-    } else {
-        *count = count.saturating_add(1);
-        0.0
-    }
-}
-fn sanitize(value: f32, count: &mut u64) -> f32 {
-    sanitize_input(value, count)
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::fmt::Write as _;
-    use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
-    use miso_engine_dsp_reference::{
-        ReferenceBiquad, ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput,
-        ReferenceTptRetainedAction, ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
+/// Evidence and fixture access to prepared words and retained state.
+///
+/// Not part of the supported surface: it exists so that gates and the fixture generator can read
+/// and inject the exact words a render path uses without going through production output, which
+/// master plan §8 forbids as a source of pins.
+#[doc(hidden)]
+pub mod test_support {
+    use super::{
+        BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, InputBuiltins, InputStageKernel,
+        Matrix2x2, MatrixBuiltins, SvfSection,
     };
 
-    // Issue 032: the first tier is launch-gated; the second remains informational compatibility
-    // evidence from issue 007 and is not an engine session or host support claim.
-    fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
-        LAUNCH_SAMPLE_RATES
-            .into_iter()
-            .chain(EXTENDED_COMPATIBILITY_SAMPLE_RATES)
-            .map(|rate| rate.0)
-    }
-
-    #[test]
-    fn polarity_trim_fader_and_matrix_are_exact() {
-        let mut chain = BuiltinChain::new(
-            48_000,
-            BuiltinParameters {
-                left: ChannelParameters {
-                    polarity_invert: true,
-                    trim_db: 6.0206,
-                    fader_db: 0.0,
-                    ..ChannelParameters::default()
-                },
-                right: ChannelParameters::default(),
-                matrix: Matrix2x2::IDENTITY,
-                smoothing_samples: 0,
-            },
-        )
-        .expect("prepare");
-        let mut left = [0.5_f32];
-        let mut right = [0.0_f32];
-        chain
-            .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
-            .expect("valid block");
-        assert!((left[0] + 1.0).abs() < 2e-5);
-        assert_eq!(right, [0.0]);
-    }
-    #[test]
-    fn matrix_ramp_reaches_target() {
-        let mut chain = BuiltinChain::new(
-            48_000,
-            BuiltinParameters {
-                smoothing_samples: 2,
-                ..BuiltinParameters::default()
-            },
-        )
-        .expect("prepare");
-        chain
-            .set_matrix_target(Matrix2x2 {
-                ll: 0.0,
-                lr: 0.0,
-                rl: 0.0,
-                rr: 0.0,
-            })
-            .expect("target");
-        let mut left = [1.0, 1.0];
-        let mut right = [0.0, 0.0];
-        chain
-            .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
-            .expect("valid block");
-        assert_eq!(left, [0.5, 0.0]);
-    }
-    #[test]
-    fn meter_windows_are_exact() {
-        let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
-        let config = MeterConfig {
-            period_frames: NonZeroU32::new(2).expect("constant"),
-            peak_hold_frames: 0,
-            peak_decay_db_per_second: 0.0,
-            queue_capacity: NonZeroUsize::new(2).expect("constant"),
-            reset_generation: 7,
-        };
-        let PreparedMeter {
-            mut accumulator,
-            mut consumer,
-        } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
-        accumulator
-            .observe(&[1.0, 0.5], &[0.0, -1.0], 3)
-            .expect("matched meter lanes");
-        let snap = consumer.try_pop().expect("snapshot");
-        assert_eq!(snap.start_sample, 3);
-        assert_eq!(snap.end_sample, 5);
-        assert_eq!(snap.left.clipped_samples, 1);
-        assert_eq!(snap.right.clipped_samples, 1);
-    }
-    #[test]
-    fn parameter_descriptors_have_complete_stable_contracts() {
-        let descriptors = BUILTIN_PARAMETER_DESCRIPTORS_V1;
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.id),
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.name),
-            [
-                "polarity_invert",
-                "trim_db",
-                "hpf_hz",
-                "lpf_hz",
-                "fader_db",
-                "mute",
-                "matrix_ll",
-                "matrix_lr",
-                "matrix_rl",
-                "matrix_rr",
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.scope),
-            [
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::PerLane,
-                BuiltinParameterScope::MatrixShared,
-                BuiltinParameterScope::MatrixShared,
-                BuiltinParameterScope::MatrixShared,
-                BuiltinParameterScope::MatrixShared,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.mapping),
-            [
-                BuiltinParameterMapping::Boolean,
-                BuiltinParameterMapping::DecibelAmplitude,
-                BuiltinParameterMapping::Hertz,
-                BuiltinParameterMapping::Hertz,
-                BuiltinParameterMapping::DecibelAmplitude,
-                BuiltinParameterMapping::Boolean,
-                BuiltinParameterMapping::Linear,
-                BuiltinParameterMapping::Linear,
-                BuiltinParameterMapping::Linear,
-                BuiltinParameterMapping::Linear,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.default.to_bits()),
-            [0, 0, 0, 0, 0, 0, 1.0_f32.to_bits(), 0, 0, 1.0_f32.to_bits()]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.update_rate),
-            [
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::PreparedOnly,
-                BuiltinParameterUpdateRate::BlockTarget,
-                BuiltinParameterUpdateRate::BlockTarget,
-                BuiltinParameterUpdateRate::BlockTarget,
-                BuiltinParameterUpdateRate::BlockTarget,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.smoothing),
-            [
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::None,
-                BuiltinSmoothingPolicy::LinearNUpdates,
-                BuiltinSmoothingPolicy::LinearNUpdates,
-                BuiltinSmoothingPolicy::LinearNUpdates,
-                BuiltinSmoothingPolicy::LinearNUpdates,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.reset),
-            [
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::RestorePreparedValue,
-                BuiltinParameterReset::KeepTargetResetCurrent,
-                BuiltinParameterReset::KeepTargetResetCurrent,
-                BuiltinParameterReset::KeepTargetResetCurrent,
-                BuiltinParameterReset::KeepTargetResetCurrent,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.disabled_value),
-            [
-                None,
-                None,
-                Some(0.0),
-                Some(0.0),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ]
-        );
-        assert_eq!(
-            descriptors.map(|descriptor| descriptor.domain),
-            [
-                BuiltinParameterDomain::BooleanExact,
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -144.0,
-                    maximum: 24.0,
-                },
-                BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
-                    disabled: 0.0,
-                    minimum_hz: 10.0,
-                },
-                BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
-                    disabled: 0.0,
-                    minimum_hz: 10.0,
-                },
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -144.0,
-                    maximum: 24.0,
-                },
-                BuiltinParameterDomain::BooleanExact,
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -1.0,
-                    maximum: 1.0,
-                },
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -1.0,
-                    maximum: 1.0,
-                },
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -1.0,
-                    maximum: 1.0,
-                },
-                BuiltinParameterDomain::FiniteInclusive {
-                    minimum: -1.0,
-                    maximum: 1.0,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn descriptor_domains_are_exhaustive_at_launch_rates() {
-        for rate in [44_100, 48_000, 88_200, 96_000] {
-            for descriptor in BUILTIN_PARAMETER_DESCRIPTORS_V1 {
-                assert!(descriptor.domain.contains(descriptor.default, rate));
-                assert!(!descriptor.domain.contains(f32::NAN, rate));
-                assert!(!descriptor.domain.contains(f32::INFINITY, rate));
-                assert!(!descriptor.domain.contains(f32::NEG_INFINITY, rate));
-            }
-            for descriptor in [
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
-            ] {
-                let maximum = builtin_filter_cutoff_maximum_hz_v1(rate)
-                    .expect("launch rate has an exact cutoff maximum");
-                let successor = f32::from_bits(maximum.to_bits() + 1);
-                let nyquist = rate as f32 / 2.0;
-                let just_below_maximum = f32::from_bits(maximum.to_bits() - 1);
-                assert!(descriptor.domain.contains(0.0, rate));
-                assert!(!descriptor.domain.contains(-0.0, rate));
-                assert!(!descriptor.domain.contains(9.999, rate));
-                assert!(descriptor.domain.contains(10.0, rate));
-                assert!(descriptor.domain.contains(just_below_maximum, rate));
-                assert!(descriptor.domain.contains(maximum, rate));
-                assert!(!descriptor.domain.contains(successor, rate));
-                assert!(!descriptor.domain.contains(nyquist, rate));
-            }
-        }
-        for boolean in [
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[0],
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[5],
-        ] {
-            assert!(boolean.domain.contains(0.0, 48_000));
-            assert!(boolean.domain.contains(1.0, 48_000));
-            assert!(!boolean.domain.contains(-0.0, 48_000));
-            assert!(!boolean.domain.contains(0.5, 48_000));
-        }
-        for decibels in [
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[1],
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[4],
-        ] {
-            assert!(decibels.domain.contains(-144.0, 48_000));
-            assert!(decibels.domain.contains(24.0, 48_000));
-            assert!(!decibels.domain.contains(-144.001, 48_000));
-            assert!(!decibels.domain.contains(24.001, 48_000));
-        }
-        for matrix in &BUILTIN_PARAMETER_DESCRIPTORS_V1[6..] {
-            assert!(matrix.domain.contains(-1.0, 48_000));
-            assert!(matrix.domain.contains(1.0, 48_000));
-            assert!(!matrix.domain.contains(-1.001, 48_000));
-            assert!(!matrix.domain.contains(1.001, 48_000));
-        }
-    }
-
-    #[test]
-    fn compatibility_fallback_is_limited_to_the_exact_extended_rate_tier() {
-        for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES.map(|rate| rate.0) {
-            assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
-            for descriptor in [
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
-            ] {
-                assert!(descriptor.domain.contains(0.0, rate));
-                assert!(descriptor.domain.contains(10.0, rate));
-                assert!(descriptor.domain.contains(0.45 * rate as f32, rate));
-            }
-            assert!(BuiltinChain::new(rate, BuiltinParameters::default()).is_ok());
-        }
-        for rate in [0, 32_000, 192_001] {
-            assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
-            for descriptor in [
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-                BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
-            ] {
-                assert!(!descriptor.domain.contains(0.0, rate));
-                assert!(!descriptor.domain.contains(10.0, rate));
-            }
-            assert!(matches!(
-                BuiltinChain::new(rate, BuiltinParameters::default()),
-                Err(BuiltinParameterError::FilterCutoff)
-            ));
-        }
-    }
-
-    fn parameters_with_cutoff(cutoff: f32, high_pass: bool) -> BuiltinParameters {
-        let mut parameters = BuiltinParameters::default();
-        if high_pass {
-            parameters.left.hpf_hz = cutoff;
-        } else {
-            parameters.left.lpf_hz = cutoff;
-        }
-        parameters
-    }
-
-    fn bank_parameters(index: usize) -> BuiltinParameters {
-        BuiltinParameters {
-            left: ChannelParameters {
-                polarity_invert: index % 2 == 1,
-                trim_db: index as f32 - 2.0,
-                hpf_hz: 80.0 + index as f32 * 11.0,
-                lpf_hz: 2_000.0 + index as f32 * 101.0,
-                ..ChannelParameters::default()
-            },
-            right: ChannelParameters {
-                polarity_invert: index % 3 == 1,
-                trim_db: 2.0 - index as f32,
-                hpf_hz: 120.0 + index as f32 * 13.0,
-                lpf_hz: 3_000.0 + index as f32 * 97.0,
-                ..ChannelParameters::default()
-            },
-            ..BuiltinParameters::default()
-        }
-    }
-
-    fn prepared_input(parameters: BuiltinParameters) -> InputBuiltins {
-        BuiltinChain::new(48_000, parameters)
-            .expect("accepted input builtins")
-            .into_input_builtins()
-    }
-
-    fn assert_tpt_tolerance(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() <= 1.0e-6 + 2.0e-5 * expected.abs(),
-            "actual={actual:e} expected={expected:e}"
-        );
-    }
-
-    fn available_nonfused_bank() -> Option<(KernelBackendV1, BankWidth)> {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if std::is_x86_feature_detected!("avx2") {
-            return Some((KernelBackendV1::X86Avx2, BankWidth::Eight));
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            return Some((KernelBackendV1::Aarch64Neon, BankWidth::Four));
-        }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        {
-            return Some((KernelBackendV1::WasmSimd128, BankWidth::Four));
-        }
-        #[allow(unreachable_code)]
-        None
-    }
-
-    fn assert_bank_state_matches_scalar(bank: &BuiltinInputBankV1, scalar: &[InputBuiltins]) {
-        for (lane, scalar) in scalar.iter().enumerate() {
-            for (actual, expected, label) in [
-                (bank.left.hpf.s1[lane], scalar.left.hpf.s1, "left HPF s1"),
-                (bank.left.hpf.s2[lane], scalar.left.hpf.s2, "left HPF s2"),
-                (bank.left.lpf.s1[lane], scalar.left.lpf.s1, "left LPF s1"),
-                (bank.left.lpf.s2[lane], scalar.left.lpf.s2, "left LPF s2"),
-                (bank.right.hpf.s1[lane], scalar.right.hpf.s1, "right HPF s1"),
-                (bank.right.hpf.s2[lane], scalar.right.hpf.s2, "right HPF s2"),
-                (bank.right.lpf.s1[lane], scalar.right.lpf.s1, "right LPF s1"),
-                (bank.right.lpf.s2[lane], scalar.right.lpf.s2, "right LPF s2"),
-            ] {
-                assert_eq!(actual.to_bits(), expected.to_bits(), "lane={lane} {label}");
-            }
-        }
-    }
-
-    fn bank_lane_state_bits(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
-        [
-            bank.left.hpf.s1[lane].to_bits(),
-            bank.left.hpf.s2[lane].to_bits(),
-            bank.left.lpf.s1[lane].to_bits(),
-            bank.left.lpf.s2[lane].to_bits(),
-            bank.right.hpf.s1[lane].to_bits(),
-            bank.right.hpf.s2[lane].to_bits(),
-            bank.right.lpf.s1[lane].to_bits(),
-            bank.right.lpf.s2[lane].to_bits(),
-        ]
-    }
-
-    fn issue068_hash_words(words: impl IntoIterator<Item = u32>) -> u64 {
-        words
-            .into_iter()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, word| {
-                (hash ^ u64::from(word)).wrapping_mul(0x0000_0100_0000_01b3)
-            })
-    }
-
-    #[test]
-    fn issue068_launch_rates_match_scalar_for_nonfused_and_fma_tpt_banks() {
-        let (nonfused_backend, nonfused_width) =
-            available_nonfused_bank().expect("Issue 068 requires a native nonfused bank");
-        PreparedTptBankKernelV1::try_new(KernelBackendV1::X86Avx2Fma)
-            .expect("Issue 068 requires native AVX2+FMA");
-
-        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
-            let nonfused_lanes = nonfused_width.lanes() as usize;
-            let nonfused_parameters: Vec<_> = (0..nonfused_lanes).map(bank_parameters).collect();
-            let mut nonfused_scalar: Vec<_> = nonfused_parameters
-                .iter()
-                .copied()
-                .map(|parameters| {
-                    BuiltinChain::new(rate, parameters)
-                        .expect("scalar input")
-                        .into_input_builtins()
-                })
-                .collect();
-            let mut nonfused = BuiltinInputBankV1::new(
-                nonfused_backend,
-                nonfused_width,
-                nonfused_parameters
-                    .into_iter()
-                    .map(|parameters| {
-                        BuiltinChain::new(rate, parameters)
-                            .expect("bank input")
-                            .into_input_builtins()
-                    })
-                    .collect(),
-                &vec![true; nonfused_lanes],
-            )
-            .expect("nonfused bank");
-
-            let fma_parameters: Vec<_> = (0..8).map(bank_parameters).collect();
-            let mut fma_scalar: Vec<_> = fma_parameters
-                .iter()
-                .copied()
-                .map(|parameters| {
-                    BuiltinChain::new(rate, parameters)
-                        .expect("FMA scalar input")
-                        .into_input_builtins()
-                })
-                .collect();
-            let mut fma = BuiltinInputBankV1::new(
-                KernelBackendV1::X86Avx2Fma,
-                BankWidth::Eight,
-                fma_parameters
-                    .into_iter()
-                    .map(|parameters| {
-                        BuiltinChain::new(rate, parameters)
-                            .expect("FMA bank input")
-                            .into_input_builtins()
-                    })
-                    .collect(),
-                &[true; 8],
-            )
-            .expect("FMA bank");
-
-            let mut row_words = Vec::new();
-            for (block, frames) in [17usize, 29usize].into_iter().enumerate() {
-                let first_sample = (block * 29) as u64;
-                let mut left = vec![0.0; frames * nonfused_lanes];
-                let mut right = vec![0.0; frames * nonfused_lanes];
-                let mut expected_left = vec![vec![0.0; frames]; nonfused_lanes];
-                let mut expected_right = vec![vec![0.0; frames]; nonfused_lanes];
-                for frame in 0..frames {
-                    for lane in 0..nonfused_lanes {
-                        let index = frame * nonfused_lanes + lane;
-                        left[index] =
-                            ((rate as usize + frame * 19 + lane * 23) as f32 * 0.013).sin() * 0.67;
-                        right[index] =
-                            ((rate as usize + frame * 11 + lane * 29) as f32 * 0.017).cos() * -0.53;
-                        expected_left[lane][frame] = left[index];
-                        expected_right[lane][frame] = right[index];
-                    }
-                }
-                for lane in 0..nonfused_lanes {
-                    nonfused_scalar[lane]
-                        .process(
-                            DualMonoBlock::new(
-                                &mut expected_left[lane],
-                                &mut expected_right[lane],
-                                first_sample,
-                            )
-                            .expect("nonfused scalar block"),
-                        )
-                        .expect("nonfused scalar process");
-                }
-                let report = nonfused
-                    .process(&mut left, &mut right, frames as u32, first_sample)
-                    .expect("nonfused bank process");
-                assert_eq!(report, BuiltinProcessReport::default());
-                for frame in 0..frames {
-                    for lane in 0..nonfused_lanes {
-                        let index = frame * nonfused_lanes + lane;
-                        assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
-                        assert_eq!(
-                            right[index].to_bits(),
-                            expected_right[lane][frame].to_bits()
-                        );
-                        row_words.extend([
-                            expected_left[lane][frame].to_bits(),
-                            expected_right[lane][frame].to_bits(),
-                        ]);
-                    }
-                }
-                assert_bank_state_matches_scalar(&nonfused, &nonfused_scalar);
-
-                let mut fma_left = vec![0.0; frames * 8];
-                let mut fma_right = vec![0.0; frames * 8];
-                let mut fma_expected_left = vec![vec![0.0; frames]; 8];
-                let mut fma_expected_right = vec![vec![0.0; frames]; 8];
-                for frame in 0..frames {
-                    for lane in 0..8 {
-                        let index = frame * 8 + lane;
-                        fma_left[index] =
-                            ((rate as usize + frame * 31 + lane * 7) as f32 * 0.009).sin() * 0.81;
-                        fma_right[index] =
-                            ((rate as usize + frame * 5 + lane * 37) as f32 * 0.021).cos() * -0.41;
-                        fma_expected_left[lane][frame] = fma_left[index];
-                        fma_expected_right[lane][frame] = fma_right[index];
-                    }
-                }
-                for lane in 0..8 {
-                    fma_scalar[lane]
-                        .process(
-                            DualMonoBlock::new(
-                                &mut fma_expected_left[lane],
-                                &mut fma_expected_right[lane],
-                                first_sample,
-                            )
-                            .expect("FMA scalar block"),
-                        )
-                        .expect("FMA scalar process");
-                }
-                let fma_report = fma
-                    .process(&mut fma_left, &mut fma_right, frames as u32, first_sample)
-                    .expect("FMA bank process");
-                assert_eq!(fma_report, BuiltinProcessReport::default());
-                for frame in 0..frames {
-                    for lane in 0..8 {
-                        let index = frame * 8 + lane;
-                        assert_tpt_tolerance(fma_left[index], fma_expected_left[lane][frame]);
-                        assert_tpt_tolerance(fma_right[index], fma_expected_right[lane][frame]);
-                    }
-                }
-                for (lane, scalar) in fma_scalar.iter().enumerate() {
-                    for (actual, expected) in bank_lane_state_bits(&fma, lane)
-                        .into_iter()
-                        .zip(input_state_bits(scalar))
-                    {
-                        assert_tpt_tolerance(f32::from_bits(actual), f32::from_bits(expected));
-                    }
-                }
-            }
-            for lane in 0..nonfused_lanes {
-                row_words.extend(bank_lane_state_bits(&nonfused, lane));
-            }
-            let row_hash = issue068_hash_words(row_words);
-            let expected_hash = match rate {
-                44_100 => 0xb1dc_6cb4_340e_2587,
-                48_000 => 0x880b_5d4b_2bc6_cce7,
-                88_200 => 0xbe67_b6b9_58f1_df14,
-                96_000 => 0xc4d6_5580_7935_9c99,
-                _ => unreachable!("launch rate set is frozen"),
-            };
-            assert_eq!(row_hash, expected_hash, "rate={rate}");
-            println!(
-                "issue068 four-rate row rate={rate} scalar_hash={:016x}",
-                row_hash
-            );
-        }
-    }
-
-    #[test]
-    fn available_nonfused_bank_is_bit_identical_to_independent_scalar_tpt() {
-        let Some((backend, width)) = available_nonfused_bank() else {
-            return;
-        };
-        let lanes = width.lanes() as usize;
-        let frames = 31usize;
-        let params: Vec<_> = (0..lanes).map(bank_parameters).collect();
-        let mut scalar: Vec<_> = params.iter().copied().map(prepared_input).collect();
-        let mut bank = BuiltinInputBankV1::new(
-            backend,
-            width,
-            params.into_iter().map(prepared_input).collect(),
-            &vec![true; lanes],
-        )
-        .expect("nonfused bank");
-        let mut left = vec![0.0; frames * lanes];
-        let mut right = vec![0.0; frames * lanes];
-        let mut expected_left = vec![vec![0.0; frames]; lanes];
-        let mut expected_right = vec![vec![0.0; frames]; lanes];
-        for frame in 0..frames {
-            for lane in 0..lanes {
-                let value = ((frame * 17 + lane * 31) as f32 * 0.011).sin() * 0.7;
-                let index = frame * lanes + lane;
-                left[index] = value;
-                right[index] = -value * 0.73 + lane as f32 * 0.001;
-                expected_left[lane][frame] = left[index];
-                expected_right[lane][frame] = right[index];
-            }
-        }
-        for lane in 0..lanes {
-            scalar[lane]
-                .process(
-                    DualMonoBlock::new(&mut expected_left[lane], &mut expected_right[lane], 99)
-                        .expect("block"),
-                )
-                .expect("scalar input");
-        }
-        let bank_report = bank
-            .process(&mut left, &mut right, frames as u32, 99)
-            .expect("bank input");
-        assert_eq!(bank_report, BuiltinProcessReport::default());
-        for frame in 0..frames {
-            for lane in 0..lanes {
-                let index = frame * lanes + lane;
-                assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
-                assert_eq!(
-                    right[index].to_bits(),
-                    expected_right[lane][frame].to_bits()
-                );
-            }
-        }
-        assert_bank_state_matches_scalar(&bank, &scalar);
-
-        // Compare a second block as well so bit identity covers carried state, not just the
-        // all-zero initial condition.
-        for lane in 0..lanes {
-            expected_left[lane].fill(0.173 + lane as f32 * 0.003);
-            expected_right[lane].fill(-0.219 + lane as f32 * 0.002);
-            scalar[lane]
-                .process(
-                    DualMonoBlock::new(
-                        &mut expected_left[lane],
-                        &mut expected_right[lane],
-                        99 + frames as u64,
-                    )
-                    .expect("second scalar block"),
-                )
-                .expect("second scalar input");
-            for frame in 0..frames {
-                left[frame * lanes + lane] = 0.173 + lane as f32 * 0.003;
-                right[frame * lanes + lane] = -0.219 + lane as f32 * 0.002;
-            }
-        }
-        let bank_report = bank
-            .process(&mut left, &mut right, frames as u32, 99 + frames as u64)
-            .expect("second bank input");
-        assert_eq!(bank_report, BuiltinProcessReport::default());
-        for frame in 0..frames {
-            for lane in 0..lanes {
-                let index = frame * lanes + lane;
-                assert_eq!(left[index].to_bits(), expected_left[lane][frame].to_bits());
-                assert_eq!(
-                    right[index].to_bits(),
-                    expected_right[lane][frame].to_bits()
-                );
-            }
-        }
-        assert_bank_state_matches_scalar(&bank, &scalar);
-    }
-
-    #[test]
-    fn eight_lane_fma_bank_obeys_frozen_scalar_tolerance_and_right_isolation() {
-        if PreparedTptBankKernelV1::try_new(KernelBackendV1::X86Avx2Fma).is_err() {
-            return;
-        }
-        let frames = 19usize;
-        let params: Vec<_> = (0..8).map(bank_parameters).collect();
-        let mut scalar: Vec<_> = params.iter().copied().map(prepared_input).collect();
-        let mut fma = BuiltinInputBankV1::new(
-            KernelBackendV1::X86Avx2Fma,
-            BankWidth::Eight,
-            params.into_iter().map(prepared_input).collect(),
-            &[true; 8],
-        )
-        .expect("eight lane bank");
-        let mut left = vec![0.0; frames * 8];
-        let mut right = vec![0.0; frames * 8];
-        let mut expected_left = vec![vec![0.0; frames]; 8];
-        let mut expected_right = vec![vec![0.0; frames]; 8];
-        for frame in 0..frames {
-            for lane in 0..8 {
-                let index = frame * 8 + lane;
-                left[index] = ((frame * 5 + lane * 7) as f32 * 0.071).cos() * 0.8;
-                right[index] = ((frame * 11 + lane * 3) as f32 * 0.037).sin() * 0.6;
-                expected_left[lane][frame] = left[index];
-                expected_right[lane][frame] = right[index];
-            }
-        }
-        for lane in 0..8 {
-            scalar[lane]
-                .process(
-                    DualMonoBlock::new(&mut expected_left[lane], &mut expected_right[lane], 0)
-                        .expect("block"),
-                )
-                .expect("scalar input");
-        }
-        fma.process(&mut left, &mut right, frames as u32, 0)
-            .expect("fma input");
-        for frame in 0..frames {
-            for lane in 0..8 {
-                let index = frame * 8 + lane;
-                assert_tpt_tolerance(left[index], expected_left[lane][frame]);
-                assert_tpt_tolerance(right[index], expected_right[lane][frame]);
-            }
-        }
-        let (control_backend, control_width) = available_nonfused_bank().expect("nonfused bank");
-        let control_lanes = control_width.lanes() as usize;
-        let control_params: Vec<_> = (0..control_lanes).map(bank_parameters).collect();
-        let mut control = BuiltinInputBankV1::new(
-            control_backend,
-            control_width,
-            control_params.iter().copied().map(prepared_input).collect(),
-            &vec![true; control_lanes],
-        )
-        .expect("control");
-        let mut perturbed = BuiltinInputBankV1::new(
-            control_backend,
-            control_width,
-            control_params.into_iter().map(prepared_input).collect(),
-            &vec![true; control_lanes],
-        )
-        .expect("perturbed");
-        let mut control_left = vec![0.2; control_lanes * 8];
-        let mut perturbed_left = control_left.clone();
-        for value in perturbed_left.iter_mut().step_by(control_lanes) {
-            *value = -0.7;
-        }
-        let mut control_right = vec![0.3; control_lanes * 8];
-        let mut perturbed_right = control_right.clone();
-        control
-            .process(&mut control_left, &mut control_right, 8, 0)
-            .expect("control render");
-        perturbed
-            .process(&mut perturbed_left, &mut perturbed_right, 8, 0)
-            .expect("perturbed render");
-        assert_eq!(
-            control_right
-                .iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>(),
-            perturbed_right
-                .iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn inactive_bank_lane_is_exact_identity() {
-        let Some((backend, width)) = available_nonfused_bank() else {
-            return;
-        };
-        let lanes = width.lanes() as usize;
-        let mut active = vec![true; lanes];
-        active[1] = false;
-        let mut bank = BuiltinInputBankV1::new(
-            backend,
-            width,
-            (0..lanes)
-                .map(bank_parameters)
-                .map(prepared_input)
-                .collect(),
-            &active,
-        )
-        .expect("bank");
-        let arbitrary_left = [
-            (-0.0_f32).to_bits(),
-            0x7fc0_1234,
-            f32::INFINITY.to_bits(),
-            1,
-        ];
-        let arbitrary_right = [
-            0.0_f32.to_bits(),
-            0xffc0_5678,
-            f32::NEG_INFINITY.to_bits(),
-            0x8000_0001,
-        ];
-        let mut left = vec![0.0; lanes * arbitrary_left.len()];
-        let mut right = vec![0.0; lanes * arbitrary_right.len()];
-        for (frame, bits) in arbitrary_left.into_iter().enumerate() {
-            left[frame * lanes + 1] = f32::from_bits(bits);
-            right[frame * lanes + 1] = f32::from_bits(arbitrary_right[frame]);
-        }
-        let state_before = bank_lane_state_bits(&bank, 1);
-        let report = bank
-            .process(&mut left, &mut right, arbitrary_left.len() as u32, 0)
-            .expect("bank render");
-        assert_eq!(report, BuiltinProcessReport::default());
-        assert_eq!(bank_lane_state_bits(&bank, 1), state_before);
-        for frame in 0..arbitrary_left.len() {
-            assert_eq!(left[frame * lanes + 1].to_bits(), arbitrary_left[frame]);
-            assert_eq!(right[frame * lanes + 1].to_bits(), arbitrary_right[frame]);
-        }
-    }
-
-    #[test]
-    fn left_only_one_track_mutation_is_isolated_in_output_state_and_counters() {
-        let Some((backend, width)) = available_nonfused_bank() else {
-            return;
-        };
-        let lanes = width.lanes() as usize;
-        let params: Vec<_> = (0..lanes).map(bank_parameters).collect();
-        let active = vec![true; lanes];
-        let mut control = BuiltinInputBankV1::new(
-            backend,
-            width,
-            params.iter().copied().map(prepared_input).collect(),
-            &active,
-        )
-        .expect("control bank");
-        let mut perturbed = BuiltinInputBankV1::new(
-            backend,
-            width,
-            params.into_iter().map(prepared_input).collect(),
-            &active,
-        )
-        .expect("perturbed bank");
-        let frames = 23usize;
-        let mut control_left = vec![0.0; frames * lanes];
-        let mut control_right = vec![0.0; frames * lanes];
-        for frame in 0..frames {
-            for lane in 0..lanes {
-                control_left[frame * lanes + lane] =
-                    ((frame * 13 + lane * 7) as f32 * 0.019).sin() * 0.5;
-                control_right[frame * lanes + lane] =
-                    ((frame * 5 + lane * 17) as f32 * 0.023).cos() * 0.4;
-            }
-        }
-        let mut perturbed_left = control_left.clone();
-        let mut perturbed_right = control_right.clone();
-        for frame in 0..frames {
-            perturbed_left[frame * lanes + 2] = ((frame * 29 + 3) as f32 * 0.031).cos() * -0.71;
-        }
-        let control_report = control
-            .process(&mut control_left, &mut control_right, frames as u32, 4_096)
-            .expect("control process");
-        let perturbed_report = perturbed
-            .process(
-                &mut perturbed_left,
-                &mut perturbed_right,
-                frames as u32,
-                4_096,
-            )
-            .expect("perturbed process");
-        assert_eq!(control_report, perturbed_report, "per-call counters");
-        for frame in 0..frames {
-            for lane in 0..lanes {
-                let index = frame * lanes + lane;
-                if lane != 2 {
-                    assert_eq!(
-                        control_left[index].to_bits(),
-                        perturbed_left[index].to_bits(),
-                        "unrelated left lane={lane} frame={frame}"
-                    );
-                }
-                assert_eq!(
-                    control_right[index].to_bits(),
-                    perturbed_right[index].to_bits(),
-                    "right lane={lane} frame={frame}"
-                );
-            }
-        }
-        for lane in 0..lanes {
-            let control_state = bank_lane_state_bits(&control, lane);
-            let perturbed_state = bank_lane_state_bits(&perturbed, lane);
-            if lane == 2 {
-                assert_eq!(
-                    &control_state[4..],
-                    &perturbed_state[4..],
-                    "same-track right state"
-                );
-            } else {
-                assert_eq!(
-                    control_state, perturbed_state,
-                    "unrelated lane={lane} state"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn bank_state_recovery_is_lane_local_and_reported_per_call() {
-        let Some((backend, width)) = available_nonfused_bank() else {
-            return;
-        };
-        let lanes = width.lanes() as usize;
-        let params: Vec<_> = (0..lanes).map(bank_parameters).collect();
-        let active = vec![true; lanes];
-        let mut control = BuiltinInputBankV1::new(
-            backend,
-            width,
-            params.iter().copied().map(prepared_input).collect(),
-            &active,
-        )
-        .expect("control");
-        let mut corrupt = BuiltinInputBankV1::new(
-            backend,
-            width,
-            params.into_iter().map(prepared_input).collect(),
-            &active,
-        )
-        .expect("corrupt");
-        corrupt.left.hpf.s1[2] = f32::NAN;
-        let mut control_left = vec![0.25; lanes * 2];
-        let mut control_right = vec![-0.125; lanes * 2];
-        let mut corrupt_left = control_left.clone();
-        let mut corrupt_right = control_right.clone();
-        control
-            .process(&mut control_left, &mut control_right, 2, 0)
-            .expect("control render");
-        let first = corrupt
-            .process(&mut corrupt_left, &mut corrupt_right, 2, 0)
-            .expect("recovery render");
-        assert_eq!(first.recovered_left_state, 1);
-        assert_eq!(first.recovered_right_state, 0);
-        for frame in 0..2 {
-            for lane in 0..lanes {
-                let index = frame * lanes + lane;
-                if lane != 2 {
-                    assert_eq!(corrupt_left[index].to_bits(), control_left[index].to_bits());
-                }
-                assert_eq!(
-                    corrupt_right[index].to_bits(),
-                    control_right[index].to_bits()
-                );
-            }
-        }
-        let second = corrupt
-            .process(&mut corrupt_left, &mut corrupt_right, 2, 2)
-            .expect("post-recovery render");
-        assert_eq!(second.recovered_left_state, 0);
-        assert_eq!(second.recovered_right_state, 0);
-    }
-
-    #[test]
-    fn representable_cutoff_domain_is_shared_by_descriptors_and_preparation() {
-        for (rate, maximum_bits) in [
-            (44_100, 0x46ac_42f7),
-            (48_000, 0x46bb_7ede),
-            (88_200, 0x472c_42f7),
-            (96_000, 0x473b_7ede),
-        ] {
-            let maximum =
-                builtin_filter_cutoff_maximum_hz_v1(rate).expect("launch rate has maximum");
-            assert_eq!(maximum.to_bits(), maximum_bits, "rate={rate}");
-            let successor = f32::from_bits(maximum_bits + 1);
-            let nyquist = rate as f32 * 0.5;
-            let nyquist_predecessor = f32::from_bits(nyquist.to_bits() - 1);
-            for (descriptor, high_pass) in [
-                (BUILTIN_PARAMETER_DESCRIPTORS_V1[2], true),
-                (BUILTIN_PARAMETER_DESCRIPTORS_V1[3], false),
-            ] {
-                for (cutoff, expected) in [
-                    (0.0, true),
-                    (10.0, true),
-                    (f32::from_bits(maximum_bits - 1), true),
-                    (maximum, true),
-                    (successor, false),
-                    (nyquist_predecessor, false),
-                    (nyquist, false),
-                    (9.999, false),
-                    (f32::NAN, false),
-                    (f32::INFINITY, false),
-                    (f32::NEG_INFINITY, false),
-                ] {
-                    assert_eq!(
-                        descriptor.domain.contains(cutoff, rate),
-                        expected,
-                        "descriptor rate={rate}, high_pass={high_pass}, cutoff={:08x}",
-                        cutoff.to_bits()
-                    );
-                    assert_eq!(
-                        BuiltinChain::new(rate, parameters_with_cutoff(cutoff, high_pass)).is_ok(),
-                        expected,
-                        "preparation rate={rate}, high_pass={high_pass}, cutoff={:08x}",
-                        cutoff.to_bits()
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn representable_cutoff_seam_is_contiguous_for_both_tpt_sections() {
-        for (rate, maximum_bits) in [
-            (44_100, 0x46ac_42f7),
-            (48_000, 0x46bb_7ede),
-            (88_200, 0x472c_42f7),
-            (96_000, 0x473b_7ede),
-        ] {
-            let start_bits = (0.45_f32 * rate as f32).to_bits();
-            for high_pass in [true, false] {
-                for bits in start_bits..=maximum_bits {
-                    let cutoff = f32::from_bits(bits);
-                    assert!(
-                        validate_builtin_filter_cutoff_v1(cutoff, rate, 0.0, 10.0).is_ok(),
-                        "domain rate={rate}, high_pass={high_pass}, cutoff={bits:08x}"
-                    );
-                    TptSvf::design(rate, cutoff, high_pass).unwrap_or_else(|error| {
-                        panic!(
-                            "TPT rate={rate}, high_pass={high_pass}, cutoff={bits:08x}, error={error:?}"
-                        )
-                    });
-                }
-                let successor = f32::from_bits(maximum_bits + 1);
-                assert_eq!(
-                    validate_builtin_filter_cutoff_v1(successor, rate, 0.0, 10.0),
-                    Err(BuiltinParameterError::FilterCutoff),
-                    "successor rate={rate}, high_pass={high_pass}"
-                );
-                assert!(
-                    matches!(
-                        BuiltinChain::new(rate, parameters_with_cutoff(successor, high_pass)),
-                        Err(BuiltinParameterError::FilterCutoff)
-                    ),
-                    "successor preparation rate={rate}, high_pass={high_pass}"
-                );
-            }
-            assert!(
-                matches!(
-                    TptSvf::design(rate, f32::from_bits(maximum_bits + 1), true),
-                    Err(BuiltinParameterError::FilterCoefficients)
-                ),
-                "the published successor must be the first underlying HPF coefficient failure: rate={rate}"
-            );
-        }
-    }
-    #[test]
-    fn blocks_reject_before_processing_and_reports_are_per_call() {
-        let mut left = [1.0_f32];
-        let mut right = [1.0_f32, 1.0];
-        assert!(matches!(
-            DualMonoBlock::new(&mut left, &mut right, 0),
-            Err(BuiltinParameterError::LaneLength)
-        ));
-        let mut empty_left = [];
-        let mut empty_right = [];
-        assert!(matches!(
-            DualMonoBlock::new(&mut empty_left, &mut empty_right, 0),
-            Err(BuiltinParameterError::EmptyBlock)
-        ));
-        let mut overflow_left = [1.0_f32];
-        let mut overflow_right = [1.0_f32];
-        assert!(matches!(
-            DualMonoBlock::new(&mut overflow_left, &mut overflow_right, u64::MAX),
-            Err(BuiltinParameterError::SampleTimeOverflow)
-        ));
-
-        let mut chain = BuiltinChain::new(
-            48_000,
-            BuiltinParameters {
-                left: ChannelParameters {
-                    hpf_hz: 100.0,
-                    ..ChannelParameters::default()
-                },
-                ..BuiltinParameters::default()
-            },
-        )
-        .expect("prepare");
-        chain.input.left.hpf.s1 = f32::NAN;
-        let mut first_left = [0.5_f32];
-        let mut first_right = [0.0_f32];
-        let first = chain
-            .process_input(DualMonoBlock::new(&mut first_left, &mut first_right, 0).expect("block"))
-            .expect("process");
-        assert_eq!(first.recovered_left_state, 1);
-        assert_eq!(chain.input.lifetime_recovered_state(), (1, 0));
-        let mut second_left = [0.5_f32];
-        let mut second_right = [0.0_f32];
-        let second = chain
-            .process_input(
-                DualMonoBlock::new(&mut second_left, &mut second_right, 1).expect("block"),
-            )
-            .expect("process");
-        assert_eq!(second.recovered_left_state, 0);
-        assert_eq!(chain.input.lifetime_recovered_state(), (1, 0));
-    }
-    #[test]
-    fn fader_and_identity_matrix_sanitize_and_preserve_signed_zero() {
-        let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).expect("prepare");
-        let mut left = [-0.0_f32, f32::NAN];
-        let mut right = [0.0_f32, f32::INFINITY];
-        let report = chain
-            .process_fader_mute(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
-            .expect("process");
-        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
-        assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
-        assert_eq!(left[1], 0.0);
-        assert_eq!(right[1], 0.0);
-        assert_eq!(report.sanitized_input, 2);
-        let report = chain
-            .process_matrix(DualMonoBlock::new(&mut left, &mut right, 2).expect("block"))
-            .expect("process");
-        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
-        assert_eq!(right[0].to_bits(), 0.0_f32.to_bits());
-        assert_eq!(report.sanitized_input, 0);
-    }
-    #[test]
-    fn meter_windows_discontinuities_resets_and_drops_are_exact() {
-        let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
-        let config = MeterConfig {
-            period_frames: NonZeroU32::new(2).expect("constant"),
-            peak_hold_frames: 1,
-            peak_decay_db_per_second: 0.0,
-            queue_capacity: NonZeroUsize::new(1).expect("constant"),
-            reset_generation: 9,
-        };
-        let PreparedMeter {
-            mut accumulator,
-            mut consumer,
-        } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
-        assert_eq!(
-            accumulator.observe(&[0.5], &[f32::NAN, 0.0], 0),
-            Err(MeterObservationError::LaneLength)
-        );
-        accumulator
-            .observe(&[1.0, 0.0], &[0.25, -0.25], 4)
-            .expect("first window");
-        let first = consumer.try_pop().expect("first snapshot");
-        assert_eq!(
-            (first.start_sample, first.end_sample, first.frames),
-            (4, 6, 2)
-        );
-        assert_eq!(first.left.energy, 1.0);
-        assert!((first.left.rms - 1.0 / 2.0_f64.sqrt()).abs() <= f64::EPSILON);
-        assert_eq!(first.left.held_peak, 1.0);
-        accumulator
-            .observe(&[0.0], &[0.0], 9)
-            .expect("discontinuity");
-        accumulator
-            .observe(&[0.0], &[0.0], 10)
-            .expect("second window");
-        let second = consumer.try_pop().expect("second snapshot");
-        assert_eq!((second.start_sample, second.end_sample), (9, 11));
-        assert_eq!(second.cumulative_discontinuities, 1);
-        accumulator
-            .observe(&[0.0, 0.0], &[0.0, 0.0], 11)
-            .expect("queued snapshot");
-        accumulator
-            .observe(&[0.0, 0.0], &[0.0, 0.0], 13)
-            .expect("dropped snapshot");
-        let queued = consumer.try_pop().expect("queued snapshot");
-        assert_eq!(queued.cumulative_dropped_snapshots, 0);
-        accumulator
-            .observe(&[0.0, 0.0], &[0.0, 0.0], 15)
-            .expect("post-drop snapshot");
-        let post_drop = consumer.try_pop().expect("post-drop snapshot");
-        assert_eq!(post_drop.cumulative_dropped_snapshots, 1);
-        accumulator.reset(BuiltinResetKind::DiscontinuityKeepTargets);
-        accumulator
-            .observe(&[0.0, 0.0], &[0.0, 0.0], 17)
-            .expect("reset window");
-        let reset = consumer.try_pop().expect("reset snapshot");
-        assert_eq!(reset.window_sequence, 5);
-        assert_eq!(reset.cumulative_dropped_snapshots, 1);
-        accumulator.reset(BuiltinResetKind::FullToPrepared);
-        accumulator
-            .observe(&[0.0, 0.0], &[0.0, 0.0], 19)
-            .expect("full reset window");
-        let full_reset = consumer.try_pop().expect("full reset snapshot");
-        assert_eq!(full_reset.window_sequence, 0);
-        assert_eq!(full_reset.cumulative_dropped_snapshots, 0);
-        assert_eq!(full_reset.cumulative_discontinuities, 0);
-    }
-    #[test]
-    fn ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite() {
-        let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
-        let mut state = 0x4d45_5445_525f_3031_u64;
-        for iteration in 0..10_000_u64 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let period = NonZeroU32::new(((state as u32) & 7) + 1).expect("nonzero");
-            let capacity = NonZeroUsize::new((((state >> 8) as usize) & 3) + 1).expect("nonzero");
-            let PreparedMeter {
-                mut accumulator,
-                mut consumer,
-            } = MeterAccumulator::prepare(
-                handle,
-                MeterConfig {
-                    period_frames: period,
-                    peak_hold_frames: ((state >> 16) as u32) & 15,
-                    peak_decay_db_per_second: ((state >> 32) as f32 / u32::MAX as f32) * 120.0,
-                    queue_capacity: capacity,
-                    reset_generation: iteration,
-                },
-                48_000,
-            )
-            .expect("generated meter config");
-            let frames = usize::try_from(period.get()).expect("small period") * 2;
-            let mut left = [0.0_f32; 16];
-            let mut right = [0.0_f32; 16];
-            for index in 0..frames {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                left[index] = if state & 31 == 0 {
-                    f32::NAN
-                } else {
-                    ((state as i32) as f32) / i32::MAX as f32
-                };
-                right[index] = if state & 63 == 0 {
-                    f32::INFINITY
-                } else {
-                    (((state >> 32) as i32) as f32) / i32::MAX as f32
-                };
-            }
-            accumulator
-                .observe(
-                    &left[..frames],
-                    &right[..frames],
-                    iteration.saturating_mul(32),
-                )
-                .expect("matching meter lanes");
-            while let Ok(snapshot) = consumer.try_pop() {
-                assert_eq!(snapshot.frames, period.get());
-                assert!(snapshot.left.energy.is_finite());
-                assert!(snapshot.right.energy.is_finite());
-                assert!(snapshot.left.rms.is_finite());
-                assert!(snapshot.right.rms.is_finite());
-                assert!(snapshot.left.sample_peak.is_finite());
-                assert!(snapshot.right.sample_peak.is_finite());
-            }
-        }
-    }
-    #[test]
-    fn launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle() {
-        for rate in launch_and_extended_compatibility_rates() {
-            let parameters = BuiltinParameters {
-                left: ChannelParameters {
-                    hpf_hz: 100.0,
-                    lpf_hz: 1_000.0,
-                    ..ChannelParameters::default()
-                },
-                ..BuiltinParameters::default()
-            };
-            let mut chain = BuiltinChain::new(rate, parameters).expect("prepare");
-            let mut left = [0.0_f32; 256];
-            let mut right = [0.0_f32; 256];
-            left[0] = 1.0;
-            let mut high = ReferenceBiquad::rbj_butterworth(
-                f64::from(rate),
-                100.0,
-                ReferenceFilterKind::HighPass,
-            )
-            .expect("reference high pass");
-            let mut low = ReferenceBiquad::rbj_butterworth(
-                f64::from(rate),
-                1_000.0,
-                ReferenceFilterKind::LowPass,
-            )
-            .expect("reference low pass");
-            let expected: Vec<_> = (0..left.len())
-                .map(|index| low.process(high.process(if index == 0 { 1.0 } else { 0.0 })))
-                .collect();
-            let _ = chain
-                .process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"))
-                .expect("valid block");
-            for (actual, reference) in left.iter().zip(expected) {
-                assert!(
-                    (f64::from(*actual) - reference).abs() <= 2e-5,
-                    "rate={rate}, actual={actual}, reference={reference}"
-                );
-            }
-            assert_eq!(right, [0.0; 256]);
-        }
-    }
-    #[test]
-    fn ten_thousand_bounded_parameter_and_block_mutations_stay_finite() {
-        let mut state = 0x5EED_CAFE_1234_5678_u64;
-        for iteration in 0..10_000_u64 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let fraction = |shift| ((state >> shift) as u32) as f32 / u32::MAX as f32;
-            let db = |shift| -144.0 + fraction(shift) * 168.0;
-            let matrix = Matrix2x2 {
-                ll: fraction(0) * 2.0 - 1.0,
-                lr: fraction(8) * 2.0 - 1.0,
-                rl: fraction(16) * 2.0 - 1.0,
-                rr: fraction(24) * 2.0 - 1.0,
-            };
-            let rate = LAUNCH_SAMPLE_RATES[(state as usize) & 3].0;
-            let mut chain = BuiltinChain::new(
-                rate,
-                BuiltinParameters {
-                    left: ChannelParameters {
-                        polarity_invert: state & 1 != 0,
-                        trim_db: db(0),
-                        hpf_hz: 100.0,
-                        lpf_hz: 1_000.0,
-                        fader_db: db(32),
-                        muted: state & 2 != 0,
-                    },
-                    right: ChannelParameters {
-                        polarity_invert: state & 4 != 0,
-                        trim_db: db(8),
-                        hpf_hz: 0.0,
-                        lpf_hz: 0.0,
-                        fader_db: db(40),
-                        muted: state & 8 != 0,
-                    },
-                    matrix,
-                    smoothing_samples: (state as u32) & 127,
-                },
-            )
-            .expect("generated parameters are in the prepared domain");
-            chain
-                .set_matrix_target(Matrix2x2::IDENTITY)
-                .expect("identity");
-            let mut left = [0.25_f32; 127];
-            let mut right = [-0.5_f32; 127];
-            let _ = chain
-                .process_dual_mono(
-                    DualMonoBlock::new(&mut left, &mut right, iteration.saturating_mul(127))
-                        .expect("block"),
-                )
-                .expect("valid block");
-            assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
-        }
-    }
-    #[test]
-    fn launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude() {
-        for rate in launch_and_extended_compatibility_rates() {
-            for frequency in [100.0, 1_000.0, f64::from(rate) * 0.2] {
-                let frames = 4_096;
-                let mut left: Vec<f32> = (0..frames)
-                    .map(|index| {
-                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(rate)).sin()
-                            as f32
-                    })
-                    .collect();
-                let mut right = vec![0.0_f32; frames];
-                let parameters = BuiltinParameters {
-                    left: ChannelParameters {
-                        hpf_hz: 100.0,
-                        lpf_hz: 1_000.0,
-                        ..ChannelParameters::default()
-                    },
-                    ..BuiltinParameters::default()
-                };
-                let mut chain = BuiltinChain::new(rate, parameters).expect("prepare");
-                let mut offset = 0;
-                for quantum in [1, 127, 128, 255, 1_024].into_iter().cycle() {
-                    if offset == frames {
-                        break;
-                    }
-                    let end = (offset + quantum).min(frames);
-                    let _ = chain
-                        .process_input(
-                            DualMonoBlock::new(
-                                &mut left[offset..end],
-                                &mut right[offset..end],
-                                offset as u64,
-                            )
-                            .expect("block"),
-                        )
-                        .expect("valid block");
-                    offset = end;
-                }
-                let mut high = ReferenceBiquad::rbj_butterworth(
-                    f64::from(rate),
-                    100.0,
-                    ReferenceFilterKind::HighPass,
-                )
-                .expect("reference high pass");
-                let mut low = ReferenceBiquad::rbj_butterworth(
-                    f64::from(rate),
-                    1_000.0,
-                    ReferenceFilterKind::LowPass,
-                )
-                .expect("reference low pass");
-                let mut actual_energy = 0.0_f64;
-                let mut reference_energy = 0.0_f64;
-                for (index, actual) in left.iter().copied().enumerate() {
-                    let input =
-                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(rate)).sin();
-                    let reference = low.process(high.process(input));
-                    if index >= frames / 2 {
-                        actual_energy += f64::from(actual) * f64::from(actual);
-                        reference_energy += reference * reference;
-                    }
-                }
-                let actual_db = 10.0 * actual_energy.log10();
-                let reference_db = 10.0 * reference_energy.log10();
-                if reference_db >= -120.0 {
-                    assert!(
-                        (actual_db - reference_db).abs() <= 0.05,
-                        "rate={rate}, frequency={frequency}, actual={actual_db}, reference={reference_db}"
-                    );
-                }
-            }
-        }
-    }
-    #[test]
-    fn cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates() {
-        for rate in launch_and_extended_compatibility_rates() {
-            let mut cutoffs = vec![
-                10.0,
-                20.0,
-                100.0,
-                1_000.0,
-                (20_000.0_f64).min(0.1 * f64::from(rate)),
-                0.45 * f64::from(rate),
-            ];
-            cutoffs.sort_by(f64::total_cmp);
-            cutoffs.dedup_by(|left, right| *left == *right);
-            for (high_pass, kind, output) in [
-                (
-                    true,
-                    ReferenceFilterKind::HighPass,
-                    ReferenceTptOutput::HighPass,
-                ),
-                (
-                    false,
-                    ReferenceFilterKind::LowPass,
-                    ReferenceTptOutput::LowPass,
-                ),
-            ] {
-                for cutoff in &cutoffs {
-                    let filter = TptSvf::design(rate, *cutoff as f32, high_pass).expect("valid");
-                    let state = ReferenceTptStateSpace::from_cast_coefficients(
-                        filter.c1, filter.a2, filter.a3, filter.k, output,
-                    );
-                    assert_tpt_limits_and_monotonic(state, rate, high_pass, *cutoff);
-                    let mut probes = coherent_probes(rate, *cutoff);
-                    probes.extend([*cutoff, 0.49 * f64::from(rate)]);
-                    probes.sort_by(f64::total_cmp);
-                    probes.dedup_by(|left, right| *left == *right);
-                    for frequency in probes {
-                        let reference =
-                            rbj_butterworth_magnitude_db(f64::from(rate), *cutoff, kind, frequency)
-                                .expect("reference");
-                        let actual = state
-                            .magnitude_db(f64::from(rate), frequency)
-                            .expect("state");
-                        if reference >= -120.0 {
-                            assert!(
-                                (actual - reference).abs() <= 0.005,
-                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, actual={actual}, reference={reference}"
-                            );
-                        }
-                    }
-                    let cutoff_db = state
-                        .magnitude_db(f64::from(rate), *cutoff)
-                        .expect("cutoff state");
-                    assert!(
-                        (cutoff_db + 3.010_299_956_6).abs() <= 0.005,
-                        "rate={rate}, cutoff={cutoff}, db={cutoff_db}"
-                    );
-                }
-            }
-        }
-    }
-    #[test]
-    fn one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates() {
-        for rate in launch_and_extended_compatibility_rates() {
-            let mut cutoffs = vec![
-                10.0,
-                20.0,
-                100.0,
-                1_000.0,
-                (20_000.0_f64).min(0.1 * f64::from(rate)),
-                0.45 * f64::from(rate),
-            ];
-            cutoffs.sort_by(f64::total_cmp);
-            cutoffs.dedup_by(|left, right| *left == *right);
-            for (high_pass, kind) in [
-                (true, ReferenceFilterKind::HighPass),
-                (false, ReferenceFilterKind::LowPass),
-            ] {
-                for cutoff in &cutoffs {
-                    let mut partition_reference: Option<Vec<f32>> = None;
-                    for quantum in [1, 127, 128, 255, 1_024] {
-                        let mut filter = TptSvf::design(rate, *cutoff as f32, high_pass)
-                            .expect("valid matrix cutoff");
-                        let mut report = BuiltinProcessReport::default();
-                        let mut recovered = 0;
-                        let mut impulse = vec![0.0_f32; rate as usize];
-                        for block_start in (0..impulse.len()).step_by(quantum) {
-                            let block_end = (block_start + quantum).min(impulse.len());
-                            for (index, sample) in
-                                impulse[block_start..block_end].iter_mut().enumerate()
-                            {
-                                *sample = filter.process(
-                                    if block_start + index == 0 { 1.0 } else { 0.0 },
-                                    &mut recovered,
-                                    &mut report,
-                                );
-                            }
-                        }
-                        assert!(impulse.iter().all(|sample| sample.is_finite()));
-                        assert!(
-                            recovered <= 1,
-                            "rate={rate}, cutoff={cutoff}, recoveries={recovered}"
-                        );
-                        let tail_energy = impulse[impulse.len().saturating_sub(4_096)..]
-                            .iter()
-                            .map(|sample| f64::from(*sample) * f64::from(*sample))
-                            .sum::<f64>();
-                        assert!(
-                            tail_energy.is_finite() && tail_energy <= 1e-8,
-                            "rate={rate}, cutoff={cutoff}, quantum={quantum}, tail_energy={tail_energy}"
-                        );
-                        if let Some(reference) = &partition_reference {
-                            assert_eq!(
-                                &impulse, reference,
-                                "block partition changed bits: rate={rate}, cutoff={cutoff}, quantum={quantum}"
-                            );
-                        } else {
-                            partition_reference = Some(impulse.clone());
-                        }
-                        for frequency in coherent_probes(rate, *cutoff) {
-                            let reference = rbj_butterworth_magnitude_db(
-                                f64::from(rate),
-                                *cutoff,
-                                kind,
-                                frequency,
-                            )
-                            .expect("reference");
-                            let actual =
-                                impulse_dft_magnitude_db(&impulse, f64::from(rate), frequency);
-                            if reference >= -120.0 {
-                                assert!(
-                                    (actual - reference).abs() <= 0.05,
-                                    "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
-                                );
-                            } else {
-                                assert!(
-                                    actual <= -115.0,
-                                    "rate={rate}, cutoff={cutoff}, quantum={quantum}, frequency={frequency}, actual={actual}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn coherent_sustained_sines_cover_launch_and_extended_compatibility_rates() {
-        for rate in launch_and_extended_compatibility_rates() {
-            let mut cutoffs = vec![
-                10.0,
-                20.0,
-                100.0,
-                1_000.0,
-                (20_000.0_f64).min(0.1 * f64::from(rate)),
-                0.45 * f64::from(rate),
-            ];
-            cutoffs.sort_by(f64::total_cmp);
-            cutoffs.dedup_by(|left, right| *left == *right);
-            for (high_pass, kind) in [
-                (true, ReferenceFilterKind::HighPass),
-                (false, ReferenceFilterKind::LowPass),
-            ] {
-                for cutoff in &cutoffs {
-                    for frequency in coherent_probes(rate, *cutoff) {
-                        let mut production = TptSvf::design(rate, *cutoff as f32, high_pass)
-                            .expect("valid matrix cutoff");
-                        let mut reference =
-                            ReferenceBiquad::rbj_butterworth(f64::from(rate), *cutoff, kind)
-                                .expect("reference");
-                        let measurement =
-                            sustained_measurement(&mut production, &mut reference, rate, frequency);
-                        if measurement.reference_gain_db >= -90.0 {
-                            assert!(
-                                (measurement.production_gain_db - measurement.reference_gain_db)
-                                    .abs()
-                                    <= 0.05,
-                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, production={}, reference={}",
-                                measurement.production_gain_db,
-                                measurement.reference_gain_db
-                            );
-                            assert!(
-                                measurement.residual_db <= -100.0,
-                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, residual={}",
-                                measurement.residual_db
-                            );
-                        } else {
-                            assert!(
-                                measurement.total_output_db <= -88.0,
-                                "rate={rate}, cutoff={cutoff}, frequency={frequency}, output={}",
-                                measurement.total_output_db
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[derive(Debug, Eq, PartialEq)]
-    struct CascadeRecoveryEvent {
-        sample: u32,
-        section: u8,
-        lane: u8,
-        pre_state_bits: [u32; 2],
-        next_state_bits: [u32; 2],
-        output_bits: u32,
-        action: ReferenceTptRetainedAction,
-        recovery_delta: u64,
-    }
-
-    #[derive(Debug, Eq, PartialEq)]
-    struct CascadeTimeline {
-        pcm_bits: Vec<[u32; 2]>,
-        final_state_bits: [u32; 8],
-        report: BuiltinProcessReport,
-        events: Vec<CascadeRecoveryEvent>,
-    }
-
-    fn fixed_cascade_parameters() -> BuiltinParameters {
-        BuiltinParameters {
-            left: ChannelParameters {
-                hpf_hz: 100.0,
-                lpf_hz: 1_000.0,
-                ..ChannelParameters::default()
-            },
-            right: ChannelParameters {
-                hpf_hz: 100.0,
-                lpf_hz: 1_000.0,
-                ..ChannelParameters::default()
-            },
-            ..BuiltinParameters::default()
-        }
-    }
-
-    fn filter_state_bits(filter: &TptSvf) -> [u32; 2] {
-        [filter.s1.to_bits(), filter.s2.to_bits()]
-    }
-
-    fn input_state_bits(input: &InputBuiltins) -> [u32; 8] {
-        [
-            input.left.hpf.s1.to_bits(),
-            input.left.hpf.s2.to_bits(),
-            input.left.lpf.s1.to_bits(),
-            input.left.lpf.s2.to_bits(),
-            input.right.hpf.s1.to_bits(),
-            input.right.hpf.s2.to_bits(),
-            input.right.lpf.s1.to_bits(),
-            input.right.lpf.s2.to_bits(),
-        ]
-    }
-
-    // This record and its injection helper are deliberately test-module private.  They qualify
-    // the retained scalar prepared-chain layout without introducing a production/test-support
-    // surface or a general state interchange format.
-    #[derive(Debug, Eq, PartialEq)]
-    struct PreparedChainSnapshotV1 {
-        filter_state_bits: [u32; 8],
-        matrix_current_bits: [u32; 4],
-        matrix_target_bits: [u32; 4],
-        remaining_updates: u32,
-        lifetime_recoveries: [u64; 2],
-    }
-
-    #[allow(dead_code)]
-    #[derive(Clone, Copy)]
-    enum PreparedChainFilterSectionV1 {
-        LeftHpf,
-        LeftLpf,
-        RightHpf,
-        RightLpf,
-    }
-
-    fn matrix_bits(matrix: Matrix2x2) -> [u32; 4] {
-        [
-            matrix.ll.to_bits(),
-            matrix.lr.to_bits(),
-            matrix.rl.to_bits(),
-            matrix.rr.to_bits(),
-        ]
-    }
-
-    fn prepared_chain_snapshot_v1(chain: &BuiltinChain) -> PreparedChainSnapshotV1 {
-        let (left, right) = chain.input.lifetime_recovered_state();
-        PreparedChainSnapshotV1 {
-            filter_state_bits: input_state_bits(&chain.input),
-            matrix_current_bits: matrix_bits(chain.matrix.current),
-            matrix_target_bits: matrix_bits(chain.matrix.target),
-            remaining_updates: chain.matrix.remaining_updates,
-            lifetime_recoveries: [left, right],
-        }
-    }
-
-    fn issue069_words(values: &[u32]) -> String {
-        let mut output = String::from("[");
-        for (index, value) in values.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
-            write!(&mut output, "\"{value:08x}\"").expect("string");
-        }
-        output.push(']');
-        output
-    }
-
-    fn issue069_state_row(
-        call: u32,
-        snapshot: &PreparedChainSnapshotV1,
-        report: BuiltinProcessReport,
-    ) -> String {
-        format!(
-            "{{\"call\":{call},\"filter\":{},\"current\":{},\"target\":{},\"remaining\":{},\"lifetime\":[\"{:016x}\",\"{:016x}\"],\"report\":[\"{:016x}\",\"{:016x}\",\"{:016x}\",\"{:016x}\"]}}",
-            issue069_words(&snapshot.filter_state_bits),
-            issue069_words(&snapshot.matrix_current_bits),
-            issue069_words(&snapshot.matrix_target_bits),
-            snapshot.remaining_updates,
-            snapshot.lifetime_recoveries[0],
-            snapshot.lifetime_recoveries[1],
-            report.sanitized_input,
-            report.sanitized_output,
-            report.recovered_left_state,
-            report.recovered_right_state,
-        )
-    }
-
-    fn inject_prepared_chain_filter_state_v1(
-        chain: &mut BuiltinChain,
-        section: PreparedChainFilterSectionV1,
-        s1_bits: u32,
-        s2_bits: u32,
-    ) {
-        let filter = match section {
-            PreparedChainFilterSectionV1::LeftHpf => &mut chain.input.left.hpf,
-            PreparedChainFilterSectionV1::LeftLpf => &mut chain.input.left.lpf,
-            PreparedChainFilterSectionV1::RightHpf => &mut chain.input.right.hpf,
-            PreparedChainFilterSectionV1::RightLpf => &mut chain.input.right.lpf,
-        };
-        filter.s1 = f32::from_bits(s1_bits);
-        filter.s2 = f32::from_bits(s2_bits);
-    }
-
-    fn issue069_process_call(
-        chain: &mut BuiltinChain,
-        first_sample: u64,
-        first_left: Option<f32>,
-        first_right: Option<f32>,
-    ) -> BuiltinProcessReport {
-        let mut left = [0.25_f32; 128];
-        let mut right = [-0.5_f32; 128];
-        if let Some(value) = first_left {
-            left[0] = value;
-        }
-        if let Some(value) = first_right {
-            right[0] = value;
-        }
-        chain
-            .process_dual_mono(
-                DualMonoBlock::new(&mut left, &mut right, first_sample).expect("fixed block"),
-            )
-            .expect("prepared chain call")
-    }
-
-    #[test]
-    fn issue069_prepared_chain_snapshot_reset_and_recovery_script_is_exact() {
-        let mut evidence = String::new();
-        let mut chain = BuiltinChain::new(
-            48_000,
-            BuiltinParameters {
-                left: ChannelParameters {
-                    hpf_hz: 100.0,
-                    lpf_hz: 1_000.0,
-                    ..ChannelParameters::default()
-                },
-                right: ChannelParameters {
-                    hpf_hz: 200.0,
-                    lpf_hz: 2_000.0,
-                    ..ChannelParameters::default()
-                },
-                matrix: Matrix2x2::IDENTITY,
-                smoothing_samples: 257,
-            },
-        )
-        .expect("prepare exact chain");
-
-        assert_eq!(
-            prepared_chain_snapshot_v1(&chain),
-            PreparedChainSnapshotV1 {
-                filter_state_bits: [0; 8],
-                matrix_current_bits: matrix_bits(Matrix2x2::IDENTITY),
-                matrix_target_bits: matrix_bits(Matrix2x2::IDENTITY),
-                remaining_updates: 0,
-                lifetime_recoveries: [0, 0],
-            }
-        );
-
-        let swap = Matrix2x2 {
-            ll: 0.0,
-            lr: 1.0,
-            rl: 1.0,
-            rr: 0.0,
-        };
-        chain.set_matrix_target(swap).expect("call one target");
-        let report = issue069_process_call(&mut chain, 0, None, None);
-        assert_eq!(report, BuiltinProcessReport::default());
-        let after_call_one = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(after_call_one.matrix_target_bits, matrix_bits(swap));
-        assert_eq!(after_call_one.remaining_updates, 129);
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(1, &after_call_one, report)
-        )
-        .expect("string");
-
-        let second_target = Matrix2x2 {
-            ll: 0.9,
-            lr: 0.1,
-            rl: -0.1,
-            rr: 0.9,
-        };
-        chain
-            .set_matrix_target(second_target)
-            .expect("call two retarget");
-        assert_eq!(chain.matrix.remaining_updates, 257);
-        let report = issue069_process_call(&mut chain, 128, None, None);
-        assert_eq!(report, BuiltinProcessReport::default());
-        let after_call_two = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(after_call_two.remaining_updates, 129);
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(2, &after_call_two, report)
-        )
-        .expect("string");
-
-        let before_rejected_target = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(
-            chain.set_matrix_target(Matrix2x2 {
-                ll: f32::NAN,
-                lr: 0.0,
-                rl: 0.0,
-                rr: 1.0,
-            }),
-            Err(BuiltinParameterError::MatrixCoefficient)
-        );
-        assert_eq!(
-            prepared_chain_snapshot_v1(&chain),
-            before_rejected_target,
-            "a rejected target is transactional"
-        );
-        let report = issue069_process_call(&mut chain, 256, Some(f32::NAN), Some(f32::INFINITY));
-        assert_eq!(
-            report,
-            BuiltinProcessReport {
-                sanitized_input: 2,
-                sanitized_output: 0,
-                recovered_left_state: 0,
-                recovered_right_state: 0,
-            }
-        );
-        let after_call_three = prepared_chain_snapshot_v1(&chain);
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(3, &after_call_three, report)
-        )
-        .expect("string");
-
-        inject_prepared_chain_filter_state_v1(
-            &mut chain,
-            PreparedChainFilterSectionV1::LeftHpf,
-            f32::NAN.to_bits(),
-            0.0_f32.to_bits(),
-        );
-        inject_prepared_chain_filter_state_v1(
-            &mut chain,
-            PreparedChainFilterSectionV1::RightLpf,
-            f32::INFINITY.to_bits(),
-            0.0_f32.to_bits(),
-        );
-        let report = issue069_process_call(&mut chain, 384, None, None);
-        assert_eq!(
-            report,
-            BuiltinProcessReport {
-                sanitized_input: 0,
-                sanitized_output: 0,
-                recovered_left_state: 1,
-                recovered_right_state: 1,
-            }
-        );
-        let after_recovery = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(after_recovery.lifetime_recoveries, [1, 1]);
-        assert!(after_recovery.filter_state_bits.into_iter().all(|bits| {
-            let value = f32::from_bits(bits);
-            value.is_finite() && !value.is_subnormal()
-        }));
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(4, &after_recovery, report)
-        )
-        .expect("string");
-
-        chain.reset(BuiltinResetKind::DiscontinuityKeepTargets);
-        let after_discontinuity = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(after_discontinuity.filter_state_bits, [0; 8]);
-        assert_eq!(
-            after_discontinuity.matrix_current_bits,
-            after_discontinuity.matrix_target_bits
-        );
-        assert_eq!(after_discontinuity.remaining_updates, 0);
-        assert_eq!(after_discontinuity.lifetime_recoveries, [1, 1]);
-        let report = issue069_process_call(&mut chain, 512, None, None);
-        assert_eq!(report, BuiltinProcessReport::default());
-        let after_call_five = prepared_chain_snapshot_v1(&chain);
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(5, &after_call_five, report)
-        )
-        .expect("string");
-
-        chain.reset(BuiltinResetKind::FullToPrepared);
-        let after_full = prepared_chain_snapshot_v1(&chain);
-        assert_eq!(after_full.filter_state_bits, [0; 8]);
-        assert_eq!(
-            after_full.matrix_current_bits,
-            after_full.matrix_target_bits
-        );
-        assert_eq!(after_full.remaining_updates, 0);
-        assert_eq!(after_full.lifetime_recoveries, [1, 1]);
-        let report = issue069_process_call(&mut chain, 640, None, None);
-        assert_eq!(report, BuiltinProcessReport::default());
-        let after_call_six = prepared_chain_snapshot_v1(&chain);
-        writeln!(
-            evidence,
-            "{}",
-            issue069_state_row(6, &after_call_six, report)
-        )
-        .expect("string");
-        assert_eq!(
-            evidence,
-            include_str!(
-                "../../../tools/miso-engine-builtins-audit/fixtures/v1/prepared-chain-state-report.jsonl"
-            )
-        );
-    }
-
-    fn assert_reference_coefficients(production: &TptSvf, reference: ReferenceRetainedTptF32) {
-        assert_eq!(
-            [
-                production.c1.to_bits(),
-                production.a2.to_bits(),
-                production.a3.to_bits(),
-                production.k.to_bits(),
-            ],
-            reference.coefficient_bits(),
-            "independent retained coefficient words"
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn trace_cascade_section(
-        production: &mut TptSvf,
-        reference: &mut ReferenceRetainedTptF32,
-        input: f32,
-        sample: u32,
-        section: u8,
-        lane: u8,
-        recovered: &mut u64,
-        report: &mut BuiltinProcessReport,
-        events: &mut Vec<CascadeRecoveryEvent>,
-    ) -> f32 {
-        let production_pre = filter_state_bits(production);
-        let recovered_before = *recovered;
-        let output = production.process(input, recovered, report);
-        let reference_step = reference.process(input);
-        assert_eq!(
-            production_pre, reference_step.pre_state_bits,
-            "rate-independent pre-state section={section} lane={lane} sample={sample}"
-        );
-        assert_eq!(
-            filter_state_bits(production),
-            reference_step.next_state_bits,
-            "rate-independent next-state section={section} lane={lane} sample={sample}"
-        );
-        assert_eq!(
-            output.to_bits(),
-            reference_step.output_bits,
-            "rate-independent output section={section} lane={lane} sample={sample}"
-        );
-        let recovery_delta = recovered.saturating_sub(recovered_before);
-        assert_eq!(
-            recovery_delta, reference_step.recovery_delta,
-            "rate-independent recovery section={section} lane={lane} sample={sample}"
-        );
-        if reference_step.action != ReferenceTptRetainedAction::FiniteNormal {
-            events.push(CascadeRecoveryEvent {
-                sample,
-                section,
-                lane,
-                pre_state_bits: production_pre,
-                next_state_bits: filter_state_bits(production),
-                output_bits: output.to_bits(),
-                action: reference_step.action,
-                recovery_delta,
-            });
-        }
-        output
-    }
-
-    fn trace_fixed_cascade(rate: u32, quantum: usize) -> CascadeTimeline {
-        let mut input = BuiltinChain::new(rate, fixed_cascade_parameters())
-            .expect("prepared cascade")
-            .into_input_builtins();
-        let mut reference_left_high = ReferenceRetainedTptF32::conditioned_butterworth(
-            rate,
-            100.0,
-            ReferenceTptOutput::HighPass,
-        )
-        .expect("reference high");
-        let mut reference_left_low = ReferenceRetainedTptF32::conditioned_butterworth(
-            rate,
-            1_000.0,
-            ReferenceTptOutput::LowPass,
-        )
-        .expect("reference low");
-        let mut reference_right_high = reference_left_high;
-        let mut reference_right_low = reference_left_low;
-        assert_reference_coefficients(&input.left.hpf, reference_left_high);
-        assert_reference_coefficients(&input.left.lpf, reference_left_low);
-        assert_reference_coefficients(&input.right.hpf, reference_right_high);
-        assert_reference_coefficients(&input.right.lpf, reference_right_low);
-
-        let mut report = BuiltinProcessReport::default();
-        let mut recovered_left = 0;
-        let mut recovered_right = 0;
-        let mut pcm_bits = Vec::with_capacity(rate as usize);
-        let mut events = Vec::new();
-        for block_start in (0..rate as usize).step_by(quantum) {
-            let block_end = (block_start + quantum).min(rate as usize);
-            for index in block_start..block_end {
-                let sample = u32::try_from(index).expect("one second fits u32");
-                let dry = if index == 0 { 1.0 } else { 0.0 };
-                let left_high = trace_cascade_section(
-                    &mut input.left.hpf,
-                    &mut reference_left_high,
-                    dry,
-                    sample,
-                    0,
-                    0,
-                    &mut recovered_left,
-                    &mut report,
-                    &mut events,
-                );
-                let left = trace_cascade_section(
-                    &mut input.left.lpf,
-                    &mut reference_left_low,
-                    left_high,
-                    sample,
-                    1,
-                    0,
-                    &mut recovered_left,
-                    &mut report,
-                    &mut events,
-                );
-                let right_high = trace_cascade_section(
-                    &mut input.right.hpf,
-                    &mut reference_right_high,
-                    dry,
-                    sample,
-                    0,
-                    1,
-                    &mut recovered_right,
-                    &mut report,
-                    &mut events,
-                );
-                let right = trace_cascade_section(
-                    &mut input.right.lpf,
-                    &mut reference_right_low,
-                    right_high,
-                    sample,
-                    1,
-                    1,
-                    &mut recovered_right,
-                    &mut report,
-                    &mut events,
-                );
-                pcm_bits.push([left.to_bits(), right.to_bits()]);
-            }
-        }
-        report.recovered_left_state = recovered_left;
-        report.recovered_right_state = recovered_right;
-        CascadeTimeline {
-            pcm_bits,
-            final_state_bits: input_state_bits(&input),
-            report,
-            events,
-        }
-    }
-
-    fn render_fixed_cascade_public(rate: u32, quantum: usize) -> CascadeTimeline {
-        let mut input = BuiltinChain::new(rate, fixed_cascade_parameters())
-            .expect("prepared cascade")
-            .into_input_builtins();
-        let mut report = BuiltinProcessReport::default();
-        let mut pcm_bits = Vec::with_capacity(rate as usize);
-        for block_start in (0..rate as usize).step_by(quantum) {
-            let frames = (rate as usize - block_start).min(quantum);
-            let mut left = vec![0.0; frames];
-            let mut right = vec![0.0; frames];
-            if block_start == 0 {
-                left[0] = 1.0;
-                right[0] = 1.0;
-            }
-            report.add(
-                input
-                    .process(
-                        DualMonoBlock::new(&mut left, &mut right, block_start as u64)
-                            .expect("block"),
-                    )
-                    .expect("input render"),
-            );
-            pcm_bits.extend(
-                left.into_iter()
-                    .zip(right)
-                    .map(|(left, right)| [left.to_bits(), right.to_bits()]),
-            );
-        }
-        CascadeTimeline {
-            pcm_bits,
-            final_state_bits: input_state_bits(&input),
-            report,
-            events: Vec::new(),
-        }
-    }
-
-    fn timeline_hash(timeline: &CascadeTimeline) -> u64 {
-        fn mix(hash: &mut u64, word: u64) {
-            *hash ^= word;
-            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        let mut hash = 0xcbf2_9ce4_8422_2325;
-        for [left, right] in &timeline.pcm_bits {
-            mix(&mut hash, u64::from(*left));
-            mix(&mut hash, u64::from(*right));
-        }
-        for word in timeline.final_state_bits {
-            mix(&mut hash, u64::from(word));
-        }
-        for word in [
-            timeline.report.sanitized_input,
-            timeline.report.sanitized_output,
-            timeline.report.recovered_left_state,
-            timeline.report.recovered_right_state,
-        ] {
-            mix(&mut hash, word);
-        }
-        for event in &timeline.events {
-            mix(&mut hash, u64::from(event.sample));
-            mix(&mut hash, u64::from(event.section));
-            mix(&mut hash, u64::from(event.lane));
-            for word in event
-                .pre_state_bits
-                .into_iter()
-                .chain(event.next_state_bits)
-            {
-                mix(&mut hash, u64::from(word));
-            }
-            mix(&mut hash, u64::from(event.output_bits));
-            mix(
-                &mut hash,
-                match event.action {
-                    ReferenceTptRetainedAction::FiniteNormal => 0,
-                    ReferenceTptRetainedAction::SubnormalCanonicalization => 1,
-                    ReferenceTptRetainedAction::InvalidRecovery => 2,
-                },
-            );
-            mix(&mut hash, event.recovery_delta);
-        }
-        hash
-    }
-
-    fn probe_metadata_hash(timeline: &CascadeTimeline, rate: u32, probe: f64) -> u64 {
-        let mut hash = probe.to_bits() ^ u64::from(rate);
-        for [left, right] in &timeline.pcm_bits {
-            hash ^= u64::from(*left);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            hash ^= u64::from(*right);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        hash
-    }
-
-    fn event_counts(timeline: &CascadeTimeline) -> [[usize; 2]; 2] {
-        let mut counts = [[0; 2]; 2];
-        for event in &timeline.events {
-            counts[event.section as usize][event.lane as usize] += 1;
-        }
-        counts
-    }
-
-    #[test]
-    fn fixed_cascade_recovery_timeline_is_independent_partition_and_probe_invariant() {
-        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
-            let baseline = trace_fixed_cascade(rate, 1);
-            let public_baseline = render_fixed_cascade_public(rate, 1);
-            assert_eq!(
-                baseline.pcm_bits, public_baseline.pcm_bits,
-                "public PCM rate={rate}"
-            );
-            assert_eq!(
-                baseline.final_state_bits, public_baseline.final_state_bits,
-                "public state rate={rate}"
-            );
-            assert_eq!(
-                baseline.report, public_baseline.report,
-                "public report rate={rate}"
-            );
-            assert_eq!(
-                baseline.report.recovered_left_state, 0,
-                "left recovery rate={rate}"
-            );
-            assert_eq!(
-                baseline.report.recovered_right_state, 0,
-                "right recovery rate={rate}"
-            );
-            assert!(
-                baseline
-                    .events
-                    .iter()
-                    .all(|event| event.action
-                        == ReferenceTptRetainedAction::SubnormalCanonicalization),
-                "only finite underflow may occur rate={rate}"
-            );
-            assert!(
-                !baseline.events.is_empty(),
-                "must observe underflow rate={rate}"
-            );
-            let baseline_hash = timeline_hash(&baseline);
-            let (expected_events, expected_hash) = match rate {
-                44_100 => ([[36_229, 36_229], [36_225, 36_225]], 0x41e0_0de8_a16c_7fbb),
-                48_000 => ([[39_435, 39_435], [39_433, 39_433]], 0xa0ff_0793_2e1b_7a8d),
-                88_200 => ([[385, 385], [960, 960]], 0xcdda_7646_b050_4e2a),
-                96_000 => ([[414, 414], [1_133, 1_133]], 0x2023_c640_00bb_1500),
-                _ => unreachable!("launch-rate iteration"),
-            };
-            assert_eq!(
-                event_counts(&baseline),
-                expected_events,
-                "event totals rate={rate}"
-            );
-            assert_eq!(baseline_hash, expected_hash, "timeline hash rate={rate}");
-            for quantum in [127, 128, 255, 1_024] {
-                let candidate = trace_fixed_cascade(rate, quantum);
-                let public = render_fixed_cascade_public(rate, quantum);
-                assert_eq!(
-                    candidate, baseline,
-                    "trace partition rate={rate} quantum={quantum}"
-                );
-                assert_eq!(
-                    public.pcm_bits, baseline.pcm_bits,
-                    "public PCM rate={rate} quantum={quantum}"
-                );
-                assert_eq!(
-                    public.final_state_bits, baseline.final_state_bits,
-                    "public state rate={rate} quantum={quantum}"
-                );
-                assert_eq!(
-                    public.report, baseline.report,
-                    "public report rate={rate} quantum={quantum}"
-                );
-            }
-            for probe in cascade_probes(rate) {
-                let first = probe_metadata_hash(&baseline, rate, probe);
-                let duplicate = probe_metadata_hash(&baseline, rate, probe);
-                assert_eq!(
-                    first, duplicate,
-                    "duplicated probe rate={rate} probe={probe}"
-                );
-                assert_eq!(
-                    timeline_hash(&baseline),
-                    baseline_hash,
-                    "probe mutated render rate={rate}"
-                );
-            }
-            println!(
-                "issue-059 rate={rate} events={:?} recovered_left={} recovered_right={} hash={baseline_hash:016x}",
-                event_counts(&baseline),
-                baseline.report.recovered_left_state,
-                baseline.report.recovered_right_state,
-            );
-        }
-    }
-
-    #[test]
-    fn finite_subnormal_tpt_state_is_canonicalized_without_scalar_or_bank_recovery() {
-        let mut scalar = TptSvf::design(48_000, 100.0, true).expect("scalar");
-        scalar.s1 = f32::from_bits(1);
-        scalar.s2 = -f32::from_bits(1);
-        let mut recovered = 0;
-        let mut scalar_report = BuiltinProcessReport::default();
-        assert_eq!(scalar.process(0.0, &mut recovered, &mut scalar_report), 0.0);
-        assert_eq!(recovered, 0);
-        assert_eq!(
-            filter_state_bits(&scalar),
-            [0.0_f32.to_bits(), 0.0_f32.to_bits()]
-        );
-
-        let Some((backend, width)) = available_nonfused_bank() else {
-            return;
-        };
-        let lanes = width.lanes() as usize;
-        let parameters = vec![fixed_cascade_parameters(); lanes];
-        let active = vec![true; lanes];
-        let scalar_inputs = parameters
-            .iter()
-            .copied()
-            .map(|parameters| {
-                BuiltinChain::new(48_000, parameters)
-                    .expect("scalar input")
-                    .into_input_builtins()
-            })
-            .collect::<Vec<_>>();
-        let mut bank =
-            BuiltinInputBankV1::new(backend, width, scalar_inputs, &active).expect("bank");
-        bank.left.hpf.s1[0] = f32::from_bits(1);
-        bank.left.hpf.s2[0] = -f32::from_bits(1);
-        let mut left = vec![0.0; lanes];
-        let mut right = vec![0.0; lanes];
-        let report = bank
-            .process(&mut left, &mut right, 1, 0)
-            .expect("bank process");
-        assert_eq!(report.recovered_left_state, 0);
-        assert_eq!(report.recovered_right_state, 0);
-        assert_eq!(bank.left.hpf.s1[0].to_bits(), 0.0_f32.to_bits());
-        assert_eq!(bank.left.hpf.s2[0].to_bits(), 0.0_f32.to_bits());
-    }
-
-    #[test]
-    fn production_order_hpf_lpf_cascade_meets_all_launch_response_gates() {
-        for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
-            let probes = cascade_probes(rate);
-            let high_state = TptSvf::design(rate, 100.0, true).expect("high pass");
-            let low_state = TptSvf::design(rate, 1_000.0, false).expect("low pass");
-            let high_space = ReferenceTptStateSpace::from_cast_coefficients(
-                high_state.c1,
-                high_state.a2,
-                high_state.a3,
-                high_state.k,
-                ReferenceTptOutput::HighPass,
-            );
-            let low_space = ReferenceTptStateSpace::from_cast_coefficients(
-                low_state.c1,
-                low_state.a2,
-                low_state.a3,
-                low_state.k,
-                ReferenceTptOutput::LowPass,
-            );
-            for frequency in probes
-                .iter()
-                .copied()
-                .chain([100.0, 1_000.0, 0.49 * f64::from(rate)])
-            {
-                let reference = rbj_butterworth_magnitude_db(
-                    f64::from(rate),
-                    100.0,
-                    ReferenceFilterKind::HighPass,
-                    frequency,
-                )
-                .expect("reference high")
-                    + rbj_butterworth_magnitude_db(
-                        f64::from(rate),
-                        1_000.0,
-                        ReferenceFilterKind::LowPass,
-                        frequency,
-                    )
-                    .expect("reference low");
-                let actual = high_space
-                    .magnitude_db(f64::from(rate), frequency)
-                    .expect("state high")
-                    + low_space
-                        .magnitude_db(f64::from(rate), frequency)
-                        .expect("state low");
-                if reference >= -120.0 {
-                    assert!(
-                        (actual - reference).abs() <= 0.005,
-                        "analytic rate={rate}, frequency={frequency}, actual={actual}, reference={reference}"
-                    );
-                }
-            }
-            for quantum in [1, 127, 128, 255, 1_024] {
-                let mut high = TptSvf::design(rate, 100.0, true).expect("high pass");
-                let mut low = TptSvf::design(rate, 1_000.0, false).expect("low pass");
-                let mut report = BuiltinProcessReport::default();
-                let mut recovered = 0;
-                let mut impulse = vec![0.0_f32; rate as usize];
-                for start in (0..impulse.len()).step_by(quantum) {
-                    let end = (start + quantum).min(impulse.len());
-                    for (offset, sample) in impulse[start..end].iter_mut().enumerate() {
-                        let input = if start + offset == 0 { 1.0 } else { 0.0 };
-                        let high_output = high.process(input, &mut recovered, &mut report);
-                        *sample = low.process(high_output, &mut recovered, &mut report);
-                    }
-                }
-                assert!(impulse.iter().all(|sample| sample.is_finite()));
-                for frequency in &probes {
-                    let reference = rbj_butterworth_magnitude_db(
-                        f64::from(rate),
-                        100.0,
-                        ReferenceFilterKind::HighPass,
-                        *frequency,
-                    )
-                    .expect("reference high")
-                        + rbj_butterworth_magnitude_db(
-                            f64::from(rate),
-                            1_000.0,
-                            ReferenceFilterKind::LowPass,
-                            *frequency,
-                        )
-                        .expect("reference low");
-                    let actual = impulse_dft_magnitude_db(&impulse, f64::from(rate), *frequency);
-                    if reference >= -120.0 {
-                        assert!(
-                            (actual - reference).abs() <= 0.05,
-                            "impulse rate={rate}, quantum={quantum}, frequency={frequency}, actual={actual}, reference={reference}"
-                        );
-                    } else {
-                        assert!(
-                            actual <= -115.0,
-                            "impulse rate={rate}, quantum={quantum}, frequency={frequency}, actual={actual}"
-                        );
-                    }
-                }
-            }
-            for frequency in probes {
-                let measurement = sustained_cascade_measurement(rate, frequency);
-                if measurement.reference_gain_db >= -90.0 {
-                    assert!(
-                        (measurement.production_gain_db - measurement.reference_gain_db).abs()
-                            <= 0.05,
-                        "sustained rate={rate}, frequency={frequency}, production={}, reference={}",
-                        measurement.production_gain_db,
-                        measurement.reference_gain_db
-                    );
-                    assert!(
-                        measurement.residual_db <= -100.0,
-                        "sustained rate={rate}, frequency={frequency}, residual={}",
-                        measurement.residual_db
-                    );
-                } else {
-                    assert!(
-                        measurement.total_output_db <= -88.0,
-                        "sustained rate={rate}, frequency={frequency}, output={}",
-                        measurement.total_output_db
-                    );
-                }
-            }
-        }
-    }
-
-    struct SustainedMeasurement {
-        production_gain_db: f64,
-        reference_gain_db: f64,
-        residual_db: f64,
-        total_output_db: f64,
-    }
-
-    fn sustained_measurement(
-        production: &mut TptSvf,
-        reference: &mut ReferenceBiquad,
+    /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`BuiltinParameterError::FilterCoefficients`] when a cast word is not
+    /// representable.
+    pub fn section_words(
         rate: u32,
-        frequency: f64,
-    ) -> SustainedMeasurement {
-        let settle = rate as usize / 2;
-        let frames = rate as usize / 4;
-        let mut report = BuiltinProcessReport::default();
-        let mut recovered = 0;
-        let mut input_energy = 0.0_f64;
-        let mut output_energy = 0.0_f64;
-        let mut measured_outputs = Vec::with_capacity(frames);
-        let mut reference_outputs = Vec::with_capacity(frames);
-        let rate_f64 = f64::from(rate);
-        for index in 0..settle + frames {
-            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
-            let input = (0.5 * phase.sin()) as f32;
-            let output = production.process(input, &mut recovered, &mut report);
-            let reference_output = reference.process(f64::from(input));
-            if index >= settle {
-                let output = f64::from(output);
-                measured_outputs.push(output);
-                reference_outputs.push(reference_output);
-                input_energy += f64::from(input) * f64::from(input);
-                output_energy += output * output;
-            }
-        }
-        let frames_f64 = frames as f64;
-        let input_rms = (input_energy / frames_f64).sqrt();
-        let [
-            production_dc,
-            production_sine_coefficient,
-            production_cosine_coefficient,
-        ] = fit_dc_sine_cosine(&measured_outputs, settle, rate_f64, frequency);
-        let [_, reference_sine_coefficient, reference_cosine_coefficient] =
-            fit_dc_sine_cosine(&reference_outputs, settle, rate_f64, frequency);
-        let production_amplitude = production_sine_coefficient.hypot(production_cosine_coefficient);
-        let reference_amplitude = reference_sine_coefficient.hypot(reference_cosine_coefficient);
-        let mut residual_energy = 0.0_f64;
-        for (offset, output) in measured_outputs.iter().copied().enumerate() {
-            let index = settle + offset;
-            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
-            let fitted = production_dc
-                + production_sine_coefficient * phase.sin()
-                + production_cosine_coefficient * phase.cos();
-            residual_energy += (output - fitted).powi(2);
-        }
-        let residual_rms = (residual_energy / frames_f64).sqrt();
-        let output_rms = (output_energy / frames_f64).sqrt();
-        SustainedMeasurement {
-            production_gain_db: 20.0 * (production_amplitude / 0.5).log10(),
-            reference_gain_db: 20.0 * (reference_amplitude / 0.5).log10(),
-            residual_db: 20.0 * (residual_rms / input_rms).log10(),
-            total_output_db: 20.0 * (output_rms / input_rms).log10(),
-        }
-    }
-
-    fn sustained_cascade_measurement(rate: u32, frequency: f64) -> SustainedMeasurement {
-        let mut high = TptSvf::design(rate, 100.0, true).expect("high pass");
-        let mut low = TptSvf::design(rate, 1_000.0, false).expect("low pass");
-        let mut high_reference =
-            ReferenceBiquad::rbj_butterworth(f64::from(rate), 100.0, ReferenceFilterKind::HighPass)
-                .expect("reference high");
-        let mut low_reference = ReferenceBiquad::rbj_butterworth(
-            f64::from(rate),
-            1_000.0,
-            ReferenceFilterKind::LowPass,
-        )
-        .expect("reference low");
-        let settle = rate as usize / 2;
-        let frames = rate as usize / 4;
-        let rate_f64 = f64::from(rate);
-        let mut report = BuiltinProcessReport::default();
-        let mut recovered = 0;
-        let mut input_energy = 0.0_f64;
-        let mut output_energy = 0.0_f64;
-        let mut measured_outputs = Vec::with_capacity(frames);
-        let mut reference_outputs = Vec::with_capacity(frames);
-        for index in 0..settle + frames {
-            let phase = core::f64::consts::TAU * frequency * index as f64 / rate_f64;
-            let input = (0.5 * phase.sin()) as f32;
-            let high_output = high.process(input, &mut recovered, &mut report);
-            let output = low.process(high_output, &mut recovered, &mut report);
-            let reference = low_reference.process(high_reference.process(f64::from(input)));
-            if index >= settle {
-                let output = f64::from(output);
-                measured_outputs.push(output);
-                reference_outputs.push(reference);
-                input_energy += f64::from(input) * f64::from(input);
-                output_energy += output * output;
-            }
-        }
-        let frames_f64 = frames as f64;
-        let input_rms = (input_energy / frames_f64).sqrt();
-        let [dc, sine, cosine] = fit_dc_sine_cosine(&measured_outputs, settle, rate_f64, frequency);
-        let [_, reference_sine, reference_cosine] =
-            fit_dc_sine_cosine(&reference_outputs, settle, rate_f64, frequency);
-        let production_amplitude = sine.hypot(cosine);
-        let reference_amplitude = reference_sine.hypot(reference_cosine);
-        let residual_energy = measured_outputs
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(offset, output)| {
-                let phase =
-                    core::f64::consts::TAU * frequency * (settle + offset) as f64 / rate_f64;
-                (output - (dc + sine * phase.sin() + cosine * phase.cos())).powi(2)
-            })
-            .sum::<f64>();
-        SustainedMeasurement {
-            production_gain_db: 20.0 * (production_amplitude / 0.5).log10(),
-            reference_gain_db: 20.0 * (reference_amplitude / 0.5).log10(),
-            residual_db: 20.0 * ((residual_energy / frames_f64).sqrt() / input_rms).log10(),
-            total_output_db: 20.0 * ((output_energy / frames_f64).sqrt() / input_rms).log10(),
-        }
-    }
-
-    fn fit_dc_sine_cosine(
-        samples: &[f64],
-        first_index: usize,
-        rate: f64,
-        frequency: f64,
-    ) -> [f64; 3] {
-        let mut normal = [[0.0_f64; 3]; 3];
-        let mut right = [0.0_f64; 3];
-        for (offset, sample) in samples.iter().copied().enumerate() {
-            let phase = core::f64::consts::TAU * frequency * (first_index + offset) as f64 / rate;
-            let basis = [1.0, phase.sin(), phase.cos()];
-            for row in 0..3 {
-                right[row] += basis[row] * sample;
-                for column in 0..3 {
-                    normal[row][column] += basis[row] * basis[column];
-                }
-            }
-        }
-        solve_three_by_three([
-            [normal[0][0], normal[0][1], normal[0][2], right[0]],
-            [normal[1][0], normal[1][1], normal[1][2], right[1]],
-            [normal[2][0], normal[2][1], normal[2][2], right[2]],
-        ])
-    }
-
-    fn solve_three_by_three(mut augmented: [[f64; 4]; 3]) -> [f64; 3] {
-        for column in 0..3 {
-            let mut pivot = column;
-            for row in column + 1..3 {
-                if augmented[row][column].abs() > augmented[pivot][column].abs() {
-                    pivot = row;
-                }
-            }
-            augmented.swap(column, pivot);
-            let divisor = augmented[column][column];
-            assert!(divisor.is_finite() && divisor.abs() > f64::EPSILON);
-            for value in &mut augmented[column][column..] {
-                *value /= divisor;
-            }
-            let pivot_row = augmented[column];
-            for (row_index, row) in augmented.iter_mut().enumerate() {
-                if row_index == column {
-                    continue;
-                }
-                let factor = row[column];
-                for (value, pivot_value) in row[column..].iter_mut().zip(&pivot_row[column..]) {
-                    *value -= factor * pivot_value;
-                }
-            }
-        }
-        [augmented[0][3], augmented[1][3], augmented[2][3]]
-    }
-
-    fn assert_tpt_limits_and_monotonic(
-        state: ReferenceTptStateSpace,
-        rate: u32,
+        cutoff: f32,
         high_pass: bool,
-        cutoff: f64,
-    ) {
-        let nyquist = 0.5 * f64::from(rate);
-        let magnitude = |frequency| {
-            let (real, imaginary) = state
-                .response(f64::from(rate), frequency)
-                .expect("finite state-space response");
-            real.hypot(imaginary)
-        };
-        let (dc, at_nyquist) = (magnitude(0.0), magnitude(nyquist));
-        if high_pass {
-            assert!(
-                dc <= 1e-6,
-                "HPF DC limit: rate={rate}, cutoff={cutoff}, value={dc}"
-            );
-            assert!(
-                (at_nyquist - 1.0).abs() <= 1e-6,
-                "HPF Nyquist limit: rate={rate}, cutoff={cutoff}, value={at_nyquist}"
-            );
-        } else {
-            assert!(
-                (dc - 1.0).abs() <= 1e-6,
-                "LPF DC limit: rate={rate}, cutoff={cutoff}, value={dc}"
-            );
-            assert!(
-                at_nyquist <= 1e-6,
-                "LPF Nyquist limit: rate={rate}, cutoff={cutoff}, value={at_nyquist}"
-            );
-        }
-        let mut previous = magnitude(0.0);
-        for index in 1..=4_096 {
-            let current = magnitude(nyquist * f64::from(index) / 4_096.0);
-            if high_pass {
-                assert!(
-                    current + 2e-6 >= previous,
-                    "HPF monotonicity: rate={rate}, cutoff={cutoff}, index={index}, previous={previous}, current={current}"
-                );
-            } else {
-                assert!(
-                    current <= previous + 2e-6,
-                    "LPF monotonicity: rate={rate}, cutoff={cutoff}, index={index}, previous={previous}, current={current}"
-                );
-            }
-            previous = current;
-        }
+    ) -> Result<[u32; 7], BuiltinParameterError> {
+        SvfSection::design(rate, cutoff, high_pass).map(SvfSection::words)
     }
 
-    fn coherent_probes(rate: u32, cutoff: f64) -> Vec<f64> {
-        let nyquist = 0.5 * f64::from(rate);
-        let mut probes = [
-            0.25 * cutoff,
-            cutoff,
-            4.0 * cutoff,
-            0.2 * f64::from(rate),
-            0.45 * f64::from(rate),
+    /// The four prepared sections of one input chain, `[l_hpf, l_lpf, r_hpf, r_lpf]`.
+    #[must_use]
+    pub fn input_section_words(input: &InputBuiltins) -> [[u32; 7]; 4] {
+        [
+            input.track.left.hpf.words(),
+            input.track.left.lpf.words(),
+            input.track.right.hpf.words(),
+            input.track.right.lpf.words(),
         ]
-        .into_iter()
-        .map(|probe| probe.clamp(4.0, nyquist - 4.0))
-        .map(|probe| (probe / 4.0).round() * 4.0)
-        .collect::<Vec<_>>();
-        probes.sort_by(f64::total_cmp);
-        probes.dedup_by(|left, right| *left == *right);
-        probes
     }
 
-    fn cascade_probes(rate: u32) -> Vec<f64> {
-        let mut probes = coherent_probes(rate, 100.0);
-        probes.extend(coherent_probes(rate, 1_000.0));
-        probes.sort_by(f64::total_cmp);
-        probes.dedup_by(|left, right| *left == *right);
-        probes
+    /// The folded trim words of one input chain, `[left, right]`.
+    #[must_use]
+    pub fn input_trim_words(input: &InputBuiltins) -> [u32; 2] {
+        [
+            input.track.left.trim_signed.to_bits(),
+            input.track.right.trim_signed.to_bits(),
+        ]
     }
 
-    fn impulse_dft_magnitude_db(samples: &[f32], rate: f64, frequency: f64) -> f64 {
-        let phase = -core::f64::consts::TAU * frequency / rate;
-        let (step_real, step_imaginary) = (phase.cos(), phase.sin());
-        let (mut unit_real, mut unit_imaginary) = (1.0_f64, 0.0_f64);
-        let (mut real, mut imaginary) = (0.0_f64, 0.0_f64);
-        for sample in samples {
-            let sample = f64::from(*sample);
-            real += sample * unit_real;
-            imaginary += sample * unit_imaginary;
-            (unit_real, unit_imaginary) = (
-                unit_real * step_real - unit_imaginary * step_imaginary,
-                unit_real * step_imaginary + unit_imaginary * step_real,
-            );
+    /// Retained state words `[l_hpf_ic1, l_hpf_ic2, l_lpf_ic1, l_lpf_ic2, r_hpf_ic1, ..]`.
+    #[must_use]
+    pub fn input_state_words(input: &InputBuiltins) -> [u32; 8] {
+        input.stage.lane_state_words(0)
+    }
+
+    /// Overwrites the retained state words of one input chain.
+    pub fn set_input_state_words(input: &mut InputBuiltins, words: [u32; 8]) {
+        input.stage.set_lane_state_words(0, words);
+    }
+
+    /// Retained state words of one bank lane, in the [`input_state_words`] order.
+    #[must_use]
+    pub fn bank_lane_state_words(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
+        match &bank.stage {
+            InputStageKernel::Simd4(stage) => stage.lane_state_words(lane),
+            InputStageKernel::Simd8(stage) => stage.lane_state_words(lane),
         }
-        let magnitude = real.hypot(imaginary);
-        if magnitude == 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            20.0 * magnitude.log10()
+    }
+
+    /// Overwrites the retained state words of one bank lane.
+    pub fn set_bank_lane_state_words(
+        bank: &mut BuiltinInputBankV1,
+        lane: usize,
+        words: [u32; 8],
+    ) {
+        match &mut bank.stage {
+            InputStageKernel::Simd4(stage) => stage.set_lane_state_words(lane, words),
+            InputStageKernel::Simd8(stage) => stage.set_lane_state_words(lane, words),
         }
+    }
+
+    /// The current (applied) matrix of a scalar matrix section.
+    #[must_use]
+    pub fn matrix_current(matrix: &MatrixBuiltins) -> Matrix2x2 {
+        matrix.stage.read_current()[0]
+    }
+
+    /// The input section of a chain, for state injection.
+    pub fn chain_input_mut(chain: &mut BuiltinChain) -> &mut InputBuiltins {
+        &mut chain.input
+    }
+
+    /// The input section of a chain.
+    #[must_use]
+    pub fn chain_input(chain: &BuiltinChain) -> &InputBuiltins {
+        &chain.input
+    }
+
+    /// The matrix section of a chain.
+    #[must_use]
+    pub fn chain_matrix(chain: &BuiltinChain) -> &MatrixBuiltins {
+        &chain.matrix
+    }
+
+    /// The matrix section of a chain, mutably.
+    pub fn chain_matrix_mut(chain: &mut BuiltinChain) -> &mut MatrixBuiltins {
+        &mut chain.matrix
     }
 }

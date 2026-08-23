@@ -141,8 +141,7 @@ fn run_audit() {
             let report = chain
                 .process_dual_mono(
                     DualMonoBlock::new(&mut left, &mut right, first_sample).expect("fixed block"),
-                )
-                .expect("fixed block processing");
+                );
             add_report(&mut total, report);
             fold_pcm(&mut digest, &left, &right);
         }
@@ -229,7 +228,6 @@ fn traced_process(
             .process_dual_mono(
                 DualMonoBlock::new(left, right, block * QUANTUM as u64).expect("fixed block"),
             )
-            .expect("prepared chain")
     });
     eprintln!("MISO_ISSUE069_DIRECT_RT_END");
     report

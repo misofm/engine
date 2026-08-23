@@ -18,7 +18,7 @@ use miso_engine_builtins::{
     BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, BuiltinParameters, BuiltinTail,
     ChannelParameters, DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
     MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
+    PreparedMeter, builtin_bank_width, pan_matrix, validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
@@ -116,9 +116,8 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        self.bank
-            .process(left, right, frames, first_sample)
-            .map_err(render_error)?;
+        let _ = first_sample;
+        self.bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
         self.tpt_kernel_calls = self
             .tpt_kernel_calls
@@ -157,7 +156,7 @@ fn planned_builtin_bank_members(
     dispatch: KernelDispatch,
     levels: &[DependencyLevel],
 ) -> Vec<Box<[GraphNodeId]>> {
-    let Some(width) = dispatch.bank_width() else {
+    let Some(width) = builtin_bank_width(dispatch.backend()) else {
         return Vec::new();
     };
     let level_by_node: BTreeMap<_, _> = levels
@@ -850,7 +849,7 @@ impl PreparedBuiltinsSession {
         dispatch: KernelDispatch,
         levels: &[DependencyLevel],
     ) -> Option<GraphBuiltinBankResourceEstimate> {
-        let Some(width) = dispatch.bank_width() else {
+        let Some(width) = builtin_bank_width(dispatch.backend()) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
         let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
@@ -866,7 +865,7 @@ impl PreparedBuiltinsSession {
         dispatch: KernelDispatch,
         levels: &[DependencyLevel],
     ) -> PreparedBuiltinsGraphArtifact<R> {
-        let Some(width) = dispatch.bank_width() else {
+        let Some(width) = builtin_bank_width(dispatch.backend()) else {
             return self.into_graph_artifact(graph, report);
         };
         let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
@@ -892,7 +891,7 @@ impl PreparedBuiltinsSession {
                         .expect("prepared builtin member ownership")
                 })
                 .collect();
-            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, inputs, &active)
+            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, inputs)
                 .expect("selected backend and exact bank width are preparation-validated");
             selected.extend(members.iter().cloned());
             banks.push(PreparedBuiltinInputBankV1 {
@@ -1806,37 +1805,28 @@ fn add_vector_layout<T>(
 struct InputProcessor(InputBuiltins);
 impl GraphRuntimeProcessor for InputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        self.0
-            .process(
-                DualMonoBlock::new(block.left, block.right, block.first_sample)
-                    .map_err(render_error)?,
-            )
-            .map(|_| ())
-            .map_err(render_error)
+        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
+            .map_err(render_error)?;
+        self.0.process(block);
+        Ok(())
     }
 }
 struct FaderProcessor(FaderMuteBuiltins);
 impl GraphRuntimeProcessor for FaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        self.0
-            .process(
-                DualMonoBlock::new(block.left, block.right, block.first_sample)
-                    .map_err(render_error)?,
-            )
-            .map(|_| ())
-            .map_err(render_error)
+        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
+            .map_err(render_error)?;
+        self.0.process(block);
+        Ok(())
     }
 }
 struct MatrixProcessor(MatrixBuiltins);
 impl GraphRuntimeProcessor for MatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        self.0
-            .process(
-                DualMonoBlock::new(block.left, block.right, block.first_sample)
-                    .map_err(render_error)?,
-            )
-            .map(|_| ())
-            .map_err(render_error)
+        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
+            .map_err(render_error)?;
+        self.0.process(block);
+        Ok(())
     }
 }
 struct MeterObserver(MeterAccumulator);
@@ -3299,9 +3289,7 @@ mod tests {
                         let mut right = vec![0.0_f32; frames];
                         let block = DualMonoBlock::new(&mut left, &mut right, u64::from(case))
                             .expect("valid generated block");
-                        chain
-                            .process_dual_mono(block)
-                            .expect("valid generated render");
+                        chain.process_dual_mono(block);
                     }
                 }
             }

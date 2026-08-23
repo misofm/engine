@@ -295,16 +295,14 @@ impl ScalarRuntime {
     }
     fn render(&mut self, observation: u64) -> Result<(), ()> {
         for (index, chain) in self.chains.iter_mut().enumerate() {
-            chain
-                .process_input(
-                    DualMonoBlock::new(
-                        &mut self.left[index],
-                        &mut self.right[index],
-                        observation * QUANTUM as u64,
-                    )
-                    .map_err(|_| ())?,
+            chain.process_input(
+                DualMonoBlock::new(
+                    &mut self.left[index],
+                    &mut self.right[index],
+                    observation * QUANTUM as u64,
                 )
-                .map_err(|_| ())?;
+                .map_err(|_| ())?,
+            );
         }
         Ok(())
     }
@@ -333,7 +331,6 @@ impl BankRuntime {
                 backend,
                 miso_engine_effect_contract::BankWidth::Eight,
                 inputs,
-                &[true; 8],
             )
             .expect("prepared eight-lane production bank"),
             backend_name: backend_name(backend),
@@ -345,15 +342,10 @@ impl BankRuntime {
         fill_aosoa_inputs(&mut self.left, &mut self.right, 8, observation);
     }
     fn render(&mut self, observation: u64) -> Result<(), ()> {
+        let _ = observation;
         self.bank
-            .process(
-                &mut self.left,
-                &mut self.right,
-                QUANTUM as u32,
-                observation * QUANTUM as u64,
-            )
-            .map(|_| ())
-            .map_err(|_| ())
+            .process(&mut self.left, &mut self.right, QUANTUM as u32);
+        Ok(())
     }
     fn hash_output(&self, hash: &mut Sha256) {
         for track in 0..8 {

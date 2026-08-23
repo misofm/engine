@@ -643,6 +643,8 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
+ "miso-engine-lane",
+ "miso-engine-math",
 ]
 
 [[package]]

@@ -861,8 +861,7 @@ fn measure_response(
             .process_dual_mono(
                 DualMonoBlock::new(&mut left[..frames], &mut right[..frames], start as u64)
                     .expect("block"),
-            )
-            .expect("render");
+            );
         recoveries += report.recovered_left_state + report.recovered_right_state;
         impulse.extend_from_slice(&left[..frames]);
     }
@@ -948,8 +947,7 @@ fn sustained_metrics(
             .process_dual_mono(
                 DualMonoBlock::new(&mut left[..count], &mut right[..count], start as u64)
                     .expect("block"),
-            )
-            .expect("render");
+            );
         for index in 0..count {
             if start + index >= settle {
                 samples.push(f64::from(left[index]));
@@ -1549,8 +1547,7 @@ fn render_pcm(parameters: BuiltinParameters) -> Vec<u8> {
     let mut left = [0.0_f32, -0.0, 0.25, -0.5, 1.0, -1.0, 0.125, -0.25];
     let mut right = [-0.0_f32, 0.0, -0.125, 0.5, -1.0, 1.0, -0.25, 0.25];
     chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("fixture block"))
-        .expect("fixture render");
+        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("fixture block"));
     left.into_iter()
         .chain(right)
         .flat_map(f32::to_le_bytes)
@@ -1585,8 +1582,7 @@ fn render_matrix_ramp(updates: u32) -> Vec<u8> {
     let mut left = [1.0_f32; 128];
     let mut right = [-0.5_f32; 128];
     chain
-        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("ramp block"))
-        .expect("ramp render");
+        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("ramp block"));
     pack_pcm(&left, &right)
 }
 
@@ -1610,8 +1606,7 @@ fn render_matrix_retarget() -> Vec<u8> {
     let mut left = vec![1.0_f32; 4];
     let mut right = vec![-0.5_f32; 4];
     chain
-        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("first block"))
-        .expect("first render");
+        .process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("first block"));
     chain
         .set_matrix_target(Matrix2x2::IDENTITY)
         .expect("second target");
@@ -1620,8 +1615,7 @@ fn render_matrix_retarget() -> Vec<u8> {
     chain
         .process_matrix(
             DualMonoBlock::new(&mut tail_left, &mut tail_right, 4).expect("second block"),
-        )
-        .expect("second render");
+        );
     left.extend(tail_left);
     right.extend(tail_right);
     pack_pcm(&left, &right)
@@ -1656,8 +1650,7 @@ fn render_reset_fixture_v1() -> ResetFixtureV1 {
     let mut left = vec![1.0_f32, 0.0, 0.0, 0.0];
     let mut right = vec![0.0_f32; 4];
     chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("pre-reset"))
-        .expect("pre-reset render");
+        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("pre-reset"));
     let discontinuity = BuiltinResetKind::DiscontinuityKeepTargets;
     chain.reset(discontinuity);
     let mut post_left = [1.0_f32, 0.0, 0.0, 0.0];
@@ -1665,8 +1658,7 @@ fn render_reset_fixture_v1() -> ResetFixtureV1 {
     chain
         .process_dual_mono(
             DualMonoBlock::new(&mut post_left, &mut post_right, 4).expect("post-reset"),
-        )
-        .expect("post-reset render");
+        );
     let full = BuiltinResetKind::FullToPrepared;
     chain.reset(full);
     let mut full_left = [1.0_f32, 0.0, 0.0, 0.0];
@@ -1674,8 +1666,7 @@ fn render_reset_fixture_v1() -> ResetFixtureV1 {
     chain
         .process_dual_mono(
             DualMonoBlock::new(&mut full_left, &mut full_right, 8).expect("full-reset"),
-        )
-        .expect("full-reset render");
+        );
     left.extend(post_left);
     right.extend(post_right);
     left.extend(full_left);
@@ -1705,8 +1696,7 @@ fn render_lr_isolation() -> Vec<u8> {
     let mut left = [1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let mut right = [0.0_f32, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     chain
-        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("isolation block"))
-        .expect("isolation render");
+        .process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).expect("isolation block"));
     pack_pcm(&left, &right)
 }
 
@@ -1734,8 +1724,7 @@ fn render_partition() -> Vec<u8> {
                     offset as u64,
                 )
                 .expect("partition block"),
-            )
-            .expect("partition render");
+            );
     }
     pack_pcm(&left, &right)
 }
