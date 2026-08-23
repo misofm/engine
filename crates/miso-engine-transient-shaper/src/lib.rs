@@ -524,6 +524,47 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         self.left_env = el;
         self.right_env = er;
     }
+    fn snapshot(
+        &self,
+        lane: usize,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        validate_state_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.metadata.state_sizes,
+        )?;
+        write_lane(output.left, &self.left_env, &self.left, lane);
+        write_lane(output.right, &self.right_env, &self.right, lane);
+        Ok(())
+    }
+
+    fn restore(
+        &mut self,
+        lane: usize,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        if state_layout_version != TRANSIENT_SHAPER_DESCRIPTOR_V1.state_layout_version {
+            return Err(state_error("effect.state.version"));
+        }
+        validate_state_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.metadata.state_sizes,
+        )?;
+        let left = read_lane(input.left)?;
+        let right = read_lane(input.right)?;
+        self.left_env.fast = replace_lane(self.left_env.fast, lane, left.fast);
+        self.left_env.slow = replace_lane(self.left_env.slow, lane, left.slow);
+        self.right_env.fast = replace_lane(self.right_env.fast, lane, right.fast);
+        self.right_env.slow = replace_lane(self.right_env.slow, lane, right.slow);
+        self.left.ramps[lane] = left.ramps;
+        self.right.ramps[lane] = right.ramps;
+        Ok(())
+    }
 }
 
 /// Reads one lane's eleven state words out of a payload section.
@@ -721,50 +762,6 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
         return Err(state_error("effect.state.track"));
     }
     Ok(track)
-}
-
-impl<L: Lane, const W: usize> Shaper<L, W> {
-    fn snapshot(
-        &self,
-        lane: usize,
-        output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        validate_state_lengths(
-            output.common.len(),
-            output.left.len(),
-            output.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        write_lane(output.left, &self.left_env, &self.left, lane);
-        write_lane(output.right, &self.right_env, &self.right, lane);
-        Ok(())
-    }
-
-    fn restore(
-        &mut self,
-        lane: usize,
-        state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        if state_layout_version != TRANSIENT_SHAPER_DESCRIPTOR_V1.state_layout_version {
-            return Err(state_error("effect.state.version"));
-        }
-        validate_state_lengths(
-            input.common.len(),
-            input.left.len(),
-            input.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        let left = read_lane(input.left)?;
-        let right = read_lane(input.right)?;
-        self.left_env.fast = replace_lane(self.left_env.fast, lane, left.fast);
-        self.left_env.slow = replace_lane(self.left_env.slow, lane, left.slow);
-        self.right_env.fast = replace_lane(self.right_env.fast, lane, right.fast);
-        self.right_env.slow = replace_lane(self.right_env.slow, lane, right.slow);
-        self.left.ramps[lane] = left.ramps;
-        self.right.ramps[lane] = right.ramps;
-        Ok(())
-    }
 }
 
 /// Replaces one lane of a packed word, leaving the others bit-exact.

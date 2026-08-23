@@ -35,8 +35,8 @@ use miso_engine_lane::kernels::{
     svf_block_ramped,
 };
 use miso_engine_math::corpus as math_corpus;
-use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
+use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
 
 /// Independent single-lane signals in every lane case; a multiple of the widest backend.
