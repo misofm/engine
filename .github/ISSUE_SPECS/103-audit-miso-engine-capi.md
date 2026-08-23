@@ -339,9 +339,11 @@ substitute an unpinned toolchain.
 
 ## Evidence and completion
 
-Record the base/candidate/tree and exact changed paths; both historical invalid-evidence
-invocations, the fresh owner-rescope authorization, qualification-only diff inspection, exact-name
-preflight and final cumulative Miri counters; old and new Plan ownership; active-report
+Record the base/candidate/tree and exact changed paths; all historical invalid/incomplete-evidence
+invocations, the owner-directed rescope authorization, qualification-only diff inspection,
+exact-name preflight, immutable launcher/runner/command hashes, authoritative stable runner
+identity, both atomically published pipeline statuses and final cumulative Miri counters; old and
+new Plan ownership; active-report
 transition before/after a committed replacement; all 14 header ownership rows; diagnostic table;
 every cap/alignment site and exact rejection; E1–E6 results; pre-fix and corrected Miri results;
 each red mutation; independent resource-owner totals; format/Clippy/test/doc/policy results; frozen
@@ -529,10 +531,10 @@ The root and each named child must be absent before its one allowed creation. Cr
 `mkdir`, never `mkdir -p`, so pre-existence refuses the workflow. No file or directory in this
 namespace may be deleted, truncated, renamed away, cleaned or reused. The corrected-green child
 must not be created before valid red evidence and the green candidate are ready. Evidence artifacts
-are intentionally untracked and outside the worktree; the only allowed per-run helper is an exact
-`runner.sh` inside its own evidence child. That helper is evidence for one launch, not repository
-tooling, and must never appear in the worktree, Git index or a commit. No other untracked helper is
-allowed.
+are intentionally untracked and outside the worktree; the only allowed per-run helpers are exact
+`launcher.sh` and `runner.sh` files inside their own evidence child. Those helpers are evidence for
+one launch, not repository tooling, and must never appear in the worktree, Git index or a commit.
+No other untracked helper is allowed.
 
 Every child is append-only while active and sealed read-only after completion or terminal
 classification. An incomplete child may receive exactly one atomically published
@@ -547,22 +549,23 @@ each command is resolvable. Each run child is prepared with these atomically pub
 launch:
 
 - `command.txt`: the exact human-readable command, one line;
-- `runner.sh`: the frozen Bash runner with an argv array matching `command.txt` without `eval`;
-- `runner.sha256`, `command.sha256`, `repo-state.txt` and `environment.txt`;
+- `launcher.sh` and `runner.sh`: the frozen strict-mode launcher and runner, with the runner argv
+  array matching `command.txt` without `eval`;
+- `launcher.sha256`, `runner.sha256`, `command.sha256`, `repo-state.txt` and `environment.txt`;
 - an empty, newly created `transcript.partial`.
 
 Write each file to a same-directory unique temporary name and publish it with `mv`. Record the
 absolute worktree path, Git HEAD/tree, branch, `ffi.rs` blob, toolchain, Miri component state, PATH
 and UTC time in `repo-state.txt`/`environment.txt`. Make the prepared command, runner and metadata
 read-only. Root, Sol High and Sol XHigh must compare the argv array with `command.txt` and record the
-runner/command hashes before launch.
+launcher/runner/command hashes before launch.
 
 The frozen runner body must implement this algorithm, with only the evidence directory and command
 argv differing by phase:
 
 ```bash
 #!/usr/bin/env bash
-set -u -o pipefail
+set -euo pipefail
 umask 077
 readonly RUN_DIR='ABSOLUTE_PHASE_DIRECTORY'
 readonly WORKTREE='/tmp/engine-v2-103-retry.o8pyzA/worktree'
@@ -571,7 +574,7 @@ readonly -a CMD=( EXACT_ARGV_WITHOUT_EVAL )
 cd "$WORKTREE" || exit 125
 printf '%s\n' "$$" >"$RUN_DIR/runner.pid.tmp.$$"
 mv "$RUN_DIR/runner.pid.tmp.$$" "$RUN_DIR/runner.pid"
-ps -o pid=,ppid=,pgid=,sid=,lstart=,args= -p "$$" \
+ps -o pid=,pgid=,sid=,lstart=,args= -p "$$" \
   >"$RUN_DIR/process.identity.tmp.$$"
 mv "$RUN_DIR/process.identity.tmp.$$" "$RUN_DIR/process.identity"
 while [[ ! -d "$RUN_DIR/START" ]]; do
@@ -580,8 +583,10 @@ done
 
 set +e
 "${CMD[@]}" 2>&1 | tee -a "$RUN_DIR/transcript.partial"
-command_status=${PIPESTATUS[0]}
+pipeline_status=( "${PIPESTATUS[@]}" )
 set -e
+command_status=${pipeline_status[0]}
+capture_status=${pipeline_status[1]}
 
 cp "$RUN_DIR/transcript.partial" "$RUN_DIR/transcript.final.tmp.$$"
 mv "$RUN_DIR/transcript.final.tmp.$$" "$RUN_DIR/transcript.final"
@@ -589,45 +594,65 @@ sha256sum "$RUN_DIR/transcript.final" >"$RUN_DIR/transcript.sha256.tmp.$$"
 mv "$RUN_DIR/transcript.sha256.tmp.$$" "$RUN_DIR/transcript.sha256"
 printf '%s\n' "$command_status" >"$RUN_DIR/exit.status.tmp.$$"
 mv "$RUN_DIR/exit.status.tmp.$$" "$RUN_DIR/exit.status"
+printf '%s\n' "$capture_status" >"$RUN_DIR/capture.status.tmp.$$"
+mv "$RUN_DIR/capture.status.tmp.$$" "$RUN_DIR/capture.status"
 printf '%s\n' complete >"$RUN_DIR/COMPLETE.tmp.$$"
 mv "$RUN_DIR/COMPLETE.tmp.$$" "$RUN_DIR/COMPLETE"
 chmod -R a-w "$RUN_DIR"
 exit "$command_status"
 ```
 
-The launcher must be a short non-Miri shell action. From outside the child, it first executes
-`mkdir "$RUN_DIR/LAUNCH_ONCE"`. That atomic directory creation is the one-shot sentinel and
-consumes the phase's launch slot; failure because it exists is terminal and must never fall through
-to launch. It then runs exactly:
+The frozen `launcher.sh` is a short non-Miri shell action. It runs in strict mode and explicitly
+refuses a reused sentinel with status `124`. Atomic creation of `LAUNCH_ONCE` consumes the phase's
+launch slot; failure must never fall through to launch. It is exactly:
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+readonly RUN_DIR='ABSOLUTE_PHASE_DIRECTORY'
+
+if ! mkdir -- "$RUN_DIR/LAUNCH_ONCE"; then
+  exit 124
+fi
 nohup setsid bash "$RUN_DIR/runner.sh" </dev/null \
   >>"$RUN_DIR/launcher.log" 2>&1 &
 launcher_pid=$!
 printf '%s\n' "$launcher_pid" >"$RUN_DIR/launcher.pid.tmp.$launcher_pid"
-mv "$RUN_DIR/launcher.pid.tmp.$launcher_pid" "$RUN_DIR/launcher.pid"
-mkdir "$RUN_DIR/START"
+mv -- "$RUN_DIR/launcher.pid.tmp.$launcher_pid" "$RUN_DIR/launcher.pid"
+mkdir -- "$RUN_DIR/START"
 ```
 
-The runner records its identity and waits before invoking its argv. The launcher publishes
-`launcher.pid`, then atomically creates `START`; this prevents an immediate command failure from
-sealing the directory before the recoverable launcher identity exists. The caller returns after
-creating `START`; it does not wait interactively for Miri. If the launcher turn ends between PID
-publication and `START`, root may create the missing `START` only after matching the live recorded
-runner identity; that continues the already consumed launch and is not a rerun.
+Invoke only `bash "$RUN_DIR/launcher.sh"`. After `LAUNCH_ONCE`, `set -euo pipefail` makes every
+later launcher step fail closed. Such a failure consumes the slot; it authorizes only the exact
+live-runner missing-`START` recovery below, never a launcher rerun.
+
+The runner records its identity and waits before invoking its argv. The launcher publishes its
+advisory `launcher.pid`, then atomically creates `START`; this prevents an immediate command failure
+from sealing the directory before the authoritative runner identity exists. The caller returns after
+creating `START`; it does not wait interactively for Miri. If the launcher fails or its turn ends
+before `START`, root may create the missing `START` only when authoritative `runner.pid` and
+`process.identity` exist and their stable identity exactly matches the live runner. This recovery
+does not require `launcher.pid`; it continues the already consumed launch and is not a rerun.
 
 `nohup` plus the new `setsid` session makes the runner independent of the launching agent/reporting
-turn. `runner.pid`, `process.identity`, `launcher.pid`, the absolute runner path and the recorded
-argv make the live process recoverable. A later observer must compare the recorded identity and
-current `ps` row, not rely on `kill -0` alone because PIDs can be reused. Monitoring reads the
-artifacts and process state only, except for the bounded missing-`START` recovery above; it must
-never invoke the command again.
+turn. `runner.pid` plus `process.identity` are authoritative. Stable identity is the exact PID,
+PGID, SID, start time and absolute `bash /.../runner.sh` argv; PPID is deliberately excluded because
+it can change across detachment/reparenting. `launcher.pid` is advisory only and its absence cannot
+defeat recovery when the authoritative runner identity matches. A later observer must compare the
+entire stable tuple with a current `ps` row, not rely on `kill -0` alone because PIDs can be reused.
+Monitoring reads the artifacts and process state only, except for the bounded missing-`START`
+recovery above; it must never invoke the command again.
 
 `transcript.partial` is the live combined stdout/stderr record and remains available during
-execution. The runner publishes `transcript.final`, its digest and `exit.status` by same-directory
-atomic renames, then publishes `COMPLETE` last. These atomic renames protect readers from mistaking
-a partially written final artifact for completion. They are process-lifetime durability, not a
-claim of persistence across host loss.
+execution. Immediately after the pipeline, the runner snapshots both `PIPESTATUS` entries before
+any other command can overwrite them: command status becomes `exit.status`, while `tee` status
+becomes `capture.status`. It publishes `transcript.final`, its digest and both statuses by
+same-directory atomic renames, then publishes `COMPLETE` last. `capture.status` must be `0` for
+synthetic, red and green evidence; a nonzero capture status means output evidence may be incomplete
+and is terminal. These atomic renames protect readers from mistaking a partially written final
+artifact for completion. They are process-lifetime durability, not a claim of persistence across
+host loss.
 
 ### Harmless synthetic capture preflight
 
@@ -640,20 +665,26 @@ readonly -a CMD=(
 ```
 
 Its `command.txt` must represent that argv exactly. It is authorized once and must not call Cargo,
-rustc, any test binary or Miri. While its recorded process identity is live, root must observe both
-tokens in `transcript.partial` and prove that `COMPLETE` and `exit.status` are still absent. After
-completion, `transcript.final` must contain both tokens, match `transcript.partial` and its recorded
-SHA-256, `exit.status` must contain exactly `23`, `COMPLETE` must exist, and the child must be
-read-only. This proves live partial capture, detachment, recovery and atomic final publication
-without consuming a Miri slot. Any mismatch is HOLD: do not prepare or launch the intended red.
+rustc, any test binary or Miri. While its authoritative recorded runner identity matches live, root
+must observe both tokens in `transcript.partial` and prove that `COMPLETE`, `exit.status` and
+`capture.status` are still absent. After completion, `transcript.final` must contain both tokens,
+match `transcript.partial` and its recorded SHA-256, `exit.status` must contain exactly `23`,
+`capture.status` must contain exactly `0`,
+`COMPLETE` must exist, and the child must be read-only. This proves live partial capture,
+detachment, recovery and atomic final publication without consuming a Miri slot. Any mismatch is
+HOLD: do not prepare or launch the intended red.
 
 ### Three-party PRE-MIRI audit and exact launch commands
 
 After the synthetic preflight passes, prepare but do not arm `pre-fix-red-v1`. Root, Sol High and
 Sol XHigh must each record PRE-MIRI PASS for all of the following:
 
-- synthetic artifacts and exit `23` are exact and immutable;
-- the red child is fresh, has no `LAUNCH_ONCE`, and its frozen runner matches the protocol;
+- synthetic artifacts, exit `23` and capture status `0` are exact and immutable;
+- the red child is fresh, has no `LAUNCH_ONCE`, and its frozen launcher/runner match the protocol;
+- both helpers use strict mode; the launcher has the explicit fail-closed sentinel/status-124 law;
+  the runner immediately captures both pipeline statuses and atomically publishes both status files;
+- authoritative runner identity records exactly PID/PGID/SID/start time/absolute runner argv with
+  PPID excluded, and `launcher.pid` is treated as advisory;
 - HEAD/tree and changed-path fence are recorded; `ffi.rs` hashes to
   `d09e3f289e85770a41335fdd0bfdb58a771173da`;
 - all scaffold additions remain test-only; the exact E1 name occurs once; wrapper provenance,
@@ -672,10 +703,11 @@ Only root may arm and launch the detached red after all three PRE-MIRI passes ar
 may paste or invoke that command directly in an interactive shell or tool call.
 
 After valid red evidence and implementation attempt 1, prepare `corrected-green-v1` from scratch.
-Root, Sol High and Sol XHigh must again audit the immutable runner/command/repo-state artifacts,
-exact test name/filter/16-iteration Miri branch, unchanged test-only scaffold semantics, the green
-candidate HEAD/tree and all non-Miri gates. Its argv and `command.txt` are byte-for-byte identical
-to the red command above. Only root may create its `LAUNCH_ONCE` and detach it. The directories,
+Root, Sol High and Sol XHigh must again audit the immutable launcher/runner/command/repo-state
+artifacts, exact test name/filter/16-iteration Miri branch, unchanged test-only scaffold semantics,
+the green candidate HEAD/tree, stable runner identity law, two-status publication and all non-Miri
+gates. Its argv and `command.txt` are byte-for-byte identical to the red command above. Only root
+may create its `LAUNCH_ONCE` and detach it. The directories,
 runner files and artifacts may not be copied from red; their content must be freshly generated and
 hashed so phase identity cannot be confused.
 
@@ -686,18 +718,21 @@ the runner or Cargo fails. Classify artifacts as follows:
 
 - no `LAUNCH_ONCE`: not launched; on a preparation defect, abandon that unarmed child forever and
   rebrief a new child name—never correct, delete or reuse it;
-- `LAUNCH_ONCE`, matching live process identity, partial transcript and no `COMPLETE`: still
-  running; recover/monitor the detached process and do not launch anything;
-- `LAUNCH_ONCE`, no matching live process, and missing `COMPLETE`, final transcript or exit status:
+- `LAUNCH_ONCE`, matching live authoritative runner identity, partial transcript and no `COMPLETE`:
+  still running; recover/monitor the detached process and do not launch anything;
+- `LAUNCH_ONCE`, no matching authoritative runner identity, and missing `COMPLETE`, final
+  transcript or either status:
   incomplete infrastructure evidence; preserve and seal partial artifacts, consume the slot and
   STOP;
-- `COMPLETE` with missing/mismatched final transcript, digest, status, command or identity:
+- `COMPLETE` with missing/mismatched final transcript, digest, either status, command or stable
+  runner identity, or with nonzero `capture.status`:
   corrupt/incomplete evidence; consume the slot and STOP;
 - red completion: valid only when the final transcript reports exactly `running 1 test`, the exit
-  status is nonzero, and the diagnostic specifically reaches the retained production whole-Plan
-  alias/data-race conflict; pass, zero tests or any unrelated failure is terminal;
+  status is nonzero, `capture.status` is `0`, and the diagnostic specifically reaches the retained
+  production whole-Plan alias/data-race conflict; pass, zero tests or any unrelated failure is
+  terminal;
 - green completion: valid only when the final transcript reports exactly `running 1 test`, exit
-  status is `0`, and the exact E1 passes; any other result is terminal.
+  status and `capture.status` are both `0`, and the exact E1 passes; any other result is terminal.
 
 Partial transcript text alone never proves red or green, even if it contains an expected fragment.
 If only partial artifacts survive, do not infer completion from the lack of a process. No retry,

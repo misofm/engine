@@ -52,28 +52,40 @@ allowance does not alter the final stable all-targets `-D warnings` gate, which 
 Use only the exact external namespace
 `/tmp/engine-v2-103-retry.o8pyzA/evidence/issue-103-f2-f3-rescope-3/` with separate never-reused
 children `capture-preflight-v1`, `pre-fix-red-v1` and `corrected-green-v1`. Each child owns its
-read-only exact command, Bash argv runner, hashes, repository/environment record, live combined
-`transcript.partial`, PID/process identity, atomic final transcript/digest/status and final
-`COMPLETE`. No runner or artifact may appear untracked in the repository.
+read-only exact command, strict Bash launcher/argv runner, hashes, repository/environment record,
+live combined `transcript.partial`, authoritative runner identity, atomic final transcript/digest/
+command-status/capture-status files and final `COMPLETE`. No helper or artifact may appear
+untracked in the repository.
 
 Each launch is armed exactly once by atomically creating `LAUNCH_ONCE`, then uses `nohup setsid`
-and a recoverable PID. The runner records its identity and waits on atomic `START`; the launcher
-publishes its PID before creating `START`. Final files are published by same-directory `mv`, with
-`COMPLETE` last, then the child is sealed read-only. No cleanup, overwrite, reuse or direct command
-invocation is allowed.
+and a recoverable identity. The launcher uses `set -euo pipefail` plus explicit
+`if ! mkdir -- .../LAUNCH_ONCE; then exit 124; fi`; every later launcher step fails closed. The
+runner uses `set -euo pipefail`, disables `-e` only around its command/`tee` pipeline, immediately
+captures both `PIPESTATUS` entries, and atomically publishes `exit.status` and `capture.status`.
+`capture.status` must be `0` for every phase. Final files use same-directory `mv`, with `COMPLETE`
+last, then the child is sealed read-only. No cleanup, overwrite, reuse or direct command invocation
+is allowed.
+
+`runner.pid` plus `process.identity` are authoritative and must match live PID, PGID, SID, start
+time and absolute runner argv; PPID is excluded. `launcher.pid` is advisory. A missing `START` may
+be recovered by root whenever that authoritative live runner tuple matches, even when
+`launcher.pid` is absent; this continues the consumed launch and is not a rerun.
 
 First prove the mechanism once with the spec's harmless Bash command: combined stdout/stderr tokens,
-a 15-second live partial-capture interval and final exit `23`. It invokes neither Cargo nor Miri.
+a 15-second live partial-capture interval, final exit `23` and capture status `0`. It invokes
+neither Cargo nor Miri.
 Then root, Sol High and Sol XHigh must independently pass the synthetic artifacts, unarmed red
-runner/command hashes, exact adopted `ffi.rs` blob, test-only/provenance/barrier/join/destruction
-laws, retained production defect and non-Miri preflights. Only root may arm the intended-red child.
+launcher/runner/command hashes, exact adopted `ffi.rs` blob, test-only/provenance/barrier/join/
+destruction laws, retained production defect and non-Miri preflights. Only root may arm the
+intended-red child.
 After valid red, implementation and green non-Miri gates, repeat the three-party artifact audit on
 the separately generated corrected child before root arms it.
 
 The exact Miri argv in both Miri children is the single named pinned command in the spec. If only a
-partial transcript survives, the process identity controls recovery while live; a dead/mismatched
-process without atomically complete artifacts is terminal incomplete evidence. Partial text never
-proves red or green. `LAUNCH_ONCE` always consumes that phase's slot.
+partial transcript survives, the authoritative stable runner identity controls recovery while
+live; a dead/mismatched runner without atomically complete transcript, digest and both status files
+is terminal incomplete evidence. Partial text never proves red or green, and nonzero
+`capture.status` invalidates every phase. `LAUNCH_ONCE` always consumes that phase's slot.
 
 ## Exact implementation
 
@@ -137,8 +149,9 @@ Do not weaken a gate or land a partial F2/F3 checkpoint.
 
 The prior workflow remains stopped. This successor supplies its required material rescope, but Miri
 may not start until the synthetic proof and root/High/XHigh PRE-MIRI audits pass. Stop on an armed
-child with incomplete/corrupt artifacts, dead or mismatched process identity, an unrelated red,
-unexpected red pass or any green failure. Preserve and seal the evidence; do not clean or rerun.
+child with incomplete/corrupt artifacts, nonzero capture status, dead or mismatched authoritative
+runner identity, an unrelated red, unexpected red pass or any green failure. Preserve and seal the
+evidence; do not clean or rerun.
 
 ## Terminal verdict
 
