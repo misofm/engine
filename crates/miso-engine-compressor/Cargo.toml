@@ -15,6 +15,8 @@ miso-engine-effect-contract.workspace = true
 [dev-dependencies]
 # The independent f64 oracle is test-only and never reachable from production code.
 miso-engine-dsp-reference.workspace = true
+# Frozen SplitMix64 fixture generator for the timing example and the eval corpora.
+miso-engine-conformance.workspace = true
 
 [lints]
 workspace = true
