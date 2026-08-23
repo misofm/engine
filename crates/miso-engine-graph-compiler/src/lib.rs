@@ -1326,6 +1326,9 @@ fn topo(
     if schedule.len() != nodes.len() {
         None
     } else {
+        for nodes in levels.values_mut() {
+            nodes.sort();
+        }
         Some((
             schedule,
             levels
@@ -2088,8 +2091,9 @@ mod tests {
         NativeGraphRenderModeV1, NativeSchedulerConfigV1, SchedulerSelectionV1,
     };
     use miso_engine_session::{
-        CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
-        Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
+        CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
+        RouteDestination, RouteSource, Sidechain, SidechainDeclaration, StableId, Submix,
+        compile_session, parse_session_toml,
     };
     use std::sync::{
         Arc,
@@ -2817,6 +2821,454 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    fn compile_reverse_route_submix_fixture(plan_id: u64) -> PreparedGraphArtifact {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        model.submixes = vec![
+            Submix {
+                id: StableId::parse("a-submix").expect("submix id"),
+            },
+            Submix {
+                id: StableId::parse("z-submix").expect("submix id"),
+            },
+        ];
+        let base_route = model.routes[0].clone();
+        let mut to_a = base_route.clone();
+        to_a.id = StableId::parse("to-a-submix").expect("route id");
+        to_a.destination = RouteDestination::SubmixInput {
+            submix_id: StableId::parse("a-submix").expect("submix id"),
+        };
+        let mut to_z = base_route.clone();
+        to_z.id = StableId::parse("to-z-submix").expect("route id");
+        to_z.destination = RouteDestination::SubmixInput {
+            submix_id: StableId::parse("z-submix").expect("submix id"),
+        };
+        let mut z_downstream = base_route.clone();
+        z_downstream.id = StableId::parse("z-downstream").expect("route id");
+        z_downstream.source = RouteSource::SubmixOutput {
+            submix_id: StableId::parse("a-submix").expect("submix id"),
+        };
+        let mut a_downstream = base_route;
+        a_downstream.id = StableId::parse("a-downstream").expect("route id");
+        a_downstream.source = RouteSource::SubmixOutput {
+            submix_id: StableId::parse("z-submix").expect("submix id"),
+        };
+        model.routes = vec![to_a, to_z, z_downstream, a_downstream];
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled reverse-route submix session");
+        GraphCompiler::compile(GraphCompileRequest {
+            plan_id,
+            effects: EffectPreparedSession {
+                session,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    fn dependency_level_contract(
+        report: &GraphCompileReport,
+        levels: &[DependencyLevel],
+    ) -> Result<(), &'static str> {
+        if levels.is_empty() || levels.windows(2).any(|pair| pair[0].level >= pair[1].level) {
+            return Err("level order");
+        }
+        let mut level_by_node = BTreeMap::new();
+        for level in levels {
+            if level.nodes.is_empty() || level.nodes.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err("member order");
+            }
+            for node in &level.nodes {
+                if level_by_node.insert(node.clone(), level.level).is_some() {
+                    return Err("duplicate level member");
+                }
+            }
+        }
+        let compiled_nodes: BTreeSet<_> = report.nodes.iter().map(|node| node.id.clone()).collect();
+        if level_by_node.keys().cloned().collect::<BTreeSet<_>>() != compiled_nodes {
+            return Err("level membership");
+        }
+        let schedule_nodes: BTreeSet<_> = report.sequential_schedule.iter().cloned().collect();
+        if schedule_nodes != compiled_nodes
+            || schedule_nodes.len() != report.sequential_schedule.len()
+        {
+            return Err("schedule membership");
+        }
+        if report
+            .edges
+            .iter()
+            .any(|edge| level_by_node[&edge.source.node] >= level_by_node[&edge.destination.node])
+        {
+            return Err("edge dependency");
+        }
+        Ok(())
+    }
+
+    fn canonical_with_levels(report: &GraphCompileReport, levels: &[DependencyLevel]) -> Vec<u8> {
+        canonical_bytes(CanonicalParts {
+            rate: 48_000,
+            quantum: 128,
+            nodes: &report.nodes,
+            ports: &report.ports,
+            edges: &report.edges,
+            schedule: &report.sequential_schedule,
+            levels,
+            routes: &report.route_timings,
+            route_transforms: &report.route_transforms,
+            delays: &report.inserted_delays,
+            reductions: &report.reductions,
+            buffers: &report.buffer_assignments,
+            estimate: &report.estimate,
+        })
+    }
+
+    fn reverse_fixture_identity_contract(
+        report: &GraphCompileReport,
+        levels: &[DependencyLevel],
+        expected_schedule: &[&str],
+        expected_sha256: &str,
+    ) -> Result<(), &'static str> {
+        dependency_level_contract(report, levels)?;
+        if report
+            .sequential_schedule
+            .iter()
+            .map(node_text)
+            .collect::<Vec<_>>()
+            != expected_schedule
+        {
+            return Err("schedule identity");
+        }
+        let canonical = canonical_with_levels(report, levels);
+        if canonical != report.canonical_debug_bytes
+            || hex_sha256(&canonical) != report.sha256
+            || report.sha256 != expected_sha256
+        {
+            return Err("canonical identity");
+        }
+        Ok(())
+    }
+
+    fn render_reverse_route_submix(
+        artifact: PreparedGraphArtifact,
+        render_mode: NativeGraphRenderModeV1,
+    ) -> (Vec<u32>, SchedulerSelectionV1, u64, bool) {
+        let envelope = artifact.graph.envelope;
+        let nodes = artifact
+            .graph
+            .required_bindings
+            .iter()
+            .cloned()
+            .map(|node| {
+                let processor: Box<dyn GraphRuntimeProcessor> = if matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                ) {
+                    Box::new(ImpulseBinding)
+                } else {
+                    Box::new(IdentityBinding)
+                };
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let observer_order = Arc::new(AtomicU64::new(0));
+        let observed_audio = Arc::new(AtomicBool::new(false));
+        let observed_node = track_node("vocal", TrackStage::PostMatrix);
+        let bindings = GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: vec![
+                GraphNodeObserverBinding::new(
+                    observed_node.clone(),
+                    2,
+                    Box::new(OrderedPostBankObserver {
+                        expected_order: 1,
+                        order: Arc::clone(&observer_order),
+                        observed_post_bank_audio: Arc::clone(&observed_audio),
+                    }),
+                ),
+                GraphNodeObserverBinding::new(
+                    observed_node,
+                    1,
+                    Box::new(OrderedPostBankObserver {
+                        expected_order: 0,
+                        order: Arc::clone(&observer_order),
+                        observed_post_bank_audio: Arc::clone(&observed_audio),
+                    }),
+                ),
+            ],
+        };
+        let prepared = artifact
+            .graph
+            .bind_native(
+                bindings,
+                NativeGraphBindConfigV1 {
+                    render_mode,
+                    scheduler: NativeSchedulerConfigV1::new(
+                        NonZeroUsize::new(4).expect("four lanes"),
+                        true,
+                    ),
+                    maximum_retained_bytes: 1 << 20,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("native bind: {}", failure.code));
+        let selection = prepared.metadata.selection;
+        let mut plan = prepared.into_plan();
+        let frames = envelope.quantum.0 as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        plan.render(
+            RenderIo {
+                input: None,
+                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+            },
+            RenderTime { absolute_sample: 0 },
+        )
+        .expect("reverse-route submix render");
+        (
+            pcm.into_iter().map(f32::to_bits).collect(),
+            selection,
+            observer_order.load(Ordering::SeqCst),
+            observed_audio.load(Ordering::SeqCst),
+        )
+    }
+
+    #[test]
+    fn issue122_reverse_route_ids_emit_sorted_levels_and_bind_both_native_modes() {
+        let baseline = compile_reverse_route_submix_fixture(122_000);
+        let existing_fixture = compile_fixture(122_001);
+        dependency_level_contract(
+            &existing_fixture.report,
+            &existing_fixture.report.dependency_levels,
+        )
+        .expect("existing deterministic fixture level contract");
+
+        let expected_schedule = [
+            "track:vocal:input",
+            "track:vocal:post-input-builtins",
+            "track:vocal:post-simd1",
+            "track:vocal:post-dynamic",
+            "track:vocal:post-simd2-pre-fader",
+            "track:vocal:post-fader",
+            "track:vocal:post-matrix",
+            "route:to-a-submix",
+            "route:to-z-submix",
+            "submix:a-submix",
+            "route:z-downstream",
+            "submix:z-submix",
+            "route:a-downstream",
+            "output:main-out",
+        ];
+        reverse_fixture_identity_contract(
+            &baseline.report,
+            &baseline.report.dependency_levels,
+            &expected_schedule,
+            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+        )
+        .expect("sorted production identity");
+        let level_transcript: Vec<_> = baseline
+            .report
+            .dependency_levels
+            .iter()
+            .map(|level| {
+                (
+                    level.level,
+                    level.nodes.iter().map(node_text).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let expected_levels = vec![
+            (0, vec!["track:vocal:input".to_owned()]),
+            (1, vec!["track:vocal:post-input-builtins".to_owned()]),
+            (2, vec!["track:vocal:post-simd1".to_owned()]),
+            (3, vec!["track:vocal:post-dynamic".to_owned()]),
+            (4, vec!["track:vocal:post-simd2-pre-fader".to_owned()]),
+            (5, vec!["track:vocal:post-fader".to_owned()]),
+            (6, vec!["track:vocal:post-matrix".to_owned()]),
+            (
+                7,
+                vec![
+                    "route:to-a-submix".to_owned(),
+                    "route:to-z-submix".to_owned(),
+                ],
+            ),
+            (
+                8,
+                vec!["submix:a-submix".to_owned(), "submix:z-submix".to_owned()],
+            ),
+            (
+                9,
+                vec![
+                    "route:a-downstream".to_owned(),
+                    "route:z-downstream".to_owned(),
+                ],
+            ),
+            (10, vec!["output:main-out".to_owned()]),
+        ];
+        assert_eq!(level_transcript, expected_levels);
+
+        let levels_by_node: BTreeMap<_, _> = baseline
+            .report
+            .dependency_levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .nodes
+                    .iter()
+                    .cloned()
+                    .map(move |node| (node, level.level))
+            })
+            .collect();
+        let mut legacy_levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
+        for node in &baseline.report.sequential_schedule {
+            legacy_levels
+                .entry(levels_by_node[node])
+                .or_default()
+                .push(node.clone());
+        }
+        let legacy_levels: Vec<_> = legacy_levels
+            .into_iter()
+            .map(|(level, nodes)| DependencyLevel { level, nodes })
+            .collect();
+        assert_eq!(
+            legacy_levels[9]
+                .nodes
+                .iter()
+                .map(node_text)
+                .collect::<Vec<_>>(),
+            ["route:z-downstream", "route:a-downstream"]
+        );
+        assert_eq!(
+            dependency_level_contract(&baseline.report, &legacy_levels),
+            Err("member order")
+        );
+        let legacy_canonical = canonical_with_levels(&baseline.report, &legacy_levels);
+        let without_levels = |bytes: &[u8]| {
+            core::str::from_utf8(bytes)
+                .expect("canonical UTF-8")
+                .lines()
+                .filter(|line| !line.starts_with("level\t"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            without_levels(&legacy_canonical),
+            without_levels(&baseline.report.canonical_debug_bytes)
+        );
+        assert_ne!(legacy_canonical, baseline.report.canonical_debug_bytes);
+        assert_eq!(
+            hex_sha256(&legacy_canonical),
+            "6676779806af8bb20c9abb287a39488512fc7c0972e96f6cd300f469539bd770"
+        );
+        assert_eq!(
+            baseline.report.sha256,
+            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce"
+        );
+        let mut reversed = baseline.report.dependency_levels.clone();
+        reversed[9].nodes.reverse();
+        assert_eq!(
+            dependency_level_contract(&baseline.report, &reversed),
+            Err("member order")
+        );
+        let mut omitted = baseline.report.dependency_levels.clone();
+        omitted[9].nodes.pop();
+        assert_eq!(
+            dependency_level_contract(&baseline.report, &omitted),
+            Err("level membership")
+        );
+        let mut duplicate = baseline.report.dependency_levels.clone();
+        let duplicate_node = duplicate[9].nodes[0].clone();
+        duplicate[10].nodes.insert(0, duplicate_node);
+        assert_eq!(
+            dependency_level_contract(&baseline.report, &duplicate),
+            Err("duplicate level member")
+        );
+        let mut schedule_corruption = baseline.report.clone();
+        schedule_corruption.sequential_schedule.swap(9, 11);
+        assert_eq!(
+            reverse_fixture_identity_contract(
+                &schedule_corruption,
+                &schedule_corruption.dependency_levels,
+                &expected_schedule,
+                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+            ),
+            Err("schedule identity")
+        );
+        let mut canonical_corruption = baseline.report.clone();
+        canonical_corruption.canonical_debug_bytes[0] ^= 1;
+        assert_eq!(
+            reverse_fixture_identity_contract(
+                &canonical_corruption,
+                &canonical_corruption.dependency_levels,
+                &expected_schedule,
+                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+            ),
+            Err("canonical identity")
+        );
+
+        let repeated = compile_reverse_route_submix_fixture(122_003);
+        assert_eq!(
+            repeated.report.sequential_schedule,
+            baseline.report.sequential_schedule
+        );
+        assert_eq!(
+            repeated.report.canonical_debug_bytes,
+            baseline.report.canonical_debug_bytes
+        );
+        assert_eq!(repeated.report.sha256, baseline.report.sha256);
+        assert_eq!(
+            repeated.report.buffer_assignments,
+            baseline.report.buffer_assignments
+        );
+        assert_eq!(repeated.report.output_latency, LatencySamples(0));
+        assert!(repeated.report.inserted_delays.is_empty());
+
+        let single_artifact = compile_reverse_route_submix_fixture(122_004);
+        let wave_artifact = compile_reverse_route_submix_fixture(122_005);
+        for artifact in [&single_artifact, &wave_artifact] {
+            assert_eq!(
+                artifact.report.output_latency,
+                baseline.report.output_latency
+            );
+            assert_eq!(
+                artifact.report.inserted_delays,
+                baseline.report.inserted_delays
+            );
+            assert_eq!(artifact.report.route_timings, baseline.report.route_timings);
+            assert_eq!(
+                artifact.report.canonical_debug_bytes,
+                baseline.report.canonical_debug_bytes
+            );
+            assert_eq!(artifact.report.sha256, baseline.report.sha256);
+        }
+        let single =
+            render_reverse_route_submix(single_artifact, NativeGraphRenderModeV1::SingleThread);
+        let wave =
+            render_reverse_route_submix(wave_artifact, NativeGraphRenderModeV1::DependencyWaves);
+        assert!(matches!(single.1, SchedulerSelectionV1::Sequential(_)));
+        assert_eq!(wave.1, SchedulerSelectionV1::Parallel);
+        assert_eq!(single.0, wave.0);
+        assert_eq!(single.0[0], 2.0_f32.to_bits());
+        assert_eq!(single.0[128], (-2.0_f32).to_bits());
+        assert!(single.0[1..128].iter().all(|sample| *sample == 0));
+        assert!(single.0[129..].iter().all(|sample| *sample == 0));
+        assert_eq!((single.2, single.3), (2, true));
+        assert_eq!((wave.2, wave.3), (2, true));
     }
 
     #[test]

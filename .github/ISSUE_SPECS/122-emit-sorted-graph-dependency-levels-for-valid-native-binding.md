@@ -196,3 +196,58 @@ zero prohibited counters; and Sol High/Sol XHigh verdicts.
 Issue-098 executor or buffer-coloring correction; plan lowering; bank/cohort unification; graph or
 scheduler optimization; new features or APIs; fixture expansion; target/browser/device matrix;
 benchmark, timing, workload, soak or listening execution; or V1/legacy inspection.
+
+## Sol High pass-1 evidence — 2026-08-23
+
+The product correction is limited to sorting each completed `topo` dependency-level member vector.
+The existing Kahn ready-pop loop, node-level calculation and sequential schedule are unchanged.
+
+The focused production-path regression compiles this exact topology:
+
+```text
+track:vocal:post-matrix
+  -> route:to-a-submix -> submix:a-submix -> route:z-downstream --+
+  -> route:to-z-submix -> submix:z-submix -> route:a-downstream --+-> output:main-out
+```
+
+The frozen Kahn schedule is:
+
+```text
+track:vocal:input, track:vocal:post-input-builtins, track:vocal:post-simd1,
+track:vocal:post-dynamic, track:vocal:post-simd2-pre-fader, track:vocal:post-fader,
+track:vocal:post-matrix, route:to-a-submix, route:to-z-submix, submix:a-submix,
+route:z-downstream, submix:z-submix, route:a-downstream, output:main-out
+```
+
+Its corrected dependency-level transcript is levels 0–6 containing the corresponding single
+track stages above, level 7 `[route:to-a-submix, route:to-z-submix]`, level 8
+`[submix:a-submix, submix:z-submix]`, level 9
+`[route:a-downstream, route:z-downstream]`, and level 10 `[output:main-out]`.
+Reconstructing members in frozen schedule order produces the pre-correction level-9 mutation
+`[route:z-downstream, route:a-downstream]`; the independent contract rejects it before binding.
+Explicit reversed, omitted, duplicated, schedule-swapped and canonical-byte mutations are also
+rejected.
+
+The contract proves increasing nonempty levels, strictly ascending members, exactly-once node and
+schedule membership, and strict source-level-before-destination-level for every edge. Fresh
+compilations preserve identical schedules, buffer assignments, route timings, PDC, canonical bytes
+and hashes. The reconstructed pre-correction canonical SHA-256 is
+`6676779806af8bb20c9abb287a39488512fc7c0972e96f6cd300f469539bd770`; the corrected identity is
+`3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce`. Removing dependency-level
+rows makes the two canonical payloads byte-identical.
+
+Native `SingleThread` selects the explicit sequential fallback and `DependencyWaves` selects the
+parallel scheduler. Both bind without ID changes and render bit-identical q128 PCM: left frame 0 is
+`2.0` (`0x40000000`), right frame 0 is `-2.0` (`0xc0000000`), and every other sample is positive
+zero. Both have output latency 0, no inserted delays, and execute observer handles 1 then 2 with
+two observations of nonzero post-matrix audio.
+
+Focused Issue-122, direct-route render, semantic-hash, buffer-coloring, timing and scratch-only
+fixture-corruption tests pass. Warning-denied graph-compiler Clippy/rustdoc, format, graph policy,
+realtime policy and its mutations, and exact diff/static checks pass. The amended fixture audit
+reproduces exit 1 with sole output `graph fixture manifest mismatch`, exactly two mismatched paths,
+the pinned sizes/hashes and sole five-zero estimate-row change, with no new or missing path and all
+level/schedule rows byte-identical. No fixture, generator or manifest byte changed.
+
+Final counters are `benchmark_invocations=0`, `timed_benchmark_invocations=0`, and
+`workload_invocations=0`.
