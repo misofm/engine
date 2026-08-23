@@ -56,21 +56,31 @@ outputs are never retained.
 
 ## Atomic publication and diagnostics
 
-Both the final path and exact sibling `OUTPUT.issue073.partial` must be absent. The runner creates
-the partial with create-new semantics, streams and hashes bytes, flushes and synchronizes it, and
-retains the create-new handle through exact `frames * 8` length, digest, and identity checks.
-Publication is explicit per supported host family and never falls back to a checked pathname:
+The caller must provide an existing output directory exclusively owned for the complete runner
+invocation. From entry through return, no other thread or process may create, remove, rename, link,
+replace, chmod, or otherwise mutate an entry in that directory. The runner cannot infer this
+authority from ownership bits, ACLs, or process identity. It does not claim safety against a
+same-privilege concurrent directory-entry mutator; callers needing concurrency must coordinate it
+externally.
 
-- Linux and Android use `linkat(AT_EMPTY_PATH)` on the retained descriptor;
-- Apple Unix uses no-replace `linkat` through the retained `/dev/fd/N` descriptor name; and
-- Windows uses no-replace `SetFileInformationByHandle(FileLinkInfo)` on the retained handle.
+Within that precondition, both the final path and exact sibling `OUTPUT.issue073.partial` must be
+absent. The runner creates the partial with create-new semantics, streams and hashes bytes, flushes
+and synchronizes it, and retains the create-new handle through exact `frames * 8` length, digest,
+and identity checks. Publication is explicit per supported host family and never falls back to a
+pathname hard link:
+
+- Linux and Android use atomic `renameat2(RENAME_NOREPLACE)`;
+- Apple Unix uses atomic `renameatx_np(RENAME_EXCL)`; and
+- Windows uses `SetFileInformationByHandle(FileRenameInfo)` on the retained handle with
+  replacement disabled.
 
 Unix compares device/inode identity and Windows compares volume serial/file index identity from
-opened handles. Each primitive publishes the exact retained file only while the final name is
-absent. Removal is identity-checked and leaves a single final name. Existing regular files,
+opened handles before and after publication. Each primitive rejects every existing final kind and
+atomically consumes the partial, leaving one accepted final. Failure cleanup is bounded and
+identity-checked under the exclusive-directory precondition. Existing regular files, directories,
 symlinks, and hardlinks are never followed, truncated, or replaced. A native platform without one
-of these proved adapters returns `preflight/platform.unsupported` before output creation or engine
-invocation.
+of these adapters returns `preflight/platform.unsupported` before output creation, source
+resolution, or engine invocation.
 
 Stderr failures have the stable tab-separated form:
 
