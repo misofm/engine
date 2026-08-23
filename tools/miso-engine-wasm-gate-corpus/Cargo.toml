@@ -1,0 +1,21 @@
+[package]
+name = "miso-engine-wasm-gate-corpus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# An `rlib`, deliberately: this crate is linked by both legs of gate G5 -- natively into
+# `miso-engine-wasm-gates`, and through `miso-engine-wasm-gate-guest` into the `wasm32` module.
+# The `cdylib` lives in the guest, because a lib target that emits one is compiled with the
+# release profile's `panic = "abort"` and could then not be linked into an unwinding test harness.
+[lib]
+name = "miso_engine_wasm_gate_corpus"
+
+[dependencies]
+miso-engine-lane.workspace = true
+miso-engine-math = { workspace = true, features = ["lane"] }
+sha2.workspace = true
+
+[lints]
+workspace = true

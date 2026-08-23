@@ -1,0 +1,87 @@
+//! Gate G5 runner: compare the frozen corpus's digests native versus wasm.
+//!
+//! ```text
+//! miso_engine_wasm_gates --native
+//! miso_engine_wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8
+//! miso_engine_wasm_gates --print-pins
+//! ```
+//!
+//! Each run prints one JSON evidence line and exits non-zero on the first mismatch.
+//! `scripts/run-wasm-gates.sh` builds both guest artifacts and runs all three legs.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use miso_engine_wasm_gates::{
+    ExpectedBackend, WASMTIME_LICENCE, WASMTIME_VERSION, native_report, print_lane_pins,
+    wasm_report,
+};
+
+/// Usage text, printed on an argument error.
+const USAGE: &str = "usage:\n  \
+     miso_engine_wasm_gates --native\n  \
+     miso_engine_wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8\n  \
+     miso_engine_wasm_gates --print-pins";
+
+fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match arguments.first().map(String::as_str) {
+        Some("--native") if arguments.len() == 1 => run_native(),
+        Some("--print-pins") if arguments.len() == 1 => {
+            print!("{}", print_lane_pins());
+            ExitCode::SUCCESS
+        }
+        Some("--version") if arguments.len() == 1 => {
+            println!("wasmtime {WASMTIME_VERSION} ({WASMTIME_LICENCE})");
+            ExitCode::SUCCESS
+        }
+        Some(path) if arguments.len() == 3 && arguments[1] == "--expect-backend" => {
+            match ExpectedBackend::parse(&arguments[2]) {
+                Ok(expected) => run_wasm(PathBuf::from(path), expected),
+                Err(unknown) => {
+                    eprintln!("unknown backend '{unknown}'\n{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The native leg: the corpus run in this process at every width against the pins.
+fn run_native() -> ExitCode {
+    let report = native_report();
+    println!("{}", report.json());
+    if report.mismatches.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        for mismatch in &report.mismatches {
+            eprintln!("native mismatch: {mismatch}");
+        }
+        ExitCode::FAILURE
+    }
+}
+
+/// The wasm leg: the same corpus executed under wasmtime against the same pins.
+fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
+    match wasm_report(&path, expected) {
+        Ok(report) => {
+            println!("{}", report.json());
+            if report.mismatches.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                for mismatch in &report.mismatches {
+                    eprintln!("wasm mismatch: {mismatch}");
+                }
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("wasm gate failure: {error:?}");
+            ExitCode::FAILURE
+        }
+    }
+}

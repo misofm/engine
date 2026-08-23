@@ -1,0 +1,22 @@
+[package]
+name = "miso-engine-wasm-gate-guest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# `cdylib` only: this is the artifact `wasm32-unknown-unknown` links into the module wasmtime
+# instantiates, and nothing links it as a Rust library. Keeping the shared corpus in a separate
+# `rlib` is what lets the native leg link the identical code (a lib target that emits a `cdylib`
+# is compiled with the release profile's `panic = "abort"`, and an unwinding test harness cannot
+# then link it).
+[lib]
+name = "miso_engine_wasm_gate_guest"
+crate-type = ["cdylib"]
+
+[dependencies]
+miso-engine-lane.workspace = true
+miso-engine-wasm-gate-corpus.workspace = true
+
+[lints]
+workspace = true

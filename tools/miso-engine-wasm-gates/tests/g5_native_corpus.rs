@@ -1,0 +1,202 @@
+//! The native half of gate G5, and the assertions that make the wasm half mean something.
+//!
+//! The wasm leg needs a built `wasm32-unknown-unknown` artifact and therefore lives in
+//! `scripts/run-wasm-gates.sh` and the `wasm-gates` CI job. What runs here is everything that can
+//! be checked in-process: that the pins still describe the corpus at every width, that the corpus
+//! carries no NaN into a digest (master plan D5 excludes NaN payloads because wasm canonicalises
+//! them), that no two cases are the same computation, and that the `lane_fma` case actually
+//! separates a fused evaluation from an unfused one.
+//!
+//! Without the last of those, a green wasm run would only prove that both targets computed
+//! *something* the same way.
+
+use miso_engine_wasm_gate_corpus as corpus;
+use miso_engine_wasm_gates::{hex, native_report};
+
+/// The native leg: every case, at every width, equals its pin.
+///
+/// Red mutation: change one byte of `src/lane_digests.in`, or reorder `KERNELS` — both make this
+/// fail immediately and name the case.
+#[test]
+fn g5_native_digests_match_pins() {
+    let report = native_report();
+    assert_eq!(
+        report.cases,
+        corpus::CASE_COUNT,
+        "every case must be compared"
+    );
+    assert!(
+        report.comparisons >= corpus::LANE_CASE_COUNT * corpus::WIDTHS,
+        "every lane case must be compared at every width, got {} comparisons",
+        report.comparisons
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "native corpus digests differ from the pins:\n{}",
+        report
+            .mismatches
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// D5: nothing NaN or infinite is ever digested, so the wasm comparison is not comparing
+/// canonicalised NaN payloads to native ones.
+///
+/// Red mutation: add `f32::NAN` to one signal's fill; this fails and names the case.
+#[test]
+fn g5_lane_corpus_is_finite() {
+    for case in 0..corpus::CASE_COUNT {
+        if !corpus::is_lane_case(case) {
+            continue;
+        }
+        for width in 0..corpus::WIDTHS {
+            let values = corpus::lane_case_values(case, width);
+            assert_eq!(
+                values.len(),
+                corpus::LANES * corpus::FRAMES,
+                "case {case} must produce one value per lane frame"
+            );
+            let offending = values.iter().position(|value| !value.is_finite());
+            assert!(
+                offending.is_none(),
+                "case {} ({}) at {} produced a non-finite value at index {}",
+                case,
+                corpus::case_name(case),
+                corpus::width_name(width),
+                offending.unwrap_or_default()
+            );
+        }
+    }
+}
+
+/// The one pair of cases that must be identical: `svf_block_ramped` with `ramp_frames = 0` is
+/// specified to equal `svf_block` bit for bit, so the corpus checks that rather than excusing it.
+const IDLE_PREFIX: &str = "svf_block_ramped/idle/";
+
+/// Every case is a different computation, except the one pair that is defined to be the same.
+///
+/// A corpus with two accidentally identical cases silently halves the coverage its case count
+/// suggests.
+#[test]
+fn g5_case_digests_are_distinct() {
+    let mut seen: Vec<(String, [u8; 32])> = Vec::with_capacity(corpus::CASE_COUNT);
+    for case in 0..corpus::CASE_COUNT {
+        let name = corpus::case_name(case);
+        if name.starts_with(IDLE_PREFIX) {
+            continue;
+        }
+        let digest = corpus::expected_digest(case);
+        if let Some((other, _)) = seen.iter().find(|(_, other)| *other == digest) {
+            panic!(
+                "cases '{name}' and '{other}' have the same pinned digest {}: they are the same \
+                 computation twice",
+                hex(&digest)
+            );
+        }
+        seen.push((name, digest));
+    }
+}
+
+/// `svf_block_ramped` with an idle ramp is `svf_block`, on every signal and at every width.
+///
+/// Red mutation: make the ramped kernel add `step` before the first frame; every signal fails.
+#[test]
+fn g5_idle_ramped_svf_equals_the_plain_svf() {
+    for case in 0..corpus::CASE_COUNT {
+        let name = corpus::case_name(case);
+        let Some(signal) = name.strip_prefix(IDLE_PREFIX) else {
+            continue;
+        };
+        let plain = (0..corpus::CASE_COUNT)
+            .find(|other| corpus::case_name(*other) == format!("svf_block/low/{signal}"))
+            .expect("every idle-ramp case has a plain low-pass counterpart");
+        assert_eq!(
+            hex(&corpus::expected_digest(case)),
+            hex(&corpus::expected_digest(plain)),
+            "an idle coefficient ramp changed the output for signal '{signal}'"
+        );
+    }
+}
+
+/// The `lane_fma` case separates `Lane::fma` from a multiply followed by an add.
+///
+/// This is the standing form of the G5 red mutation "build the guest with `+relaxed-simd` and use
+/// a relaxed multiply-add": whatever makes the wasm build stop rounding once shows up here as a
+/// different digest. If this ever passes vacuously — because the operands stopped separating the
+/// two forms — the wasm leg would go on being green while proving nothing.
+#[test]
+fn g5_fma_case_separates_fused_from_unfused() {
+    let fused = corpus::expected_digest(corpus::fma_case());
+    for width in 0..corpus::WIDTHS {
+        let unfused = corpus::unfused_fma_digest(width);
+        assert_ne!(
+            hex(&fused),
+            hex(&unfused),
+            "the lane_fma corpus does not distinguish a fused from an unfused evaluation at {}: \
+             the case proves nothing",
+            corpus::width_name(width)
+        );
+    }
+}
+
+/// The math half of the corpus is not a second pin: it is compared against the digests gate M3
+/// wrote in `miso-engine-math`, so the wasm run replays that gate rather than a copy of it.
+#[test]
+fn g5_math_cases_use_the_m3_pins() {
+    assert_eq!(
+        corpus::MATH_CASE_COUNT,
+        miso_engine_math::corpus::CASE_COUNT,
+        "the math half must cover every M3 case"
+    );
+    for case in 0..corpus::MATH_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(corpus::LANE_CASE_COUNT + case),
+            miso_engine_math::corpus::M3_DIGESTS[case],
+            "math case {case} must be pinned by miso-engine-math, not by this crate"
+        );
+    }
+}
+
+/// The one lane case whose correct output is nothing at all.
+///
+/// A subnormal signal driven into a one-pole recurrence is flushed to `+0.0` by D7 on every
+/// target, so the case's value is precisely that it produces zeros. Every *other* case must
+/// produce something, or its digest agrees across targets for the empty reason.
+const ALL_ZERO_CASES: [&str; 1] = ["one_pole_block/subnormal"];
+
+/// No case is vacuously `+0.0` except the enumerated flush case.
+///
+/// This is the assertion that caught `ramp_block/impulse`: a ramp starting at zero multiplied the
+/// impulse's only non-zero sample by zero, so the case digested 8,192 zeros and would have agreed
+/// across every target and every width while proving nothing about `ramp_block`.
+#[test]
+fn g5_no_case_is_vacuously_zero() {
+    for case in 0..corpus::CASE_COUNT {
+        if !corpus::is_lane_case(case) {
+            continue;
+        }
+        let name = corpus::case_name(case);
+        for width in 0..corpus::WIDTHS {
+            let values = corpus::lane_case_values(case, width);
+            let all_zero = values.iter().all(|value| value.to_bits() == 0);
+            if ALL_ZERO_CASES.contains(&name.as_str()) {
+                assert!(
+                    all_zero,
+                    "case '{name}' at {} is listed as an all-zero flush case but produced a \
+                     non-zero value",
+                    corpus::width_name(width)
+                );
+            } else {
+                assert!(
+                    !all_zero,
+                    "case '{name}' at {} produced only +0.0: it would agree across targets for \
+                     the empty reason",
+                    corpus::width_name(width)
+                );
+            }
+        }
+    }
+}
