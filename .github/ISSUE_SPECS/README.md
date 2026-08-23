@@ -44,10 +44,10 @@ before later members' inputs exist. Issue 123, **Emit a level-major sequential g
 bank correctness**, owns only the exact flattened-level schedule, matching buffer recoloring,
 transactional scalar/native bind guards and bank-audio/hash proof. It follows accepted Issues 006,
 039 and 122 and defers Issue-098 F2–F13. Its Issue-125 rescope candidate `494f4fe` passed #98 E1/E2
-plus native PCM/counter equality on all 100 Issue-037 layouts, but main CI `32631304629` found two
-pre-existing hand-built plans with empty dependency levels. The sole bounded correction may add
-only those test/audit level lists before terminal Sol XHigh review. The historical long-audit
-counter remains consumed; no benchmark or timing is authorized.
+plus native PCM/counter equality on all 100 Issue-037 layouts. After main CI `32631304629` found two
+pre-existing hand-built plans with empty levels, sole correction `bdd4db4` added only their exact
+singleton metadata and received terminal Sol XHigh PASS. The historical long-audit counter remains
+consumed; no benchmark or timing ran.
 
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
 launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;

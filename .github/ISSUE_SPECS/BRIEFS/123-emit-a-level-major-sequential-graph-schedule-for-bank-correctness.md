@@ -2,12 +2,13 @@
 
 ## Decision
 
-**BOUNDED HOLD / SOLE CORRECTION AUTHORIZED.** After the recorded terminal verdict, the user directed
+**COMPLETE / TERMINAL SOL XHIGH PASS.** After the recorded terminal verdict, the user directed
 execution of standing controller Issue 125. AGENTS.md and Issue 125 authorize a narrower,
 synchronized in-place rescope rather than a disguised fourth retry or a new attempt issue. This
 fresh workflow's first Sol High implementation attempt at `494f4fe` passed focused review but was
 invalidated by main CI `32631304629`. Sol XHigh issued the sole bounded HOLD for two exact
-test/audit metadata repairs; no production correction or later HOLD is authorized.
+test/audit metadata repairs, then returned terminal PASS at `bdd4db4`; no production correction or
+later HOLD was consumed.
 
 The replacement gates are #98 wave-0 E1/E2 plus the Issue-037 100-layout transcript derived from
 independently prepared native execution on every layout. The previous 100,000-render audit remains
@@ -185,3 +186,15 @@ singleton levels to `tools/miso-engine-graph-audit::prepared_graph()`. Do not ch
 validation or any other line in those files. Reproduce both red failures, restore either empty list
 as independent red mutations, then run the exact focused/audit/workspace/policy gates in the issue
 spec and obtain green main CI. The next Sol XHigh verdict is terminal PASS or STOP.
+
+## Terminal PASS
+
+Correction `bdd4db4a934f593eb88ea10c863a2fcf29aab22f` (tree
+`13049f424d9b42d814776fb546c6cfff57fc0784`) received terminal Sol XHigh PASS. Its exact two-helper
+diff is `24/2`, containing only five singleton level records. Both empty-level reversions fail;
+focused, full-workspace, three-block direct/trace and policy gates pass. The uncommitted `22/2`
+reviewer-wrapper expectation was arithmetic outside the issue gates and hid no extra behavior.
+
+The historical long audit remains one invocation with zero retries; no benchmark/timing/default-
+million run occurred. Fresh counters are attempt 1, HOLD 1 and sole correction consumed. Delivery
+requires green replacement main CI and verified GitHub closure.

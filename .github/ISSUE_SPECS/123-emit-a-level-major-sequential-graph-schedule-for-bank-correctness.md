@@ -6,14 +6,14 @@ Make the compiler's canonical sequential graph schedule exactly the concatenatio
 sorted dependency levels so a retained homogeneous bank never gathers another member's input
 before that input has been produced in the current block.
 
-**BOUNDED HOLD / SOLE CORRECTION AUTHORIZED.** The user directed execution of standing audit
+**COMPLETE / TERMINAL SOL XHIGH PASS.** The user directed execution of standing audit
 controller Issue 125
 after the terminal verdict recorded below. AGENTS.md requires a failed shape to be rescoped and
 rebriefed before work restarts, while Issue 125 requires Issue 123 to finish in place rather than
 creating an attempt issue. Sol XHigh approved this synchronized narrower restart. Its first fresh
 implementation verdict was invalidated by main CI run `32631304629`, which found two pre-existing
 hand-built plans with empty dependency levels. Sol XHigh issued the fresh workflow's sole bounded
-HOLD and authorized only the test/audit metadata correction recorded below.
+HOLD, then returned terminal PASS on the exact test/audit metadata correction `bdd4db4`.
 
 The old 100,000-render audit remains consumed: invocation count `1`, retry count `0`. It is not an
 acceptance gate, may not be rerun, and neither its `0xf8ee_8fef_8f42_3df4` candidate nor the stopped
@@ -488,3 +488,38 @@ Fresh counters are attempt 1, HOLD 1, sole correction authorized. No further cor
 it. Historical long-audit counters stay one invocation and zero retries; benchmark and timed-
 benchmark counts stay zero. A replacement green main CI must precede terminal Sol XHigh PASS and
 GitHub closure; any failure after this correction is terminal STOP.
+
+## Terminal correction verdict — 2026-08-23
+
+Sol XHigh returned terminal PASS for correction
+`bdd4db4a934f593eb88ea10c863a2fcf29aab22f` (tree
+`13049f424d9b42d814776fb546c6cfff57fc0784`). Only the two authorized helpers changed:
+
+- `crates/miso-engine-builtins-compiler/src/lib.rs` SHA-256
+  `669a39f17423cc803b9fa79d5fd8d541a1d97bc3490b144c322f19f48d405ecd`, numstat `14/1`;
+- `tools/miso-engine-graph-audit/src/main.rs` SHA-256
+  `89c05f24262f6b481f2d15f0d0b1b53b11c7344ff54014cbba97b8ab1d8bf717`, numstat `10/1`.
+
+The exact binary diff SHA-256 is
+`d6f3951a06a00b8f9451687399cc72bb28fba342c47530dec262673a84c2f1e1`; aggregate numstat is
+`24/2`. Every insertion belongs to the five authorized singleton `DependencyLevel` records. An
+uncommitted reviewer wrapper expected aggregate `22/2` and exited nonzero; Sol XHigh found that to
+be harmless arithmetic in a non-gate wrapper, not a product/evidence failure. The authoritative
+fence is exact paths, helpers and hunks, all of which pass.
+
+Repository-wide search finds no remaining `dependency_levels: Vec::new()`. Baseline and independent
+empty-level reversions reproduce `graph.scheduler.layout`. Focused/all builtins, graph,
+graph-compiler and graph-audit tests; full workspace all-target tests; three-block direct audit and
+syscall trace; formatting; warning-denied Clippy/rustdoc; graph/realtime/workspace policies; and
+diff checks all pass. The trace reports zero allocations, frees, locks, logs, I/O, syscalls and
+total violations.
+
+Bounded audit accounting is two failed pre-render three-block requests, two direct and one traced
+three-block success by the correction author, and one direct and one traced success by the terminal
+reviewer: 12 successfully rendered blocks total. No default million-block or new 100,000-block run
+occurred. Historical long-audit totals remain one invocation and zero retries; benchmark and timed-
+benchmark totals remain zero. Fresh workflow totals are attempt 1, HOLD 1 and the sole correction
+consumed.
+
+The complete Issue-123 candidate is ready for `main`. GitHub closes only after the replacement main
+CI is green and its remote closed state is verified.
