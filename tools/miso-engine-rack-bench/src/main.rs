@@ -523,19 +523,31 @@ impl MixedRuntime {
         assert_eq!(cohorts.dispatch.backend(), backend);
         // #96: the report is the *bound* plan, from the same planner that produced the banks.
         let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocationV1::Simd1).collect();
-        // Two program keys reach SIMD rack 1 here: the bypassed leading slot that eight tracks
-        // carry, and the main slot that ten tracks carry. Each forms one full eight-lane bank; the
-        // main slot's two remaining tracks form a padded group that #96 leaves unbound.
-        assert_eq!(bound_groups.len(), 2, "two full effect-bank cohorts");
+        // #99 F3: the cohort is now the whole rack *chain*, not one effect. Eight tracks carry
+        // the two-slot program `[delay-leading (bypassed), delay-main]`; the two tracks that carry
+        // only `delay-main` join the same cohort through their subsequence mask and land in the
+        // padded remainder group, which stays unbound (#96 F6/F7). So this is ONE cohort binding
+        // TWO banks -- one per slot -- where #96 reported two single-slot cohorts binding one bank
+        // each.
+        //
+        // Membership is bit-identical across that change, and that is the point: the same eight
+        // tracks (rack00/01/03/04/06/07/08/09) bank both slots, rack02 and rack05 remain the
+        // compatible scalar tail, and fallback10/fallback11 remain the connected-sidechain
+        // fallbacks. Only the report's shape moved.
+        assert_eq!(bound_groups.len(), 1, "one full rack-chain cohort");
+        assert_eq!(bound_groups[0].program.len(), 2, "a two-slot chain");
         assert!(
             bound_groups.iter().all(|group| group.is_full()),
-            "only full groups are bound in #96"
+            "only full groups are bound"
         );
         assert!(bound_groups.iter().all(|group| group.active_count() == 8));
+        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocationV1::Simd1).collect();
+        assert_eq!(bound_slots.len(), 2, "one bank per slot of the chain");
+        assert!(bound_slots.iter().all(|bound| bound.members.len() == 8));
         assert_eq!(
-            bound_groups.len() as u64,
+            bound_slots.len() as u64,
             artifact.graph_resource_estimate().effect_bank_count,
-            "the report is the bound plan: one bound group per prepared bank"
+            "the report is the bound plan: one bound slot per prepared bank"
         );
         let scalar = cohorts.scalar_in(RackLocationV1::Simd1);
         let compatible_tails = scalar

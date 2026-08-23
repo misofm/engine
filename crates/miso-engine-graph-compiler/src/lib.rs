@@ -149,50 +149,86 @@ pub struct GraphCompileReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphRackBankReport {
     pub dispatch: KernelDispatch,
-    pub plan: BankPlan<EffectNodeId>,
-    /// `plan.groups[i]` was bound as a homogeneous bank iff `bound[i]`.
-    pub bound: Vec<bool>,
+    /// The cohort plan, over whole **rack chains** (#99 F3): one candidate per `(track, rack)`
+    /// whose slots are that track's rack program in session order.
+    pub plan: BankPlan<RackChainId>,
+    /// One entry per bound homogeneous bank, in bind order.
+    pub bound_slots: Vec<GraphRackBoundSlot>,
+    /// The effect node each chain runs at each of its own slots, in session order. Keyed the same
+    /// way the plan is, so a group member can be resolved back to graph nodes.
+    pub chains: BTreeMap<RackChainId, Vec<EffectNodeId>>,
+}
+
+/// Identifies one track's program in one bankable rack: the unit the cohort planner groups.
+///
+/// #96's planner takes one candidate per *effect*, which can only ever form single-slot banks.
+/// AGENTS.md's cohort model is a whole-rack signature -- "slot types/order, quality, and
+/// compatible routing", with absent slots as identity kernels -- so #99 passes whole chains and
+/// lets `RackProgramV1::subsequence_mask` decide which lanes run which slot.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RackChainId {
+    pub track_id: String,
+    pub rack: RackId,
+}
+
+/// One bound homogeneous bank: a slot of a cohort, and the effect node each lane runs there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphRackBoundSlot {
+    /// Index into [`BankPlan::groups`].
+    pub group: usize,
+    /// Index into that group's leader program.
+    pub slot: usize,
+    /// One node per lane, in lane order.
+    pub members: Vec<EffectNodeId>,
 }
 
 impl GraphRackBankReport {
-    pub fn groups_in(
-        &self,
-        rack: RackLocationV1,
-    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+    pub fn groups_in(&self, rack: RackLocationV1) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
             .iter()
             .filter(move |group| group.rack == rack)
     }
+    /// Groups with at least one slot actually bound as a bank.
     pub fn bound_groups_in(
         &self,
         rack: RackLocationV1,
-    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+    ) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
             .iter()
-            .zip(self.bound.iter())
-            .filter(move |(group, bound)| **bound && group.rack == rack)
-            .map(|(group, _)| group)
+            .enumerate()
+            .filter(move |(index, group)| {
+                group.rack == rack && self.bound_slots.iter().any(|bound| bound.group == *index)
+            })
+            .map(|(_, group)| group)
     }
-    /// Members of unbound (padded) groups plus the never-bankable candidates, in id order: exactly
-    /// the effects that render on the per-node scalar path.
+    /// Banks bound in one rack, in bind order.
+    pub fn bound_slots_in(
+        &self,
+        rack: RackLocationV1,
+    ) -> impl Iterator<Item = &GraphRackBoundSlot> {
+        self.bound_slots
+            .iter()
+            .filter(move |bound| self.plan.groups[bound.group].rack == rack)
+    }
+    /// Effect nodes that render on the per-node scalar path in one rack, in id order: every node
+    /// of a candidate that never banked, plus every node at a slot that was not bound.
     #[must_use]
     pub fn scalar_in(&self, rack: RackLocationV1) -> Vec<EffectNodeId> {
-        let mut ids: Vec<EffectNodeId> = self
-            .plan
-            .groups
+        let banked: std::collections::BTreeSet<&EffectNodeId> = self
+            .bound_slots
             .iter()
-            .zip(self.bound.iter())
-            .filter(|(group, bound)| !**bound && group.rack == rack)
-            .flat_map(|(group, _)| group.members.iter().flatten().cloned())
-            .chain(
-                self.plan
-                    .scalar
-                    .iter()
-                    .filter(|id| rack_location(id.rack) == Some(rack))
-                    .cloned(),
-            )
+            .filter(|bound| self.plan.groups[bound.group].rack == rack)
+            .flat_map(|bound| bound.members.iter())
+            .collect();
+        let mut ids: Vec<EffectNodeId> = self
+            .chains
+            .iter()
+            .filter(|(chain, _)| rack_location(chain.rack) == Some(rack))
+            .flat_map(|(_, nodes)| nodes.iter())
+            .filter(|node| !banked.contains(node))
+            .cloned()
             .collect();
         ids.sort();
         ids
@@ -787,6 +823,26 @@ const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
 /// workspace. #96 binds only full groups: every effect factory rejects `requests.len() != lanes`
 /// and the contract has no per-lane mask yet (#96 F7), so a padded group's members stay on the
 /// per-node scalar path, exactly as they did before. #99 flips that once #95 adds the lane mask.
+/// Plan the SIMD-rack cohorts over whole rack chains, and bind every slot that can be bound.
+///
+/// The planner is `miso_engine_rack_compiler::plan_bank_groups` -- the single cohort planner in
+/// the workspace (#96 F1). #99 F3 changes *what is handed to it*: one candidate per
+/// `(track, rack)` whose slots are that track's rack program **in session order**
+/// (`track.simd1.effects` / `track.simd2.effects`), not `EffectPreparedSession::entries` order,
+/// which is sorted by effect id. That is AGENTS.md's cohort model -- a signature over slot
+/// types/order with absent slots as identity kernels -- and it is what makes a multi-slot bank
+/// expressible at all: #96's per-effect candidates carry one-slot programs, so they can only ever
+/// form single-slot banks.
+///
+/// A slot is bound when the group is full and **every** lane runs that slot. A slot some lane
+/// skips would need a per-lane bypass mask in the effect contract, which does not exist yet
+/// (#96 F7, owned by #95); those members render on the per-node scalar path exactly as before.
+/// Padded (non-full) groups are likewise unbound, unchanged from #96.
+///
+/// Level bucketing: slot `k` of every chain in a bucket sits at `level + k`, because a rack chain
+/// is a path and a sidechain source never raises a chain member's level. A bank may not cross a
+/// dependency level (#96 F12), so chains are bucketed by the level of their *first* slot and the
+/// arithmetic is asserted rather than assumed.
 fn bind_rack_banks(
     effects: &EffectPreparedSession,
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
@@ -799,17 +855,75 @@ fn bind_rack_banks(
     ),
     GraphDiagnostic,
 > {
-    let empty = |dispatch| GraphRackBankReport {
+    let model = effects.session.normalized_model();
+    let entry_by_key: BTreeMap<(&str, RackId, &str), &EffectPreparedEntry> = effects
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                (
+                    entry.track_id.as_str(),
+                    rack_id(entry.rack),
+                    entry.effect_id.as_str(),
+                ),
+                entry,
+            )
+        })
+        .collect();
+
+    // One chain per (track, bankable rack), in session slot order.
+    let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
+    let mut programs: BTreeMap<RackChainId, RackProgramV1> = BTreeMap::new();
+    for track in &model.tracks {
+        for (rack, declared) in [
+            (RackId::Simd1, &track.simd1.effects),
+            (RackId::Simd2, &track.simd2.effects),
+        ] {
+            let Some(location) = rack_location(rack) else {
+                continue;
+            };
+            if declared.is_empty() {
+                continue;
+            }
+            let chain = RackChainId {
+                track_id: track.id.as_str().to_owned(),
+                rack,
+            };
+            let mut nodes = Vec::with_capacity(declared.len());
+            let mut slots = Vec::with_capacity(declared.len());
+            for effect in declared {
+                let key = (track.id.as_str(), rack, effect.id.as_str());
+                let Some(entry) = entry_by_key.get(&key).copied() else {
+                    return Err(diag("graph.internal.invariant", "$.effects"));
+                };
+                let Some(node) = ids.get(&(
+                    track.id.as_str().to_owned(),
+                    rack,
+                    effect.id.as_str().to_owned(),
+                )) else {
+                    return Err(diag("graph.internal.invariant", "$.effects"));
+                };
+                nodes.push(node.clone());
+                slots.push(entry.metadata.program_key());
+            }
+            programs.insert(chain.clone(), RackProgramV1::new(location, slots));
+            chains.insert(chain, nodes);
+        }
+    }
+
+    let empty = |dispatch, chains: BTreeMap<RackChainId, Vec<EffectNodeId>>| GraphRackBankReport {
         dispatch,
         plan: BankPlan {
             groups: Vec::new(),
             scalar: Vec::new(),
         },
-        bound: Vec::new(),
+        bound_slots: Vec::new(),
+        chains,
     };
     let Some(width) = dispatch.bank_width() else {
-        return Ok((Vec::new(), empty(dispatch)));
+        return Ok((Vec::new(), empty(dispatch, chains)));
     };
+
     let level_by_node: BTreeMap<_, _> = levels
         .iter()
         .flat_map(|level| {
@@ -820,25 +934,36 @@ fn bind_rack_banks(
                 .map(move |node| (node, level.level))
         })
         .collect();
-    let mut entry_by_id = BTreeMap::new();
-    let mut candidates_by_level: BTreeMap<u64, Vec<CohortCandidate<EffectNodeId>>> =
-        BTreeMap::new();
-    for entry in &effects.entries {
-        let rack = rack_id(entry.rack);
-        let Some(location) = rack_location(rack) else {
+
+    let mut candidates_by_level: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
+    for (chain, nodes) in &chains {
+        let Some(first) = nodes.first() else {
             continue;
         };
-        let id = ids[&(entry.track_id.clone(), rack, entry.effect_id.clone())].clone();
-        let Some(level) = level_by_node.get(&GraphNodeId::Effect(id.clone())).copied() else {
+        let Some(level) = level_by_node
+            .get(&GraphNodeId::Effect(first.clone()))
+            .copied()
+        else {
             continue;
         };
-        entry_by_id.insert(id.clone(), entry);
+        // Slot k sits at level + k: a rack chain is a path, so each slot depends on the previous.
+        for (offset, node) in nodes.iter().enumerate() {
+            let Some(slot_level) = level_by_node
+                .get(&GraphNodeId::Effect(node.clone()))
+                .copied()
+            else {
+                return Err(diag("graph.internal.invariant", "$.effects"));
+            };
+            if slot_level != level + offset as u64 {
+                return Err(diag("graph.internal.invariant", "$.effects"));
+            }
+        }
         candidates_by_level
             .entry(level)
             .or_default()
             .push(CohortCandidate {
-                id,
-                program: RackProgramV1::new(location, vec![entry.metadata.program_key()]),
+                id: chain.clone(),
+                program: programs[chain].clone(),
             });
     }
     let levels_in: Vec<_> = candidates_by_level
@@ -849,61 +974,85 @@ fn bind_rack_banks(
         .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
 
     let mut banks = Vec::new();
-    let mut bound = Vec::with_capacity(plan.groups.len());
-    for group in &plan.groups {
+    let mut bound_slots = Vec::new();
+    for (group_index, group) in plan.groups.iter().enumerate() {
         if !group.is_full() {
-            bound.push(false);
             continue;
         }
-        let members: Vec<_> = group
-            .members
-            .iter()
-            .map(|id| entry_by_id[id.as_ref().expect("full group")])
-            .collect();
-        let requests: Vec<_> = members
-            .iter()
-            .map(|entry| entry.bank_preparation.request())
-            .collect();
-        let request = PrepareEffectBankRequest {
-            backend: dispatch.backend(),
-            width,
-            requests: &requests,
-        };
-        // Equal program key implies the same registry factory: the registry maps one `EffectId` to
-        // one `Arc` (#96 F12), so the old per-chunk `Arc::ptr_eq` scan proved nothing.
-        let Some(processor) = members[0]
-            .factory
-            .bind_homogeneous_bank(request)
-            .map_err(|error| diag(error.code, "$.effects"))?
-        else {
-            bound.push(false);
-            continue;
-        };
-        if processor.metadata().width != width
-            || processor.metadata().program_key != group.program[0]
-        {
-            return Err(diag("graph.effect.bank_metadata", "$.effects"));
-        }
-        let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
-            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-        banks.push(miso_engine_graph::GraphPreparedEffectBank {
-            members: group
-                .members
+        for slot in 0..group.program.len() {
+            if group.slot_is_identity_everywhere(slot) {
+                continue;
+            }
+            // Every lane must run this slot: the effect contract has no per-lane bypass mask
+            // (#96 F7 / #95), so a bank whose lanes disagree cannot be expressed.
+            if !group.active_slots.iter().all(|lane| lane[slot]) {
+                continue;
+            }
+            // Lane `i` runs its own chain in order, so the leader slot maps to the lane's slot by
+            // the rank of `slot` among that lane's active positions.
+            let mut members = Vec::with_capacity(group.members.len());
+            for (lane, id) in group.members.iter().enumerate() {
+                let id = id.as_ref().expect("full group");
+                let rank = group.active_slots[lane][..slot]
+                    .iter()
+                    .filter(|active| **active)
+                    .count();
+                let Some(node) = chains[id].get(rank) else {
+                    return Err(diag("graph.internal.invariant", "$.effects"));
+                };
+                members.push(node.clone());
+            }
+            let entries: Vec<&EffectPreparedEntry> = members
                 .iter()
-                .map(|id| id.clone().expect("full group"))
-                .collect(),
-            active_mask: group.active_mask.clone(),
-            processor,
-            scratch,
-        });
-        bound.push(true);
+                .map(|node| {
+                    entry_by_key[&(node.track_id.as_str(), node.rack, node.effect_id.as_str())]
+                })
+                .collect();
+            let requests: Vec<_> = entries
+                .iter()
+                .map(|entry| entry.bank_preparation.request())
+                .collect();
+            let request = PrepareEffectBankRequest {
+                backend: dispatch.backend(),
+                width,
+                requests: &requests,
+            };
+            // Equal program key implies the same registry factory: the registry maps one
+            // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
+            let Some(processor) = entries[0]
+                .factory
+                .bind_homogeneous_bank(request)
+                .map_err(|error| diag(error.code, "$.effects"))?
+            else {
+                continue;
+            };
+            if processor.metadata().width != width
+                || processor.metadata().program_key != group.program[slot]
+            {
+                return Err(diag("graph.effect.bank_metadata", "$.effects"));
+            }
+            let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
+                .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+            banks.push(miso_engine_graph::GraphPreparedEffectBank {
+                members: members.clone().into_boxed_slice(),
+                active_mask: group.active_mask.clone(),
+                processor,
+                scratch,
+            });
+            bound_slots.push(GraphRackBoundSlot {
+                group: group_index,
+                slot,
+                members,
+            });
+        }
     }
     Ok((
         banks,
         GraphRackBankReport {
             dispatch,
             plan,
-            bound,
+            bound_slots,
+            chains,
         },
     ))
 }
@@ -3696,6 +3845,226 @@ mod tests {
         assert_eq!(plain.report.rack_cohorts.dispatch, scalar);
     }
 
+    /// `slots` bankable SIMD-1 effects per track, on `tracks` tracks, plus a route per track.
+    ///
+    /// Generalises `twelve_track_bank_fixture` so #99 F3's evals can exercise a *chain*: with
+    /// `slots > 1` every track's SIMD-1 rack is a multi-slot program, which is the case #96's
+    /// per-effect candidates could not express at all.
+    fn rack_chain_fixture(
+        tracks: usize,
+        slots: usize,
+        depth_of: impl Fn(usize) -> usize,
+    ) -> (NativeEffectRegistry, EffectPreparedSession) {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..tracks)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index:02}")).expect("id");
+                track.dynamic.effects.clear();
+                let template = base_track.dynamic.effects[0].clone();
+                track.simd1.effects = (0..depth_of(index).min(slots))
+                    .map(|slot| {
+                        let mut effect = template.clone();
+                        // Reverse-alphabetical on purpose: `EffectPreparedSession::entries` is
+                        // sorted by effect id, so session slot order and entries order disagree
+                        // here. That is the trap #96's crate doc calls out for #99, and it is
+                        // only detectable with a fixture where the two orders differ.
+                        effect.id =
+                            StableId::parse(&format!("chain{}", slots - 1 - slot)).expect("id");
+                        effect.identity = EffectIdentity::Native {
+                            effect_id: StableId::parse("conformance.delay").expect("id"),
+                        };
+                        effect.params = vec![EffectParam {
+                            parameter_id: 1,
+                            channel: ParameterChannel::Both,
+                            unit: ParameterUnit::Linear,
+                            value: 1.0 + index as f32 * 0.01 + slot as f32 * 0.001,
+                        }];
+                        effect
+                    })
+                    .collect();
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("chain-route{index:02}")).expect("id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let registry =
+            NativeEffectRegistry::new([Box::new(DualAccumulatorDelayFactory::correct())
+                as Box<dyn miso_engine_effect_contract::NativeEffectFactory>])
+            .expect("registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("effects");
+        (registry, effects)
+    }
+
+    fn compile_chain_fixture(effects: EffectPreparedSession) -> PreparedGraphArtifact {
+        GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 4242,
+            effects,
+            caps: integration_caps(),
+            dispatch: host_dispatch(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    /// #99 F3: a **multi-slot** rack chain forms one cohort and binds a bank at every slot.
+    ///
+    /// This is the case #96 could not express. Its planner takes one candidate per effect with a
+    /// one-slot program, so a two-effect SIMD-1 rack on eight tracks produced two unrelated
+    /// single-slot cohorts that happened to have the same members. #99 hands it the whole chain in
+    /// **session order**, so the cohort is the rack program and each slot binds once.
+    #[test]
+    fn multi_slot_rack_chains_form_one_cohort_and_bind_every_slot() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
+        };
+        let lanes = width.lanes() as usize;
+        let (_registry, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+        let artifact = compile_chain_fixture(effects);
+        let report = &artifact.report.rack_cohorts;
+
+        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        assert_eq!(groups.len(), 1, "one cohort for one shared rack program");
+        assert_eq!(
+            groups[0].program.len(),
+            2,
+            "the cohort is the two-slot chain"
+        );
+        assert!(groups[0].is_full());
+
+        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        assert_eq!(bound.len(), 2, "one bank per slot of the chain");
+        assert_eq!(bound[0].slot, 0);
+        assert_eq!(bound[1].slot, 1);
+        for slot in &bound {
+            assert_eq!(slot.members.len(), lanes);
+            // Session order, not `entries` order: the fixture names slot 0 `chain1` and slot 1
+            // `chain0`, so binding by entries order would swap these two banks.
+            let expected = format!("chain{}", 1 - slot.slot);
+            assert!(
+                slot.members
+                    .iter()
+                    .all(|member| member.effect_id.as_str() == expected),
+                "slot {} must bind every track's {expected}",
+                slot.slot
+            );
+        }
+        assert_eq!(artifact.graph.prepared_bank_count(), 2);
+        assert!(report.scalar_in(RackLocationV1::Simd1).is_empty());
+    }
+
+    /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
+    ///
+    /// The pre-#96 former chunked `entries` directly, so membership was an artefact of a sort by
+    /// effect id. The planner keys on `(level, id, program)` only; this shuffles the prepared
+    /// entries and requires the identical bound plan.
+    #[test]
+    fn bank_membership_is_independent_of_entry_order() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        let (_r1, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+        let baseline = compile_chain_fixture(effects);
+
+        let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for index in (1..shuffled.entries.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            shuffled
+                .entries
+                .swap(index, (state % (index as u64 + 1)) as usize);
+        }
+        let candidate = compile_chain_fixture(shuffled);
+
+        assert_eq!(
+            candidate.report.rack_cohorts.plan,
+            baseline.report.rack_cohorts.plan
+        );
+        assert_eq!(
+            candidate.report.rack_cohorts.bound_slots,
+            baseline.report.rack_cohorts.bound_slots
+        );
+        assert_eq!(candidate.report.sha256, baseline.report.sha256);
+    }
+
+    /// #99 F3: chains of different depth are bucketed by their first slot's level, and a shorter
+    /// chain joins a longer cohort through its subsequence mask rather than being dropped.
+    ///
+    /// The pre-#96 former chunked before grouping by level, so a chunk straddling two levels
+    /// discarded every member in it.
+    #[test]
+    fn chains_of_different_depths_share_a_cohort_through_identity_slots() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        // Half the tracks run both slots, half run only the first.
+        let (_registry, effects) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
+        let artifact = compile_chain_fixture(effects);
+        let report = &artifact.report.rack_cohorts;
+
+        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        assert_eq!(
+            groups.len(),
+            1,
+            "the short chains are a subsequence of the long one"
+        );
+        assert_eq!(groups[0].program.len(), 2);
+        assert!(groups[0].is_full());
+        // Every lane runs slot 0; only half run slot 1.
+        assert!(groups[0].active_slots.iter().all(|lane| lane[0]));
+        assert_eq!(
+            groups[0].active_slots.iter().filter(|lane| lane[1]).count(),
+            lanes / 2
+        );
+
+        // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
+        // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
+        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].slot, 0);
+        assert_eq!(bound[0].members.len(), lanes);
+        assert_eq!(report.scalar_in(RackLocationV1::Simd1).len(), lanes / 2);
+    }
+
     /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
     ///
     /// Shared by the bank-binding test and by `scalar_dispatch_compiles_without_banks_on_any_host`
@@ -3980,12 +4349,15 @@ mod tests {
             assert!(banks.iter().all(|bank| {
                 bank.members.len() == lanes && bank.active_mask.iter().all(|active| *active)
             }));
-            // The report is the bound plan: one `bound` flag per planned group, and the padded
+            // The report is the bound plan: one entry per bank actually bound, and the padded
             // remainder group is planned but deliberately left unbound (#96 F6/F7).
-            assert_eq!(report.bound.len(), report.plan.groups.len());
-            assert_eq!(
-                report.bound.iter().filter(|bound| **bound).count(),
-                banks.len()
+            assert_eq!(report.bound_slots.len(), banks.len());
+            assert!(
+                report
+                    .bound_slots
+                    .iter()
+                    .all(|bound| bound.slot == 0 && bound.members.len() == lanes),
+                "each track here has a one-slot rack chain"
             );
             assert_eq!(
                 report.scalar_in(RackLocationV1::Simd1).len()
@@ -4094,13 +4466,18 @@ mod tests {
             .collect();
         for group in &split_report.plan.groups {
             for member in group.members.iter().flatten() {
-                assert_eq!(
-                    split_levels
-                        .get(&GraphNodeId::Effect(member.clone()))
-                        .copied(),
-                    Some(group.level),
-                    "every planned group is level-uniform"
-                );
+                // A chain candidate carries its whole rack program; the group's level is the level
+                // of its *first* slot, and slot k sits at level + k (#99 F3).
+                let nodes = &split_report.chains[member];
+                for (offset, node) in nodes.iter().enumerate() {
+                    assert_eq!(
+                        split_levels
+                            .get(&GraphNodeId::Effect(node.clone()))
+                            .copied(),
+                        Some(group.level + offset as u64),
+                        "every planned group is level-uniform at each slot"
+                    );
+                }
             }
         }
 
@@ -4530,14 +4907,7 @@ mod tests {
             bank_artifact.report.rack_cohorts.plan.groups,
             "cohort planning is independent of the factory's legal scalar fallback"
         );
-        assert!(
-            scalar_artifact
-                .report
-                .rack_cohorts
-                .bound
-                .iter()
-                .all(|bound| !*bound)
-        );
+        assert!(scalar_artifact.report.rack_cohorts.bound_slots.is_empty());
         assert_eq!(
             scalar_artifact
                 .report

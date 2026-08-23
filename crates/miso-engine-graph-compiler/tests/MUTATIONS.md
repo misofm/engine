@@ -129,3 +129,26 @@ it lands here. `direct-route` cannot see this bug: it is a chain with one node p
 * Mutation: remove one `+ 1` between `rack_token` and the effect id.
 * Command: `cargo test -p miso-engine-graph-compiler --lib node_text_len`
 * Red: `node_text_len disagrees for Effect(EffectNodeId { .., rack: Simd1, .. })`.
+
+---
+
+## F3 — one cohort former, over whole rack chains
+
+### M-15 — build chain slots from `entries` order instead of session order
+* Mutation: sort each track's declared rack effects by effect id before reading their program keys.
+* Command: `cargo test -p miso-engine-graph-compiler --lib -- multi_slot chains_of_different bank_membership_is_independent`
+* Red: all three chain tests. The fixtures name slot 0 `chain1` and slot 1 `chain0` deliberately,
+  so session order and `EffectPreparedSession::entries` order (sorted by effect id) disagree --
+  the exact trap #96's crate doc calls out for #99. Without that naming the mutation is invisible.
+
+### M-16 — bind a slot even when some lane skips it
+* Mutation: drop the `group.active_slots.iter().all(|lane| lane[slot])` guard.
+* Command: as above.
+* Red: `chains_of_different_depths_share_a_cohort_through_identity_slots` — slot 1 binds with half
+  its lanes inactive, which the effect contract cannot express until #95 adds the per-lane mask.
+
+### M-17 — bucket every chain at level 0 instead of its first slot's level
+* Mutation: `candidates_by_level.entry(0)`.
+* Command: `cargo test -p miso-engine-graph-compiler --lib`
+* Red: `mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes` --
+  the level-uniformity assertion, which now checks slot `k` of a chain sits at `level + k`.
