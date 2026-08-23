@@ -210,8 +210,9 @@ use crate::{
     CommandFrame, CommandHeader, DecodeError, DecodeScratch, DecodedFrame, EncodeError,
     ExpectedRevision, Frame, MessageId, ProtocolCodec, RequestId, SessionEditV1,
     btlv::{
-        CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8 as read_u8_exact,
-        read_u16 as read_u16_exact, read_u32 as read_u32_exact, read_u64 as read_u64_exact,
+        CountSink, Fields as Message, MessageMeasure, Sink, SliceSink, read_f32,
+        read_u8 as read_u8_exact, read_u16 as read_u16_exact, read_u32 as read_u32_exact,
+        read_u64 as read_u64_exact,
     },
     schema::{self, FieldSpec},
 };
@@ -255,6 +256,16 @@ impl ProtocolCodec {
         &self,
         transaction: &SessionTransactionFrame<'_>,
     ) -> Result<usize, EncodeError> {
+        let measure = self.measure_session_transaction_payload(transaction)?;
+        crate::OUTER_HEADER_BYTES
+            .checked_add(measure.length)
+            .ok_or(EncodeError::LimitExceeded)
+    }
+
+    fn measure_session_transaction_payload(
+        &self,
+        transaction: &SessionTransactionFrame<'_>,
+    ) -> Result<MessageMeasure, EncodeError> {
         if !matches!(transaction.expected_revision, ExpectedRevision::Exact(_))
             || transaction.edits.is_empty()
         {
@@ -262,14 +273,14 @@ impl ProtocolCodec {
         }
         let mut sizing = CountSink::new(transaction_envelope_limits(self.limits()));
         encode_transaction_payload_into(&mut sizing, transaction.edits)?;
-        sizing.finish_message()?;
+        let measure = sizing.measure_message()?;
         let required = crate::OUTER_HEADER_BYTES
-            .checked_add(sizing.written())
+            .checked_add(measure.length)
             .ok_or(EncodeError::LimitExceeded)?;
         if required > self.limits().max_frame_bytes {
             return Err(EncodeError::LimitExceeded);
         }
-        Ok(required)
+        Ok(measure)
     }
 
     /// Encode a canonical session transaction. A short caller buffer is left wholly unmodified.
@@ -278,7 +289,10 @@ impl ProtocolCodec {
         transaction: &SessionTransactionFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let required = self.encoded_session_transaction_len(transaction)?;
+        let measure = self.measure_session_transaction_payload(transaction)?;
+        let required = crate::OUTER_HEADER_BYTES
+            .checked_add(measure.length)
+            .ok_or(EncodeError::LimitExceeded)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
@@ -296,18 +310,15 @@ impl ProtocolCodec {
             u32::try_from(required - crate::OUTER_HEADER_BYTES)
                 .map_err(|_| EncodeError::LimitExceeded)?,
         );
-        put_u32(
-            output,
-            40,
-            u32::try_from(transaction.edits.len()).map_err(|_| EncodeError::LimitExceeded)?,
-        );
+        put_u32(output, 40, measure.field_count);
         let mut writer = SliceSink::new(
             &mut output[crate::OUTER_HEADER_BYTES..required],
             transaction_envelope_limits(self.limits()),
         );
         encode_transaction_payload_into(&mut writer, transaction.edits)?;
-        writer.finish_message()?;
-        debug_assert_eq!(writer.written(), required - crate::OUTER_HEADER_BYTES);
+        if writer.measure_message()? != measure {
+            return Err(EncodeError::LimitExceeded);
+        }
         Ok(required)
     }
 
@@ -2106,6 +2117,41 @@ mod tests {
                 .windows(2)
                 .any(|window| window == 0x0006_u16.to_le_bytes())
         );
+    }
+
+    #[test]
+    fn transaction_outer_header_uses_sizing_sink_repeated_count() {
+        let codec = ProtocolCodec::default();
+        let edits = [
+            SessionEditV1::SetSessionId {
+                session_id: id("measured"),
+            },
+            SessionEditV1::SetSampleRateHz {
+                sample_rate_hz: 48_000,
+            },
+            SessionEditV1::SetQuantumFrames {
+                quantum_frames: 128,
+            },
+        ];
+        for count in 1..=edits.len() {
+            let transaction = SessionTransactionFrame {
+                request_id: RequestId::new(3).expect("request"),
+                expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+                edits: &edits[..count],
+            };
+            let required = codec
+                .encoded_session_transaction_len(&transaction)
+                .expect("measured length");
+            let mut output = vec![0; required];
+            assert_eq!(
+                codec.encode_session_transaction(&transaction, &mut output),
+                Ok(required)
+            );
+            assert_eq!(
+                u32::from_le_bytes(output[40..44].try_into().expect("outer TLV count")),
+                u32::try_from(count).expect("small count")
+            );
+        }
     }
 
     fn source() -> Source {

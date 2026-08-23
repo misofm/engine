@@ -2172,7 +2172,7 @@ fn decode_automation_enqueue<'a>(
     Ok(result)
 }
 
-fn write_snapshot_request(
+pub(crate) fn write_snapshot_request(
     sink: &mut dyn Sink,
     value: SessionSnapshotRequest,
 ) -> Result<(), EncodeError> {
@@ -2192,7 +2192,10 @@ fn write_snapshot_request(
     )
 }
 
-fn write_snapshot(sink: &mut dyn Sink, value: SessionSnapshot<'_>) -> Result<(), EncodeError> {
+pub(crate) fn write_snapshot(
+    sink: &mut dyn Sink,
+    value: SessionSnapshot<'_>,
+) -> Result<(), EncodeError> {
     if value.offset > value.total_bytes
         || u64::try_from(value.canonical_toml_chunk.len())
             .map_err(|_| EncodeError::LimitExceeded)?
@@ -2220,7 +2223,7 @@ fn write_snapshot(sink: &mut dyn Sink, value: SessionSnapshot<'_>) -> Result<(),
     write_spec!(sink, schema::snapshot::EOF, &[u8::from(value.eof)])
 }
 
-fn write_transaction_applied(
+pub(crate) fn write_transaction_applied(
     sink: &mut dyn Sink,
     value: TransactionApplied,
 ) -> Result<(), EncodeError> {
@@ -2232,7 +2235,7 @@ fn write_transaction_applied(
     )
 }
 
-fn write_session_committed(
+pub(crate) fn write_session_committed(
     sink: &mut dyn Sink,
     value: SessionCommitted,
 ) -> Result<(), EncodeError> {
@@ -2259,7 +2262,7 @@ fn write_session_committed(
     )
 }
 
-fn write_metadata_request(
+pub(crate) fn write_metadata_request(
     sink: &mut dyn Sink,
     value: ParameterMetadataRequest,
 ) -> Result<(), EncodeError> {
@@ -2279,7 +2282,7 @@ fn write_metadata_request(
     )
 }
 
-fn write_state_request(
+pub(crate) fn write_state_request(
     sink: &mut dyn Sink,
     value: &ParameterStateRequest,
 ) -> Result<(), EncodeError> {
@@ -2288,7 +2291,7 @@ fn write_state_request(
     write_u32s(sink, schema::state_request::HANDLES, &value.handles)
 }
 
-fn write_automation_enqueue(
+pub(crate) fn write_automation_enqueue(
     sink: &mut dyn Sink,
     value: AutomationEnqueue<'_>,
 ) -> Result<(), EncodeError> {
@@ -2308,7 +2311,7 @@ fn write_automation_enqueue(
     write_automation_record_bytes(sink, value.records)
 }
 
-fn write_automation_enqueued(
+pub(crate) fn write_automation_enqueued(
     sink: &mut dyn Sink,
     value: AutomationEnqueued,
 ) -> Result<(), EncodeError> {
@@ -2338,7 +2341,10 @@ fn write_automation_enqueued(
     )
 }
 
-fn write_transport_set(sink: &mut dyn Sink, value: TransportSetRequest) -> Result<(), EncodeError> {
+pub(crate) fn write_transport_set(
+    sink: &mut dyn Sink,
+    value: TransportSetRequest,
+) -> Result<(), EncodeError> {
     sink.check_field_count(schema::transport_set::SPEC.field_count(&[(
         schema::transport_set::POSITION,
         usize::from(value.position.is_some()),
@@ -2354,7 +2360,7 @@ fn write_transport_set(sink: &mut dyn Sink, value: TransportSetRequest) -> Resul
     Ok(())
 }
 
-fn write_transport_snapshot(
+pub(crate) fn write_transport_snapshot(
     sink: &mut dyn Sink,
     value: TransportSnapshot,
 ) -> Result<(), EncodeError> {
@@ -2376,7 +2382,7 @@ fn write_transport_snapshot(
     )
 }
 
-fn write_transport_state_event(
+pub(crate) fn write_transport_state_event(
     sink: &mut dyn Sink,
     value: TransportStateEvent,
 ) -> Result<(), EncodeError> {
@@ -2414,7 +2420,7 @@ fn write_transport_state_event(
     Ok(())
 }
 
-fn write_automation_canceled(
+pub(crate) fn write_automation_canceled(
     sink: &mut dyn Sink,
     value: AutomationCanceled,
 ) -> Result<(), EncodeError> {
@@ -2460,7 +2466,10 @@ fn write_automation_canceled(
     Ok(())
 }
 
-fn write_meter_batch(sink: &mut dyn Sink, value: MeterBatch<'_>) -> Result<(), EncodeError> {
+pub(crate) fn write_meter_batch(
+    sink: &mut dyn Sink,
+    value: MeterBatch<'_>,
+) -> Result<(), EncodeError> {
     validate_meter_records(value.records)?;
     sink.check_field_count(schema::meter_batch::SPEC.field_count(&[])?)?;
     let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
@@ -2490,7 +2499,7 @@ fn write_meter_batch(sink: &mut dyn Sink, value: MeterBatch<'_>) -> Result<(), E
     })
 }
 
-fn write_telemetry_configuration(
+pub(crate) fn write_telemetry_configuration(
     sink: &mut dyn Sink,
     value: &TelemetryConfiguration,
 ) -> Result<(), EncodeError> {
@@ -2528,7 +2537,10 @@ fn write_telemetry_configuration(
     )
 }
 
-fn write_counters_request(sink: &mut dyn Sink, value: &CountersRequest) -> Result<(), EncodeError> {
+pub(crate) fn write_counters_request(
+    sink: &mut dyn Sink,
+    value: &CountersRequest,
+) -> Result<(), EncodeError> {
     validate_counters_request(value).map_err(|_| EncodeError::LimitExceeded)?;
     sink.check_field_count(
         schema::counters_request::SPEC
@@ -2541,7 +2553,7 @@ fn write_counters_request(sink: &mut dyn Sink, value: &CountersRequest) -> Resul
     Ok(())
 }
 
-fn write_counter_snapshot(
+pub(crate) fn write_counter_snapshot(
     sink: &mut dyn Sink,
     value: CounterSnapshotRef<'_>,
 ) -> Result<(), EncodeError> {
@@ -2573,7 +2585,7 @@ fn write_counter_snapshot(
     Ok(())
 }
 
-fn write_diagnostics_request(
+pub(crate) fn write_diagnostics_request(
     sink: &mut dyn Sink,
     value: DiagnosticsRequest,
 ) -> Result<(), EncodeError> {
@@ -2598,7 +2610,7 @@ fn write_diagnostics_request(
     )
 }
 
-fn write_non_ok(
+pub(crate) fn write_non_ok(
     codec: &ProtocolCodec,
     sink: &mut dyn Sink,
     value: &NonOkResponse,
@@ -2636,7 +2648,7 @@ fn check_handles(handles: &[u32]) -> Result<(), DecodeError> {
     }
     Ok(())
 }
-fn write_metadata_page(
+pub(crate) fn write_metadata_page(
     codec: &ProtocolCodec,
     sink: &mut dyn Sink,
     value: &ParameterMetadataPage,
@@ -2930,7 +2942,10 @@ fn parse_rate(v: u8) -> Result<ParameterAutomationRate, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn write_state_page(sink: &mut dyn Sink, value: &ParameterStatePage) -> Result<(), EncodeError> {
+pub(crate) fn write_state_page(
+    sink: &mut dyn Sink,
+    value: &ParameterStatePage,
+) -> Result<(), EncodeError> {
     if value.records.len() > 256 {
         return Err(EncodeError::LimitExceeded);
     }
@@ -3015,7 +3030,10 @@ fn validate_state_record(value: &ParameterStateRecord) -> Result<(), DecodeError
     Ok(())
 }
 
-fn write_capabilities(sink: &mut dyn Sink, value: &Capabilities<'_>) -> Result<(), EncodeError> {
+pub(crate) fn write_capabilities(
+    sink: &mut dyn Sink,
+    value: &Capabilities<'_>,
+) -> Result<(), EncodeError> {
     check_capabilities(value)?;
     sink.check_field_count(schema::capabilities::SPEC.field_count(&[])?)?;
     write_spec!(
@@ -3602,7 +3620,7 @@ fn write_backpressure_message(sink: &mut dyn Sink, value: Backpressure) -> Resul
     Ok(())
 }
 
-fn write_diagnostic_event(
+pub(crate) fn write_diagnostic_event(
     codec: &ProtocolCodec,
     sink: &mut dyn Sink,
     diagnostic: &Diagnostic,
@@ -3623,7 +3641,7 @@ fn write_diagnostic_event(
     )
 }
 
-fn write_diagnostics_page(
+pub(crate) fn write_diagnostics_page(
     codec: &ProtocolCodec,
     sink: &mut dyn Sink,
     value: &DiagnosticsPage,

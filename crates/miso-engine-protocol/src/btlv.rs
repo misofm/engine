@@ -549,11 +549,22 @@ impl MessageFields {
     }
 
     fn finish(self) -> Result<(), EncodeError> {
+        self.finished_count().map(|_| ())
+    }
+
+    fn finished_count(self) -> Result<u32, EncodeError> {
         match self.expected {
-            Some(expected) if expected == self.actual => Ok(()),
+            Some(expected) if expected == self.actual => Ok(self.actual),
             _ => Err(EncodeError::LimitExceeded),
         }
     }
+}
+
+/// Exact metadata produced by one completed top-level sizing pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MessageMeasure {
+    pub(crate) length: usize,
+    pub(crate) field_count: u32,
 }
 
 pub(crate) trait Sink {
@@ -570,6 +581,13 @@ pub(crate) trait Sink {
 
     fn finish_message(&self) -> Result<(), EncodeError> {
         self.message_fields().finish()
+    }
+
+    fn measure_message(&self) -> Result<MessageMeasure, EncodeError> {
+        Ok(MessageMeasure {
+            length: self.written(),
+            field_count: self.message_fields().finished_count()?,
+        })
     }
 
     fn message_header(&mut self, count: u32) -> Result<(), EncodeError> {

@@ -4,6 +4,7 @@
 //! offer a raw message ID, field, or payload escape hatch: every public enum variant corresponds
 //! to exactly one registered command, successful response, non-OK response, or event schema.
 
+use crate::btlv::{CountSink, MessageMeasure, Sink, SliceSink};
 use crate::{
     AutomationCanceled, AutomationEnqueue, AutomationEnqueued, Capabilities, CommandHeader,
     CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
@@ -238,9 +239,7 @@ impl ProtocolCodec {
                 output,
             );
         }
-        let payload_len =
-            encoded_payload_len(|output| encode_command_payload(self, &frame.payload, output))?;
-        let tlv_count = command_field_count(&frame.payload)?;
+        let measure = measure_payload(self, |sink| write_command_payload(&frame.payload, sink))?;
         encode_complete_frame(
             self,
             FrameKind::Command,
@@ -249,10 +248,9 @@ impl ProtocolCodec {
             frame.request_id.get(),
             command_revision(frame.expected_revision),
             command_flags(frame.expected_revision),
-            payload_len,
-            tlv_count,
+            measure,
             output,
-            |payload| encode_command_payload(self, &frame.payload, payload),
+            |sink| write_command_payload(&frame.payload, sink),
         )
     }
 
@@ -262,9 +260,9 @@ impl ProtocolCodec {
         frame: &TypedSuccessResponseFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let payload_len =
-            encoded_payload_len(|output| encode_success_payload(self, &frame.payload, output))?;
-        let tlv_count = success_field_count(&frame.payload)?;
+        let measure = measure_payload(self, |sink| {
+            write_success_payload(self, &frame.payload, sink)
+        })?;
         encode_complete_frame(
             self,
             FrameKind::Response,
@@ -273,10 +271,9 @@ impl ProtocolCodec {
             frame.request_id.get(),
             frame.revision.0,
             0,
-            payload_len,
-            tlv_count,
+            measure,
             output,
-            |payload| encode_success_payload(self, &frame.payload, payload),
+            |sink| write_success_payload(self, &frame.payload, sink),
         )
     }
 
@@ -292,18 +289,9 @@ impl ProtocolCodec {
         {
             return Err(EncodeError::MessageKindMismatch);
         }
-        let payload_len =
-            encoded_payload_len(|output| self.encode_non_ok_payload(frame.payload, output))?;
-        let tlv_count = crate::schema::non_ok::SPEC.field_count(&[
-            (
-                crate::schema::non_ok::DIAGNOSTIC,
-                frame.payload.diagnostics.len(),
-            ),
-            (
-                crate::schema::non_ok::BACKPRESSURE,
-                usize::from(frame.payload.backpressure.is_some()),
-            ),
-        ])?;
+        let measure = measure_payload(self, |sink| {
+            crate::message_wire::write_non_ok(self, sink, frame.payload)
+        })?;
         encode_complete_frame(
             self,
             FrameKind::Response,
@@ -312,10 +300,9 @@ impl ProtocolCodec {
             frame.request_id.get(),
             frame.revision.0,
             0,
-            payload_len,
-            tlv_count,
+            measure,
             output,
-            |payload| self.encode_non_ok_payload(frame.payload, payload),
+            |sink| crate::message_wire::write_non_ok(self, sink, frame.payload),
         )
     }
 
@@ -325,9 +312,8 @@ impl ProtocolCodec {
         frame: &TypedEventFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let payload_len =
-            encoded_payload_len(|output| encode_event_payload(self, &frame.payload, output))?;
-        let tlv_count = event_field_count(&frame.payload)?;
+        let measure =
+            measure_payload(self, |sink| write_event_payload(self, &frame.payload, sink))?;
         encode_complete_frame(
             self,
             FrameKind::Event,
@@ -336,10 +322,9 @@ impl ProtocolCodec {
             0,
             frame.revision.0,
             0,
-            payload_len,
-            tlv_count,
+            measure,
             output,
-            |payload| encode_event_payload(self, &frame.payload, payload),
+            |sink| write_event_payload(self, &frame.payload, sink),
         )
     }
 
@@ -564,113 +549,17 @@ const fn command_flags(revision: crate::ExpectedRevision) -> u8 {
     }
 }
 
-fn encoded_payload_len(
-    encode: impl FnOnce(&mut [u8]) -> Result<usize, EncodeError>,
-) -> Result<usize, EncodeError> {
-    match encode(&mut []) {
-        Ok(length) => Ok(length),
-        Err(EncodeError::OutputTooSmall { required }) => Ok(required),
-        Err(error) => Err(error),
+fn measure_payload(
+    codec: &ProtocolCodec,
+    write: impl FnOnce(&mut dyn Sink) -> Result<(), EncodeError>,
+) -> Result<MessageMeasure, EncodeError> {
+    let mut sizing = CountSink::new(codec.limits());
+    write(&mut sizing)?;
+    let measure = sizing.measure_message()?;
+    if measure.length > codec.limits().max_frame_bytes {
+        return Err(EncodeError::LimitExceeded);
     }
-}
-
-fn command_field_count(payload: &CommandPayload<'_>) -> Result<u32, EncodeError> {
-    match payload {
-        CommandPayload::CapabilitiesGet => {
-            crate::schema::capabilities_request::SPEC.field_count(&[])
-        }
-        CommandPayload::SessionSnapshotGet(_) => {
-            crate::schema::snapshot_request::SPEC.field_count(&[])
-        }
-        CommandPayload::SessionTransactionApply(_) => {
-            unreachable!("handled as a complete transaction frame")
-        }
-        CommandPayload::ParameterMetadataGet(_) => {
-            crate::schema::metadata_request::SPEC.field_count(&[])
-        }
-        CommandPayload::ParameterStateGet(_) => crate::schema::state_request::SPEC.field_count(&[]),
-        CommandPayload::AutomationEnqueue(_) => {
-            crate::schema::automation_enqueue::SPEC.field_count(&[])
-        }
-        CommandPayload::TransportGet => crate::schema::transport_get::SPEC.field_count(&[]),
-        CommandPayload::TransportSet(value) => crate::schema::transport_set::SPEC.field_count(&[(
-            crate::schema::transport_set::POSITION,
-            usize::from(value.position.is_some()),
-        )]),
-        CommandPayload::TelemetryConfigure(_) => {
-            crate::schema::telemetry_configuration::SPEC.field_count(&[])
-        }
-        CommandPayload::CountersGet(value) => {
-            crate::schema::counters_request::SPEC.field_count(&[(
-                crate::schema::counters_request::IDS,
-                usize::from(!value.all),
-            )])
-        }
-        CommandPayload::DiagnosticsGet(_) => {
-            crate::schema::diagnostics_request::SPEC.field_count(&[])
-        }
-    }
-}
-
-fn success_field_count(payload: &SuccessResponsePayload<'_>) -> Result<u32, EncodeError> {
-    match payload {
-        SuccessResponsePayload::Capabilities(_) => {
-            crate::schema::capabilities::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::SessionSnapshot(_) => {
-            crate::schema::snapshot::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::SessionTransactionApplied(_) => {
-            crate::schema::transaction_applied::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::ParameterMetadata(value) => crate::schema::metadata_page::SPEC
-            .field_count(&[(
-                crate::schema::metadata_page::DESCRIPTOR,
-                value.descriptors.len(),
-            )]),
-        SuccessResponsePayload::ParameterState(_) => {
-            crate::schema::state_page::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::AutomationEnqueued(_) => {
-            crate::schema::automation_enqueued::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::TransportGetSnapshot(_)
-        | SuccessResponsePayload::TransportSetSnapshot(_) => {
-            crate::schema::transport_snapshot::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::TelemetryConfiguration(_) => {
-            crate::schema::telemetry_configuration::SPEC.field_count(&[])
-        }
-        SuccessResponsePayload::CounterSnapshot(value) => crate::schema::counter_snapshot::SPEC
-            .field_count(&[(crate::schema::counter_snapshot::VALUE, value.values.len())]),
-        SuccessResponsePayload::DiagnosticsPage(value) => crate::schema::diagnostics_page::SPEC
-            .field_count(&[(
-                crate::schema::diagnostics_page::DIAGNOSTIC,
-                value.diagnostics.len(),
-            )]),
-    }
-}
-
-fn event_field_count(payload: &EventPayload<'_>) -> Result<u32, EncodeError> {
-    match payload {
-        EventPayload::SessionCommitted(_) => {
-            crate::schema::session_committed::SPEC.field_count(&[])
-        }
-        EventPayload::AutomationCanceled(value) => crate::schema::automation_canceled::SPEC
-            .field_count(&[(
-                crate::schema::automation_canceled::EFFECTIVE_SAMPLE,
-                usize::from(value.effective_sample.is_some()),
-            )]),
-        EventPayload::TransportState(value) => crate::schema::transport_state_event::SPEC
-            .field_count(&[(
-                crate::schema::transport_state_event::ORIGIN_REQUEST_ID,
-                usize::from(value.origin_request_id.is_some()),
-            )]),
-        EventPayload::MeterBatch(_) => crate::schema::meter_batch::SPEC.field_count(&[]),
-        EventPayload::CounterSnapshot(value) => crate::schema::counter_snapshot::SPEC
-            .field_count(&[(crate::schema::counter_snapshot::VALUE, value.values.len())]),
-        EventPayload::Diagnostic(_) => crate::schema::diagnostic_event::SPEC.field_count(&[]),
-    }
+    Ok(measure)
 }
 
 #[allow(clippy::too_many_arguments)] // The frozen outer-header fields are deliberately explicit.
@@ -682,16 +571,17 @@ fn encode_complete_frame(
     request_id: u64,
     revision: u64,
     flags: u8,
-    payload_len: usize,
-    tlv_count: u32,
+    measure: MessageMeasure,
     output: &mut [u8],
-    encode_payload: impl FnOnce(&mut [u8]) -> Result<usize, EncodeError>,
+    write_payload: impl FnOnce(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<usize, EncodeError> {
-    let payload_u32 = u32::try_from(payload_len).map_err(|_| EncodeError::LimitExceeded)?;
+    let payload_u32 = u32::try_from(measure.length).map_err(|_| EncodeError::LimitExceeded)?;
     let required = OUTER_HEADER_BYTES
-        .checked_add(payload_len)
+        .checked_add(measure.length)
         .ok_or(EncodeError::LimitExceeded)?;
-    if required > codec.limits().max_frame_bytes || tlv_count > codec.limits().max_tlv_count {
+    if required > codec.limits().max_frame_bytes
+        || measure.field_count > codec.limits().max_tlv_count
+    {
         return Err(EncodeError::LimitExceeded);
     }
     if output.len() < required {
@@ -706,89 +596,125 @@ fn encode_complete_frame(
         revision,
         flags,
         payload_u32,
-        tlv_count,
+        measure.field_count,
     )?;
-    let written = encode_payload(&mut output[OUTER_HEADER_BYTES..required])?;
-    debug_assert_eq!(written, payload_len);
+    let mut writer = SliceSink::new(&mut output[OUTER_HEADER_BYTES..required], codec.limits());
+    write_payload(&mut writer)?;
+    if writer.measure_message()? != measure {
+        return Err(EncodeError::LimitExceeded);
+    }
     Ok(required)
 }
 
-fn encode_command_payload(
-    codec: &ProtocolCodec,
+fn write_command_payload(
     payload: &CommandPayload<'_>,
-    output: &mut [u8],
-) -> Result<usize, EncodeError> {
+    sink: &mut dyn Sink,
+) -> Result<(), EncodeError> {
     match payload {
-        CommandPayload::CapabilitiesGet => Ok(0),
-        CommandPayload::SessionSnapshotGet(value) => codec.encode_snapshot_request(*value, output),
+        CommandPayload::CapabilitiesGet => {
+            sink.check_field_count(crate::schema::capabilities_request::SPEC.field_count(&[])?)
+        }
+        CommandPayload::SessionSnapshotGet(value) => {
+            crate::message_wire::write_snapshot_request(sink, *value)
+        }
         CommandPayload::SessionTransactionApply(_) => {
             unreachable!("handled as a complete transaction frame")
         }
         CommandPayload::ParameterMetadataGet(value) => {
-            codec.encode_parameter_metadata_request(*value, output)
+            crate::message_wire::write_metadata_request(sink, *value)
         }
         CommandPayload::ParameterStateGet(value) => {
-            codec.encode_parameter_state_request(value, output)
+            crate::message_wire::write_state_request(sink, value)
         }
-        CommandPayload::AutomationEnqueue(value) => codec.encode_automation_enqueue(*value, output),
-        CommandPayload::TransportGet => codec.encode_transport_get_request(output),
-        CommandPayload::TransportSet(value) => codec.encode_transport_set_request(*value, output),
+        CommandPayload::AutomationEnqueue(value) => {
+            crate::message_wire::write_automation_enqueue(sink, *value)
+        }
+        CommandPayload::TransportGet => {
+            sink.check_field_count(crate::schema::transport_get::SPEC.field_count(&[])?)
+        }
+        CommandPayload::TransportSet(value) => {
+            crate::message_wire::write_transport_set(sink, *value)
+        }
         CommandPayload::TelemetryConfigure(value) => {
-            codec.encode_telemetry_configuration(value, output)
+            crate::message_wire::write_telemetry_configuration(sink, value)
         }
-        CommandPayload::CountersGet(value) => codec.encode_counters_request(value, output),
-        CommandPayload::DiagnosticsGet(value) => codec.encode_diagnostics_request(*value, output),
+        CommandPayload::CountersGet(value) => {
+            crate::message_wire::write_counters_request(sink, value)
+        }
+        CommandPayload::DiagnosticsGet(value) => {
+            crate::message_wire::write_diagnostics_request(sink, *value)
+        }
     }
 }
 
-fn encode_success_payload(
+fn write_success_payload(
     codec: &ProtocolCodec,
     payload: &SuccessResponsePayload<'_>,
-    output: &mut [u8],
-) -> Result<usize, EncodeError> {
+    sink: &mut dyn Sink,
+) -> Result<(), EncodeError> {
     match payload {
-        SuccessResponsePayload::Capabilities(value) => codec.encode_capabilities(value, output),
-        SuccessResponsePayload::SessionSnapshot(value) => codec.encode_snapshot(*value, output),
+        SuccessResponsePayload::Capabilities(value) => {
+            crate::message_wire::write_capabilities(sink, value)
+        }
+        SuccessResponsePayload::SessionSnapshot(value) => {
+            crate::message_wire::write_snapshot(sink, *value)
+        }
         SuccessResponsePayload::SessionTransactionApplied(value) => {
-            codec.encode_transaction_applied(*value, output)
+            crate::message_wire::write_transaction_applied(sink, *value)
         }
         SuccessResponsePayload::ParameterMetadata(value) => {
-            codec.encode_parameter_metadata_page(value, output)
+            crate::message_wire::write_metadata_page(codec, sink, value)
         }
         SuccessResponsePayload::ParameterState(value) => {
-            codec.encode_parameter_state_page(value, output)
+            crate::message_wire::write_state_page(sink, value)
         }
         SuccessResponsePayload::AutomationEnqueued(value) => {
-            codec.encode_automation_enqueued(*value, output)
+            crate::message_wire::write_automation_enqueued(sink, *value)
         }
         SuccessResponsePayload::TransportGetSnapshot(value)
         | SuccessResponsePayload::TransportSetSnapshot(value) => {
-            codec.encode_transport_snapshot(*value, output)
+            crate::message_wire::write_transport_snapshot(sink, *value)
         }
         SuccessResponsePayload::TelemetryConfiguration(value) => {
-            codec.encode_telemetry_configuration(value, output)
+            crate::message_wire::write_telemetry_configuration(sink, value)
         }
         SuccessResponsePayload::CounterSnapshot(value) => {
-            codec.encode_counter_snapshot(value, output)
+            crate::message_wire::write_counter_snapshot(
+                sink,
+                CounterSnapshotRef {
+                    observed_sample: value.observed_sample,
+                    values: &value.values,
+                },
+            )
         }
         SuccessResponsePayload::DiagnosticsPage(value) => {
-            codec.encode_diagnostics_page(value, output)
+            crate::message_wire::write_diagnostics_page(codec, sink, value)
         }
     }
 }
 
-fn encode_event_payload(
+fn write_event_payload(
     codec: &ProtocolCodec,
     payload: &EventPayload<'_>,
-    output: &mut [u8],
-) -> Result<usize, EncodeError> {
+    sink: &mut dyn Sink,
+) -> Result<(), EncodeError> {
     match payload {
-        EventPayload::SessionCommitted(value) => codec.encode_session_committed(*value, output),
-        EventPayload::AutomationCanceled(value) => codec.encode_automation_canceled(*value, output),
-        EventPayload::TransportState(value) => codec.encode_transport_state_event(*value, output),
-        EventPayload::MeterBatch(value) => codec.encode_meter_batch(*value, output),
-        EventPayload::CounterSnapshot(value) => codec.encode_counter_snapshot_ref(*value, output),
-        EventPayload::Diagnostic(value) => codec.encode_diagnostic_ref(value, output),
+        EventPayload::SessionCommitted(value) => {
+            crate::message_wire::write_session_committed(sink, *value)
+        }
+        EventPayload::AutomationCanceled(value) => {
+            crate::message_wire::write_automation_canceled(sink, *value)
+        }
+        EventPayload::TransportState(value) => {
+            crate::message_wire::write_transport_state_event(sink, *value)
+        }
+        EventPayload::MeterBatch(value) => crate::message_wire::write_meter_batch(sink, *value),
+        EventPayload::CounterSnapshot(value) => {
+            crate::message_wire::write_counter_snapshot(sink, *value)
+        }
+        EventPayload::Diagnostic(value) => {
+            crate::message_wire::write_diagnostic_event(codec, sink, value)
+        }
     }
 }
 
@@ -896,6 +822,67 @@ mod tests {
             })
         );
         assert!(short.iter().all(|byte| *byte == 0xa5));
+    }
+
+    fn outer_field_count(frame: &[u8]) -> u32 {
+        u32::from_le_bytes(frame[40..44].try_into().expect("outer TLV count"))
+    }
+
+    #[test]
+    fn complete_frame_header_uses_sizing_sink_optional_and_repeated_counts() {
+        let codec = ProtocolCodec::default();
+        let without_position = encode_command(
+            &codec,
+            &TypedCommandFrame {
+                request_id: request_id(),
+                expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
+                payload: CommandPayload::TransportSet(TransportSetRequest {
+                    state: crate::TransportState::Playing,
+                    position: None,
+                }),
+            },
+        );
+        let with_position = encode_command(
+            &codec,
+            &TypedCommandFrame {
+                request_id: request_id(),
+                expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
+                payload: CommandPayload::TransportSet(TransportSetRequest {
+                    state: crate::TransportState::Playing,
+                    position: Some(crate::SampleTime(9)),
+                }),
+            },
+        );
+        assert_eq!(outer_field_count(&without_position), 1);
+        assert_eq!(outer_field_count(&with_position), 2);
+
+        let diagnostic = crate::Diagnostic {
+            code: "protocol.count".to_owned(),
+            severity: crate::DiagnosticSeverity::Error,
+            path: Vec::new(),
+            detail: None,
+            operation_index: None,
+            sample_time: None,
+            provider_sequence: None,
+        };
+        let payload = NonOkResponse {
+            diagnostics: vec![diagnostic.clone(), diagnostic],
+            omitted_diagnostics: 0,
+            backpressure: None,
+        };
+        let frame = TypedNonOkResponseFrame {
+            request_id: request_id(),
+            revision: SessionRevision(7),
+            message_id: MessageId::CapabilitiesGet,
+            status: StatusCode::InvalidField,
+            payload: &payload,
+        };
+        let mut output = vec![0_u8; 4096];
+        let written = codec
+            .encode_non_ok_response_frame_into(&frame, &mut output)
+            .expect("non-OK frame");
+        output.truncate(written);
+        assert_eq!(outer_field_count(&output), 3);
     }
 
     #[test]
