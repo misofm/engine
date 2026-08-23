@@ -7,13 +7,15 @@ resource and event semantics identical to the production library, derive the com
 admission oracle from primitive external authority, and observe real construction/Drop ownership
 rather than a procedural test ledger.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One implementation pass plus one bounded HOLD correction is the full
-budget; a second HOLD stops. Benchmark, timing, real-workload, playback and listening counters start
-at zero and must remain zero.
-
-Remote Issue 120 is unallocated. Root must create and synchronize it under this exact title after
-the docs checkpoint is upstream. This record makes no GitHub mutation.
+**TERMINAL STOP AFTER THE SECOND SOL XHIGH VERDICT.** Preserve technical checkpoint
+`ecd72538c5bd5605c4257700fa33b9786f60774c` (tree
+`ebff0e0fe71d1df8975824945f2cdd192886a8b3`) without overall PASS. Production/test layout identity,
+eager resource ownership, literal command/event vectors, production-origin event stimulation,
+constructor/Drop observation and the ordered 6x6 transaction/reclaim matrix are verified technical
+input. The correction still exposed a new public mutable protocol diagnostic/event producer, and
+the remaining plan/model/source oracle facts were pinned high-level totals rather than primitive
+derivations with effective mutations. The one-pass-plus-one-HOLD budget is exhausted. Benchmark,
+timing, real-workload, playback and listening counters remained zero.
 
 ## Dependencies and routing by exact title
 
@@ -31,9 +33,11 @@ the restored Issue-022 report row, separate compiled-model admission, byte-pinne
 and accepted replacement order. Inherit no overall PASS, oracle, event-origin, layout or lifecycle
 claim. Stopped Issues 113, 117 and 118 are transitive technical history only.
 
-Accepted Issue 120 gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and
-120 jointly gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then
-gates **End-to-end release, performance, and listening qualification** (Issue 026).
+Accepted **Close CAPI-owned render events and primitive replacement resource authority** (Issue
+121) gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and 121 jointly
+gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then gates
+**End-to-end release, performance, and listening qualification** (Issue 026). Issue 120 grants no
+accepted downstream capability.
 
 ## Frozen product authority
 

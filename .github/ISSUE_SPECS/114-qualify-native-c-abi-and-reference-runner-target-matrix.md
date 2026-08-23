@@ -5,7 +5,7 @@
 Qualify the completed native C ABI control/render product and WAV/RF64 reference runner across the
 launch native target boundary without changing product bytes or rerunning descriptive benchmarks.
 
-**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 116 AND 120.** Sol High implements; Sol XHigh
+**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 116 AND 121.** Sol High implements; Sol XHigh
 briefs and verifies. One pass plus one bounded HOLD correction is the complete budget. A second HOLD
 stops. Benchmark/timing counts are zero and must remain zero.
 
@@ -16,7 +16,7 @@ under this exact title after the docs checkpoint is upstream. This record makes 
 
 - **Seal portable native PCM runner under an explicit output-directory ownership contract**
   (Issue 116)
-- **Seal production-identical C ABI replacement evidence and lifecycle ownership** (Issue 120)
+- **Close CAPI-owned render events and primitive replacement resource authority** (Issue 121)
 
 Stopped **Close portable native PCM runner publication and seal the reference tool** (Issue 115)
 contributes technical input through accepted Issue 116 only; it is not a dependency and cannot be
@@ -25,16 +25,17 @@ qualified here.
 Stopped **Close C ABI control/event transport and transactional plan replacement** (Issue 113) and
 stopped **Complete C ABI transactions with two-phase protocol and plan reservations** (Issue 117),
 stopped **Close C ABI replacement resource accounting and cross-component evidence** (Issue 118),
-and stopped **Preallocate C ABI controller resources and independently seal replacement semantics**
-(Issue 119) contribute technical input through Issue 120 only. None is an accepted dependency and
-none can be qualified here.
+stopped **Preallocate C ABI controller resources and independently seal replacement semantics**
+(Issue 119), and stopped **Seal production-identical C ABI replacement evidence and lifecycle
+ownership** (Issue 120) contribute technical input through Issue 121 only. None is an accepted
+dependency and none can be qualified here.
 
 This issue gates **End-to-end release, performance, and listening qualification** (Issue 026). It
-does not gate Issue 025, which consumes accepted Issue 120 directly.
+does not gate Issue 025, which consumes accepted Issue 121 directly.
 
 ## Qualification-only matrix
 
-Freeze the accepted #116/#120 candidate before implementation and pin the installed header, static/
+Freeze the accepted #116/#121 candidate before implementation and pin the installed header, static/
 shared libraries, runner binary/source, Cargo locks, fixture manifests and protocol/session corpora.
 No product correction is permitted here.
 

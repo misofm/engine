@@ -120,11 +120,15 @@ terminal second HOLD at technical checkpoint `1a3dde2`: eager arenas, frozen gra
 separate model admission and pinned commands improved, but its model oracle remained production-
 derived, events/resource layouts diverged under tests, a mutable protocol backdoor grew uncharged
 provider state and lifecycle counters did not observe real Drop. Issue 120, **Seal production-
-identical C ABI replacement evidence and lifecycle ownership**, consumes that checkpoint plus
-accepted Issues 005, 003 and 022; it owns production-identical resource/event semantics, the truly
-primitive full-admission oracle and real owner construction/Drop evidence, and gates Issue 025
-directly. Issue 114, **Qualify native C ABI and reference runner target matrix**, joins accepted
-Issues 116 and 120 and alone owns native platform/runner qualification before Issue 026. Issues 101
+identical C ABI replacement evidence and lifecycle ownership**, then stopped at its terminal second
+verdict at technical checkpoint `ecd7253`: layout identity, eager ownership, literal command/event
+vectors, production-origin stimulation, real lifecycle wrappers and the ordered 6x6 matrix are
+verified technical input, but a new public mutable protocol event producer remained and plan/model/
+source oracle inputs were still high-level pins with ineffective mutations. Issue 121, **Close
+CAPI-owned render events and primitive replacement resource authority**, consumes that checkpoint
+plus accepted Issues 005, 003 and 022, owns only those two residuals, and gates Issue 025 directly.
+Issue 114, **Qualify native C ABI and reference runner target matrix**, joins accepted Issues 116
+and 121 and alone owns native platform/runner qualification before Issue 026. Issues 101
 and 112 change
 no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,

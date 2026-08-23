@@ -2,20 +2,21 @@
 
 ## Decision
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Consume stopped Issue
-119 technical checkpoint `1a3dde27e78634243d4474c13959697e672a7b33` (tree
-`3edd0b8db01672ea2a625fc6e2deef38734c5eb1`) without inheriting overall PASS. Retain its eager
-arenas, frozen Issue-022 report assignment, separate model admission, pinned 11-command vectors and
-replacement mechanics. Close only production/test semantic identity, a primitive full-admission
-oracle, shipped event origins and real lifecycle observation.
+**TERMINAL STOP AFTER THE SECOND SOL XHIGH VERDICT.** Preserve technical checkpoint
+`ecd72538c5bd5605c4257700fa33b9786f60774c` (tree
+`ebff0e0fe71d1df8975824945f2cdd192886a8b3`) without overall PASS. Production/test layout identity,
+eager ownership, literal command/event vectors, shipped event stimulation, real lifecycle wrappers
+and the complete ordered 6x6 transaction/reclaim matrix are verified technical input. A public
+mutable protocol diagnostic producer and non-primitive plan/model/source oracle inputs remain.
 
 Accepted dependencies are **Transport-neutral binary control protocol** (005), **Real-time memory,
 buffers, queues, and plan lifetime** (003), and **Stable C ABI and host-fed planar PCM render**
-(022). Accepted 120 gates **Optional binary WebSocket sidecar** (025); accepted 116 + 120 gate
-**Qualify native C ABI and reference runner target matrix** (114), then 026.
+(022). Remaining work is Issue 121, **Close CAPI-owned render events and primitive replacement
+resource authority**. Accepted 121 gates **Optional binary WebSocket sidecar** (025); accepted
+Issues 116 and 121 gate **Qualify native C ABI and reference runner target matrix** (114), then 026.
 
-Sol High implements; Sol XHigh verifies. One pass plus one bounded HOLD correction is the complete
-budget; a second HOLD stops. Benchmark/timing/workload/playback/listening counters remain zero.
+The one-pass-plus-one-HOLD budget is exhausted. Benchmark/timing/workload/playback/listening
+counters remained zero. Issue 120 grants no accepted downstream capability.
 
 ## Smallest closable product
 
