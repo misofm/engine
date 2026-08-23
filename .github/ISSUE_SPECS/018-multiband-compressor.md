@@ -101,7 +101,11 @@ mutation occurs here. `timed_benchmark_invocations=0`.
 
 ## Hazards/decisions
 
-LP and HP branches require independent histories; sharing their first section changes the transfer.
+Sharing the first section does not change the transfer: the HP-first and LP-first sections
+receive the same input and the same coefficients and carry bit-identical state, and
+`LP2^2 + HP2^2 = D(-s)/D(s)` exactly, so the crossover is two sections and
+`high = AP2(x) - low` with `AP2(x) = x - 2k*v1` from the first stage (audit #94 F4; `f64` mapping
+test, worst band deviation 1.33e-15 against the four-section oracle).
 Their sum is all-pass, not zero-phase or sample-identical dry, so only the prepare-time `bypass`
 path selects the delayed-dry ring; the enabled path always outputs the band sum (`low + high`),
 including at unity gain. A runtime dry/sum switch is a discontinuity (audit #94 F1). Crossover
@@ -260,3 +264,27 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   `bash` without changing their modes. The identity-branch and signed-zero mutations were each
   executed once and reverted. No fixture was re-pinned, and no benchmark, timing, target matrix or
   listening command ran; `timed_benchmark_invocations=0`.
+
+## Audit #94 wave 2 — phase 0 (LR4 sign and phase convention, `f64`)
+
+- Added `crates/miso-engine-multiband-compressor/tests/lr4_two_section_mapping_f64.rs`: an `f64`
+  transcription of the two-section LR4 form (`lp1 = LP2(x)`, `ap = x - 2k*v1`, `low = LP2(lp1)`,
+  `high = ap - low`) checked against two independent oracles before any production line moves.
+- Oracle 1, the merged four-section `f64` reference `miso_engine_dsp_reference::lr4`
+  (issue #105 phase 1, `d019fcb`), whose own gates report analytic sum flatness
+  `4.985573e-13` dB, crossing error `2.575717e-13` dB and recurrence-versus-state-space agreement
+  `1.110223e-16`, and which documents the same no-inversion convention (plain `low + high`).
+  Measured over 200,000 seeded-noise samples at 4 rates x 3 crossovers: worst low-band deviation
+  `3.330669e-16`, worst high-band deviation `1.332268e-15`.
+- Oracle 2, the closed-form second-order Butterworth all-pass `D(-jt)/D(jt)` measured by
+  demodulation at integer-Hz one-sixth-octave probes: worst sum flatness `2.711689e-12` dB
+  (gate 0.001 dB), worst phase error `6.131984e-12` degrees (gate 0.01 degrees).
+- `|(low + high) - ap|` is `2.220446e-16`, not exactly zero: `fl(low + fl(ap - low))` is not an
+  identity in binary floating point, so the gate is `<= 1e-15` and not `== 0`.
+- Red mutations, each run once and reverted, recorded in
+  `crates/miso-engine-multiband-compressor/tests/MUTATIONS.md`: `high = low - ap` (high band off by
+  `3.635925`, flatness `-6.785610e-2` dB) and `ap = x - k*v1` (high band off by `1.183920`,
+  flatness `-5.774936e-1` dB).
+- PASS: `cargo fmt --all -- --check`; `cargo clippy --locked -p miso-engine-multiband-compressor
+  --all-targets -- -D warnings`; `cargo test --locked --release -p miso-engine-multiband-compressor
+  --test lr4_two_section_mapping_f64`. `timed_benchmark_invocations=0`.
