@@ -4,7 +4,7 @@
 //! will construct the same commands after the bounded wire decoder has finished; no decoder calls
 //! a renderer, and this module has no plan-publication capability.
 
-use core::{alloc::Layout, fmt, num::NonZeroUsize};
+use core::{alloc::Layout, fmt, num::NonZeroUsize, ops::Range};
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
@@ -940,6 +940,22 @@ impl ControlCommand<'_> {
                 | Self::TelemetryConfigure { .. }
         )
     }
+
+    const fn message_id(&self) -> MessageId {
+        match self {
+            Self::CapabilitiesGet => MessageId::CapabilitiesGet,
+            Self::SessionSnapshotGet { .. } => MessageId::SessionSnapshotGet,
+            Self::SessionTransactionApply { .. } => MessageId::SessionTransactionApply,
+            Self::ParameterMetadataGet { .. } => MessageId::ParameterMetadataGet,
+            Self::ParameterStateGet { .. } => MessageId::ParameterStateGet,
+            Self::AutomationEnqueue { .. } => MessageId::AutomationEnqueue,
+            Self::TransportGet => MessageId::TransportGet,
+            Self::TransportSet { .. } => MessageId::TransportSet,
+            Self::TelemetryConfigure { .. } => MessageId::TelemetryConfigure,
+            Self::CountersGet { .. } => MessageId::CountersGet,
+            Self::DiagnosticsGet { .. } => MessageId::DiagnosticsGet,
+        }
+    }
 }
 
 /// One internally decoded request. `canonical_bytes` are retained exactly for replay comparison.
@@ -970,6 +986,40 @@ pub struct ControllerResponse {
     /// Older payload-only controller callers intentionally leave this absent.  Keeping this
     /// internal preserves their compatibility without introducing a public raw-frame escape.
     frame_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy)]
+struct CapabilitySet {
+    commands: [u16; 11],
+    command_len: u8,
+    events: [u16; 6],
+    event_len: u8,
+    flags: CapabilityFlags,
+}
+
+enum Body {
+    Capabilities(CapabilitySet),
+    Snapshot {
+        total: u64,
+        offset: u64,
+        range: Range<usize>,
+        eof: bool,
+    },
+    TransactionApplied(TransactionApplied),
+    ParameterMetadata(ParameterMetadataPage),
+    ParameterState(ParameterStatePage),
+    AutomationEnqueued(AutomationEnqueued),
+    Transport(TransportSnapshot),
+    Telemetry(TelemetryConfiguration),
+    Counters(CounterSnapshot),
+    Diagnostics(DiagnosticsPage),
+    NonOk(NonOkResponse),
+}
+
+struct Outcome {
+    status: StatusCode,
+    revision: SessionRevision,
+    body: Body,
 }
 
 impl ControllerResponse {
@@ -1323,8 +1373,13 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
+        let message_id = request.command.message_id();
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
-            return self.response(request.request_id, StatusCode::Backpressure, Vec::new());
+            return self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.non_ok(StatusCode::Backpressure, None),
+            );
         }
         match self
             .replay
@@ -1332,27 +1387,41 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             ReplayDecision::Cached(response) => return response,
             ReplayDecision::RequestIdReuse => {
-                return self.response(request.request_id, StatusCode::RequestIdReuse, Vec::new());
+                return self.compatibility_response(
+                    message_id,
+                    request.request_id,
+                    self.non_ok(StatusCode::RequestIdReuse, None),
+                );
             }
             ReplayDecision::ReplayExpired => {
-                return self.response(request.request_id, StatusCode::ReplayExpired, Vec::new());
+                return self.compatibility_response(
+                    message_id,
+                    request.request_id,
+                    self.non_ok(StatusCode::ReplayExpired, None),
+                );
             }
             ReplayDecision::Backpressure => {
-                return self.replay_backpressure_response(
+                return self.compatibility_response(
+                    message_id,
                     request.request_id,
-                    request.canonical_bytes.len(),
+                    self.replay_backpressure_outcome(request.canonical_bytes.len()),
                 );
             }
             ReplayDecision::Execute => {}
         }
-        let response = self.execute(&request);
+        let outcome = self.execute(&request);
+        let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
             request.request_id,
             request.canonical_bytes,
             response.clone(),
         ) {
             Ok(()) => response,
-            Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
+            Err(_) => self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.non_ok(StatusCode::Internal, None),
+            ),
         }
     }
 
@@ -1571,21 +1640,18 @@ impl<P: ControlProvider> ProtocolController<P> {
             Ok(value) => value,
             Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
         };
-        let bytes = match self
-            .encode_transaction_applied_payload(TransactionApplied { applied_operations })
-        {
-            Ok(bytes) => bytes,
+        let revision = prospective_session.revision();
+        let frame = match self.encode_outcome_frame(
+            header.message_id,
+            header.request_id,
+            self.ok_at_revision(
+                revision,
+                Body::TransactionApplied(TransactionApplied { applied_operations }),
+            ),
+        ) {
+            Ok(frame) => frame,
             Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
         };
-        let mut response = self.response_at_revision(
-            header.request_id,
-            StatusCode::Ok,
-            prospective_session.revision(),
-            bytes,
-        );
-        let frame = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
         if frame.len() > output_capacity {
             return Err(CommandFrameProcessError::Encode(
                 EncodeError::OutputTooSmall {
@@ -1593,7 +1659,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                 },
             ));
         }
-        response.frame_bytes = Some(frame);
+        let response = ControllerResponse {
+            request_id: header.request_id,
+            status: StatusCode::Ok,
+            revision,
+            bytes: Vec::new(),
+            frame_bytes: Some(frame),
+        };
         prospective_replay
             .complete(header.request_id, input, response.clone())
             .map_err(|_| CommandFrameProcessError::Internal)?;
@@ -1755,26 +1827,24 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReplayDecision::Execute => {}
         }
 
-        let mut response = match self.codec.decode_typed_command(input, scratch) {
+        let outcome = match self.codec.decode_typed_command(input, scratch) {
             Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
-            Err(error) => self.response(header.request_id, error.status(), Vec::new()),
+            Err(error) => self.non_ok(error.status(), None),
         };
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
+        let (written, status, revision) = self
+            .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
             .map_err(CommandFrameProcessError::Encode)?;
-        response.frame_bytes = Some(bytes);
-        let result = copy_complete_frame(
-            response
-                .frame_bytes
-                .as_deref()
-                .expect("just assigned complete response"),
-            output,
-        )
-        .map_err(CommandFrameProcessError::Encode);
+        let response = ControllerResponse {
+            request_id: header.request_id,
+            status,
+            revision,
+            bytes: Vec::new(),
+            frame_bytes: Some(output[..written].to_vec()),
+        };
         self.replay
             .complete(header.request_id, input, response)
             .map_err(|_| CommandFrameProcessError::Internal)?;
-        result
+        Ok(written)
     }
 
     fn write_uncached_status_frame(
@@ -1783,11 +1853,14 @@ impl<P: ControlProvider> ProtocolController<P> {
         status: StatusCode,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        let response = self.response(header.request_id, status, Vec::new());
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
-        copy_complete_frame(&bytes, output).map_err(CommandFrameProcessError::Encode)
+        self.encode_outcome_or_internal_into(
+            header.message_id,
+            header.request_id,
+            self.non_ok(status, None),
+            output,
+        )
+        .map(|(written, _, _)| written)
+        .map_err(CommandFrameProcessError::Encode)
     }
 
     fn write_uncached_replay_backpressure_frame(
@@ -1796,18 +1869,21 @@ impl<P: ControlProvider> ProtocolController<P> {
         request_bytes: usize,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        let response = self.replay_backpressure_response(header.request_id, request_bytes);
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
-        copy_complete_frame(&bytes, output).map_err(CommandFrameProcessError::Encode)
+        self.encode_outcome_or_internal_into(
+            header.message_id,
+            header.request_id,
+            self.replay_backpressure_outcome(request_bytes),
+            output,
+        )
+        .map(|(written, _, _)| written)
+        .map_err(CommandFrameProcessError::Encode)
     }
 
     fn execute_decoded_command(
         &mut self,
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
-    ) -> ControllerResponse {
+    ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
             DecodedCommandPayload::SessionSnapshotGet(request) => {
@@ -1832,12 +1908,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             DecodedCommandPayload::AutomationEnqueue(value) => {
                 let ExpectedRevision::Exact(revision) = header.expected_revision else {
-                    return self.response(header.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 };
                 let batch = match value.into_batch(revision, header.request_id) {
                     Ok(batch) => batch,
                     Err(error) => {
-                        return self.response(header.request_id, error.status(), Vec::new());
+                        return self.non_ok(error.status(), None);
                     }
                 };
                 ControlCommand::AutomationEnqueue { batch }
@@ -1862,182 +1938,188 @@ impl<P: ControlProvider> ProtocolController<P> {
         })
     }
 
-    fn encode_controller_response_frame(
+    fn encode_outcome_into(
         &self,
         message_id: MessageId,
-        response: &ControllerResponse,
-    ) -> Result<Vec<u8>, EncodeError> {
-        let tlv_count = canonical_tlv_count(&response.bytes)?;
-        let required = if response.status == StatusCode::Ok {
-            self.encoded_success_response_frame_len(message_id, response, tlv_count)?
-        } else {
-            let payload = self
-                .codec
-                .decode_non_ok_payload(&response.bytes, tlv_count)
-                .map_err(|_| EncodeError::LimitExceeded)?;
-            encoded_non_ok_response_frame_len(&self.codec, &payload)?
-        };
-        let mut output = vec![0_u8; required];
-        if response.status == StatusCode::Ok {
-            self.encode_success_response_frame(message_id, response, tlv_count, &mut output)?;
-        } else {
-            let payload = self
-                .codec
-                .decode_non_ok_payload(&response.bytes, tlv_count)
-                .map_err(|_| EncodeError::LimitExceeded)?;
-            self.codec.encode_non_ok_response_frame_into(
-                &TypedNonOkResponseFrame {
-                    request_id: response.request_id,
-                    revision: response.revision,
-                    message_id,
-                    status: response.status,
-                    payload: &payload,
-                },
-                &mut output,
-            )?;
-        }
-        Ok(output)
-    }
-
-    fn encoded_success_response_frame_len(
-        &self,
-        message_id: MessageId,
-        response: &ControllerResponse,
-        tlv_count: u32,
-    ) -> Result<usize, EncodeError> {
-        let mut empty = [];
-        match self.encode_success_response_frame(message_id, response, tlv_count, &mut empty) {
-            Err(EncodeError::OutputTooSmall { required }) => Ok(required),
-            Err(error) => Err(error),
-            Ok(_) => Err(EncodeError::LimitExceeded),
-        }
-    }
-
-    fn encode_success_response_frame(
-        &self,
-        message_id: MessageId,
-        response: &ControllerResponse,
-        tlv_count: u32,
+        request_id: RequestId,
+        outcome: Outcome,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
+        let Outcome {
+            status,
+            revision,
+            body,
+        } = outcome;
+        if status != StatusCode::Ok {
+            let Body::NonOk(payload) = body else {
+                return Err(EncodeError::MessageKindMismatch);
+            };
+            return self.codec.encode_non_ok_response_frame_into(
+                &TypedNonOkResponseFrame {
+                    request_id,
+                    revision,
+                    message_id,
+                    status,
+                    payload: &payload,
+                },
+                output,
+            );
+        }
         macro_rules! encode_success {
             ($payload:expr) => {
                 self.codec.encode_success_response_frame_into(
                     &TypedSuccessResponseFrame {
-                        request_id: response.request_id,
-                        revision: response.revision,
+                        request_id,
+                        revision,
                         payload: $payload,
                     },
                     output,
                 )
             };
         }
-        match message_id {
-            // The response body was just constructed from the current controller limits and
-            // features. Reconstructing that typed value keeps full-frame encoding on the closed
-            // typed API rather than exposing an opaque response-byte route.
-            MessageId::CapabilitiesGet => {
-                let queue = self.queues.config();
-                let replay = self.replay.config();
-                let (commands, events, flags) = self.capability_registry();
-                encode_success!(SuccessResponsePayload::Capabilities(Capabilities {
-                    minimum_version: crate::ProtocolVersion::V1,
-                    maximum_version: crate::ProtocolVersion::V1,
-                    maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
-                    maximum_tlvs: self.codec.limits().max_tlv_count,
-                    maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
-                    maximum_nesting: self.codec.limits().max_nesting,
-                    maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
-                    control_command_slots: queue.control_command_slots.get() as u64,
-                    control_command_bytes: queue.control_command_bytes.get() as u64,
-                    automation_batch_slots: queue.automation_batch_slots.get() as u64,
-                    reliable_response_slots: queue.reliable_response_slots.get() as u64,
-                    reliable_event_slots: queue.reliable_event_slots.get() as u64,
-                    telemetry_slots: queue.telemetry_slots.get() as u64,
-                    replay_entries: replay.entries.get() as u64,
-                    replay_bytes: replay.bytes.get() as u64,
-                    maximum_cached_response_bytes: replay.max_response_bytes as u64,
-                    per_block_automation_density: queue.per_block_automation_density.get() as u64,
-                    admission_quantum_frames: queue.quantum_frames.get() as u64,
-                    maximum_parameter_page_items: 256,
-                    maximum_diagnostic_page_items: 256,
-                    maximum_telemetry_handles: 256,
-                    maximum_transaction_edits: self.effective_maximum_transaction_edits(),
-                    supported_commands: &commands,
-                    supported_events: &events,
-                    flags,
+        match (message_id, body) {
+            (MessageId::CapabilitiesGet, Body::Capabilities(set)) => {
+                encode_success!(SuccessResponsePayload::Capabilities(
+                    self.capabilities(&set)
+                ))
+            }
+            (
+                MessageId::SessionSnapshotGet,
+                Body::Snapshot {
+                    total,
+                    offset,
+                    range,
+                    eof,
+                },
+            ) => {
+                let bytes = self.session.canonical_snapshot().as_bytes();
+                let chunk = bytes.get(range).ok_or(EncodeError::LimitExceeded)?;
+                encode_success!(SuccessResponsePayload::SessionSnapshot(SessionSnapshot {
+                    total_bytes: total,
+                    offset,
+                    canonical_toml_chunk: chunk,
+                    eof,
                 }))
             }
-            MessageId::SessionSnapshotGet => {
-                encode_success!(SuccessResponsePayload::SessionSnapshot(
-                    self.codec
-                        .decode_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::SessionTransactionApply, Body::TransactionApplied(value)) => {
+                encode_success!(SuccessResponsePayload::SessionTransactionApplied(value))
             }
-            MessageId::SessionTransactionApply => {
-                encode_success!(SuccessResponsePayload::SessionTransactionApplied(
-                    self.codec
-                        .decode_transaction_applied(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::ParameterMetadataGet, Body::ParameterMetadata(value)) => {
+                encode_success!(SuccessResponsePayload::ParameterMetadata(value))
             }
-            MessageId::ParameterMetadataGet => {
-                encode_success!(SuccessResponsePayload::ParameterMetadata(
-                    self.codec
-                        .decode_parameter_metadata_page(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::ParameterStateGet, Body::ParameterState(value)) => {
+                encode_success!(SuccessResponsePayload::ParameterState(value))
             }
-            MessageId::ParameterStateGet => {
-                encode_success!(SuccessResponsePayload::ParameterState(
-                    self.codec
-                        .decode_parameter_state_page(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::AutomationEnqueue, Body::AutomationEnqueued(value)) => {
+                encode_success!(SuccessResponsePayload::AutomationEnqueued(value))
             }
-            MessageId::AutomationEnqueue => {
-                encode_success!(SuccessResponsePayload::AutomationEnqueued(
-                    self.codec
-                        .decode_automation_enqueued(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TransportGet, Body::Transport(value)) => {
+                encode_success!(SuccessResponsePayload::TransportGetSnapshot(value))
             }
-            MessageId::TransportGet => {
-                encode_success!(SuccessResponsePayload::TransportGetSnapshot(
-                    self.codec
-                        .decode_transport_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TransportSet, Body::Transport(value)) => {
+                encode_success!(SuccessResponsePayload::TransportSetSnapshot(value))
             }
-            MessageId::TransportSet => {
-                encode_success!(SuccessResponsePayload::TransportSetSnapshot(
-                    self.codec
-                        .decode_transport_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TelemetryConfigure, Body::Telemetry(value)) => {
+                encode_success!(SuccessResponsePayload::TelemetryConfiguration(value))
             }
-            MessageId::TelemetryConfigure => {
-                encode_success!(SuccessResponsePayload::TelemetryConfiguration(
-                    self.codec
-                        .decode_telemetry_configuration(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::CountersGet, Body::Counters(value)) => {
+                encode_success!(SuccessResponsePayload::CounterSnapshot(value))
             }
-            MessageId::CountersGet => encode_success!(SuccessResponsePayload::CounterSnapshot(
-                self.codec
-                    .decode_counter_snapshot(&response.bytes, tlv_count)
-                    .map_err(|_| EncodeError::LimitExceeded)?,
-            )),
-            MessageId::DiagnosticsGet => encode_success!(SuccessResponsePayload::DiagnosticsPage(
-                self.codec
-                    .decode_diagnostics_page(&response.bytes, tlv_count)
-                    .map_err(|_| EncodeError::LimitExceeded)?,
-            )),
+            (MessageId::DiagnosticsGet, Body::Diagnostics(value)) => {
+                encode_success!(SuccessResponsePayload::DiagnosticsPage(value))
+            }
             _ => Err(EncodeError::MessageKindMismatch),
         }
     }
 
+    fn encode_outcome_frame(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+    ) -> Result<Vec<u8>, EncodeError> {
+        let mut output = vec![0_u8; self.replay.config.max_response_bytes];
+        let written = self.encode_outcome_into(message_id, request_id, outcome, &mut output)?;
+        output.truncate(written);
+        Ok(output)
+    }
+
+    fn encode_outcome_or_internal_into(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+        output: &mut [u8],
+    ) -> Result<(usize, StatusCode, SessionRevision), EncodeError> {
+        let status = outcome.status;
+        let revision = outcome.revision;
+        match self.encode_outcome_into(message_id, request_id, outcome, output) {
+            Ok(written) => Ok((written, status, revision)),
+            Err(EncodeError::OutputTooSmall { required }) => {
+                Err(EncodeError::OutputTooSmall { required })
+            }
+            Err(_) => {
+                let fallback = self.encode_failure_outcome();
+                let status = fallback.status;
+                let revision = fallback.revision;
+                let written = self.encode_outcome_into(message_id, request_id, fallback, output)?;
+                Ok((written, status, revision))
+            }
+        }
+    }
+
+    fn encode_failure_outcome(&self) -> Outcome {
+        self.non_ok_value(
+            StatusCode::Internal,
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: "protocol.encode".to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path: Vec::new(),
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
+    fn compatibility_response(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+    ) -> ControllerResponse {
+        let status = outcome.status;
+        let revision = outcome.revision;
+        let (status, revision, frame) =
+            match self.encode_outcome_frame(message_id, request_id, outcome) {
+                Ok(frame) => (status, revision, frame),
+                Err(_) => {
+                    let fallback = self.encode_failure_outcome();
+                    let status = fallback.status;
+                    let revision = fallback.revision;
+                    let frame = self
+                        .encode_outcome_frame(message_id, request_id, fallback)
+                        .unwrap_or_default();
+                    (status, revision, frame)
+                }
+            };
+        let bytes = frame
+            .get(crate::OUTER_HEADER_BYTES..)
+            .unwrap_or_default()
+            .to_vec();
+        ControllerResponse {
+            request_id,
+            status,
+            revision,
+            bytes,
+            frame_bytes: None,
+        }
+    }
     /// Borrow authoritative control-plane session state.
     #[must_use]
     pub const fn session(&self) -> &SessionStore {
@@ -2474,7 +2556,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
-    fn execute(&mut self, request: &ControllerRequest<'_>) -> ControllerResponse {
+    fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
         let features = self.config.provider_features;
         let enabled = match request.command {
             ControlCommand::SessionTransactionApply { .. } => {
@@ -2489,64 +2571,49 @@ impl<P: ControlProvider> ProtocolController<P> {
             _ => true,
         };
         if !enabled {
-            return self.response(request.request_id, StatusCode::Unavailable, Vec::new());
+            return self.non_ok(StatusCode::Unavailable, None);
         }
         if request.command.requires_exact_revision()
             && !matches!(request.expected_revision, ExpectedRevision::Exact(_))
         {
-            return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+            return self.non_ok(StatusCode::InvalidField, None);
         }
         if let ExpectedRevision::Exact(expected) = request.expected_revision
             && expected != self.session.revision()
         {
-            return self.response(request.request_id, StatusCode::RevisionConflict, Vec::new());
+            return self.non_ok(StatusCode::RevisionConflict, None);
         }
         match &request.command {
-            ControlCommand::CapabilitiesGet => match self.encode_capabilities_payload() {
-                Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-            },
+            ControlCommand::CapabilitiesGet => {
+                self.ok(Body::Capabilities(self.capability_registry()))
+            }
             ControlCommand::SessionSnapshotGet { offset, max_bytes } => {
                 let snapshot = self.session.canonical_snapshot().as_bytes();
                 let offset = match usize::try_from(*offset) {
                     Ok(value) if value <= snapshot.len() => value,
                     _ => {
-                        return self.response(
-                            request.request_id,
-                            StatusCode::InvalidField,
-                            Vec::new(),
-                        );
+                        return self.non_ok(StatusCode::InvalidField, None);
                     }
                 };
                 if *max_bytes == 0 {
-                    return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 }
                 let end = offset
                     .saturating_add(*max_bytes as usize)
                     .min(snapshot.len());
-                let value = SessionSnapshot {
-                    total_bytes: snapshot.len() as u64,
+                self.ok(Body::Snapshot {
+                    total: snapshot.len() as u64,
                     offset: offset as u64,
-                    canonical_toml_chunk: &snapshot[offset..end],
+                    range: offset..end,
                     eof: end == snapshot.len(),
-                };
-                match self.encode_snapshot_payload(value) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                }
+                })
             }
             ControlCommand::SessionTransactionApply { edits } => {
                 if edits.is_empty() {
-                    return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 }
                 if edits.len() > self.config.maximum_transaction_edits as usize {
-                    return self.response(
-                        request.request_id,
-                        StatusCode::LimitExceeded,
-                        Vec::new(),
-                    );
+                    return self.non_ok(StatusCode::LimitExceeded, None);
                 }
                 let event_sequence = self.next_reliable_event_sequence;
                 let cancellation_batches =
@@ -2557,13 +2624,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                         .unwrap_or(u64::MAX)
                         .saturating_add(1),
                 ) else {
-                    return self.response(request.request_id, StatusCode::Internal, Vec::new());
+                    return self.non_ok(StatusCode::Internal, None);
                 };
                 let mut cancellation_reservations =
                     match self.queues.reserve_reliable_events(cancellation_batches) {
                         Ok(reservations) => reservations,
                         Err(report) => {
-                            return self.queue_backpressure_response(request.request_id, report);
+                            return self.queue_backpressure_outcome(report);
                         }
                     };
                 let applied_operations = match u32::try_from(edits.len()) {
@@ -2571,11 +2638,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(_) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.response(
-                            request.request_id,
-                            StatusCode::LimitExceeded,
-                            Vec::new(),
-                        );
+                        return self.non_ok(StatusCode::LimitExceeded, None);
                     }
                 };
                 let previous_revision = self.session.revision();
@@ -2584,7 +2647,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(report) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.queue_backpressure_response(request.request_id, report);
+                        return self.queue_backpressure_outcome(report);
                     }
                 };
                 match self
@@ -2609,93 +2672,74 @@ impl<P: ControlProvider> ProtocolController<P> {
                             AutomationCancellationReason::RevisionChanged,
                             Some(effective_sample),
                         );
-                        match self.encode_transaction_applied_payload(TransactionApplied {
-                            applied_operations,
-                        }) {
-                            Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                            Err(_) => {
-                                self.response(request.request_id, StatusCode::Internal, Vec::new())
-                            }
-                        }
+                        self.ok_at_revision(
+                            commit.revision,
+                            Body::TransactionApplied(TransactionApplied { applied_operations }),
+                        )
                     }
                     Err(error) => {
                         self.queues.release_reliable_event(reservation);
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        self.transaction_error_response(request.request_id, &error)
+                        self.transaction_error_outcome(&error)
                     }
                 }
             }
             ControlCommand::ParameterMetadataGet {
                 request: parameter_request,
             } => match self.provider.parameter_metadata(*parameter_request) {
-                Ok(page) => match self.encode_parameter_metadata_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(page) => self.ok(Body::ParameterMetadata(page)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::ParameterStateGet {
                 request: parameter_request,
             } => match self.provider.parameter_state(parameter_request) {
-                Ok(page) => match self.encode_parameter_state_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(page) => self.ok(Body::ParameterState(page)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::AutomationEnqueue { batch } => {
                 if batch.revision != self.session.revision() {
-                    return self.response(
-                        request.request_id,
-                        StatusCode::RevisionConflict,
-                        Vec::new(),
-                    );
+                    return self.non_ok(StatusCode::RevisionConflict, None);
                 }
                 if let Err(error) = self.validate_automation_domains(batch) {
-                    return self.response(request.request_id, error, Vec::new());
+                    return self.non_ok(error, None);
                 }
                 let current_sample = self.provider.current_sample();
                 match self.queues.try_enqueue_automation(current_sample, *batch) {
-                    Ok(()) => match self.encode_automation_enqueued_payload(batch.len) {
-                        Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                        Err(_) => {
-                            self.response(request.request_id, StatusCode::Internal, Vec::new())
-                        }
-                    },
-                    Err(AutomationEnqueueError::Full { report, .. }) => {
-                        match self.encode_automation_backpressure(
-                            report.capacity,
-                            report.occupancy,
-                            report.generation.0,
-                        ) {
-                            Ok(bytes) => {
-                                self.response(request.request_id, StatusCode::Backpressure, bytes)
-                            }
-                            Err(_) => {
-                                self.response(request.request_id, StatusCode::Internal, Vec::new())
-                            }
-                        }
+                    Ok(()) => {
+                        let report = self.queues.report(crate::QueueKind::Automation);
+                        self.ok(Body::AutomationEnqueued(AutomationEnqueued {
+                            accepted_records: batch.len,
+                            occupancy: report.occupancy,
+                            capacity: report.capacity as u64,
+                            generation: report.generation.0,
+                        }))
                     }
+                    Err(AutomationEnqueueError::Full { report, .. }) => self.non_ok_value(
+                        StatusCode::Backpressure,
+                        NonOkResponse {
+                            diagnostics: Vec::new(),
+                            omitted_diagnostics: 0,
+                            backpressure: Some(Backpressure {
+                                queue_kind: BackpressureQueueKind::Automation,
+                                capacity: report.capacity as u64,
+                                occupancy: report.occupancy,
+                                requested_items: 1,
+                                generation: Some(report.generation.0),
+                                retry_boundary: None,
+                                requested_bytes: None,
+                                available_bytes: None,
+                            }),
+                        },
+                    ),
                     Err(AutomationEnqueueError::Invalid { error, .. }) => {
-                        self.response(request.request_id, status_for_automation(error), Vec::new())
+                        self.non_ok(status_for_automation(error), None)
                     }
                 }
             }
             ControlCommand::TransportGet => {
                 let snapshot = self.provider.transport_get();
-                match self.encode_transport_snapshot_payload(snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TransportSet {
                 request: transport_request,
@@ -2712,13 +2756,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                         .unwrap_or(u64::MAX)
                         .saturating_add(1),
                 ) else {
-                    return self.response(request.request_id, StatusCode::Internal, Vec::new());
+                    return self.non_ok(StatusCode::Internal, None);
                 };
                 let mut cancellation_reservations =
                     match self.queues.reserve_reliable_events(cancellation_batches) {
                         Ok(reservations) => reservations,
                         Err(report) => {
-                            return self.queue_backpressure_response(request.request_id, report);
+                            return self.queue_backpressure_outcome(report);
                         }
                     };
                 let reservation = match self.queues.reserve_reliable_event() {
@@ -2726,7 +2770,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(report) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.queue_backpressure_response(request.request_id, report);
+                        return self.queue_backpressure_outcome(report);
                     }
                 };
                 let snapshot = self.provider.transport_set(*transport_request);
@@ -2749,56 +2793,36 @@ impl<P: ControlProvider> ProtocolController<P> {
                         Some(snapshot.effective_sample),
                     );
                 }
-                match self.encode_transport_snapshot_payload(snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
                 let configured = self.provider.telemetry_configure(configuration.clone());
-                match self.encode_telemetry_configuration_payload(&configured) {
-                    Ok(bytes) => {
-                        // The codec has just validated the complete normalized six-field value.
-                        // Only then may it enable/mock-configure endpoint event egress.
-                        self.telemetry_configuration.meter_handles.clear();
-                        self.telemetry_configuration
-                            .meter_handles
-                            .extend_from_slice(&configured.meter_handles);
-                        self.telemetry_configuration.counter_ids.clear();
-                        self.telemetry_configuration
-                            .counter_ids
-                            .extend_from_slice(&configured.counter_ids);
-                        self.telemetry_configuration.meter_period_blocks =
-                            configured.meter_period_blocks;
-                        self.telemetry_configuration.counter_period_blocks =
-                            configured.counter_period_blocks;
-                        self.telemetry_configuration.diagnostics_enabled =
-                            configured.diagnostics_enabled;
-                        self.telemetry_configuration.minimum_diagnostic_severity =
-                            configured.minimum_diagnostic_severity;
-                        self.response(request.request_id, StatusCode::Ok, bytes)
-                    }
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.telemetry_configuration.meter_handles.clear();
+                self.telemetry_configuration
+                    .meter_handles
+                    .extend_from_slice(&configured.meter_handles);
+                self.telemetry_configuration.counter_ids.clear();
+                self.telemetry_configuration
+                    .counter_ids
+                    .extend_from_slice(&configured.counter_ids);
+                self.telemetry_configuration.meter_period_blocks = configured.meter_period_blocks;
+                self.telemetry_configuration.counter_period_blocks =
+                    configured.counter_period_blocks;
+                self.telemetry_configuration.diagnostics_enabled = configured.diagnostics_enabled;
+                self.telemetry_configuration.minimum_diagnostic_severity =
+                    configured.minimum_diagnostic_severity;
+                self.ok(Body::Telemetry(configured))
             }
             ControlCommand::CountersGet {
                 request: counters_request,
             } => match self.provider.counters(counters_request) {
-                Ok(snapshot) => match self.encode_counter_snapshot_payload(&snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(snapshot) => self.ok(Body::Counters(snapshot)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::DiagnosticsGet {
                 request: diagnostics_request,
             } => match self.provider.diagnostics(*diagnostics_request) {
-                Ok(page) => match self.encode_diagnostics_page_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                },
+                Ok(page) => self.ok(Body::Diagnostics(page)),
                 Err(ParameterProviderError::ReplayExpired) => {
                     let expired = NonOkResponse {
                         diagnostics: vec![Diagnostic {
@@ -2813,40 +2837,28 @@ impl<P: ControlProvider> ProtocolController<P> {
                         omitted_diagnostics: 0,
                         backpressure: None,
                     };
-                    match self.encode_non_ok_payload(&expired) {
-                        Ok(bytes) => {
-                            self.response(request.request_id, StatusCode::ReplayExpired, bytes)
-                        }
-                        Err(_) => {
-                            self.response(request.request_id, StatusCode::Internal, Vec::new())
-                        }
-                    }
+                    self.non_ok_value(StatusCode::ReplayExpired, expired)
                 }
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
         }
     }
 
-    fn response(
-        &self,
-        request_id: RequestId,
-        status: StatusCode,
-        bytes: Vec<u8>,
-    ) -> ControllerResponse {
-        self.response_at_revision(request_id, status, self.session.revision(), bytes)
+    fn ok(&self, body: Body) -> Outcome {
+        self.ok_at_revision(self.session.revision(), body)
     }
 
-    fn response_at_revision(
-        &self,
-        request_id: RequestId,
-        status: StatusCode,
-        revision: SessionRevision,
-        mut bytes: Vec<u8>,
-    ) -> ControllerResponse {
-        if status != StatusCode::Ok && bytes.is_empty() {
-            let backpressure = (status == StatusCode::Backpressure).then_some(Backpressure {
+    fn ok_at_revision(&self, revision: SessionRevision, body: Body) -> Outcome {
+        Outcome {
+            status: StatusCode::Ok,
+            revision,
+            body,
+        }
+    }
+
+    fn non_ok(&self, status: StatusCode, backpressure: Option<Backpressure>) -> Outcome {
+        let backpressure = if status == StatusCode::Backpressure && backpressure.is_none() {
+            Some(Backpressure {
                 queue_kind: BackpressureQueueKind::ReplayCache,
                 capacity: self.replay.config.entries.get() as u64,
                 occupancy: self.replay.entries.len() as u64,
@@ -2855,14 +2867,20 @@ impl<P: ControlProvider> ProtocolController<P> {
                 retry_boundary: None,
                 requested_bytes: None,
                 available_bytes: None,
-            });
-            let value = NonOkResponse {
+            })
+        } else {
+            backpressure
+        };
+        let code = if backpressure.is_some() {
+            "protocol.backpressure"
+        } else {
+            "protocol.failure"
+        };
+        self.non_ok_value(
+            status,
+            NonOkResponse {
                 diagnostics: vec![Diagnostic {
-                    code: if backpressure.is_some() {
-                        "protocol.backpressure".to_owned()
-                    } else {
-                        "protocol.failure".to_owned()
-                    },
+                    code: code.to_owned(),
                     severity: crate::DiagnosticSeverity::Error,
                     path: Vec::new(),
                     detail: None,
@@ -2872,23 +2890,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }],
                 omitted_diagnostics: 0,
                 backpressure,
-            };
-            bytes = self.encode_non_ok_payload(&value).unwrap_or_default();
-        }
-        ControllerResponse {
-            request_id,
+            },
+        )
+    }
+
+    fn non_ok_value(&self, status: StatusCode, payload: NonOkResponse) -> Outcome {
+        Outcome {
             status,
-            revision,
-            bytes,
-            frame_bytes: None,
+            revision: self.session.revision(),
+            body: Body::NonOk(payload),
         }
     }
 
-    fn queue_backpressure_response(
-        &self,
-        request_id: RequestId,
-        report: QueueReport,
-    ) -> ControllerResponse {
+    fn queue_backpressure_outcome(&self, report: QueueReport) -> Outcome {
         let queue_kind = match report.kind {
             crate::QueueKind::ControlCommand => BackpressureQueueKind::ControlCommand,
             crate::QueueKind::Automation => BackpressureQueueKind::Automation,
@@ -2896,18 +2910,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             crate::QueueKind::ReliableEvent => BackpressureQueueKind::ReliableEvent,
             crate::QueueKind::Telemetry => BackpressureQueueKind::Telemetry,
         };
-        let payload = NonOkResponse {
-            diagnostics: vec![Diagnostic {
-                code: "protocol.backpressure".to_owned(),
-                severity: crate::DiagnosticSeverity::Error,
-                path: Vec::new(),
-                detail: None,
-                operation_index: None,
-                sample_time: None,
-                provider_sequence: None,
-            }],
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
+        self.non_ok(
+            StatusCode::Backpressure,
+            Some(Backpressure {
                 queue_kind,
                 capacity: report.capacity as u64,
                 occupancy: report.occupancy,
@@ -2917,36 +2922,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 requested_bytes: None,
                 available_bytes: None,
             }),
-        };
-        match self.encode_non_ok_payload(&payload) {
-            Ok(bytes) => self.response(request_id, StatusCode::Backpressure, bytes),
-            Err(_) => self.response(request_id, StatusCode::Internal, Vec::new()),
-        }
+        )
     }
 
-    fn replay_backpressure_response(
-        &self,
-        request_id: RequestId,
-        request_bytes: usize,
-    ) -> ControllerResponse {
+    fn replay_backpressure_outcome(&self, request_bytes: usize) -> Outcome {
         let config = self.replay.config();
         let requested_bytes = request_bytes.saturating_add(config.max_response_bytes);
         let available_bytes = config
             .bytes
             .get()
             .saturating_sub(self.replay.retained_bytes());
-        let payload = NonOkResponse {
-            diagnostics: vec![Diagnostic {
-                code: "protocol.backpressure".to_owned(),
-                severity: crate::DiagnosticSeverity::Error,
-                path: Vec::new(),
-                detail: None,
-                operation_index: None,
-                sample_time: None,
-                provider_sequence: None,
-            }],
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
+        self.non_ok(
+            StatusCode::Backpressure,
+            Some(Backpressure {
                 queue_kind: BackpressureQueueKind::ReplayCache,
                 capacity: config.entries.get() as u64,
                 occupancy: self.replay.entries.len() as u64,
@@ -2956,123 +2944,54 @@ impl<P: ControlProvider> ProtocolController<P> {
                 requested_bytes: Some(u64::try_from(requested_bytes).unwrap_or(u64::MAX)),
                 available_bytes: Some(u64::try_from(available_bytes).unwrap_or(u64::MAX)),
             }),
-        };
-        match self.encode_non_ok_payload(&payload) {
-            Ok(bytes) => self.response(request_id, StatusCode::Backpressure, bytes),
-            Err(_) => self.response(request_id, StatusCode::Internal, Vec::new()),
-        }
+        )
     }
 
-    fn transaction_error_response(
-        &self,
-        request_id: RequestId,
-        error: &SessionStoreError,
-    ) -> ControllerResponse {
+    fn transaction_error_outcome(&self, error: &SessionStoreError) -> Outcome {
         let status = status_for_transaction(error);
         let diagnostics = transaction_error_diagnostics(error);
         if diagnostics.is_empty() {
-            return self.response(request_id, status, Vec::new());
+            return self.non_ok(status, None);
         }
-        match self.encode_bounded_non_ok_diagnostics(&diagnostics) {
-            Ok(bytes) => self.response(request_id, status, bytes),
-            Err(_) => {
-                // A validation rejection must not fall back to the generic `protocol.failure`
-                // identity. The empty common error payload remains canonical and explicitly
-                // reports that every original diagnostic was omitted by endpoint limits.
-                let value = NonOkResponse {
-                    diagnostics: Vec::new(),
-                    omitted_diagnostics: u32::try_from(diagnostics.len()).unwrap_or(u32::MAX),
-                    backpressure: None,
-                };
-                match self.encode_non_ok_payload(&value) {
-                    Ok(bytes) => self.response(request_id, status, bytes),
-                    Err(_) => ControllerResponse {
-                        request_id,
-                        status,
-                        revision: self.session.revision(),
-                        bytes: Vec::new(),
-                        frame_bytes: None,
-                    },
-                }
-            }
-        }
+        self.non_ok_value(status, self.bounded_non_ok_diagnostics(&diagnostics))
     }
-
-    fn encode_capabilities_payload(&self) -> Result<Vec<u8>, crate::EncodeError> {
-        let queue = self.queues.config();
-        let replay = self.replay.config();
-        let (commands, events, flags) = self.capability_registry();
-        let value = Capabilities {
-            minimum_version: crate::ProtocolVersion::V1,
-            maximum_version: crate::ProtocolVersion::V1,
-            maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
-            maximum_tlvs: self.codec.limits().max_tlv_count,
-            maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
-            maximum_nesting: self.codec.limits().max_nesting,
-            maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
-            control_command_slots: queue.control_command_slots.get() as u64,
-            control_command_bytes: queue.control_command_bytes.get() as u64,
-            automation_batch_slots: queue.automation_batch_slots.get() as u64,
-            reliable_response_slots: queue.reliable_response_slots.get() as u64,
-            reliable_event_slots: queue.reliable_event_slots.get() as u64,
-            telemetry_slots: queue.telemetry_slots.get() as u64,
-            replay_entries: replay.entries.get() as u64,
-            replay_bytes: replay.bytes.get() as u64,
-            maximum_cached_response_bytes: replay.max_response_bytes as u64,
-            per_block_automation_density: queue.per_block_automation_density.get() as u64,
-            admission_quantum_frames: queue.quantum_frames.get() as u64,
-            maximum_parameter_page_items: 256,
-            maximum_diagnostic_page_items: 256,
-            maximum_telemetry_handles: 256,
-            maximum_transaction_edits: self.effective_maximum_transaction_edits(),
-            supported_commands: &commands,
-            supported_events: &events,
-            flags,
-        };
-        let mut bytes = vec![0; self.codec.encoded_capabilities_len(&value)?];
-        self.codec.encode_capabilities(&value, &mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn capability_registry(&self) -> (Vec<u16>, Vec<u16>, CapabilityFlags) {
+    fn capability_registry(&self) -> CapabilitySet {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = vec![1_u16, 2, 6, 9];
-        if session_transactions {
-            commands.push(3);
+        let mut commands = [0_u16; 11];
+        let mut command_len = 0_usize;
+        for id in 1_u16..=11 {
+            let enabled = match id {
+                3 => session_transactions,
+                4 | 5 => features.parameters,
+                7 => features.transport,
+                8 => features.transport && features.transport_events,
+                10 => features.counters,
+                11 => features.diagnostics,
+                _ => true,
+            };
+            if enabled {
+                commands[command_len] = id;
+                command_len += 1;
+            }
         }
-        if features.parameters {
-            commands.extend([4, 5]);
-        }
-        if features.transport {
-            commands.push(7);
-        }
-        if features.transport && features.transport_events {
-            commands.push(8);
-        }
-        if features.counters {
-            commands.push(10);
-        }
-        if features.diagnostics {
-            commands.push(11);
-        }
-        commands.sort_unstable();
-        let mut events = Vec::new();
-        if session_transactions {
-            events.extend([0x8001_u16, 0x8002]);
-        }
-        if features.transport && features.transport_events {
-            events.push(0x8010);
-        }
-        if features.meters {
-            events.push(0x8020);
-        }
-        if features.counters {
-            events.push(0x8021);
-        }
-        if features.diagnostics {
-            events.push(0x8030);
+        let candidates = [0x8001_u16, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030];
+        let mut events = [0_u16; 6];
+        let mut event_len = 0_usize;
+        for id in candidates {
+            let enabled = match id {
+                0x8001 | 0x8002 => session_transactions,
+                0x8010 => features.transport && features.transport_events,
+                0x8020 => features.meters,
+                0x8021 => features.counters,
+                0x8030 => features.diagnostics,
+                _ => false,
+            };
+            if enabled {
+                events[event_len] = id;
+                event_len += 1;
+            }
         }
         let mut flags = (1 << 7) - 1;
         if !session_transactions {
@@ -3099,7 +3018,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         if features.transport && features.transport_events {
             flags |= 1 << 13;
         }
-        (commands, events, CapabilityFlags(flags))
+        CapabilitySet {
+            commands,
+            command_len: command_len as u8,
+            events,
+            event_len: event_len as u8,
+            flags: CapabilityFlags(flags),
+        }
     }
 
     fn effective_maximum_transaction_edits(&self) -> u32 {
@@ -3109,121 +3034,40 @@ impl<P: ControlProvider> ProtocolController<P> {
             0
         }
     }
-    fn encode_snapshot_payload(
-        &self,
-        value: SessionSnapshot<'_>,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_snapshot_len(value)?];
-        self.codec.encode_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_transaction_applied_payload(
-        &self,
-        value: TransactionApplied,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; 16];
-        self.codec.encode_transaction_applied(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_parameter_metadata_payload(
-        &self,
-        page: &ParameterMetadataPage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_parameter_metadata_page_len(page)?];
-        self.codec
-            .encode_parameter_metadata_page(page, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_parameter_state_payload(
-        &self,
-        page: &ParameterStatePage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_parameter_state_page_len(page)?];
-        self.codec.encode_parameter_state_page(page, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_automation_enqueued_payload(
-        &self,
-        accepted_records: u16,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let report = self.queues.report(crate::QueueKind::Automation);
-        let value = AutomationEnqueued {
-            accepted_records,
-            occupancy: report.occupancy,
-            capacity: report.capacity as u64,
-            generation: report.generation.0,
-        };
-        let mut bytes = vec![0; 64];
-        self.codec.encode_automation_enqueued(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_automation_backpressure(
-        &self,
-        capacity: usize,
-        occupancy: u64,
-        generation: u64,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let value = NonOkResponse {
-            diagnostics: Vec::new(),
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
-                queue_kind: BackpressureQueueKind::Automation,
-                capacity: capacity as u64,
-                occupancy,
-                requested_items: 1,
-                generation: Some(generation),
-                retry_boundary: None,
-                requested_bytes: None,
-                available_bytes: None,
-            }),
-        };
-        let mut bytes = vec![0; self.codec.encoded_non_ok_payload_len(&value)?];
-        self.codec.encode_non_ok_payload(&value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_transport_snapshot_payload(
-        &self,
-        value: TransportSnapshot,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; 48];
-        self.codec.encode_transport_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_telemetry_configuration_payload(
-        &self,
-        value: &TelemetryConfiguration,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_telemetry_configuration_len(value)?];
-        self.codec
-            .encode_telemetry_configuration(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_counter_snapshot_payload(
-        &self,
-        value: &CounterSnapshot,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_counter_snapshot_len(value)?];
-        self.codec.encode_counter_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_diagnostics_page_payload(
-        &self,
-        value: &DiagnosticsPage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_diagnostics_page_len(value)?];
-        self.codec.encode_diagnostics_page(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_non_ok_payload(&self, value: &NonOkResponse) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_non_ok_payload_len(value)?];
-        self.codec.encode_non_ok_payload(value, &mut bytes)?;
-        Ok(bytes)
+
+    fn capabilities<'a>(&self, set: &'a CapabilitySet) -> Capabilities<'a> {
+        let queue = self.queues.config();
+        let replay = self.replay.config();
+        Capabilities {
+            minimum_version: crate::ProtocolVersion::V1,
+            maximum_version: crate::ProtocolVersion::V1,
+            maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
+            maximum_tlvs: self.codec.limits().max_tlv_count,
+            maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
+            maximum_nesting: self.codec.limits().max_nesting,
+            maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
+            control_command_slots: queue.control_command_slots.get() as u64,
+            control_command_bytes: queue.control_command_bytes.get() as u64,
+            automation_batch_slots: queue.automation_batch_slots.get() as u64,
+            reliable_response_slots: queue.reliable_response_slots.get() as u64,
+            reliable_event_slots: queue.reliable_event_slots.get() as u64,
+            telemetry_slots: queue.telemetry_slots.get() as u64,
+            replay_entries: replay.entries.get() as u64,
+            replay_bytes: replay.bytes.get() as u64,
+            maximum_cached_response_bytes: replay.max_response_bytes as u64,
+            per_block_automation_density: queue.per_block_automation_density.get() as u64,
+            admission_quantum_frames: queue.quantum_frames.get() as u64,
+            maximum_parameter_page_items: 256,
+            maximum_diagnostic_page_items: 256,
+            maximum_telemetry_handles: 256,
+            maximum_transaction_edits: self.effective_maximum_transaction_edits(),
+            supported_commands: &set.commands[..usize::from(set.command_len)],
+            supported_events: &set.events[..usize::from(set.event_len)],
+            flags: set.flags,
+        }
     }
 
-    fn encode_bounded_non_ok_diagnostics(
-        &self,
-        diagnostics: &[Diagnostic],
-    ) -> Result<Vec<u8>, crate::EncodeError> {
+    fn bounded_non_ok_diagnostics(&self, diagnostics: &[Diagnostic]) -> NonOkResponse {
         let maximum = usize::from(self.config.maximum_response_diagnostics);
         let mut retained = Vec::with_capacity(diagnostics.len().min(maximum));
         for diagnostic in diagnostics.iter().take(maximum) {
@@ -3234,24 +3078,24 @@ impl<P: ControlProvider> ProtocolController<P> {
                 omitted_diagnostics: 0,
                 backpressure: None,
             };
-            let encoded_len = match self.codec.encoded_non_ok_payload_len(&value) {
-                Ok(length) => length,
-                Err(_) => {
-                    break;
-                }
-            };
-            if encoded_len > self.replay.config.max_response_bytes {
+            let fits = self
+                .codec
+                .encoded_non_ok_payload_len(&value)
+                .is_ok_and(|length| {
+                    length.saturating_add(crate::OUTER_HEADER_BYTES)
+                        <= self.replay.config.max_response_bytes
+                });
+            if !fits {
                 break;
             }
             retained.push(diagnostic.clone());
         }
-        let value = NonOkResponse {
+        NonOkResponse {
             omitted_diagnostics: u32::try_from(diagnostics.len().saturating_sub(retained.len()))
                 .unwrap_or(u32::MAX),
             diagnostics: retained,
             backpressure: None,
-        };
-        self.encode_non_ok_payload(&value)
+        }
     }
 
     fn validate_automation_domains(
@@ -3456,51 +3300,6 @@ fn copy_complete_frame(input: &[u8], output: &mut [u8]) -> Result<usize, EncodeE
         return Err(EncodeError::OutputTooSmall { required });
     }
     output[..required].copy_from_slice(input);
-    Ok(required)
-}
-
-fn canonical_tlv_count(payload: &[u8]) -> Result<u32, EncodeError> {
-    let mut offset = 0_usize;
-    let mut count = 0_u32;
-    while offset != payload.len() {
-        let prefix_end = offset
-            .checked_add(crate::TLV_PREFIX_BYTES)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let prefix = payload
-            .get(offset..prefix_end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let value_len = u32::from_le_bytes(
-            prefix[4..8]
-                .try_into()
-                .map_err(|_| EncodeError::LimitExceeded)?,
-        );
-        let value_len = usize::try_from(value_len).map_err(|_| EncodeError::LimitExceeded)?;
-        let field_end = prefix_end
-            .checked_add(value_len)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let padded_end = field_end
-            .checked_add((8 - field_end % 8) % 8)
-            .ok_or(EncodeError::LimitExceeded)?;
-        if payload.get(offset..padded_end).is_none() {
-            return Err(EncodeError::LimitExceeded);
-        }
-        offset = padded_end;
-        count = count.checked_add(1).ok_or(EncodeError::LimitExceeded)?;
-    }
-    Ok(count)
-}
-
-fn encoded_non_ok_response_frame_len(
-    codec: &ProtocolCodec,
-    payload: &NonOkResponse,
-) -> Result<usize, EncodeError> {
-    let payload_len = codec.encoded_non_ok_payload_len(payload)?;
-    let required = crate::OUTER_HEADER_BYTES
-        .checked_add(payload_len)
-        .ok_or(EncodeError::LimitExceeded)?;
-    if required > codec.limits().max_frame_bytes {
-        return Err(EncodeError::LimitExceeded);
-    }
     Ok(required)
 }
 
@@ -4647,10 +4446,11 @@ mod tests {
                 assert_eq!(error.status(), case.status, "{} decoder mapping", case.name);
             }
             let controller = controller(4, 1);
-            let response = controller.response(
-                id(u64::try_from(index).expect("case index fits") + 1),
-                case.status,
-                Vec::new(),
+            let request_id = id(u64::try_from(index).expect("case index fits") + 1);
+            let response = controller.compatibility_response(
+                MessageId::CapabilitiesGet,
+                request_id,
+                controller.non_ok(case.status, None),
             );
             assert_eq!(response.status, case.status, "{} status", case.name);
             let decoded = codec
