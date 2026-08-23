@@ -21,6 +21,7 @@ use miso_engine_core::{
 use miso_engine_graph::{GraphNodeId, StableGraphId, TrackStage};
 use miso_engine_session::CompiledSession;
 
+use crate::native_wave::{validate_region, validate_seek_frame};
 use crate::{
     HostChunkError, HostChunkProvider, NativeWaveDecoder, NativeWaveError, NativeWaveMetadata,
     NativeWaveParseCaps, NativeWaveRegion, PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig,
@@ -718,7 +719,8 @@ impl NativeSourceController {
                 },
             );
         }
-        validate_seek_frame(self.region, frame)?;
+        validate_seek_frame(self.region, frame)
+            .map_err(|_| NativeSourceWorkerControlError::RegionOutOfBounds)?;
         self.try_send(WorkerCommand::Seek { generation, frame })?;
         self.next_requested_generation = generation;
         Ok(())
@@ -966,7 +968,8 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
     {
         return Err(NativeSourcePrepareError::ChannelMismatch);
     }
-    validate_region(metadata, request.region)?;
+    validate_region(metadata, request.region)
+        .map_err(|_| NativeSourcePrepareError::RegionOutOfBounds)?;
     let report = source_resource_report(metadata, request.ring_config, caps)?;
     let (frames_per_read, decoder_read_scratch_bytes) =
         worker_decode_buffer_shape(metadata, request.ring_config, caps)?;
@@ -1527,36 +1530,6 @@ fn exact_queue_resources<T: Send + 'static>(
     })
 }
 
-fn validate_region(
-    metadata: NativeWaveMetadata,
-    region: NativeWaveRegion,
-) -> Result<(), NativeSourcePrepareError> {
-    let end = region
-        .start_frame
-        .0
-        .checked_add(region.length_frames)
-        .ok_or(NativeSourcePrepareError::RegionOutOfBounds)?;
-    if end > metadata.total_frames {
-        return Err(NativeSourcePrepareError::RegionOutOfBounds);
-    }
-    Ok(())
-}
-
-fn validate_seek_frame(
-    region: NativeWaveRegion,
-    frame: SourceFrame,
-) -> Result<(), NativeSourceWorkerControlError> {
-    let end = region
-        .start_frame
-        .0
-        .checked_add(region.length_frames)
-        .ok_or(NativeSourceWorkerControlError::RegionOutOfBounds)?;
-    if frame.0 < region.start_frame.0 || frame.0 > end {
-        return Err(NativeSourceWorkerControlError::RegionOutOfBounds);
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Idle {
     Progress,
@@ -1694,9 +1667,11 @@ fn service_job<R: Read + Seek>(
         return Ok(idle);
     }
     let start_frame = job.decoder.next_source_frame();
+    let channels = usize::from(job.decoder.metadata().channel_count);
+    let frames = job.planar_staging.len() / channels;
     let decoded = job
         .decoder
-        .decode_quantum_into_planar(&mut job.planar_staging)
+        .decode_planar(&mut job.planar_staging, frames)
         .map_err(NativeSourceWorkerExit::DecodeFailed)?;
     job.sanitation = job.sanitation.max(decoded.sanitized_sample_count);
     job.pending = Some(PendingBlock {
