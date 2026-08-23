@@ -121,3 +121,37 @@ p50/p95/p99/p99.9, and no timing threshold. Decode/CRC p50 was 5.8522/5.8558 ns/
 3.6495/3.6581 ns/sample. The host was an AMD Ryzen 7 9700X with 8 physical/16 logical cores under the
 `powersave` governor; Git/worktree and power-source metadata were unavailable and are explicitly named.
 The tail variance was accepted as descriptive machine noise and was not retried or optimized.
+
+## Oracle inventory (#105 phase 1, 2026-08)
+
+`crates/miso-engine-dsp-reference` is the only oracle source master plan §8.3 allows for re-pinning
+implementation-bit fixtures. Every module it still compiles, what it models, what its derivation was
+checked against, whether it shares code with production, and who consumes it:
+
+| module | models | derivation checked against | shares code with production? | consumers |
+| --- | --- | --- | --- | --- |
+| `svf.rs` (new) | Simper/Zavalishin TPT SVF, all seven types, master plan §4.2 A1 `c1` storage; the crate's single `H(z) = D + C(zI - A)^-1 B` | RBJ cookbook closed forms via `parametric_eq.rs` (E1, 102,696 probes) and the realized recurrence via the state-space iteration (E2) | no | `lr4.rs`, `tpt.rs`, wave-2 re-pins |
+| `lr4.rs` (was `multiband_compressor.rs`) | LR4 crossover as two cascaded `Q = 1/sqrt(2)` SVF sections per band | the analytic LR4 identity `LP^2 + HP^2 = (s^2 - sqrt(2)s + 1)/(s^2 + sqrt(2)s + 1)` (E3) and the cascaded state space (E4) | no | `miso-engine-multiband-compressor` tests |
+| `biquad.rs` | RBJ Butterworth LP/HP, transposed DF-II, plus `rbj_butterworth_magnitude_db` (moved here from `tpt.rs`) | cookbook LP/HP with `alpha = sin(w0)/(2*(1/sqrt(2)))`; strict Jury | no (`check-conformance-boundaries.sh` rule 3) | `miso-engine-builtins` tests, `miso-engine-builtins-fixture` |
+| `parametric_eq.rs` | six RBJ families, direct-form I | cookbook including `alpha_S` and `beta = 2*sqrt(A)*alpha_S`; exact identity shortcut at 0 dB | no, but the **same closed forms** as `miso-engine-parametric-eq/src/lib.rs` — its independence comes from the E1 cross-derivation against `svf.rs` | `miso-engine-parametric-eq` tests, `svf.rs` E1 |
+| `tpt.rs` | `ReferenceRetainedTptF32` conditioned `f32` twin; `ReferenceTptStateSpace` transfer adapter | the adapter is a thin wrapper over `svf.rs` and is `to_bits`-identical to the model it replaced (E5) | **yes** — `ReferenceRetainedTptF32::process` is the `core/arch` scalar graph transcribed; it is a twin, not an oracle, and now says so | `miso-engine-builtins` tests, `miso-engine-builtins-fixture`, `miso-engine-builtins-audit` |
+| `compressor.rs` | GMR 2012 eq. 4 soft knee, one-pole dB smoother | GMR eq. 4; `exp(-1/(tau*fs))` | no | `miso-engine-compressor` tests |
+| `gate_expander.rs` | static downward-expansion curve with range cap | contract text (tautological today; a real oracle comparison is #89) | no | `miso-engine-gate-expander` tests |
+| `transient_shaper.rs` | two-follower contrast | contract text | no | `miso-engine-transient-shaper` tests |
+| `soft_clip.rs` | 2x zero-stuff, 63-tap Blackman halfband, cubic | Vaidyanathan halfband constraints (even-index zeros, centre 1/2, off-centre sum 1/2) | no; the table is bit-compared by `miso-engine-soft-clip` after an `f32` cast | `miso-engine-soft-clip` tests |
+| `delay.rs` | integer delay, 128-sample tap crossfade, feedback matrix | contract text | no | `miso-engine-delay` tests |
+| `spectrum.rs` | direct DFT, bounded to 4,096 frames | the DFT definition | no | crate tests, effect tests |
+| `signals.rs` | impulse / sine / SplitMix64 noise | — | no | crate tests, effect tests |
+| `block.rs`, `processor.rs` | planar `f64` buffer and offline processor plumbing | — | no | crate tests |
+
+§8.3 re-pin mapping for wave-2 jobs: EQ -> `ReferenceParametricEqCoefficients` cross-checked by
+`ReferenceSvfStateSpace`; builtins HPF/LPF -> `ReferenceSvfStateSpace` + `ReferenceBiquad`;
+multiband -> `ReferenceLr4Crossover`; compressor -> `ReferencePeakCompressor`; gate ->
+`reference_gate_expander_gain_reduction_db`; transient -> `ReferenceTransientShaper`; soft clip ->
+`ReferenceSoftClip`; delay -> `ReferenceDelayPair`; true-peak limiter -> none today (gap owned by
+#90).
+
+Gap and caveat: `ReferenceRetainedTptF32` is a bit-identity twin of production, so fixtures
+regenerated from it prove reproducibility, not correctness; the correctness oracle for that
+topology is `ReferenceSvfStateSpace`. Four stopped-issue research harnesses (031/042/044/045) are
+archived under `dsp-research/archive/` and are not compiled.
