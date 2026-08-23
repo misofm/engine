@@ -1792,8 +1792,21 @@ fn sidechain_matches(declaration: &SidechainDeclaration, entry: &EffectPreparedE
         _ => false,
     }
 }
+/// Linear route gain from decibels, and the 2x2 matrix that carries it.
+///
+/// The conversion is `miso_engine_math::db_to_gain_f32` -- the workspace's single dB->linear
+/// routine (master plan #83 D6/S5.1). The platform `f64::powf` this replaced resolved to the host
+/// libm (glibc/musl natively, compiler-builtins' libm on wasm32), is not correctly rounded, and
+/// differed in the last ulp between targets; the `as f32` narrowing rounded a second time. Those
+/// bits reach both the render multiply and the semantic SHA-256 (#99 F4), so they were the one
+/// place in this crate that could break the native/wasm bit-identity contract (D5).
+///
+/// `db_to_gain_f32(0.0)` is `exp2f(0.0) == 1.0` exactly, so a 0 dB route keeps `0x3f80_0000` and
+/// every checked-in graph fixture is byte-identical. A session with a **non-zero** route gain gets
+/// a one-time semantic-hash change: its `route-transform` canonical line now carries the
+/// deterministic coefficient instead of the host's.
 fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<RouteTransform> {
-    let gain = 10_f64.powf(f64::from(gain_db) / 20.0) as f32;
+    let gain = miso_engine_math::db_to_gain_f32(gain_db);
     (gain_db.is_finite()
         && gain.is_finite()
         && !gain.is_subnormal()
@@ -7958,6 +7971,53 @@ mod tests {
         assert_ne!(
             changed.report.canonical_debug_bytes,
             baseline.canonical_debug_bytes
+        );
+    }
+
+    /// #99 F4: the compiled route gain is `miso_engine_math::db_to_gain_f32`, bit for bit.
+    ///
+    /// -19 dB is the witness: the platform `f64::powf` form this replaced produced
+    /// `0x3de5_ca15` on this host, one ulp below the canonical `0x3de5_ca16`, and it produced
+    /// whatever the *host's* libm produced on any other. `tests/route_gain.rs` pins both
+    /// literals against a live `powf` oracle so this witness cannot go stale silently.
+    #[test]
+    fn route_transform_uses_the_canonical_db_to_gain_conversion() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        model.routes[0].gain_db = -19.0;
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("session");
+        let compiled = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1,
+            effects: EffectPreparedSession {
+                session,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        let gains: Vec<u32> = compiled
+            .report
+            .route_transforms
+            .iter()
+            .map(|route| route.transform.gain.to_bits())
+            .collect();
+        assert_eq!(gains, vec![0x3de5_ca16]);
+        assert_eq!(
+            gains[0],
+            miso_engine_math::db_to_gain_f32(-19.0).to_bits(),
+            "route gain must be the canonical conversion, not a local one"
         );
     }
 
