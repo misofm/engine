@@ -465,6 +465,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-native-pcm-runner"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-capi",
+ "miso-engine-session",
+ "miso-engine-source",
+ "sha2",
+]
+
+[[package]]
 name = "miso-engine-native-scheduler"
 version = "0.1.0"
 dependencies = [

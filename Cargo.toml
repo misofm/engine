@@ -49,6 +49,7 @@ members = [
     "tools/miso-engine-rack-bench",
     "tools/miso-engine-source-fixture",
     "tools/miso-engine-source-audit",
+    "tools/miso-engine-native-pcm-runner",
 ]
 resolver = "3"
 

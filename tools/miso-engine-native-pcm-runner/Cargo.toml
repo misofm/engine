@@ -1,0 +1,18 @@
+[package]
+name = "miso-engine-native-pcm-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_native_pcm_runner"
+
+[dependencies]
+miso-engine-capi.workspace = true
+miso-engine-session.workspace = true
+miso-engine-source.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
