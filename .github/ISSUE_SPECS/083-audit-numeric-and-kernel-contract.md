@@ -28,10 +28,10 @@ checkpoint (AGENTS.md: no cross-cutting change without an amended issue).
 
 | job | scope | state |
 |---|---|---|
-| 83a | `crates/miso-engine-lane`: the `Lane` trait over `wide`, the ISA pin and boot attestation, the block kernels of §4.2, gates G1-G4/G6/P1, the lane policy scripts, this ISSUE_SPECS sync | delivered on branch `audit-083a-lane` |
-| 83b | `crates/miso-engine-math`: vendored scalar functions and the lane-wide `exp2`/`log2`, gates M1-M3 | parallel |
+| 83a | `crates/miso-engine-lane`: the `Lane` trait over `wide`, the ISA pin and boot attestation, the block kernels of §4.2, gates G1-G4/G6/P1, the lane policy scripts, this ISSUE_SPECS sync | merged |
+| 83b | `crates/miso-engine-math`: vendored scalar functions and the lane-wide `exp2`/`log2`, gates M1-M3 | merged |
 | 83c | `crates/miso-engine-effect-runtime`: the scaffolding of master plan §6 and the block boundary check | needs 83a and 83b |
-| 83d | release profiles, the remaining policy scripts, CI, and the `wasmtime` cross-target gate crate (G5, M3, the wasm leg of G6) | last |
+| 83d | release profiles, CI, the boot-attestation wiring, and the `wasmtime` cross-target gate crates (G5 and the wasm replay of M3) | delivered on branch `audit-083d-ci` |
 
 ## Evidence -- 83a
 
@@ -50,6 +50,75 @@ Deferred with owners: G5 cross-target digests and the wasm leg of G6 (83d, they 
 gate crate); wiring `attest_host` into the C ABI and the hosts (#106); the `KernelTable` of function
 pointers, which has no consumer until wave 2; deleting `crates/miso-engine-core/src/arch/` and the
 `Prepared*KernelV1` tokens (#84).
+
+## Evidence -- 83d
+
+Delivered: the D12 release profile in the root `Cargo.toml`; three new dev/tooling crates
+(`tools/miso-engine-wasm-gate-corpus`, `-guest`, `miso-engine-wasm-gates`);
+`scripts/run-wasm-gates.sh`; the `wasm-gates` CI job and the `miso-engine-lane` additions to the
+wasm/Android/iOS package lists; the D4 boot-attestation call in
+`hosts/miso-engine-host-native`, `hosts/miso-engine-host-mobile` and
+`miso_engine_v2_engine_create`; the `check-conformance-boundaries.sh` extension to `lane` and
+`math`; and `tools/miso-engine-wasm-gates/MUTATIONS.md`.
+
+**G5 cross-target digests, and the wasm replay of M3.** One frozen corpus
+(`tools/miso-engine-wasm-gate-corpus`) compiled twice: linked natively, and built for
+`wasm32-unknown-unknown` with and without `simd128` and executed under wasmtime 47.0.3
+(Apache-2.0 WITH LLVM-exception, pinned exactly, a dependency of the host runner alone). 83 cases:
+twelve block kernels x four signals, `lane_fma`, `exp2_lane`, `log2_lane`, and the 32
+`miso-engine-math` M3 cases -- which are compared against that crate's own `M3_DIGESTS` rather than
+a second pin, so the wasm run replays gate M3 instead of a transcription of it. Every lane case is
+digested at `f32`, `Simd4` and `Simd8` on both legs, read back lane-major so the digest describes
+the arithmetic and not the AoSoA layout. The 51 lane pins were generated from the scalar `Lane`
+oracle (master plan §8), never from a vector or wasm run.
+
+| leg | backend | cases | comparisons | mismatches |
+|---|---|---|---|---|
+| native (`x86-64-v3`) | `Simd8` | 83 | 185 | 0 |
+| wasm, `-simd128` | `Scalar` | 83 | 185 | 0 |
+| wasm, `+simd128` | `Simd4` | 83 | 185 | 0 |
+
+The `+simd128` leg is the first execution anywhere of the lane crate's `v128` software FMA
+(master plan §3.5); 83a could only compile-check it.
+
+**Red mutations** (recorded in `tools/miso-engine-wasm-gates/MUTATIONS.md`): `f32x4_relaxed_madd`
+built with `+relaxed-simd` -- rejected twice, by `check-lane-policy.sh` on the source and by the
+runner on the artifact (`relaxed SIMD support is not enabled`, from `wasm_relaxed_simd(false)`);
+an unconditional `| 1` round-to-odd in the `v128` body -- `lane_fma` moves at `simd4` and `simd8`
+on the wasm leg only; one pin byte flipped -- both legs red.
+
+Two things the mutations found rather than confirmed. First, with the runner temporarily allowing
+relaxed SIMD the digests still matched, because wasmtime 47 lowers `f32x4.relaxed_madd` to a
+hardware `vfmadd` on this host: rejecting the opcode is the load-bearing check, and a digest
+comparison alone would have passed that mutation. Second, the round-to-odd mutation was *green*
+against the corpus as first written, whose FMA operands all produced an exact `f64` sum so the
+adjustment never fired; the corpus now carries a midpoint family and the pins were regenerated
+from the oracle after the correction. A distinctness assertion separately caught
+`ramp_block/impulse` digesting 8,192 zeros, which would have agreed on every target while proving
+nothing.
+
+**D12 profiles.** `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `debug = 1`, with
+`[profile.bench]` inheriting release. Verified from the `rustc` command lines that a release
+*binary* is built with `-C panic=abort` while a release *test harness* is not, so the release
+gates, the Loom race model and `#[should_panic]` still unwind. What `panic = "abort"` changes is
+documented for embedders in `docs/REALTIME_DEPENDENCY_POLICY.md` ("Panic behaviour by profile"):
+a release `libmiso_engine_capi` no longer converts a panic into `RESULT_INTERNAL`, and the
+AudioWorklet artifacts trap instead. One consequence shaped the design: a lib target that emits a
+`cdylib` is compiled with the profile's `panic = "abort"` and an unwinding test harness then cannot
+link it, which is why the corpus is a separate `rlib` from the guest `cdylib`.
+
+**Boot attestation (D4).** `miso_engine_lane::attest_host` is called at
+`hosts/miso-engine-host-native::main` (diagnostic and `ExitCode::FAILURE`),
+`hosts/miso-engine-host-mobile::mobile_target_smoke` (`Err(HostAttestation)`) and
+`miso_engine_v2_engine_create` (`MISO_ENGINE_V2_UNSUPPORTED`). The C header previously said
+`UNSUPPORTED` was reserved and never returned; it now documents the one entry point that returns
+it. `host-web` is `wasm32`, where the instruction set is a build flag rather than a CPU property,
+so the attestation is a compile-time no-operation and no call is added.
+
+Deferred with owners: 83c's `crates/miso-engine-effect-runtime` was not on `main` at delivery, so
+its dynamics digest is not in the G5 corpus -- a one-commit wiring change in wave 2. The
+`--lane-kernels` flag of `tools/miso-engine-realtime-audit` (eval A1) is not delivered; the
+existing realtime trace still runs unchanged.
 
 ---
 

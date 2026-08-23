@@ -8,7 +8,7 @@ if rg -q '^\[dependencies\]' crates/miso-engine-dsp-reference/Cargo.toml; then
     exit 1
 fi
 
-if rg -n 'miso-engine-(dsp-reference|conformance)' crates/miso-engine-{core,session,protocol,capi,target-smoke,effect-contract,effect-compiler,effect-package} hosts; then
+if rg -n 'miso-engine-(dsp-reference|conformance)' crates/miso-engine-{core,session,protocol,capi,target-smoke,effect-contract,effect-compiler,effect-package,lane,math} hosts; then
     printf 'conformance boundary failure: production crates/hosts must not depend on harness crates\n' >&2
     exit 1
 fi
