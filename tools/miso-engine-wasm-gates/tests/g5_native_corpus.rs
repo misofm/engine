@@ -249,11 +249,6 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         "the builtins block must cover every case that crate pins"
     );
     let builtins_base = gate_expander_base + corpus::GATE_EXPANDER_CASE_COUNT;
-    assert_eq!(
-        builtins_base + corpus::BUILTINS_CASE_COUNT,
-        corpus::CASE_COUNT,
-        "builtins must be the last family in the pin order"
-    );
     for case in 0..corpus::BUILTINS_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(builtins_base + case),
@@ -267,6 +262,32 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert!(
             corpus::case_name(builtins_base + case).starts_with("builtins/"),
             "builtins cases keep their owning crate's names, and it is not an effect crate"
+        );
+    }
+    assert_eq!(
+        corpus::LIMITER_CASE_COUNT,
+        miso_engine_true_peak_limiter::corpus::CASE_COUNT,
+        "the true-peak limiter block must cover every case that crate pins"
+    );
+    let limiter_base = builtins_base + corpus::BUILTINS_CASE_COUNT;
+    assert_eq!(
+        limiter_base + corpus::LIMITER_CASE_COUNT,
+        corpus::CASE_COUNT,
+        "the true-peak limiter must be the last family in the pin order"
+    );
+    for case in 0..corpus::LIMITER_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(limiter_base + case),
+            miso_engine_true_peak_limiter::corpus::D90_DIGESTS[case],
+            "limiter case {case} must be pinned by miso-engine-true-peak-limiter, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(limiter_base + case),
+            "a limiter case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(limiter_base + case).starts_with("effect/true_peak_limiter/"),
+            "limiter cases keep their owning crate's names"
         );
     }
 }

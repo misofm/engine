@@ -20,6 +20,7 @@ miso-engine-lane.workspace = true
 miso-engine-math = { workspace = true, features = ["lane"] }
 miso-engine-parametric-eq.workspace = true
 miso-engine-soft-clip.workspace = true
+miso-engine-true-peak-limiter.workspace = true
 miso-engine-wasm-gate-corpus.workspace = true
 # Gate G5's WebAssembly runtime. Apache-2.0 WITH LLVM-exception (wasmtime and the Cranelift
 # backend it embeds). Pinned exactly: a runtime upgrade may change which relaxed or post-MVP

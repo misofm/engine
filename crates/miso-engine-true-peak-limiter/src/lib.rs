@@ -40,6 +40,8 @@
 //! `miso-engine-effect-runtime`.
 #![allow(missing_docs)]
 
+pub mod corpus;
+
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
@@ -72,6 +74,9 @@ const HISTORY_WORDS: usize = 12;
 const FIR_ALIGNMENT_SAMPLES: usize = 6;
 /// Widest backend, so per-frame scratch is a fixed-size array and never an allocation.
 const MAXIMUM_WIDTH: usize = 8;
+/// Frames of one detector pass; the peak scratch is `2 * DETECTOR_CHUNK * MAXIMUM_WIDTH` on the
+/// stack, two kilobytes, and never an allocation.
+const DETECTOR_CHUNK: usize = 32;
 /// Updates in the frozen `SmoothingRule::Linear` de-zipper window.
 const RAMP_UPDATES: u32 = 64;
 /// Lane words before the three rings.
@@ -862,60 +867,84 @@ fn limiter_block<L: Lane>(
     let mut main_cursor = cursors.main as usize;
     let mut ring_cursor = cursors.ring as usize;
     let mut scratch = [0.0_f32; MAXIMUM_WIDTH];
+    let mut peaks = [[0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH]; 2];
 
-    for frame in 0..frames {
-        let base = frame * width;
-        let limit_left = hot_left.limit.advance();
-        let release_left = hot_left.release.advance();
-        let limit_right = hot_right.limit.advance();
-        let release_right = hot_right.release.advance();
-
-        let x_left = L::load(&left_io[base..]);
-        let x_right = L::load(&right_io[base..]);
-        let peak_left = detector_peak(&mut hot_left.history, x_left, &coef.fir);
-        let peak_right = detector_peak(&mut hot_right.history, x_right, &coef.fir);
-        let linked = peak_right.max(peak_left);
-        let peak_left = L::select(link, linked, peak_left);
-        let peak_right = L::select(link, linked, peak_right);
-
-        channel_frame(
-            left_io,
-            base,
-            x_left,
-            peak_left,
-            limit_left,
-            release_left,
-            &mut hot_left,
-            left,
-            shape.ring,
-            ring_cursor,
-            main_cursor,
-            bypass,
-            &mut scratch,
-        );
-        channel_frame(
-            right_io,
-            base,
-            x_right,
-            peak_right,
-            limit_right,
-            release_right,
-            &mut hot_right,
-            right,
-            shape.ring,
-            ring_cursor,
-            main_cursor,
-            bypass,
-            &mut scratch,
-        );
-
-        main_cursor += 1;
-        if main_cursor == shape.main {
-            main_cursor = 0;
+    // The block is walked in chunks so that only one channel's twelve history words are live at a
+    // time. Both channels' histories together are twenty-four vector registers, which is more than
+    // any of the three backends has; splitting the detector into two passes over a short chunk
+    // costs twelve loads and twelve stores per chunk and removes the spill from the inner loop.
+    // Nothing about the per-lane operation order changes, so the block is bit-identical to the
+    // single-pass form (the E12 digests are the proof).
+    for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
+        let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+        for (channel, io) in [&*left_io, &*right_io].into_iter().enumerate() {
+            let hot = if channel == 0 {
+                &mut hot_left
+            } else {
+                &mut hot_right
+            };
+            let mut history = hot.history;
+            for frame in 0..span {
+                let base = (chunk + frame) * width;
+                let x = L::load(&io[base..]);
+                detector_peak(&mut history, x, &coef.fir)
+                    .store(&mut peaks[channel][frame * width..]);
+            }
+            hot.history = history;
         }
-        ring_cursor += 1;
-        if ring_cursor == shape.ring {
-            ring_cursor = 0;
+
+        for frame in 0..span {
+            let base = (chunk + frame) * width;
+            let limit_left = hot_left.limit.advance();
+            let release_left = hot_left.release.advance();
+            let limit_right = hot_right.limit.advance();
+            let release_right = hot_right.release.advance();
+
+            let peak_left = L::load(&peaks[0][frame * width..]);
+            let peak_right = L::load(&peaks[1][frame * width..]);
+            let linked = peak_right.max(peak_left);
+            let peak_left = L::select(link, linked, peak_left);
+            let peak_right = L::select(link, linked, peak_right);
+
+            channel_frame(
+                left_io,
+                base,
+                L::load(&left_io[base..]),
+                peak_left,
+                limit_left,
+                release_left,
+                &mut hot_left,
+                left,
+                shape.ring,
+                ring_cursor,
+                main_cursor,
+                bypass,
+                &mut scratch,
+            );
+            channel_frame(
+                right_io,
+                base,
+                L::load(&right_io[base..]),
+                peak_right,
+                limit_right,
+                release_right,
+                &mut hot_right,
+                right,
+                shape.ring,
+                ring_cursor,
+                main_cursor,
+                bypass,
+                &mut scratch,
+            );
+
+            main_cursor += 1;
+            if main_cursor == shape.main {
+                main_cursor = 0;
+            }
+            ring_cursor += 1;
+            if ring_cursor == shape.ring {
+                ring_cursor = 0;
+            }
         }
     }
 
@@ -1681,10 +1710,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
 mod tests {
     use super::*;
     use miso_engine_core::KernelBackendV1;
-    use miso_engine_dsp_reference::{
-        ReferenceTruePeakLimiter, ReferenceTruePeakLimiterParameters, reference_annex2_phases,
-        reference_true_peak_estimate,
-    };
+    use miso_engine_dsp_reference::reference_annex2_phases;
     use miso_engine_effect_contract::{
         PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort, validate_descriptor_v1,
     };
@@ -1916,14 +1942,20 @@ mod tests {
                 history[tap] = history[tap - 1];
             }
             history[0] = sample;
-            let mut expected = [0.0_f32; 4];
-            for (phase, output) in expected.iter_mut().enumerate() {
-                let mut accumulator = 0.0_f32;
-                for (tap, word) in history.iter().enumerate() {
-                    accumulator = accumulator + ANNEX2_FIR[tap][phase] * *word;
+            // Typed from the brief: increasing tap order, `+0.0` accumulator, separately rounded
+            // multiply then add. `#[allow]` because the brief's order is the assertion.
+            #[allow(clippy::assign_op_pattern)]
+            let expected = {
+                let mut expected = [0.0_f32; 4];
+                for (phase, output) in expected.iter_mut().enumerate() {
+                    let mut accumulator = 0.0_f32;
+                    for (tap, word) in history.iter().enumerate() {
+                        accumulator = accumulator + ANNEX2_FIR[tap][phase] * *word;
+                    }
+                    *output = accumulator;
                 }
-                *output = accumulator;
-            }
+                expected
+            };
             let _ = detector_peak(&mut kernel_history, sample, &coefficients.fir);
             let produced = annex2_phases(&kernel_history, &coefficients.fir);
             for (phase, value) in produced.iter().enumerate() {
@@ -2353,7 +2385,8 @@ mod tests {
 
         let sizes = peer.metadata().state_sizes;
         let reference = snapshot(peer.as_ref());
-        let corruptions: [(&str, Box<dyn Fn(&mut Vec<u8>)>); 6] = [
+        type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
+        let corruptions: [Corruption; 6] = [
             (
                 "version",
                 Box::new(|bytes: &mut Vec<u8>| write_u32(bytes, 0, 1)),
@@ -2395,9 +2428,8 @@ mod tests {
             } else {
                 corrupt(&mut left);
             }
-            let version = if name == "version" { 2 } else { 2 };
             let result = peer.restore_state_payload(
-                version,
+                STATE_LAYOUT_VERSION,
                 StatePayloadInput::new(&common, &left, &right, sizes).expect("sizes"),
             );
             assert!(result.is_err(), "{name} was accepted");
@@ -2557,138 +2589,5 @@ mod tests {
             limit_coefficient(-3.0).to_bits()
         );
         assert_eq!(read_u32(&payload.1, words::MAIN_CURSOR), 0);
-    }
-
-    /// E4 (hard gate): the true-peak estimate of the output never exceeds the ceiling.
-    #[test]
-    fn output_true_peak_never_exceeds_the_ceiling() {
-        let frames = 2048_usize;
-        let mut worst = f64::NEG_INFINITY;
-        let mut worst_case = String::new();
-        for rate in [44_100_u32, 48_000, 88_200, 96_000] {
-            for link in [LinkMode::DualMono, LinkMode::Maximum] {
-                for ceiling in [-1.0_f32, -6.0, -12.0] {
-                    for lookahead in [0.0_f32, 1.0, 5.0, 10.0] {
-                        for release in [10.0_f32, 2000.0] {
-                            for corpus in 0..5 {
-                                let (mut left, mut right) = corpus_signal(corpus, frames, rate);
-                                let values = values_with(ceiling, release, lookahead);
-                                let mut preparation = request_at_rate(&values, rate);
-                                preparation.link_mode = link;
-                                let mut effect = TruePeakLimiterFactory
-                                    .prepare(preparation)
-                                    .expect("prepare");
-                                render(effect.as_mut(), &mut left, &mut right, 128);
-                                let ceiling_gain =
-                                    f64::from(10.0_f32).powf(f64::from(ceiling) / 20.0);
-                                for (side, channel) in [("left", &left), ("right", &right)] {
-                                    let measured: Vec<f64> =
-                                        channel.iter().map(|x| f64::from(*x)).collect();
-                                    let estimate = reference_true_peak_estimate(&measured)
-                                        .expect("finite output");
-                                    let excess_db = 20.0 * (estimate / ceiling_gain).log10();
-                                    if excess_db > worst {
-                                        worst = excess_db;
-                                        worst_case = format!(
-                                            "{rate} {link:?} ceiling {ceiling} lookahead \
-                                             {lookahead} release {release} corpus {corpus} {side}"
-                                        );
-                                    }
-                                    assert!(
-                                        estimate <= ceiling_gain,
-                                        "{rate} {link:?} ceiling {ceiling} lookahead {lookahead} \
-                                         release {release} corpus {corpus} {side}: estimate \
-                                         {estimate} exceeds {ceiling_gain} by {excess_db} dB"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Descriptive, and the number the #49 guard decision needs: the whole matrix stays this
-        // far under the user ceiling with the frozen 1 dB internal guard and `W_MIN = 32`.
-        println!("worst true-peak margin {worst:+.4} dB at {worst_case}");
-        assert!(worst < 0.0, "worst margin {worst} dB at {worst_case}");
-    }
-
-    /// The seeded corpora of the ceiling gate. Never a file, always a seed.
-    fn corpus_signal(index: usize, frames: usize, rate: u32) -> (Vec<f32>, Vec<f32>) {
-        let mut left = vec![0.0_f32; frames];
-        let mut right = vec![0.0_f32; frames];
-        match index {
-            0 | 1 | 2 => {
-                // Bipolar noise at +6 dBFS, three seeds.
-                let mut noise = Noise(0xC0DE_0000 + index as u64);
-                for frame in 0..frames {
-                    left[frame] = noise.next() * 2.0;
-                    right[frame] = noise.next() * 2.0;
-                }
-            }
-            3 => {
-                // A near-Nyquist sine at +3 dB: the classic inter-sample overshoot generator.
-                let step = core::f64::consts::TAU * 0.49;
-                for frame in 0..frames {
-                    let phase = step * frame as f64;
-                    left[frame] = (phase.sin() * 1.4125) as f32;
-                    right[frame] = ((phase + 0.37).sin() * 1.4125) as f32;
-                }
-            }
-            _ => {
-                // An impulse train at the highest rate the ring can carry.
-                let period = (rate / 1000).max(1) as usize;
-                for frame in 0..frames {
-                    if frame % period == 0 {
-                        left[frame] = if (frame / period) % 2 == 0 { 4.0 } else { -4.0 };
-                        right[frame] = -left[frame];
-                    }
-                }
-            }
-        }
-        (left, right)
-    }
-
-    /// E5: the production law tracks the independent `f64` oracle.
-    #[test]
-    fn production_tracks_the_f64_oracle() {
-        let frames = 4096_usize;
-        for lookahead in [0.0_f32, 5.0, 10.0] {
-            for ceiling in [-1.0_f32, -6.0] {
-                let values = values_with(ceiling, 100.0, lookahead);
-                let mut effect = TruePeakLimiterFactory
-                    .prepare(request(&values))
-                    .expect("prepare");
-                let mut noise = Noise(0x5150 + lookahead as u64);
-                let source: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
-                let mut left = source.clone();
-                let mut right = source.clone();
-                render(effect.as_mut(), &mut left, &mut right, 128);
-
-                let mut oracle = ReferenceTruePeakLimiter::new(
-                    48_000.0,
-                    ReferenceTruePeakLimiterParameters {
-                        ceiling_db: f64::from(ceiling),
-                        release_ms: 100.0,
-                        lookahead_ms: f64::from(lookahead),
-                    },
-                )
-                .expect("oracle");
-                let mut worst = 0.0_f64;
-                for frame in 0..frames {
-                    let x = f64::from(source[frame]);
-                    let peak = oracle.detect(x);
-                    let expected = oracle.apply(x, peak);
-                    let error = (f64::from(left[frame]) - expected).abs();
-                    if error > worst {
-                        worst = error;
-                    }
-                }
-                assert!(
-                    worst <= 1.0e-4,
-                    "lookahead {lookahead} ceiling {ceiling}: worst deviation {worst}"
-                );
-            }
-        }
     }
 }

@@ -17,6 +17,7 @@ miso-engine-math.workspace = true
 [dev-dependencies]
 miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

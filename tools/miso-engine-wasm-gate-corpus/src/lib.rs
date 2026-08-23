@@ -49,6 +49,7 @@ use miso_engine_multiband_compressor::corpus as multiband_corpus;
 use miso_engine_parametric_eq::corpus as parametric_eq_corpus;
 use miso_engine_soft_clip::corpus as soft_clip_corpus;
 use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
+use miso_engine_true_peak_limiter::corpus as limiter_corpus;
 use sha2::{Digest, Sha256};
 
 /// Independent single-lane signals in every lane case; a multiple of the widest backend.
@@ -137,6 +138,20 @@ pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 /// the scheduling change it claims to be.
 pub const BUILTINS_CASE_COUNT: usize = builtins_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_true_peak_limiter::corpus`] (issue #90 E12), replayed under
+/// wasm.
+///
+/// A whole prepared limiter bank per case, over 1 024 frames of eight independent stereo tracks:
+/// the tap-major Annex-2 detector, the streaming van Herk window minimum — the only per-lane
+/// control flow in this corpus that is data independent but *window-length* dependent, so a lane
+/// whose lookahead differs runs a different schedule inside the same vector body — the exactly
+/// summed box ramp on its `2^-14` grid, and the single-rounding `fma` one-pole on the reduction
+/// word with its D7 `flush`. One case per link mode, one at the `W_MIN` window with near-Nyquist
+/// input, one at the longest lookahead, and one of subnormal input between bursts, which is where
+/// the flush has to remove the same bits on every target. Lane generic, and their pins live in that
+/// crate.
+pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -147,7 +162,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + SOFT_CLIP_CASE_COUNT
     + PARAMETRIC_EQ_CASE_COUNT
     + GATE_EXPANDER_CASE_COUNT
-    + BUILTINS_CASE_COUNT;
+    + BUILTINS_CASE_COUNT
+    + LIMITER_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -347,6 +363,8 @@ enum Case {
     GateExpander(usize),
     /// One case of the `miso-engine-builtins` chain corpus.
     Builtins(usize),
+    /// One case of the `miso-engine-true-peak-limiter` E12 corpus.
+    Limiter(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -399,7 +417,11 @@ fn case_of(index: usize) -> Case {
     if index < GATE_EXPANDER_CASE_COUNT {
         return Case::GateExpander(index);
     }
-    Case::Builtins(index - GATE_EXPANDER_CASE_COUNT)
+    let index = index - GATE_EXPANDER_CASE_COUNT;
+    if index < BUILTINS_CASE_COUNT {
+        return Case::Builtins(index);
+    }
+    Case::Limiter(index - BUILTINS_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -459,6 +481,10 @@ pub fn case_name(index: usize) -> String {
             gate_expander_corpus::CASE_NAMES[case]
         ),
         Case::Builtins(case) => format!("builtins/{}", builtins_corpus::CASE_NAMES[case]),
+        Case::Limiter(case) => format!(
+            "effect/true_peak_limiter/{}",
+            limiter_corpus::CASE_NAMES[case]
+        ),
     }
 }
 
@@ -500,6 +526,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::ParametricEq(case) => parametric_eq_corpus::E9_DIGESTS[case],
         Case::GateExpander(case) => gate_expander_corpus::GATE_DIGESTS[case],
         Case::Builtins(case) => builtins_corpus::BUILTINS_DIGESTS[case],
+        Case::Limiter(case) => limiter_corpus::D90_DIGESTS[case],
     }
 }
 
@@ -547,6 +574,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_builtins::<f32>(case),
             1 => digest_builtins::<miso_engine_lane::Simd4>(case),
             _ => digest_builtins::<miso_engine_lane::Simd8>(case),
+        },
+        Case::Limiter(case) => match width {
+            0 => digest_limiter::<f32>(case),
+            1 => digest_limiter::<miso_engine_lane::Simd4>(case),
+            _ => digest_limiter::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -613,7 +645,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::SoftClip(_)
         | Case::ParametricEq(_)
         | Case::GateExpander(_)
-        | Case::Builtins(_) => {
+        | Case::Builtins(_)
+        | Case::Limiter(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -1030,6 +1063,18 @@ fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for value in builtins_corpus::case_values::<L>(case) {
         hasher.update(value.to_bits().to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-true-peak-limiter` E12 case at width `L::WIDTH`, exactly as that
+/// crate's `tests/determinism.rs` does natively.
+fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; limiter_corpus::POINTS];
+    limiter_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
     }
     hasher.finalize().into()
 }

@@ -1200,6 +1200,7 @@ dependencies = [
  "miso-engine-effect-runtime",
  "miso-engine-lane",
  "miso-engine-math",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1216,6 +1217,7 @@ dependencies = [
  "miso-engine-parametric-eq",
  "miso-engine-soft-clip",
  "miso-engine-transient-shaper",
+ "miso-engine-true-peak-limiter",
  "sha2 0.11.0",
 ]
 
@@ -1238,6 +1240,7 @@ dependencies = [
  "miso-engine-math",
  "miso-engine-parametric-eq",
  "miso-engine-soft-clip",
+ "miso-engine-true-peak-limiter",
  "miso-engine-wasm-gate-corpus",
  "wasmtime",
 ]

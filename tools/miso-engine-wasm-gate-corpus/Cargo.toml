@@ -25,6 +25,7 @@ miso-engine-multiband-compressor.workspace = true
 miso-engine-parametric-eq.workspace = true
 miso-engine-soft-clip.workspace = true
 miso-engine-transient-shaper.workspace = true
+miso-engine-true-peak-limiter.workspace = true
 sha2.workspace = true
 
 [lints]
