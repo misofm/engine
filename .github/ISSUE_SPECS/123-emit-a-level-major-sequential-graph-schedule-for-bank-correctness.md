@@ -6,10 +6,11 @@ Make the compiler's canonical sequential graph schedule exactly the concatenatio
 sorted dependency levels so a retained homogeneous bank never gathers another member's input
 before that input has been produced in the current block.
 
-**READY FOR SOL HIGH PASS 1.** Sol High implements and freezes one coherent checkpoint; Sol XHigh
-performs the read-only adversarial review. The complete budget is one implementation pass plus one
-bounded HOLD correction. A second material HOLD is terminal STOP. No benchmark or timing run is
-needed or authorized, and no tuning is in scope.
+**TERMINAL STOP / NO OVERALL PASS.** Sol High completed pass 1 and the sole bounded correction;
+Sol XHigh issued the one permitted HOLD and then returned terminal STOP. The product checkpoint is
+preserved as technical input only. The consumed 100,000-render audit may not be retried, and no
+further Issue-123 implementation pass is authorized. Benchmark and timing invocation counts remain
+zero.
 
 Remote Issue 123 was read-only confirmed unallocated on 2026-08-23. Root owns GitHub creation,
 body synchronization and state changes after this docs checkpoint is committed and upstream. This
@@ -259,3 +260,84 @@ Issue-098 F2–F13; executor unification or render-loop edits; native dependency
 buffer-layout optimization; new public APIs; new effects/builtins/source/control behavior; fixture
 regeneration; cross-target qualification; benchmark, timing, tuning, listening or performance
 claims; and V1/legacy inspection.
+
+## Implementation and review evidence — 2026-08-23
+
+### Sol High pass 1 and sole Sol XHigh HOLD
+
+Pass 1 implemented the F1 product correction within the exact two-product-path fence. The compiler
+emits `sequential_schedule` by concatenating Issue-122's sorted dependency levels and recomputes
+buffer coloring from that schedule. The graph crate adds one private structural-layout predicate
+shared by scalar/native and source/no-source binding families after existing binding validation and
+before executor or scheduler construction. Corrupt schedule, level, node, edge and bank layouts
+return `graph.scheduler.layout` transactionally; corrected returned ownership binds successfully.
+No render loop, native wave/unit/partition, scheduler, fixture, Cargo or Issue-098 F2–F13 behavior
+changed.
+
+Focused evidence passed the level-major schedule/canonical identity, independent liveness interval,
+old-color rejection, bank-color distinctness, all-four-bind ownership retry, selected-backend
+12-track bank/scalar/native one-block hash `47633fd9831d49c3`, W4/W8 off-render membership, strict
+package checks, policies and mutations. The reverse-route canonical SHA-256 became
+`464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5`
+solely from its authorized sequential-schedule change; dependency levels stayed unchanged.
+
+The one authorized environment-gated 100,000-render functional audit ran once and was not rerun.
+It observed corrected sequential hash `f8ee8fef8f423df4`, replacing stale Kahn-schedule hash
+`9f30db0220656d79`, with its existing allocation and bank-call checks green. Sol XHigh nevertheless
+issued the sole bounded HOLD because that changed long-corpus hash had no independent like-for-like
+analytic/native oracle: the independent scalar/bank/native evidence covered only the one-block hash,
+and comparing that one-block value to the old 100,000-block value was not an effective stale-hash
+mutation. The forced-W4 row also lacked the required observer-order and explicit PDC/latency
+assertions.
+
+### Sole correction and terminal Sol XHigh STOP
+
+The correction closed the W4 finding. Independently prepared scalar, banked sequential and native
+`SingleThread` plans now prove the exact two-block PCM `[10,-15,20,-30]`, exact bank counters
+`[2,2]`, native sequential-fallback selection, empty inserted-delay sets, zero latency on every
+node, and eight exact observer calls per plan. Each observer checks lane audio and the complete
+stable order 0–3 at block zero then 4–7 on the continuation block.
+
+The correction did not close the 100,000-block oracle gate. A separately prepared native
+`SingleThread` graph renders only a 4,096-block prefix, observes that the last 28 PCM-output blocks
+repeat three times, then repeats those output bytes synthetically through block 100,000 to obtain
+`f8ee8fef8f423df4`. It rejects same-length stale hash `9f30db0220656d79` and a one-bit mutation,
+but it compares only output blocks. It does not snapshot or prove equality of all hidden effect,
+builtin, delay and accumulator state at the proposed cycle boundaries. Three equal output periods
+therefore do not prove that a deterministic stateful graph cannot diverge later. The extended hash
+is a modeled extrapolation, not an independent exact same-corpus native or analytic oracle.
+
+The consumed environment-gated audit was correctly not rerun, but its missing independent seal
+cannot be repaired by inference or by weakening the gate. Because the sole HOLD correction was
+consumed, Sol XHigh returned terminal STOP rather than a second HOLD.
+
+### Frozen technical checkpoint and counters
+
+The preserved technical checkpoint is commit
+`34d0e825d8d470ce499f423276a1e28c3e19f991`, tree
+`acfad7a8ff12f88e32a9582450bb78f22a419a6a`. Its exact two product paths and SHA-256 identities
+are:
+
+- `crates/miso-engine-graph/src/lib.rs`:
+  `4dcd1f3fbba12be49b593548ac00494ced9a5a83fc8aa4840909112ba326d956`;
+- `crates/miso-engine-graph-compiler/src/lib.rs`:
+  `22e2e2a508ad31c4d9389f2ba90787ac2c346d19c1a130b830f485cf1b2a930a`.
+
+The exact binary diff SHA-256 against briefing base
+`89274a17a441cf8d255058058a4e83e7cef82692` is
+`8b49c123bfe38cd402abd50b127aed3965e75259a22de24c7ce53555bebff1a4`.
+The pinned graph-fixture command still exits 1 with sole output
+`graph fixture manifest mismatch`, exactly the two accepted resource-zero-derived identities and
+no new, missing or changed path; fixtures, generator and manifest remain untouched.
+
+Final execution counters are exactly:
+
+- `environment_gated_100000_render_audit_invocations=1`;
+- `environment_gated_100000_render_audit_retries=0`;
+- `benchmark_invocations=0`;
+- `timed_benchmark_invocations=0`.
+
+Issue 123 has **no overall PASS**. Commit
+`34d0e825d8d470ce499f423276a1e28c3e19f991` is technical input only and does not unblock Issue 026
+or authorize a retry, another correction, a second 100,000-render audit, timing, benchmark or
+performance claim.

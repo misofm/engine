@@ -2,12 +2,11 @@
 
 ## Decision
 
-**READY FOR SOL HIGH PASS 1.** Implement only Issue-098 F1: make the compiler's sequential schedule
-the exact concatenation of accepted sorted dependency levels, recolor buffers against that
-schedule, and reject invalid prepared schedules transactionally in both graph binding families.
-Sol High freezes one checkpoint and Sol XHigh reviews read-only. One bounded HOLD correction is the
-entire remaining budget; a second material HOLD is terminal STOP. No benchmark, timing or tuning is
-authorized.
+**TERMINAL STOP / NO OVERALL PASS.** Sol High completed pass 1 and the sole bounded correction.
+Sol XHigh issued the one permitted HOLD, then returned terminal STOP because the corrected
+100,000-block evidence still extrapolates from output repetition without proving hidden-state
+recurrence. The product checkpoint is technical input only; no retry, second correction, benchmark
+or timing run is authorized.
 
 Accepted authorities are Issue 006 product checkpoint/rescope
 `40f0a2f3f5057e725e80715da18afb0e5f4d6bb3` /
@@ -101,3 +100,49 @@ Handoff one immutable exact-path candidate/tree with all hashes, transcripts, PC
 mutation outcomes, fixture exception and invocation counters. Sol XHigh returns strict PASS or the
 sole bounded HOLD. PASS gates **End-to-end release, performance, and listening qualification**; it
 does not close Issue 098 or authorize its remaining findings.
+
+## Final evidence and verdict
+
+Pass 1 correctly landed the bounded F1 mechanics: compiler schedule equals concatenated sorted
+levels, coloring is recomputed, and one private validator guards scalar/native plus
+source/no-source binds transactionally before construction. The reverse-route canonical identity
+is `464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5`;
+Issue-122 level bytes, both executor render loops, native waves/scheduler, fixtures and F2–F13 are
+frozen. Focused checks, coloring evidence, ownership retries, one-block 12-track
+scalar/bank/native hash `47633fd9831d49c3`, strict package gates, policies and mutations passed.
+
+The sole HOLD identified two evidence defects. First, the changed 100,000-render sequential hash
+`f8ee8fef8f423df4` lacked an independent same-corpus oracle; the native/scalar proof covered only
+one block, and its comparison to stale 100,000-block hash `9f30db0220656d79` was cross-length.
+Second, forced-W4 evidence had no observer bindings and no explicit PDC/latency assertions.
+
+The sole correction closed W4 completely: exact PCM `[10,-15,20,-30]`, bank counters `[2,2]`,
+native single-thread fallback, empty inserted delays, all-node zero latency, and exact observer
+audio/order 0–7 with count 8 all match across independently prepared scalar, banked and native
+plans.
+
+The 100,000-block finding remains. A native plan renders 4,096 blocks, the test observes three
+equal 28-block PCM-output periods, and then synthetically repeats those output bytes to hash the
+remaining corpus. Output equality does not prove equality of hidden effect, builtin, delay and
+accumulator state, so it cannot prove the future output period. Same-length stale and one-bit
+mutations reject, but they validate only the extrapolated reference. The one authorized
+environment-gated audit was not rerun, as required.
+
+The frozen technical checkpoint is
+`34d0e825d8d470ce499f423276a1e28c3e19f991`, tree
+`acfad7a8ff12f88e32a9582450bb78f22a419a6a`, with exact product hashes:
+
+- graph: `4dcd1f3fbba12be49b593548ac00494ced9a5a83fc8aa4840909112ba326d956`;
+- graph compiler: `22e2e2a508ad31c4d9389f2ba90787ac2c346d19c1a130b830f485cf1b2a930a`.
+
+Its exact binary diff SHA-256 against base `89274a17a441cf8d255058058a4e83e7cef82692`
+is `8b49c123bfe38cd402abd50b127aed3965e75259a22de24c7ce53555bebff1a4`.
+The fixture check retains exactly its pinned sole mismatch and no fixture byte changed.
+
+Final counters are
+`environment_gated_100000_render_audit_invocations=1`,
+`environment_gated_100000_render_audit_retries=0`, `benchmark_invocations=0`, and
+`timed_benchmark_invocations=0`.
+
+Verdict: **terminal STOP, no overall PASS, no retry.** The technical checkpoint is preserved as
+input only and does not unblock Issue 026.
