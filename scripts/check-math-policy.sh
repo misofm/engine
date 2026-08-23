@@ -15,6 +15,10 @@ set -euo pipefail
 # Files that still call the platform libm, with the maximum number of call sites permitted and the
 # issue that removes them. Enumerated 2026-08-23 by running this script's own pattern.
 #
+# Issue #91 removed two lines: `miso-engine-soft-clip` moved to `miso_engine_math::db_to_gain_f32`
+# and its tests out of `src/`, and `miso-engine-core/src/arch/mod.rs`'s single site was inside the
+# soft-clip kernel test that #91 deleted (the kernel's last consumer had moved).
+#
 #   path                                                  max  owner
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
@@ -23,12 +27,10 @@ crates/miso-engine-parametric-eq/src/lib.rs                22  87
 crates/miso-engine-compressor/src/lib.rs                    4  88
 crates/miso-engine-gate-expander/src/lib.rs                 6  89
 crates/miso-engine-true-peak-limiter/src/lib.rs             3  90
-crates/miso-engine-soft-clip/src/lib.rs                    12  91
 crates/miso-engine-effect-contract/src/lib.rs               4  95
 crates/miso-engine-graph/src/lib.rs                         2  98
 crates/miso-engine-graph-compiler/src/lib.rs                1  99
 crates/miso-engine-conformance/src/compare.rs               1 105
-crates/miso-engine-core/src/arch/mod.rs                     1  84
 ALLOWLIST
 }
 

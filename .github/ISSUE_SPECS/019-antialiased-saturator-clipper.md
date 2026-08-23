@@ -7,6 +7,44 @@ checkpoint `e674d5e` is preserved as technical input only. Issue 053, **Launch s
 graph closure**, owns the missing launch-product work; Issue 052 remains its downstream broad
 qualification. No Issue-019 benchmark was invoked.
 
+## Amendment — issue #91, 2026-08-23 (state layout 2, polyphase kernel)
+
+The wave-2 re-landing of `miso-engine-soft-clip` on the `Lane` foundation (issue #91, master plan
+in #83) changes the following. Everything not listed here still holds, and the rendered signal is
+**bit-identical** to what this brief froze (proved sample by sample against a transliteration of
+the "Exact 2x pipeline" section below).
+
+* **State layout version 1 -> 2.** Each channel is now **104** little-endian words (416 bytes),
+  and the common section carries the shared payload codec's two-word header (8 bytes), so a
+  prepared instance is **840 bytes** per track, and bank retained bytes are `W * (840 + 24)`:
+  W4 3,456, W8 6,912. Layout-1 payloads are rejected with `effect.state.version`; a converting
+  edge, if one is ever wanted, belongs to the migration registry of issue #080.
+  * The two cursor words are gone: decision D10 gives the whole bank one shared history position,
+    and a per-track reset or restore is expressed relative to it (audit finding #91 F3).
+  * Each ramp gained a precomputed `step` word: decision D11 divides **once**, at the event, and
+    the per-sample value is the iterated sum. The lines below that say "the first update advances
+    by `(target-current)/64`" describe the same first sample and a different law after it.
+  * Word order: three ramps (`current`, `target`, `step`, `remaining`), then `X[n]..X[n-30]`,
+    `e[n]..e[n-29]` and `x[n]..x[n-30]`, newest first. The histories are stored by **age**, not by
+    ring position, which is what makes a restore independent of the bank's cursor.
+* **The 63-tap convolutions are polyphase.** The interpolator and decimator keep the frozen
+  ascending tap order and every surviving product, and drop only the products the zero-stuffed
+  stream makes exactly `+-0.0` (finding #91 F2). The tap values now live once, in
+  `miso-engine-lane`'s `kernels::halfband::HALFBAND63_EVEN`, and are still checked against the
+  independent `f64` design.
+* **No per-operation checking.** Decision D7 replaces the per-product `is_finite`/`is_subnormal`
+  wrappers with a flush on the two values that enter a history and one boundary check per block per
+  bank. A block that fails is zeroed, the state is reset and a counter advances by one *block*; the
+  per-lane per-sample recovery this brief describes no longer exists. Input sanitation moved to the
+  track's input stage.
+* **`10f32.powf` -> `miso_engine_math::db_to_gain_f32`** (decision D6). The two differ by at most
+  one ulp, and the new one is the correctly rounded side; the measured alias figure moves from
+  9.798681840940 dB to 9.798682094805 dB, and the frozen claim (9.80 dB, gate `>= 2.0 dB`) is
+  unchanged.
+
+Latency 31, tail 29, support through sample 60, the parameter table, the port table, the descriptor
+identity and the dual-mono contract are all unchanged.
+
 ## Outcome
 
 Ship one honest launch nonlinear processor: a Normal-only, fixed-2x, linear-phase FIR oversampled

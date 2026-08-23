@@ -20,6 +20,7 @@ miso-engine-math = { workspace = true, features = ["lane"] }
 # The wave-2 effect crates whose corpora this gate replays; their pins live in those crates,
 # so the wasm leg replays the gate rather than a copy of it.
 miso-engine-multiband-compressor.workspace = true
+miso-engine-soft-clip.workspace = true
 miso-engine-transient-shaper.workspace = true
 sha2.workspace = true
 

@@ -8,6 +8,19 @@ owns the unimplemented bank/registry/graph product gates and the single represen
 Issue 052 follows it for broad qualification. This historical scalar brief authorizes no further
 Issue-019 implementation or benchmark.
 
+## Amendment — issue #91, 2026-08-23
+
+The equations, tap literals, operation order, latency and tail below are the frozen contract and are
+unchanged: the wave-2 polyphase kernel reproduces them **bit for bit**
+(`crates/miso-engine-soft-clip/tests/polyphase_identity.rs` transliterates this section and compares
+900,000 samples with zero mismatches). What did change is recorded in
+`.github/ISSUE_SPECS/019-antialiased-saturator-clipper.md`'s amendment of the same date: state layout
+version 2 (104 words per channel, no cursor word, a precomputed ramp `step`), decision D7 replacing
+the per-operation finite/subnormal checks with a per-block boundary check, decision D11 ramps, and
+`miso_engine_math::db_to_gain_f32` in place of `10f32.powf`. The "Each lane is exactly 169
+little-endian words" paragraph and the `W*(1352+24)` bank arithmetic below are therefore layout 1
+and are superseded.
+
 ## Decision and boundary
 
 Freeze one useful mode: `miso.soft-clip`, `CubicSoftClip`, Normal quality, fixed 2x, DualMono only.

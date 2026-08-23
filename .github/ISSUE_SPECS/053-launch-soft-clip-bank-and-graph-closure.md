@@ -1,5 +1,28 @@
 # 053 Launch soft-clip bank and graph closure
 
+## Amendment — issue #91, 2026-08-23 (state layout 2)
+
+The wave-2 re-landing (issue #91) keeps every product gate in this document — bank membership,
+scalar tails, latency 31 / tail 29 / support 60, bypass and identity warming the wet history,
+transactional caps, the frozen alias claim — and changes only the retained-state arithmetic they
+are measured in:
+
+| | layout 1 | layout 2 |
+|---|---:|---:|
+| per lane (channel) | 676 B | 416 B |
+| per track state (dual mono) | 1,352 B | 832 B + an 8 B common header = 840 B |
+| W4 bank retained, `W * (state + 24)` | 5,504 B | 3,456 B |
+| W8 bank retained, `W * (state + 24)` | 11,008 B | 6,912 B |
+
+`state_layout_version` is 2, so a layout-1 instance and a layout-2 instance can never share a
+cohort — which is the contract's own mechanism and is intended. The scalar path and the banks are
+now the *same* generic kernel at `WIDTH = 1`, 4 and 8 rather than five transliterations, so the
+scalar-delegate equality this document requires is a property of the code.
+
+The bypass rule of this document ("bypass keeps the wet histories warm") is preserved exactly: the
+kernel always runs the full chain and selects the delayed dry signal at the end.
+
+
 ## Outcome
 
 Close the stopped Issue 019 launch product by carrying its accepted fixed-2x cubic scalar checkpoint

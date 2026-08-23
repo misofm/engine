@@ -17,14 +17,6 @@ type TptKernelFn = for<'a> fn(TptKernelBlock<'a>);
 type DeltaKernelFn = for<'a> fn(DeltaKernelBlock<'a>);
 type CompressorGainMixKernelFn = for<'a> fn(CompressorGainMixKernelBlock<'a>);
 type GateGainKernelFn = for<'a> fn(GateGainKernelBlock<'a>);
-type SoftClipKernelFn = for<'a> fn(SoftClipKernelBlock<'a>) -> u32;
-
-const SOFT_CLIP_HISTORY_WORDS: usize = 63;
-const SOFT_CLIP_NONZERO_TAPS: [usize; 31] = [
-    2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 31, 32, 34, 36, 38, 40, 42, 44, 46, 48,
-    50, 52, 54, 56, 58, 60,
-];
-
 /// Preparation or shape failure for an architecture-owned TPT bank kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TptBankKernelError {
@@ -69,21 +61,6 @@ pub enum GateGainKernelError {
     LaneLength,
     /// An identity selection mask was neither all-zero nor all-one.
     MaskValue,
-}
-
-/// Preparation or shape failure for one soft-clip high-rate bank phase.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SoftClipBankKernelError {
-    /// The selected semantic backend cannot execute on this build/current processor.
-    BackendUnavailable,
-    /// A per-lane slice did not match the backend's exact logical lane count.
-    LaneLength,
-    /// The supplied fixed FIR table did not contain exactly 63 finite coefficients.
-    CoefficientTable,
-    /// A sample-major history did not contain exactly `63 * lane_count` words.
-    HistoryLength,
-    /// A lane high-rate cursor was outside the 63-word history range.
-    Cursor,
 }
 
 /// A safe, immutable dispatch token prepared before realtime rendering.
@@ -410,94 +387,6 @@ impl PreparedGateGainKernelV1 {
     }
 }
 
-/// A safe, immutable dispatch token for one fixed-2x soft-clip high-rate phase.
-///
-/// The caller supplies an effect-owned 63-word coefficient table and two sample-major histories.
-/// Each logical lane owns an independent cursor, so reset, restore, and recovery remain
-/// lane-local. Construction performs architecture feature detection only on the control plane.
-#[derive(Clone, Copy)]
-pub struct PreparedSoftClipBankKernelV1 {
-    backend: KernelBackendV1,
-    process: SoftClipKernelFn,
-}
-
-impl PreparedSoftClipBankKernelV1 {
-    /// Prepare the selected backend if it is executable by this artifact and processor.
-    pub fn try_new(backend: KernelBackendV1) -> Result<Self, SoftClipBankKernelError> {
-        let process = match backend {
-            KernelBackendV1::Scalar => scalar::process_soft_clip_scalar,
-            KernelBackendV1::WasmSimd128 => soft_clip_wasm_kernel()?,
-            KernelBackendV1::Aarch64Neon => soft_clip_neon_kernel()?,
-            KernelBackendV1::X86Avx2 => soft_clip_x86_avx2_kernel()?,
-            KernelBackendV1::X86Avx2Fma => soft_clip_x86_avx2_fma_kernel()?,
-        };
-        Ok(Self { backend, process })
-    }
-
-    /// Semantic backend whose feature preconditions were proved at preparation.
-    #[must_use]
-    pub const fn backend(self) -> KernelBackendV1 {
-        self.backend
-    }
-
-    /// Execute one interpolate/cubic/decimate high-rate phase across exact logical lanes.
-    ///
-    /// `samples` are written to the interpolation history and replaced with the decimator result.
-    /// The two histories use sample-major AoSoA storage: word `sample * lanes + lane`. The routine
-    /// traverses the frozen ascending nonzero indices, performs separate multiply/add operations,
-    /// writes the cubic result, then advances each healthy lane cursor exactly once. The returned
-    /// bitmask sets bit `lane` when any frozen intermediate in that lane became nonfinite; finite
-    /// subnormals are replaced with positive zero and do not set a bit.
-    pub fn process_phase(
-        self,
-        samples: &mut [f32],
-        coefficients: &[f32],
-        cursors: &mut [u32],
-        interpolation_history: &mut [f32],
-        decimation_history: &mut [f32],
-    ) -> Result<u32, SoftClipBankKernelError> {
-        let lanes = self.backend.lanes() as usize;
-        if samples.len() != lanes || cursors.len() != lanes {
-            return Err(SoftClipBankKernelError::LaneLength);
-        }
-        if coefficients.len() != SOFT_CLIP_HISTORY_WORDS
-            || coefficients.iter().any(|value| !value.is_finite())
-        {
-            return Err(SoftClipBankKernelError::CoefficientTable);
-        }
-        let history_len = SOFT_CLIP_HISTORY_WORDS
-            .checked_mul(lanes)
-            .ok_or(SoftClipBankKernelError::HistoryLength)?;
-        if interpolation_history.len() != history_len || decimation_history.len() != history_len {
-            return Err(SoftClipBankKernelError::HistoryLength);
-        }
-        if cursors
-            .iter()
-            .any(|cursor| *cursor as usize >= SOFT_CLIP_HISTORY_WORDS)
-        {
-            return Err(SoftClipBankKernelError::Cursor);
-        }
-        Ok((self.process)(SoftClipKernelBlock {
-            samples,
-            coefficients,
-            cursors,
-            interpolation_history,
-            decimation_history,
-        }))
-    }
-}
-
-fn check_soft_clip_lanes(values: &mut [f32], failed_lanes: &mut u32) {
-    for (lane, value) in values.iter_mut().enumerate() {
-        if !value.is_finite() {
-            *failed_lanes |= 1_u32 << lane;
-            *value = 0.0;
-        } else if value.is_subnormal() {
-            *value = 0.0;
-        }
-    }
-}
-
 pub(super) struct TptKernelBlock<'a> {
     pub(super) samples: &'a mut [f32],
     pub(super) c1: &'a [f32],
@@ -539,14 +428,6 @@ pub(super) struct GateGainKernelBlock<'a> {
     pub(super) identity_mask: &'a [u32],
 }
 
-pub(super) struct SoftClipKernelBlock<'a> {
-    pub(super) samples: &'a mut [f32],
-    pub(super) coefficients: &'a [f32],
-    pub(super) cursors: &'a mut [u32],
-    pub(super) interpolation_history: &'a mut [f32],
-    pub(super) decimation_history: &'a mut [f32],
-}
-
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn wasm_kernel() -> Result<TptKernelFn, TptBankKernelError> {
     Ok(wasm32::process_tpt_wasm_simd128)
@@ -567,11 +448,6 @@ fn gate_wasm_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Ok(wasm32::process_gate_gain_wasm_simd128)
 }
 
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn soft_clip_wasm_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Ok(wasm32::process_soft_clip_wasm_simd128)
-}
-
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 fn delta_wasm_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
@@ -585,11 +461,6 @@ fn compressor_wasm_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainM
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 fn gate_wasm_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Err(GateGainKernelError::BackendUnavailable)
-}
-
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
-fn soft_clip_wasm_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Err(SoftClipBankKernelError::BackendUnavailable)
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
@@ -617,11 +488,6 @@ fn gate_neon_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Ok(aarch64::process_gate_gain_aarch64_neon)
 }
 
-#[cfg(target_arch = "aarch64")]
-fn soft_clip_neon_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Ok(aarch64::process_soft_clip_aarch64_neon)
-}
-
 #[cfg(not(target_arch = "aarch64"))]
 fn delta_neon_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
@@ -635,11 +501,6 @@ fn compressor_neon_kernel() -> Result<CompressorGainMixKernelFn, CompressorGainM
 #[cfg(not(target_arch = "aarch64"))]
 fn gate_neon_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Err(GateGainKernelError::BackendUnavailable)
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn soft_clip_neon_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Err(SoftClipBankKernelError::BackendUnavailable)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -683,15 +544,6 @@ fn gate_x86_avx2_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn soft_clip_x86_avx2_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    if std::is_x86_feature_detected!("avx2") {
-        Ok(x86::process_soft_clip_x86_avx2)
-    } else {
-        Err(SoftClipBankKernelError::BackendUnavailable)
-    }
-}
-
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn delta_x86_avx2_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
@@ -705,11 +557,6 @@ fn compressor_x86_avx2_kernel() -> Result<CompressorGainMixKernelFn, CompressorG
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn gate_x86_avx2_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Err(GateGainKernelError::BackendUnavailable)
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn soft_clip_x86_avx2_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Err(SoftClipBankKernelError::BackendUnavailable)
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -757,16 +604,6 @@ fn gate_x86_avx2_fma_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn soft_clip_x86_avx2_fma_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-        // The separately selected FMA backend aliases the frozen noncontracting AVX2 graph.
-        Ok(x86::process_soft_clip_x86_avx2_fma)
-    } else {
-        Err(SoftClipBankKernelError::BackendUnavailable)
-    }
-}
-
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn delta_x86_avx2_fma_kernel() -> Result<DeltaKernelFn, DeltaBankKernelError> {
     Err(DeltaBankKernelError::BackendUnavailable)
@@ -781,11 +618,6 @@ fn compressor_x86_avx2_fma_kernel()
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn gate_x86_avx2_fma_kernel() -> Result<GateGainKernelFn, GateGainKernelError> {
     Err(GateGainKernelError::BackendUnavailable)
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn soft_clip_x86_avx2_fma_kernel() -> Result<SoftClipKernelFn, SoftClipBankKernelError> {
-    Err(SoftClipBankKernelError::BackendUnavailable)
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -1315,293 +1147,5 @@ mod tests {
         {
             assert!(PreparedTptBankKernelV1::try_new(KernelBackendV1::WasmSimd128).is_ok());
         }
-    }
-
-    fn soft_clip_coefficients() -> [f32; SOFT_CLIP_HISTORY_WORDS] {
-        let mut coefficients = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        for tap in SOFT_CLIP_NONZERO_TAPS {
-            coefficients[tap] = if tap == 31 {
-                0.5
-            } else {
-                (tap as f32 - 31.0) * 0.003_125
-            };
-        }
-        coefficients
-    }
-
-    fn process_soft_clip_scalar_tracks(
-        samples: &mut [f32; 8],
-        coefficients: &[f32; SOFT_CLIP_HISTORY_WORDS],
-        cursors: &mut [u32; 8],
-        interpolation: &mut [f32; SOFT_CLIP_HISTORY_WORDS * 8],
-        decimation: &mut [f32; SOFT_CLIP_HISTORY_WORDS * 8],
-    ) {
-        let scalar =
-            PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::Scalar).expect("scalar");
-        for lane in 0..8 {
-            let mut sample = [samples[lane]];
-            let mut cursor = [cursors[lane]];
-            let mut lane_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-            let mut lane_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-            for word in 0..SOFT_CLIP_HISTORY_WORDS {
-                lane_interpolation[word] = interpolation[word * 8 + lane];
-                lane_decimation[word] = decimation[word * 8 + lane];
-            }
-            scalar
-                .process_phase(
-                    &mut sample,
-                    coefficients,
-                    &mut cursor,
-                    &mut lane_interpolation,
-                    &mut lane_decimation,
-                )
-                .expect("scalar phase");
-            samples[lane] = sample[0];
-            cursors[lane] = cursor[0];
-            for word in 0..SOFT_CLIP_HISTORY_WORDS {
-                interpolation[word * 8 + lane] = lane_interpolation[word];
-                decimation[word * 8 + lane] = lane_decimation[word];
-            }
-        }
-    }
-
-    #[test]
-    fn soft_clip_scalar_phase_preserves_cubic_zero_and_error_contracts() {
-        let kernel =
-            PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::Scalar).expect("scalar");
-        let mut coefficients = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        coefficients[31] = 1.0;
-        let mut samples = [0.0];
-        let mut cursors = [0];
-        let mut interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        let mut decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        interpolation[32] = 2.0;
-        kernel
-            .process_phase(
-                &mut samples,
-                &coefficients,
-                &mut cursors,
-                &mut interpolation,
-                &mut decimation,
-            )
-            .expect("phase");
-        assert_eq!(decimation[0].to_bits(), (2.0_f32 / 3.0_f32).to_bits());
-        assert_eq!(cursors, [1]);
-
-        let mut zero = [-0.0_f32];
-        let mut zero_cursor = [0];
-        let mut zero_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        let mut zero_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        kernel
-            .process_phase(
-                &mut zero,
-                &coefficients,
-                &mut zero_cursor,
-                &mut zero_interpolation,
-                &mut zero_decimation,
-            )
-            .expect("zero phase");
-        assert_eq!(zero[0].to_bits(), 0.0_f32.to_bits());
-
-        let mut fault = [0.0];
-        let mut fault_cursor = [0];
-        let mut fault_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        let mut fault_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        fault_interpolation[32] = f32::NAN;
-        let failed_lanes = kernel
-            .process_phase(
-                &mut fault,
-                &coefficients,
-                &mut fault_cursor,
-                &mut fault_interpolation,
-                &mut fault_decimation,
-            )
-            .expect("fault phase");
-        assert_eq!(failed_lanes, 1);
-        assert_eq!(fault_cursor, [0]);
-        assert!(fault[0].is_finite());
-
-        let mut subnormal = [0.0];
-        let mut subnormal_cursor = [0];
-        let mut subnormal_interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        let mut subnormal_decimation = [0.0; SOFT_CLIP_HISTORY_WORDS];
-        subnormal_interpolation[32] = f32::MIN_POSITIVE / 2.0;
-        let failed_lanes = kernel
-            .process_phase(
-                &mut subnormal,
-                &coefficients,
-                &mut subnormal_cursor,
-                &mut subnormal_interpolation,
-                &mut subnormal_decimation,
-            )
-            .expect("subnormal phase");
-        assert_eq!(failed_lanes, 0);
-        assert_eq!(subnormal_cursor, [1]);
-        assert_eq!(subnormal[0].to_bits(), 0.0_f32.to_bits());
-
-        assert_eq!(
-            kernel.process_phase(
-                &mut samples,
-                &coefficients[..62],
-                &mut cursors,
-                &mut interpolation,
-                &mut decimation,
-            ),
-            Err(SoftClipBankKernelError::CoefficientTable)
-        );
-        assert_eq!(
-            kernel.process_phase(
-                &mut samples,
-                &coefficients,
-                &mut cursors,
-                &mut interpolation[..62],
-                &mut decimation,
-            ),
-            Err(SoftClipBankKernelError::HistoryLength)
-        );
-        assert_eq!(
-            kernel.process_phase(
-                &mut samples,
-                &coefficients,
-                &mut [63],
-                &mut interpolation,
-                &mut decimation,
-            ),
-            Err(SoftClipBankKernelError::Cursor)
-        );
-    }
-
-    #[test]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn x86_soft_clip_phase_matches_scalar_with_lane_local_cursors() {
-        let Ok(base) = PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2) else {
-            return;
-        };
-        let coefficients = soft_clip_coefficients();
-        let mut expected_samples = core::array::from_fn(|lane| (lane as f32 - 3.5) * 0.125);
-        let mut expected_cursors = core::array::from_fn(|lane| ((lane * 7) % 63) as u32);
-        let mut expected_interpolation = core::array::from_fn(|word| (word % 11) as f32 * 0.001);
-        let mut expected_decimation = core::array::from_fn(|word| -((word % 13) as f32) * 0.0015);
-        let mut actual_samples = expected_samples;
-        let mut actual_cursors = expected_cursors;
-        let mut actual_interpolation = expected_interpolation;
-        let mut actual_decimation = expected_decimation;
-        for phase in 0..71 {
-            for lane in 0..8 {
-                let input = ((phase * 17 + lane * 5) as f32 * 0.03125).sin() * 0.75;
-                expected_samples[lane] = input;
-                actual_samples[lane] = input;
-            }
-            process_soft_clip_scalar_tracks(
-                &mut expected_samples,
-                &coefficients,
-                &mut expected_cursors,
-                &mut expected_interpolation,
-                &mut expected_decimation,
-            );
-            base.process_phase(
-                &mut actual_samples,
-                &coefficients,
-                &mut actual_cursors,
-                &mut actual_interpolation,
-                &mut actual_decimation,
-            )
-            .expect("base phase");
-        }
-        assert_eq!(
-            actual_samples.map(f32::to_bits),
-            expected_samples.map(f32::to_bits)
-        );
-        assert_eq!(actual_cursors, expected_cursors);
-        assert_eq!(
-            actual_interpolation.map(f32::to_bits),
-            expected_interpolation.map(f32::to_bits)
-        );
-        assert_eq!(
-            actual_decimation.map(f32::to_bits),
-            expected_decimation.map(f32::to_bits)
-        );
-
-        let Ok(fma) = PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2Fma) else {
-            return;
-        };
-        let mut fma_samples = actual_samples;
-        let mut fma_cursors = actual_cursors;
-        let mut fma_interpolation = actual_interpolation;
-        let mut fma_decimation = actual_decimation;
-        fma.process_phase(
-            &mut fma_samples,
-            &coefficients,
-            &mut fma_cursors,
-            &mut fma_interpolation,
-            &mut fma_decimation,
-        )
-        .expect("fma phase");
-        base.process_phase(
-            &mut actual_samples,
-            &coefficients,
-            &mut actual_cursors,
-            &mut actual_interpolation,
-            &mut actual_decimation,
-        )
-        .expect("base phase");
-        assert_eq!(
-            fma_samples.map(f32::to_bits),
-            actual_samples.map(f32::to_bits)
-        );
-        assert_eq!(fma_cursors, actual_cursors);
-        assert_eq!(
-            fma_interpolation.map(f32::to_bits),
-            actual_interpolation.map(f32::to_bits)
-        );
-        assert_eq!(
-            fma_decimation.map(f32::to_bits),
-            actual_decimation.map(f32::to_bits)
-        );
-    }
-
-    #[test]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    fn x86_soft_clip_phase_reports_exact_failed_lanes_without_cross_lane_damage() {
-        let Ok(kernel) = PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2) else {
-            return;
-        };
-        let coefficients = soft_clip_coefficients();
-        let mut samples = [0.0; 8];
-        let mut cursors = [0; 8];
-        let mut interpolation = [0.0; SOFT_CLIP_HISTORY_WORDS * 8];
-        let mut decimation = [0.0; SOFT_CLIP_HISTORY_WORDS * 8];
-        interpolation[61 * 8 + 2] = f32::NAN;
-        decimation[61 * 8 + 5] = f32::INFINITY;
-        let failed_lanes = kernel
-            .process_phase(
-                &mut samples,
-                &coefficients,
-                &mut cursors,
-                &mut interpolation,
-                &mut decimation,
-            )
-            .expect("AVX2 fault phase");
-        assert_eq!(failed_lanes, (1 << 2) | (1 << 5));
-        assert_eq!(cursors[2], 0);
-        assert_eq!(cursors[5], 0);
-        for lane in [0, 1, 3, 4, 6, 7] {
-            assert_eq!(cursors[lane], 1);
-            assert!(samples[lane].is_finite());
-        }
-    }
-
-    #[test]
-    fn unsupported_soft_clip_backend_fails_at_preparation() {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert_eq!(
-            PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::WasmSimd128).err(),
-            Some(SoftClipBankKernelError::BackendUnavailable)
-        );
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        assert_eq!(
-            PreparedSoftClipBankKernelV1::try_new(KernelBackendV1::X86Avx2).err(),
-            Some(SoftClipBankKernelError::BackendUnavailable)
-        );
     }
 }

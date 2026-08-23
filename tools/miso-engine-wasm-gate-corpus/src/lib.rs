@@ -20,12 +20,16 @@
 //!    operation order. Changing one of them is a re-pin, permitted only from the scalar `Lane`
 //!    oracle and only with the change stated in the commit message (master plan §8).
 //!
-//! Two halves of the corpus are not redefined here. Cases past [`LANE_CASE_COUNT`] delegate to
-//! [`miso_engine_math::corpus`] (gate M3) and [`miso_engine_effect_runtime::corpus`] (gate D1) and
-//! are compared against those crates' own pins, so the wasm run replays exactly what M3 and D1
-//! pinned natively rather than a transcription of them. The `effect-runtime` cases are lane
-//! generic — the dB curve a compressor rides, the followers that ride it — so they too are
-//! digested at every width.
+//! The rest of the corpus is not redefined here. Cases past [`LANE_CASE_COUNT`] delegate to
+//! [`miso_engine_math::corpus`] (gate M3), [`miso_engine_effect_runtime::corpus`] (gate D1) and
+//! [`miso_engine_soft_clip::corpus`] (issue #91) and are compared against those crates' own pins,
+//! so the wasm run replays exactly what those gates pinned natively rather than a transcription of
+//! them. All of them but the math cases are lane generic — the dB curve a compressor rides, the
+//! followers that ride it, a whole soft-clip block — so they too are digested at every width.
+//!
+//! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
+//! number, so a new block of cases has to go on the end for the existing pins to keep describing
+//! the same computations.
 
 use miso_engine_delay::corpus as delay_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
@@ -38,6 +42,7 @@ use miso_engine_lane::kernels::{
 use miso_engine_math::corpus as math_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
 use miso_engine_multiband_compressor::corpus as multiband_corpus;
+use miso_engine_soft_clip::corpus as soft_clip_corpus;
 use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
 
@@ -88,13 +93,22 @@ pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
 /// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link.
 pub const MULTIBAND_CASE_COUNT: usize = multiband_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_soft_clip::corpus`] (issue #91), replayed under wasm.
+///
+/// A whole prepared soft-clip block per case: the polyphase half-band pair, the cubic shaper and
+/// the dry/wet mix, over 512 frames of eight independent lanes. Lane generic, and the case that
+/// would move if a target's `div`, `select` or comparison semantics differed from the oracle's
+/// inside a real render path rather than inside a kernel.
+pub const SOFT_CLIP_CASE_COUNT: usize = soft_clip_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
     + RUNTIME_CASE_COUNT
     + TRANSIENT_SHAPER_CASE_COUNT
     + DELAY_CASE_COUNT
-    + MULTIBAND_CASE_COUNT;
+    + MULTIBAND_CASE_COUNT
+    + SOFT_CLIP_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -286,6 +300,8 @@ enum Case {
     Delay(usize),
     /// One case of the `miso-engine-multiband-compressor` cross-target corpus.
     Multiband(usize),
+    /// One case of the `miso-engine-soft-clip` corpus.
+    SoftClip(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -322,7 +338,11 @@ fn case_of(index: usize) -> Case {
     if index < DELAY_CASE_COUNT {
         return Case::Delay(index);
     }
-    Case::Multiband(index - DELAY_CASE_COUNT)
+    let index = index - DELAY_CASE_COUNT;
+    if index < MULTIBAND_CASE_COUNT {
+        return Case::Multiband(index);
+    }
+    Case::SoftClip(index - MULTIBAND_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -331,6 +351,9 @@ fn case_of(index: usize) -> Case {
 /// The math and delay cases are excluded: the math functions are scalar `f64`/`f32` with no lane
 /// instantiation, and the delay is a `W = 1` effect, so both are run once and their digests cannot
 /// depend on a width.
+///
+/// Everything else — this crate's kernels, the effect-runtime helpers and the soft-clip block — is
+/// one generic body instantiated per width, so all three widths must agree.
 ///
 /// # Panics
 ///
@@ -369,6 +392,7 @@ pub fn case_name(index: usize) -> String {
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
         Case::Delay(case) => format!("delay/{}", delay_corpus::CASE_NAMES[case]),
         Case::Multiband(case) => format!("multiband/{}", multiband_corpus::CASE_NAMES[case]),
+        Case::SoftClip(case) => format!("effect/{}", soft_clip_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -406,6 +430,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
         Case::Delay(case) => delay_corpus::G5_DIGESTS[case],
         Case::Multiband(case) => multiband_corpus::DIGESTS[case],
+        Case::SoftClip(case) => soft_clip_corpus::SOFT_CLIP_DIGESTS[case],
     }
 }
 
@@ -433,6 +458,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_multiband::<f32>(case),
             1 => digest_multiband::<miso_engine_lane::Simd4>(case),
             _ => digest_multiband::<miso_engine_lane::Simd8>(case),
+        },
+        Case::SoftClip(case) => match width {
+            0 => digest_soft_clip::<f32>(case),
+            1 => digest_soft_clip::<miso_engine_lane::Simd4>(case),
+            _ => digest_soft_clip::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -495,7 +525,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::Runtime(_)
         | Case::TransientShaper(_)
         | Case::Delay(_)
-        | Case::Multiband(_) => {
+        | Case::Multiband(_)
+        | Case::SoftClip(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -865,6 +896,17 @@ fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
 fn digest_delay(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; delay_corpus::POINTS];
     delay_corpus::run_case(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-soft-clip` case, exactly as that crate's `tests/determinism.rs` does.
+fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; soft_clip_corpus::POINTS];
+    soft_clip_corpus::run_case::<L>(case, &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

@@ -142,9 +142,10 @@ fn g5_fma_case_separates_fused_from_unfused() {
     }
 }
 
-/// The delegated halves of the corpus are not second pins: they are compared against the digests
-/// gates M3 and D1 wrote in `miso-engine-math` and `miso-engine-effect-runtime`, so the wasm run
-/// replays those gates rather than a copy of them that could drift away from the originals.
+/// The delegated parts of the corpus are not second pins: they are compared against the digests
+/// gates M3, D1 and issue #91 wrote in `miso-engine-math`, `miso-engine-effect-runtime` and
+/// `miso-engine-soft-clip`, so the wasm run replays those gates rather than a copy of them that
+/// could drift away from the originals.
 #[test]
 fn g5_delegated_cases_use_the_owning_crates_pins() {
     assert_eq!(
@@ -169,6 +170,40 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
             corpus::expected_digest(corpus::LANE_CASE_COUNT + corpus::MATH_CASE_COUNT + case),
             miso_engine_effect_runtime::corpus::D1_DIGESTS[case],
             "runtime case {case} must be pinned by miso-engine-effect-runtime, not by this crate"
+        );
+    }
+    assert_eq!(
+        corpus::SOFT_CLIP_CASE_COUNT,
+        miso_engine_soft_clip::corpus::CASE_COUNT,
+        "the soft-clip block must cover every case that crate pins"
+    );
+    // Soft-clip is the last family in the pin order, so its base is everything before it. Reading
+    // it off the counts rather than writing a literal is what keeps this assertion honest when the
+    // next effect crate appends its own family.
+    let soft_clip_base = corpus::LANE_CASE_COUNT
+        + corpus::MATH_CASE_COUNT
+        + corpus::RUNTIME_CASE_COUNT
+        + corpus::TRANSIENT_SHAPER_CASE_COUNT
+        + corpus::DELAY_CASE_COUNT
+        + corpus::MULTIBAND_CASE_COUNT;
+    assert_eq!(
+        soft_clip_base + corpus::SOFT_CLIP_CASE_COUNT,
+        corpus::CASE_COUNT,
+        "soft-clip must be the last family in the pin order"
+    );
+    for case in 0..corpus::SOFT_CLIP_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(soft_clip_base + case),
+            miso_engine_soft_clip::corpus::SOFT_CLIP_DIGESTS[case],
+            "soft-clip case {case} must be pinned by miso-engine-soft-clip, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(soft_clip_base + case),
+            "a soft-clip case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(soft_clip_base + case).starts_with("effect/soft_clip/"),
+            "soft-clip cases keep their owning crate's names"
         );
     }
 }

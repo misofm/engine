@@ -1195,6 +1195,7 @@ dependencies = [
  "miso-engine-lane",
  "miso-engine-math",
  "miso-engine-multiband-compressor",
+ "miso-engine-soft-clip",
  "miso-engine-transient-shaper",
  "sha2 0.11.0",
 ]
@@ -1214,6 +1215,7 @@ dependencies = [
  "miso-engine-effect-runtime",
  "miso-engine-lane",
  "miso-engine-math",
+ "miso-engine-soft-clip",
  "miso-engine-wasm-gate-corpus",
  "wasmtime",
 ]
