@@ -43,12 +43,12 @@ pub const CASE_COUNT: usize = 6;
 
 /// Case names, in pin order.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
-    "gate/dual-mono/noise",
-    "gate/maximum/noise",
-    "gate/average/noise",
-    "gate/dual-mono/bursts",
-    "gate/dual-mono/subnormal",
-    "gate/dual-mono/ramping",
+    "dual_mono/noise",
+    "maximum/noise",
+    "average/noise",
+    "dual_mono/bursts",
+    "dual_mono/subnormal",
+    "dual_mono/ramping",
 ];
 
 /// Result words per case: two channels of [`LANES`] signals.
