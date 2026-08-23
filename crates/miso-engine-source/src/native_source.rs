@@ -1586,11 +1586,6 @@ fn service_job<R: Read + Seek>(
         }
     }
     if let Some(latest) = latest_seek {
-        job.pending = None;
-        job.end_submitted = false;
-        job.decoder
-            .seek_to_source_frame(latest.frame)
-            .map_err(NativeSourceWorkerExit::DecodeFailed)?;
         job.pending_seek = Some(latest);
     }
     if let Some(seek) = job.pending_seek {
@@ -1599,7 +1594,12 @@ fn service_job<R: Read + Seek>(
             frame: seek.frame,
         }) {
             Ok(()) => {
+                job.decoder
+                    .seek_to_source_frame(seek.frame)
+                    .map_err(NativeSourceWorkerExit::DecodeFailed)?;
                 job.generation = seek.generation;
+                job.pending = None;
+                job.end_submitted = false;
                 job.pending_seek = None;
             }
             Err(SourceSeekError::Backpressure { .. }) => {
@@ -2644,6 +2644,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_seek_admission_precedes_decoder_reposition() {
+        let source = include_str!("native_source.rs");
+        let start = source.find("fn service_job").expect("service_job");
+        let tail = &source[start..];
+        let end = tail.find("\nfn publish_terminal").expect("service_job end");
+        let body = &tail[..end];
+        let provider_seek = body
+            .find("job.provider.try_seek")
+            .expect("provider seek admission");
+        let accepted = body[provider_seek..]
+            .find("Ok(()) => {")
+            .map(|offset| provider_seek + offset)
+            .expect("provider accepted arm");
+        let decoder_seek = body
+            .find(".seek_to_source_frame(seek.frame)")
+            .expect("decoder reposition");
+        let backpressure = body
+            .find("Err(SourceSeekError::Backpressure")
+            .expect("provider backpressure arm");
+        let seek_failed = body
+            .find("NativeSourceWorkerExit::SeekFailed")
+            .expect("non-backpressure seek failure");
+        assert!(provider_seek < accepted && accepted < decoder_seek);
+        assert!(decoder_seek < backpressure && backpressure < seek_failed);
+        assert_eq!(body.matches(".seek_to_source_frame(").count(), 1);
+        assert_eq!(
+            body.matches("NativeSourceWorkerExit::SeekFailed").count(),
+            1
+        );
+        assert!(
+            !body[..accepted].contains(".seek_to_source_frame("),
+            "decoder must retain its current position until provider seek admission succeeds"
+        );
+    }
+
+    #[test]
     fn pending_seek_stops_without_render_drain_and_controller_backpressure_does_not_advance() {
         let (command_sender, mut command_receiver) = bounded_spsc(
             NonZeroUsize::new(1).expect("one command"),
@@ -3111,8 +3147,16 @@ mod tests {
             input_channels: None,
             output_channels: NonZeroUsize::new(2).expect("two outputs"),
         };
-        let input_nodes: Vec<_> = session
-            .normalized_model()
+        let model = session.normalized_model();
+        assert_eq!(model.sources.len(), SOURCE_COUNT);
+        assert_eq!(model.tracks.len(), SOURCE_COUNT);
+        for (source, track) in model.sources.iter().zip(&model.tracks) {
+            assert_eq!(
+                track.source_id, source.id,
+                "each unique compiled track must retain its intended unique source mapping"
+            );
+        }
+        let input_nodes: Vec<_> = model
             .tracks
             .iter()
             .map(|track| GraphNodeId::TrackStage {
@@ -3123,6 +3167,15 @@ mod tests {
         let output = GraphNodeId::Output {
             output_id: StableGraphId::parse("main").expect("output ID"),
         };
+        assert_eq!(source_set.claims().len(), SOURCE_COUNT);
+        assert!(
+            source_set
+                .claims()
+                .iter()
+                .map(|claim| &claim.node)
+                .eq(input_nodes.iter()),
+            "the source set must expose each of the eight compiled track-input claims exactly once"
+        );
         let mut nodes: Vec<_> = input_nodes
             .iter()
             .cloned()
@@ -3246,6 +3299,17 @@ mod tests {
                 },
             )
             .expect("source-set render");
+            let expected = if block < REGION_FRAMES / u64::from(QUANTUM) {
+                2.0_f32
+            } else {
+                0.0_f32
+            };
+            assert!(
+                output_pcm
+                    .iter()
+                    .all(|sample| sample.to_bits() == expected.to_bits()),
+                "block {block} must mix all eight quarter-scale claims, then expose positive-zero EOF"
+            );
         };
         render(0);
         for controller in &mut controllers {
