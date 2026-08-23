@@ -5,7 +5,7 @@ use core::fmt::Write;
 use crate::{
     Automation, AutomationSegment, AutomationShape, Effect, EffectQuality, LinkMode, MatrixOrPan,
     ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, SampleFormat, SendTap,
-    SessionTomlV1, validate::validate_session,
+    SessionTomlV1, validate::validate_session, value::write_f32,
 };
 
 /// Produce canonical V1 TOML bytes as UTF-8 text with LF line endings and one final newline.
@@ -85,16 +85,16 @@ pub fn canonical_session_toml(session: &SessionTomlV1) -> Result<String, crate::
             output.push_str(", destination = ");
             write_route_destination(output, &route.destination);
             output.push_str(", channel_matrix = { ll = ");
-            output.push_str(&float(route.channel_matrix.ll));
+            let _ = write_f32(output, route.channel_matrix.ll);
             output.push_str(", lr = ");
-            output.push_str(&float(route.channel_matrix.lr));
+            let _ = write_f32(output, route.channel_matrix.lr);
             output.push_str(", rl = ");
-            output.push_str(&float(route.channel_matrix.rl));
+            let _ = write_f32(output, route.channel_matrix.rl);
             output.push_str(", rr = ");
-            output.push_str(&float(route.channel_matrix.rr));
+            let _ = write_f32(output, route.channel_matrix.rr);
             output.push_str(" }");
             output.push_str(", gain_db = ");
-            output.push_str(&float(route.gain_db));
+            let _ = write_f32(output, route.gain_db);
             output.push_str(" }");
         },
     );
@@ -205,9 +205,9 @@ fn write_track(output: &mut String, track: &crate::Track) {
     output.push_str(", simd2 = ");
     write_rack(output, &track.simd2);
     output.push_str(", fader = { left_db = ");
-    output.push_str(&float(track.fader.left_db));
+    let _ = write_f32(output, track.fader.left_db);
     output.push_str(", right_db = ");
-    output.push_str(&float(track.fader.right_db));
+    let _ = write_f32(output, track.fader.right_db);
     output.push_str(", left_mute = ");
     output.push_str(if track.fader.left_mute {
         "true"
@@ -228,9 +228,9 @@ fn write_track(output: &mut String, track: &crate::Track) {
             smoothing_samples,
         } => {
             output.push_str("pan = { left = ");
-            output.push_str(&float(left));
+            let _ = write_f32(output, left);
             output.push_str(", right = ");
-            output.push_str(&float(right));
+            let _ = write_f32(output, right);
             let _ = write!(output, ", smoothing_samples = {} }}", smoothing_samples);
         }
         MatrixOrPan::Matrix {
@@ -241,13 +241,13 @@ fn write_track(output: &mut String, track: &crate::Track) {
             smoothing_samples,
         } => {
             output.push_str("matrix = { ll = ");
-            output.push_str(&float(ll));
+            let _ = write_f32(output, ll);
             output.push_str(", lr = ");
-            output.push_str(&float(lr));
+            let _ = write_f32(output, lr);
             output.push_str(", rl = ");
-            output.push_str(&float(rl));
+            let _ = write_f32(output, rl);
             output.push_str(", rr = ");
-            output.push_str(&float(rr));
+            let _ = write_f32(output, rr);
             let _ = write!(output, ", smoothing_samples = {} }}", smoothing_samples);
         }
     }
@@ -262,11 +262,11 @@ fn write_builtins_channel(output: &mut String, channel: &crate::ChannelBuiltins)
         "false"
     });
     output.push_str(", trim_db = ");
-    output.push_str(&float(channel.trim_db));
+    let _ = write_f32(output, channel.trim_db);
     output.push_str(", hpf_hz = ");
-    output.push_str(&float(channel.hpf_hz));
+    let _ = write_f32(output, channel.hpf_hz);
     output.push_str(", lpf_hz = ");
-    output.push_str(&float(channel.lpf_hz));
+    let _ = write_f32(output, channel.lpf_hz);
     output.push_str(" }");
 }
 
@@ -320,7 +320,7 @@ fn write_effect(output: &mut String, effect: &Effect) {
         output.push_str(", unit = ");
         output.push_str(&quoted(unit(param.unit)));
         output.push_str(", value = ");
-        output.push_str(&float(param.value));
+        let _ = write_f32(output, param.value);
         output.push_str(" }");
     }
     output.push(']');
@@ -372,9 +372,9 @@ fn write_segment(output: &mut String, segment: &AutomationSegment) {
         segment.start_sample, segment.end_sample
     );
     output.push_str(", start_value = ");
-    output.push_str(&float(segment.start_value));
+    let _ = write_f32(output, segment.start_value);
     output.push_str(", end_value = ");
-    output.push_str(&float(segment.end_value));
+    let _ = write_f32(output, segment.end_value);
     output.push_str(", unit = ");
     output.push_str(&quoted(unit(segment.unit)));
     output.push_str(" }");
@@ -439,15 +439,6 @@ fn quoted(value: &str) -> String {
     }
     output.push('"');
     output
-}
-
-fn float(value: f32) -> String {
-    let value = if value == 0.0 { 0.0 } else { value };
-    let mut text = value.to_string();
-    if !text.contains(['.', 'e', 'E']) {
-        text.push_str(".0");
-    }
-    text
 }
 
 fn render_mode(value: RenderMode) -> &'static str {

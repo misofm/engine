@@ -11,7 +11,10 @@ submixes, and outputs share the graph-entity namespace; routes, automations, rac
 and `(parameter_id, channel)` pairs are unique in their corresponding scopes. Canonical entity
 sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack effects plus
 automation segments preserve declared order. Canonical text uses LF, exactly one final newline,
-canonical string escapes, finite `f32` spellings, and normalized negative zero.
+canonical string escapes, and finite `f32` spellings that preserve exact bits through both direct
+`f32` parsing and the parser's `f64`-then-`f32` conversion. Normal values use shortest `f32`
+`Display`; the two double-rounding values use exact `f64` `Display`; integral spellings gain `.0`
+to remain TOML floats; and negative zero is preserved exactly as `-0.0`.
 
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
 96000 Hz. Other values, including extended compatibility corpus rates, reject with
