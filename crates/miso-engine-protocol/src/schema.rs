@@ -176,295 +176,351 @@ pub(crate) mod descriptor {
 
 pub(crate) mod snapshot_request {
     use super::*;
+    pub(crate) const OFFSET: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const MAXIMUM_BYTES: FieldSpec = FieldSpec::req(2, Wire::U32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "SessionSnapshotRequest",
-        fields: &[FieldSpec::req(1, Wire::U64), FieldSpec::req(2, Wire::U32)],
+        fields: &[OFFSET, MAXIMUM_BYTES],
     };
 }
 
 pub(crate) mod snapshot {
     use super::*;
+    pub(crate) const TOTAL_BYTES: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const OFFSET: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const CANONICAL_TOML_CHUNK: FieldSpec = FieldSpec::req(3, Wire::Bytes);
+    pub(crate) const EOF: FieldSpec = FieldSpec::req(4, Wire::Bool);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "SessionSnapshot",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U64),
-            FieldSpec::req(3, Wire::Bytes),
-            FieldSpec::req(4, Wire::Bool),
-        ],
+        fields: &[TOTAL_BYTES, OFFSET, CANONICAL_TOML_CHUNK, EOF],
     };
 }
 
 pub(crate) mod transaction_applied {
     use super::*;
+    pub(crate) const APPLIED_OPERATIONS: FieldSpec = FieldSpec::req(1, Wire::U32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransactionApplied",
-        fields: &[FieldSpec::req(1, Wire::U32)],
+        fields: &[APPLIED_OPERATIONS],
     };
 }
 
 pub(crate) mod session_committed {
     use super::*;
+    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const ORIGIN_REQUEST_ID: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const PREVIOUS_REVISION: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const APPLIED_OPERATIONS: FieldSpec = FieldSpec::req(4, Wire::U32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "SessionCommitted",
         fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U64),
-            FieldSpec::req(3, Wire::U64),
-            FieldSpec::req(4, Wire::U32),
+            EVENT_SEQUENCE,
+            ORIGIN_REQUEST_ID,
+            PREVIOUS_REVISION,
+            APPLIED_OPERATIONS,
         ],
     };
 }
 
 pub(crate) mod metadata_request {
     use super::*;
+    pub(crate) const AFTER_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const LIMIT: FieldSpec = FieldSpec::req(2, Wire::U16);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ParameterMetadataRequest",
-        fields: &[FieldSpec::req(1, Wire::U32), FieldSpec::req(2, Wire::U16)],
+        fields: &[AFTER_HANDLE, LIMIT],
     };
 }
 
 pub(crate) mod metadata_page {
     use super::{descriptor, *};
+    pub(crate) const LAST_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const EOF: FieldSpec = FieldSpec::req(2, Wire::Bool);
+    pub(crate) const DESCRIPTOR: FieldSpec = FieldSpec::msg(3, true, true, &descriptor::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ParameterMetadataPage",
-        fields: &[
-            FieldSpec::req(1, Wire::U32),
-            FieldSpec::req(2, Wire::Bool),
-            FieldSpec::msg(3, true, true, &descriptor::SPEC),
-        ],
+        fields: &[LAST_HANDLE, EOF, DESCRIPTOR],
     };
 }
 
 pub(crate) mod state_request {
     use super::*;
+    pub(crate) const HANDLES: FieldSpec = FieldSpec::req(1, Wire::PackedU32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ParameterStateRequest",
-        fields: &[FieldSpec::req(1, Wire::PackedU32)],
+        fields: &[HANDLES],
     };
 }
 
 pub(crate) mod state_page {
     use super::*;
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const COUNT: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(3, Wire::U16);
+    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(4, Wire::Bytes);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ParameterStatePage",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U16),
-            FieldSpec::req(3, Wire::U16),
-            FieldSpec::req(4, Wire::Bytes),
-        ],
+        fields: &[OBSERVED_SAMPLE, COUNT, RECORD_BYTES, RECORDS],
     };
 }
 
 pub(crate) mod automation_enqueued {
     use super::*;
+    pub(crate) const ACCEPTED_RECORDS: FieldSpec = FieldSpec::req(1, Wire::U16);
+    pub(crate) const OCCUPANCY: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const CAPACITY: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const GENERATION: FieldSpec = FieldSpec::req(4, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "AutomationEnqueued",
-        fields: &[
-            FieldSpec::req(1, Wire::U16),
-            FieldSpec::req(2, Wire::U64),
-            FieldSpec::req(3, Wire::U64),
-            FieldSpec::req(4, Wire::U64),
-        ],
+        fields: &[ACCEPTED_RECORDS, OCCUPANCY, CAPACITY, GENERATION],
     };
 }
 
 pub(crate) mod automation_canceled {
     use super::*;
+    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const ORIGIN_REQUEST_ID: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const CANCELED_RECORDS: FieldSpec = FieldSpec::req(3, Wire::U16);
+    pub(crate) const REASON: FieldSpec = FieldSpec::req(4, Wire::U8);
+    pub(crate) const QUEUE_GENERATION: FieldSpec = FieldSpec::req(5, Wire::U64);
+    pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::opt(6, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "AutomationCanceled",
         fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U64),
-            FieldSpec::req(3, Wire::U16),
-            FieldSpec::req(4, Wire::U8),
-            FieldSpec::req(5, Wire::U64),
-            FieldSpec::opt(6, Wire::U64),
+            EVENT_SEQUENCE,
+            ORIGIN_REQUEST_ID,
+            CANCELED_RECORDS,
+            REASON,
+            QUEUE_GENERATION,
+            EFFECTIVE_SAMPLE,
         ],
     };
 }
 
 pub(crate) mod meter_batch {
     use super::*;
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const COUNT: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(3, Wire::U16);
+    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(4, Wire::Bytes);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "MeterBatch",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U16),
-            FieldSpec::req(3, Wire::U16),
-            FieldSpec::req(4, Wire::Bytes),
-        ],
+        fields: &[OBSERVED_SAMPLE, COUNT, RECORD_BYTES, RECORDS],
     };
 }
 
 pub(crate) mod telemetry_configuration {
     use super::*;
+    pub(crate) const METER_HANDLES: FieldSpec = FieldSpec::req(1, Wire::PackedU32);
+    pub(crate) const METER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(2, Wire::U32);
+    pub(crate) const COUNTER_IDS: FieldSpec = FieldSpec::req(3, Wire::PackedU32);
+    pub(crate) const COUNTER_PERIOD_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
+    pub(crate) const DIAGNOSTICS_ENABLED: FieldSpec = FieldSpec::req(5, Wire::Bool);
+    pub(crate) const MINIMUM_DIAGNOSTIC_SEVERITY: FieldSpec = FieldSpec::req(6, Wire::U8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TelemetryConfiguration",
         fields: &[
-            FieldSpec::req(1, Wire::PackedU32),
-            FieldSpec::req(2, Wire::U32),
-            FieldSpec::req(3, Wire::PackedU32),
-            FieldSpec::req(4, Wire::U32),
-            FieldSpec::req(5, Wire::Bool),
-            FieldSpec::req(6, Wire::U8),
+            METER_HANDLES,
+            METER_PERIOD_BLOCKS,
+            COUNTER_IDS,
+            COUNTER_PERIOD_BLOCKS,
+            DIAGNOSTICS_ENABLED,
+            MINIMUM_DIAGNOSTIC_SEVERITY,
         ],
     };
 }
 
 pub(crate) mod counters_request {
     use super::*;
+    pub(crate) const ALL: FieldSpec = FieldSpec::req(1, Wire::Bool);
+    pub(crate) const IDS: FieldSpec = FieldSpec::opt(2, Wire::PackedU32);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "CountersRequest",
-        fields: &[
-            FieldSpec::req(1, Wire::Bool),
-            FieldSpec::opt(2, Wire::PackedU32),
-        ],
+        fields: &[ALL, IDS],
     };
 }
 
 pub(crate) mod counter_value {
     use super::*;
+    pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const VALUE: FieldSpec = FieldSpec::req(2, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "CounterValue",
-        fields: &[FieldSpec::req(1, Wire::U32), FieldSpec::req(2, Wire::U64)],
+        fields: &[ID, VALUE],
     };
 }
 
 pub(crate) mod counter_snapshot {
     use super::{counter_value, *};
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, true, &counter_value::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "CounterSnapshot",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::msg(2, true, true, &counter_value::SPEC),
-        ],
+        fields: &[OBSERVED_SAMPLE, VALUE],
     };
 }
 
 pub(crate) mod diagnostics_request {
     use super::*;
+    pub(crate) const AFTER_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const LIMIT: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const MINIMUM_SEVERITY: FieldSpec = FieldSpec::req(3, Wire::U8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "DiagnosticsRequest",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::U16),
-            FieldSpec::req(3, Wire::U8),
-        ],
+        fields: &[AFTER_SEQUENCE, LIMIT, MINIMUM_SEVERITY],
     };
 }
 
 pub(crate) mod path_segment {
     use super::*;
+    pub(crate) const TAG: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const FIELD: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    pub(crate) const INDEX: FieldSpec = FieldSpec::opt(3, Wire::U64);
+    pub(crate) const STABLE_ID: FieldSpec = FieldSpec::opt(4, Wire::Utf8);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "PathSegment",
-        fields: &[
-            FieldSpec::req(1, Wire::U8),
-            FieldSpec::opt(2, Wire::Utf8),
-            FieldSpec::opt(3, Wire::U64),
-            FieldSpec::opt(4, Wire::Utf8),
-        ],
+        fields: &[TAG, FIELD, INDEX, STABLE_ID],
     };
 }
 
 pub(crate) mod diagnostic {
     use super::{path_segment, *};
+    pub(crate) const CODE: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+    pub(crate) const SEVERITY: FieldSpec = FieldSpec::req(2, Wire::U8);
+    pub(crate) const PATH: FieldSpec = FieldSpec::msg(3, true, true, &path_segment::SPEC);
+    pub(crate) const DETAIL: FieldSpec = FieldSpec::opt(4, Wire::Utf8);
+    pub(crate) const OPERATION_INDEX: FieldSpec = FieldSpec::opt(5, Wire::U32);
+    pub(crate) const SAMPLE_TIME: FieldSpec = FieldSpec::opt(6, Wire::U64);
+    pub(crate) const PROVIDER_SEQUENCE: FieldSpec = FieldSpec::opt(7, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "Diagnostic",
         fields: &[
-            FieldSpec::req(1, Wire::Utf8),
-            FieldSpec::req(2, Wire::U8),
-            FieldSpec::msg(3, true, true, &path_segment::SPEC),
-            FieldSpec::opt(4, Wire::Utf8),
-            FieldSpec::opt(5, Wire::U32),
-            FieldSpec::opt(6, Wire::U64),
-            FieldSpec::opt(7, Wire::U64),
+            CODE,
+            SEVERITY,
+            PATH,
+            DETAIL,
+            OPERATION_INDEX,
+            SAMPLE_TIME,
+            PROVIDER_SEQUENCE,
         ],
     };
 }
 
 pub(crate) mod backpressure {
     use super::*;
+    pub(crate) const QUEUE_KIND: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const CAPACITY: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const OCCUPANCY: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const REQUESTED_ITEMS: FieldSpec = FieldSpec::req(4, Wire::U16);
+    pub(crate) const GENERATION: FieldSpec = FieldSpec::opt(5, Wire::U64);
+    pub(crate) const RETRY_BOUNDARY: FieldSpec = FieldSpec::opt(6, Wire::U64);
+    pub(crate) const REQUESTED_BYTES: FieldSpec = FieldSpec::opt(7, Wire::U64);
+    pub(crate) const AVAILABLE_BYTES: FieldSpec = FieldSpec::opt(8, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "Backpressure",
         fields: &[
-            FieldSpec::req(1, Wire::U8),
-            FieldSpec::req(2, Wire::U64),
-            FieldSpec::req(3, Wire::U64),
-            FieldSpec::req(4, Wire::U16),
-            FieldSpec::opt(5, Wire::U64),
-            FieldSpec::opt(6, Wire::U64),
-            FieldSpec::opt(7, Wire::U64),
-            FieldSpec::opt(8, Wire::U64),
+            QUEUE_KIND,
+            CAPACITY,
+            OCCUPANCY,
+            REQUESTED_ITEMS,
+            GENERATION,
+            RETRY_BOUNDARY,
+            REQUESTED_BYTES,
+            AVAILABLE_BYTES,
         ],
     };
 }
 
 pub(crate) mod non_ok {
     use super::{backpressure, diagnostic, *};
+    pub(crate) const DIAGNOSTIC: FieldSpec = FieldSpec::msg(1, true, true, &diagnostic::SPEC);
+    pub(crate) const OMITTED_DIAGNOSTICS: FieldSpec = FieldSpec::req(2, Wire::U32);
+    pub(crate) const BACKPRESSURE: FieldSpec = FieldSpec::msg(3, false, false, &backpressure::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "NonOkResponse",
-        fields: &[
-            FieldSpec::msg(1, true, true, &diagnostic::SPEC),
-            FieldSpec::req(2, Wire::U32),
-            FieldSpec::msg(3, false, false, &backpressure::SPEC),
-        ],
+        fields: &[DIAGNOSTIC, OMITTED_DIAGNOSTICS, BACKPRESSURE],
     };
 }
 
 pub(crate) mod diagnostics_page {
     use super::{diagnostic, *};
+    pub(crate) const LAST_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const EOF: FieldSpec = FieldSpec::req(2, Wire::Bool);
+    pub(crate) const DIAGNOSTIC: FieldSpec = FieldSpec::msg(3, true, true, &diagnostic::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "DiagnosticsPage",
-        fields: &[
-            FieldSpec::req(1, Wire::U64),
-            FieldSpec::req(2, Wire::Bool),
-            FieldSpec::msg(3, true, true, &diagnostic::SPEC),
-        ],
+        fields: &[LAST_SEQUENCE, EOF, DIAGNOSTIC],
     };
 }
 
 pub(crate) mod diagnostic_event {
     use super::{diagnostic, *};
+    pub(crate) const DIAGNOSTIC: FieldSpec = FieldSpec::msg(1, true, false, &diagnostic::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "DiagnosticEvent",
-        fields: &[FieldSpec::msg(1, true, false, &diagnostic::SPEC)],
+        fields: &[DIAGNOSTIC],
     };
 }
 
 pub(crate) mod capabilities {
     use super::*;
+    pub(crate) const MINIMUM_VERSION_MAJOR: FieldSpec = FieldSpec::req(1, Wire::U16);
+    pub(crate) const MINIMUM_VERSION_MINOR: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const MAXIMUM_VERSION_MAJOR: FieldSpec = FieldSpec::req(3, Wire::U16);
+    pub(crate) const MAXIMUM_VERSION_MINOR: FieldSpec = FieldSpec::req(4, Wire::U16);
+    pub(crate) const MAXIMUM_FRAME_BYTES: FieldSpec = FieldSpec::req(5, Wire::U64);
+    pub(crate) const MAXIMUM_TLVS: FieldSpec = FieldSpec::req(6, Wire::U32);
+    pub(crate) const MAXIMUM_STRING_BYTES: FieldSpec = FieldSpec::req(7, Wire::U64);
+    pub(crate) const MAXIMUM_NESTING: FieldSpec = FieldSpec::req(8, Wire::U8);
+    pub(crate) const MAXIMUM_AUTOMATION_RECORDS: FieldSpec = FieldSpec::req(9, Wire::U16);
+    pub(crate) const CONTROL_COMMAND_SLOTS: FieldSpec = FieldSpec::req(10, Wire::U64);
+    pub(crate) const CONTROL_COMMAND_BYTES: FieldSpec = FieldSpec::req(11, Wire::U64);
+    pub(crate) const AUTOMATION_BATCH_SLOTS: FieldSpec = FieldSpec::req(12, Wire::U64);
+    pub(crate) const RELIABLE_RESPONSE_SLOTS: FieldSpec = FieldSpec::req(13, Wire::U64);
+    pub(crate) const RELIABLE_EVENT_SLOTS: FieldSpec = FieldSpec::req(14, Wire::U64);
+    pub(crate) const TELEMETRY_SLOTS: FieldSpec = FieldSpec::req(15, Wire::U64);
+    pub(crate) const REPLAY_ENTRIES: FieldSpec = FieldSpec::req(16, Wire::U64);
+    pub(crate) const REPLAY_BYTES: FieldSpec = FieldSpec::req(17, Wire::U64);
+    pub(crate) const MAXIMUM_CACHED_RESPONSE_BYTES: FieldSpec = FieldSpec::req(18, Wire::U64);
+    pub(crate) const PER_BLOCK_AUTOMATION_DENSITY: FieldSpec = FieldSpec::req(19, Wire::U64);
+    pub(crate) const ADMISSION_QUANTUM_FRAMES: FieldSpec = FieldSpec::req(20, Wire::U64);
+    pub(crate) const MAXIMUM_PARAMETER_PAGE_ITEMS: FieldSpec = FieldSpec::req(21, Wire::U16);
+    pub(crate) const MAXIMUM_DIAGNOSTIC_PAGE_ITEMS: FieldSpec = FieldSpec::req(22, Wire::U16);
+    pub(crate) const MAXIMUM_TELEMETRY_HANDLES: FieldSpec = FieldSpec::req(23, Wire::U16);
+    pub(crate) const MAXIMUM_TRANSACTION_EDITS: FieldSpec = FieldSpec::req(24, Wire::U32);
+    pub(crate) const SUPPORTED_COMMANDS: FieldSpec = FieldSpec::req(25, Wire::PackedU16);
+    pub(crate) const SUPPORTED_EVENTS: FieldSpec = FieldSpec::req(26, Wire::PackedU16);
+    pub(crate) const FLAGS: FieldSpec = FieldSpec::req(27, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "Capabilities",
         fields: &[
-            FieldSpec::req(1, Wire::U16),
-            FieldSpec::req(2, Wire::U16),
-            FieldSpec::req(3, Wire::U16),
-            FieldSpec::req(4, Wire::U16),
-            FieldSpec::req(5, Wire::U64),
-            FieldSpec::req(6, Wire::U32),
-            FieldSpec::req(7, Wire::U64),
-            FieldSpec::req(8, Wire::U8),
-            FieldSpec::req(9, Wire::U16),
-            FieldSpec::req(10, Wire::U64),
-            FieldSpec::req(11, Wire::U64),
-            FieldSpec::req(12, Wire::U64),
-            FieldSpec::req(13, Wire::U64),
-            FieldSpec::req(14, Wire::U64),
-            FieldSpec::req(15, Wire::U64),
-            FieldSpec::req(16, Wire::U64),
-            FieldSpec::req(17, Wire::U64),
-            FieldSpec::req(18, Wire::U64),
-            FieldSpec::req(19, Wire::U64),
-            FieldSpec::req(20, Wire::U64),
-            FieldSpec::req(21, Wire::U16),
-            FieldSpec::req(22, Wire::U16),
-            FieldSpec::req(23, Wire::U16),
-            FieldSpec::req(24, Wire::U32),
-            FieldSpec::req(25, Wire::PackedU16),
-            FieldSpec::req(26, Wire::PackedU16),
-            FieldSpec::req(27, Wire::U64),
+            MINIMUM_VERSION_MAJOR,
+            MINIMUM_VERSION_MINOR,
+            MAXIMUM_VERSION_MAJOR,
+            MAXIMUM_VERSION_MINOR,
+            MAXIMUM_FRAME_BYTES,
+            MAXIMUM_TLVS,
+            MAXIMUM_STRING_BYTES,
+            MAXIMUM_NESTING,
+            MAXIMUM_AUTOMATION_RECORDS,
+            CONTROL_COMMAND_SLOTS,
+            CONTROL_COMMAND_BYTES,
+            AUTOMATION_BATCH_SLOTS,
+            RELIABLE_RESPONSE_SLOTS,
+            RELIABLE_EVENT_SLOTS,
+            TELEMETRY_SLOTS,
+            REPLAY_ENTRIES,
+            REPLAY_BYTES,
+            MAXIMUM_CACHED_RESPONSE_BYTES,
+            PER_BLOCK_AUTOMATION_DENSITY,
+            ADMISSION_QUANTUM_FRAMES,
+            MAXIMUM_PARAMETER_PAGE_ITEMS,
+            MAXIMUM_DIAGNOSTIC_PAGE_ITEMS,
+            MAXIMUM_TELEMETRY_HANDLES,
+            MAXIMUM_TRANSACTION_EDITS,
+            SUPPORTED_COMMANDS,
+            SUPPORTED_EVENTS,
+            FLAGS,
         ],
     };
 }

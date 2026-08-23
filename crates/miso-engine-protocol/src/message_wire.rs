@@ -14,13 +14,38 @@ const WIRE_U8: u8 = 1;
 const WIRE_U16: u8 = 2;
 const WIRE_U32: u8 = 3;
 const WIRE_U64: u8 = 4;
-const WIRE_F32: u8 = 6;
 const WIRE_UTF8: u8 = 9;
 const WIRE_MESSAGE: u8 = 11;
-const WIRE_PACKED_U16: u8 = 12;
-const WIRE_PACKED_U32: u8 = 13;
 const TLV_PREFIX_BYTES: usize = 8;
 const NESTED_HEADER_BYTES: usize = 8;
+
+macro_rules! write_spec {
+    ($writer:expr, $spec:expr, $bytes:expr $(,)?) => {{
+        let spec = $spec;
+        $writer.field(spec.id, spec.wire.raw(), spec.mandatory, $bytes)
+    }};
+}
+
+macro_rules! one_spec {
+    ($message:expr, $spec:expr $(,)?) => {{
+        let spec = $spec;
+        $message.one(spec.id, spec.wire.raw())
+    }};
+}
+
+macro_rules! optional_spec {
+    ($message:expr, $spec:expr $(,)?) => {{
+        let spec = $spec;
+        $message.optional_one(spec.id, spec.wire.raw())
+    }};
+}
+
+macro_rules! values_spec {
+    ($message:expr, $spec:expr $(,)?) => {{
+        let spec = $spec;
+        $message.values(spec.id, spec.wire.raw())
+    }};
+}
 
 /// Capability bits advertised by a typed BTLV endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -837,8 +862,16 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.offset.to_le_bytes())?;
-        writer.field(2, WIRE_U32, true, &value.maximum_bytes.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::snapshot_request::OFFSET,
+            &value.offset.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::snapshot_request::MAXIMUM_BYTES,
+            &value.maximum_bytes.to_le_bytes()
+        )?;
         Ok(required)
     }
 
@@ -851,8 +884,8 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::snapshot_request::SPEC)?;
         let result = SessionSnapshotRequest {
-            offset: read_u64(message.one(1, WIRE_U64)?)?,
-            maximum_bytes: read_u32(message.one(2, WIRE_U32)?)?,
+            offset: read_u64(one_spec!(message, schema::snapshot_request::OFFSET)?)?,
+            maximum_bytes: read_u32(one_spec!(message, schema::snapshot_request::MAXIMUM_BYTES)?)?,
         };
         if result.maximum_bytes == 0 {
             return Err(DecodeError::InvalidTlv);
@@ -896,10 +929,22 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.total_bytes.to_le_bytes())?;
-        writer.field(2, WIRE_U64, true, &value.offset.to_le_bytes())?;
-        writer.field(3, 10, true, value.canonical_toml_chunk)?;
-        writer.field(4, 8, true, &[u8::from(value.eof)])?;
+        write_spec!(
+            writer,
+            schema::snapshot::TOTAL_BYTES,
+            &value.total_bytes.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::snapshot::OFFSET,
+            &value.offset.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::snapshot::CANONICAL_TOML_CHUNK,
+            value.canonical_toml_chunk
+        )?;
+        write_spec!(writer, schema::snapshot::EOF, &[u8::from(value.eof)])?;
         Ok(required)
     }
 
@@ -912,10 +957,10 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::snapshot::SPEC)?;
         let result = SessionSnapshot {
-            total_bytes: read_u64(message.one(1, WIRE_U64)?)?,
-            offset: read_u64(message.one(2, WIRE_U64)?)?,
-            canonical_toml_chunk: message.one(3, 10)?,
-            eof: read_bool(message.one(4, 8)?)?,
+            total_bytes: read_u64(one_spec!(message, schema::snapshot::TOTAL_BYTES)?)?,
+            offset: read_u64(one_spec!(message, schema::snapshot::OFFSET)?)?,
+            canonical_toml_chunk: one_spec!(message, schema::snapshot::CANONICAL_TOML_CHUNK)?,
+            eof: read_bool(one_spec!(message, schema::snapshot::EOF)?)?,
         };
         if result.offset > result.total_bytes
             || u64::try_from(result.canonical_toml_chunk.len())
@@ -942,11 +987,10 @@ impl ProtocolCodec {
         if output.len() < LEN {
             return Err(EncodeError::OutputTooSmall { required: LEN });
         }
-        PayloadWriter::new(output, self.limits().max_tlv_count).field(
-            1,
-            WIRE_U32,
-            true,
-            &value.applied_operations.to_le_bytes(),
+        write_spec!(
+            PayloadWriter::new(output, self.limits().max_tlv_count),
+            schema::transaction_applied::APPLIED_OPERATIONS,
+            &value.applied_operations.to_le_bytes()
         )?;
         Ok(LEN)
     }
@@ -960,7 +1004,10 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::transaction_applied::SPEC)?;
         Ok(TransactionApplied {
-            applied_operations: read_u32(message.one(1, WIRE_U32)?)?,
+            applied_operations: read_u32(one_spec!(
+                message,
+                schema::transaction_applied::APPLIED_OPERATIONS
+            )?)?,
         })
     }
 
@@ -975,15 +1022,26 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required: LEN });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.event_sequence.to_le_bytes())?;
-        writer.field(
-            2,
-            WIRE_U64,
-            true,
+        write_spec!(
+            writer,
+            schema::session_committed::EVENT_SEQUENCE,
+            &value.event_sequence.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::session_committed::ORIGIN_REQUEST_ID,
             &value.origin_request_id.get().to_le_bytes(),
         )?;
-        writer.field(3, WIRE_U64, true, &value.previous_revision.0.to_le_bytes())?;
-        writer.field(4, WIRE_U32, true, &value.applied_operations.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::session_committed::PREVIOUS_REVISION,
+            &value.previous_revision.0.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::session_committed::APPLIED_OPERATIONS,
+            &value.applied_operations.to_le_bytes()
+        )?;
         Ok(LEN)
     }
 
@@ -996,11 +1054,23 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::session_committed::SPEC)?;
         Ok(SessionCommitted {
-            event_sequence: read_u64(message.one(1, WIRE_U64)?)?,
-            origin_request_id: crate::RequestId::new(read_u64(message.one(2, WIRE_U64)?)?)
-                .ok_or(DecodeError::InvalidTlv)?,
-            previous_revision: crate::SessionRevision(read_u64(message.one(3, WIRE_U64)?)?),
-            applied_operations: read_u32(message.one(4, WIRE_U32)?)?,
+            event_sequence: read_u64(one_spec!(
+                message,
+                schema::session_committed::EVENT_SEQUENCE
+            )?)?,
+            origin_request_id: crate::RequestId::new(read_u64(one_spec!(
+                message,
+                schema::session_committed::ORIGIN_REQUEST_ID
+            )?)?)
+            .ok_or(DecodeError::InvalidTlv)?,
+            previous_revision: crate::SessionRevision(read_u64(one_spec!(
+                message,
+                schema::session_committed::PREVIOUS_REVISION
+            )?)?),
+            applied_operations: read_u32(one_spec!(
+                message,
+                schema::session_committed::APPLIED_OPERATIONS
+            )?)?,
         })
     }
 
@@ -1017,8 +1087,16 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required: 32 });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U32, true, &value.after_handle.to_le_bytes())?;
-        writer.field(2, WIRE_U16, true, &value.limit.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::metadata_request::AFTER_HANDLE,
+            &value.after_handle.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::metadata_request::LIMIT,
+            &value.limit.to_le_bytes()
+        )?;
         Ok(32)
     }
     /// Strictly decode the exact two-field metadata cursor request.
@@ -1030,8 +1108,8 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::metadata_request::SPEC)?;
         let value = ParameterMetadataRequest {
-            after_handle: read_u32(message.one(1, WIRE_U32)?)?,
-            limit: read_u16(message.one(2, WIRE_U16)?)?,
+            after_handle: read_u32(one_spec!(message, schema::metadata_request::AFTER_HANDLE)?)?,
+            limit: read_u16(one_spec!(message, schema::metadata_request::LIMIT)?)?,
         };
         if value.limit == 0 || value.limit > 256 {
             return Err(DecodeError::InvalidTlv);
@@ -1093,7 +1171,7 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.packed_u32(1, &value.handles)?;
+        writer.packed_u32(schema::state_request::HANDLES, &value.handles)?;
         Ok(required)
     }
     /// Strictly decode a bounded sorted unique nonzero state-handle request.
@@ -1104,7 +1182,7 @@ impl ProtocolCodec {
     ) -> Result<ParameterStateRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::state_request::SPEC)?;
-        let bytes = message.one(1, WIRE_PACKED_U32)?;
+        let bytes = one_spec!(message, schema::state_request::HANDLES)?;
         if !bytes.len().is_multiple_of(4) {
             return Err(DecodeError::InvalidValueLength);
         }
@@ -1133,14 +1211,21 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.observed_sample.to_le_bytes())?;
-        writer.field(
-            2,
-            WIRE_U16,
-            true,
+        write_spec!(
+            writer,
+            schema::state_page::OBSERVED_SAMPLE,
+            &value.observed_sample.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::state_page::COUNT,
             &(value.records.len() as u16).to_le_bytes(),
         )?;
-        writer.field(3, WIRE_U16, true, &16_u16.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::state_page::RECORD_BYTES,
+            &16_u16.to_le_bytes()
+        )?;
         write_state_record_bytes(&mut writer, &value.records)?;
         Ok(required)
     }
@@ -1218,10 +1303,26 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required: LEN });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U16, true, &value.accepted_records.to_le_bytes())?;
-        writer.field(2, WIRE_U64, true, &value.occupancy.to_le_bytes())?;
-        writer.field(3, WIRE_U64, true, &value.capacity.to_le_bytes())?;
-        writer.field(4, WIRE_U64, true, &value.generation.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::automation_enqueued::ACCEPTED_RECORDS,
+            &value.accepted_records.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_enqueued::OCCUPANCY,
+            &value.occupancy.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_enqueued::CAPACITY,
+            &value.capacity.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_enqueued::GENERATION,
+            &value.generation.to_le_bytes()
+        )?;
         Ok(LEN)
     }
 
@@ -1234,10 +1335,13 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::automation_enqueued::SPEC)?;
         let result = AutomationEnqueued {
-            accepted_records: read_u16(message.one(1, WIRE_U16)?)?,
-            occupancy: read_u64(message.one(2, WIRE_U64)?)?,
-            capacity: read_u64(message.one(3, WIRE_U64)?)?,
-            generation: read_u64(message.one(4, WIRE_U64)?)?,
+            accepted_records: read_u16(one_spec!(
+                message,
+                schema::automation_enqueued::ACCEPTED_RECORDS
+            )?)?,
+            occupancy: read_u64(one_spec!(message, schema::automation_enqueued::OCCUPANCY)?)?,
+            capacity: read_u64(one_spec!(message, schema::automation_enqueued::CAPACITY)?)?,
+            generation: read_u64(one_spec!(message, schema::automation_enqueued::GENERATION)?)?,
         };
         if result.accepted_records == 0
             || result.capacity == 0
@@ -1423,18 +1527,37 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.event_sequence.to_le_bytes())?;
-        writer.field(
-            2,
-            WIRE_U64,
-            true,
+        write_spec!(
+            writer,
+            schema::automation_canceled::EVENT_SEQUENCE,
+            &value.event_sequence.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_canceled::ORIGIN_REQUEST_ID,
             &value.origin_request_id.get().to_le_bytes(),
         )?;
-        writer.field(3, WIRE_U16, true, &value.canceled_records.to_le_bytes())?;
-        writer.field(4, WIRE_U8, true, &[value.reason as u8])?;
-        writer.field(5, WIRE_U64, true, &value.queue_generation.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::automation_canceled::CANCELED_RECORDS,
+            &value.canceled_records.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_canceled::REASON,
+            &[value.reason as u8]
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_canceled::QUEUE_GENERATION,
+            &value.queue_generation.to_le_bytes()
+        )?;
         if let Some(sample) = value.effective_sample {
-            writer.field(6, WIRE_U64, false, &sample.0.to_le_bytes())?;
+            write_spec!(
+                writer,
+                schema::automation_canceled::EFFECTIVE_SAMPLE,
+                &sample.0.to_le_bytes()
+            )?;
         }
         Ok(required)
     }
@@ -1448,17 +1571,34 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::automation_canceled::SPEC)?;
         let value = AutomationCanceled {
-            event_sequence: read_u64(message.one(1, WIRE_U64)?)?,
-            origin_request_id: crate::RequestId::new(read_u64(message.one(2, WIRE_U64)?)?)
-                .ok_or(DecodeError::InvalidTlv)?,
-            canceled_records: read_u16(message.one(3, WIRE_U16)?)?,
-            reason: parse_automation_cancellation_reason(read_u8(message.one(4, WIRE_U8)?)?)?,
-            queue_generation: read_u64(message.one(5, WIRE_U64)?)?,
-            effective_sample: message
-                .optional_one(6, WIRE_U64)?
-                .map(read_u64)
-                .transpose()?
-                .map(crate::SampleTime),
+            event_sequence: read_u64(one_spec!(
+                message,
+                schema::automation_canceled::EVENT_SEQUENCE
+            )?)?,
+            origin_request_id: crate::RequestId::new(read_u64(one_spec!(
+                message,
+                schema::automation_canceled::ORIGIN_REQUEST_ID
+            )?)?)
+            .ok_or(DecodeError::InvalidTlv)?,
+            canceled_records: read_u16(one_spec!(
+                message,
+                schema::automation_canceled::CANCELED_RECORDS
+            )?)?,
+            reason: parse_automation_cancellation_reason(read_u8(one_spec!(
+                message,
+                schema::automation_canceled::REASON
+            )?)?)?,
+            queue_generation: read_u64(one_spec!(
+                message,
+                schema::automation_canceled::QUEUE_GENERATION
+            )?)?,
+            effective_sample: optional_spec!(
+                message,
+                schema::automation_canceled::EFFECTIVE_SAMPLE
+            )?
+            .map(read_u64)
+            .transpose()?
+            .map(crate::SampleTime),
         };
         if value.canceled_records == 0 {
             return Err(DecodeError::InvalidTlv);
@@ -1494,11 +1634,19 @@ impl ProtocolCodec {
             .checked_mul(16)
             .ok_or(EncodeError::LimitExceeded)?;
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.observed_sample.0.to_le_bytes())?;
-        writer.field(2, WIRE_U16, true, &count.to_le_bytes())?;
-        writer.field(3, WIRE_U16, true, &16_u16.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::meter_batch::OBSERVED_SAMPLE,
+            &value.observed_sample.0.to_le_bytes()
+        )?;
+        write_spec!(writer, schema::meter_batch::COUNT, &count.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::meter_batch::RECORD_BYTES,
+            &16_u16.to_le_bytes()
+        )?;
         let start = writer.position;
-        writer.field(4, 10, true, &[])?;
+        write_spec!(writer, schema::meter_batch::RECORDS, &[])?;
         let end = start
             .checked_add(tlv_len(record_bytes)?)
             .ok_or(EncodeError::LimitExceeded)?;
@@ -1529,13 +1677,16 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::meter_batch::SPEC)?;
         let result = DecodedMeterBatch {
-            observed_sample: crate::SampleTime(read_u64(message.one(1, WIRE_U64)?)?),
-            count: read_u16(message.one(2, WIRE_U16)?)?,
-            record_bytes: message.one(4, 10)?,
+            observed_sample: crate::SampleTime(read_u64(one_spec!(
+                message,
+                schema::meter_batch::OBSERVED_SAMPLE
+            )?)?),
+            count: read_u16(one_spec!(message, schema::meter_batch::COUNT)?)?,
+            record_bytes: one_spec!(message, schema::meter_batch::RECORDS)?,
         };
         if result.count == 0
             || result.count > 256
-            || read_u16(message.one(3, WIRE_U16)?)? != 16
+            || read_u16(one_spec!(message, schema::meter_batch::RECORD_BYTES)?)? != 16
             || result.record_bytes.len()
                 != usize::from(result.count)
                     .checked_mul(16)
@@ -1610,7 +1761,12 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_diagnostic_field(self, &mut writer, 1, true, diagnostic)?;
+        write_diagnostic_field(
+            self,
+            &mut writer,
+            schema::diagnostic_event::DIAGNOSTIC,
+            diagnostic,
+        )?;
         Ok(required)
     }
 
@@ -1624,7 +1780,11 @@ impl ProtocolCodec {
         message.schema_spec(&schema::diagnostic_event::SPEC)?;
         let diagnostic = decode_diagnostic(
             self,
-            nested_message(self, message.one(1, WIRE_MESSAGE)?, 1)?,
+            nested_message(
+                self,
+                one_spec!(message, schema::diagnostic_event::DIAGNOSTIC)?,
+                1,
+            )?,
         )?;
         if diagnostic.provider_sequence.is_none() {
             return Err(DecodeError::InvalidTlv);
@@ -1668,17 +1828,35 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.packed_u32(1, &value.meter_handles)?;
-        writer.field(2, WIRE_U32, true, &value.meter_period_blocks.to_le_bytes())?;
-        write_counter_ids(&mut writer, 3, true, &value.counter_ids)?;
-        writer.field(
-            4,
-            WIRE_U32,
-            true,
+        writer.packed_u32(
+            schema::telemetry_configuration::METER_HANDLES,
+            &value.meter_handles,
+        )?;
+        write_spec!(
+            writer,
+            schema::telemetry_configuration::METER_PERIOD_BLOCKS,
+            &value.meter_period_blocks.to_le_bytes()
+        )?;
+        write_counter_ids(
+            &mut writer,
+            schema::telemetry_configuration::COUNTER_IDS,
+            &value.counter_ids,
+        )?;
+        write_spec!(
+            writer,
+            schema::telemetry_configuration::COUNTER_PERIOD_BLOCKS,
             &value.counter_period_blocks.to_le_bytes(),
         )?;
-        writer.field(5, 8, true, &[u8::from(value.diagnostics_enabled)])?;
-        writer.field(6, WIRE_U8, true, &[value.minimum_diagnostic_severity as u8])?;
+        write_spec!(
+            writer,
+            schema::telemetry_configuration::DIAGNOSTICS_ENABLED,
+            &[u8::from(value.diagnostics_enabled)]
+        )?;
+        write_spec!(
+            writer,
+            schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY,
+            &[value.minimum_diagnostic_severity as u8]
+        )?;
         Ok(required)
     }
 
@@ -1691,14 +1869,30 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::telemetry_configuration::SPEC)?;
         let result = TelemetryConfiguration {
-            meter_handles: decode_nonzero_u32s(message.one(1, WIRE_PACKED_U32)?, true)?,
-            meter_period_blocks: read_u32(message.one(2, WIRE_U32)?)?,
-            counter_ids: decode_counter_ids(message.one(3, WIRE_PACKED_U32)?)?,
-            counter_period_blocks: read_u32(message.one(4, WIRE_U32)?)?,
-            diagnostics_enabled: read_bool(message.one(5, 8)?)?,
-            minimum_diagnostic_severity: DiagnosticSeverity::decode(read_u8(
-                message.one(6, WIRE_U8)?,
+            meter_handles: decode_nonzero_u32s(
+                one_spec!(message, schema::telemetry_configuration::METER_HANDLES)?,
+                true,
+            )?,
+            meter_period_blocks: read_u32(one_spec!(
+                message,
+                schema::telemetry_configuration::METER_PERIOD_BLOCKS
             )?)?,
+            counter_ids: decode_counter_ids(one_spec!(
+                message,
+                schema::telemetry_configuration::COUNTER_IDS
+            )?)?,
+            counter_period_blocks: read_u32(one_spec!(
+                message,
+                schema::telemetry_configuration::COUNTER_PERIOD_BLOCKS
+            )?)?,
+            diagnostics_enabled: read_bool(one_spec!(
+                message,
+                schema::telemetry_configuration::DIAGNOSTICS_ENABLED
+            )?)?,
+            minimum_diagnostic_severity: DiagnosticSeverity::decode(read_u8(one_spec!(
+                message,
+                schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY
+            )?)?)?,
         };
         validate_telemetry_configuration(&result).map_err(|_| DecodeError::InvalidTlv)?;
         Ok(result)
@@ -1728,9 +1922,13 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, 8, true, &[u8::from(value.all)])?;
+        write_spec!(
+            writer,
+            schema::counters_request::ALL,
+            &[u8::from(value.all)]
+        )?;
         if !value.all {
-            write_u32s(&mut writer, 2, false, &value.ids)?;
+            write_u32s(&mut writer, schema::counters_request::IDS, &value.ids)?;
         }
         Ok(required)
     }
@@ -1743,9 +1941,8 @@ impl ProtocolCodec {
     ) -> Result<CountersRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::counters_request::SPEC)?;
-        let all = read_bool(message.one(1, 8)?)?;
-        let ids = message
-            .optional_one(2, WIRE_PACKED_U32)?
+        let all = read_bool(one_spec!(message, schema::counters_request::ALL)?)?;
+        let ids = optional_spec!(message, schema::counters_request::IDS)?
             .map(|bytes| decode_nonzero_u32s(bytes, true))
             .transpose()?
             .unwrap_or_default();
@@ -1804,11 +2001,23 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.observed_sample.0.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::counter_snapshot::OBSERVED_SAMPLE,
+            &value.observed_sample.0.to_le_bytes()
+        )?;
         for counter in value.values {
-            writer.nested_start(2, true, 32, 2)?;
-            writer.field(1, WIRE_U32, true, &(counter.id as u32).to_le_bytes())?;
-            writer.field(2, WIRE_U64, true, &counter.value.to_le_bytes())?;
+            writer.nested_start_spec(schema::counter_snapshot::VALUE, 32, 2)?;
+            write_spec!(
+                writer,
+                schema::counter_value::ID,
+                &(counter.id as u32).to_le_bytes()
+            )?;
+            write_spec!(
+                writer,
+                schema::counter_value::VALUE,
+                &counter.value.to_le_bytes()
+            )?;
             writer.finish_nested(32)?;
         }
         Ok(required)
@@ -1822,17 +2031,21 @@ impl ProtocolCodec {
     ) -> Result<CounterSnapshot, DecodeError> {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::counter_snapshot::SPEC)?;
-        let mut values = Vec::with_capacity(message.values(2, WIRE_MESSAGE)?.count());
-        for raw in message.values(2, WIRE_MESSAGE)? {
+        let mut values =
+            Vec::with_capacity(values_spec!(message, schema::counter_snapshot::VALUE)?.count());
+        for raw in values_spec!(message, schema::counter_snapshot::VALUE)? {
             let counter = nested_message(self, raw, 1)?;
             counter.schema_spec(&schema::counter_value::SPEC)?;
             values.push(CounterValue {
-                id: parse_counter_id(read_u32(counter.one(1, WIRE_U32)?)?)?,
-                value: read_u64(counter.one(2, WIRE_U64)?)?,
+                id: parse_counter_id(read_u32(one_spec!(counter, schema::counter_value::ID)?)?)?,
+                value: read_u64(one_spec!(counter, schema::counter_value::VALUE)?)?,
             });
         }
         let result = CounterSnapshot {
-            observed_sample: crate::SampleTime(read_u64(message.one(1, WIRE_U64)?)?),
+            observed_sample: crate::SampleTime(read_u64(one_spec!(
+                message,
+                schema::counter_snapshot::OBSERVED_SAMPLE
+            )?)?),
             values,
         };
         validate_counter_snapshot(&result).map_err(|_| DecodeError::InvalidTlv)?;
@@ -1852,9 +2065,21 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required: 48 });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.after_sequence.to_le_bytes())?;
-        writer.field(2, WIRE_U16, true, &value.limit.to_le_bytes())?;
-        writer.field(3, WIRE_U8, true, &[value.minimum_severity as u8])?;
+        write_spec!(
+            writer,
+            schema::diagnostics_request::AFTER_SEQUENCE,
+            &value.after_sequence.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::diagnostics_request::LIMIT,
+            &value.limit.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::diagnostics_request::MINIMUM_SEVERITY,
+            &[value.minimum_severity as u8]
+        )?;
         Ok(48)
     }
 
@@ -1867,9 +2092,15 @@ impl ProtocolCodec {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::diagnostics_request::SPEC)?;
         let value = DiagnosticsRequest {
-            after_sequence: read_u64(message.one(1, WIRE_U64)?)?,
-            limit: read_u16(message.one(2, WIRE_U16)?)?,
-            minimum_severity: DiagnosticSeverity::decode(read_u8(message.one(3, WIRE_U8)?)?)?,
+            after_sequence: read_u64(one_spec!(
+                message,
+                schema::diagnostics_request::AFTER_SEQUENCE
+            )?)?,
+            limit: read_u16(one_spec!(message, schema::diagnostics_request::LIMIT)?)?,
+            minimum_severity: DiagnosticSeverity::decode(read_u8(one_spec!(
+                message,
+                schema::diagnostics_request::MINIMUM_SEVERITY
+            )?)?)?,
         };
         if value.limit == 0 || value.limit > 256 {
             return Err(DecodeError::InvalidTlv);
@@ -1921,10 +2152,23 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.last_sequence.to_le_bytes())?;
-        writer.field(2, 8, true, &[u8::from(value.eof)])?;
+        write_spec!(
+            writer,
+            schema::diagnostics_page::LAST_SEQUENCE,
+            &value.last_sequence.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::diagnostics_page::EOF,
+            &[u8::from(value.eof)]
+        )?;
         for diagnostic in &value.diagnostics {
-            write_diagnostic_field(self, &mut writer, 3, true, diagnostic)?;
+            write_diagnostic_field(
+                self,
+                &mut writer,
+                schema::diagnostics_page::DIAGNOSTIC,
+                diagnostic,
+            )?;
         }
         Ok(required)
     }
@@ -1937,13 +2181,12 @@ impl ProtocolCodec {
     ) -> Result<DiagnosticsPage, DecodeError> {
         let message = top_level_message(self, payload, count)?;
         message.schema_spec(&schema::diagnostics_page::SPEC)?;
-        let diagnostics = message
-            .values(3, WIRE_MESSAGE)?
+        let diagnostics = values_spec!(message, schema::diagnostics_page::DIAGNOSTIC)?
             .map(|raw| decode_diagnostic(self, nested_message(self, raw, 1)?))
             .collect::<Result<Vec<_>, _>>()?;
         let value = DiagnosticsPage {
-            last_sequence: read_u64(message.one(1, WIRE_U64)?)?,
-            eof: read_bool(message.one(2, 8)?)?,
+            last_sequence: read_u64(one_spec!(message, schema::diagnostics_page::LAST_SEQUENCE)?)?,
+            eof: read_bool(one_spec!(message, schema::diagnostics_page::EOF)?)?,
             diagnostics,
         };
         validate_diagnostics_page(&value).map_err(|_| DecodeError::InvalidTlv)?;
@@ -2278,8 +2521,7 @@ fn validate_diagnostics_page(value: &DiagnosticsPage) -> Result<(), EncodeError>
 
 fn write_counter_ids(
     writer: &mut PayloadWriter<'_>,
-    id: u16,
-    mandatory: bool,
+    spec: schema::FieldSpec,
     values: &[CounterId],
 ) -> Result<(), EncodeError> {
     let len = values
@@ -2287,7 +2529,7 @@ fn write_counter_ids(
         .checked_mul(4)
         .ok_or(EncodeError::LimitExceeded)?;
     let start = writer.position;
-    writer.field(id, WIRE_PACKED_U32, mandatory, &[])?;
+    write_spec!(writer, spec, &[])?;
     let end = start
         .checked_add(tlv_len(len)?)
         .ok_or(EncodeError::LimitExceeded)?;
@@ -2307,8 +2549,7 @@ fn write_counter_ids(
 
 fn write_u32s(
     writer: &mut PayloadWriter<'_>,
-    id: u16,
-    mandatory: bool,
+    spec: schema::FieldSpec,
     values: &[u32],
 ) -> Result<(), EncodeError> {
     let len = values
@@ -2316,7 +2557,7 @@ fn write_u32s(
         .checked_mul(4)
         .ok_or(EncodeError::LimitExceeded)?;
     let start = writer.position;
-    writer.field(id, WIRE_PACKED_U32, mandatory, &[])?;
+    write_spec!(writer, spec, &[])?;
     let end = start
         .checked_add(tlv_len(len)?)
         .ok_or(EncodeError::LimitExceeded)?;
@@ -2562,13 +2803,13 @@ impl<'a> PayloadWriter<'a> {
         Ok(())
     }
 
-    fn packed_u16(&mut self, id: u16, values: &[u16]) -> Result<(), EncodeError> {
+    fn packed_u16(&mut self, spec: schema::FieldSpec, values: &[u16]) -> Result<(), EncodeError> {
         let value_len = values
             .len()
             .checked_mul(2)
             .ok_or(EncodeError::LimitExceeded)?;
         let start = self.position;
-        self.field(id, WIRE_PACKED_U16, true, &[])?;
+        write_spec!(self, spec, &[])?;
         let end = start
             .checked_add(tlv_len(value_len)?)
             .ok_or(EncodeError::LimitExceeded)?;
@@ -2590,13 +2831,13 @@ impl<'a> PayloadWriter<'a> {
         Ok(())
     }
 
-    fn packed_u32(&mut self, id: u16, values: &[u32]) -> Result<(), EncodeError> {
+    fn packed_u32(&mut self, spec: schema::FieldSpec, values: &[u32]) -> Result<(), EncodeError> {
         let value_len = values
             .len()
             .checked_mul(4)
             .ok_or(EncodeError::LimitExceeded)?;
         let start = self.position;
-        self.field(id, WIRE_PACKED_U32, true, &[])?;
+        write_spec!(self, spec, &[])?;
         let end = start
             .checked_add(tlv_len(value_len)?)
             .ok_or(EncodeError::LimitExceeded)?;
@@ -2648,6 +2889,15 @@ impl<'a> PayloadWriter<'a> {
         Ok(())
     }
 
+    fn nested_start_spec(
+        &mut self,
+        spec: schema::FieldSpec,
+        body_len: usize,
+        field_count: u32,
+    ) -> Result<(), EncodeError> {
+        self.nested_start(spec.id, spec.mandatory, body_len, field_count)
+    }
+
     fn finish_nested(&mut self, body_len: usize) -> Result<(), EncodeError> {
         let padding = padding(NESTED_HEADER_BYTES + body_len);
         let end = self
@@ -2669,11 +2919,15 @@ fn write_non_ok(
     value: &NonOkResponse,
 ) -> Result<(), EncodeError> {
     for diagnostic in &value.diagnostics {
-        write_diagnostic_field(codec, writer, 1, true, diagnostic)?;
+        write_diagnostic_field(codec, writer, schema::non_ok::DIAGNOSTIC, diagnostic)?;
     }
-    writer.field(2, WIRE_U32, true, &value.omitted_diagnostics.to_le_bytes())?;
+    write_spec!(
+        writer,
+        schema::non_ok::OMITTED_DIAGNOSTICS,
+        &value.omitted_diagnostics.to_le_bytes()
+    )?;
     if let Some(backpressure) = value.backpressure {
-        write_backpressure_field(codec, writer, 3, false, backpressure)?;
+        write_backpressure_field(codec, writer, schema::non_ok::BACKPRESSURE, backpressure)?;
     }
     Ok(())
 }
@@ -2769,17 +3023,21 @@ fn write_metadata_page(
     writer: &mut PayloadWriter<'_>,
     value: &ParameterMetadataPage,
 ) -> Result<(), EncodeError> {
-    writer.field(1, WIRE_U32, true, &value.last_handle.to_le_bytes())?;
-    writer.field(2, 8, true, &[u8::from(value.eof)])?;
+    write_spec!(
+        writer,
+        schema::metadata_page::LAST_HANDLE,
+        &value.last_handle.to_le_bytes()
+    )?;
+    write_spec!(writer, schema::metadata_page::EOF, &[u8::from(value.eof)])?;
     for descriptor in &value.descriptors {
-        write_descriptor(codec, writer, 3, descriptor)?;
+        write_descriptor(codec, writer, schema::metadata_page::DESCRIPTOR, descriptor)?;
     }
     Ok(())
 }
 fn write_descriptor(
     codec: &ProtocolCodec,
     writer: &mut PayloadWriter<'_>,
-    id: u16,
+    spec: schema::FieldSpec,
     value: &ParameterDescriptor,
 ) -> Result<(), EncodeError> {
     let total = descriptor_len(codec, value)?;
@@ -2790,51 +3048,50 @@ fn write_descriptor(
         + u32::from(value.display_name.is_some())
         + u32::from(value.display_unit.is_some())
         + value.enum_choices.len() as u32;
-    macro_rules! field {
-        ($spec:expr, $bytes:expr) => {
-            writer.field($spec.id, $spec.wire.raw(), $spec.mandatory, $bytes)
-        };
-    }
-    writer.nested_start(id, true, body, fields)?;
-    field!(descriptor::HANDLE, &value.handle.to_le_bytes())?;
-    field!(descriptor::TRACK_ID, value.track_id.as_bytes())?;
-    field!(descriptor::RACK, &[value.rack as u8])?;
-    field!(descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
-    field!(descriptor::PARAMETER_ID, &value.parameter_id.to_le_bytes())?;
-    field!(descriptor::CHANNEL, &[value.channel as u8])?;
-    field!(descriptor::VALUE_KIND, &[value.value_kind as u8])?;
-    field!(descriptor::UNIT, &[value.unit as u8])?;
-    field!(descriptor::DOMAIN, &[value.domain as u8])?;
+    writer.nested_start_spec(spec, body, fields)?;
+    write_spec!(writer, descriptor::HANDLE, &value.handle.to_le_bytes())?;
+    write_spec!(writer, descriptor::TRACK_ID, value.track_id.as_bytes())?;
+    write_spec!(writer, descriptor::RACK, &[value.rack as u8])?;
+    write_spec!(writer, descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
+    write_spec!(
+        writer,
+        descriptor::PARAMETER_ID,
+        &value.parameter_id.to_le_bytes()
+    )?;
+    write_spec!(writer, descriptor::CHANNEL, &[value.channel as u8])?;
+    write_spec!(writer, descriptor::VALUE_KIND, &[value.value_kind as u8])?;
+    write_spec!(writer, descriptor::UNIT, &[value.unit as u8])?;
+    write_spec!(writer, descriptor::DOMAIN, &[value.domain as u8])?;
     if let Some(v) = value.minimum {
-        field!(descriptor::MINIMUM, &v.to_le_bytes())?;
+        write_spec!(writer, descriptor::MINIMUM, &v.to_le_bytes())?;
     }
     if let Some(v) = value.maximum {
-        field!(descriptor::MAXIMUM, &v.to_le_bytes())?;
+        write_spec!(writer, descriptor::MAXIMUM, &v.to_le_bytes())?;
     }
-    field!(descriptor::DEFAULT, &value.default.to_le_bytes())?;
-    field!(descriptor::MAPPING, &[value.mapping as u8])?;
-    field!(descriptor::AUTOMATION_RATE, &[value.automation_rate as u8])?;
-    field!(
+    write_spec!(writer, descriptor::DEFAULT, &value.default.to_le_bytes())?;
+    write_spec!(writer, descriptor::MAPPING, &[value.mapping as u8])?;
+    write_spec!(
+        writer,
+        descriptor::AUTOMATION_RATE,
+        &[value.automation_rate as u8]
+    )?;
+    write_spec!(
+        writer,
         descriptor::SMOOTHING_SAMPLES,
         &value.smoothing_samples.to_le_bytes()
     )?;
-    field!(descriptor::FLAGS, &value.flags.to_le_bytes())?;
+    write_spec!(writer, descriptor::FLAGS, &value.flags.to_le_bytes())?;
     if let Some(v) = &value.display_name {
-        field!(descriptor::DISPLAY_NAME, v.as_bytes())?;
+        write_spec!(writer, descriptor::DISPLAY_NAME, v.as_bytes())?;
     }
     if let Some(v) = &value.display_unit {
-        field!(descriptor::DISPLAY_UNIT, v.as_bytes())?;
+        write_spec!(writer, descriptor::DISPLAY_UNIT, v.as_bytes())?;
     }
     for choice in &value.enum_choices {
         let total = enum_choice_len(codec, choice)?;
-        writer.nested_start(
-            descriptor::ENUM_CHOICE.id,
-            descriptor::ENUM_CHOICE.mandatory,
-            total - NESTED_HEADER_BYTES,
-            2,
-        )?;
-        field!(enum_choice::VALUE, &choice.value.to_le_bytes())?;
-        field!(enum_choice::LABEL, choice.label.as_bytes())?;
+        writer.nested_start_spec(descriptor::ENUM_CHOICE, total - NESTED_HEADER_BYTES, 2)?;
+        write_spec!(writer, enum_choice::VALUE, &choice.value.to_le_bytes())?;
+        write_spec!(writer, enum_choice::LABEL, choice.label.as_bytes())?;
         writer.finish_nested(total - NESTED_HEADER_BYTES)?;
     }
     writer.finish_nested(body)
@@ -2844,13 +3101,12 @@ fn decode_metadata_page(
     message: Message<'_>,
 ) -> Result<ParameterMetadataPage, DecodeError> {
     message.schema_spec(&schema::metadata_page::SPEC)?;
-    let descriptors = message
-        .values(3, WIRE_MESSAGE)?
+    let descriptors = values_spec!(message, schema::metadata_page::DESCRIPTOR)?
         .map(|v| decode_descriptor(codec, nested_message(codec, v, 1)?))
         .collect::<Result<Vec<_>, _>>()?;
     let page = ParameterMetadataPage {
-        last_handle: read_u32(message.one(1, WIRE_U32)?)?,
-        eof: read_bool(message.one(2, 8)?)?,
+        last_handle: read_u32(one_spec!(message, schema::metadata_page::LAST_HANDLE)?)?,
+        eof: read_bool(one_spec!(message, schema::metadata_page::EOF)?)?,
         descriptors,
     };
     if page.descriptors.len() > 256
@@ -2872,39 +3128,34 @@ fn decode_descriptor(
     message: Message<'_>,
 ) -> Result<ParameterDescriptor, DecodeError> {
     message.schema_spec(&descriptor::SPEC)?;
-    let choices = message
-        .values(19, WIRE_MESSAGE)?
+    let choices = values_spec!(message, descriptor::ENUM_CHOICE)?
         .map(|v| decode_choice(codec, nested_message(codec, v, 2)?))
         .collect::<Result<Vec<_>, _>>()?;
     let value = ParameterDescriptor {
-        handle: read_u32(message.one(1, WIRE_U32)?)?,
-        track_id: read_string(codec, message.one(2, WIRE_UTF8)?)?.to_owned(),
-        rack: parse_rack(read_u8(message.one(3, WIRE_U8)?)?)?,
-        effect_id: read_string(codec, message.one(4, WIRE_UTF8)?)?.to_owned(),
-        parameter_id: read_u32(message.one(5, WIRE_U32)?)?,
-        channel: parse_channel(read_u8(message.one(6, WIRE_U8)?)?)?,
-        value_kind: parse_value_kind(read_u8(message.one(7, WIRE_U8)?)?)?,
-        unit: parse_unit(read_u8(message.one(8, WIRE_U8)?)?)?,
-        domain: parse_domain(read_u8(message.one(9, WIRE_U8)?)?)?,
-        minimum: message
-            .optional_one(10, WIRE_F32)?
+        handle: read_u32(one_spec!(message, descriptor::HANDLE)?)?,
+        track_id: read_string(codec, one_spec!(message, descriptor::TRACK_ID)?)?.to_owned(),
+        rack: parse_rack(read_u8(one_spec!(message, descriptor::RACK)?)?)?,
+        effect_id: read_string(codec, one_spec!(message, descriptor::EFFECT_ID)?)?.to_owned(),
+        parameter_id: read_u32(one_spec!(message, descriptor::PARAMETER_ID)?)?,
+        channel: parse_channel(read_u8(one_spec!(message, descriptor::CHANNEL)?)?)?,
+        value_kind: parse_value_kind(read_u8(one_spec!(message, descriptor::VALUE_KIND)?)?)?,
+        unit: parse_unit(read_u8(one_spec!(message, descriptor::UNIT)?)?)?,
+        domain: parse_domain(read_u8(one_spec!(message, descriptor::DOMAIN)?)?)?,
+        minimum: optional_spec!(message, descriptor::MINIMUM)?
             .map(read_f32)
             .transpose()?,
-        maximum: message
-            .optional_one(11, WIRE_F32)?
+        maximum: optional_spec!(message, descriptor::MAXIMUM)?
             .map(read_f32)
             .transpose()?,
-        default: read_f32(message.one(12, WIRE_F32)?)?,
-        mapping: parse_mapping(read_u8(message.one(13, WIRE_U8)?)?)?,
-        automation_rate: parse_rate(read_u8(message.one(14, WIRE_U8)?)?)?,
-        smoothing_samples: read_u32(message.one(15, WIRE_U32)?)?,
-        flags: read_u32(message.one(16, WIRE_U32)?)?,
-        display_name: message
-            .optional_one(17, WIRE_UTF8)?
+        default: read_f32(one_spec!(message, descriptor::DEFAULT)?)?,
+        mapping: parse_mapping(read_u8(one_spec!(message, descriptor::MAPPING)?)?)?,
+        automation_rate: parse_rate(read_u8(one_spec!(message, descriptor::AUTOMATION_RATE)?)?)?,
+        smoothing_samples: read_u32(one_spec!(message, descriptor::SMOOTHING_SAMPLES)?)?,
+        flags: read_u32(one_spec!(message, descriptor::FLAGS)?)?,
+        display_name: optional_spec!(message, descriptor::DISPLAY_NAME)?
             .map(|v| read_string(codec, v).map(str::to_owned))
             .transpose()?,
-        display_unit: message
-            .optional_one(18, WIRE_UTF8)?
+        display_unit: optional_spec!(message, descriptor::DISPLAY_UNIT)?
             .map(|v| read_string(codec, v).map(str::to_owned))
             .transpose()?,
         enum_choices: choices,
@@ -2914,13 +3165,13 @@ fn decode_descriptor(
 }
 fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoice, DecodeError> {
     message.schema_spec(&enum_choice::SPEC)?;
-    let value = read_f32(message.one(1, WIRE_F32)?)?;
+    let value = read_f32(one_spec!(message, enum_choice::VALUE)?)?;
     if !value.is_finite() {
         return Err(DecodeError::InvalidTlv);
     };
     Ok(EnumChoice {
         value,
-        label: read_string(codec, message.one(2, WIRE_UTF8)?)?.to_owned(),
+        label: read_string(codec, one_spec!(message, enum_choice::LABEL)?)?.to_owned(),
     })
 }
 fn validate_descriptor(
@@ -3066,7 +3317,7 @@ fn write_state_record_bytes(
         .checked_mul(16)
         .ok_or(EncodeError::LimitExceeded)?;
     let start = writer.position;
-    writer.field(4, 10, true, &[])?;
+    write_spec!(writer, schema::state_page::RECORDS, &[])?;
     let end = start
         .checked_add(tlv_len(len)?)
         .ok_or(EncodeError::LimitExceeded)?;
@@ -3091,11 +3342,11 @@ fn decode_state_page(
     message: Message<'_>,
 ) -> Result<ParameterStatePage, DecodeError> {
     message.schema_spec(&schema::state_page::SPEC)?;
-    let count = read_u16(message.one(2, WIRE_U16)?)? as usize;
-    if count > 256 || read_u16(message.one(3, WIRE_U16)?)? != 16 {
+    let count = read_u16(one_spec!(message, schema::state_page::COUNT)?)? as usize;
+    if count > 256 || read_u16(one_spec!(message, schema::state_page::RECORD_BYTES)?)? != 16 {
         return Err(DecodeError::InvalidTlv);
     }
-    let bytes = message.one(4, 10)?;
+    let bytes = one_spec!(message, schema::state_page::RECORDS)?;
     if bytes.len() != count.checked_mul(16).ok_or(DecodeError::LimitExceeded)? {
         return Err(DecodeError::InvalidValueLength);
     }
@@ -3113,7 +3364,7 @@ fn decode_state_page(
         records.push(record)
     }
     Ok(ParameterStatePage {
-        observed_sample: read_u64(message.one(1, WIRE_U64)?)?,
+        observed_sample: read_u64(one_spec!(message, schema::state_page::OBSERVED_SAMPLE)?)?,
         records,
     })
 }
@@ -3186,82 +3437,123 @@ fn write_capabilities(
     writer: &mut PayloadWriter<'_>,
     value: &Capabilities<'_>,
 ) -> Result<(), EncodeError> {
-    writer.field(
-        1,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MINIMUM_VERSION_MAJOR,
         &value.minimum_version.major.to_le_bytes(),
     )?;
-    writer.field(
-        2,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MINIMUM_VERSION_MINOR,
         &value.minimum_version.minor.to_le_bytes(),
     )?;
-    writer.field(
-        3,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_VERSION_MAJOR,
         &value.maximum_version.major.to_le_bytes(),
     )?;
-    writer.field(
-        4,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_VERSION_MINOR,
         &value.maximum_version.minor.to_le_bytes(),
     )?;
-    writer.field(5, WIRE_U64, true, &value.maximum_frame_bytes.to_le_bytes())?;
-    writer.field(6, WIRE_U32, true, &value.maximum_tlvs.to_le_bytes())?;
-    writer.field(7, WIRE_U64, true, &value.maximum_string_bytes.to_le_bytes())?;
-    writer.field(8, WIRE_U8, true, &[value.maximum_nesting])?;
-    writer.field(
-        9,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_FRAME_BYTES,
+        &value.maximum_frame_bytes.to_le_bytes()
+    )?;
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_TLVS,
+        &value.maximum_tlvs.to_le_bytes()
+    )?;
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_STRING_BYTES,
+        &value.maximum_string_bytes.to_le_bytes()
+    )?;
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_NESTING,
+        &[value.maximum_nesting]
+    )?;
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_AUTOMATION_RECORDS,
         &value.maximum_automation_records.to_le_bytes(),
     )?;
-    for (id, field) in [
-        (10, value.control_command_slots),
-        (11, value.control_command_bytes),
-        (12, value.automation_batch_slots),
-        (13, value.reliable_response_slots),
-        (14, value.reliable_event_slots),
-        (15, value.telemetry_slots),
-        (16, value.replay_entries),
-        (17, value.replay_bytes),
-        (18, value.maximum_cached_response_bytes),
-        (19, value.per_block_automation_density),
-        (20, value.admission_quantum_frames),
+    for (spec, field) in [
+        (
+            schema::capabilities::CONTROL_COMMAND_SLOTS,
+            value.control_command_slots,
+        ),
+        (
+            schema::capabilities::CONTROL_COMMAND_BYTES,
+            value.control_command_bytes,
+        ),
+        (
+            schema::capabilities::AUTOMATION_BATCH_SLOTS,
+            value.automation_batch_slots,
+        ),
+        (
+            schema::capabilities::RELIABLE_RESPONSE_SLOTS,
+            value.reliable_response_slots,
+        ),
+        (
+            schema::capabilities::RELIABLE_EVENT_SLOTS,
+            value.reliable_event_slots,
+        ),
+        (schema::capabilities::TELEMETRY_SLOTS, value.telemetry_slots),
+        (schema::capabilities::REPLAY_ENTRIES, value.replay_entries),
+        (schema::capabilities::REPLAY_BYTES, value.replay_bytes),
+        (
+            schema::capabilities::MAXIMUM_CACHED_RESPONSE_BYTES,
+            value.maximum_cached_response_bytes,
+        ),
+        (
+            schema::capabilities::PER_BLOCK_AUTOMATION_DENSITY,
+            value.per_block_automation_density,
+        ),
+        (
+            schema::capabilities::ADMISSION_QUANTUM_FRAMES,
+            value.admission_quantum_frames,
+        ),
     ] {
-        writer.field(id, WIRE_U64, true, &field.to_le_bytes())?;
+        write_spec!(writer, spec, &field.to_le_bytes())?;
     }
-    writer.field(
-        21,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_PARAMETER_PAGE_ITEMS,
         &value.maximum_parameter_page_items.to_le_bytes(),
     )?;
-    writer.field(
-        22,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_DIAGNOSTIC_PAGE_ITEMS,
         &value.maximum_diagnostic_page_items.to_le_bytes(),
     )?;
-    writer.field(
-        23,
-        WIRE_U16,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_TELEMETRY_HANDLES,
         &value.maximum_telemetry_handles.to_le_bytes(),
     )?;
-    writer.field(
-        24,
-        WIRE_U32,
-        true,
+    write_spec!(
+        writer,
+        schema::capabilities::MAXIMUM_TRANSACTION_EDITS,
         &value.maximum_transaction_edits.to_le_bytes(),
     )?;
-    writer.packed_u16(25, value.supported_commands)?;
-    writer.packed_u16(26, value.supported_events)?;
-    writer.field(27, WIRE_U64, true, &value.flags.0.to_le_bytes())?;
+    writer.packed_u16(
+        schema::capabilities::SUPPORTED_COMMANDS,
+        value.supported_commands,
+    )?;
+    writer.packed_u16(
+        schema::capabilities::SUPPORTED_EVENTS,
+        value.supported_events,
+    )?;
+    write_spec!(
+        writer,
+        schema::capabilities::FLAGS,
+        &value.flags.0.to_le_bytes()
+    )?;
     Ok(())
 }
 
@@ -3272,36 +3564,93 @@ fn decode_capabilities<'a>(
     message.schema_spec(&schema::capabilities::SPEC)?;
     let value = DecodedCapabilities {
         minimum_version: crate::ProtocolVersion {
-            major: read_u16(message.one(1, WIRE_U16)?)?,
-            minor: read_u16(message.one(2, WIRE_U16)?)?,
+            major: read_u16(one_spec!(
+                message,
+                schema::capabilities::MINIMUM_VERSION_MAJOR
+            )?)?,
+            minor: read_u16(one_spec!(
+                message,
+                schema::capabilities::MINIMUM_VERSION_MINOR
+            )?)?,
         },
         maximum_version: crate::ProtocolVersion {
-            major: read_u16(message.one(3, WIRE_U16)?)?,
-            minor: read_u16(message.one(4, WIRE_U16)?)?,
+            major: read_u16(one_spec!(
+                message,
+                schema::capabilities::MAXIMUM_VERSION_MAJOR
+            )?)?,
+            minor: read_u16(one_spec!(
+                message,
+                schema::capabilities::MAXIMUM_VERSION_MINOR
+            )?)?,
         },
-        maximum_frame_bytes: read_u64(message.one(5, WIRE_U64)?)?,
-        maximum_tlvs: read_u32(message.one(6, WIRE_U32)?)?,
-        maximum_string_bytes: read_u64(message.one(7, WIRE_U64)?)?,
-        maximum_nesting: read_u8(message.one(8, WIRE_U8)?)?,
-        maximum_automation_records: read_u16(message.one(9, WIRE_U16)?)?,
-        control_command_slots: read_u64(message.one(10, WIRE_U64)?)?,
-        control_command_bytes: read_u64(message.one(11, WIRE_U64)?)?,
-        automation_batch_slots: read_u64(message.one(12, WIRE_U64)?)?,
-        reliable_response_slots: read_u64(message.one(13, WIRE_U64)?)?,
-        reliable_event_slots: read_u64(message.one(14, WIRE_U64)?)?,
-        telemetry_slots: read_u64(message.one(15, WIRE_U64)?)?,
-        replay_entries: read_u64(message.one(16, WIRE_U64)?)?,
-        replay_bytes: read_u64(message.one(17, WIRE_U64)?)?,
-        maximum_cached_response_bytes: read_u64(message.one(18, WIRE_U64)?)?,
-        per_block_automation_density: read_u64(message.one(19, WIRE_U64)?)?,
-        admission_quantum_frames: read_u64(message.one(20, WIRE_U64)?)?,
-        maximum_parameter_page_items: read_u16(message.one(21, WIRE_U16)?)?,
-        maximum_diagnostic_page_items: read_u16(message.one(22, WIRE_U16)?)?,
-        maximum_telemetry_handles: read_u16(message.one(23, WIRE_U16)?)?,
-        maximum_transaction_edits: read_u32(message.one(24, WIRE_U32)?)?,
-        supported_commands: message.one(25, WIRE_PACKED_U16)?,
-        supported_events: message.one(26, WIRE_PACKED_U16)?,
-        flags: CapabilityFlags(read_u64(message.one(27, WIRE_U64)?)?),
+        maximum_frame_bytes: read_u64(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_FRAME_BYTES
+        )?)?,
+        maximum_tlvs: read_u32(one_spec!(message, schema::capabilities::MAXIMUM_TLVS)?)?,
+        maximum_string_bytes: read_u64(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_STRING_BYTES
+        )?)?,
+        maximum_nesting: read_u8(one_spec!(message, schema::capabilities::MAXIMUM_NESTING)?)?,
+        maximum_automation_records: read_u16(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_AUTOMATION_RECORDS
+        )?)?,
+        control_command_slots: read_u64(one_spec!(
+            message,
+            schema::capabilities::CONTROL_COMMAND_SLOTS
+        )?)?,
+        control_command_bytes: read_u64(one_spec!(
+            message,
+            schema::capabilities::CONTROL_COMMAND_BYTES
+        )?)?,
+        automation_batch_slots: read_u64(one_spec!(
+            message,
+            schema::capabilities::AUTOMATION_BATCH_SLOTS
+        )?)?,
+        reliable_response_slots: read_u64(one_spec!(
+            message,
+            schema::capabilities::RELIABLE_RESPONSE_SLOTS
+        )?)?,
+        reliable_event_slots: read_u64(one_spec!(
+            message,
+            schema::capabilities::RELIABLE_EVENT_SLOTS
+        )?)?,
+        telemetry_slots: read_u64(one_spec!(message, schema::capabilities::TELEMETRY_SLOTS)?)?,
+        replay_entries: read_u64(one_spec!(message, schema::capabilities::REPLAY_ENTRIES)?)?,
+        replay_bytes: read_u64(one_spec!(message, schema::capabilities::REPLAY_BYTES)?)?,
+        maximum_cached_response_bytes: read_u64(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_CACHED_RESPONSE_BYTES
+        )?)?,
+        per_block_automation_density: read_u64(one_spec!(
+            message,
+            schema::capabilities::PER_BLOCK_AUTOMATION_DENSITY
+        )?)?,
+        admission_quantum_frames: read_u64(one_spec!(
+            message,
+            schema::capabilities::ADMISSION_QUANTUM_FRAMES
+        )?)?,
+        maximum_parameter_page_items: read_u16(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_PARAMETER_PAGE_ITEMS
+        )?)?,
+        maximum_diagnostic_page_items: read_u16(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_DIAGNOSTIC_PAGE_ITEMS
+        )?)?,
+        maximum_telemetry_handles: read_u16(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_TELEMETRY_HANDLES
+        )?)?,
+        maximum_transaction_edits: read_u32(one_spec!(
+            message,
+            schema::capabilities::MAXIMUM_TRANSACTION_EDITS
+        )?)?,
+        supported_commands: one_spec!(message, schema::capabilities::SUPPORTED_COMMANDS)?,
+        supported_events: one_spec!(message, schema::capabilities::SUPPORTED_EVENTS)?,
+        flags: CapabilityFlags(read_u64(one_spec!(message, schema::capabilities::FLAGS)?)?),
     };
     if !value.supported_commands.len().is_multiple_of(2)
         || !value.supported_events.len().is_multiple_of(2)
@@ -3432,12 +3781,11 @@ fn allocated_id(id: u16, event: bool) -> bool {
 fn write_diagnostic_field(
     codec: &ProtocolCodec,
     writer: &mut PayloadWriter<'_>,
-    id: u16,
-    mandatory: bool,
+    spec: schema::FieldSpec,
     value: &Diagnostic,
 ) -> Result<(), EncodeError> {
     let body_len = diagnostic_body_len(codec, value)?;
-    writer.nested_start(id, mandatory, body_len, diagnostic_field_count(value)?)?;
+    writer.nested_start_spec(spec, body_len, diagnostic_field_count(value)?)?;
     write_diagnostic_body(codec, writer, value)?;
     writer.finish_nested(body_len)
 }
@@ -3448,22 +3796,38 @@ fn write_diagnostic_body(
     value: &Diagnostic,
 ) -> Result<(), EncodeError> {
     check_diagnostic(codec, value)?;
-    writer.field(1, WIRE_UTF8, true, value.code.as_bytes())?;
-    writer.field(2, WIRE_U8, true, &[value.severity as u8])?;
+    write_spec!(writer, schema::diagnostic::CODE, value.code.as_bytes())?;
+    write_spec!(
+        writer,
+        schema::diagnostic::SEVERITY,
+        &[value.severity as u8]
+    )?;
     for segment in &value.path {
-        write_path_segment_field(codec, writer, 3, true, segment)?;
+        write_path_segment_field(codec, writer, schema::diagnostic::PATH, segment)?;
     }
     if let Some(detail) = &value.detail {
-        writer.field(4, WIRE_UTF8, false, detail.as_bytes())?;
+        write_spec!(writer, schema::diagnostic::DETAIL, detail.as_bytes())?;
     }
     if let Some(index) = value.operation_index {
-        writer.field(5, WIRE_U32, false, &index.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::diagnostic::OPERATION_INDEX,
+            &index.to_le_bytes()
+        )?;
     }
     if let Some(sample) = value.sample_time {
-        writer.field(6, WIRE_U64, false, &sample.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::diagnostic::SAMPLE_TIME,
+            &sample.to_le_bytes()
+        )?;
     }
     if let Some(sequence) = value.provider_sequence {
-        writer.field(7, WIRE_U64, false, &sequence.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::diagnostic::PROVIDER_SEQUENCE,
+            &sequence.to_le_bytes()
+        )?;
     }
     Ok(())
 }
@@ -3471,17 +3835,26 @@ fn write_diagnostic_body(
 fn write_path_segment_field(
     codec: &ProtocolCodec,
     writer: &mut PayloadWriter<'_>,
-    id: u16,
-    mandatory: bool,
+    spec: schema::FieldSpec,
     value: &PathSegment,
 ) -> Result<(), EncodeError> {
     let body_len = path_segment_body_len(codec, value)?;
-    writer.nested_start(id, mandatory, body_len, 2)?;
-    writer.field(1, WIRE_U8, true, &[path_segment_tag(value)])?;
+    writer.nested_start_spec(spec, body_len, 2)?;
+    write_spec!(
+        writer,
+        schema::path_segment::TAG,
+        &[path_segment_tag(value)]
+    )?;
     match value {
-        PathSegment::Field(field) => writer.field(2, WIRE_UTF8, false, field.as_bytes())?,
-        PathSegment::Index(index) => writer.field(3, WIRE_U64, false, &index.to_le_bytes())?,
-        PathSegment::StableId(id) => writer.field(4, WIRE_UTF8, false, id.as_bytes())?,
+        PathSegment::Field(field) => {
+            write_spec!(writer, schema::path_segment::FIELD, field.as_bytes())?
+        }
+        PathSegment::Index(index) => {
+            write_spec!(writer, schema::path_segment::INDEX, &index.to_le_bytes())?
+        }
+        PathSegment::StableId(id) => {
+            write_spec!(writer, schema::path_segment::STABLE_ID, id.as_bytes())?
+        }
     }
     writer.finish_nested(body_len)
 }
@@ -3489,27 +3862,58 @@ fn write_path_segment_field(
 fn write_backpressure_field(
     codec: &ProtocolCodec,
     writer: &mut PayloadWriter<'_>,
-    id: u16,
-    mandatory: bool,
+    spec: schema::FieldSpec,
     value: Backpressure,
 ) -> Result<(), EncodeError> {
     let body_len = backpressure_body_len(codec, value)?;
-    writer.nested_start(id, mandatory, body_len, backpressure_field_count(value)?)?;
-    writer.field(1, WIRE_U8, true, &[value.queue_kind as u8])?;
-    writer.field(2, WIRE_U64, true, &value.capacity.to_le_bytes())?;
-    writer.field(3, WIRE_U64, true, &value.occupancy.to_le_bytes())?;
-    writer.field(4, WIRE_U16, true, &value.requested_items.to_le_bytes())?;
+    writer.nested_start_spec(spec, body_len, backpressure_field_count(value)?)?;
+    write_spec!(
+        writer,
+        schema::backpressure::QUEUE_KIND,
+        &[value.queue_kind as u8]
+    )?;
+    write_spec!(
+        writer,
+        schema::backpressure::CAPACITY,
+        &value.capacity.to_le_bytes()
+    )?;
+    write_spec!(
+        writer,
+        schema::backpressure::OCCUPANCY,
+        &value.occupancy.to_le_bytes()
+    )?;
+    write_spec!(
+        writer,
+        schema::backpressure::REQUESTED_ITEMS,
+        &value.requested_items.to_le_bytes()
+    )?;
     if let Some(generation) = value.generation {
-        writer.field(5, WIRE_U64, false, &generation.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::backpressure::GENERATION,
+            &generation.to_le_bytes()
+        )?;
     }
     if let Some(boundary) = value.retry_boundary {
-        writer.field(6, WIRE_U64, false, &boundary.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::backpressure::RETRY_BOUNDARY,
+            &boundary.to_le_bytes()
+        )?;
     }
     if let Some(bytes) = value.requested_bytes {
-        writer.field(7, WIRE_U64, false, &bytes.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::backpressure::REQUESTED_BYTES,
+            &bytes.to_le_bytes()
+        )?;
     }
     if let Some(bytes) = value.available_bytes {
-        writer.field(8, WIRE_U64, false, &bytes.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::backpressure::AVAILABLE_BYTES,
+            &bytes.to_le_bytes()
+        )?;
     }
     writer.finish_nested(body_len)
 }
@@ -3710,13 +4114,11 @@ fn decode_non_ok(
     message: Message<'_>,
 ) -> Result<NonOkResponse, DecodeError> {
     message.schema_spec(&schema::non_ok::SPEC)?;
-    let diagnostics = message
-        .values(1, WIRE_MESSAGE)?
+    let diagnostics = values_spec!(message, schema::non_ok::DIAGNOSTIC)?
         .map(|value| decode_diagnostic(codec, nested_message(codec, value, 1)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let omitted_diagnostics = read_u32(message.one(2, WIRE_U32)?)?;
-    let backpressure = message
-        .optional_one(3, WIRE_MESSAGE)?
+    let omitted_diagnostics = read_u32(one_spec!(message, schema::non_ok::OMITTED_DIAGNOSTICS)?)?;
+    let backpressure = optional_spec!(message, schema::non_ok::BACKPRESSURE)?
         .map(|value| decode_backpressure(codec, nested_message(codec, value, 1)?))
         .transpose()?;
     Ok(NonOkResponse {
@@ -3731,29 +4133,25 @@ fn decode_diagnostic(
     message: Message<'_>,
 ) -> Result<Diagnostic, DecodeError> {
     message.schema_spec(&schema::diagnostic::SPEC)?;
-    let code = read_string(codec, message.one(1, WIRE_UTF8)?)?.to_owned();
+    let code = read_string(codec, one_spec!(message, schema::diagnostic::CODE)?)?.to_owned();
     if !valid_dotted_code(&code) {
         return Err(DecodeError::InvalidTlv);
     }
-    let severity = DiagnosticSeverity::decode(read_u8(message.one(2, WIRE_U8)?)?)?;
-    let path = message
-        .values(3, WIRE_MESSAGE)?
+    let severity =
+        DiagnosticSeverity::decode(read_u8(one_spec!(message, schema::diagnostic::SEVERITY)?)?)?;
+    let path = values_spec!(message, schema::diagnostic::PATH)?
         .map(|value| decode_path_segment(codec, nested_message(codec, value, 2)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let detail = message
-        .optional_one(4, WIRE_UTF8)?
+    let detail = optional_spec!(message, schema::diagnostic::DETAIL)?
         .map(|value| read_string(codec, value).map(str::to_owned))
         .transpose()?;
-    let operation_index = message
-        .optional_one(5, WIRE_U32)?
+    let operation_index = optional_spec!(message, schema::diagnostic::OPERATION_INDEX)?
         .map(read_u32)
         .transpose()?;
-    let sample_time = message
-        .optional_one(6, WIRE_U64)?
+    let sample_time = optional_spec!(message, schema::diagnostic::SAMPLE_TIME)?
         .map(read_u64)
         .transpose()?;
-    let provider_sequence = message
-        .optional_one(7, WIRE_U64)?
+    let provider_sequence = optional_spec!(message, schema::diagnostic::PROVIDER_SEQUENCE)?
         .map(read_u64)
         .transpose()?;
     Ok(Diagnostic {
@@ -3772,10 +4170,10 @@ fn decode_path_segment(
     message: Message<'_>,
 ) -> Result<PathSegment, DecodeError> {
     message.schema_spec(&schema::path_segment::SPEC)?;
-    let tag = read_u8(message.one(1, WIRE_U8)?)?;
-    let field = message.optional_one(2, WIRE_UTF8)?;
-    let index = message.optional_one(3, WIRE_U64)?;
-    let stable_id = message.optional_one(4, WIRE_UTF8)?;
+    let tag = read_u8(one_spec!(message, schema::path_segment::TAG)?)?;
+    let field = optional_spec!(message, schema::path_segment::FIELD)?;
+    let index = optional_spec!(message, schema::path_segment::INDEX)?;
+    let stable_id = optional_spec!(message, schema::path_segment::STABLE_ID)?;
     match tag {
         1 if field.is_some() && index.is_none() && stable_id.is_none() => Ok(PathSegment::Field(
             read_string(codec, field.expect("present"))?.to_owned(),
@@ -3799,26 +4197,25 @@ fn decode_backpressure(
     message: Message<'_>,
 ) -> Result<Backpressure, DecodeError> {
     message.schema_spec(&schema::backpressure::SPEC)?;
-    let queue_kind = BackpressureQueueKind::decode(read_u8(message.one(1, WIRE_U8)?)?)?;
+    let queue_kind = BackpressureQueueKind::decode(read_u8(one_spec!(
+        message,
+        schema::backpressure::QUEUE_KIND
+    )?)?)?;
     let value = Backpressure {
         queue_kind,
-        capacity: read_u64(message.one(2, WIRE_U64)?)?,
-        occupancy: read_u64(message.one(3, WIRE_U64)?)?,
-        requested_items: read_u16(message.one(4, WIRE_U16)?)?,
-        generation: message
-            .optional_one(5, WIRE_U64)?
+        capacity: read_u64(one_spec!(message, schema::backpressure::CAPACITY)?)?,
+        occupancy: read_u64(one_spec!(message, schema::backpressure::OCCUPANCY)?)?,
+        requested_items: read_u16(one_spec!(message, schema::backpressure::REQUESTED_ITEMS)?)?,
+        generation: optional_spec!(message, schema::backpressure::GENERATION)?
             .map(read_u64)
             .transpose()?,
-        retry_boundary: message
-            .optional_one(6, WIRE_U64)?
+        retry_boundary: optional_spec!(message, schema::backpressure::RETRY_BOUNDARY)?
             .map(read_u64)
             .transpose()?,
-        requested_bytes: message
-            .optional_one(7, WIRE_U64)?
+        requested_bytes: optional_spec!(message, schema::backpressure::REQUESTED_BYTES)?
             .map(read_u64)
             .transpose()?,
-        available_bytes: message
-            .optional_one(8, WIRE_U64)?
+        available_bytes: optional_spec!(message, schema::backpressure::AVAILABLE_BYTES)?
             .map(read_u64)
             .transpose()?,
     };
