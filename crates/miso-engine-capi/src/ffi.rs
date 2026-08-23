@@ -13,7 +13,7 @@ use core::ffi::c_void;
 use core::ptr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::runtime::{CommandError, compile_children, limits_are_valid};
+use crate::runtime::{CommandError, EventError, EventLane, compile_children, limits_are_valid};
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RESULT_INTERNAL)
@@ -538,8 +538,93 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
                     .set(b"control.frame.invalid");
                 RESULT_INVALID_ARGUMENT
             }
+            Err(CommandError::Backpressure) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.plan.backpressure");
+                RESULT_BACKPRESSURE
+            }
+            Err(CommandError::CompileRejected(failure)) => {
+                session.last_error.borrow_mut().set(&failure.diagnostics);
+                RESULT_COMPILE_REJECTED
+            }
             Err(CommandError::Internal) => {
                 session.last_error.borrow_mut().set(b"control.internal");
+                RESULT_INTERNAL
+            }
+        }
+    })
+}
+
+/// Dequeue one complete reliable or lossy event frame into caller-owned bytes.
+///
+/// # Safety
+///
+/// `session` must be live and `event` must satisfy the ABI V1 bytes-output contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
+    session: *mut Session,
+    lane: u32,
+    event: *mut BytesOut,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        let lane = match lane {
+            crate::EVENT_LANE_RELIABLE => EventLane::Reliable,
+            crate::EVENT_LANE_LOSSY => EventLane::Lossy,
+            _ => return RESULT_INVALID_ARGUMENT,
+        };
+        // SAFETY: The caller promises a readable/writable bytes-output descriptor for this call.
+        let capacity = match unsafe { validate_bytes_out(event) } {
+            Ok(value) => value.capacity_bytes,
+            Err(code) => return code,
+        };
+        // SAFETY: The live-kind check establishes the concrete serialized session owner.
+        let session = unsafe { &mut *session };
+        match session.state.dequeue_event(lane, capacity) {
+            Ok(Some(bytes)) => {
+                let encoded = session.state.event_response(bytes);
+                // SAFETY: Event preparation admitted the exact caller capacity.
+                let code = unsafe { write_bytes(event, encoded) };
+                if code == RESULT_OK {
+                    session.last_error.borrow_mut().clear();
+                }
+                code
+            }
+            Ok(None) => {
+                // SAFETY: Empty egress is successful and writes only the required length.
+                let code = unsafe { write_bytes(event, &[]) };
+                if code == RESULT_OK {
+                    session.last_error.borrow_mut().clear();
+                }
+                code
+            }
+            Err(EventError::BufferTooSmall { required }) => {
+                // SAFETY: Validation established writable descriptor metadata.
+                unsafe { (*event).required_bytes = required };
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.event.output.too_small");
+                RESULT_BUFFER_TOO_SMALL
+            }
+            Err(EventError::Backpressure) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.event.backpressure");
+                RESULT_BACKPRESSURE
+            }
+            Err(EventError::Internal) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.event.internal");
                 RESULT_INTERNAL
             }
         }
@@ -669,7 +754,7 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
         // SAFETY: `plan` passed the live-kind check and is borrowed immutably for the copy.
         let plan = unsafe { &*plan };
         // SAFETY: Exact struct size establishes writable ABI V1 report storage.
-        unsafe { out.write(plan.state.resources) };
+        unsafe { out.write(plan.state.resources()) };
         plan.last_error.borrow_mut().clear();
         RESULT_OK
     })
@@ -1235,6 +1320,131 @@ mod tests {
             miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
                 if header.request_id.get() == 1
         ));
+
+        let mut invalid_event_storage = [0xa5_u8; 8];
+        let mut event_out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: invalid_event_storage.as_mut_ptr(),
+            capacity_bytes: invalid_event_storage.len() as u64,
+            required_bytes: 77,
+        };
+        assert_eq!(
+            // SAFETY: The live session and complete output descriptor remain valid.
+            unsafe { miso_engine_v2_dequeue_event(session, 2, &mut event_out) },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(event_out.required_bytes, 77);
+        assert_eq!(invalid_event_storage, [0xa5; 8]);
+        assert_eq!(
+            // SAFETY: The reliable lane is valid and currently empty.
+            unsafe {
+                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+            },
+            RESULT_OK
+        );
+        assert_eq!(event_out.required_bytes, 0);
+
+        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("capi-ffi-replaced")
+                .expect("stable ID"),
+        };
+        let mut structural_request = vec![0_u8; 4_096];
+        let structural_len = codec
+            .encode_command_frame_into(
+                &miso_engine_protocol::TypedCommandFrame {
+                    request_id: miso_engine_protocol::RequestId::new(2).expect("request"),
+                    expected_revision: miso_engine_protocol::ExpectedRevision::Exact(
+                        miso_engine_protocol::SessionRevision(42),
+                    ),
+                    payload: miso_engine_protocol::CommandPayload::SessionTransactionApply(
+                        core::slice::from_ref(&edit),
+                    ),
+                },
+                &mut structural_request,
+            )
+            .expect("structural command");
+        structural_request.truncate(structural_len);
+        response.required_bytes = 0;
+        response_bytes.resize(response.capacity_bytes as usize, 0xa5);
+        response_bytes.fill(0xa5);
+        assert_eq!(
+            // SAFETY: The structural request and admitted response storage are complete.
+            unsafe {
+                miso_engine_v2_submit_command(
+                    session,
+                    structural_request.as_ptr(),
+                    structural_request.len() as u64,
+                    &mut response,
+                )
+            },
+            RESULT_OK
+        );
+        let mut structural_fields = [0_u16; 64];
+        assert!(matches!(
+            codec
+                .decode_typed_response(
+                    &response_bytes[..response.required_bytes as usize],
+                    &mut miso_engine_protocol::DecodeScratch::new(&mut structural_fields),
+                )
+                .expect("structural response"),
+            miso_engine_protocol::DecodedTypedResponseFrame::Success { header, .. }
+                if header.revision == miso_engine_protocol::SessionRevision(43)
+        ));
+
+        event_out.data = ptr::null_mut();
+        event_out.capacity_bytes = 0;
+        event_out.required_bytes = 0;
+        assert_eq!(
+            // SAFETY: A zero-capacity query is valid and consumes no reliable event.
+            unsafe {
+                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+            },
+            RESULT_BUFFER_TOO_SMALL
+        );
+        let event_bytes = event_out.required_bytes as usize;
+        assert!(event_bytes > 1);
+        let mut short_event = vec![0xa5_u8; event_bytes - 1];
+        event_out.data = short_event.as_mut_ptr();
+        event_out.capacity_bytes = short_event.len() as u64;
+        assert_eq!(
+            // SAFETY: The one-short buffer is valid for its declared capacity.
+            unsafe {
+                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+            },
+            RESULT_BUFFER_TOO_SMALL
+        );
+        assert_eq!(event_out.required_bytes as usize, event_bytes);
+        assert!(short_event.iter().all(|byte| *byte == 0xa5));
+        let mut reliable_event = vec![0xa5_u8; event_bytes];
+        event_out.data = reliable_event.as_mut_ptr();
+        event_out.capacity_bytes = reliable_event.len() as u64;
+        assert_eq!(
+            // SAFETY: The exact retry buffer receives the complete pending event.
+            unsafe {
+                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+            },
+            RESULT_OK
+        );
+        let mut event_fields = [0_u16; 64];
+        assert!(matches!(
+            codec
+                .decode_typed_event(
+                    &reliable_event,
+                    &mut miso_engine_protocol::DecodeScratch::new(&mut event_fields),
+                )
+                .expect("reliable event"),
+            miso_engine_protocol::DecodedTypedEventFrame {
+                header,
+                payload: miso_engine_protocol::DecodedEventPayload::SessionCommitted(_),
+            } if header.revision == miso_engine_protocol::SessionRevision(43)
+        ));
+
+        assert_eq!(
+            // SAFETY: The next exact boundary applies the matched replacement plan.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 256, &output) },
+            RESULT_OK
+        );
 
         // SAFETY: Each independently owned child and engine is destroyed exactly once, quiescent.
         unsafe {

@@ -20,6 +20,9 @@ extern "C" {
 #define MISO_ENGINE_V2_RENDER_REJECTED UINT32_C(8)
 #define MISO_ENGINE_V2_INTERNAL UINT32_C(255)
 
+#define MISO_ENGINE_V2_EVENT_LANE_RELIABLE UINT32_C(0)
+#define MISO_ENGINE_V2_EVENT_LANE_LOSSY UINT32_C(1)
+
 #define MISO_ENGINE_V2_TAIL_FINITE UINT64_C(0)
 #define MISO_ENGINE_V2_TAIL_INFINITE UINT64_C(1)
 
@@ -187,6 +190,9 @@ uint32_t miso_engine_v2_submit_command(miso_engine_v2_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,
                                        miso_engine_v2_bytes_out *response);
+uint32_t miso_engine_v2_dequeue_event(miso_engine_v2_session *session,
+                                      uint32_t lane,
+                                      miso_engine_v2_bytes_out *event);
 uint32_t miso_engine_v2_render_f32_planar(miso_engine_v2_plan *plan,
                                           uint64_t absolute_sample,
                                           const miso_engine_v2_planar_output *output);

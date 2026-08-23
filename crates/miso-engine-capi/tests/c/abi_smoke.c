@@ -85,6 +85,10 @@ static uint32_t (*const submit_command_signature)(miso_engine_v2_session *,
                                                   uint64_t,
                                                   miso_engine_v2_bytes_out *) =
     miso_engine_v2_submit_command;
+static uint32_t (*const dequeue_event_signature)(miso_engine_v2_session *,
+                                                 uint32_t,
+                                                 miso_engine_v2_bytes_out *) =
+    miso_engine_v2_dequeue_event;
 static uint32_t (*const render_signature)(miso_engine_v2_plan *,
                                           uint64_t,
                                           const miso_engine_v2_planar_output *) =
@@ -121,6 +125,7 @@ int main(void) {
 
     return compile_session_signature == NULL || source_submit_signature == NULL ||
                    source_seek_signature == NULL || submit_command_signature == NULL ||
+                   dequeue_event_signature == NULL ||
                    render_signature == NULL || resources_signature == NULL ||
                    last_error_signature == NULL || session_destroy_signature == NULL ||
                    plan_destroy_signature == NULL

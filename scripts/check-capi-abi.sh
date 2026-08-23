@@ -61,6 +61,7 @@ fi
 printf '%s\n' \
     miso_engine_v2_abi_version \
     miso_engine_v2_compile_session \
+    miso_engine_v2_dequeue_event \
     miso_engine_v2_engine_create \
     miso_engine_v2_engine_destroy \
     miso_engine_v2_last_error \

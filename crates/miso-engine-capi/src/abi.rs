@@ -28,6 +28,11 @@ pub const RESULT_RENDER_REJECTED: u32 = 8;
 /// A panic or other internal failure was contained at the ABI boundary.
 pub const RESULT_INTERNAL: u32 = 255;
 
+/// Reliable event-egress lane. Events remain pending until copied completely.
+pub const EVENT_LANE_RELIABLE: u32 = 0;
+/// Explicitly lossy/coalescing telemetry event-egress lane.
+pub const EVENT_LANE_LOSSY: u32 = 1;
+
 /// A plan tail terminates after `tail_samples`.
 pub const TAIL_FINITE: u64 = 0;
 /// A plan tail is unbounded and reports zero `tail_samples`.
