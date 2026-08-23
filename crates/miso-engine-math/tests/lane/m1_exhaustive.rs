@@ -26,8 +26,21 @@
 //! The gate is 2 ulp, and the margin is what pays for `mul`/`add` instead of `fma`
 //! (`fma` would give `exp2` 1.191 ulp and `log2` no change; see `lane_math.rs`).
 //!
+//! **Red mutations**, each run exhaustively against the same oracle:
+//!
+//! | mutation | result |
+//! |---|---|
+//! | `EXP2_P[5]` + 1e-6 | `exp2_lane` 2.103 ulp at `x = -0.48641285`, 4 decreasing steps — over the gate |
+//! | `LOG2_P[8]` + 1e-5 | `log2_lane` 35.61 ulp at `x = 1.4136208`, 64 decreasing steps — over the gate |
+//! | Cephes fold removed (reduce to `[0, 1)` keeping the same coefficients) | `exp2_lane` 95.01 ulp at `x = -0.00026169422` — over the gate |
+//! | Cephes summation reassociated to `(y + x) * LOG2EA + (y + x)` | `log2_lane` 1.938 ulp — still inside the gate, but two thirds of the margin gone, which is why the summation order is frozen above |
+//!
+//! `LOG2_P[8]` + 1e-6 reaches only 1.722 ulp and stays inside the gate; that is a property of the
+//! polynomial, not a hole in the sweep, and it is why the gate is a bound rather than a pin.
+//!
 //! Memory note: the sweep iterates ranges of `u32`. Never collect the patterns — 2^31 `u32`s is
-//! 8 GB.
+//! 8 GB. Each thread starts its monotonicity chain fresh, so one consecutive pair per thread
+//! boundary goes unchecked — a handful out of four billion.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -100,10 +113,14 @@ fn sweep_range(
             result.worst_bits = bits;
         }
 
-        // Monotonicity: within one contiguous run of bit patterns of the same sign, increasing
-        // patterns mean increasing values, and both functions are non-decreasing there.
+        // Monotonicity. Both functions are non-decreasing on their whole domain. Increasing bit
+        // patterns mean increasing values in the positive half and *decreasing* values in the
+        // negative half, so both directions are checked: testing only `previous_x < x` would leave
+        // every negative argument unchecked.
         if let Some((previous_x, previous_y)) = previous {
-            if previous_x < x && previous_y > got {
+            let decreased =
+                (previous_x < x && previous_y > got) || (previous_x > x && previous_y < got);
+            if decreased {
                 result.non_monotone += 1;
             }
         }
