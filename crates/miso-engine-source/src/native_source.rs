@@ -413,10 +413,13 @@ pub enum NativeSourceWorkerEvent {
     },
 }
 
-/// Worker terminal state returned after an off-render join.
+/// Exact per-job terminal reason embedded in [`NativeSourceWorkerEvent::Terminal`].
+///
+/// The shared set worker join uses the same type for its set-level result: an explicit set stop
+/// returns [`Self::Stopped`], while isolated per-job failures are observed through their events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeSourceWorkerExit {
-    /// Explicit stop or controller disconnect stopped the worker.
+    /// Explicit set stop ended a live job or the shared worker.
     Stopped,
     /// File/decoder work failed outside render.
     DecodeFailed(NativeWaveError),
@@ -582,6 +585,7 @@ struct SourceJob<R: Read + Seek> {
     sanitation: u64,
     render_wait: Duration,
     terminated: Option<NativeSourceWorkerExit>,
+    #[cfg(feature = "test-support")]
     audit_gate: Option<WorkerAuditGate>,
     #[cfg(feature = "test-support")]
     audit_resume_after_submit: bool,
@@ -871,7 +875,9 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
     resolver: &mut S,
     request: NativeSourcePrepareRequest,
     caps: NativeSourcePrepareCaps,
-    audit_gate: Option<WorkerAuditGate>,
+    #[cfg_attr(not(feature = "test-support"), allow(unused_variables))] audit_gate: Option<
+        WorkerAuditGate,
+    >,
 ) -> Result<UnstartedNativeSource<S::Asset>, NativeSourcePrepareError> {
     let mut asset = resolver
         .resolve(&request.locator)
@@ -940,6 +946,7 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
             sanitation: 0,
             render_wait,
             terminated: None,
+            #[cfg(feature = "test-support")]
             audit_gate,
             #[cfg(feature = "test-support")]
             audit_resume_after_submit: false,
@@ -1330,7 +1337,7 @@ fn worker_render_wait(
 
 fn service_job<R: Read + Seek>(
     job: &mut SourceJob<R>,
-    stop: &mut Consumer<()>,
+    #[cfg_attr(not(feature = "test-support"), allow(unused_variables))] stop: &mut Consumer<()>,
 ) -> Result<Idle, NativeSourceWorkerExit> {
     let mut idle = Idle::WaitingForCommand;
     let mut latest_seek = None;
