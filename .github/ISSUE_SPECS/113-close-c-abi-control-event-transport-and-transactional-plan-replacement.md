@@ -1,99 +1,61 @@
 # 113 Close C ABI control/event transport and transactional plan replacement
 
-## Outcome and readiness
+## Terminal decision
 
-Complete the launch C ABI control product omitted from immutable Issue 022: expose the accepted
-Issue-005 command/response/event contract and publish structurally edited sessions as complete
-replacement plans at render block boundaries with bounded off-render retirement.
+**TERMINAL ARCHITECTURE STOP / NO IMPLEMENTATION / NO OVERALL PASS.** The stateless readiness audit
+proved that this issue's exact atomicity gate is not implementable through its frozen CAPI plus
+single core-seam boundary. Sol High made no implementation edit. Sol XHigh confirmed the STOP
+before pass 1 rather than copying accepted protocol semantics or weakening the transaction.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One implementation pass plus one bounded HOLD correction is the
-complete budget. A second HOLD stops. Benchmark, timing and real workload counts are zero and must
-remain zero.
+The audited clean baseline was commit `b5be8148b7651024307eca17b664b09a07a13122`, tree
+`cef7922aff699afb292e22fa13953356aa875753`. No Cargo/build, benchmark, timing, workload, render,
+audio, fuzz, Git or GitHub mutation was run. Benchmark, timing and real-workload counters are
+`0/0/0`.
 
-Read-only boundary inspection found remote Issue 113 unallocated. Root must create/synchronize it
-under this exact title after the docs checkpoint is upstream. This record makes no GitHub change.
+## Dependencies and successor
 
-## Dependencies by exact accepted title
+The stopped shape followed these exact accepted dependencies:
 
 - **Transport-neutral binary control protocol** (Issue 005)
 - **Real-time memory, buffers, queues, and plan lifetime** (Issue 003)
 - **Stable C ABI and host-fed planar PCM render** (Issue 022)
 
-Issue 025, **Optional binary WebSocket sidecar**, follows this issue. The reference runner in Issue
-073 is independent and does not gate this product.
+The stateless successor is Issue 117, **Complete C ABI transactions with two-phase protocol and
+plan reservations**. Issue 113 is readiness evidence only and is not an accepted dependency. Issue
+025 consumes accepted Issue 117 directly. Issue 114 waits for accepted Issues 116 and 117.
 
-## Frozen product slice
+## Confirmed architecture blocker
 
-Preserve ABI V1 version and every existing symbol/struct field. Add only an event-egress function
-whose hand-written C signature uses the existing opaque session handle and
-`miso_engine_v2_bytes_out`, plus a fixed `uint32_t` lane selector for reliable or lossy Issue-005
-events. Invalid selector is invalid argument; empty is OK with `required_bytes = 0`; too-small
-output reports the exact required length and consumes nothing. Reliable events are never silently
-dropped; lossy meter/counter events retain the accepted coalescing/drop-counter semantics. No Rust
-layout, callback or allocator crosses C.
+The accepted `ProtocolController::process_command_frame_into` is an irreversible one-shot path. It
+performs replay preflight/reservation, dispatches the command, writes the response and completes
+replay. For a structural transaction, `execute_decoded_command` reserves event/cancellation rows,
+then `SessionStore::apply_transaction` commits the compiled session/model/revision before the
+reliable event and replay completion are committed. There is no prospective transaction token,
+prepare/commit split, rollback, snapshot or external publication hook.
 
-Replace the capability-only C provider with the accepted bounded `ProtocolController` and one
-C-specific provider over canonical typed session state. `submit_command` retains exact request-ID,
-revision, replay, response and diagnostic bytes from Issue 005. It must reserve response, reliable
-event, replacement and retirement capacity before visible mutation. Malformed/unsupported/stale/
-backpressured commands leave revision, canonical session, source routing and live plan unchanged.
+The accepted `PlanPublisher` exposes only fallible publication. Retirement admission remains a
+render-boundary operation in `RealtimePlanOwner::enter_block`; the control side has no publication
+reservation/cancel token and cannot pre-reserve the displaced plan's bounded retirement capacity.
+Therefore neither possible order satisfies the frozen gate:
 
-### Transaction and plan lifecycle
+- protocol first can commit session/revision/event/replay before plan publication or retirement
+  admission fails; and
+- plan first can publish a replacement before protocol response/replay/session commit fails.
 
-Nonstructural transport/parameter/automation commands update only their accepted bounded control/
-event queues. A committed structural transaction performs this exact off-render order:
+Reimplementing or copying the controller transaction in CAPI would create a second protocol and
+was expressly forbidden. Adding the missing protocol and core reservations exceeded Issue 113's
+allowed product boundary. This is an architecture STOP, not evidence of a product regression in
+accepted Issues 003, 005 or 022.
 
-1. decode and validate the complete Issue-005 transaction against the current canonical model;
-2. create the prospective strict typed session and canonical TOML in scratch;
-3. prepare every required host-source producer/consumer endpoint and compile a complete replacement
-   `PreparedRenderPlan` under the compile-time limits;
-4. reserve the response/reliable-event/replay rows and a publication plus retirement slot;
-5. publish the complete plan for the next block boundary; and only on accepted publication commit
-   the new revision, canonical model, source-provider epoch and response/event/replay state; and
-6. reclaim the displaced plan and its matching retired source-provider epoch only through the
-   control-side retirer, never on render.
+## Preserved contract and non-evidence
 
-Publication/retirement backpressure returns the accepted typed backpressure without partial
-commit. Host submission after commit addresses the new provider epoch; the old provider remains
-alive until its matching displaced plan is reclaimed. No render call allocates/frees, locks,
-decodes, logs, performs I/O or waits. Destroy is off-render and drains/reclaims only after caller
-quiescence. Resource reports include every new fixed controller/event/replay/publication/provider-
-epoch byte and one-byte-below limits reject before either original child publishes.
+The original required outcome remains useful input for Issue 117: byte-exact Issue-005 C command,
+response and event transport; prospective strict-session compilation; matched source-provider
+epochs; next-boundary complete-plan replacement; bounded off-render retirement; exact typed
+backpressure; and no visible mutation on any failed phase. Existing ABI V1 layouts and symbols,
+protocol wire/event/replay bytes, render constraints, session schema, sources, graph/DSP/effects,
+runner and host products remain frozen.
 
-## Acceptance gates
-
-- All accepted Issue-005 command families and six event families traverse caller-owned C buffers
-  with byte-exact Rust/C parity, exact replay and revision behavior, reliable/lossy ordering and
-  stable result/diagnostic classification.
-- Representative source-preserving and source-changing structural transactions prove pre-boundary
-  old-plan output, next-boundary new-plan output, canonical snapshot equality and exact source epoch
-  routing. Full retirement defers without mutation; later reclamation drops plan/providers only off
-  render. Serial replacements preserve order.
-- Every failure phase—decode, semantic validation, session encode, source preparation, compile,
-  response/event/replay reservation, publication and retirement capacity—proves atomic session,
-  source, revision and plan state plus by-value disposal of provisional allocations.
-- Allocation/syscall/drop audits arm render across steady state and replacement boundaries; exact
-  limit/resource rows, long counts without a compiled track ceiling, C11 layout/symbol smoke and
-  Wasm exclusion pass. No benchmark, timer or listening gate is permitted.
-
-## Allowed paths
-
-Product edits are limited to `crates/miso-engine-capi/**` and the minimum sealed orchestration seam
-inside `crates/miso-engine-core/src/realtime/**` if the accepted exchange cannot carry the matched
-source-provider retirement epoch. Focused tests may use `crates/miso-engine-protocol` only without
-changing its accepted wire/semantics. Root manifests/lock, C ABI docs, exact C ABI checker/policy
-mutations and this issue's routing/evidence docs are permitted.
-
-No source decoder behavior, graph/DSP/session schema, protocol bytes/opcode/diagnostic registry,
-runner, host application, browser/mobile adapter, benchmark or timing change. A need to edit those
-contracts is STOP/rescope.
-
-## Checkpoint and evidence policy
-
-Checkpoint 1 freezes the additive C event API, controller/provider and exhaustive byte/diagnostic/
-resource tests. Checkpoint 2 freezes transactional replacement, provider-epoch retirement and
-realtime/atomicity evidence. Sol High stops after each coherent focused-green tranche for Sol XHigh
-review; the one-pass budget covers both planned checkpoints, not two attempts. Record exact paths,
-hashes, counts and zero prohibited invocations. Overall PASS requires the complete focused product
-and a clean proportional nonbenchmark seal; it does not wait for Issue 114.
+No focused implementation checkpoint, test result, qualification result or remote synchronization
+is claimed for Issue 113. Its only accepted output is this candid STOP and the bounded Issue-117
+route.

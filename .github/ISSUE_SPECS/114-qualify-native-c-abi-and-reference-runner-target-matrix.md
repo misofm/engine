@@ -5,7 +5,7 @@
 Qualify the completed native C ABI control/render product and WAV/RF64 reference runner across the
 launch native target boundary without changing product bytes or rerunning descriptive benchmarks.
 
-**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 116 AND 113.** Sol High implements; Sol XHigh
+**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 116 AND 117.** Sol High implements; Sol XHigh
 briefs and verifies. One pass plus one bounded HOLD correction is the complete budget. A second HOLD
 stops. Benchmark/timing counts are zero and must remain zero.
 
@@ -16,18 +16,22 @@ under this exact title after the docs checkpoint is upstream. This record makes 
 
 - **Seal portable native PCM runner under an explicit output-directory ownership contract**
   (Issue 116)
-- **Close C ABI control/event transport and transactional plan replacement** (Issue 113)
+- **Complete C ABI transactions with two-phase protocol and plan reservations** (Issue 117)
 
 Stopped **Close portable native PCM runner publication and seal the reference tool** (Issue 115)
 contributes technical input through accepted Issue 116 only; it is not a dependency and cannot be
 qualified here.
 
+Stopped **Close C ABI control/event transport and transactional plan replacement** (Issue 113)
+contributes only the architecture/readiness finding consumed by Issue 117. It is not an accepted
+dependency and cannot be qualified here.
+
 This issue gates **End-to-end release, performance, and listening qualification** (Issue 026). It
-does not gate Issue 025, which consumes Issue 113 directly.
+does not gate Issue 025, which consumes accepted Issue 117 directly.
 
 ## Qualification-only matrix
 
-Freeze the accepted #116/#113 candidate before implementation and pin the installed header, static/
+Freeze the accepted #116/#117 candidate before implementation and pin the installed header, static/
 shared libraries, runner binary/source, Cargo locks, fixture manifests and protocol/session corpora.
 No product correction is permitted here.
 

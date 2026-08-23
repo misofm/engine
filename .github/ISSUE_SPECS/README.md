@@ -102,13 +102,16 @@ TOCTOU. Issue 115, **Close portable native PCM runner publication and seal the r
 then stopped at its terminal second HOLD: its explicit adapters compile, but the visible named
 partial cannot be identity-conditionally unlinked against a concurrent same-privilege directory
 mutator. Issue 116, **Seal portable native PCM runner under an explicit output-directory ownership
-contract**, consumes that technical checkpoint, freezes exclusive caller ownership during the
-invocation, and owns portable no-replace publication plus the fresh full runner seal. Issue 113,
-**Close C ABI control/event transport and transactional plan replacement**,
-follows accepted Issues 005, 003 and 022 and owns the complete control provider, event egress and
-replacement-plan product; it gates Issue 025 directly. Issue 114, **Qualify native C ABI and
-reference runner target matrix**, joins accepted Issues 116 and 113 and alone owns native platform/runner
-qualification before Issue 026. Issues 101 and 112 change no public/resource shape and defer the
+contract**, completed that technical checkpoint under exclusive caller ownership during the
+invocation and sealed portable no-replace publication with Sol XHigh PASS. Issue 113, **Close C ABI
+control/event transport and transactional plan replacement**, stopped at architecture readiness:
+the accepted controller has no two-phase token and the accepted plan exchange has no publication/
+retirement reservation, so neither ordering can meet atomicity. Issue 117, **Complete C ABI
+transactions with two-phase protocol and plan reservations**, consumes accepted Issues 005, 003
+and 022 plus that stopped finding and owns the missing protocol/core seams and CAPI completion; it
+gates Issue 025 directly. Issue 114, **Qualify native C ABI and reference runner target matrix**,
+joins accepted Issues 116 and 117 and alone owns native platform/runner qualification before Issue
+026. Issues 101 and 112 change no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
 not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, stopped

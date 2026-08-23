@@ -1,42 +1,30 @@
 # Sol implementation brief — issue 113 C ABI control and plan replacement
 
-## Decision
+## Terminal verdict
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Add the smallest ABI V1
-completion that makes the accepted Issue-005 controller usable from C and applies structural edits
-through the accepted bounded plan-exchange lifecycle. Sol High implements; Sol XHigh verifies. One
-pass plus one bounded HOLD correction; second HOLD stops. No benchmark, timing or workload.
+**TERMINAL ARCHITECTURE STOP / NO IMPLEMENTATION / NO OVERALL PASS.** Sol XHigh's stateless audit
+confirmed Sol High's blocker before pass 1. The accepted protocol controller has no prospective
+prepare/commit/cancel token: structural dispatch commits `SessionStore`, reliable event and replay
+state inside its one-shot command path. The accepted plan exchange has no control-side publication
+reservation/cancel token, and retirement capacity is admitted only by the render owner at a block
+boundary.
 
-Direct accepted dependencies are **Transport-neutral binary control protocol** (005), **Real-time
-memory, buffers, queues, and plan lifetime** (003), and **Stable C ABI and host-fed planar PCM
-render** (022). This issue gates **Optional binary WebSocket sidecar** (025). Issue 073 is independent.
+Protocol-first ordering can leave a committed session without its plan; plan-first ordering can
+leave a published plan without its protocol/session commit. Copying accepted controller semantics
+into CAPI is forbidden. The required atomic transaction is therefore impossible within Issue 113's
+frozen CAPI plus one core-seam allowance.
 
-## Frozen API and ordering
+The clean audit baseline was `b5be8148b7651024307eca17b664b09a07a13122`, tree
+`cef7922aff699afb292e22fa13953356aa875753`. Sol High made no implementation edit. All benchmark,
+timing and real-workload counters remain zero; no build or execution evidence is claimed.
 
-Keep ABI V1 and existing layouts/symbols. Add one hand-written event dequeue symbol using session,
-the existing `bytes_out`, and a fixed reliable/lossy selector. Buffer-too-small and empty dequeue
-must not consume. Use the accepted `ProtocolController`; do not copy its wire, replay, revision,
-diagnostic or event policies.
+## Successor route
 
-For structural transactions: decode/validate -> prospective typed session/canonical TOML -> prepare
-source endpoints -> compile complete plan -> reserve response/event/replay/publication/retirement ->
-publish for next boundary -> atomically commit revision/model/provider epoch. Any failure leaves all
-live state unchanged. Old source producers live with their matching old plan epoch until the
-control-side retirer reclaims it. Full retirement defers. Render performs no destruction or other
-forbidden work.
+Issue 117, **Complete C ABI transactions with two-phase protocol and plan reservations**, consumes
+the exact accepted Issues 005, 003 and 022 plus this stopped readiness record. It alone may add the
+narrow protocol transaction token and core publication/retirement reservation needed before CAPI
+integration. Issue 113 supplies technical reasoning only, not an accepted product checkpoint.
 
-Nonstructural commands keep their accepted bounded queue behavior. Host submissions route to the
-committed provider epoch only. Resource reports and limits include every new fixed allocation; no
-lazy growth or implicit track ceiling.
-
-## Evidence and fence
-
-Prove byte-exact C/Rust parity for all commands/events, replay/revision and reliable/lossy behavior;
-source-preserving/source-changing replacements; boundary output; serial order; every reservation/
-compile/publication failure; disposal; allocation/drop/syscall safety; C11 layout/symbols; and clean
-limits. Run proportional nonbenchmark gates only.
-
-Edit `miso-engine-capi/**`, at most one sealed core realtime epoch-retirement seam, minimal
-manifest/lock and exact checker/policy/docs rows. The accepted protocol/session/source/graph/DSP
-contracts, runner and hosts are frozen. Hand off coherent controller/API and replacement checkpoints
-within the same implementation pass.
+Accepted Issue 117 gates **Optional binary WebSocket sidecar** (025). **Qualify native C ABI and
+reference runner target matrix** (114) waits on accepted Issues 116 and 117. Do not resume Issue
+113, weaken atomicity, duplicate protocol behavior or claim PASS.
