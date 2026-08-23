@@ -2,9 +2,10 @@
 
 ## Decision
 
-**READY / SOL XHIGH PASS.** Implement the smallest independent F1 slice only. Canonical TOML must
-round-trip every finite `f32` through direct `f32` and `f64`-then-cast parsing while preserving
-`-0.0`. One exhaustive release invocation is authorized after all other gates are green.
+**F1 COMPLETE / SOL XHIGH PASS.** Sol High candidate `0acfbc8` passed the smallest independent F1
+slice on attempt 1. Canonical TOML round-trips every finite `f32` through direct `f32` and
+`f64`-then-cast parsing while preserving `-0.0`. The exhaustive release gate ran exactly once
+after all other gates were green, with zero retries.
 
 ## Exact implementation
 
@@ -32,3 +33,11 @@ benchmark, fuzz, timing or target matrix.
 
 Stop on any unexpected finite mismatch, fallback count other than two, maximum length over 50,
 fixture delta, or consumed exhaustive-runner failure. Do not add special cases or loosen gates.
+
+## Final evidence
+
+`0acfbc87d59e3472b1216beddaa484cdc6529d3e` (tree `76eb7047bdfa5682fe302ac7c494982955301cf3`)
+received strict Sol XHigh PASS. The one exhaustive run covered all `2^32` patterns with zero
+mismatch, fallbacks only at `0x15ae43fd` and `0x95ae43fd`, and maximum length 48. All five red
+mutations failed and were reverted; ordinary workspace/policy/fixture gates passed; fixtures and
+the size estimate remained unchanged. Issue 107 stays open for later findings.

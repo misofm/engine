@@ -6,10 +6,10 @@ Close audit finding F1: canonical TOML must be a bit-exact inverse for every fin
 through both direct `f32` parsing and the session parser's `f64`-then-cast path, while preserving
 the sign of zero.
 
-**READY / SOL XHIGH BRIEF PASS.** This dependency-free Step-0 slice was rebriefed on 2026-08-23
-against `main` at `97e1a03`. It is independent of graph Issue 123 and multiband Issue 94. One
-exhaustive `2^32` release sweep is authorized only after all non-exhaustive gates are green; it may
-not be retried or tuned. Issue 107 remains open afterward for later audit findings.
+**F1 COMPLETE / SOL XHIGH PASS.** This dependency-free Step-0 slice was rebriefed on 2026-08-23
+against `main` at `97e1a03`. Sol High implemented it at `0acfbc8` and Sol XHigh returned strict
+PASS on attempt 1. The one exhaustive `2^32` release sweep ran only after all non-exhaustive gates
+were green and was not retried or tuned. Issue 107 remains open for later audit findings.
 
 ## Defect and canonical law
 
@@ -159,3 +159,50 @@ keep it open for later waves.
 
 Later Issue-107 validation/allocation findings; parser or public schema changes; fixture changes;
 render behavior; benchmarks, timing, fuzzing, target matrix or performance claims.
+
+## F1 implementation and Sol XHigh evidence — 2026-08-23
+
+Sol High candidate `0acfbc87d59e3472b1216beddaa484cdc6529d3e` (tree
+`76eb7047bdfa5682fe302ac7c494982955301cf3`) received strict Sol XHigh PASS on attempt 1. Its
+exact binary diff SHA-256 from the rebrief checkpoint is
+`42f78cca153226ef68d1de2fcb64121f3345437ec917338771a6fe51a35eaca9`.
+
+Exact changed paths and SHA-256 identities are:
+
+- `crates/miso-engine-session/src/value.rs`:
+  `4f6ec6f76648b5a1c4352f5753339d246057f76308531b15d16d4c804adb8aed`;
+- `crates/miso-engine-session/src/canonical.rs`:
+  `7d94bea4510eee72c1a74f43cb08fc19455a56cc3a1eae88ce37ee8779a16532`;
+- `crates/miso-engine-session/tests/canonical_schema.rs`:
+  `d3c5c8cd3ead3d6b2a73d1fb79f0072a46e2a1e12e663c2e33a4c1632f5cbe6f`;
+- `docs/SESSION_SCHEMA_V1.md`:
+  `48dc22dc372df905aefc4dc938040138ef69c3f18dc07db1ce63c3c99126f488`.
+
+All 19 canonical float sites use `write_f32`. The independently checked exact-f64 fallbacks are
+`0x15ae43fd -> 0.00000000000000000000000007038530691851209` and
+`0x95ae43fd -> -0.00000000000000000000000007038530691851209`; normal values retain shortest f32
+Display. Direct and f64-then-f32 parsing, `.0` identity, writer `-0.0` and `bounded_f32(-0.0)` all
+preserve exact bits.
+
+The directed gate and 10,000,000-pattern gate passed. After every ordinary command was green, the
+ignored exhaustive release gate ran exactly once over all `2^32` patterns using `u64` partitions:
+zero mismatch, exactly two fallbacks and maximum spelling length 48. Invocation count is one and
+retry count zero; Sol XHigh did not rerun it.
+
+The signed-zero/double-rounding session reparsed, compiled and recanonicalized bit-exactly. The
+ten-field maximal-float session proved the existing canonical size estimate sufficient, so
+`estimate.rs` did not change. The three canonical fixtures recanonicalized byte-exactly. The
+intentionally noncanonical parametric-EQ fixture remained exactly 9,475 bytes with its frozen
+FNV-1a identity, and the exact Git fixture diff was empty. No fixture was re-pinned.
+
+Executed/reverted mutations removed fallback (`0x15ae43fd` became `0x15ae43fe` through session
+parsing), folded writer zero, folded bounded zero, removed `.0`, and changed a surrounding
+canonical separator. Their E1/E4/fixture gates failed exactly as intended; no mutation remains.
+
+PASS commands include release value tests, canonical-schema tests, formatting, warning-denied
+workspace all-target/all-feature Clippy, full workspace all-target tests, warning-denied rustdoc,
+session/workspace policies and mutation tests, diff check and exact fixture diff. No benchmark,
+fuzz, timing or target-matrix invocation ran.
+
+This evidence completes only Issue-107 F1. Later session findings remain open; Issue 107 must not
+close at this checkpoint.
