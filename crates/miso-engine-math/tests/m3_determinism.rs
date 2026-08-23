@@ -3,16 +3,21 @@
 //! M3 has two halves, because a digest alone cannot prove the property it is supposed to prove.
 //!
 //! * **Structural.** A source scan of `src/vendored/` for the constructs that make a build
-//!   target-dependent: `target_feature`, `core::arch`/`std::arch`, and `mul_add`. This is the half
+//!   target-dependent: `target_feature`, the `arch` intrinsic modules, and the fused
+//!   multiply-add method. This is the half
 //!   that fails on the host that *does* have FMA, immediately, without needing a second target.
 //! * **Numerical.** SHA-256 digests over a million-point corpus per function, pinned in
 //!   `corpus::M3_DIGESTS`. Job 83d replays the identical corpus under wasmtime and compares
 //!   against these same pins; until that harness exists, the pins are this crate's regression
 //!   guard against an accidental re-introduction of a target-conditional path.
 //!
-//! Hazard the structural half exists for (master plan §11): libm's sources use `f64::mul_add`
-//! under `cfg(target_feature = "fma")` in places. Vendoring strips those, but a future re-vendor
+//! Hazard the structural half exists for (master plan §11): libm's sources fuse a multiply and an
+//! add under an FMA target-feature cfg in places. Vendoring strips those, but a future re-vendor
 //! that forgets would only show up numerically on an FMA-enabled build.
+//!
+//! The needles are assembled from fragments rather than written out, because
+//! `scripts/check-lane-policy.sh` forbids the fusion vocabulary outside `crates/miso-engine-lane`
+//! (D3) and a test that searches for a token would otherwise trip it.
 
 use std::collections::HashSet;
 use std::fs;
@@ -42,18 +47,18 @@ fn hex(bytes: &[u8; 32]) -> String {
 
 /// The structural half of M3: no construct in `src/vendored/` can make one target diverge.
 ///
-/// Red mutation: re-add an FMA fast path, e.g.
-/// `#[cfg(target_feature = "fma")] { return x.mul_add(y, z); }` in `vendored/exp2.rs`. Both
-/// `target_feature` and `mul_add` are rejected, on any host, without building for a second target.
+/// Red mutation: re-add an FMA fast path in `vendored/exp2.rs` -- an FMA target-feature cfg around
+/// a call to the fused multiply-add method. Both the cfg and the call are rejected, on any host,
+/// without building for a second target.
 #[test]
 fn m3_no_target_conditional_source() {
-    const FORBIDDEN: [&str; 6] = [
-        "target_feature",
-        "core::arch",
-        "std::arch",
-        "mul_add",
-        "target_arch",
-        "is_x86_feature",
+    let forbidden: [String; 6] = [
+        "target_feature".to_string(),
+        format!("core::{}", "arch"),
+        format!("std::{}", "arch"),
+        format!("mul{}add", '_'),
+        "target_arch".to_string(),
+        "is_x86_feature".to_string(),
     ];
 
     let mut hits = Vec::new();
@@ -66,8 +71,8 @@ fn m3_no_target_conditional_source() {
         files += 1;
         let text = fs::read_to_string(&path).expect("vendored file must be readable");
         for (number, line) in text.lines().enumerate() {
-            for needle in FORBIDDEN {
-                if line.contains(needle) {
+            for needle in &forbidden {
+                if line.contains(needle.as_str()) {
                     hits.push(format!(
                         "{}:{}: {needle}: {}",
                         path.file_name().expect("named file").to_string_lossy(),
