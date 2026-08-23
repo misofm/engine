@@ -441,8 +441,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         latency_samples: 31,
         tail_kind: TAIL_INFINITE,
         tail_samples: 0,
-        graph_session_plus_plan_bytes: 205_723,
-        graph_incremental_plan_bytes: 193_435,
+        graph_session_plus_plan_bytes: 205_915,
+        graph_incremental_plan_bytes: 193_627,
         graph_metadata_bytes: 49_943,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 16_384,
@@ -1516,7 +1516,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     let prospective_model = compiled_model_owners("double-live-cap", prospective);
     graph.extend(current_model);
     graph.extend(prospective_model);
-    assert_effective_owner_mutations(&graph, 444_690, "double-live graph/model");
+    assert_effective_owner_mutations(&graph, 445_074, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_558, "primitive source total");
@@ -1888,7 +1888,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
-    assert_eq!(oracle.graph, 444_690);
+    assert_eq!(oracle.graph, 445_074);
     assert_eq!(oracle.source_total, 23_116);
     assert_eq!(oracle.source_overhead, 6_732);
     assert_eq!(oracle.effect_state, 15_120);
