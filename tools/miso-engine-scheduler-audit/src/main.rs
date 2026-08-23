@@ -68,7 +68,7 @@ fn main() {
     let initial = q128_fixture(39_901);
     let replacement = q128_fixture(39_902);
     assert_eq!(initial.metadata, replacement.metadata);
-    assert_eq!(initial.report.sha256, replacement.report.sha256);
+    assert_eq!(initial.graph_sha256, replacement.graph_sha256);
     assert!(initial.pdc_samples > 0);
     assert!(initial.prepared_builtin_bank_count > 0);
     // #86 F3: every post-input node is a bank member on a vector host; the last bank of the

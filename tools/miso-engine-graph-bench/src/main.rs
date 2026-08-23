@@ -293,15 +293,21 @@ fn run_once(fixture: &Fixture) -> Sample {
     })
     .unwrap_or_else(|failure| panic!("benchmark graph: {:?}", failure.diagnostics));
     let graph_compile_ns = compile_started.elapsed().as_nanos();
+    // #99 F5: the evidence payload is produced here, strictly AFTER `graph_compile_ns` has been
+    // taken. Before this it was built inside `GraphCompiler::compile`, so every compile -- and
+    // therefore this number -- carried a multi-megabyte canonical dump, its SHA-256 and a
+    // Graphviz string that no production caller ever read. The record still reports its sizes and
+    // hash, because the benchmark's jq validators pin them; they are just no longer timed.
     let report = artifact.report;
-    black_box((&report.canonical_debug_bytes, &report.dot));
+    let evidence = GraphCompiler::evidence(&artifact.graph, &report);
+    black_box((&evidence.canonical_bytes, &evidence.dot));
     Sample {
         total_ns: total.elapsed().as_nanos(),
         effect_prepare_ns,
         graph_compile_ns,
-        graph_sha256: report.sha256,
-        canonical_debug_bytes: report.canonical_debug_bytes.len(),
-        dot_bytes: report.dot.len(),
+        graph_sha256: evidence.sha256,
+        canonical_debug_bytes: evidence.canonical_bytes.len(),
+        dot_bytes: evidence.dot.len(),
         estimate: report.estimate,
     }
 }
@@ -620,7 +626,8 @@ mod tests {
         .unwrap_or_else(|failure| panic!("benchmark fixture: {:?}", failure.diagnostics));
         assert_eq!(artifact.report.estimate.routes, 1_024);
         assert_eq!(artifact.report.estimate.effects, 64);
-        assert!(!artifact.report.canonical_debug_bytes.is_empty());
-        assert!(!artifact.report.dot.is_empty());
+        let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
+        assert!(!evidence.canonical_bytes.is_empty());
+        assert!(!evidence.dot.is_empty());
     }
 }

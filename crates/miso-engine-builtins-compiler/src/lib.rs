@@ -1085,6 +1085,15 @@ fn forged_request_seal() -> MeterRequestSeal {
 impl<R> PreparedBuiltinsGraphArtifact<R> {
     /// Immutable caller-owned graph report.
     #[must_use]
+    /// The sealed graph, by shared reference.
+    ///
+    /// Read-only, and deliberately so: #99 F5 stopped `GraphCompileReport` from carrying its own
+    /// copy of the plan's vectors, so the callers that used to read them from the report read
+    /// them here instead. The seal's compile-fail doctests still hold -- a `&` cannot extract,
+    /// clone or mutate the artifact's provenance.
+    pub const fn graph(&self) -> &PreparedGraphPlan {
+        &self.graph
+    }
     pub const fn report(&self) -> &R {
         &self.report
     }

@@ -208,6 +208,9 @@ mod native {
         pub plan: miso_engine_core::realtime::PreparedRenderPlan,
         pub metadata: NativeGraphPreparedMetadataV1,
         pub report: GraphCompileReport,
+        /// The semantic graph hash, taken while the artifact still owned its plan (#99 F5): the
+        /// report no longer carries it, and the plan is consumed into `plan` on the way out.
+        pub graph_sha256: String,
         pub pdc_samples: u64,
         pub prepared_builtin_bank_count: usize,
         pub prepared_builtin_bank_member_count: usize,
@@ -472,7 +475,10 @@ mod native {
             return Err("q128.builtin_bank".to_owned());
         }
         let report = artifact.report().clone();
-        let pdc_samples = report
+        let graph_sha256 = GraphCompiler::sha256(artifact.graph(), artifact.report());
+        // #99 F5: the plan owns the schedule vectors; the report no longer duplicates them.
+        let pdc_samples = artifact
+            .graph()
             .inserted_delays
             .iter()
             .map(|delay| delay.samples.0)
@@ -545,6 +551,7 @@ mod native {
             plan: bound.prepared.into_plan(),
             metadata,
             report,
+            graph_sha256,
             pdc_samples,
             prepared_builtin_bank_count,
             prepared_builtin_bank_member_count,
@@ -689,8 +696,8 @@ mod tests {
             let mut sequential = fixture(rate, 1, Q128RenderMode::Sequential, 39_001);
             let mut two_lane = fixture(rate, 2, Q128RenderMode::DependencyWaves, 39_002);
             let mut four_lane = fixture(rate, 4, Q128RenderMode::DependencyWaves, 39_003);
-            assert_eq!(sequential.report.sha256, two_lane.report.sha256);
-            assert_eq!(sequential.report.sha256, four_lane.report.sha256);
+            assert_eq!(sequential.graph_sha256, two_lane.graph_sha256);
+            assert_eq!(sequential.graph_sha256, four_lane.graph_sha256);
             assert_eq!(sequential.pdc_samples, two_lane.pdc_samples);
             assert_eq!(sequential.pdc_samples, four_lane.pdc_samples);
             assert!(sequential.pdc_samples > 0);

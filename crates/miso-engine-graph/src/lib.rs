@@ -644,6 +644,11 @@ impl PreparedGraphPlan {
         self.builtin_banks = banks;
         Ok(self)
     }
+    /// The prepared route transforms, by shared reference (#99 F5).
+    #[must_use]
+    pub fn routes(&self) -> &[PreparedRoute] {
+        &self.routes
+    }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
         Self {
             plan_id: parts.plan_id,
