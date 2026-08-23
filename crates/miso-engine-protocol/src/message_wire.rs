@@ -110,6 +110,10 @@ pub struct Capabilities<'a> {
 }
 
 /// Borrowed strict decode view of a capabilities response's packed ID fields.
+///
+/// This remains distinct from [`Capabilities`] for workspace source compatibility: existing
+/// consumers construct `Capabilities` with native `u16` slice literals, while decode must borrow
+/// allocation-free packed little-endian bytes from the input frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(missing_docs)] // Borrowed counterpart of the same frozen 27-field registry.
 pub struct DecodedCapabilities<'a> {
@@ -3266,118 +3270,159 @@ fn decode_capabilities<'a>(
     {
         return Err(DecodeError::InvalidValueLength);
     }
-    check_capabilities_decode(&value)?;
+    check_capabilities_invariants(CapabilityInvariantView::from(&value))?;
     let _ = codec;
     Ok(value)
 }
 
 fn check_capabilities(value: &Capabilities<'_>) -> Result<(), EncodeError> {
-    check_capabilities_common(value).map_err(|_| EncodeError::LimitExceeded)
+    check_capabilities_invariants(CapabilityInvariantView::from(value))
+        .map_err(|_| EncodeError::LimitExceeded)
 }
-fn check_capabilities_decode(value: &DecodedCapabilities<'_>) -> Result<(), DecodeError> {
-    let has_command = |wanted| {
-        value
-            .supported_commands
-            .chunks_exact(2)
-            .any(|id| u16::from_le_bytes([id[0], id[1]]) == wanted)
-    };
-    let has_event = |wanted| {
-        value
-            .supported_events
-            .chunks_exact(2)
-            .any(|id| u16::from_le_bytes([id[0], id[1]]) == wanted)
-    };
-    let session_family = has_command(0x0003) && has_event(0x8001) && has_event(0x8002);
-    if value.minimum_version.major != 1
-        || value.maximum_version.major != 1
-        || value.minimum_version.minor > value.maximum_version.minor
-        || value.maximum_frame_bytes == 0
-        || value.maximum_tlvs < 27
-        || value.maximum_nesting == 0
-        || value.maximum_automation_records != 256
-        || value.maximum_parameter_page_items > 256
-        || value.maximum_diagnostic_page_items > 256
-        || ((value.maximum_transaction_edits != 0) != session_family)
-        || value.flags.0 & !CapabilityFlags::KNOWN != 0
-        || !strict_ids(value.supported_commands, false)
-        || !strict_ids(value.supported_events, true)
-        || ((value.flags.0 & (1 << 3) != 0) != session_family)
-        || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
-        || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
-        || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
-        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x0004) && has_command(0x0005)))
-        || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
-        || ((value.flags.0 & (1 << 9) != 0) != has_event(0x8020))
-        || ((value.flags.0 & (1 << 10) != 0) != (has_command(0x000a) && has_event(0x8021)))
-        || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
-        || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
-        || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
-        || (has_command(0x0003) != has_event(0x8001))
-        || (has_event(0x8001) != has_event(0x8002))
-        || (has_command(0x0004) != has_command(0x0005))
-        || (has_command(0x0008) != has_event(0x8010))
-        || (has_command(0x000a) != has_event(0x8021))
-        || (has_command(0x000b) != has_event(0x8030))
-    {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(())
+
+#[derive(Clone, Copy)]
+enum IdSource<'a> {
+    Native(&'a [u16]),
+    LittleEndian(&'a [u8]),
 }
-fn check_capabilities_common(value: &Capabilities<'_>) -> Result<(), DecodeError> {
-    let has_command = |wanted| value.supported_commands.contains(&wanted);
-    let has_event = |wanted| value.supported_events.contains(&wanted);
-    let session_family = has_command(0x0003) && has_event(0x8001) && has_event(0x8002);
-    if value.minimum_version.major != 1
-        || value.maximum_version.major != 1
-        || value.minimum_version.minor > value.maximum_version.minor
-        || value.maximum_frame_bytes == 0
-        || value.maximum_tlvs < 27
-        || value.maximum_nesting == 0
-        || value.maximum_automation_records != 256
-        || value.maximum_parameter_page_items > 256
-        || value.maximum_diagnostic_page_items > 256
-        || ((value.maximum_transaction_edits != 0) != session_family)
-        || value.flags.0 & !CapabilityFlags::KNOWN != 0
-        || !strict_u16_ids(value.supported_commands, false)
-        || !strict_u16_ids(value.supported_events, true)
-        || ((value.flags.0 & (1 << 3) != 0) != session_family)
-        || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
-        || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
-        || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
-        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x0004) && has_command(0x0005)))
-        || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
-        || ((value.flags.0 & (1 << 9) != 0) != has_event(0x8020))
-        || ((value.flags.0 & (1 << 10) != 0) != (has_command(0x000a) && has_event(0x8021)))
-        || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
-        || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
-        || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
-        || (has_command(0x0003) != has_event(0x8001))
-        || (has_event(0x8001) != has_event(0x8002))
-        || (has_command(0x0004) != has_command(0x0005))
-        || (has_command(0x0008) != has_event(0x8010))
-        || (has_command(0x000a) != has_event(0x8021))
-        || (has_command(0x000b) != has_event(0x8030))
-    {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(())
-}
-fn strict_ids(bytes: &[u8], events: bool) -> bool {
-    let mut prior = None;
-    for item in bytes.chunks_exact(2) {
-        let id = u16::from_le_bytes([item[0], item[1]]);
-        if !allocated_id(id, events) || prior.is_some_and(|previous| id <= previous) {
-            return false;
+
+impl IdSource<'_> {
+    fn len(self) -> Option<usize> {
+        match self {
+            Self::Native(ids) => Some(ids.len()),
+            Self::LittleEndian(bytes) if bytes.len().is_multiple_of(2) => Some(bytes.len() / 2),
+            Self::LittleEndian(_) => None,
         }
-        prior = Some(id);
     }
-    true
+
+    fn get(self, index: usize) -> Option<u16> {
+        match self {
+            Self::Native(ids) => ids.get(index).copied(),
+            Self::LittleEndian(bytes) => {
+                let offset = index.checked_mul(2)?;
+                Some(u16::from_le_bytes([
+                    *bytes.get(offset)?,
+                    *bytes.get(offset + 1)?,
+                ]))
+            }
+        }
+    }
+
+    fn contains(self, wanted: u16) -> bool {
+        self.len()
+            .is_some_and(|len| (0..len).any(|index| self.get(index) == Some(wanted)))
+    }
+
+    fn is_strict_allocated(self, events: bool) -> bool {
+        let Some(len) = self.len() else {
+            return false;
+        };
+        let mut prior = None;
+        for index in 0..len {
+            let Some(id) = self.get(index) else {
+                return false;
+            };
+            if !allocated_id(id, events) || prior.is_some_and(|previous| id <= previous) {
+                return false;
+            }
+            prior = Some(id);
+        }
+        true
+    }
 }
-fn strict_u16_ids(ids: &[u16], events: bool) -> bool {
-    ids.iter()
-        .copied()
-        .enumerate()
-        .all(|(index, id)| allocated_id(id, events) && (index == 0 || id > ids[index - 1]))
+
+#[derive(Clone, Copy)]
+struct CapabilityInvariantView<'a> {
+    minimum_version: crate::ProtocolVersion,
+    maximum_version: crate::ProtocolVersion,
+    maximum_frame_bytes: u64,
+    maximum_tlvs: u32,
+    maximum_nesting: u8,
+    maximum_automation_records: u16,
+    maximum_parameter_page_items: u16,
+    maximum_diagnostic_page_items: u16,
+    maximum_transaction_edits: u32,
+    supported_commands: IdSource<'a>,
+    supported_events: IdSource<'a>,
+    flags: CapabilityFlags,
+}
+
+impl<'a> From<&Capabilities<'a>> for CapabilityInvariantView<'a> {
+    fn from(value: &Capabilities<'a>) -> Self {
+        Self {
+            minimum_version: value.minimum_version,
+            maximum_version: value.maximum_version,
+            maximum_frame_bytes: value.maximum_frame_bytes,
+            maximum_tlvs: value.maximum_tlvs,
+            maximum_nesting: value.maximum_nesting,
+            maximum_automation_records: value.maximum_automation_records,
+            maximum_parameter_page_items: value.maximum_parameter_page_items,
+            maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
+            maximum_transaction_edits: value.maximum_transaction_edits,
+            supported_commands: IdSource::Native(value.supported_commands),
+            supported_events: IdSource::Native(value.supported_events),
+            flags: value.flags,
+        }
+    }
+}
+
+impl<'a> From<&DecodedCapabilities<'a>> for CapabilityInvariantView<'a> {
+    fn from(value: &DecodedCapabilities<'a>) -> Self {
+        Self {
+            minimum_version: value.minimum_version,
+            maximum_version: value.maximum_version,
+            maximum_frame_bytes: value.maximum_frame_bytes,
+            maximum_tlvs: value.maximum_tlvs,
+            maximum_nesting: value.maximum_nesting,
+            maximum_automation_records: value.maximum_automation_records,
+            maximum_parameter_page_items: value.maximum_parameter_page_items,
+            maximum_diagnostic_page_items: value.maximum_diagnostic_page_items,
+            maximum_transaction_edits: value.maximum_transaction_edits,
+            supported_commands: IdSource::LittleEndian(value.supported_commands),
+            supported_events: IdSource::LittleEndian(value.supported_events),
+            flags: value.flags,
+        }
+    }
+}
+
+fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(), DecodeError> {
+    let has_command = |wanted| value.supported_commands.contains(wanted);
+    let has_event = |wanted| value.supported_events.contains(wanted);
+    let session_family = has_command(0x0003) && has_event(0x8001) && has_event(0x8002);
+    if value.minimum_version.major != 1
+        || value.maximum_version.major != 1
+        || value.minimum_version.minor > value.maximum_version.minor
+        || value.maximum_frame_bytes == 0
+        || value.maximum_tlvs < 27
+        || value.maximum_nesting == 0
+        || value.maximum_automation_records != 256
+        || value.maximum_parameter_page_items > 256
+        || value.maximum_diagnostic_page_items > 256
+        || ((value.maximum_transaction_edits != 0) != session_family)
+        || value.flags.0 & !CapabilityFlags::KNOWN != 0
+        || !value.supported_commands.is_strict_allocated(false)
+        || !value.supported_events.is_strict_allocated(true)
+        || ((value.flags.0 & (1 << 3) != 0) != session_family)
+        || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
+        || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
+        || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
+        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x0004) && has_command(0x0005)))
+        || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
+        || ((value.flags.0 & (1 << 9) != 0) != has_event(0x8020))
+        || ((value.flags.0 & (1 << 10) != 0) != (has_command(0x000a) && has_event(0x8021)))
+        || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
+        || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
+        || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
+        || (has_command(0x0003) != has_event(0x8001))
+        || (has_event(0x8001) != has_event(0x8002))
+        || (has_command(0x0004) != has_command(0x0005))
+        || (has_command(0x0008) != has_event(0x8010))
+        || (has_command(0x000a) != has_event(0x8021))
+        || (has_command(0x000b) != has_event(0x8030))
+    {
+        return Err(DecodeError::InvalidTlv);
+    }
+    Ok(())
 }
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
@@ -4167,6 +4212,73 @@ mod tests {
             );
             assert_eq!(codec.decode_non_ok_payload(&output, 3), Ok(value.clone()));
         }
+    }
+
+    #[test]
+    fn capability_id_views_reject_order_allocation_and_session_family_identically() {
+        fn le(ids: &[u16]) -> Vec<u8> {
+            ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+        }
+        fn view<'a>(commands: IdSource<'a>, events: IdSource<'a>) -> CapabilityInvariantView<'a> {
+            CapabilityInvariantView {
+                minimum_version: crate::ProtocolVersion::V1,
+                maximum_version: crate::ProtocolVersion::V1,
+                maximum_frame_bytes: 4096,
+                maximum_tlvs: 64,
+                maximum_nesting: 4,
+                maximum_automation_records: 256,
+                maximum_parameter_page_items: 256,
+                maximum_diagnostic_page_items: 256,
+                maximum_transaction_edits: 64,
+                supported_commands: commands,
+                supported_events: events,
+                flags: CapabilityFlags(
+                    CapabilityFlags::B1B_BASE.0 | CapabilityFlags::SESSION_EVENT_STREAM.0,
+                ),
+            }
+        }
+        fn assert_parity_rejects(commands: &[u16], events: &[u16]) {
+            let command_bytes = le(commands);
+            let event_bytes = le(events);
+            assert_eq!(
+                check_capabilities_invariants(view(
+                    IdSource::Native(commands),
+                    IdSource::Native(events),
+                )),
+                Err(DecodeError::InvalidTlv)
+            );
+            assert_eq!(
+                check_capabilities_invariants(view(
+                    IdSource::LittleEndian(&command_bytes),
+                    IdSource::LittleEndian(&event_bytes),
+                )),
+                Err(DecodeError::InvalidTlv)
+            );
+        }
+
+        let commands = [1, 2, 3];
+        let events = [0x8001, 0x8002];
+        let command_bytes = le(&commands);
+        let event_bytes = le(&events);
+        assert!(
+            check_capabilities_invariants(view(
+                IdSource::Native(&commands),
+                IdSource::Native(&events),
+            ))
+            .is_ok()
+        );
+        assert!(
+            check_capabilities_invariants(view(
+                IdSource::LittleEndian(&command_bytes),
+                IdSource::LittleEndian(&event_bytes),
+            ))
+            .is_ok()
+        );
+
+        assert_parity_rejects(&[1, 3, 2], &events);
+        assert_parity_rejects(&[1, 2, 12], &events);
+        assert_parity_rejects(&commands, &[0x8001]);
+        assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
     }
 
     #[test]
