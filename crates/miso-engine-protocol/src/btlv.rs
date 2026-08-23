@@ -139,6 +139,22 @@ impl<'a> Fields<'a> {
         Ok(Self::raw(&bytes[8..], count))
     }
 
+    pub(crate) fn nested_value(&self, bytes: &'a [u8]) -> Result<Self, DecodeError> {
+        let header = bytes.get(..8).ok_or(DecodeError::Truncated)?;
+        let count = read_u32_at(header, 0)?;
+        if read_u32_at(header, 4)? != 0 {
+            return Err(DecodeError::NonzeroReserved);
+        }
+        let payload = &bytes[8..];
+        match self.validation {
+            Some((limits, depth)) => {
+                let depth = depth.checked_add(1).ok_or(DecodeError::LimitExceeded)?;
+                Ok(Self::bounded(payload, count, limits, depth))
+            }
+            None => Ok(Self::raw(payload, count)),
+        }
+    }
+
     pub(crate) const fn raw(bytes: &'a [u8], count: u32) -> Self {
         Self {
             bytes,
@@ -162,14 +178,6 @@ impl<'a> Fields<'a> {
             slots: [None; 32],
             validation: Some((limits, depth)),
         }
-    }
-
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    pub(crate) fn count(&self, id: u16) -> usize {
-        self.slot(id).map_or(0, |slot| slot.count as usize)
     }
 
     pub(crate) fn schema_spec(mut self, spec: &'static MessageSpec) -> Result<Self, DecodeError> {

@@ -349,11 +349,12 @@ impl ProtocolCodec {
         input: &'a [u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedTypedCommandFrame<'a>, DecodeError> {
-        let decoded = self.decode(input, scratch)?;
+        let decoded = self.decode_header(input)?;
         let header = decoded
             .header
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
+        scratch.prepare(header.tlv_count)?;
         if command_message_requires_exact(header.message_id)
             && !matches!(header.expected_revision, crate::ExpectedRevision::Exact(_))
         {
@@ -373,7 +374,7 @@ impl ProtocolCodec {
                 self.decode_snapshot_request(decoded.payload, header.tlv_count)?,
             ),
             MessageId::SessionTransactionApply => {
-                let transaction = self.decode_session_transaction(input, scratch)?;
+                let transaction = self.decode_session_transaction_frame(decoded)?;
                 DecodedCommandPayload::SessionTransactionApply(transaction.edits)
             }
             MessageId::ParameterMetadataGet => DecodedCommandPayload::ParameterMetadataGet(
@@ -412,11 +413,12 @@ impl ProtocolCodec {
         input: &'a [u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedTypedResponseFrame<'a>, DecodeError> {
-        let decoded = self.decode(input, scratch)?;
+        let decoded = self.decode_header(input)?;
         let header = decoded
             .header
             .response()
             .ok_or(DecodeError::MessageKindMismatch)?;
+        scratch.prepare(header.tlv_count)?;
         if header.status != StatusCode::Ok {
             let payload = self.decode_non_ok_payload(decoded.payload, header.tlv_count)?;
             if (header.status == StatusCode::Backpressure) != payload.backpressure.is_some() {
@@ -471,11 +473,12 @@ impl ProtocolCodec {
         input: &'a [u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedTypedEventFrame<'a>, DecodeError> {
-        let decoded = self.decode(input, scratch)?;
+        let decoded = self.decode_header(input)?;
         let header = decoded
             .header
             .event()
             .ok_or(DecodeError::MessageKindMismatch)?;
+        scratch.prepare(header.tlv_count)?;
         let payload = match header.message_id {
             MessageId::SessionCommitted => DecodedEventPayload::SessionCommitted(
                 self.decode_session_committed(decoded.payload, header.tlv_count)?,

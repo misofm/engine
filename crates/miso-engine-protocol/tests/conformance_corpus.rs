@@ -36,6 +36,21 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
 }
 
 #[test]
+fn frozen_deep_transaction_uses_typed_command_dispatch() {
+    let codec = ProtocolCodec::default();
+    let corpus = complete_schema_corpus();
+    let transaction = corpus
+        .iter()
+        .find(|frame| frame.name == "command.session_transaction_apply")
+        .expect("frozen transaction frame");
+    assert_eq!(transaction.decoder, ConformanceDecoder::Command);
+    let mut fields = [0_u16; 1024];
+    codec
+        .decode_typed_command(&transaction.bytes, &mut DecodeScratch::new(&mut fields))
+        .expect("typed command dispatch honors the transaction envelope allowance");
+}
+
+#[test]
 fn descriptor_handle_required_flag_is_frozen() {
     let codec = ProtocolCodec::default();
     let page = ParameterMetadataPage {

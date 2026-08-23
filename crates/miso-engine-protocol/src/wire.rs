@@ -448,6 +448,16 @@ impl<'a> DecodeScratch<'a> {
         self.used += 1;
         Ok(())
     }
+
+    pub(crate) fn prepare(&mut self, count: u32) -> Result<(), DecodeError> {
+        self.reset();
+        let count = usize::try_from(count).map_err(|_| DecodeError::LimitExceeded)?;
+        if count > self.field_ids.len() {
+            return Err(DecodeError::ScratchTooSmall);
+        }
+        self.used = count;
+        Ok(())
+    }
 }
 
 /// A zero-copy validated frame borrowed only from the decode input.
@@ -579,6 +589,28 @@ impl ProtocolCodec {
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedFrame<'a>, DecodeError> {
         scratch.reset();
+        let decoded = self.decode_header(input)?;
+        let tlv_count = match decoded.header {
+            FrameHeader::Command(header) => header.tlv_count,
+            FrameHeader::Response(header) => header.tlv_count,
+            FrameHeader::Event(header) => header.tlv_count,
+        };
+        crate::btlv::validate_message(
+            decoded.payload,
+            tlv_count,
+            0,
+            self.limits,
+            None,
+            |field_id| scratch.push(field_id),
+        )?;
+        Ok(decoded)
+    }
+
+    /// Parse and validate the fixed outer header without walking its BTLV payload.
+    pub(crate) fn decode_header<'a>(
+        &self,
+        input: &'a [u8],
+    ) -> Result<DecodedFrame<'a>, DecodeError> {
         if input.len() > self.limits.max_frame_bytes {
             return Err(DecodeError::LimitExceeded);
         }
@@ -628,20 +660,6 @@ impl ProtocolCodec {
             return Err(DecodeError::NonzeroReserved);
         }
         let payload = &input[OUTER_HEADER_BYTES..];
-        let top_level_spec =
-            if message_id == MessageId::CapabilitiesGet && kind == FrameKind::Command {
-                Some(&crate::schema::capabilities_request::SPEC)
-            } else {
-                None
-            };
-        crate::btlv::validate_message(
-            payload,
-            tlv_count,
-            0,
-            self.limits,
-            top_level_spec,
-            |field_id| scratch.push(field_id),
-        )?;
         let header = match kind {
             FrameKind::Command => {
                 let request_id =
@@ -705,72 +723,10 @@ impl ProtocolCodec {
     /// header has established a real request ID. Controllers and hosts can use this header-only
     /// operation to correlate a request before validating its payload.
     pub fn decode_command_header(&self, input: &[u8]) -> Result<CommandHeader, DecodeError> {
-        if input.len() > self.limits.max_frame_bytes {
-            return Err(DecodeError::LimitExceeded);
-        }
-        let header = input
-            .get(..OUTER_HEADER_BYTES)
-            .ok_or(DecodeError::Truncated)?;
-        if header[..8] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        let version = ProtocolVersion {
-            major: read_u16(header, 8)?,
-            minor: read_u16(header, 10)?,
-        };
-        if version.major != PROTOCOL_MAJOR_V1 {
-            return Err(DecodeError::UnsupportedVersion);
-        }
-        if read_u16(header, 12)? != OUTER_HEADER_BYTES as u16 {
-            return Err(DecodeError::BadHeaderLength);
-        }
-        if FrameKind::parse(header[14])? != FrameKind::Command {
-            return Err(DecodeError::MessageKindMismatch);
-        }
-        let flags = header[15];
-        if flags & !KNOWN_FLAG_BITS != 0 {
-            return Err(DecodeError::InvalidFlags);
-        }
-        let message_id = MessageId::from_raw(read_u16(header, 16)?)?;
-        if !message_id.permits_kind(FrameKind::Command) {
-            return Err(DecodeError::MessageKindMismatch);
-        }
-        if StatusCode::parse(read_u16(header, 18)?)? != StatusCode::Ok {
-            return Err(DecodeError::InvalidStatus);
-        }
-        let payload_len = read_u32(header, 20)?;
-        let declared_len = OUTER_HEADER_BYTES
-            .checked_add(usize::try_from(payload_len).map_err(|_| DecodeError::LimitExceeded)?)
-            .ok_or(DecodeError::LimitExceeded)?;
-        if declared_len != input.len() {
-            return Err(DecodeError::BadPayloadLength);
-        }
-        let request_id =
-            RequestId::new(read_u64(header, 24)?).ok_or(DecodeError::InvalidRequestId)?;
-        let wire_revision = read_u64(header, 32)?;
-        let tlv_count = read_u32(header, 40)?;
-        if tlv_count > self.limits.max_tlv_count {
-            return Err(DecodeError::LimitExceeded);
-        }
-        if read_u32(header, 44)? != 0 {
-            return Err(DecodeError::NonzeroReserved);
-        }
-        let expected_revision = if flags & FLAG_REVISION_ANY != 0 {
-            if wire_revision != 0 {
-                return Err(DecodeError::InvalidRevisionEncoding);
-            }
-            ExpectedRevision::Any
-        } else {
-            ExpectedRevision::Exact(SessionRevision(wire_revision))
-        };
-        Ok(CommandHeader {
-            version,
-            message_id,
-            request_id,
-            expected_revision,
-            payload_len,
-            tlv_count,
-        })
+        self.decode_header(input)?
+            .header
+            .command()
+            .ok_or(DecodeError::MessageKindMismatch)
     }
 
     /// Encode a canonical empty-payload frame into caller output without partial writes.
@@ -977,10 +933,16 @@ mod tests {
         assert_eq!(header.message_id, MessageId::CapabilitiesGet);
         assert_eq!(header.payload_len, 16);
         assert_eq!(header.tlv_count, 1);
-        assert_eq!(
-            codec.decode(&frame, &mut DecodeScratch::new(&mut [0_u16; 1])),
-            Err(DecodeError::UnknownRequiredField)
+        assert!(
+            codec
+                .decode(&frame, &mut DecodeScratch::new(&mut [0_u16; 1]))
+                .is_ok(),
+            "generic decode validates structure without selecting a message schema"
         );
+        assert!(matches!(
+            codec.decode_typed_command(&frame, &mut DecodeScratch::new(&mut [0_u16; 1])),
+            Err(DecodeError::UnknownRequiredField)
+        ));
     }
 
     #[test]
@@ -1101,9 +1063,10 @@ mod tests {
         frame[40] = 1;
         frame.extend_from_slice(&[1, 0, 1, 1, 1, 0, 0, 0]);
         frame.extend_from_slice(&[0; 8]);
-        assert_eq!(
-            codec.decode(&frame, &mut DecodeScratch::new(&mut slots)),
-            Err(DecodeError::UnknownRequiredField)
+        assert!(
+            codec
+                .decode(&frame, &mut DecodeScratch::new(&mut slots))
+                .is_ok()
         );
         frame[57] = 1;
         assert_eq!(

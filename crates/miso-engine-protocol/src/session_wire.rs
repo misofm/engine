@@ -207,8 +207,8 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
 }
 
 use crate::{
-    CommandFrame, DecodeError, DecodeScratch, DecodedFrame, EncodeError, ExpectedRevision, Frame,
-    MessageId, ProtocolCodec, RequestId, SessionEditV1,
+    CommandFrame, CommandHeader, DecodeError, DecodeScratch, DecodedFrame, EncodeError,
+    ExpectedRevision, Frame, MessageId, ProtocolCodec, RequestId, SessionEditV1,
     btlv::{
         CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8 as read_u8_exact,
         read_u16 as read_u16_exact, read_u32 as read_u32_exact, read_u64 as read_u64_exact,
@@ -346,25 +346,17 @@ impl ProtocolCodec {
         input: &'a [u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
-        let outer = self.decode_session_transaction_outer(input, scratch)?;
-        let header = outer
-            .frame
-            .header
-            .command()
-            .ok_or(DecodeError::MessageKindMismatch)?;
-        let top = Message::raw(outer.frame.payload, header.tlv_count)
-            .schema_spec(&schema::session::transaction::SPEC)?;
-        if top.is_empty() {
-            return Err(DecodeError::InvalidTlv);
-        }
-        let mut edits = Vec::with_capacity(top.count(schema::session::transaction::EDIT.id));
-        for value in values_spec!(top, schema::session::transaction::EDIT)? {
-            edits.push(parse_edit(Message::nested(value)?)?);
-        }
-        Ok(DecodedSessionTransaction {
-            frame: outer.frame,
-            edits,
-        })
+        let frame = self.decode_header(input)?;
+        let header = transaction_header(frame)?;
+        scratch.prepare(header.tlv_count)?;
+        self.decode_session_transaction_frame(frame)
+    }
+
+    pub(crate) fn decode_session_transaction_frame<'a>(
+        &self,
+        frame: DecodedFrame<'a>,
+    ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
+        self.decode_session_transaction_frame_limited(frame, None)
     }
 
     /// Decode a transaction only after its exact repeated edit count is within the endpoint cap.
@@ -374,31 +366,53 @@ impl ProtocolCodec {
         scratch: &mut DecodeScratch<'_>,
         maximum_edits: u32,
     ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
-        let outer = self.decode_session_transaction_outer(input, scratch)?;
-        let header = outer
-            .frame
-            .header
-            .command()
-            .ok_or(DecodeError::MessageKindMismatch)?;
-        let top = Message::raw(outer.frame.payload, header.tlv_count)
+        let frame = self.decode_header(input)?;
+        let header = transaction_header(frame)?;
+        scratch.prepare(header.tlv_count)?;
+        self.decode_session_transaction_frame_limited(frame, Some(maximum_edits))
+    }
+
+    fn decode_session_transaction_frame_limited<'a>(
+        &self,
+        frame: DecodedFrame<'a>,
+        maximum_edits: Option<u32>,
+    ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
+        let header = transaction_header(frame)?;
+        let limits = self.limits();
+        let envelope_limits = crate::ProtocolLimits {
+            max_nesting: limits.max_nesting.saturating_add(3),
+            ..limits
+        };
+        let top = Message::bounded(frame.payload, header.tlv_count, envelope_limits, 0)
             .schema_spec(&schema::session::transaction::SPEC)?;
         let count = u32::try_from(values_spec!(top, schema::session::transaction::EDIT)?.count())
             .map_err(|_| DecodeError::LimitExceeded)?;
         if count == 0 {
             return Err(DecodeError::InvalidTlv);
         }
-        if count > maximum_edits {
+        if maximum_edits.is_some_and(|maximum| count > maximum) {
             return Err(DecodeError::LimitExceeded);
         }
         let mut edits = Vec::with_capacity(count as usize);
         for value in values_spec!(top, schema::session::transaction::EDIT)? {
-            edits.push(parse_edit(Message::nested(value)?)?);
+            edits.push(parse_edit(top.nested_value(value)?)?);
         }
-        Ok(DecodedSessionTransaction {
-            frame: outer.frame,
-            edits,
-        })
+        Ok(DecodedSessionTransaction { frame, edits })
     }
+}
+
+fn transaction_header(frame: DecodedFrame<'_>) -> Result<CommandHeader, DecodeError> {
+    let header = frame
+        .header
+        .command()
+        .ok_or(DecodeError::MessageKindMismatch)?;
+    if header.message_id != MessageId::SessionTransactionApply {
+        return Err(DecodeError::MessageKindMismatch);
+    }
+    if !matches!(header.expected_revision, ExpectedRevision::Exact(_)) {
+        return Err(DecodeError::InvalidTlv);
+    }
+    Ok(header)
 }
 
 const fn enum_quality(value: EffectQuality) -> u8 {
