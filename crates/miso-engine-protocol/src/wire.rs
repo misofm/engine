@@ -2,7 +2,10 @@
 
 use core::{fmt, num::NonZeroU64};
 
-use crate::{OUTER_HEADER_BYTES, PROTOCOL_MAJOR_V1, PROTOCOL_MINOR_V1, TLV_PREFIX_BYTES};
+use crate::{
+    OUTER_HEADER_BYTES, PROTOCOL_MAJOR_V1, PROTOCOL_MINOR_V1,
+    btlv::{read_u16_at as read_u16, read_u32_at as read_u32, read_u64_at as read_u64},
+};
 
 const MAGIC: [u8; 8] = *b"MISOCTL\0";
 const FLAG_REVISION_ANY: u8 = 1;
@@ -630,18 +633,14 @@ impl ProtocolCodec {
             } else {
                 None
             };
-        let count = parse_tlvs(
+        crate::btlv::validate_message(
             payload,
             tlv_count,
             0,
             self.limits,
-            scratch,
-            true,
             top_level_spec,
+            |field_id| scratch.push(field_id),
         )?;
-        if count != tlv_count {
-            return Err(DecodeError::InvalidTlv);
-        }
         let header = match kind {
             FrameKind::Command => {
                 let request_id =
@@ -885,163 +884,6 @@ fn header_for_frame(
             ))
         }
     }
-}
-
-fn parse_tlvs(
-    bytes: &[u8],
-    declared_count: u32,
-    depth: u8,
-    limits: ProtocolLimits,
-    scratch: &mut DecodeScratch<'_>,
-    top_level: bool,
-    top_level_spec: Option<&'static crate::schema::MessageSpec>,
-) -> Result<u32, DecodeError> {
-    let mut cursor = 0usize;
-    let mut previous_id = 0u16;
-    for index in 0..declared_count {
-        let prefix_end = cursor
-            .checked_add(TLV_PREFIX_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let prefix = bytes
-            .get(cursor..prefix_end)
-            .ok_or(DecodeError::Truncated)?;
-        let field_id = read_u16(prefix, 0)?;
-        if field_id == 0 || (index != 0 && field_id < previous_id) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        previous_id = field_id;
-        let wire_type = prefix[2];
-        let flags = prefix[3];
-        if !(1..=15).contains(&wire_type) || flags & !1 != 0 {
-            return Err(DecodeError::InvalidTlv);
-        }
-        let value_len =
-            usize::try_from(read_u32(prefix, 4)?).map_err(|_| DecodeError::LimitExceeded)?;
-        let value_start = prefix_end;
-        let value_end = value_start
-            .checked_add(value_len)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value = bytes
-            .get(value_start..value_end)
-            .ok_or(DecodeError::Truncated)?;
-        validate_value(wire_type, value, depth, limits, scratch)?;
-        let padded_end = value_end
-            .checked_add(padding(value_len))
-            .ok_or(DecodeError::LimitExceeded)?;
-        let padding_bytes = bytes
-            .get(value_end..padded_end)
-            .ok_or(DecodeError::Truncated)?;
-        if padding_bytes.iter().any(|byte| *byte != 0) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        if let Some(spec) = top_level_spec {
-            let field_spec = spec
-                .fields
-                .binary_search_by_key(&field_id, |candidate| candidate.id)
-                .ok()
-                .map(|position| spec.fields[position]);
-            match field_spec {
-                Some(field_spec)
-                    if field_spec.wire.raw() != wire_type
-                        || field_spec.mandatory != (flags & 1 != 0) =>
-                {
-                    return Err(DecodeError::InvalidTlv);
-                }
-                None if flags & 1 != 0 => return Err(DecodeError::UnknownRequiredField),
-                _ => {}
-            }
-        }
-        if top_level {
-            scratch.push(field_id)?;
-        }
-        cursor = padded_end;
-    }
-    if cursor != bytes.len() {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(declared_count)
-}
-
-fn validate_value(
-    wire_type: u8,
-    value: &[u8],
-    depth: u8,
-    limits: ProtocolLimits,
-    scratch: &mut DecodeScratch<'_>,
-) -> Result<(), DecodeError> {
-    let exact = match wire_type {
-        1 | 8 => Some(1),
-        2 => Some(2),
-        3 | 6 => Some(4),
-        4 | 5 | 7 => Some(8),
-        _ => None,
-    };
-    if let Some(exact) = exact {
-        if value.len() != exact {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        if wire_type == 8 && !matches!(value[0], 0 | 1) {
-            return Err(DecodeError::InvalidValueLength);
-        }
-    }
-    match wire_type {
-        9 => {
-            if value.len() > limits.max_string_bytes {
-                return Err(DecodeError::LimitExceeded);
-            }
-            if core::str::from_utf8(value).is_err() {
-                return Err(DecodeError::InvalidUtf8);
-            }
-        }
-        11 => {
-            if depth >= limits.max_nesting {
-                return Err(DecodeError::LimitExceeded);
-            }
-            let nested_header = value.get(..8).ok_or(DecodeError::Truncated)?;
-            let count = read_u32(nested_header, 0)?;
-            if count > limits.max_tlv_count {
-                return Err(DecodeError::LimitExceeded);
-            }
-            if read_u32(nested_header, 4)? != 0 {
-                return Err(DecodeError::NonzeroReserved);
-            }
-            parse_tlvs(&value[8..], count, depth + 1, limits, scratch, false, None)?;
-        }
-        12 if !value.len().is_multiple_of(2) => return Err(DecodeError::InvalidValueLength),
-        13 | 15 if !value.len().is_multiple_of(4) => {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        14 if !value.len().is_multiple_of(8) => return Err(DecodeError::InvalidValueLength),
-        _ => {}
-    }
-    Ok(())
-}
-
-const fn padding(length: usize) -> usize {
-    (8 - (length & 7)) & 7
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 2)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u16::from_le_bytes([value[0], value[1]]))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 4)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 8)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u64::from_le_bytes([
-        value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
-    ]))
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

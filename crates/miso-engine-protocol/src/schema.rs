@@ -1,8 +1,7 @@
 //! Declarative message-field registry for shared typed protocol payloads.
 //!
-//! Session-edit payloads and transport payloads retain their specialized readers until their
-//! respective migrations. This registry is metadata consumed by the existing bounded reader; it
-//! is never a second encoder or decoder.
+//! Every typed payload family consumes this metadata through the shared bounded reader. The
+//! registry is never a second encoder or decoder.
 
 /// Frozen BTLV wire type.
 #[repr(u8)]
@@ -273,6 +272,65 @@ pub(crate) mod automation_enqueued {
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "AutomationEnqueued",
         fields: &[ACCEPTED_RECORDS, OCCUPANCY, CAPACITY, GENERATION],
+    };
+}
+
+pub(crate) mod automation_enqueue {
+    use super::*;
+    pub(crate) const COUNT: FieldSpec = FieldSpec::req(1, Wire::U16);
+    pub(crate) const RECORD_BYTES: FieldSpec = FieldSpec::req(2, Wire::U16);
+    pub(crate) const RECORDS: FieldSpec = FieldSpec::req(3, Wire::Bytes);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "AutomationEnqueue",
+        fields: &[COUNT, RECORD_BYTES, RECORDS],
+    };
+}
+
+pub(crate) mod transport_get {
+    use super::MessageSpec;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TransportGet",
+        fields: &[],
+    };
+}
+
+pub(crate) mod transport_set {
+    use super::*;
+    pub(crate) const STATE: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const POSITION: FieldSpec = FieldSpec::opt(2, Wire::U64);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TransportSet",
+        fields: &[STATE, POSITION],
+    };
+}
+
+pub(crate) mod transport_snapshot {
+    use super::*;
+    pub(crate) const STATE: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const POSITION: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TransportSnapshot",
+        fields: &[STATE, POSITION, EFFECTIVE_SAMPLE],
+    };
+}
+
+pub(crate) mod transport_state_event {
+    use super::*;
+    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const STATE: FieldSpec = FieldSpec::req(2, Wire::U8);
+    pub(crate) const POSITION: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::req(4, Wire::U64);
+    pub(crate) const ORIGIN_REQUEST_ID: FieldSpec = FieldSpec::opt(5, Wire::U64);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TransportStateEvent",
+        fields: &[
+            EVENT_SEQUENCE,
+            STATE,
+            POSITION,
+            EFFECTIVE_SAMPLE,
+            ORIGIN_REQUEST_ID,
+        ],
     };
 }
 
@@ -1124,7 +1182,12 @@ mod tests {
             &metadata_page::SPEC,
             &state_request::SPEC,
             &state_page::SPEC,
+            &automation_enqueue::SPEC,
             &automation_enqueued::SPEC,
+            &transport_get::SPEC,
+            &transport_set::SPEC,
+            &transport_snapshot::SPEC,
+            &transport_state_event::SPEC,
             &automation_canceled::SPEC,
             &meter_batch::SPEC,
             &telemetry_configuration::SPEC,

@@ -6,15 +6,14 @@
 
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
+    btlv::{Fields as Message, padding, read_f32, read_u8, read_u16, read_u32, read_u64},
     schema::{self, descriptor, enum_choice},
-    session_wire::Message,
 };
 
+#[cfg(test)]
 const WIRE_U8: u8 = 1;
-const WIRE_U16: u8 = 2;
+#[cfg(test)]
 const WIRE_U32: u8 = 3;
-const WIRE_U64: u8 = 4;
-const WIRE_UTF8: u8 = 9;
 const WIRE_MESSAGE: u8 = 11;
 const TLV_PREFIX_BYTES: usize = 8;
 const NESTED_HEADER_BYTES: usize = 8;
@@ -840,7 +839,9 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<(), DecodeError> {
-        top_level_message(self, payload, count)?.schema_spec(&schema::capabilities_request::SPEC)
+        top_level_message(self, payload, count)?
+            .schema_spec(&schema::capabilities_request::SPEC)
+            .map(|_| ())
     }
 
     /// Exact caller-output length for a snapshot request.
@@ -882,7 +883,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionSnapshotRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::snapshot_request::SPEC)?;
+        let message = message.schema_spec(&schema::snapshot_request::SPEC)?;
         let result = SessionSnapshotRequest {
             offset: read_u64(one_spec!(message, schema::snapshot_request::OFFSET)?)?,
             maximum_bytes: read_u32(one_spec!(message, schema::snapshot_request::MAXIMUM_BYTES)?)?,
@@ -955,7 +956,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionSnapshot<'a>, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::snapshot::SPEC)?;
+        let message = message.schema_spec(&schema::snapshot::SPEC)?;
         let result = SessionSnapshot {
             total_bytes: read_u64(one_spec!(message, schema::snapshot::TOTAL_BYTES)?)?,
             offset: read_u64(one_spec!(message, schema::snapshot::OFFSET)?)?,
@@ -1002,7 +1003,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<TransactionApplied, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::transaction_applied::SPEC)?;
+        let message = message.schema_spec(&schema::transaction_applied::SPEC)?;
         Ok(TransactionApplied {
             applied_operations: read_u32(one_spec!(
                 message,
@@ -1052,7 +1053,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionCommitted, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::session_committed::SPEC)?;
+        let message = message.schema_spec(&schema::session_committed::SPEC)?;
         Ok(SessionCommitted {
             event_sequence: read_u64(one_spec!(
                 message,
@@ -1106,7 +1107,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ParameterMetadataRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::metadata_request::SPEC)?;
+        let message = message.schema_spec(&schema::metadata_request::SPEC)?;
         let value = ParameterMetadataRequest {
             after_handle: read_u32(one_spec!(message, schema::metadata_request::AFTER_HANDLE)?)?,
             limit: read_u16(one_spec!(message, schema::metadata_request::LIMIT)?)?,
@@ -1181,7 +1182,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ParameterStateRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::state_request::SPEC)?;
+        let message = message.schema_spec(&schema::state_request::SPEC)?;
         let bytes = one_spec!(message, schema::state_request::HANDLES)?;
         if !bytes.len().is_multiple_of(4) {
             return Err(DecodeError::InvalidValueLength);
@@ -1268,11 +1269,14 @@ impl ProtocolCodec {
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
         let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
-        writer.field(1, WIRE_U16, true, &count.to_le_bytes())?;
-        writer.field(
-            2,
-            WIRE_U16,
-            true,
+        write_spec!(
+            writer,
+            schema::automation_enqueue::COUNT,
+            &count.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::automation_enqueue::RECORD_BYTES,
             &(crate::AUTOMATION_RECORD_BYTES as u16).to_le_bytes(),
         )?;
         write_automation_record_bytes(&mut writer, value.records)?;
@@ -1333,7 +1337,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<AutomationEnqueued, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::automation_enqueued::SPEC)?;
+        let message = message.schema_spec(&schema::automation_enqueued::SPEC)?;
         let result = AutomationEnqueued {
             accepted_records: read_u16(one_spec!(
                 message,
@@ -1366,8 +1370,9 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<(), DecodeError> {
-        let fields = scan_transport_fields(self, payload, count, &[])?;
-        transport_schema(&fields, &[])
+        top_level_message(self, payload, count)?
+            .schema_spec(&schema::transport_get::SPEC)
+            .map(|_| ())
     }
 
     /// Return the exact caller-output size for a typed absolute transport set request.
@@ -1386,9 +1391,13 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U8, true, &[value.state as u8])?;
+        write_spec!(writer, schema::transport_set::STATE, &[value.state as u8])?;
         if let Some(position) = value.position {
-            writer.field(2, WIRE_U64, false, &position.0.to_le_bytes())?;
+            write_spec!(
+                writer,
+                schema::transport_set::POSITION,
+                &position.0.to_le_bytes()
+            )?;
         }
         Ok(required)
     }
@@ -1399,11 +1408,14 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSetRequest, DecodeError> {
-        let fields = scan_transport_fields(self, payload, count, &[1, 2])?;
-        transport_schema(&fields, &[(1, WIRE_U8, true), (2, WIRE_U64, false)])?;
+        let fields =
+            top_level_message(self, payload, count)?.schema_spec(&schema::transport_set::SPEC)?;
         Ok(TransportSetRequest {
-            state: parse_transport_state(read_u8(transport_required(&fields, 1)?)?)?,
-            position: transport_optional(&fields, 2)
+            state: parse_transport_state(read_u8(one_spec!(
+                fields,
+                schema::transport_set::STATE
+            )?)?)?,
+            position: optional_spec!(fields, schema::transport_set::POSITION)?
                 .map(read_u64)
                 .transpose()?
                 .map(crate::SampleTime),
@@ -1421,9 +1433,21 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required: LEN });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U8, true, &[value.state as u8])?;
-        writer.field(2, WIRE_U64, true, &value.position.0.to_le_bytes())?;
-        writer.field(3, WIRE_U64, true, &value.effective_sample.0.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::transport_snapshot::STATE,
+            &[value.state as u8]
+        )?;
+        write_spec!(
+            writer,
+            schema::transport_snapshot::POSITION,
+            &value.position.0.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::transport_snapshot::EFFECTIVE_SAMPLE,
+            &value.effective_sample.0.to_le_bytes()
+        )?;
         Ok(LEN)
     }
 
@@ -1433,15 +1457,21 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSnapshot, DecodeError> {
-        let fields = scan_transport_fields(self, payload, count, &[1, 2, 3])?;
-        transport_schema(
-            &fields,
-            &[(1, WIRE_U8, true), (2, WIRE_U64, true), (3, WIRE_U64, true)],
-        )?;
+        let fields = top_level_message(self, payload, count)?
+            .schema_spec(&schema::transport_snapshot::SPEC)?;
         Ok(TransportSnapshot {
-            state: parse_transport_state(read_u8(transport_required(&fields, 1)?)?)?,
-            position: crate::SampleTime(read_u64(transport_required(&fields, 2)?)?),
-            effective_sample: crate::SampleTime(read_u64(transport_required(&fields, 3)?)?),
+            state: parse_transport_state(read_u8(one_spec!(
+                fields,
+                schema::transport_snapshot::STATE
+            )?)?)?,
+            position: crate::SampleTime(read_u64(one_spec!(
+                fields,
+                schema::transport_snapshot::POSITION
+            )?)?),
+            effective_sample: crate::SampleTime(read_u64(one_spec!(
+                fields,
+                schema::transport_snapshot::EFFECTIVE_SAMPLE
+            )?)?),
         })
     }
 
@@ -1465,12 +1495,32 @@ impl ProtocolCodec {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.field(1, WIRE_U64, true, &value.event_sequence.to_le_bytes())?;
-        writer.field(2, WIRE_U8, true, &[value.state as u8])?;
-        writer.field(3, WIRE_U64, true, &value.position.0.to_le_bytes())?;
-        writer.field(4, WIRE_U64, true, &value.effective_sample.0.to_le_bytes())?;
+        write_spec!(
+            writer,
+            schema::transport_state_event::EVENT_SEQUENCE,
+            &value.event_sequence.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::transport_state_event::STATE,
+            &[value.state as u8]
+        )?;
+        write_spec!(
+            writer,
+            schema::transport_state_event::POSITION,
+            &value.position.0.to_le_bytes()
+        )?;
+        write_spec!(
+            writer,
+            schema::transport_state_event::EFFECTIVE_SAMPLE,
+            &value.effective_sample.0.to_le_bytes()
+        )?;
         if let Some(origin) = value.origin_request_id {
-            writer.field(5, WIRE_U64, false, &origin.get().to_le_bytes())?;
+            write_spec!(
+                writer,
+                schema::transport_state_event::ORIGIN_REQUEST_ID,
+                &origin.get().to_le_bytes()
+            )?;
         }
         Ok(required)
     }
@@ -1481,23 +1531,32 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportStateEvent, DecodeError> {
-        let fields = scan_transport_fields(self, payload, count, &[1, 2, 3, 4, 5])?;
-        transport_schema(
-            &fields,
-            &[
-                (1, WIRE_U64, true),
-                (2, WIRE_U8, true),
-                (3, WIRE_U64, true),
-                (4, WIRE_U64, true),
-                (5, WIRE_U64, false),
-            ],
-        )?;
+        let fields = top_level_message(self, payload, count)?
+            .schema_spec(&schema::transport_state_event::SPEC)?;
         Ok(TransportStateEvent {
-            event_sequence: read_u64(transport_required(&fields, 1)?)?,
-            state: parse_transport_state(read_u8(transport_required(&fields, 2)?)?)?,
-            position: crate::SampleTime(read_u64(transport_required(&fields, 3)?)?),
-            effective_sample: crate::SampleTime(read_u64(transport_required(&fields, 4)?)?),
-            origin_request_id: match transport_optional(&fields, 5).map(read_u64).transpose()? {
+            event_sequence: read_u64(one_spec!(
+                fields,
+                schema::transport_state_event::EVENT_SEQUENCE
+            )?)?,
+            state: parse_transport_state(read_u8(one_spec!(
+                fields,
+                schema::transport_state_event::STATE
+            )?)?)?,
+            position: crate::SampleTime(read_u64(one_spec!(
+                fields,
+                schema::transport_state_event::POSITION
+            )?)?),
+            effective_sample: crate::SampleTime(read_u64(one_spec!(
+                fields,
+                schema::transport_state_event::EFFECTIVE_SAMPLE
+            )?)?),
+            origin_request_id: match optional_spec!(
+                fields,
+                schema::transport_state_event::ORIGIN_REQUEST_ID
+            )?
+            .map(read_u64)
+            .transpose()?
+            {
                 Some(value) => Some(crate::RequestId::new(value).ok_or(DecodeError::InvalidTlv)?),
                 None => None,
             },
@@ -1569,7 +1628,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<AutomationCanceled, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::automation_canceled::SPEC)?;
+        let message = message.schema_spec(&schema::automation_canceled::SPEC)?;
         let value = AutomationCanceled {
             event_sequence: read_u64(one_spec!(
                 message,
@@ -1675,7 +1734,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DecodedMeterBatch<'a>, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::meter_batch::SPEC)?;
+        let message = message.schema_spec(&schema::meter_batch::SPEC)?;
         let result = DecodedMeterBatch {
             observed_sample: crate::SampleTime(read_u64(one_spec!(
                 message,
@@ -1777,7 +1836,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticEvent, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::diagnostic_event::SPEC)?;
+        let message = message.schema_spec(&schema::diagnostic_event::SPEC)?;
         let diagnostic = decode_diagnostic(
             self,
             nested_message(
@@ -1867,7 +1926,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<TelemetryConfiguration, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::telemetry_configuration::SPEC)?;
+        let message = message.schema_spec(&schema::telemetry_configuration::SPEC)?;
         let result = TelemetryConfiguration {
             meter_handles: decode_nonzero_u32s(
                 one_spec!(message, schema::telemetry_configuration::METER_HANDLES)?,
@@ -1940,7 +1999,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<CountersRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::counters_request::SPEC)?;
+        let message = message.schema_spec(&schema::counters_request::SPEC)?;
         let all = read_bool(one_spec!(message, schema::counters_request::ALL)?)?;
         let ids = optional_spec!(message, schema::counters_request::IDS)?
             .map(|bytes| decode_nonzero_u32s(bytes, true))
@@ -2030,12 +2089,12 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<CounterSnapshot, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::counter_snapshot::SPEC)?;
+        let message = message.schema_spec(&schema::counter_snapshot::SPEC)?;
         let mut values =
             Vec::with_capacity(values_spec!(message, schema::counter_snapshot::VALUE)?.count());
         for raw in values_spec!(message, schema::counter_snapshot::VALUE)? {
             let counter = nested_message(self, raw, 1)?;
-            counter.schema_spec(&schema::counter_value::SPEC)?;
+            let counter = counter.schema_spec(&schema::counter_value::SPEC)?;
             values.push(CounterValue {
                 id: parse_counter_id(read_u32(one_spec!(counter, schema::counter_value::ID)?)?)?,
                 value: read_u64(one_spec!(counter, schema::counter_value::VALUE)?)?,
@@ -2090,7 +2149,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticsRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::diagnostics_request::SPEC)?;
+        let message = message.schema_spec(&schema::diagnostics_request::SPEC)?;
         let value = DiagnosticsRequest {
             after_sequence: read_u64(one_spec!(
                 message,
@@ -2180,7 +2239,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticsPage, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema_spec(&schema::diagnostics_page::SPEC)?;
+        let message = message.schema_spec(&schema::diagnostics_page::SPEC)?;
         let diagnostics = values_spec!(message, schema::diagnostics_page::DIAGNOSTIC)?
             .map(|raw| decode_diagnostic(self, nested_message(self, raw, 1)?))
             .collect::<Result<Vec<_>, _>>()?;
@@ -2192,136 +2251,6 @@ impl ProtocolCodec {
         validate_diagnostics_page(&value).map_err(|_| DecodeError::InvalidTlv)?;
         Ok(value)
     }
-}
-
-#[derive(Clone, Copy)]
-struct TransportField<'a> {
-    wire: u8,
-    mandatory: bool,
-    value: &'a [u8],
-}
-
-struct TransportFields<'a> {
-    values: [Option<TransportField<'a>>; 5],
-}
-
-fn scan_transport_fields<'a>(
-    codec: &ProtocolCodec,
-    payload: &'a [u8],
-    count: u32,
-    known: &[u16],
-) -> Result<TransportFields<'a>, DecodeError> {
-    if count > codec.limits().max_tlv_count || payload.len() > codec.limits().max_frame_bytes {
-        return Err(DecodeError::LimitExceeded);
-    }
-    let mut fields = TransportFields { values: [None; 5] };
-    let mut cursor = 0_usize;
-    let mut prior = 0_u16;
-    for index in 0..count {
-        let prefix_end = cursor
-            .checked_add(TLV_PREFIX_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let prefix = payload
-            .get(cursor..prefix_end)
-            .ok_or(DecodeError::Truncated)?;
-        let id = u16::from_le_bytes(prefix[..2].try_into().map_err(|_| DecodeError::Truncated)?);
-        let wire = prefix[2];
-        let mandatory = prefix[3];
-        if id == 0 || !(1..=15).contains(&wire) || mandatory & !1 != 0 || (index != 0 && id < prior)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        prior = id;
-        let length = usize::try_from(u32::from_le_bytes(
-            prefix[4..8]
-                .try_into()
-                .map_err(|_| DecodeError::Truncated)?,
-        ))
-        .map_err(|_| DecodeError::LimitExceeded)?;
-        let value_start = prefix_end;
-        let value_end = value_start
-            .checked_add(length)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value = payload
-            .get(value_start..value_end)
-            .ok_or(DecodeError::Truncated)?;
-        let padded_end = value_end
-            .checked_add(padding(length))
-            .ok_or(DecodeError::LimitExceeded)?;
-        if payload
-            .get(value_end..padded_end)
-            .ok_or(DecodeError::Truncated)?
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        if known.contains(&id) {
-            let slot = fields
-                .values
-                .get_mut(usize::from(id.saturating_sub(1)))
-                .ok_or(DecodeError::InvalidTlv)?;
-            if slot
-                .replace(TransportField {
-                    wire,
-                    mandatory: mandatory == 1,
-                    value,
-                })
-                .is_some()
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
-        } else if mandatory == 1 {
-            return Err(DecodeError::UnknownRequiredField);
-        }
-        cursor = padded_end;
-    }
-    if cursor != payload.len() {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(fields)
-}
-
-fn transport_schema(
-    fields: &TransportFields<'_>,
-    rules: &[(u16, u8, bool)],
-) -> Result<(), DecodeError> {
-    for &(id, wire, mandatory) in rules {
-        let Some(field) = fields
-            .values
-            .get(usize::from(id.saturating_sub(1)))
-            .and_then(|value| *value)
-        else {
-            if mandatory {
-                return Err(DecodeError::InvalidTlv);
-            }
-            continue;
-        };
-        if field.wire != wire || field.mandatory != mandatory {
-            return Err(DecodeError::InvalidTlv);
-        }
-    }
-    Ok(())
-}
-
-fn transport_required<'a>(
-    fields: &'a TransportFields<'a>,
-    id: u16,
-) -> Result<&'a [u8], DecodeError> {
-    fields
-        .values
-        .get(usize::from(id.saturating_sub(1)))
-        .and_then(|value| *value)
-        .map(|field| field.value)
-        .ok_or(DecodeError::InvalidTlv)
-}
-
-fn transport_optional<'a>(fields: &'a TransportFields<'a>, id: u16) -> Option<&'a [u8]> {
-    fields
-        .values
-        .get(usize::from(id.saturating_sub(1)))
-        .and_then(|value| *value)
-        .map(|field| field.value)
 }
 
 fn parse_transport_state(value: u8) -> Result<TransportState, DecodeError> {
@@ -2595,7 +2524,7 @@ fn write_automation_record_bytes(
         .checked_mul(crate::AUTOMATION_RECORD_BYTES)
         .ok_or(EncodeError::LimitExceeded)?;
     let start = writer.position;
-    writer.field(3, 10, true, &[])?;
+    write_spec!(writer, schema::automation_enqueue::RECORDS, &[])?;
     let end = start
         .checked_add(tlv_len(len)?)
         .ok_or(EncodeError::LimitExceeded)?;
@@ -2624,8 +2553,7 @@ fn write_automation_record_bytes(
     Ok(())
 }
 
-/// This parser is deliberately schema-specific: automation must not allocate a generic field
-/// table merely to borrow its fixed record array.
+/// Automation uses the shared allocation-free reader while borrowing its fixed record array.
 fn decode_automation_enqueue<'a>(
     codec: &ProtocolCodec,
     payload: &'a [u8],
@@ -2634,87 +2562,14 @@ fn decode_automation_enqueue<'a>(
     if count > codec.limits().max_tlv_count || payload.len() > codec.limits().max_frame_bytes {
         return Err(DecodeError::LimitExceeded);
     }
-    let mut cursor = 0_usize;
-    let mut prior = 0_u16;
-    let mut record_count = None;
-    let mut stride = None;
-    let mut records = None;
-    for index in 0..count {
-        let prefix = payload
-            .get(
-                cursor
-                    ..cursor
-                        .checked_add(TLV_PREFIX_BYTES)
-                        .ok_or(DecodeError::LimitExceeded)?,
-            )
-            .ok_or(DecodeError::Truncated)?;
-        let id = u16::from_le_bytes(prefix[..2].try_into().map_err(|_| DecodeError::Truncated)?);
-        let wire = prefix[2];
-        let mandatory = prefix[3];
-        if id == 0 || !(1..=15).contains(&wire) || mandatory & !1 != 0 || (index != 0 && id < prior)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        prior = id;
-        let length = usize::try_from(u32::from_le_bytes(
-            prefix[4..8]
-                .try_into()
-                .map_err(|_| DecodeError::Truncated)?,
-        ))
-        .map_err(|_| DecodeError::LimitExceeded)?;
-        let value_start = cursor
-            .checked_add(TLV_PREFIX_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value_end = value_start
-            .checked_add(length)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value = payload
-            .get(value_start..value_end)
-            .ok_or(DecodeError::Truncated)?;
-        let padded_end = value_end
-            .checked_add(padding(length))
-            .ok_or(DecodeError::LimitExceeded)?;
-        if payload
-            .get(value_end..padded_end)
-            .ok_or(DecodeError::Truncated)?
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        match id {
-            1 => {
-                if mandatory != 1
-                    || wire != WIRE_U16
-                    || record_count.replace(read_u16(value)?).is_some()
-                {
-                    return Err(DecodeError::InvalidTlv);
-                }
-            }
-            2 => {
-                if mandatory != 1 || wire != WIRE_U16 || stride.replace(read_u16(value)?).is_some()
-                {
-                    return Err(DecodeError::InvalidTlv);
-                }
-            }
-            3 => {
-                if mandatory != 1 || wire != 10 || records.replace(value).is_some() {
-                    return Err(DecodeError::InvalidTlv);
-                }
-            }
-            _ if mandatory == 1 => return Err(DecodeError::UnknownRequiredField),
-            _ => {}
-        }
-        cursor = padded_end;
-    }
-    if cursor != payload.len() {
-        return Err(DecodeError::InvalidTlv);
-    }
-    let count = record_count.ok_or(DecodeError::InvalidTlv)?;
-    let records = records.ok_or(DecodeError::InvalidTlv)?;
+    let fields =
+        top_level_message(codec, payload, count)?.schema_spec(&schema::automation_enqueue::SPEC)?;
+    let count = read_u16(one_spec!(fields, schema::automation_enqueue::COUNT)?)?;
+    let stride = read_u16(one_spec!(fields, schema::automation_enqueue::RECORD_BYTES)?)?;
+    let records = one_spec!(fields, schema::automation_enqueue::RECORDS)?;
     if count == 0
         || usize::from(count) > crate::AUTOMATION_BATCH_RECORDS
-        || stride != Some(crate::AUTOMATION_RECORD_BYTES as u16)
+        || stride != crate::AUTOMATION_RECORD_BYTES as u16
         || records.len()
             != usize::from(count)
                 .checked_mul(crate::AUTOMATION_RECORD_BYTES)
@@ -3100,7 +2955,7 @@ fn decode_metadata_page(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterMetadataPage, DecodeError> {
-    message.schema_spec(&schema::metadata_page::SPEC)?;
+    let message = message.schema_spec(&schema::metadata_page::SPEC)?;
     let descriptors = values_spec!(message, schema::metadata_page::DESCRIPTOR)?
         .map(|v| decode_descriptor(codec, nested_message(codec, v, 1)?))
         .collect::<Result<Vec<_>, _>>()?;
@@ -3127,7 +2982,7 @@ fn decode_descriptor(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterDescriptor, DecodeError> {
-    message.schema_spec(&descriptor::SPEC)?;
+    let message = message.schema_spec(&descriptor::SPEC)?;
     let choices = values_spec!(message, descriptor::ENUM_CHOICE)?
         .map(|v| decode_choice(codec, nested_message(codec, v, 2)?))
         .collect::<Result<Vec<_>, _>>()?;
@@ -3164,7 +3019,7 @@ fn decode_descriptor(
     Ok(value)
 }
 fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoice, DecodeError> {
-    message.schema_spec(&enum_choice::SPEC)?;
+    let message = message.schema_spec(&enum_choice::SPEC)?;
     let value = read_f32(one_spec!(message, enum_choice::VALUE)?)?;
     if !value.is_finite() {
         return Err(DecodeError::InvalidTlv);
@@ -3341,7 +3196,7 @@ fn decode_state_page(
     _codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterStatePage, DecodeError> {
-    message.schema_spec(&schema::state_page::SPEC)?;
+    let message = message.schema_spec(&schema::state_page::SPEC)?;
     let count = read_u16(one_spec!(message, schema::state_page::COUNT)?)? as usize;
     if count > 256 || read_u16(one_spec!(message, schema::state_page::RECORD_BYTES)?)? != 16 {
         return Err(DecodeError::InvalidTlv);
@@ -3561,7 +3416,7 @@ fn decode_capabilities<'a>(
     codec: &ProtocolCodec,
     message: Message<'a>,
 ) -> Result<DecodedCapabilities<'a>, DecodeError> {
-    message.schema_spec(&schema::capabilities::SPEC)?;
+    let message = message.schema_spec(&schema::capabilities::SPEC)?;
     let value = DecodedCapabilities {
         minimum_version: crate::ProtocolVersion {
             major: read_u16(one_spec!(
@@ -4113,7 +3968,7 @@ fn decode_non_ok(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<NonOkResponse, DecodeError> {
-    message.schema_spec(&schema::non_ok::SPEC)?;
+    let message = message.schema_spec(&schema::non_ok::SPEC)?;
     let diagnostics = values_spec!(message, schema::non_ok::DIAGNOSTIC)?
         .map(|value| decode_diagnostic(codec, nested_message(codec, value, 1)?))
         .collect::<Result<Vec<_>, _>>()?;
@@ -4132,7 +3987,7 @@ fn decode_diagnostic(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<Diagnostic, DecodeError> {
-    message.schema_spec(&schema::diagnostic::SPEC)?;
+    let message = message.schema_spec(&schema::diagnostic::SPEC)?;
     let code = read_string(codec, one_spec!(message, schema::diagnostic::CODE)?)?.to_owned();
     if !valid_dotted_code(&code) {
         return Err(DecodeError::InvalidTlv);
@@ -4169,7 +4024,7 @@ fn decode_path_segment(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<PathSegment, DecodeError> {
-    message.schema_spec(&schema::path_segment::SPEC)?;
+    let message = message.schema_spec(&schema::path_segment::SPEC)?;
     let tag = read_u8(one_spec!(message, schema::path_segment::TAG)?)?;
     let field = optional_spec!(message, schema::path_segment::FIELD)?;
     let index = optional_spec!(message, schema::path_segment::INDEX)?;
@@ -4196,7 +4051,7 @@ fn decode_backpressure(
     _codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<Backpressure, DecodeError> {
-    message.schema_spec(&schema::backpressure::SPEC)?;
+    let message = message.schema_spec(&schema::backpressure::SPEC)?;
     let queue_kind = BackpressureQueueKind::decode(read_u8(one_spec!(
         message,
         schema::backpressure::QUEUE_KIND
@@ -4237,48 +4092,12 @@ fn read_string<'a>(codec: &ProtocolCodec, value: &'a [u8]) -> Result<&'a str, De
     core::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)
 }
 
-fn read_u8(value: &[u8]) -> Result<u8, DecodeError> {
-    value
-        .first()
-        .copied()
-        .filter(|_| value.len() == 1)
-        .ok_or(DecodeError::InvalidValueLength)
-}
-
 fn read_bool(value: &[u8]) -> Result<bool, DecodeError> {
     match read_u8(value)? {
         0 => Ok(false),
         1 => Ok(true),
         _ => Err(DecodeError::InvalidValueLength),
     }
-}
-
-fn read_u16(value: &[u8]) -> Result<u16, DecodeError> {
-    let value: [u8; 2] = value
-        .try_into()
-        .map_err(|_| DecodeError::InvalidValueLength)?;
-    Ok(u16::from_le_bytes(value))
-}
-
-fn read_u32(value: &[u8]) -> Result<u32, DecodeError> {
-    let value: [u8; 4] = value
-        .try_into()
-        .map_err(|_| DecodeError::InvalidValueLength)?;
-    Ok(u32::from_le_bytes(value))
-}
-
-fn read_f32(value: &[u8]) -> Result<f32, DecodeError> {
-    let value: [u8; 4] = value
-        .try_into()
-        .map_err(|_| DecodeError::InvalidValueLength)?;
-    Ok(f32::from_le_bytes(value))
-}
-
-fn read_u64(value: &[u8]) -> Result<u64, DecodeError> {
-    let value: [u8; 8] = value
-        .try_into()
-        .map_err(|_| DecodeError::InvalidValueLength)?;
-    Ok(u64::from_le_bytes(value))
 }
 
 /// Validate the direct decoder's nested BTLV tree before the typed parsing below allocates its
@@ -4289,8 +4108,10 @@ fn top_level_message<'a>(
     bytes: &'a [u8],
     count: u32,
 ) -> Result<Message<'a>, DecodeError> {
-    validate_message_tree(codec, bytes, count, 0)?;
-    Message::tlvs(bytes, count)
+    if count > codec.limits().max_tlv_count || bytes.len() > codec.limits().max_frame_bytes {
+        return Err(DecodeError::LimitExceeded);
+    }
+    Ok(Message::bounded(bytes, count, codec.limits(), 0))
 }
 
 fn nested_message<'a>(
@@ -4305,126 +4126,15 @@ fn nested_message<'a>(
     if header[4..].iter().any(|byte| *byte != 0) {
         return Err(DecodeError::NonzeroReserved);
     }
-    validate_message_tree(codec, &bytes[NESTED_HEADER_BYTES..], count, depth)?;
-    Message::nested(bytes)
-}
-
-fn validate_message_tree(
-    codec: &ProtocolCodec,
-    bytes: &[u8],
-    count: u32,
-    depth: u8,
-) -> Result<(), DecodeError> {
     if count > codec.limits().max_tlv_count || bytes.len() > codec.limits().max_frame_bytes {
         return Err(DecodeError::LimitExceeded);
     }
-    let mut cursor = 0_usize;
-    let mut previous_id = 0_u16;
-    for index in 0..count {
-        let prefix_end = cursor
-            .checked_add(TLV_PREFIX_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let prefix = bytes
-            .get(cursor..prefix_end)
-            .ok_or(DecodeError::Truncated)?;
-        let id = u16::from_le_bytes(prefix[..2].try_into().map_err(|_| DecodeError::Truncated)?);
-        let wire = prefix[2];
-        if id == 0
-            || !(1..=15).contains(&wire)
-            || prefix[3] & !1 != 0
-            || (index != 0 && id < previous_id)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        previous_id = id;
-        let value_len = usize::try_from(u32::from_le_bytes(
-            prefix[4..8]
-                .try_into()
-                .map_err(|_| DecodeError::Truncated)?,
-        ))
-        .map_err(|_| DecodeError::LimitExceeded)?;
-        let value_start = prefix_end;
-        let value_end = value_start
-            .checked_add(value_len)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value = bytes
-            .get(value_start..value_end)
-            .ok_or(DecodeError::Truncated)?;
-        validate_wire_value(codec, wire, value, depth)?;
-        let padded_end = value_end
-            .checked_add(padding(value_len))
-            .ok_or(DecodeError::LimitExceeded)?;
-        if bytes
-            .get(value_end..padded_end)
-            .ok_or(DecodeError::Truncated)?
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        cursor = padded_end;
-    }
-    if cursor != bytes.len() {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(())
-}
-
-fn validate_wire_value(
-    codec: &ProtocolCodec,
-    wire: u8,
-    value: &[u8],
-    depth: u8,
-) -> Result<(), DecodeError> {
-    let exact_length = match wire {
-        WIRE_U8 => Some(1),
-        WIRE_U16 => Some(2),
-        WIRE_U32 => Some(4),
-        WIRE_U64 => Some(8),
-        WIRE_UTF8 | WIRE_MESSAGE => None,
-        5 | 7 => Some(8),
-        6 => Some(4),
-        8 => Some(1),
-        10 | 12..=15 => None,
-        _ => return Err(DecodeError::InvalidTlv),
-    };
-    if let Some(exact_length) = exact_length {
-        if value.len() != exact_length {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        if wire == 8 && !matches!(value[0], 0 | 1) {
-            return Err(DecodeError::InvalidValueLength);
-        }
-    }
-    match wire {
-        WIRE_UTF8 => {
-            if value.len() > codec.limits().max_string_bytes {
-                return Err(DecodeError::LimitExceeded);
-            }
-            if core::str::from_utf8(value).is_err() {
-                return Err(DecodeError::InvalidUtf8);
-            }
-        }
-        WIRE_MESSAGE => {
-            if depth >= codec.limits().max_nesting {
-                return Err(DecodeError::LimitExceeded);
-            }
-            let header = value
-                .get(..NESTED_HEADER_BYTES)
-                .ok_or(DecodeError::Truncated)?;
-            let count =
-                u32::from_le_bytes(header[..4].try_into().map_err(|_| DecodeError::Truncated)?);
-            if header[4..].iter().any(|byte| *byte != 0) {
-                return Err(DecodeError::NonzeroReserved);
-            }
-            validate_message_tree(codec, &value[NESTED_HEADER_BYTES..], count, depth + 1)?;
-        }
-        12 if !value.len().is_multiple_of(2) => return Err(DecodeError::InvalidValueLength),
-        13 | 15 if !value.len().is_multiple_of(4) => return Err(DecodeError::InvalidValueLength),
-        14 if !value.len().is_multiple_of(8) => return Err(DecodeError::InvalidValueLength),
-        _ => {}
-    }
-    Ok(())
+    Ok(Message::bounded(
+        &bytes[NESTED_HEADER_BYTES..],
+        count,
+        codec.limits(),
+        depth,
+    ))
 }
 
 fn valid_dotted_code(value: &str) -> bool {
@@ -4455,10 +4165,6 @@ fn tlv_len(value_len: usize) -> Result<usize, EncodeError> {
         TLV_PREFIX_BYTES,
         checked_add(value_len, padding(value_len))?,
     )
-}
-
-const fn padding(value_len: usize) -> usize {
-    (8 - (value_len & 7)) & 7
 }
 
 #[cfg(test)]

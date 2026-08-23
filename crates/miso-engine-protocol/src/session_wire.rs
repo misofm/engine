@@ -209,7 +209,10 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
 use crate::{
     CommandFrame, DecodeError, DecodeScratch, DecodedFrame, EncodeError, ExpectedRevision, Frame,
     MessageId, ProtocolCodec, RequestId, SessionEditV1,
-    btlv::{CountSink, Sink, SliceSink},
+    btlv::{
+        CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8 as read_u8_exact,
+        read_u16 as read_u16_exact, read_u32 as read_u32_exact, read_u64 as read_u64_exact,
+    },
     schema::{self, FieldSpec},
 };
 
@@ -349,17 +352,12 @@ impl ProtocolCodec {
             .header
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
-        let top = Message::tlvs(outer.frame.payload, header.tlv_count)?;
-        top.schema_spec(&schema::session::transaction::SPEC)?;
-        if top.fields.is_empty() {
+        let top = Message::raw(outer.frame.payload, header.tlv_count)
+            .schema_spec(&schema::session::transaction::SPEC)?;
+        if top.is_empty() {
             return Err(DecodeError::InvalidTlv);
         }
-        let mut edits = Vec::with_capacity(
-            top.fields
-                .iter()
-                .filter(|field| field.id == schema::session::transaction::EDIT.id)
-                .count(),
-        );
+        let mut edits = Vec::with_capacity(top.count(schema::session::transaction::EDIT.id));
         for value in values_spec!(top, schema::session::transaction::EDIT)? {
             edits.push(parse_edit(Message::nested(value)?)?);
         }
@@ -382,8 +380,8 @@ impl ProtocolCodec {
             .header
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
-        let top = Message::tlvs(outer.frame.payload, header.tlv_count)?;
-        top.schema_spec(&schema::session::transaction::SPEC)?;
+        let top = Message::raw(outer.frame.payload, header.tlv_count)
+            .schema_spec(&schema::session::transaction::SPEC)?;
         let count = u32::try_from(values_spec!(top, schema::session::transaction::EDIT)?.count())
             .map_err(|_| DecodeError::LimitExceeded)?;
         if count == 0 {
@@ -1249,190 +1247,16 @@ fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeEr
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct Field<'a> {
-    pub(crate) id: u16,
-    pub(crate) wire: u8,
-    pub(crate) mandatory: bool,
-    pub(crate) value: &'a [u8],
-}
-
-pub(crate) struct Message<'a> {
-    pub(crate) fields: Vec<Field<'a>>,
-}
-
-impl<'a> Message<'a> {
-    pub(crate) fn nested(bytes: &'a [u8]) -> Result<Self, DecodeError> {
-        let header = bytes.get(..8).ok_or(DecodeError::Truncated)?;
-        let count = read_u32(header, 0)?;
-        if read_u32(header, 4)? != 0 {
-            return Err(DecodeError::NonzeroReserved);
-        }
-        Self::tlvs(&bytes[8..], count)
-    }
-
-    pub(crate) fn tlvs(bytes: &'a [u8], count: u32) -> Result<Self, DecodeError> {
-        let mut cursor = 0usize;
-        let mut fields =
-            Vec::with_capacity(usize::try_from(count).map_err(|_| DecodeError::LimitExceeded)?);
-        let mut prior = 0_u16;
-        for index in 0..count {
-            let prefix = bytes
-                .get(cursor..cursor.checked_add(8).ok_or(DecodeError::LimitExceeded)?)
-                .ok_or(DecodeError::Truncated)?;
-            let id = read_u16(prefix, 0)?;
-            let wire = prefix[2];
-            if id == 0
-                || !(1..=15).contains(&wire)
-                || prefix[3] & !1 != 0
-                || (index != 0 && id < prior)
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
-            prior = id;
-            let length =
-                usize::try_from(read_u32(prefix, 4)?).map_err(|_| DecodeError::LimitExceeded)?;
-            let value_start = cursor.checked_add(8).ok_or(DecodeError::LimitExceeded)?;
-            let value_end = value_start
-                .checked_add(length)
-                .ok_or(DecodeError::LimitExceeded)?;
-            let value = bytes
-                .get(value_start..value_end)
-                .ok_or(DecodeError::Truncated)?;
-            let padded_end = value_end
-                .checked_add(padding(length))
-                .ok_or(DecodeError::LimitExceeded)?;
-            if bytes
-                .get(value_end..padded_end)
-                .ok_or(DecodeError::Truncated)?
-                .iter()
-                .any(|byte| *byte != 0)
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
-            fields.push(Field {
-                id,
-                wire,
-                mandatory: prefix[3] & 1 != 0,
-                value,
-            });
-            cursor = padded_end;
-        }
-        if cursor != bytes.len() {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(Self { fields })
-    }
-
-    pub(crate) fn schema_spec(
-        &self,
-        spec: &'static crate::schema::MessageSpec,
-    ) -> Result<(), DecodeError> {
-        debug_assert!(!spec.name.is_empty());
-        for field in &self.fields {
-            let field_spec = spec
-                .fields
-                .binary_search_by_key(&field.id, |candidate| candidate.id)
-                .ok()
-                .map(|index| spec.fields[index]);
-            match field_spec {
-                Some(field_spec)
-                    if field.mandatory != field_spec.mandatory
-                        || crate::schema::Wire::from_raw(field.wire) != Some(field_spec.wire)
-                        || (field_spec.wire == crate::schema::Wire::Message)
-                            != field_spec.nested.is_some() =>
-                {
-                    return Err(DecodeError::InvalidTlv);
-                }
-                None if field.mandatory => return Err(DecodeError::UnknownRequiredField),
-                _ => {}
-            }
-        }
-        for field_spec in spec.fields {
-            if !field_spec.repeated
-                && self
-                    .fields
-                    .iter()
-                    .filter(|field| field.id == field_spec.id)
-                    .count()
-                    > 1
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn tagged_schema_spec(
-        &self,
-        spec: &'static schema::MessageSpec,
-        known: &'static schema::MessageSpec,
-    ) -> Result<(), DecodeError> {
-        self.schema_spec(spec)?;
-        if self.fields.iter().any(|field| {
-            known
-                .fields
-                .iter()
-                .any(|candidate| candidate.id == field.id)
-                && !spec.fields.iter().any(|candidate| candidate.id == field.id)
-        }) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn one(&self, id: u16, wire: u8) -> Result<&'a [u8], DecodeError> {
-        let mut values = self.fields.iter().filter(|field| field.id == id);
-        let Some(field) = values.next() else {
-            return Err(DecodeError::InvalidTlv);
-        };
-        if values.next().is_some() || field.wire != wire {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(field.value)
-    }
-
-    pub(crate) fn optional_one(&self, id: u16, wire: u8) -> Result<Option<&'a [u8]>, DecodeError> {
-        let mut values = self.fields.iter().filter(|field| field.id == id);
-        let Some(field) = values.next() else {
-            return Ok(None);
-        };
-        if values.next().is_some() || field.wire != wire {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(Some(field.value))
-    }
-
-    pub(crate) fn values(
-        &self,
-        id: u16,
-        wire: u8,
-    ) -> Result<impl Iterator<Item = &'a [u8]> + '_, DecodeError> {
-        if self
-            .fields
-            .iter()
-            .any(|field| field.id == id && field.wire != wire)
-        {
-            return Err(DecodeError::InvalidTlv);
-        }
-        Ok(self
-            .fields
-            .iter()
-            .filter(move |field| field.id == id)
-            .map(|field| field.value))
-    }
-}
-
 fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
-    message.schema_spec(&schema::session::edit::SPEC)?;
+    let message = message.schema_spec(&schema::session::edit::SPEC)?;
     let opcode = crate::SessionEditOpcode::from_raw(read_u16_exact(one_spec!(
         message,
         schema::session::edit::OPCODE
     )?)?)
     .ok_or(DecodeError::InvalidTlv)?;
-    let payload = Message::nested(one_spec!(message, schema::session::edit::PAYLOAD)?)?;
+    let payload = Message::nested(one_spec!(message, schema::session::edit::PAYLOAD)?)?
+        .schema_spec(schema::session::payload_spec(opcode))?;
     let fields = schema::session::payload_spec(opcode).fields;
-    payload.schema_spec(schema::session::payload_spec(opcode))?;
     match opcode {
         crate::SessionEditOpcode::SetSessionId => Ok(SessionEditV1::SetSessionId {
             session_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1645,7 +1469,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
 }
 
 fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeError> {
-    message.schema_spec(&schema::session::render_profile::SPEC)?;
+    let message = message.schema_spec(&schema::session::render_profile::SPEC)?;
     let mode = match read_u8_exact(one_spec!(message, schema::session::render_profile::MODE)?)? {
         1 => miso_engine_session::RenderMode::SingleThread,
         2 => miso_engine_session::RenderMode::DependencyWaves,
@@ -1658,7 +1482,7 @@ fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeErr
 }
 
 fn parse_output_profile(message: Message<'_>) -> Result<OutputProfile, DecodeError> {
-    message.schema_spec(&schema::session::output_profile::SPEC)?;
+    let message = message.schema_spec(&schema::session::output_profile::SPEC)?;
     if read_u8_exact(one_spec!(message, schema::session::output_profile::LAYOUT)?)? != 1 {
         return Err(DecodeError::InvalidTlv);
     }
@@ -1673,7 +1497,7 @@ fn parse_output_profile(message: Message<'_>) -> Result<OutputProfile, DecodeErr
 }
 
 fn parse_limits(message: Message<'_>) -> Result<SessionLimits, DecodeError> {
-    message.schema_spec(&schema::session::limits::SPEC)?;
+    let message = message.schema_spec(&schema::session::limits::SPEC)?;
     Ok(SessionLimits {
         pcm_ring_frames: read_u64_exact(one_spec!(
             message,
@@ -1688,7 +1512,7 @@ fn parse_limits(message: Message<'_>) -> Result<SessionLimits, DecodeError> {
 }
 
 fn parse_content(message: Message<'_>) -> Result<SourceContent, DecodeError> {
-    message.schema_spec(&schema::session::content::SPEC)?;
+    let message = message.schema_spec(&schema::session::content::SPEC)?;
     Ok(SourceContent {
         identity: utf8(one_spec!(message, schema::session::content::IDENTITY)?)?,
         locator: utf8(one_spec!(message, schema::session::content::LOCATOR)?)?,
@@ -1696,7 +1520,7 @@ fn parse_content(message: Message<'_>) -> Result<SourceContent, DecodeError> {
 }
 
 fn parse_region(message: Message<'_>) -> Result<SourceRegion, DecodeError> {
-    message.schema_spec(&schema::session::region::SPEC)?;
+    let message = message.schema_spec(&schema::session::region::SPEC)?;
     Ok(SourceRegion {
         start_sample: read_u64_exact(one_spec!(message, schema::session::region::START_SAMPLE)?)?,
         length_samples: read_u64_exact(one_spec!(
@@ -1707,7 +1531,7 @@ fn parse_region(message: Message<'_>) -> Result<SourceRegion, DecodeError> {
 }
 
 fn parse_mapping(message: Message<'_>) -> Result<SourceMapping, DecodeError> {
-    message.schema_spec(&schema::session::mapping::SPEC)?;
+    let message = message.schema_spec(&schema::session::mapping::SPEC)?;
     Ok(SourceMapping {
         channel_count: read_u8_exact(one_spec!(message, schema::session::mapping::CHANNEL_COUNT)?)?,
         region: parse_region(Message::nested(one_spec!(
@@ -1718,7 +1542,7 @@ fn parse_mapping(message: Message<'_>) -> Result<SourceMapping, DecodeError> {
 }
 
 fn parse_source(message: Message<'_>) -> Result<Source, DecodeError> {
-    message.schema_spec(&schema::session::source::SPEC)?;
+    let message = message.schema_spec(&schema::session::source::SPEC)?;
     Ok(Source {
         id: stable_id(one_spec!(message, schema::session::source::ID)?)?,
         sample_rate_hz: read_u32_exact(one_spec!(
@@ -1737,7 +1561,7 @@ fn parse_source(message: Message<'_>) -> Result<Source, DecodeError> {
 }
 
 fn parse_builtins(message: Message<'_>) -> Result<DualMonoBuiltins, DecodeError> {
-    message.schema_spec(&schema::session::builtins::SPEC)?;
+    let message = message.schema_spec(&schema::session::builtins::SPEC)?;
     Ok(DualMonoBuiltins {
         left: parse_channel_builtins(Message::nested(one_spec!(
             message,
@@ -1750,7 +1574,7 @@ fn parse_builtins(message: Message<'_>) -> Result<DualMonoBuiltins, DecodeError>
     })
 }
 fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, DecodeError> {
-    message.schema_spec(&schema::session::channel_builtins::SPEC)?;
+    let message = message.schema_spec(&schema::session::channel_builtins::SPEC)?;
     Ok(ChannelBuiltins {
         polarity_invert: parse_bool(one_spec!(
             message,
@@ -1771,7 +1595,7 @@ fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, Decod
     })
 }
 fn parse_track(message: Message<'_>) -> Result<miso_engine_session::Track, DecodeError> {
-    message.schema_spec(&schema::session::track::SPEC)?;
+    let message = message.schema_spec(&schema::session::track::SPEC)?;
     Ok(miso_engine_session::Track {
         id: stable_id(one_spec!(message, schema::session::track::ID)?)?,
         source_id: stable_id(one_spec!(message, schema::session::track::SOURCE_ID)?)?,
@@ -1810,7 +1634,7 @@ fn parse_track(message: Message<'_>) -> Result<miso_engine_session::Track, Decod
     })
 }
 fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
-    message.schema_spec(&schema::session::rack::SPEC)?;
+    let message = message.schema_spec(&schema::session::rack::SPEC)?;
     Ok(Rack {
         effects: values_spec!(message, schema::session::rack::EFFECT)?
             .map(|value| parse_effect(Message::nested(value)?))
@@ -1818,7 +1642,7 @@ fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
     })
 }
 fn parse_identity(message: Message<'_>) -> Result<EffectIdentity, DecodeError> {
-    message.schema_spec(&schema::session::effect_identity::SPEC)?;
+    let message = message.schema_spec(&schema::session::effect_identity::SPEC)?;
     match read_u8_exact(one_spec!(message, schema::session::effect_identity::TAG)?)? {
         1 => Ok(EffectIdentity::Native {
             effect_id: stable_id(one_spec!(message, schema::session::effect_identity::VALUE)?)?,
@@ -1830,10 +1654,13 @@ fn parse_identity(message: Message<'_>) -> Result<EffectIdentity, DecodeError> {
     }
 }
 fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> {
-    let tag = read_u8_exact(one_spec!(message, schema::session::route_source::TAG)?)?;
+    let tag = read_u8_exact(message.tag(
+        schema::session::route_source::TAG.id,
+        schema::session::route_source::TAG.wire.raw(),
+    )?)?;
     match tag {
         1 => {
-            message.tagged_schema_spec(
+            let message = message.tagged_schema_spec(
                 &schema::session::route_source::TRACK,
                 &schema::session::route_source::KNOWN,
             )?;
@@ -1846,7 +1673,7 @@ fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> 
             })
         }
         2 => {
-            message.tagged_schema_spec(
+            let message = message.tagged_schema_spec(
                 &schema::session::route_source::SUBMIX,
                 &schema::session::route_source::KNOWN,
             )?;
@@ -1858,7 +1685,7 @@ fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> 
     }
 }
 fn parse_route_destination(message: Message<'_>) -> Result<RouteDestination, DecodeError> {
-    message.schema_spec(&schema::session::route_destination::SPEC)?;
+    let message = message.schema_spec(&schema::session::route_destination::SPEC)?;
     match read_u8_exact(one_spec!(message, schema::session::route_destination::TAG)?)? {
         1 => Ok(RouteDestination::SubmixInput {
             submix_id: stable_id(one_spec!(message, schema::session::route_destination::ID)?)?,
@@ -1870,17 +1697,20 @@ fn parse_route_destination(message: Message<'_>) -> Result<RouteDestination, Dec
     }
 }
 fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeError> {
-    let tag = read_u8_exact(one_spec!(message, schema::session::sidechain::TAG)?)?;
+    let tag = read_u8_exact(message.tag(
+        schema::session::sidechain::TAG.id,
+        schema::session::sidechain::TAG.wire.raw(),
+    )?)?;
     match tag {
         1 => {
-            message.tagged_schema_spec(
+            let _message = message.tagged_schema_spec(
                 &schema::session::sidechain::NONE,
                 &schema::session::sidechain::KNOWN,
             )?;
             Ok(SidechainDeclaration::None)
         }
         2 => {
-            message.tagged_schema_spec(
+            let message = message.tagged_schema_spec(
                 &schema::session::sidechain::ROUTED,
                 &schema::session::sidechain::KNOWN,
             )?;
@@ -1898,7 +1728,7 @@ fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeE
     }
 }
 fn parse_param(message: Message<'_>) -> Result<EffectParam, DecodeError> {
-    message.schema_spec(&schema::session::param::SPEC)?;
+    let message = message.schema_spec(&schema::session::param::SPEC)?;
     Ok(EffectParam {
         parameter_id: read_u32_exact(one_spec!(message, schema::session::param::PARAMETER_ID)?)?,
         channel: parse_channel(read_u8_exact(one_spec!(
@@ -1913,7 +1743,7 @@ fn parse_param(message: Message<'_>) -> Result<EffectParam, DecodeError> {
     })
 }
 fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
-    message.schema_spec(&schema::session::effect::SPEC)?;
+    let message = message.schema_spec(&schema::session::effect::SPEC)?;
     Ok(Effect {
         id: stable_id(one_spec!(message, schema::session::effect::ID)?)?,
         identity: parse_identity(Message::nested(one_spec!(
@@ -1939,7 +1769,7 @@ fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
     })
 }
 fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {
-    message.schema_spec(&schema::session::fader::SPEC)?;
+    let message = message.schema_spec(&schema::session::fader::SPEC)?;
     Ok(DualMonoFader {
         left_db: read_f32_exact(one_spec!(message, schema::session::fader::LEFT_DB)?)?,
         right_db: read_f32_exact(one_spec!(message, schema::session::fader::RIGHT_DB)?)?,
@@ -1948,10 +1778,13 @@ fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {
     })
 }
 fn parse_matrix_or_pan(message: Message<'_>) -> Result<MatrixOrPan, DecodeError> {
-    let tag = read_u8_exact(one_spec!(message, schema::session::matrix_or_pan::TAG)?)?;
+    let tag = read_u8_exact(message.tag(
+        schema::session::matrix_or_pan::TAG.id,
+        schema::session::matrix_or_pan::TAG.wire.raw(),
+    )?)?;
     match tag {
         1 => {
-            message.tagged_schema_spec(
+            let message = message.tagged_schema_spec(
                 &schema::session::matrix_or_pan::PAN,
                 &schema::session::matrix_or_pan::KNOWN,
             )?;
@@ -1965,7 +1798,7 @@ fn parse_matrix_or_pan(message: Message<'_>) -> Result<MatrixOrPan, DecodeError>
             })
         }
         2 => {
-            message.tagged_schema_spec(
+            let message = message.tagged_schema_spec(
                 &schema::session::matrix_or_pan::MATRIX,
                 &schema::session::matrix_or_pan::KNOWN,
             )?;
@@ -1987,19 +1820,19 @@ fn parse_matrix_or_pan(message: Message<'_>) -> Result<MatrixOrPan, DecodeError>
     }
 }
 fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
-    message.schema_spec(&schema::session::submix::SPEC)?;
+    let message = message.schema_spec(&schema::session::submix::SPEC)?;
     Ok(Submix {
         id: stable_id(one_spec!(message, schema::session::submix::ID)?)?,
     })
 }
 fn parse_output(message: Message<'_>) -> Result<Output, DecodeError> {
-    message.schema_spec(&schema::session::output::SPEC)?;
+    let message = message.schema_spec(&schema::session::output::SPEC)?;
     Ok(Output {
         id: stable_id(one_spec!(message, schema::session::output::ID)?)?,
     })
 }
 fn parse_channel_matrix(message: Message<'_>) -> Result<ChannelMatrix, DecodeError> {
-    message.schema_spec(&schema::session::channel_matrix::SPEC)?;
+    let message = message.schema_spec(&schema::session::channel_matrix::SPEC)?;
     Ok(ChannelMatrix {
         ll: read_f32_exact(one_spec!(message, schema::session::channel_matrix::LL)?)?,
         lr: read_f32_exact(one_spec!(message, schema::session::channel_matrix::LR)?)?,
@@ -2008,7 +1841,7 @@ fn parse_channel_matrix(message: Message<'_>) -> Result<ChannelMatrix, DecodeErr
     })
 }
 fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
-    message.schema_spec(&schema::session::route::SPEC)?;
+    let message = message.schema_spec(&schema::session::route::SPEC)?;
     Ok(Route {
         id: stable_id(one_spec!(message, schema::session::route::ID)?)?,
         source: parse_route_source(Message::nested(one_spec!(
@@ -2027,7 +1860,7 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
     })
 }
 fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, DecodeError> {
-    message.schema_spec(&schema::session::automation_target::SPEC)?;
+    let message = message.schema_spec(&schema::session::automation_target::SPEC)?;
     Ok(AutomationTarget {
         entity_id: stable_id(one_spec!(
             message,
@@ -2052,7 +1885,7 @@ fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, Dec
     })
 }
 fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, DecodeError> {
-    message.schema_spec(&schema::session::automation_segment::SPEC)?;
+    let message = message.schema_spec(&schema::session::automation_segment::SPEC)?;
     Ok(AutomationSegment {
         shape: parse_shape(read_u8_exact(one_spec!(
             message,
@@ -2081,7 +1914,7 @@ fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, D
     })
 }
 fn parse_automation(message: Message<'_>) -> Result<Automation, DecodeError> {
-    message.schema_spec(&schema::session::automation::SPEC)?;
+    let message = message.schema_spec(&schema::session::automation::SPEC)?;
     Ok(Automation {
         id: stable_id(one_spec!(message, schema::session::automation::ID)?)?,
         target: parse_automation_target(Message::nested(one_spec!(
@@ -2175,38 +2008,8 @@ fn utf8(bytes: &[u8]) -> Result<String, DecodeError> {
 fn stable_id(bytes: &[u8]) -> Result<StableId, DecodeError> {
     StableId::parse(&utf8(bytes)?).ok_or(DecodeError::InvalidTlv)
 }
-fn read_u8_exact(bytes: &[u8]) -> Result<u8, DecodeError> {
-    bytes
-        .first()
-        .copied()
-        .filter(|_| bytes.len() == 1)
-        .ok_or(DecodeError::InvalidValueLength)
-}
-fn read_u16_exact(bytes: &[u8]) -> Result<u16, DecodeError> {
-    if bytes.len() != 2 {
-        return Err(DecodeError::InvalidValueLength);
-    }
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-fn read_u32_exact(bytes: &[u8]) -> Result<u32, DecodeError> {
-    if bytes.len() != 4 {
-        return Err(DecodeError::InvalidValueLength);
-    }
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-fn read_u64_exact(bytes: &[u8]) -> Result<u64, DecodeError> {
-    if bytes.len() != 8 {
-        return Err(DecodeError::InvalidValueLength);
-    }
-    Ok(u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ]))
-}
 fn read_f32_exact(bytes: &[u8]) -> Result<f32, DecodeError> {
-    if bytes.len() != 4 {
-        return Err(DecodeError::InvalidValueLength);
-    }
-    let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let value = read_f32(bytes)?;
     if !value.is_finite() {
         return Err(DecodeError::InvalidTlv);
     }
@@ -2219,25 +2022,6 @@ fn parse_bool(bytes: &[u8]) -> Result<bool, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, DecodeError> {
-    read_u16_exact(
-        bytes
-            .get(offset..offset + 2)
-            .ok_or(DecodeError::Truncated)?,
-    )
-}
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, DecodeError> {
-    read_u32_exact(
-        bytes
-            .get(offset..offset + 4)
-            .ok_or(DecodeError::Truncated)?,
-    )
-}
-
-const fn padding(length: usize) -> usize {
-    (8 - (length & 7)) & 7
-}
-
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -2265,7 +2049,7 @@ mod tests {
             bytes.push(u8::from(mandatory));
             bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
             bytes.extend_from_slice(&value);
-            bytes.resize(bytes.len() + padding(value.len()), 0);
+            bytes.resize(bytes.len() + crate::btlv::padding(value.len()), 0);
         }
         bytes
     }
@@ -3074,7 +2858,9 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0,
         ];
         assert_eq!(
-            Message::tlvs(&reversed, 2).err(),
+            Message::raw(&reversed, 2)
+                .schema_spec(&schema::session::sidechain::ROUTED)
+                .err(),
             Some(DecodeError::InvalidTlv)
         );
     }
