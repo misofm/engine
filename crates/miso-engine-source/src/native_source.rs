@@ -1148,6 +1148,16 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     caps: NativeSessionSourcePrepareCaps,
 ) -> Result<NativeSessionPreparedSources, NativeSessionSourcePrepareFailure> {
     let model = session.normalized_model();
+    let Some(first_source) = model.sources.first() else {
+        return Err(NativeSessionSourcePrepareFailure {
+            diagnostics: vec![SourceDiagnostic::new(
+                SourceDiagnosticCode::GraphBindingMismatch,
+                SourceDiagnosticPath::for_sources_collection(),
+                "native graph source-set preparation requires at least one source",
+            )],
+        });
+    };
+    let first_source_id = first_source.id.as_str();
     let mut diagnostics = Vec::new();
     let mut prepared_sources = Vec::with_capacity(model.sources.len());
 
@@ -1209,10 +1219,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         Ok(started) => started,
         Err(error) => {
             return Err(NativeSessionSourcePrepareFailure {
-                diagnostics: vec![native_prepare_diagnostic(
-                    model.sources[0].id.as_str(),
-                    error,
-                )],
+                diagnostics: vec![native_prepare_diagnostic(first_source_id, error)],
             });
         }
     };
@@ -1286,7 +1293,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
             return Err(NativeSessionSourcePrepareFailure {
                 diagnostics: vec![SourceDiagnostic::new(
                     SourceDiagnosticCode::GraphBindingMismatch,
-                    SourceDiagnosticPath::for_source(model.sources[0].id.as_str()),
+                    SourceDiagnosticPath::for_source(first_source_id),
                     "compiled track/source mappings could not be sealed for graph binding",
                 )],
             });
@@ -1295,11 +1302,11 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     let graph_resources = source_set.resource_report();
     let controller_records_bytes =
         retained_array_bytes::<NativeSourceController>(controllers.len())
-            .ok_or_else(|| resource_failure(model.sources[0].id.as_str()))?;
+            .ok_or_else(|| resource_failure(first_source_id))?;
     let session_runtime_bytes = session.resource_estimate().requested_runtime_bytes;
     let worker_bytes = worker_resources
         .total_engine_owned_bytes()
-        .ok_or_else(|| resource_failure(model.sources[0].id.as_str()))?;
+        .ok_or_else(|| resource_failure(first_source_id))?;
     let combined_runtime_bytes = match session_runtime_bytes
         .checked_add(graph_resources.overhead_bytes)
         .and_then(|total| total.checked_add(controller_records_bytes))
@@ -1307,7 +1314,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     {
         Some(total) => total,
         None => {
-            return Err(resource_failure(model.sources[0].id.as_str()));
+            return Err(resource_failure(first_source_id));
         }
     };
     let largest_allocation_bytes = session
@@ -1322,7 +1329,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         || combined_runtime_bytes > caps.max_combined_runtime_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
-        return Err(resource_failure(model.sources[0].id.as_str()));
+        return Err(resource_failure(first_source_id));
     }
     Ok(NativeSessionPreparedSources {
         source_set,
@@ -3481,6 +3488,48 @@ mod tests {
                     .expect("checked grid")
             );
         }
+    }
+
+    #[test]
+    fn compiled_sourceless_session_returns_collection_diagnostic_without_resolving() {
+        let mut session_toml =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("session");
+        session_toml.automation.clear();
+        session_toml.routes.clear();
+        session_toml.tracks.clear();
+        session_toml.sources.clear();
+        let session = compile_session(
+            &session_toml,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled sourceless session");
+        let mut resolver = session_resolver(b"sha256:demo");
+
+        let failure = match prepare_native_session_sources(&session, &mut resolver, session_caps())
+        {
+            Ok(_) => panic!("sourceless native session unexpectedly prepared"),
+            Err(failure) => failure,
+        };
+
+        assert_eq!(resolver.calls, 0);
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(
+            failure.diagnostics[0].code,
+            SourceDiagnosticCode::GraphBindingMismatch
+        );
+        assert_eq!(failure.diagnostics[0].path.as_str(), "$.sources");
+        assert_eq!(
+            failure.diagnostics[0].message,
+            "native graph source-set preparation requires at least one source"
+        );
     }
 
     #[test]

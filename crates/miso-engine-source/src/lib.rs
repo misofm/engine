@@ -138,11 +138,17 @@ impl fmt::Display for SourceDiagnosticCode {
     }
 }
 
-/// A stable source declaration path, including its stable-ID selector.
+/// A stable path to the source collection or to one source declaration selected by stable ID.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SourceDiagnosticPath(String);
 
 impl SourceDiagnosticPath {
+    /// Construct the source-collection diagnostic path.
+    #[must_use]
+    pub fn for_sources_collection() -> Self {
+        Self("$.sources".to_owned())
+    }
+
     /// Construct the required source-ID diagnostic path.
     #[must_use]
     pub fn for_source(source_id: &str) -> Self {
@@ -1996,6 +2002,10 @@ mod tests {
         assert_eq!(
             SourceDiagnosticPath::for_source("lead.vocal").as_str(),
             "$.sources[id=lead.vocal]"
+        );
+        assert_eq!(
+            SourceDiagnosticPath::for_sources_collection().as_str(),
+            "$.sources"
         );
         let (producer, _consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
