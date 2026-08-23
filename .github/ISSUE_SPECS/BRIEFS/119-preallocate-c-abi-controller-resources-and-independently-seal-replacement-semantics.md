@@ -2,20 +2,22 @@
 
 ## Decision
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Consume stopped Issue
-118 technical checkpoint `f9ad53896c21d03135e1ccf77c9a5dbe76a532ac` (tree
-`2a2adaa57cfd69eb2e2f76457337e1a13b1a7ddb`) without inheriting an overall PASS. Close only its
-bounded residue: eager fixed controller/provider resources, a separately owned double-live compiled-
-model admission peak, a truly independent manual oracle and the remaining production-origin C
-replacement matrix.
+**TERMINAL STOP AFTER SECOND SOL XHIGH HOLD.** Preserve technical checkpoint
+`1a3dde27e78634243d4474c13959697e672a7b33` (tree
+`3edd0b8db01672ea2a625fc6e2deef38734c5eb1`) without overall PASS. Eager resource arenas, frozen
+Issue-022 report assignment, separate compiled-model admission, pinned command bytes and bounded
+replacement mechanics are technical input. The oracle remained production-derived; event origins
+and resource layouts diverged under `cfg(test)`; a mutable protocol backdoor grew uncharged provider
+vectors; and procedural counters did not observe actual Drop ownership.
 
 Accepted dependencies are **Transport-neutral binary control protocol** (005), **Real-time memory,
 buffers, queues, and plan lifetime** (003), and **Stable C ABI and host-fed planar PCM render**
-(022). Accepted 119 gates **Optional binary WebSocket sidecar** (025); accepted 116 + 119 gate
-**Qualify native C ABI and reference runner target matrix** (114), then 026.
+(022). Remaining work is Issue 120, **Seal production-identical C ABI replacement evidence and
+lifecycle ownership**. Accepted 120 gates **Optional binary WebSocket sidecar** (025); accepted 116
++ 120 gate **Qualify native C ABI and reference runner target matrix** (114), then 026.
 
-Sol High implements; Sol XHigh verifies. One pass plus one bounded HOLD correction is the complete
-budget; a second HOLD stops. Benchmark/timing/workload/playback/listening counters remain zero.
+The one-pass-plus-one-HOLD budget is exhausted. Benchmark/timing/workload/playback/listening
+counters remained zero. Issue 119 grants no accepted downstream capability.
 
 ## Smallest closable product
 

@@ -7,10 +7,12 @@ resource eager and exactly owned, preserve the accepted Issue-022 resource-repor
 separate admission owner accounts for double-live compiled models, and seal replacement semantics
 with a genuinely independent resource oracle and production-origin cross-component evidence.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One implementation pass plus one bounded HOLD correction is the full
-budget; a second HOLD stops. Benchmark, timing, real-workload, playback and listening counters start
-at zero and must remain zero.
+**TERMINAL STOP AFTER SECOND SOL XHIGH HOLD.** The final technical checkpoint is
+`1a3dde27e78634243d4474c13959697e672a7b33` (tree
+`3edd0b8db01672ea2a625fc6e2deef38734c5eb1`). It preserves useful resource mechanics and expanded
+evidence but has no overall PASS. The bounded review budget is exhausted; remaining work moves
+statelessly to Issue 120. Benchmark, timing, real-workload, playback and listening counters remained
+zero.
 
 Read-only remote inspection on 2026-08-23 found Issue 119 unallocated. Root must create and
 synchronize it under this exact title after the docs checkpoint is upstream. This record makes no
@@ -31,9 +33,34 @@ is technical input only. Preserve its final technical checkpoint
 evidence, but inherit no overall PASS or resource-accounting claim. Earlier stopped Issues 113 and
 117 are transitive technical history only.
 
-Accepted Issue 119 gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and
-119 jointly gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then
-gates **End-to-end release, performance, and listening qualification** (Issue 026).
+Accepted **Seal production-identical C ABI replacement evidence and lifecycle ownership** (Issue
+120) gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and 120 jointly
+gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then gates
+**End-to-end release, performance, and listening qualification** (Issue 026).
+
+## Terminal review decision
+
+Checkpoint `1a3dde27e78634243d4474c13959697e672a7b33` retains the eager controller/provider/replay
+arenas, the restored Issue-022 graph report meaning, separate compiled-model admission owner,
+byte-pinned 11-command vectors, bounded replacement mechanics and expanded render/reclaim/fault
+evidence. The final review nevertheless could not return PASS:
+
+- the supposed independent double-model oracle still consumed production
+  `CompiledSession::resource_estimate()` values, so the comparison with the production admission
+  helper was tautological rather than primitive and external;
+- diagnostic, meter and counter events were synthesized by `cfg(test)` CAPI logic after render,
+  rather than by production-identical event paths, while automation setup used a behind-C provider
+  mutator;
+- a production-visible, doc-hidden mutable protocol conformance method lazily grew provider
+  metadata/state vectors, violating both the accepted read-only seam fence and eager retained
+  ownership;
+- owner “disposal” counters were incremented procedurally before returns instead of observing the
+  actual owner constructors and destructors; and
+- `cfg(test)` fields were embedded in resource-counted CAPI session/shared-plan structures, so the
+  unit-test resource layout and oracle differed from the production library layout.
+
+These are technical findings only. Issue 119 is not accepted and grants no downstream capability.
+Issue 120 consumes only the proven mechanics and closes this exact production-identical remainder.
 
 ## Frozen accepted semantics
 

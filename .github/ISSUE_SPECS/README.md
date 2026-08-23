@@ -115,12 +115,17 @@ accounting and cross-component evidence**, then stopped at its terminal second H
 checkpoint `f9ad538`: aggregate reporting and source/event evidence improved, but telemetry retained
 storage still grew lazily, the oracle used production projection helpers, the Issue-022 graph report
 meaning was changed and retirement/disposal evidence remained incomplete. Issue 119, **Preallocate C
-ABI controller resources and independently seal replacement semantics**, consumes that checkpoint
-plus accepted Issues 005, 003 and 022; it owns eager retained construction, a separate double-live
-compiled-model admission owner, an independent manual oracle and the complete production-origin
-residual matrix, and gates Issue 025 directly. Issue 114, **Qualify native C ABI and reference runner
-target matrix**, joins accepted Issues 116 and 119 and alone owns native platform/runner qualification
-before Issue 026. Issues 101 and 112 change
+ABI controller resources and independently seal replacement semantics**, then stopped at its
+terminal second HOLD at technical checkpoint `1a3dde2`: eager arenas, frozen graph reporting,
+separate model admission and pinned commands improved, but its model oracle remained production-
+derived, events/resource layouts diverged under tests, a mutable protocol backdoor grew uncharged
+provider state and lifecycle counters did not observe real Drop. Issue 120, **Seal production-
+identical C ABI replacement evidence and lifecycle ownership**, consumes that checkpoint plus
+accepted Issues 005, 003 and 022; it owns production-identical resource/event semantics, the truly
+primitive full-admission oracle and real owner construction/Drop evidence, and gates Issue 025
+directly. Issue 114, **Qualify native C ABI and reference runner target matrix**, joins accepted
+Issues 116 and 120 and alone owns native platform/runner qualification before Issue 026. Issues 101
+and 112 change
 no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
