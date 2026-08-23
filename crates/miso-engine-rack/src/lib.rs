@@ -147,20 +147,51 @@ pub struct AoSoaScratch {
 }
 
 impl AoSoaScratch {
+    /// Four planes: two main and two sidechain, for banks with a sidechain surface.
     pub fn new(width: BankWidth, quantum: u32) -> Result<Self, RackError> {
+        Self::with_planes(width, quantum, true)
+    }
+
+    /// Two main planes only, for fixed-stage banks that have no sidechain surface.
+    ///
+    /// The post-input builtin bank is such a stage: it is not automatable and has no sidechain
+    /// port, so the two sidechain planes `new` allocates are dead, cap-consuming bytes it can
+    /// never reach ([`AoSoaScratch::builtin_planes_mut`] hands out only the main planes).
+    /// [`AoSoaScratch::gather_sidechain`] and [`AoSoaScratch::process`] with `sidechain` set
+    /// reject a scratch built this way rather than indexing empty storage.
+    pub fn new_main_only(width: BankWidth, quantum: u32) -> Result<Self, RackError> {
+        Self::with_planes(width, quantum, false)
+    }
+
+    /// Whether this scratch owns sidechain planes.
+    ///
+    /// `Box<[f32]>::default()` is an empty slice and not an allocation, and a zero-quantum
+    /// scratch is already rejected, so emptiness is exactly "no sidechain planes".
+    #[must_use]
+    pub const fn has_sidechain_planes(&self) -> bool {
+        !self.sidechain_left.is_empty()
+    }
+
+    fn with_planes(width: BankWidth, quantum: u32, sidechain: bool) -> Result<Self, RackError> {
         if quantum == 0 {
             return Err(RackError::ZeroFrames);
         }
         let length = (quantum as usize)
             .checked_mul(width.lanes() as usize)
             .ok_or(RackError::Overflow)?;
+        let plane = || vec![0.0; length].into_boxed_slice();
+        let (sidechain_left, sidechain_right) = if sidechain {
+            (plane(), plane())
+        } else {
+            (Box::default(), Box::default())
+        };
         Ok(Self {
             width,
             quantum,
-            left: vec![0.0; length].into_boxed_slice(),
-            right: vec![0.0; length].into_boxed_slice(),
-            sidechain_left: vec![0.0; length].into_boxed_slice(),
-            sidechain_right: vec![0.0; length].into_boxed_slice(),
+            left: plane(),
+            right: plane(),
+            sidechain_left,
+            sidechain_right,
         })
     }
     #[must_use]
@@ -223,6 +254,9 @@ impl AoSoaScratch {
         inputs_right: &[&[f32]],
         frames: u32,
     ) -> Result<(), RackError> {
+        if !self.has_sidechain_planes() {
+            return Err(RackError::Shape);
+        }
         self.checked(frames, inputs_left.len(), inputs_right.len())?;
         let lanes = self.width.lanes() as usize;
         for sample in 0..frames as usize {
@@ -303,6 +337,9 @@ impl AoSoaScratch {
         offsets: &[u32],
         sidechain: bool,
     ) -> Result<BankProcessReport, RackError> {
+        if sidechain && !self.has_sidechain_planes() {
+            return Err(RackError::Shape);
+        }
         if bank.metadata().width != self.width {
             return Err(RackError::WidthMismatch);
         }
@@ -432,5 +469,69 @@ mod tests {
             .expect("scatter");
         assert_eq!(out_left, left);
         assert_eq!(out_right, right);
+    }
+
+    #[test]
+    fn main_only_scratch_has_two_planes_and_rejects_sidechain_use() {
+        let mut full = AoSoaScratch::new(BankWidth::Four, 3).expect("four-plane scratch");
+        let mut main_only =
+            AoSoaScratch::new_main_only(BankWidth::Four, 3).expect("two-plane scratch");
+        assert!(full.has_sidechain_planes());
+        assert!(!main_only.has_sidechain_planes());
+        assert_eq!(main_only.width(), full.width());
+        assert_eq!(main_only.quantum(), full.quantum());
+
+        // The main planes behave identically: the builtin bank surface is unchanged.
+        let left = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
+        let right = [[-1.0, -2.0], [-3.0, -4.0], [-5.0, -6.0], [-7.0, -8.0]];
+        let left_refs: Vec<&[f32]> = left.iter().map(|lane| lane.as_slice()).collect();
+        let right_refs: Vec<&[f32]> = right.iter().map(|lane| lane.as_slice()).collect();
+        full.gather(&left_refs, &right_refs, 2).expect("gather");
+        main_only
+            .gather(&left_refs, &right_refs, 2)
+            .expect("gather");
+        let (full_left, full_right) = full.builtin_planes_mut(2).expect("full planes");
+        let expected: (Vec<f32>, Vec<f32>) = (full_left.to_vec(), full_right.to_vec());
+        let (main_left, main_right) = main_only.builtin_planes_mut(2).expect("main planes");
+        assert_eq!(main_left, expected.0.as_slice());
+        assert_eq!(main_right, expected.1.as_slice());
+
+        // The dead surface is refused, not silently indexed into empty storage.
+        assert_eq!(
+            main_only.gather_sidechain(&left_refs, &right_refs, 2),
+            Err(RackError::Shape)
+        );
+        assert_eq!(
+            main_only.process(&mut RejectedBank, 2, 0, &[], &[], true),
+            Err(RackError::Shape)
+        );
+        assert!(full.gather_sidechain(&left_refs, &right_refs, 2).is_ok());
+    }
+
+    /// A bank that fails the test if it is ever reached: the sidechain guard runs first.
+    struct RejectedBank;
+    impl PreparedNativeEffectBank for RejectedBank {
+        fn metadata(&self) -> miso_engine_effect_contract::PreparedBankMetadata {
+            panic!("the sidechain-plane guard must reject before the bank is consulted")
+        }
+        fn reset(&mut self, _: miso_engine_effect_contract::ResetKind) {}
+        fn process_bank(&mut self, _: EffectBankProcessBlock<'_>) -> BankProcessReport {
+            unreachable!("guarded")
+        }
+        fn snapshot_track_state_payload(
+            &self,
+            _: u32,
+            _: miso_engine_effect_contract::StatePayloadOutput<'_>,
+        ) -> Result<(), miso_engine_effect_contract::StatePayloadError> {
+            unreachable!("guarded")
+        }
+        fn restore_track_state_payload(
+            &mut self,
+            _: u32,
+            _: u32,
+            _: miso_engine_effect_contract::StatePayloadInput<'_>,
+        ) -> Result<(), miso_engine_effect_contract::StatePayloadError> {
+            unreachable!("guarded")
+        }
     }
 }
