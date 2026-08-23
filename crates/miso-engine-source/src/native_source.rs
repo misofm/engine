@@ -460,6 +460,7 @@ enum WorkerCommand {
 }
 
 const CONTROL_POLL_WAIT: Duration = Duration::from_micros(100);
+#[cfg(feature = "test-support")]
 const AUDIT_WORKER_WAIT: Duration = Duration::from_millis(1);
 // SourceReady and one synchronous Snapshot may be outstanding; the third slot is reserved so
 // retirement can always publish Terminal without waiting for the controller to drain events.
@@ -563,6 +564,37 @@ struct PendingBlock {
 struct PendingSeek {
     generation: SourceGeneration,
     frame: SourceFrame,
+}
+
+/// Complete per-source decode state prepared before any worker thread starts.
+struct SourceJob<R: Read + Seek> {
+    commands: Consumer<WorkerCommand>,
+    events: Producer<NativeSourceWorkerEvent>,
+    provider: HostChunkProvider,
+    decoder: NativeWaveDecoder<R>,
+    planar_staging: Box<[f32]>,
+    generation: SourceGeneration,
+    pending: Option<PendingBlock>,
+    pending_seek: Option<PendingSeek>,
+    end_submitted: bool,
+    source_ready_sent: bool,
+    sanitation: u64,
+    render_wait: Duration,
+    audit_gate: Option<WorkerAuditGate>,
+    #[cfg(feature = "test-support")]
+    audit_resume_after_submit: bool,
+    #[cfg(feature = "test-support")]
+    audit_hold_after_submit: bool,
+}
+
+struct UnstartedNativeSource<R: Read + Seek> {
+    command_sender: Producer<WorkerCommand>,
+    event_receiver: Consumer<NativeSourceWorkerEvent>,
+    job: SourceJob<R>,
+    consumer: PcmSourceConsumer,
+    resources: NativeSourceResourceReport,
+    initial_generation: SourceGeneration,
+    region: NativeWaveRegion,
 }
 
 /// Non-render endpoint for bounded native seek/wake commands and worker events.
@@ -828,6 +860,16 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
     ),
     NativeSourcePrepareError,
 > {
+    let prepared = prepare_native_source_job(resolver, request, caps, audit_gate)?;
+    start_native_worker(prepared)
+}
+
+fn prepare_native_source_job<S: NativeSourceResolver>(
+    resolver: &mut S,
+    request: NativeSourcePrepareRequest,
+    caps: NativeSourcePrepareCaps,
+    audit_gate: Option<WorkerAuditGate>,
+) -> Result<UnstartedNativeSource<S::Asset>, NativeSourcePrepareError> {
     let mut asset = resolver
         .resolve(&request.locator)
         .map_err(NativeSourcePrepareError::Resolver)?;
@@ -873,29 +915,66 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
         bounded_spsc(WORKER_EVENT_QUEUE_ITEMS, QueueGeneration(12))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let initial_generation = request.ring_config.initial_generation;
-    let (stop_sender, stop_receiver) =
-        bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
-            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let render_wait = worker_render_wait(
         ring_report.transfer_block_count,
         request.ring_config.quantum_frames.0,
         metadata.sample_rate_hz,
     );
+    Ok(UnstartedNativeSource {
+        command_sender,
+        event_receiver,
+        job: SourceJob {
+            commands: command_receiver,
+            events: event_sender,
+            provider,
+            decoder,
+            planar_staging: planar_staging.into_boxed_slice(),
+            generation: initial_generation,
+            pending: None,
+            pending_seek: None,
+            end_submitted: false,
+            source_ready_sent: false,
+            sanitation: 0,
+            render_wait,
+            audit_gate,
+            #[cfg(feature = "test-support")]
+            audit_resume_after_submit: false,
+            #[cfg(feature = "test-support")]
+            audit_hold_after_submit: false,
+        },
+        consumer,
+        resources: report,
+        initial_generation,
+        region: request.region,
+    })
+}
+
+fn start_native_worker<R: Read + Seek + Send + 'static>(
+    prepared: UnstartedNativeSource<R>,
+) -> Result<
+    (
+        NativeSourceController,
+        NativeSourceWorker,
+        PcmSourceConsumer,
+        NativeSourceResourceReport,
+    ),
+    NativeSourcePrepareError,
+> {
+    let UnstartedNativeSource {
+        command_sender,
+        event_receiver,
+        job,
+        consumer,
+        resources,
+        initial_generation,
+        region,
+    } = prepared;
+    let (stop_sender, stop_receiver) =
+        bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
-        .spawn(move || {
-            run_worker(
-                command_receiver,
-                event_sender,
-                provider,
-                decoder,
-                planar_staging.into_boxed_slice(),
-                initial_generation,
-                stop_receiver,
-                audit_gate,
-                render_wait,
-            )
-        })
+        .spawn(move || run_worker(job, stop_receiver))
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
     let worker_thread = join.thread().clone();
     Ok((
@@ -905,7 +984,7 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
             observed_sanitation: 0,
             terminal_observed: false,
             next_requested_generation: initial_generation,
-            region: request.region,
+            region,
             worker: worker_thread,
             _not_sync: PhantomData,
         },
@@ -916,7 +995,7 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
             _not_sync: PhantomData,
         },
         consumer,
-        report,
+        resources,
     ))
 }
 
@@ -1227,28 +1306,29 @@ fn wait_for_worker(idle: Idle, render_wait: Duration) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_worker<R: Read + Seek>(
-    mut commands: Consumer<WorkerCommand>,
-    mut events: Producer<NativeSourceWorkerEvent>,
-    mut provider: HostChunkProvider,
-    mut decoder: NativeWaveDecoder<R>,
-    mut planar_staging: Box<[f32]>,
-    mut generation: SourceGeneration,
-    mut stop: Consumer<()>,
-    #[allow(unused_mut, unused_variables)] mut audit_gate: Option<WorkerAuditGate>,
-    render_wait: Duration,
-) -> NativeSourceWorkerExit {
-    let mut pending: Option<PendingBlock> = None;
-    let mut pending_seek: Option<PendingSeek> = None;
-    let mut end_submitted = false;
-    let mut source_ready_sent = false;
-    let mut sanitation = 0_u64;
+fn run_worker<R: Read + Seek>(job: SourceJob<R>, mut stop: Consumer<()>) -> NativeSourceWorkerExit {
+    let SourceJob {
+        mut commands,
+        mut events,
+        mut provider,
+        mut decoder,
+        mut planar_staging,
+        mut generation,
+        mut pending,
+        mut pending_seek,
+        mut end_submitted,
+        mut source_ready_sent,
+        mut sanitation,
+        render_wait,
+        mut audit_gate,
+        #[cfg(feature = "test-support")]
+        mut audit_resume_after_submit,
+        #[cfg(feature = "test-support")]
+        mut audit_hold_after_submit,
+    } = job;
+    #[cfg(not(feature = "test-support"))]
+    let _ = &mut audit_gate;
     let command_capacity = commands.capacity();
-    #[cfg(feature = "test-support")]
-    let mut audit_resume_after_submit = false;
-    #[cfg(feature = "test-support")]
-    let mut audit_hold_after_submit = false;
     let exit = loop {
         if stop.try_pop().is_ok() {
             break NativeSourceWorkerExit::Stopped;
@@ -1443,6 +1523,25 @@ mod tests {
             worker_render_wait(64, 128, SampleRateHz(44_100)),
             Duration::from_millis(20)
         );
+    }
+
+    #[test]
+    fn prepared_source_job_is_inert_until_the_single_start_boundary() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut native_resolver = resolver(&[0.25; 4], b"exact-identity");
+        let mut prepared =
+            prepare_native_source_job(&mut native_resolver, request(region), caps(), None)
+                .expect("prepare without spawning");
+
+        assert!(prepared.event_receiver.try_pop().is_err());
+        assert!(prepared.job.pending.is_none());
+        assert!(prepared.job.pending_seek.is_none());
+        assert!(!prepared.job.end_submitted);
+        assert!(!prepared.job.source_ready_sent);
+        assert_eq!(prepared.job.sanitation, 0);
     }
 
     struct Resolver {
