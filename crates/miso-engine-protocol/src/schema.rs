@@ -694,19 +694,6 @@ pub(crate) mod capabilities {
 pub(crate) mod session {
     use super::{FieldSpec, MessageSpec, Wire};
 
-    macro_rules! message {
-        ($module:ident, $name:literal, $( $field:ident = $spec:expr ),+ $(,)?) => {
-            pub(crate) mod $module {
-                use super::*;
-                $(pub(crate) const $field: FieldSpec = $spec;)+
-                pub(crate) static SPEC: MessageSpec = MessageSpec {
-                    name: $name,
-                    fields: &[$($field),+],
-                };
-            }
-        };
-    }
-
     pub(crate) mod edit_payload {
         use super::*;
         pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -714,78 +701,110 @@ pub(crate) mod session {
             fields: &[],
         };
     }
-    message!(
-        edit,
-        "SessionEdit",
-        OPCODE = FieldSpec::req(1, Wire::U16),
-        PAYLOAD = FieldSpec::msg(2, true, false, &edit_payload::SPEC)
-    );
-    message!(
-        transaction,
-        "SessionTransaction",
-        EDIT = FieldSpec::msg(1, true, true, &edit::SPEC)
-    );
-
-    message!(
-        render_profile,
-        "RenderProfile",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        MODE = FieldSpec::req(2, Wire::U8)
-    );
-    message!(
-        output_profile,
-        "OutputProfile",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        CHANNELS = FieldSpec::req(2, Wire::U8),
-        LAYOUT = FieldSpec::req(3, Wire::U8)
-    );
-    message!(
-        limits,
-        "SessionLimits",
-        PCM_RING_FRAMES = FieldSpec::req(1, Wire::U64),
-        CONTROL_QUEUE_MESSAGES = FieldSpec::req(2, Wire::U64),
-        MEMORY_BYTES = FieldSpec::req(3, Wire::U64)
-    );
-    message!(
-        content,
-        "SourceContent",
-        IDENTITY = FieldSpec::req(1, Wire::Utf8),
-        LOCATOR = FieldSpec::req(2, Wire::Utf8)
-    );
-    message!(
-        region,
-        "SourceRegion",
-        START_SAMPLE = FieldSpec::req(1, Wire::U64),
-        LENGTH_SAMPLES = FieldSpec::req(2, Wire::U64)
-    );
-    message!(
-        mapping,
-        "SourceMapping",
-        CHANNEL_COUNT = FieldSpec::req(1, Wire::U8),
-        REGION = FieldSpec::msg(2, true, false, &region::SPEC)
-    );
-    message!(
-        source,
-        "Source",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        SAMPLE_RATE_HZ = FieldSpec::req(2, Wire::U32),
-        CONTENT = FieldSpec::msg(3, true, false, &content::SPEC),
-        MAPPING = FieldSpec::msg(4, true, false, &mapping::SPEC)
-    );
-    message!(
-        channel_builtins,
-        "ChannelBuiltins",
-        POLARITY_INVERT = FieldSpec::req(1, Wire::Bool),
-        TRIM_DB = FieldSpec::req(2, Wire::F32),
-        HPF_HZ = FieldSpec::req(3, Wire::F32),
-        LPF_HZ = FieldSpec::req(4, Wire::F32)
-    );
-    message!(
-        builtins,
-        "DualMonoBuiltins",
-        LEFT = FieldSpec::msg(1, true, false, &channel_builtins::SPEC),
-        RIGHT = FieldSpec::msg(2, true, false, &channel_builtins::SPEC)
-    );
+    pub(crate) mod edit {
+        use super::*;
+        pub(crate) const OPCODE: FieldSpec = FieldSpec::req(1, Wire::U16);
+        pub(crate) const PAYLOAD: FieldSpec = FieldSpec::msg(2, true, false, &edit_payload::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SessionEdit",
+            fields: &[OPCODE, PAYLOAD],
+        };
+    }
+    pub(crate) mod transaction {
+        use super::*;
+        pub(crate) const EDIT: FieldSpec = FieldSpec::msg(1, true, true, &edit::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SessionTransaction",
+            fields: &[EDIT],
+        };
+    }
+    pub(crate) mod render_profile {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const MODE: FieldSpec = FieldSpec::req(2, Wire::U8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "RenderProfile",
+            fields: &[ID, MODE],
+        };
+    }
+    pub(crate) mod output_profile {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(2, Wire::U8);
+        pub(crate) const LAYOUT: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "OutputProfile",
+            fields: &[ID, CHANNELS, LAYOUT],
+        };
+    }
+    pub(crate) mod limits {
+        use super::*;
+        pub(crate) const PCM_RING_FRAMES: FieldSpec = FieldSpec::req(1, Wire::U64);
+        pub(crate) const CONTROL_QUEUE_MESSAGES: FieldSpec = FieldSpec::req(2, Wire::U64);
+        pub(crate) const MEMORY_BYTES: FieldSpec = FieldSpec::req(3, Wire::U64);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SessionLimits",
+            fields: &[PCM_RING_FRAMES, CONTROL_QUEUE_MESSAGES, MEMORY_BYTES],
+        };
+    }
+    pub(crate) mod content {
+        use super::*;
+        pub(crate) const IDENTITY: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const LOCATOR: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SourceContent",
+            fields: &[IDENTITY, LOCATOR],
+        };
+    }
+    pub(crate) mod region {
+        use super::*;
+        pub(crate) const START_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+        pub(crate) const LENGTH_SAMPLES: FieldSpec = FieldSpec::req(2, Wire::U64);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SourceRegion",
+            fields: &[START_SAMPLE, LENGTH_SAMPLES],
+        };
+    }
+    pub(crate) mod mapping {
+        use super::*;
+        pub(crate) const CHANNEL_COUNT: FieldSpec = FieldSpec::req(1, Wire::U8);
+        pub(crate) const REGION: FieldSpec = FieldSpec::msg(2, true, false, &region::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SourceMapping",
+            fields: &[CHANNEL_COUNT, REGION],
+        };
+    }
+    pub(crate) mod source {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::req(2, Wire::U32);
+        pub(crate) const CONTENT: FieldSpec = FieldSpec::msg(3, true, false, &content::SPEC);
+        pub(crate) const MAPPING: FieldSpec = FieldSpec::msg(4, true, false, &mapping::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Source",
+            fields: &[ID, SAMPLE_RATE_HZ, CONTENT, MAPPING],
+        };
+    }
+    pub(crate) mod channel_builtins {
+        use super::*;
+        pub(crate) const POLARITY_INVERT: FieldSpec = FieldSpec::req(1, Wire::Bool);
+        pub(crate) const TRIM_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
+        pub(crate) const HPF_HZ: FieldSpec = FieldSpec::req(3, Wire::F32);
+        pub(crate) const LPF_HZ: FieldSpec = FieldSpec::req(4, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "ChannelBuiltins",
+            fields: &[POLARITY_INVERT, TRIM_DB, HPF_HZ, LPF_HZ],
+        };
+    }
+    pub(crate) mod builtins {
+        use super::*;
+        pub(crate) const LEFT: FieldSpec = FieldSpec::msg(1, true, false, &channel_builtins::SPEC);
+        pub(crate) const RIGHT: FieldSpec = FieldSpec::msg(2, true, false, &channel_builtins::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "DualMonoBuiltins",
+            fields: &[LEFT, RIGHT],
+        };
+    }
 
     pub(crate) mod effect_identity {
         use super::*;
@@ -841,38 +860,51 @@ pub(crate) mod session {
             fields: &[TAG, SOURCE, PORT_ID],
         };
     }
-    message!(
-        param,
-        "EffectParam",
-        PARAMETER_ID = FieldSpec::req(1, Wire::U32),
-        CHANNEL = FieldSpec::req(2, Wire::U8),
-        UNIT = FieldSpec::req(3, Wire::U8),
-        VALUE = FieldSpec::req(4, Wire::F32)
-    );
-    message!(
-        rack,
-        "Rack",
-        EFFECT = FieldSpec::msg(1, true, true, &effect::SPEC)
-    );
-    message!(
-        effect,
-        "Effect",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        IDENTITY = FieldSpec::msg(2, true, false, &effect_identity::SPEC),
-        QUALITY = FieldSpec::req(3, Wire::U8),
-        BYPASS = FieldSpec::req(4, Wire::Bool),
-        LINK_MODE = FieldSpec::req(5, Wire::U8),
-        PARAM = FieldSpec::msg(6, true, true, &param::SPEC),
-        SIDECHAIN = FieldSpec::msg(7, true, false, &sidechain::KNOWN)
-    );
-    message!(
-        fader,
-        "DualMonoFader",
-        LEFT_DB = FieldSpec::req(1, Wire::F32),
-        RIGHT_DB = FieldSpec::req(2, Wire::F32),
-        LEFT_MUTE = FieldSpec::req(3, Wire::Bool),
-        RIGHT_MUTE = FieldSpec::req(4, Wire::Bool)
-    );
+    pub(crate) mod param {
+        use super::*;
+        pub(crate) const PARAMETER_ID: FieldSpec = FieldSpec::req(1, Wire::U32);
+        pub(crate) const CHANNEL: FieldSpec = FieldSpec::req(2, Wire::U8);
+        pub(crate) const UNIT: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const VALUE: FieldSpec = FieldSpec::req(4, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "EffectParam",
+            fields: &[PARAMETER_ID, CHANNEL, UNIT, VALUE],
+        };
+    }
+    pub(crate) mod rack {
+        use super::*;
+        pub(crate) const EFFECT: FieldSpec = FieldSpec::msg(1, true, true, &effect::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Rack",
+            fields: &[EFFECT],
+        };
+    }
+    pub(crate) mod effect {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const IDENTITY: FieldSpec =
+            FieldSpec::msg(2, true, false, &effect_identity::SPEC);
+        pub(crate) const QUALITY: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const BYPASS: FieldSpec = FieldSpec::req(4, Wire::Bool);
+        pub(crate) const LINK_MODE: FieldSpec = FieldSpec::req(5, Wire::U8);
+        pub(crate) const PARAM: FieldSpec = FieldSpec::msg(6, true, true, &param::SPEC);
+        pub(crate) const SIDECHAIN: FieldSpec = FieldSpec::msg(7, true, false, &sidechain::KNOWN);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Effect",
+            fields: &[ID, IDENTITY, QUALITY, BYPASS, LINK_MODE, PARAM, SIDECHAIN],
+        };
+    }
+    pub(crate) mod fader {
+        use super::*;
+        pub(crate) const LEFT_DB: FieldSpec = FieldSpec::req(1, Wire::F32);
+        pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
+        pub(crate) const LEFT_MUTE: FieldSpec = FieldSpec::req(3, Wire::Bool);
+        pub(crate) const RIGHT_MUTE: FieldSpec = FieldSpec::req(4, Wire::Bool);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "DualMonoFader",
+            fields: &[LEFT_DB, RIGHT_DB, LEFT_MUTE, RIGHT_MUTE],
+        };
+    }
     pub(crate) mod matrix_or_pan {
         use super::*;
         pub(crate) const TAG: FieldSpec = FieldSpec::req(1, Wire::U8);
@@ -895,69 +927,131 @@ pub(crate) mod session {
             fields: &[TAG, A, B, C_OR_SMOOTHING, D, SMOOTHING],
         };
     }
-    message!(
-        track,
-        "Track",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        SOURCE_ID = FieldSpec::req(2, Wire::Utf8),
-        LEFT_SOURCE_CHANNEL = FieldSpec::req(3, Wire::U8),
-        RIGHT_SOURCE_CHANNEL = FieldSpec::req(4, Wire::U8),
-        BUILTINS = FieldSpec::msg(5, true, false, &builtins::SPEC),
-        SIMD1 = FieldSpec::msg(6, true, false, &rack::SPEC),
-        DYNAMIC = FieldSpec::msg(7, true, false, &rack::SPEC),
-        SIMD2 = FieldSpec::msg(8, true, false, &rack::SPEC),
-        FADER = FieldSpec::msg(9, true, false, &fader::SPEC),
-        MATRIX_OR_PAN = FieldSpec::msg(10, true, false, &matrix_or_pan::KNOWN)
-    );
-    message!(submix, "Submix", ID = FieldSpec::req(1, Wire::Utf8));
-    message!(output, "Output", ID = FieldSpec::req(1, Wire::Utf8));
-    message!(
-        channel_matrix,
-        "ChannelMatrix",
-        LL = FieldSpec::req(1, Wire::F32),
-        LR = FieldSpec::req(2, Wire::F32),
-        RL = FieldSpec::req(3, Wire::F32),
-        RR = FieldSpec::req(4, Wire::F32)
-    );
-    message!(
-        route,
-        "Route",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        SOURCE = FieldSpec::msg(2, true, false, &route_source::KNOWN),
-        DESTINATION = FieldSpec::msg(3, true, false, &route_destination::SPEC),
-        CHANNEL_MATRIX = FieldSpec::msg(4, true, false, &channel_matrix::SPEC),
-        GAIN_DB = FieldSpec::req(5, Wire::F32)
-    );
-    message!(
-        automation_target,
-        "AutomationTarget",
-        ENTITY_ID = FieldSpec::req(1, Wire::Utf8),
-        RACK = FieldSpec::req(2, Wire::U8),
-        EFFECT_ID = FieldSpec::req(3, Wire::Utf8),
-        PARAMETER_ID = FieldSpec::req(4, Wire::U32),
-        CHANNEL = FieldSpec::req(5, Wire::U8)
-    );
-    message!(
-        automation_segment,
-        "AutomationSegment",
-        SHAPE = FieldSpec::req(1, Wire::U8),
-        START_SAMPLE = FieldSpec::req(2, Wire::U64),
-        END_SAMPLE = FieldSpec::req(3, Wire::U64),
-        START_VALUE = FieldSpec::req(4, Wire::F32),
-        END_VALUE = FieldSpec::req(5, Wire::F32),
-        UNIT = FieldSpec::req(6, Wire::U8)
-    );
-    message!(
-        automation,
-        "Automation",
-        ID = FieldSpec::req(1, Wire::Utf8),
-        TARGET = FieldSpec::msg(2, true, false, &automation_target::SPEC),
-        SEGMENT = FieldSpec::msg(3, true, true, &automation_segment::SPEC)
-    );
+    pub(crate) mod track {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const SOURCE_ID: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+        pub(crate) const LEFT_SOURCE_CHANNEL: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const RIGHT_SOURCE_CHANNEL: FieldSpec = FieldSpec::req(4, Wire::U8);
+        pub(crate) const BUILTINS: FieldSpec = FieldSpec::msg(5, true, false, &builtins::SPEC);
+        pub(crate) const SIMD1: FieldSpec = FieldSpec::msg(6, true, false, &rack::SPEC);
+        pub(crate) const DYNAMIC: FieldSpec = FieldSpec::msg(7, true, false, &rack::SPEC);
+        pub(crate) const SIMD2: FieldSpec = FieldSpec::msg(8, true, false, &rack::SPEC);
+        pub(crate) const FADER: FieldSpec = FieldSpec::msg(9, true, false, &fader::SPEC);
+        pub(crate) const MATRIX_OR_PAN: FieldSpec =
+            FieldSpec::msg(10, true, false, &matrix_or_pan::KNOWN);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Track",
+            fields: &[
+                ID,
+                SOURCE_ID,
+                LEFT_SOURCE_CHANNEL,
+                RIGHT_SOURCE_CHANNEL,
+                BUILTINS,
+                SIMD1,
+                DYNAMIC,
+                SIMD2,
+                FADER,
+                MATRIX_OR_PAN,
+            ],
+        };
+    }
+    pub(crate) mod submix {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Submix",
+            fields: &[ID],
+        };
+    }
+    pub(crate) mod output {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Output",
+            fields: &[ID],
+        };
+    }
+    pub(crate) mod channel_matrix {
+        use super::*;
+        pub(crate) const LL: FieldSpec = FieldSpec::req(1, Wire::F32);
+        pub(crate) const LR: FieldSpec = FieldSpec::req(2, Wire::F32);
+        pub(crate) const RL: FieldSpec = FieldSpec::req(3, Wire::F32);
+        pub(crate) const RR: FieldSpec = FieldSpec::req(4, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "ChannelMatrix",
+            fields: &[LL, LR, RL, RR],
+        };
+    }
+    pub(crate) mod route {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const SOURCE: FieldSpec = FieldSpec::msg(2, true, false, &route_source::KNOWN);
+        pub(crate) const DESTINATION: FieldSpec =
+            FieldSpec::msg(3, true, false, &route_destination::SPEC);
+        pub(crate) const CHANNEL_MATRIX: FieldSpec =
+            FieldSpec::msg(4, true, false, &channel_matrix::SPEC);
+        pub(crate) const GAIN_DB: FieldSpec = FieldSpec::req(5, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Route",
+            fields: &[ID, SOURCE, DESTINATION, CHANNEL_MATRIX, GAIN_DB],
+        };
+    }
+    pub(crate) mod automation_target {
+        use super::*;
+        pub(crate) const ENTITY_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const RACK: FieldSpec = FieldSpec::req(2, Wire::U8);
+        pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+        pub(crate) const PARAMETER_ID: FieldSpec = FieldSpec::req(4, Wire::U32);
+        pub(crate) const CHANNEL: FieldSpec = FieldSpec::req(5, Wire::U8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "AutomationTarget",
+            fields: &[ENTITY_ID, RACK, EFFECT_ID, PARAMETER_ID, CHANNEL],
+        };
+    }
+    pub(crate) mod automation_segment {
+        use super::*;
+        pub(crate) const SHAPE: FieldSpec = FieldSpec::req(1, Wire::U8);
+        pub(crate) const START_SAMPLE: FieldSpec = FieldSpec::req(2, Wire::U64);
+        pub(crate) const END_SAMPLE: FieldSpec = FieldSpec::req(3, Wire::U64);
+        pub(crate) const START_VALUE: FieldSpec = FieldSpec::req(4, Wire::F32);
+        pub(crate) const END_VALUE: FieldSpec = FieldSpec::req(5, Wire::F32);
+        pub(crate) const UNIT: FieldSpec = FieldSpec::req(6, Wire::U8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "AutomationSegment",
+            fields: &[
+                SHAPE,
+                START_SAMPLE,
+                END_SAMPLE,
+                START_VALUE,
+                END_VALUE,
+                UNIT,
+            ],
+        };
+    }
+    pub(crate) mod automation {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const TARGET: FieldSpec =
+            FieldSpec::msg(2, true, false, &automation_target::SPEC);
+        pub(crate) const SEGMENT: FieldSpec =
+            FieldSpec::msg(3, true, true, &automation_segment::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Automation",
+            fields: &[ID, TARGET, SEGMENT],
+        };
+    }
 
     macro_rules! payload {
         ($module:ident, $name:literal, $( $field:ident = $spec:expr ),+ $(,)?) => {
-            message!($module, $name, $($field = $spec),+);
+            pub(crate) mod $module {
+                use super::*;
+                $(pub(crate) const $field: FieldSpec = $spec;)+
+                pub(crate) static SPEC: MessageSpec = MessageSpec {
+                    name: $name,
+                    fields: &[$($field),+],
+                };
+            }
         };
     }
     payload!(
