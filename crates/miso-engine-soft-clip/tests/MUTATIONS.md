@@ -2,7 +2,8 @@
 
 Master plan for issue #83, §1.6: *every gate is proven red*. A test that has never failed is not a
 gate. Each row below was applied to the working tree, the named test binary was run in release, the
-failure was recorded, and the mutation was reverted in the same session.
+failure was recorded, and the mutation was reverted in the same session. Rows 11 and 13-14 of
+`crates/miso-engine-lane/tests/MUTATIONS.md` cover the half-band module this crate depends on.
 
 Host: `x86_64` (Zen 5 class), `rustc 1.97.1`, workspace `.cargo/config.toml` pin
 `-C target-feature=+avx2,+fma`.
@@ -28,6 +29,7 @@ cargo test --release --locked -p miso-engine-soft-clip --test <test binary>
 | 9 | a restore writes the payload's ages in reverse order into the history | `src/lib.rs` | `state_roundtrip` | RED |
 | 10 | the D11 snap moves after the segment: the last ramping sample steps instead of assigning the target | `src/lib.rs` | `ramp_law` | RED |
 | 11 | one even tap is perturbed by one ulp (`h[22]`) | `miso-engine-lane/src/kernels/halfband.rs` | `determinism`, `contract` | RED |
+| 12 | `Channel::reset_full` rebuilds itself with `Self::new` instead of clearing in place | `src/lib.rs` | `allocation` | RED |
 
 ## Recorded failures
 
@@ -86,6 +88,17 @@ The mutation is the plausible one — decrement the countdown, then snap when it
 is wrong by exactly one sample: `LinearRamp::next_value` *assigns* the target on the final sample
 rather than adding to it. This row is why the driver is tested against `next_value` sample by sample
 instead of only at block boundaries.
+
+### 12 — a reset that allocates (E8)
+
+```
+assertion `left == right` failed: render path allocated 8 times
+```
+
+This row is not hypothetical: rebuilding with `Self::new` is what the code did until the gates were
+run, and `tests/allocation.rs` is what caught it. A `FullToDefaults` reset allocates three histories
+and a ramp table, and a reset reaches the render thread from a seek or a transport stop — so the
+mutation and the defect are the same edit. Both reset kinds are now inside the measured region.
 
 ## Not proven here
 
