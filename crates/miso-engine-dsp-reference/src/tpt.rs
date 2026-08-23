@@ -11,7 +11,7 @@ pub enum ReferenceTptOutput {
     HighPass,
 }
 
-/// The retained-state boundary action taken by the independent `f32` recurrence.
+/// The retained-state boundary action taken by the twin `f32` recurrence.
 ///
 /// Finite subnormal retained words are canonicalized to positive zero. Nonfinite retained words
 /// reset the complete two-word state and are the only action reported as recovery.
@@ -25,7 +25,7 @@ pub enum ReferenceTptRetainedAction {
     InvalidRecovery,
 }
 
-/// One independently evaluated conditioned TPT recurrence step.
+/// One conditioned TPT recurrence step evaluated by the twin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReferenceTptRetainedStep {
     /// Retained state bits before the step's state boundary.
