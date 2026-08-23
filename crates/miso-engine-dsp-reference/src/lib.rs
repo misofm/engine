@@ -27,8 +27,9 @@ pub use compressor::{
 };
 pub use delay::{ReferenceDelayError, ReferenceDelayPair, ReferenceDelayParameters};
 pub use gate_expander::{
-    ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGatePhase,
-    reference_gate_expander_gain_reduction_db,
+    ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGateLink,
+    ReferenceGatePhase, ReferenceGateTiming, ReferenceGateTrace,
+    reference_gate_expander_gain_reduction_db, reference_gate_expander_process,
 };
 pub use lr4::{ReferenceLr4Crossover, ReferenceMultibandError};
 pub use parametric_eq::{
