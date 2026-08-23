@@ -262,6 +262,7 @@ impl ProtocolCodec {
         }
         let mut sizing = CountSink::new(transaction_envelope_limits(self.limits()));
         encode_transaction_payload_into(&mut sizing, transaction.edits)?;
+        sizing.finish_message()?;
         let required = crate::OUTER_HEADER_BYTES
             .checked_add(sizing.written())
             .ok_or(EncodeError::LimitExceeded)?;
@@ -305,6 +306,7 @@ impl ProtocolCodec {
             transaction_envelope_limits(self.limits()),
         );
         encode_transaction_payload_into(&mut writer, transaction.edits)?;
+        writer.finish_message()?;
         debug_assert_eq!(writer.written(), required - crate::OUTER_HEADER_BYTES);
         Ok(required)
     }
@@ -440,11 +442,6 @@ const fn enum_shape(value: AutomationShape) -> u8 {
         AutomationShape::Linear => 2,
         AutomationShape::Exponential => 3,
     }
-}
-
-fn tx_count(base: u32, repeated: usize) -> Result<u32, EncodeError> {
-    base.checked_add(u32::try_from(repeated).map_err(|_| EncodeError::LimitExceeded)?)
-        .ok_or(EncodeError::LimitExceeded)
 }
 
 fn tx_start_message(sink: &mut dyn Sink, count: u32) -> Result<(), EncodeError> {
@@ -801,7 +798,10 @@ fn tx_effect_edit_message(
 }
 
 fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(
+        sink,
+        schema::session::render_profile::SPEC.field_count(&[])?,
+    )?;
     tx_id(sink, schema::session::render_profile::ID, &value.id)?;
     tx_u8(
         sink,
@@ -813,7 +813,10 @@ fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), E
     )
 }
 fn tx_output_profile(sink: &mut dyn Sink, value: &OutputProfile) -> Result<(), EncodeError> {
-    tx_start_message(sink, 3)?;
+    tx_start_message(
+        sink,
+        schema::session::output_profile::SPEC.field_count(&[])?,
+    )?;
     tx_id(sink, schema::session::output_profile::ID, &value.id)?;
     tx_u8(
         sink,
@@ -823,7 +826,7 @@ fn tx_output_profile(sink: &mut dyn Sink, value: &OutputProfile) -> Result<(), E
     tx_u8(sink, schema::session::output_profile::LAYOUT, 1)
 }
 fn tx_limits(sink: &mut dyn Sink, value: &SessionLimits) -> Result<(), EncodeError> {
-    tx_start_message(sink, 3)?;
+    tx_start_message(sink, schema::session::limits::SPEC.field_count(&[])?)?;
     tx_u64(
         sink,
         schema::session::limits::PCM_RING_FRAMES,
@@ -841,12 +844,12 @@ fn tx_limits(sink: &mut dyn Sink, value: &SessionLimits) -> Result<(), EncodeErr
     )
 }
 fn tx_content(sink: &mut dyn Sink, value: &SourceContent) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(sink, schema::session::content::SPEC.field_count(&[])?)?;
     tx_text(sink, schema::session::content::IDENTITY, &value.identity)?;
     tx_text(sink, schema::session::content::LOCATOR, &value.locator)
 }
 fn tx_region(sink: &mut dyn Sink, value: &SourceRegion) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(sink, schema::session::region::SPEC.field_count(&[])?)?;
     tx_u64(
         sink,
         schema::session::region::START_SAMPLE,
@@ -859,7 +862,7 @@ fn tx_region(sink: &mut dyn Sink, value: &SourceRegion) -> Result<(), EncodeErro
     )
 }
 fn tx_mapping(sink: &mut dyn Sink, value: &SourceMapping) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(sink, schema::session::mapping::SPEC.field_count(&[])?)?;
     tx_u8(
         sink,
         schema::session::mapping::CHANNEL_COUNT,
@@ -870,7 +873,7 @@ fn tx_mapping(sink: &mut dyn Sink, value: &SourceMapping) -> Result<(), EncodeEr
     })
 }
 fn tx_source(sink: &mut dyn Sink, value: &Source) -> Result<(), EncodeError> {
-    tx_start_message(sink, 4)?;
+    tx_start_message(sink, schema::session::source::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::source::ID, &value.id)?;
     tx_u32(
         sink,
@@ -885,7 +888,7 @@ fn tx_source(sink: &mut dyn Sink, value: &Source) -> Result<(), EncodeError> {
     })
 }
 fn tx_builtins(sink: &mut dyn Sink, value: &DualMonoBuiltins) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(sink, schema::session::builtins::SPEC.field_count(&[])?)?;
     tx_message(sink, schema::session::builtins::LEFT, |v| {
         tx_channel_builtins(v, &value.left)
     })?;
@@ -894,7 +897,10 @@ fn tx_builtins(sink: &mut dyn Sink, value: &DualMonoBuiltins) -> Result<(), Enco
     })
 }
 fn tx_channel_builtins(sink: &mut dyn Sink, value: &ChannelBuiltins) -> Result<(), EncodeError> {
-    tx_start_message(sink, 4)?;
+    tx_start_message(
+        sink,
+        schema::session::channel_builtins::SPEC.field_count(&[])?,
+    )?;
     tx_bool(
         sink,
         schema::session::channel_builtins::POLARITY_INVERT,
@@ -917,7 +923,11 @@ fn tx_channel_builtins(sink: &mut dyn Sink, value: &ChannelBuiltins) -> Result<(
     )
 }
 fn tx_rack(sink: &mut dyn Sink, value: &Rack) -> Result<(), EncodeError> {
-    tx_start_message(sink, tx_count(0, value.effects.len())?)?;
+    tx_start_message(
+        sink,
+        schema::session::rack::SPEC
+            .field_count(&[(schema::session::rack::EFFECT, value.effects.len())])?,
+    )?;
     for effect in &value.effects {
         tx_message(sink, schema::session::rack::EFFECT, |v| {
             tx_effect(v, effect)
@@ -926,7 +936,10 @@ fn tx_rack(sink: &mut dyn Sink, value: &Rack) -> Result<(), EncodeError> {
     Ok(())
 }
 fn tx_identity(sink: &mut dyn Sink, value: &EffectIdentity) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(
+        sink,
+        schema::session::effect_identity::SPEC.field_count(&[])?,
+    )?;
     match value {
         EffectIdentity::Native { effect_id } => {
             tx_u8(sink, schema::session::effect_identity::TAG, 1)?;
@@ -941,20 +954,26 @@ fn tx_identity(sink: &mut dyn Sink, value: &EffectIdentity) -> Result<(), Encode
 fn tx_route_source(sink: &mut dyn Sink, value: &RouteSource) -> Result<(), EncodeError> {
     match value {
         RouteSource::Track { track_id, tap } => {
-            tx_start_message(sink, 3)?;
+            tx_start_message(sink, schema::session::route_source::TRACK.field_count(&[])?)?;
             tx_u8(sink, schema::session::route_source::TAG, 1)?;
             tx_id(sink, schema::session::route_source::ID, track_id)?;
             tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
         RouteSource::SubmixOutput { submix_id } => {
-            tx_start_message(sink, 2)?;
+            tx_start_message(
+                sink,
+                schema::session::route_source::SUBMIX.field_count(&[])?,
+            )?;
             tx_u8(sink, schema::session::route_source::TAG, 2)?;
             tx_id(sink, schema::session::route_source::ID, submix_id)
         }
     }
 }
 fn tx_route_destination(sink: &mut dyn Sink, value: &RouteDestination) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(
+        sink,
+        schema::session::route_destination::SPEC.field_count(&[])?,
+    )?;
     match value {
         RouteDestination::SubmixInput { submix_id } => {
             tx_u8(sink, schema::session::route_destination::TAG, 1)?;
@@ -969,11 +988,11 @@ fn tx_route_destination(sink: &mut dyn Sink, value: &RouteDestination) -> Result
 fn tx_sidechain(sink: &mut dyn Sink, value: &SidechainDeclaration) -> Result<(), EncodeError> {
     match value {
         SidechainDeclaration::None => {
-            tx_start_message(sink, 1)?;
+            tx_start_message(sink, schema::session::sidechain::NONE.field_count(&[])?)?;
             tx_u8(sink, schema::session::sidechain::TAG, 1)
         }
         SidechainDeclaration::Routed(value) => {
-            tx_start_message(sink, 3)?;
+            tx_start_message(sink, schema::session::sidechain::ROUTED.field_count(&[])?)?;
             tx_u8(sink, schema::session::sidechain::TAG, 2)?;
             tx_message(sink, schema::session::sidechain::SOURCE, |v| {
                 tx_route_source(v, &value.source)
@@ -983,7 +1002,7 @@ fn tx_sidechain(sink: &mut dyn Sink, value: &SidechainDeclaration) -> Result<(),
     }
 }
 fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError> {
-    tx_start_message(sink, 4)?;
+    tx_start_message(sink, schema::session::param::SPEC.field_count(&[])?)?;
     tx_u32(
         sink,
         schema::session::param::PARAMETER_ID,
@@ -1002,7 +1021,11 @@ fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError>
     tx_f32(sink, schema::session::param::VALUE, value.value)
 }
 fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
-    tx_start_message(sink, tx_count(6, value.params.len())?)?;
+    tx_start_message(
+        sink,
+        schema::session::effect::SPEC
+            .field_count(&[(schema::session::effect::PARAM, value.params.len())])?,
+    )?;
     tx_id(sink, schema::session::effect::ID, &value.id)?;
     tx_message(sink, schema::session::effect::IDENTITY, |v| {
         tx_identity(v, &value.identity)
@@ -1026,7 +1049,7 @@ fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
     })
 }
 fn tx_fader(sink: &mut dyn Sink, value: &DualMonoFader) -> Result<(), EncodeError> {
-    tx_start_message(sink, 4)?;
+    tx_start_message(sink, schema::session::fader::SPEC.field_count(&[])?)?;
     tx_f32(sink, schema::session::fader::LEFT_DB, value.left_db)?;
     tx_f32(sink, schema::session::fader::RIGHT_DB, value.right_db)?;
     tx_bool(sink, schema::session::fader::LEFT_MUTE, value.left_mute)?;
@@ -1039,7 +1062,7 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
             right,
             smoothing_samples,
         } => {
-            tx_start_message(sink, 4)?;
+            tx_start_message(sink, schema::session::matrix_or_pan::PAN.field_count(&[])?)?;
             tx_u8(sink, schema::session::matrix_or_pan::TAG, 1)?;
             tx_f32(sink, schema::session::matrix_or_pan::A, *left)?;
             tx_f32(sink, schema::session::matrix_or_pan::B, *right)?;
@@ -1056,7 +1079,10 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
             rr,
             smoothing_samples,
         } => {
-            tx_start_message(sink, 6)?;
+            tx_start_message(
+                sink,
+                schema::session::matrix_or_pan::MATRIX.field_count(&[])?,
+            )?;
             tx_u8(sink, schema::session::matrix_or_pan::TAG, 2)?;
             tx_f32(sink, schema::session::matrix_or_pan::A, *ll)?;
             tx_f32(sink, schema::session::matrix_or_pan::B, *lr)?;
@@ -1071,7 +1097,7 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
     }
 }
 fn tx_track(sink: &mut dyn Sink, value: &miso_engine_session::Track) -> Result<(), EncodeError> {
-    tx_start_message(sink, 10)?;
+    tx_start_message(sink, schema::session::track::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::track::ID, &value.id)?;
     tx_id(sink, schema::session::track::SOURCE_ID, &value.source_id)?;
     tx_u8(
@@ -1104,22 +1130,25 @@ fn tx_track(sink: &mut dyn Sink, value: &miso_engine_session::Track) -> Result<(
     })
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
-    tx_start_message(sink, 1)?;
+    tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::submix::ID, &value.id)
 }
 fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
-    tx_start_message(sink, 1)?;
+    tx_start_message(sink, schema::session::output::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::output::ID, &value.id)
 }
 fn tx_channel_matrix(sink: &mut dyn Sink, value: &ChannelMatrix) -> Result<(), EncodeError> {
-    tx_start_message(sink, 4)?;
+    tx_start_message(
+        sink,
+        schema::session::channel_matrix::SPEC.field_count(&[])?,
+    )?;
     tx_f32(sink, schema::session::channel_matrix::LL, value.ll)?;
     tx_f32(sink, schema::session::channel_matrix::LR, value.lr)?;
     tx_f32(sink, schema::session::channel_matrix::RL, value.rl)?;
     tx_f32(sink, schema::session::channel_matrix::RR, value.rr)
 }
 fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
-    tx_start_message(sink, 5)?;
+    tx_start_message(sink, schema::session::route::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::route::ID, &value.id)?;
     tx_message(sink, schema::session::route::SOURCE, |v| {
         tx_route_source(v, &value.source)
@@ -1133,7 +1162,10 @@ fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
     tx_f32(sink, schema::session::route::GAIN_DB, value.gain_db)
 }
 fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result<(), EncodeError> {
-    tx_start_message(sink, 5)?;
+    tx_start_message(
+        sink,
+        schema::session::automation_target::SPEC.field_count(&[])?,
+    )?;
     tx_id(
         sink,
         schema::session::automation_target::ENTITY_ID,
@@ -1164,7 +1196,10 @@ fn tx_automation_segment(
     sink: &mut dyn Sink,
     value: &AutomationSegment,
 ) -> Result<(), EncodeError> {
-    tx_start_message(sink, 6)?;
+    tx_start_message(
+        sink,
+        schema::session::automation_segment::SPEC.field_count(&[])?,
+    )?;
     tx_u8(
         sink,
         schema::session::automation_segment::SHAPE,
@@ -1197,7 +1232,11 @@ fn tx_automation_segment(
     )
 }
 fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeError> {
-    tx_start_message(sink, tx_count(2, value.segments.len())?)?;
+    tx_start_message(
+        sink,
+        schema::session::automation::SPEC
+            .field_count(&[(schema::session::automation::SEGMENT, value.segments.len())])?,
+    )?;
     tx_id(sink, schema::session::automation::ID, &value.id)?;
     tx_message(sink, schema::session::automation::TARGET, |v| {
         tx_automation_target(v, &value.target)
@@ -2365,6 +2404,33 @@ mod tests {
     }
 
     #[test]
+    fn transaction_repeated_fields_match_schema_derived_count() {
+        let edits = [SessionEditV1::SetTrackEffectOrder {
+            track_id: id("track.repeated"),
+            rack_name: RackName::Dynamic,
+            effect_ids: vec![id("effect.one"), id("effect.two"), id("effect.three")],
+        }];
+        let transaction = SessionTransactionFrame {
+            request_id: RequestId::new(37).expect("request"),
+            expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+            edits: &edits,
+        };
+        let codec = ProtocolCodec::default();
+        let required = codec
+            .encoded_session_transaction_len(&transaction)
+            .expect("schema count includes every repeated field");
+        let mut output = vec![0_u8; required];
+        assert_eq!(
+            codec.encode_session_transaction(&transaction, &mut output),
+            Ok(required)
+        );
+        let decoded = codec
+            .decode_session_transaction(&output, &mut DecodeScratch::new(&mut [0_u16; 8]))
+            .expect("repeated transaction roundtrip");
+        assert_eq!(decoded.edits, edits);
+    }
+
+    #[test]
     fn transaction_requires_exact_nonempty_edits_and_repeated_message_wire_type() {
         let codec = ProtocolCodec::default();
         let empty = SessionTransactionFrame {
@@ -2434,7 +2500,11 @@ mod tests {
             frame_limited.encoded_session_transaction_len(&frame),
             Err(EncodeError::LimitExceeded)
         );
-        assert_eq!(tx_count(u32::MAX, 1), Err(EncodeError::LimitExceeded));
+        assert_eq!(
+            schema::session::rack::SPEC
+                .field_count(&[(schema::session::rack::EFFECT, usize::MAX,)]),
+            Err(EncodeError::LimitExceeded)
+        );
         let mut overflow =
             CountSink::with_length_for_test(usize::MAX, crate::ProtocolLimits::default());
         assert_eq!(overflow.raw(&[0]), Err(EncodeError::LimitExceeded));

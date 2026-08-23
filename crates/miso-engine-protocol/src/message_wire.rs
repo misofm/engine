@@ -734,7 +734,7 @@ impl ProtocolCodec {
     pub fn encoded_non_ok_payload_len(&self, value: &NonOkResponse) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_non_ok(self, &mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode one canonical common non-OK response payload into caller output.
@@ -752,8 +752,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_non_ok(self, &mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Decode one common non-OK response payload after the outer frame has supplied its count.
@@ -773,7 +772,7 @@ impl ProtocolCodec {
     pub fn encoded_diagnostic_message_len(&self, value: &Diagnostic) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_diagnostic_message(self, &mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Decode one nested typed diagnostic payload.
@@ -785,7 +784,7 @@ impl ProtocolCodec {
     pub fn encoded_capabilities_len(&self, value: &Capabilities<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_capabilities(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a successful capabilities payload directly into caller-owned output.
@@ -800,8 +799,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_capabilities(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode the exact 27-field successful capabilities payload.
@@ -844,8 +842,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_snapshot_request(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode the typed two-field snapshot request.
@@ -870,7 +867,7 @@ impl ProtocolCodec {
     pub fn encoded_snapshot_len(&self, value: SessionSnapshot<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_snapshot(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a typed canonical-TOML snapshot chunk.
@@ -885,8 +882,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_snapshot(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed snapshot success payload.
@@ -926,13 +922,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_transaction_applied(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_transaction_applied(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode the one-field transaction success payload.
@@ -959,13 +955,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_session_committed(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_session_committed(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a reliable session-committed event payload.
@@ -1005,13 +1001,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_metadata_request(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_metadata_request(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
     /// Strictly decode the exact two-field metadata cursor request.
     pub fn decode_parameter_metadata_request(
@@ -1037,7 +1033,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_metadata_page(self, &mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
     /// Encode a canonical typed metadata page without allocation.
     pub fn encode_parameter_metadata_page(
@@ -1051,8 +1047,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_metadata_page(self, &mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
     /// Strictly decode a typed metadata page into bounded typed descriptors.
     pub fn decode_parameter_metadata_page(
@@ -1069,7 +1064,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_state_request(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a bounded sorted unique nonzero state-handle request without allocation.
@@ -1084,7 +1079,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_state_request(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
     /// Strictly decode a bounded sorted unique nonzero state-handle request.
     pub fn decode_parameter_state_request(
@@ -1112,7 +1107,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_state_page(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
     /// Encode a validated fixed-16-byte-record state page without allocation.
     pub fn encode_parameter_state_page(
@@ -1126,8 +1121,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_state_page(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
     /// Strictly decode fixed 16-byte state records.
     pub fn decode_parameter_state_page(
@@ -1145,7 +1139,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_automation_enqueue(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a fixed-record automation command directly into caller-owned output.
@@ -1160,8 +1154,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_automation_enqueue(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a borrowed fixed-record automation command without allocation.
@@ -1181,13 +1174,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_automation_enqueued(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_automation_enqueued(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode the exact four-field successful automation admission payload.
@@ -1252,8 +1245,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_transport_set(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed absolute transport-state set request without allocation.
@@ -1284,13 +1276,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_transport_snapshot(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_transport_snapshot(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed three-field transport snapshot without allocation.
@@ -1338,8 +1330,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_transport_state_event(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a reliable typed transport-state event payload without allocation.
@@ -1401,8 +1392,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_automation_canceled(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a reliable typed `AUTOMATION_CANCELED` payload.
@@ -1453,7 +1443,7 @@ impl ProtocolCodec {
     pub fn encoded_meter_batch_len(&self, value: MeterBatch<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_meter_batch(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a canonical fixed-record lossy `METER_BATCH` payload without allocation.
@@ -1468,8 +1458,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_meter_batch(&mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a bounded borrowed fixed-record lossy `METER_BATCH` payload.
@@ -1537,7 +1526,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_diagnostic_event(self, &mut sink, diagnostic)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode one reliable typed diagnostic event directly into caller output without allocation.
@@ -1561,8 +1550,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_diagnostic_event(self, &mut writer, diagnostic)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode one reliable typed diagnostic event requiring provider sequence field 7.
@@ -1594,7 +1582,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_telemetry_configuration(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a canonical telemetry configuration or success echo without allocation.
@@ -1609,7 +1597,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_telemetry_configuration(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a telemetry configuration command or canonical success echo.
@@ -1657,7 +1645,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_counters_request(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a typed counters selector without allocation.
@@ -1672,7 +1660,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_counters_request(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode an all-or-explicit-ID counters selector.
@@ -1711,7 +1699,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_counter_snapshot(&mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a typed ascending nondestructive counter snapshot without allocation.
@@ -1741,7 +1729,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_counter_snapshot(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed ascending nondestructive counter snapshot.
@@ -1781,13 +1769,13 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
         write_diagnostics_request(&mut sizing, value)?;
-        let required = checked_sink_len(self, &sizing)?;
+        let required = checked_sink_len(self, &mut sizing)?;
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_diagnostics_request(&mut writer, value)?;
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed diagnostics cursor request.
@@ -1822,7 +1810,7 @@ impl ProtocolCodec {
     ) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
         write_diagnostics_page(self, &mut sink, value)?;
-        checked_sink_len(self, &sink)
+        checked_sink_len(self, &mut sink)
     }
 
     /// Encode a typed diagnostics page directly into caller output without allocation.
@@ -1837,8 +1825,7 @@ impl ProtocolCodec {
         }
         let mut writer = SliceSink::new(output, self.limits());
         write_diagnostics_page(self, &mut writer, value)?;
-        debug_assert_eq!(writer.written(), required);
-        Ok(required)
+        checked_writer_len(&writer, required)
     }
 
     /// Strictly decode a typed bounded diagnostics page.
@@ -3940,12 +3927,21 @@ fn valid_stable_id(value: &str) -> bool {
         })
 }
 
-fn checked_sink_len(codec: &ProtocolCodec, sink: &dyn Sink) -> Result<usize, EncodeError> {
+fn checked_sink_len(codec: &ProtocolCodec, sink: &mut dyn Sink) -> Result<usize, EncodeError> {
+    sink.finish_message()?;
     let written = sink.written();
     if written > codec.limits().max_frame_bytes {
         return Err(EncodeError::LimitExceeded);
     }
     Ok(written)
+}
+
+fn checked_writer_len(sink: &dyn Sink, required: usize) -> Result<usize, EncodeError> {
+    sink.finish_message()?;
+    if sink.written() != required {
+        return Err(EncodeError::LimitExceeded);
+    }
+    Ok(required)
 }
 
 #[cfg(test)]

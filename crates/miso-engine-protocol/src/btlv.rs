@@ -504,16 +504,55 @@ pub(crate) const fn padding(value_len: usize) -> usize {
 }
 
 /// A bounded output target used by one sizing pass and one caller-buffer write pass.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MessageFields {
+    expected: Option<u32>,
+    actual: u32,
+}
+
+impl MessageFields {
+    fn expect(&mut self, count: u32, limits: ProtocolLimits) -> Result<(), EncodeError> {
+        if count > limits.max_tlv_count || self.expected.is_some() || self.actual != 0 {
+            return Err(EncodeError::LimitExceeded);
+        }
+        self.expected = Some(count);
+        Ok(())
+    }
+
+    fn emitted(&mut self) -> Result<(), EncodeError> {
+        let expected = self.expected.ok_or(EncodeError::LimitExceeded)?;
+        self.actual = self
+            .actual
+            .checked_add(1)
+            .ok_or(EncodeError::LimitExceeded)?;
+        if self.actual > expected {
+            return Err(EncodeError::LimitExceeded);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), EncodeError> {
+        match self.expected {
+            Some(expected) if expected == self.actual => Ok(()),
+            _ => Err(EncodeError::LimitExceeded),
+        }
+    }
+}
+
 pub(crate) trait Sink {
     fn limits(&self) -> ProtocolLimits;
     fn written(&self) -> usize;
     fn raw(&mut self, bytes: &[u8]) -> Result<(), EncodeError>;
+    fn message_fields(&self) -> MessageFields;
+    fn message_fields_mut(&mut self) -> &mut MessageFields;
 
-    fn check_field_count(&self, count: u32) -> Result<(), EncodeError> {
-        if count > self.limits().max_tlv_count {
-            return Err(EncodeError::LimitExceeded);
-        }
-        Ok(())
+    fn check_field_count(&mut self, count: u32) -> Result<(), EncodeError> {
+        let limits = self.limits();
+        self.message_fields_mut().expect(count, limits)
+    }
+
+    fn finish_message(&self) -> Result<(), EncodeError> {
+        self.message_fields().finish()
     }
 
     fn message_header(&mut self, count: u32) -> Result<(), EncodeError> {
@@ -532,7 +571,8 @@ pub(crate) trait Sink {
         prefix[4..].copy_from_slice(&length.to_le_bytes());
         self.raw(&prefix)?;
         self.raw(value)?;
-        self.raw(&[0_u8; 7][..padding(value.len())])
+        self.raw(&[0_u8; 7][..padding(value.len())])?;
+        self.message_fields_mut().emitted()
     }
 
     fn field_spec(&mut self, spec: FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
@@ -578,6 +618,7 @@ pub(crate) struct CountSink {
     length: usize,
     limits: ProtocolLimits,
     depth: u8,
+    fields: MessageFields,
 }
 
 impl CountSink {
@@ -586,6 +627,10 @@ impl CountSink {
             length: 0,
             limits,
             depth: 0,
+            fields: MessageFields {
+                expected: None,
+                actual: 0,
+            },
         }
     }
 
@@ -595,6 +640,10 @@ impl CountSink {
             length,
             limits,
             depth: 0,
+            fields: MessageFields {
+                expected: None,
+                actual: 0,
+            },
         }
     }
 }
@@ -616,6 +665,14 @@ impl Sink for CountSink {
         Ok(())
     }
 
+    fn message_fields(&self) -> MessageFields {
+        self.fields
+    }
+
+    fn message_fields_mut(&mut self) -> &mut MessageFields {
+        &mut self.fields
+    }
+
     fn stream_field_spec(
         &mut self,
         _spec: FieldSpec,
@@ -629,7 +686,8 @@ impl Sink for CountSink {
             return Err(EncodeError::LimitExceeded);
         }
         u32::try_from(value_len).map_err(|_| EncodeError::LimitExceeded)?;
-        self.raw(&[0_u8; 7][..padding(value_len)])
+        self.raw(&[0_u8; 7][..padding(value_len)])?;
+        self.fields.emitted()
     }
 
     fn nested_field(
@@ -643,16 +701,20 @@ impl Sink for CountSink {
         }
         self.raw(&[0_u8; TLV_PREFIX_BYTES])?;
         let body_start = self.length;
+        let parent_fields = core::mem::take(&mut self.fields);
         self.depth = self
             .depth
             .checked_add(1)
             .ok_or(EncodeError::LimitExceeded)?;
         let result = body(self);
         self.depth -= 1;
-        result?;
+        let child_result = result.and_then(|()| self.fields.finish());
+        self.fields = parent_fields;
+        child_result?;
         let body_len = self.length - body_start;
         u32::try_from(body_len).map_err(|_| EncodeError::LimitExceeded)?;
-        self.raw(&[0_u8; 7][..padding(body_len)])
+        self.raw(&[0_u8; 7][..padding(body_len)])?;
+        self.fields.emitted()
     }
 }
 
@@ -661,6 +723,7 @@ pub(crate) struct SliceSink<'a> {
     length: usize,
     limits: ProtocolLimits,
     depth: u8,
+    fields: MessageFields,
 }
 
 impl<'a> SliceSink<'a> {
@@ -670,6 +733,10 @@ impl<'a> SliceSink<'a> {
             length: 0,
             limits,
             depth: 0,
+            fields: MessageFields {
+                expected: None,
+                actual: 0,
+            },
         }
     }
 }
@@ -699,6 +766,14 @@ impl Sink for SliceSink<'_> {
         Ok(())
     }
 
+    fn message_fields(&self) -> MessageFields {
+        self.fields
+    }
+
+    fn message_fields_mut(&mut self) -> &mut MessageFields {
+        &mut self.fields
+    }
+
     fn stream_field_spec(
         &mut self,
         spec: FieldSpec,
@@ -717,7 +792,8 @@ impl Sink for SliceSink<'_> {
         if self.length - value_start != value_len {
             return Err(EncodeError::LimitExceeded);
         }
-        self.raw(&[0_u8; 7][..padding(value_len)])
+        self.raw(&[0_u8; 7][..padding(value_len)])?;
+        self.fields.emitted()
     }
 
     fn nested_field(
@@ -736,17 +812,21 @@ impl Sink for SliceSink<'_> {
         prefix[3] = u8::from(mandatory);
         self.raw(&prefix)?;
         let body_start = self.length;
+        let parent_fields = core::mem::take(&mut self.fields);
         self.depth = self
             .depth
             .checked_add(1)
             .ok_or(EncodeError::LimitExceeded)?;
         let result = body(self);
         self.depth -= 1;
-        result?;
+        let child_result = result.and_then(|()| self.fields.finish());
+        self.fields = parent_fields;
+        child_result?;
         let body_len = self.length - body_start;
         let value_len = u32::try_from(body_len).map_err(|_| EncodeError::LimitExceeded)?;
         self.output[field_start + 4..field_start + 8].copy_from_slice(&value_len.to_le_bytes());
-        self.raw(&[0_u8; 7][..padding(body_len)])
+        self.raw(&[0_u8; 7][..padding(body_len)])?;
+        self.fields.emitted()
     }
 }
 
@@ -791,6 +871,7 @@ mod tests {
             ..ProtocolLimits::default()
         };
         let mut sizing = CountSink::new(one);
+        sizing.check_field_count(1).expect("parent field count");
         assert_eq!(
             sizing.nested(1, &mut |sink| { sink.nested(2, &mut |_| Ok(())) }),
             Err(EncodeError::LimitExceeded)
@@ -803,10 +884,104 @@ mod tests {
     }
 
     #[test]
+    fn sinks_reject_under_and_over_emission_against_declared_count() {
+        let limits = ProtocolLimits::default();
+        let value = FieldSpec::req(1, Wire::U32);
+
+        let mut under_count = CountSink::new(limits);
+        under_count.check_field_count(2).expect("declared count");
+        under_count
+            .field_spec(value, &1_u32.to_le_bytes())
+            .expect("first field");
+        assert_eq!(
+            under_count.finish_message(),
+            Err(EncodeError::LimitExceeded)
+        );
+
+        let mut under_bytes = [0_u8; 32];
+        let mut under_slice = SliceSink::new(&mut under_bytes, limits);
+        under_slice.check_field_count(2).expect("declared count");
+        under_slice
+            .field_spec(value, &1_u32.to_le_bytes())
+            .expect("first field");
+        assert_eq!(
+            under_slice.finish_message(),
+            Err(EncodeError::LimitExceeded)
+        );
+
+        let mut over_count = CountSink::new(limits);
+        over_count.check_field_count(1).expect("declared count");
+        over_count
+            .field_spec(value, &1_u32.to_le_bytes())
+            .expect("declared field");
+        assert_eq!(
+            over_count.field_spec(value, &2_u32.to_le_bytes()),
+            Err(EncodeError::LimitExceeded)
+        );
+
+        let mut over_bytes = [0_u8; 32];
+        let mut over_slice = SliceSink::new(&mut over_bytes, limits);
+        over_slice.check_field_count(1).expect("declared count");
+        over_slice
+            .field_spec(value, &1_u32.to_le_bytes())
+            .expect("declared field");
+        assert_eq!(
+            over_slice.field_spec(value, &2_u32.to_le_bytes()),
+            Err(EncodeError::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn nested_count_mismatch_restores_parent_counter() {
+        let limits = ProtocolLimits::default();
+        let nested = FieldSpec::msg(1, true, false, &crate::schema::enum_choice::SPEC);
+        let child_count = crate::schema::enum_choice::SPEC
+            .field_count(&[])
+            .expect("schema count");
+
+        let mut sizing = CountSink::new(limits);
+        sizing.check_field_count(1).expect("parent count");
+        assert_eq!(
+            sizing.nested_spec(nested, &mut |sink| {
+                sink.message_header(child_count)?;
+                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())
+            }),
+            Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(sizing.fields.actual, 0);
+        sizing
+            .nested_spec(nested, &mut |sink| {
+                sink.message_header(child_count)?;
+                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())?;
+                sink.field_spec(crate::schema::enum_choice::LABEL, b"one")
+            })
+            .expect("parent counter restored");
+        sizing.finish_message().expect("parent count matches");
+
+        let mut bytes = [0_u8; 96];
+        let mut writer = SliceSink::new(&mut bytes, limits);
+        writer.check_field_count(1).expect("parent count");
+        assert_eq!(
+            writer.nested_spec(nested, &mut |sink| sink.message_header(child_count)),
+            Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(writer.fields.actual, 0);
+        writer
+            .nested_spec(nested, &mut |sink| {
+                sink.message_header(child_count)?;
+                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())?;
+                sink.field_spec(crate::schema::enum_choice::LABEL, b"one")
+            })
+            .expect("parent counter restored");
+        writer.finish_message().expect("parent count matches");
+    }
+
+    #[test]
     fn nested_body_runs_once_per_sink_and_patches_length() {
         let limits = ProtocolLimits::default();
         let mut sizing_calls = 0;
         let mut sizing = CountSink::new(limits);
+        sizing.check_field_count(1).expect("parent field count");
         sizing
             .nested(7, &mut |sink| {
                 sizing_calls += 1;
@@ -819,6 +994,7 @@ mod tests {
         let mut output = vec![0xa5; sizing.written()];
         let mut writing_calls = 0;
         let mut writer = SliceSink::new(&mut output, limits);
+        writer.check_field_count(1).expect("parent field count");
         writer
             .nested(7, &mut |sink| {
                 writing_calls += 1;
@@ -848,6 +1024,7 @@ mod tests {
         let mut sizing_stream_calls = 0;
         let mut sizing_nested_calls = 0;
         let mut sizing = CountSink::new(limits);
+        sizing.check_field_count(3).expect("field count");
         sizing
             .field_spec(required, &9_u32.to_le_bytes())
             .expect("required field");
@@ -870,6 +1047,7 @@ mod tests {
         let mut writing_stream_calls = 0;
         let mut writing_nested_calls = 0;
         let mut writer = SliceSink::new(&mut output, limits);
+        writer.check_field_count(3).expect("field count");
         writer
             .field_spec(required, &9_u32.to_le_bytes())
             .expect("required field");
