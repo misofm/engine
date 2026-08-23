@@ -14,6 +14,7 @@ name = "miso_engine_wasm_gate_corpus"
 
 [dependencies]
 miso-engine-builtins.workspace = true
+miso-engine-compressor.workspace = true
 miso-engine-delay.workspace = true
 miso-engine-effect-runtime.workspace = true
 miso-engine-gate-expander.workspace = true

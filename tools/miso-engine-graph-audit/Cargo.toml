@@ -21,7 +21,14 @@ path = "src/delay_main.rs"
 name = "miso_engine_graph_audit_gate_expander"
 path = "src/gate_expander_main.rs"
 
+# Issue #88 E10: the compressor's allocation audit. A separate binary because each one installs its
+# own global allocator.
+[[bin]]
+name = "miso_engine_graph_audit_compressor"
+path = "src/compressor_main.rs"
+
 [dependencies]
+miso-engine-compressor.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-delay.workspace = true
 miso-engine-effect-contract.workspace = true

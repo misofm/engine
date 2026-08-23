@@ -31,9 +31,12 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations.
+//! the same computations. The compressor family of issue #88 is the last one appended, and
+//! `tests/g5_native_corpus.rs` asserts that it is the last, so that a family inserted rather than
+//! appended fails instead of silently renumbering every pin after it.
 
 use miso_engine_builtins::corpus as builtins_corpus;
+use miso_engine_compressor::corpus as compressor_corpus;
 use miso_engine_delay::corpus as delay_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
 use miso_engine_gate_expander::corpus as gate_expander_corpus;
@@ -152,6 +155,19 @@ pub const BUILTINS_CASE_COUNT: usize = builtins_corpus::CASE_COUNT;
 /// crate.
 pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_compressor::corpus`] (issue #88 E4), replayed under wasm.
+///
+/// A whole prepared compressor per case, over 384 frames of eight independent stereo tracks with
+/// different thresholds, ratios, knees, ballistics, makeup, mixes and lookahead taps, rendered
+/// through the production `process_block` in a frozen block partition and read back lane major:
+/// the per-lane detector gather with its compare-select ring wrap, the branchless Giannoulis,
+/// Massberg and Reiss equation 4, the `log2`/`exp2` dB chain, the single-rounding switched one-pole
+/// on the gain-reduction word with its D7 `flush`, and the three identity selects. One case per
+/// link mode plus one that drives the D11 ramping body through a mid-block automation point. The
+/// recurrence is per lane and never crosses lanes, which is why the digests stay width
+/// independent. Lane generic, and their pins live in that crate.
+pub const COMPRESSOR_CASE_COUNT: usize = compressor_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -163,7 +179,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + PARAMETRIC_EQ_CASE_COUNT
     + GATE_EXPANDER_CASE_COUNT
     + BUILTINS_CASE_COUNT
-    + LIMITER_CASE_COUNT;
+    + LIMITER_CASE_COUNT
+    + COMPRESSOR_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -365,6 +382,8 @@ enum Case {
     Builtins(usize),
     /// One case of the `miso-engine-true-peak-limiter` E12 corpus.
     Limiter(usize),
+    /// One case of the `miso-engine-compressor` E4 corpus.
+    Compressor(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -421,7 +440,11 @@ fn case_of(index: usize) -> Case {
     if index < BUILTINS_CASE_COUNT {
         return Case::Builtins(index);
     }
-    Case::Limiter(index - BUILTINS_CASE_COUNT)
+    let index = index - BUILTINS_CASE_COUNT;
+    if index < LIMITER_CASE_COUNT {
+        return Case::Limiter(index);
+    }
+    Case::Compressor(index - LIMITER_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -485,6 +508,9 @@ pub fn case_name(index: usize) -> String {
             "effect/true_peak_limiter/{}",
             limiter_corpus::CASE_NAMES[case]
         ),
+        Case::Compressor(case) => {
+            format!("effect/compressor/{}", compressor_corpus::CASE_NAMES[case])
+        }
     }
 }
 
@@ -527,6 +553,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::GateExpander(case) => gate_expander_corpus::GATE_DIGESTS[case],
         Case::Builtins(case) => builtins_corpus::BUILTINS_DIGESTS[case],
         Case::Limiter(case) => limiter_corpus::D90_DIGESTS[case],
+        Case::Compressor(case) => compressor_corpus::C1_DIGESTS[case],
     }
 }
 
@@ -579,6 +606,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_limiter::<f32>(case),
             1 => digest_limiter::<miso_engine_lane::Simd4>(case),
             _ => digest_limiter::<miso_engine_lane::Simd8>(case),
+        },
+        Case::Compressor(case) => match width {
+            0 => digest_compressor::<f32>(case),
+            1 => digest_compressor::<miso_engine_lane::Simd4>(case),
+            _ => digest_compressor::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -646,7 +678,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::ParametricEq(_)
         | Case::GateExpander(_)
         | Case::Builtins(_)
-        | Case::Limiter(_) => {
+        | Case::Limiter(_)
+        | Case::Compressor(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -1072,6 +1105,18 @@ fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; limiter_corpus::POINTS];
     limiter_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-compressor` E4 case, exactly as that crate's `tests/cross_target.rs`
+/// does natively.
+fn digest_compressor<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; compressor_corpus::POINTS];
+    compressor_corpus::run_case::<L>(case, &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

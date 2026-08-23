@@ -270,11 +270,6 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         "the true-peak limiter block must cover every case that crate pins"
     );
     let limiter_base = builtins_base + corpus::BUILTINS_CASE_COUNT;
-    assert_eq!(
-        limiter_base + corpus::LIMITER_CASE_COUNT,
-        corpus::CASE_COUNT,
-        "the true-peak limiter must be the last family in the pin order"
-    );
     for case in 0..corpus::LIMITER_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(limiter_base + case),
@@ -288,6 +283,32 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert!(
             corpus::case_name(limiter_base + case).starts_with("effect/true_peak_limiter/"),
             "limiter cases keep their owning crate's names"
+        );
+    }
+    assert_eq!(
+        corpus::COMPRESSOR_CASE_COUNT,
+        miso_engine_compressor::corpus::CASE_COUNT,
+        "the compressor block must cover every case that crate pins"
+    );
+    let compressor_base = limiter_base + corpus::LIMITER_CASE_COUNT;
+    assert_eq!(
+        compressor_base + corpus::COMPRESSOR_CASE_COUNT,
+        corpus::CASE_COUNT,
+        "the compressor must be the last family in the pin order"
+    );
+    for case in 0..corpus::COMPRESSOR_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(compressor_base + case),
+            miso_engine_compressor::corpus::C1_DIGESTS[case],
+            "compressor case {case} must be pinned by miso-engine-compressor, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(compressor_base + case),
+            "a compressor case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(compressor_base + case).starts_with("effect/compressor/"),
+            "compressor cases keep their owning crate's names"
         );
     }
 }

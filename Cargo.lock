@@ -890,6 +890,7 @@ dependencies = [
 name = "miso-engine-graph-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-compressor",
  "miso-engine-core",
  "miso-engine-delay",
  "miso-engine-effect-contract",
@@ -1213,6 +1214,7 @@ name = "miso-engine-wasm-gate-corpus"
 version = "0.1.0"
 dependencies = [
  "miso-engine-builtins",
+ "miso-engine-compressor",
  "miso-engine-delay",
  "miso-engine-effect-runtime",
  "miso-engine-gate-expander",
@@ -1239,6 +1241,7 @@ name = "miso-engine-wasm-gates"
 version = "0.1.0"
 dependencies = [
  "miso-engine-builtins",
+ "miso-engine-compressor",
  "miso-engine-effect-runtime",
  "miso-engine-gate-expander",
  "miso-engine-lane",

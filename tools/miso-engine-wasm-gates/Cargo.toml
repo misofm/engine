@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 miso-engine-builtins.workspace = true
+miso-engine-compressor.workspace = true
 miso-engine-effect-runtime.workspace = true
 miso-engine-gate-expander.workspace = true
 miso-engine-lane.workspace = true
