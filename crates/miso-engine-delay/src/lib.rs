@@ -2,12 +2,12 @@
 //!
 //! # Shape
 //!
-//! One `W = 1` block kernel ([`delay_chunk`]) renders both lanes. `process` splits a block into
+//! One `W = 1` block kernel (`delay_chunk`) renders both lanes. `process` splits a block into
 //! chunks whose boundaries are chosen so that every per-sample decision — which taps are readable,
 //! whether a crossfade is running, whether a ramp snaps this sample, whether the ring write wraps —
 //! is **constant inside the chunk**. The kernel therefore has no data-dependent branch and no
 //! modulo, and the tap history each chunk reads is copied out with two contiguous slice copies
-//! before the chunk writes anything (the non-overlap proof is on [`chunk_frames`]).
+//! before the chunk writes anything (the non-overlap proof is on `PreparedDelay::chunk_frames`).
 //!
 //! Delays do not bank: a two-second gathered ring has no `W4`/`W8` kernel, so
 //! `bind_homogeneous_bank` returns `Ok(None)` and every instance is a scalar dynamic-rack member
@@ -15,7 +15,8 @@
 //!
 //! # Where the numerics live
 //!
-//! * Fusion — only `miso_engine_lane::Lane::fma` (D3). There is no `mul_add` in this crate.
+//! * Fusion — only `miso_engine_lane::Lane::fma` (D3). The standard library's fused form is
+//!   forbidden here and `scripts/check-lane-policy.sh` greps for it.
 //! * Denormals — `miso_engine_lane::flush` on the two recursive words per lane, the damping state
 //!   and the ring write, once per sample (D7). Nothing else is classified per value.
 //! * Finiteness — once per block per lane, over the output, the ring write window and the damping
@@ -27,7 +28,7 @@
 //! # Damping
 //!
 //! The frozen `[0, 0.995]` damping control is mapped to a **topology-preserving one-pole**
-//! coefficient at prepare and at every automation point ([`damping_coefficient`]). The control
+//! coefficient at prepare and at every automation point. The control
 //! keeps the cutoff it had at 48 kHz at every sample rate, which the raw-coefficient form it
 //! replaces did not (issue #93 finding F5). Issue 021's amendment records the mapping.
 #![allow(missing_docs)]
@@ -2087,7 +2088,12 @@ mod tests {
     type PartitionRun = (Vec<u32>, Vec<u32>, (Vec<u8>, Vec<u8>, Vec<u8>));
 
     fn render_partition(frames: usize, block_frames: usize, chunk_cap: usize) -> PartitionRun {
-        let values = initial_values();
+        let mut values = initial_values();
+        // 13 ms is 624 samples, so the initial tap stops being all-zero 624 samples in -- inside a
+        // block at every partition and inside a chunk at the 128-frame cap. That is what makes the
+        // `D - valid_history` chunk bound load bearing.
+        values[0].value = 13.0;
+        values[1].value = 13.0;
         let mut effect =
             prepare_delay(request_with_quantum(&values, 48_000, 512)).expect("prepare at q512");
         effect.chunk_cap = chunk_cap;
@@ -2263,6 +2269,16 @@ mod tests {
                 .expect("dirty block"),
         );
         let before = snapshot(&effect);
+        // The effect is moved on, so a payload that is *partly* committed is observable: the
+        // rejected restore must leave `after`, not a mixture of `after` and `before`.
+        let mut left = [-0.5_f32; 24];
+        let mut right = [0.25_f32; 24];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 8, &[], 128)
+                .expect("second block"),
+        );
+        let after = snapshot(&effect);
+        assert_ne!(after, before);
         for (section, word, value) in [(2_usize, 0_usize, f32::NAN), (1, 0, f32::INFINITY)] {
             let mut invalid = before.clone();
             let bytes = match section {
@@ -2284,7 +2300,7 @@ mod tests {
                     )
                     .is_err()
             );
-            assert_eq!(snapshot(&effect), before);
+            assert_eq!(snapshot(&effect), after);
         }
         // A stale ring word outside the valid history is rejected after the header, and still
         // leaves nothing written.
@@ -2304,7 +2320,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(snapshot(&effect), before);
+        assert_eq!(snapshot(&effect), after);
         assert!(
             effect
                 .restore_state_payload(
@@ -2338,6 +2354,18 @@ mod tests {
         let mut next_right = [-0.2_f32; 16];
         let mut restored_left = next_left;
         let mut restored_right = next_right;
+        effect
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(
+                    &before.0,
+                    &before.1,
+                    &before.2,
+                    effect.metadata().state_sizes,
+                )
+                .expect("state input"),
+            )
+            .expect("restore the reference state");
         effect.process(
             EffectProcessBlock::new(&mut next_left, &mut next_right, None, 8, &[], 128)
                 .expect("continuation"),
@@ -2401,6 +2429,31 @@ mod tests {
         assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(bypass.left.valid_history, 1);
         assert_eq!(bypass.left.ring[0].to_bits(), 0.0_f32.to_bits());
+
+        // The D7 flush is what canonicalises the ring word, not the addition: a value inside the
+        // flush band and the sum of two negative zeros both become exactly `+0.0`.
+        let mut flush_values = initial_values();
+        flush_values[0].value = 1.0;
+        flush_values[1].value = 1.0;
+        flush_values[2].value = 0.0;
+        flush_values[3].value = 0.0;
+        flush_values[4].value = 0.0;
+        flush_values[5].value = 0.0;
+        flush_values[6].value = 0.0;
+        flush_values[7].value = 0.0;
+        let mut flushing = prepare(&flush_values);
+        let mut left = vec![0.0_f32; 64];
+        let mut right = vec![0.0_f32; 64];
+        left[0] = -0.5;
+        left[1] = 1.0e-30;
+        left[48] = -0.0;
+        flushing.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("flush block"),
+        );
+        assert_eq!(flushing.left.ring[1].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(flushing.left.ring[48].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(left[1].to_bits(), 1.0e-30_f32.to_bits());
+        assert_eq!(left[48].to_bits(), (-0.0_f32).to_bits());
 
         // Damping off is the exact tap, and the damping state follows it.
         let mut wet_values = initial_values();
