@@ -1227,6 +1227,7 @@ dependencies = [
 name = "miso-engine-wasm-gates"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-builtins",
  "miso-engine-effect-runtime",
  "miso-engine-gate-expander",
  "miso-engine-lane",

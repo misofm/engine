@@ -13,6 +13,7 @@ name = "miso_engine_wasm_gates"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-builtins.workspace = true
 miso-engine-effect-runtime.workspace = true
 miso-engine-gate-expander.workspace = true
 miso-engine-lane.workspace = true
