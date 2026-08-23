@@ -2,12 +2,12 @@
 
 ## Decision
 
-**WAITING FOR ISSUES 073 AND 113.** After both pass, qualify their frozen bytes; do not repair them
+**WAITING FOR ISSUES 115 AND 113.** After both pass, qualify their frozen bytes; do not repair them
 inside this issue. Sol High implements and Sol XHigh verifies with one pass plus one bounded HOLD
 correction. A second HOLD stops. Timed and benchmark counts remain zero.
 
-Direct dependencies are **Native WAV/RF64 reference runner over frozen C ABI V1** (073) and **Close
-C ABI control/event transport and transactional plan replacement** (113). PASS gates **End-to-end
+Direct dependencies are **Close portable native PCM runner publication and seal the reference
+tool** (115) and **Close C ABI control/event transport and transactional plan replacement** (113). PASS gates **End-to-end
 release, performance, and listening qualification** (026). Issue 025 needs 113, not this matrix.
 
 ## Matrix

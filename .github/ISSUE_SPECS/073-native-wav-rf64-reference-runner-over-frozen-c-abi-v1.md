@@ -6,11 +6,12 @@ Ship the smallest native end-to-end reference tool: read one strict session, res
 WAV/RF64 inputs, feed the accepted host-source boundary, render only through frozen C ABI V1, and
 atomically publish deterministic block-planar `f32le` PCM.
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1.** This issue is tooling-only and
-dependency-ready after accepted Issues 022 and 112. Sol High implements; Sol XHigh briefs and
-adversarially verifies. One implementation pass plus one bounded HOLD correction is the complete
-budget; a second HOLD is STOP/rescope. Benchmark, timing and real-user workload counts start at and
-must remain zero.
+**TERMINAL SECOND HOLD / STOP / NO OVERALL PASS.** Sol High completed one implementation pass and
+the sole bounded correction; Sol XHigh then found the non-Linux publication fallback still had a
+check/use race. The two-pass budget is consumed. The Linux FD-bound runner, fixtures and focused
+evidence are useful technical input only. Stateless Issue 115, **Close portable native PCM runner
+publication and seal the reference tool**, owns the portable correction and fresh full runner seal.
+Benchmark, timing and real-user workload counts remained zero.
 
 Remote Issue 073 remains open under its earlier combined title/body. Root must synchronize it to
 this exact title and body after the docs checkpoint is upstream; this local brief performs no Git
@@ -129,9 +130,56 @@ change is STOP and must move to Issue 113 or a stateless rescope.
 No complete BTLV provider, event drain, session mutation, replacement-plan publication, C ABI
 symbol/layout change, platform matrix, mobile/browser host, codec, interleaving, variable-frame
 render, benchmark, timing, tuning or listening. Issue 114 owns cross-target qualification after
-both this runner and Issue 113 exist.
+accepted Issues 115 and 113 exist.
 
 Record exact changed paths/hashes, manifest/output hashes, command lines, test counts, diagnostic
 rows, allocation/resource evidence, accepted dependency identities and all zero prohibited counts.
 Sol High stops after a coherent focused-green checkpoint. Sol XHigh returns strict PASS or the sole
-bounded HOLD; focused PASS makes Issue 073 complete without waiting for Issues 113/114.
+bounded HOLD; a second HOLD stops and routes through Issue 115 rather than weakening this contract.
+
+## Terminal implementation evidence and decision — 2026-08-23
+
+The focused implementation touched exactly the permitted 22 product/tooling paths: the workspace
+manifest/lock; three runner package files; generator, manifest, five WAV and five strict-session
+fixtures; runner documentation; two runner checker scripts; and the realtime checker plus mutation
+script. C API, source, protocol, installed header and existing accepted fixture paths were unchanged.
+
+The candidate implemented the public native decoder plus frozen C ABI path, safe relative locator
+and lowercase SHA-256 adapter, exact parsed ring capacity, source-ID byte ordering, quantum-bounded
+scratch, four launch-rate RIFF rows and RF64 `ds64` with origin 1 and chunks
+`128/128/128/128/2`. Exact outputs are nonzero, 8,192-byte block-planar files with manifest-pinned
+digests. Benchmark, timing, real workload, playback and listening invocation counts are all zero.
+
+Pass 1 passed 10 runner tests and focused locked check, strict Clippy/rustdoc, format, independent
+fixture check, checker/mutations, workspace/realtime policies and mutations, C ABI symbol/header,
+shell/static/diff gates. Sol XHigh returned the sole HOLD for pathname-only partial ownership plus
+missing explicit negative/order/admission witnesses.
+
+The correction retained the partial descriptor, verified bytes through that descriptor and used
+Linux `linkat(AT_EMPTY_PATH)` to publish the exact inode. It added regular/symlink/hardlink/rename
+replacement canaries, real short-write/sync/publication cleanup, frame/ring overflow, identity,
+missing/truncated RIFF, unsupported-rate, exact ring and reversed two-source ordering rows. The
+runner suite passed 15/15 and the focused gates remained green. Frozen technical identities are:
+
+| Authority | SHA-256 |
+| --- | --- |
+| `tools/miso-engine-native-pcm-runner/src/lib.rs` | `4ed33714d232ac98c019e2af05662d0ffa03f472008333109298f63b67769444` |
+| `tools/miso-engine-native-pcm-runner/src/main.rs` | `89b2acb0f56c6e249bbbd7bcb965c7c0545fa3c6078772b5026362ec6b888dd0` |
+| `tools/miso-engine-native-pcm-runner/Cargo.toml` | `bd5cd87f0c2bcd0ae5e7faf5532b1869b39e72f296dee81b2f135345e728a8e1` |
+| `fixtures/native-pcm-runner/v1/MANIFEST.tsv` | `8d251ad6b1eca8c95e24b8b4e2959e397d8ec954502307351f1c7fb3c01a9634` |
+| `fixtures/native-pcm-runner/v1/generate.py` | `fec68443bd460859dc1093d8bf12ffd3666f0efb8e7a4fb96799927b47a535e9` |
+| `docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md` | `c24e57eff1440f64488bd678668665088aaccfd147058c8ceda24c2eadb0f361` |
+| `scripts/check-native-pcm-runner-v1.sh` | `244f2beeaf3258b1b10479edbd08ad883cd6b99dc4154cd081e00e72354fbf4c` |
+| `scripts/test-native-pcm-runner-v1-policy.sh` | `5c99bc424d0563a3316a02f84856ecec52625ddb3f5218b68e6d4cd47f921d78` |
+| root `Cargo.toml` | `96a90260841810fa7f4dc19625a81b9965c24c56f3805acdc80ec09c06f327b2` |
+| `Cargo.lock` | `c89b195f0d31ad21852d0a931023c70e1eb4a0caa534bfd6e1692c1e1178fd52` |
+
+Final Sol XHigh review accepted the Linux path and every other correction but returned the terminal
+second HOLD. On non-Linux Unix, the fallback separately checked the partial pathname's device/inode
+and then called pathname `hard_link`. A replacement between those operations could be linked at the
+final name; the later check detected it but deliberately did not remove the non-owned final, so a
+failed run could leave the requested final path present. The documentation claimed other native
+hosts, and Issue 114 is qualification-only, so this product defect cannot be deferred there.
+
+**FINAL ISSUE-073 STOP.** There is no overall PASS and no further Issue-073 edit or execution
+attempt. Preserve this checkpoint as Linux/tooling technical input for Issue 115.

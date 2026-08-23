@@ -96,11 +96,14 @@ termination**, stopped after its second review HOLD with the bounded production 
 only as technical input. Issue 112, **Close native-source seek submission qualification and seal
 backpressure fix**, completed the remaining test-only handshake and fresh clean broad nonbenchmark
 seal with Sol XHigh PASS. Issue 073, **Native WAV/RF64 reference runner over frozen C ABI V1**,
-follows accepted Issues 022 and 112 and owns only the native file runner and deterministic PCM
-fixtures. Issue 113, **Close C ABI control/event transport and transactional plan replacement**,
+then stopped at its terminal second HOLD: its Linux FD-bound runner, deterministic PCM fixtures and
+focused gates are technical input, but the non-Linux pathname publication fallback remained
+TOCTOU. Issue 115, **Close portable native PCM runner publication and seal the reference tool**,
+owns only that portable publication correction, Windows/Unix compile boundary and a fresh full
+runner seal. Issue 113, **Close C ABI control/event transport and transactional plan replacement**,
 follows accepted Issues 005, 003 and 022 and owns the complete control provider, event egress and
 replacement-plan product; it gates Issue 025 directly. Issue 114, **Qualify native C ABI and
-reference runner target matrix**, joins Issues 073 and 113 and alone owns native platform/runner
+reference runner target matrix**, joins accepted Issues 115 and 113 and alone owns native platform/runner
 qualification before Issue 026. Issues 101 and 112 change no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
@@ -172,12 +175,13 @@ native-source seek backpressure without worker termination**, consumed that acce
 stopped after its second HOLD; its `d8fd1762...` production bytes remain technical input without
 overall PASS. Issue 112, **Close native-source seek submission qualification and seal backpressure
 fix**, consumed that checkpoint, closed the remaining test synchronization and fresh broad seal,
-and has Sol XHigh PASS. It precedes tooling-only Issue 073, **Native WAV/RF64 reference runner over
-frozen C ABI V1**. Issue 041, **Issue-010 source streaming
+and has Sol XHigh PASS. Stopped tooling Issue 073, **Native WAV/RF64 reference runner over frozen C
+ABI V1**, preserves Linux/tooling technical input; Issue 115, **Close portable native PCM runner
+publication and seal the reference tool**, owns its portable completion. Issue 041, **Issue-010 source streaming
 qualification tooling and adversarial evidence**, follows 043 and owns the expanded diagnostic
 corpus, frozen seek races, real worker-delay audit and duration-independent allocation-layout/RSS
 proof. Issue 041 is nonblocking for hosts/features and gates only release qualification Issue 026.
-Issues 040, 041, 043, 101, 112 and 073 forbid benchmarks; their timed invocation count remains zero.
+Issues 040, 041, 043, 101, 112, 073 and 115 forbid benchmarks; their timed invocation count remains zero.
 
 Issue 012 stopped without overall PASS when its first independent-oracle gate disproved the frozen
 five-`f32`-coefficient direct-form-I numerical contract. Issue 042 then selected an endpoint-

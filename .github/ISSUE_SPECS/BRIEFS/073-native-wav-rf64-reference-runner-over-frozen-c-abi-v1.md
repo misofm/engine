@@ -2,21 +2,18 @@
 
 ## Decision
 
-**SOL XHIGH READINESS PASS / READY FOR SOL HIGH PASS 1.** Implement exactly one tooling vertical:
-strict session plus native WAV/RF64 inputs enter through a runner-local locator/identity adapter,
-decoded chunks cross frozen C ABI V1 host submission, and rendered stereo leaves as atomically
-published block-planar `f32le`.
-
-Sol High is implementer; Sol XHigh is briefer/verifier. The entire budget is one pass and one
-bounded HOLD correction. A second HOLD stops. Benchmark, timing, real-user workload, playback and
-listening counts remain zero. Root separately synchronizes the open remote Issue 073 title/body.
+**TERMINAL SECOND HOLD / STOP / NO OVERALL PASS.** The Linux FD-bound runner and its focused evidence
+are technical input only. Sol High used the one implementation pass and sole bounded correction;
+Sol XHigh found the corrected non-Linux path still had a pathname ownership check/use gap. All real
+workload, benchmark, timing, playback and listening counts are zero. Issue 115 owns the stateless
+portable correction and fresh full runner seal.
 
 ## Dependencies and separation
 
 Direct dependencies are accepted **Stable C ABI and host-fed planar PCM render** (Issue 022) and
 accepted **Close native-source seek submission qualification and seal backpressure fix** (Issue
 112). Issue 043 is transitive. Issue 113, not this issue, owns complete control/event transport and
-transactional replacement. Issue 114 later joins 073 and 113 for target qualification.
+transactional replacement. Issue 114 later joins accepted 115 and 113 for target qualification.
 
 Do not edit C ABI/source/protocol/session/graph/runtime product code, the installed header, or
 accepted fixtures. If the public `NativeWaveDecoder` plus frozen ABI cannot implement the vertical,
@@ -58,3 +55,18 @@ Allowed: `tools/miso-engine-native-pcm-runner/**`, its minimal root manifest/loc
 `fixtures/native-pcm-runner/v1/**`, `docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md`, the two new exact
 runner checker scripts, narrow policy allowlist/mutation rows if necessary, and exact issue/routing
 docs. Everything else is frozen.
+
+## Terminal evidence
+
+Pass 1 produced the complete decoder/C-ABI runner, four-rate RIFF/RF64 manifest and 10 green tests.
+The sole HOLD corrected ring admission/order, missing negatives, real partial cleanup and
+replacement canaries; the final suite passed 15/15 with focused gates green. Linux publication now
+retains and hashes the created descriptor and uses `linkat(AT_EMPTY_PATH)`.
+
+The terminal blocker is the non-Linux fallback: device/inode pathname check and pathname
+`hard_link` are separate. A swap in between can link a replacement at the final name; postcheck
+returns failure but leaves that non-owned final present. This violates the frozen atomic/failure-
+absent contract. No second correction is permitted. Preserve runner library SHA-256
+`4ed33714d232ac98c019e2af05662d0ffa03f472008333109298f63b67769444`, manifest
+`8d251ad6b1eca8c95e24b8b4e2959e397d8ec954502307351f1c7fb3c01a9634` and the exact evidence table
+in the spec as Issue-115 technical input. **FINAL STOP; DO NOT IMPLEMENT FURTHER UNDER ISSUE 073.**
