@@ -77,8 +77,9 @@ fn main() {
     assert_eq!(initial.scalar_builtin_tail_count, 0);
     assert!(
         initial.prepared_builtin_bank_lanes > 0
-            && initial.prepared_builtin_bank_member_count % initial.prepared_builtin_bank_lanes
-                != 0,
+            && !initial
+                .prepared_builtin_bank_member_count
+                .is_multiple_of(initial.prepared_builtin_bank_lanes),
         "the audited layout must contain a padded bank"
     );
     assert_eq!(initial.metadata.selection, SchedulerSelectionV1::Parallel);

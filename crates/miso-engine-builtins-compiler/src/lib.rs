@@ -2697,6 +2697,401 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------------------
+    // #86 A7: the bit-identity harness.
+    //
+    // These tests render through the production path -- `prepare_session_builtins` ->
+    // `into_graph_artifact_with_banks` -> `into_bound` -> `PreparedRenderPlan::render` -- and
+    // compare `to_bits()` of the post-input-builtins output, per track, per channel, per block.
+    // The oracle is the same generic kernel body at `L = f32` reached through `Scalar` dispatch,
+    // which is independent of the vector wrapper, the AoSoA transposes and the padding.
+    // ---------------------------------------------------------------------------------------
+
+    /// One session of `n` tracks with deliberately distinct per-track builtins.
+    fn n_track_session(n: usize) -> CompiledSession {
+        let mut model =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("fixture parse");
+        let mut template = model.tracks[0].clone();
+        template.simd1.effects.clear();
+        template.dynamic.effects.clear();
+        template.simd2.effects.clear();
+        model.automation.clear();
+        model.limits.memory_bytes = u64::MAX;
+        model.tracks.clear();
+        for index in 0..n {
+            let mut track = template.clone();
+            track.id = miso_engine_session::StableId::parse(&track_name(index))
+                .expect("generated stable ID");
+            let scale = index as f32;
+            track.builtins.left.hpf_hz = 20.0 + 5.0 * scale;
+            track.builtins.left.lpf_hz = 18_000.0 - 100.0 * scale;
+            track.builtins.left.trim_db = -3.0 + 0.5 * scale;
+            track.builtins.left.polarity_invert = index % 4 == 3;
+            track.builtins.right.hpf_hz = if index % 2 == 0 {
+                0.0
+            } else {
+                30.0 + 3.0 * scale
+            };
+            track.builtins.right.lpf_hz = if index % 3 == 0 {
+                0.0
+            } else {
+                17_000.0 - 250.0 * scale
+            };
+            track.builtins.right.polarity_invert = index % 2 == 1;
+            track.builtins.right.trim_db = 1.0 - 0.25 * scale;
+            track.fader.left_db = -1.0 + 0.125 * scale;
+            track.fader.right_db = 0.5 - 0.125 * scale;
+            model.tracks.push(track);
+        }
+        model.routes.truncate(1);
+        model.routes[0].source = miso_engine_session::RouteSource::Track {
+            track_id: miso_engine_session::StableId::parse(&track_name(0)).expect("route track"),
+            tap: miso_engine_session::SendTap::PostMatrix,
+        };
+        compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("harness session compile")
+    }
+
+    fn track_name(index: usize) -> String {
+        format!("t{index:02}")
+    }
+
+    const HARNESS_QUANTUM: u32 = 64;
+    const HARNESS_BLOCKS: u64 = 3;
+
+    /// A deterministic per-track input signal: an LCG seeded by `(track, first_sample)`.
+    ///
+    /// It is a plain `GraphRuntimeProcessor` bound at the `Input` stage, so every dispatch under
+    /// test sees byte-identical input.
+    struct SeededInput {
+        seed: u64,
+    }
+
+    impl GraphRuntimeProcessor for SeededInput {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            let mut state = self.seed ^ block.first_sample.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 40) as f32) / ((1_u32 << 24) as f32);
+                (unit * 2.0 - 1.0) * 0.8
+            };
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                *left = next();
+                *right = next();
+            }
+            Ok(())
+        }
+    }
+
+    /// Records `to_bits()` of both channels after its node completes.
+    struct Capture(Arc<std::sync::Mutex<Vec<u32>>>);
+
+    impl GraphRuntimeObserver for Capture {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            let mut sink = self.0.lock().expect("harness capture");
+            sink.extend(block.left.iter().map(|sample| sample.to_bits()));
+            sink.extend(block.right.iter().map(|sample| sample.to_bits()));
+            Ok(())
+        }
+    }
+
+    /// Builds the five-level graph the harness renders: one level per track stage.
+    ///
+    /// `Output` is fed by track 0's `PostMatrix` only: `GraphEdgeId::TrackMain { target }` is not
+    /// unique for fan-in, and a reduction is not what this harness measures.
+    fn track_graph(n: usize) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(HARNESS_QUANTUM),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two output channels"),
+        };
+        let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&track_name(index)).expect("harness ID"),
+            stage,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main-out").expect("harness ID"),
+        };
+        let stages = [
+            TrackStage::Input,
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for index in 0..n {
+            for pair in stages.windows(2) {
+                let source = stage(index, pair[0]);
+                let target = stage(index, pair[1]);
+                edges.push(GraphEdge {
+                    id: GraphEdgeId::TrackMain {
+                        target: target.clone(),
+                    },
+                    source: GraphPortId {
+                        node: source,
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: target,
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: format!("$.tracks[{index}].chain"),
+                });
+            }
+        }
+        edges.push(GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: output.clone(),
+            },
+            source: GraphPortId {
+                node: stage(0, TrackStage::PostMatrix),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.routes[0]".to_owned(),
+        });
+        let mut levels = Vec::new();
+        for (level, kind) in stages.iter().enumerate() {
+            let level_nodes: Vec<_> = (0..n).map(|index| stage(index, *kind)).collect();
+            nodes.extend(level_nodes.iter().cloned());
+            levels.push(DependencyLevel {
+                level: level as u64,
+                nodes: level_nodes,
+            });
+        }
+        nodes.push(output.clone());
+        levels.push(DependencyLevel {
+            level: stages.len() as u64,
+            nodes: vec![output.clone()],
+        });
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 8_600 + n as u64,
+            spec: miso_engine_graph::GraphSpec {
+                nodes: nodes
+                    .iter()
+                    .cloned()
+                    .map(|id| GraphNode {
+                        id,
+                        latency: miso_engine_effect_contract::LatencySamples(0),
+                        tail: miso_engine_effect_contract::TailSamples::Finite(0),
+                    })
+                    .collect(),
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels.clone(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: zero_graph_estimate(),
+            envelope,
+            required_bindings: nodes,
+            routes: Vec::new(),
+            effects: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        (graph, levels)
+    }
+
+    /// Renders `HARNESS_BLOCKS` blocks and returns the post-input-builtins output bits per track.
+    fn render_post_input_bits(n: usize, dispatch: KernelDispatch) -> (Vec<Vec<u32>>, usize) {
+        let compiled = n_track_session(n);
+        let builtins = prepare_session_builtins(&compiled, &[], caps()).expect("harness builtins");
+        let (graph, levels) = track_graph(n);
+        let mut artifact = builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels);
+        let bank_count = artifact.graph.prepared_builtin_bank_count();
+        let captures: Vec<_> = (0..n)
+            .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+            .collect();
+        for (index, capture) in captures.iter().enumerate() {
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(index)).expect("harness ID"),
+                        stage: TrackStage::PostInputBuiltins,
+                    },
+                    0x8600 + index as u64,
+                    Box::new(Capture(Arc::clone(capture))),
+                ));
+        }
+        let envelope = artifact.graph.envelope;
+        let mut nodes: Vec<_> = (0..n)
+            .map(|index| {
+                GraphNodeBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(index)).expect("harness ID"),
+                        stage: TrackStage::Input,
+                    },
+                    Box::new(SeededInput {
+                        seed: 0x5eed_0000 ^ index as u64,
+                    }) as Box<dyn GraphRuntimeProcessor>,
+                )
+            })
+            .collect();
+        nodes.push(GraphNodeBinding::new(
+            GraphNodeId::Output {
+                output_id: StableGraphId::parse("main-out").expect("harness ID"),
+            },
+            Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
+        ));
+        let mut plan = match artifact.into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        }) {
+            Ok(bound) => bound.plan,
+            Err(failure) => panic!("harness bind: {}", failure.code),
+        };
+        let frames = HARNESS_QUANTUM as usize;
+        let mut pcm = vec![0.0_f32; frames * 2];
+        for block in 0..HARNESS_BLOCKS {
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output: miso_engine_core::realtime::PlanarBufferMut::try_new(
+                        &mut pcm, 2, frames, frames,
+                    )
+                    .expect("harness output"),
+                },
+                miso_engine_core::realtime::RenderTime {
+                    absolute_sample: block * HARNESS_QUANTUM as u64,
+                },
+            )
+            .expect("harness render");
+        }
+        let bits = captures
+            .into_iter()
+            .map(|capture| {
+                let taken = capture.lock().expect("harness capture").clone();
+                assert_eq!(taken.len(), frames * 2 * HARNESS_BLOCKS as usize);
+                taken
+            })
+            .collect();
+        (bits, bank_count)
+    }
+
+    struct HarnessSink;
+
+    impl GraphRuntimeProcessor for HarnessSink {
+        fn process(&mut self, _block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    fn host_dispatch() -> KernelDispatch {
+        KernelDispatch::select(miso_engine_core::target_capabilities())
+    }
+
+    fn scalar_dispatch() -> KernelDispatch {
+        KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        ))
+    }
+
+    /// E2 (#86 F2 proof, F3): a track's bits do not depend on whether it renders in a bank.
+    ///
+    /// `n = 1..=9` covers the short first bank, the exactly-full bank and the padded second bank
+    /// at both widths. The oracle is the `Scalar` dispatch, which banks nothing at all.
+    #[test]
+    fn banked_tracks_are_bit_identical_to_their_scalar_tails() {
+        let host = host_dispatch();
+        for n in 1..=9 {
+            let (banked, bank_count) = render_post_input_bits(n, host);
+            let (scalar, scalar_banks) = render_post_input_bits(n, scalar_dispatch());
+            assert_eq!(scalar_banks, 0, "the scalar oracle banks nothing");
+            match host.bank_width() {
+                Some(width) => assert_eq!(
+                    bank_count,
+                    n.div_ceil(width.lanes() as usize),
+                    "padded bank count for {n} tracks"
+                ),
+                None => assert_eq!(bank_count, 0),
+            }
+            // Distinctness guard: a harness whose tracks all render silence, or render the same
+            // thing, would pass every identity assertion below without testing anything.
+            assert!(
+                banked
+                    .iter()
+                    .all(|bits| bits.iter().any(|bits| *bits != 0 && *bits != 0x8000_0000)),
+                "every track must carry signal"
+            );
+            let distinct: BTreeSet<_> = banked.iter().collect();
+            assert_eq!(distinct.len(), n, "every track must render differently");
+            for (track, (banked, scalar)) in banked.iter().zip(&scalar).enumerate() {
+                assert_eq!(
+                    banked, scalar,
+                    "track {track} of {n} differs between the bank and the scalar tail"
+                );
+            }
+        }
+    }
+
+    /// E3 (#86 F2 partition invariance): adding a track never moves an existing track's bits.
+    ///
+    /// 7, 8 and 9 tracks straddle the W8 bank boundary in both directions, and 3/4/5 straddle W4.
+    #[test]
+    fn track_bits_do_not_depend_on_session_track_count() {
+        let host = host_dispatch();
+        let renders: BTreeMap<usize, Vec<Vec<u32>>> = [3, 4, 5, 7, 8, 9]
+            .into_iter()
+            .map(|n| (n, render_post_input_bits(n, host).0))
+            .collect();
+        let reference = render_post_input_bits(7, scalar_dispatch()).0;
+        for (n, bits) in &renders {
+            for (track, (bits, reference)) in bits.iter().zip(&reference).enumerate() {
+                assert_eq!(
+                    bits, reference,
+                    "track {track} moved between a {n}-track session and the 7-track scalar oracle"
+                );
+            }
+        }
+        for smaller in [3, 4, 5, 7, 8] {
+            for larger in [4, 5, 7, 8, 9] {
+                if larger <= smaller {
+                    continue;
+                }
+                for (track, (small, large)) in
+                    renders[&smaller].iter().zip(&renders[&larger]).enumerate()
+                {
+                    assert_eq!(
+                        small, large,
+                        "track {track} moved from a {smaller}-track to a {larger}-track session"
+                    );
+                }
+            }
+        }
+    }
+
     fn handle(value: u64) -> MeterHandle {
         MeterHandle(NonZeroU64::new(value).expect("nonzero test meter handle"))
     }
