@@ -390,7 +390,7 @@ impl ProtocolCodec {
         let header = transaction_header(frame)?;
         let limits = self.limits();
         let envelope_limits = transaction_envelope_limits(limits);
-        let top = Message::bounded(frame.payload, header.tlv_count, envelope_limits, 0)
+        let top = Message::top_level(frame.payload, header.tlv_count, envelope_limits)?
             .schema_spec(&schema::session::transaction::SPEC)?;
         let count = u32::try_from(values_spec!(top, schema::session::transaction::EDIT)?.count())
             .map_err(|_| DecodeError::LimitExceeded)?;

@@ -158,21 +158,56 @@ impl<'a> Fields<'a> {
     }
 
     pub(crate) fn nested_value(&self, bytes: &'a [u8]) -> Result<Self, DecodeError> {
+        match self.validation {
+            Some((limits, depth)) => {
+                let depth = depth.checked_add(1).ok_or(DecodeError::LimitExceeded)?;
+                Self::nested_at_depth(bytes, limits, depth)
+            }
+            None => {
+                #[cfg(test)]
+                {
+                    Self::nested(bytes)
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = bytes;
+                    Err(DecodeError::LimitExceeded)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn top_level(
+        bytes: &'a [u8],
+        count: u32,
+        limits: ProtocolLimits,
+    ) -> Result<Self, DecodeError> {
+        if count > limits.max_tlv_count || bytes.len() > limits.max_frame_bytes {
+            return Err(DecodeError::LimitExceeded);
+        }
+        Ok(Self::bounded(bytes, count, limits, 0))
+    }
+
+    pub(crate) fn nested_at_depth(
+        bytes: &'a [u8],
+        limits: ProtocolLimits,
+        depth: u8,
+    ) -> Result<Self, DecodeError> {
+        if bytes.len() > limits.max_frame_bytes || depth > limits.max_nesting {
+            return Err(DecodeError::LimitExceeded);
+        }
         let header = bytes.get(..8).ok_or(DecodeError::Truncated)?;
         let count = read_u32_at(header, 0)?;
         if read_u32_at(header, 4)? != 0 {
             return Err(DecodeError::NonzeroReserved);
         }
-        let payload = &bytes[8..];
-        match self.validation {
-            Some((limits, depth)) => {
-                let depth = depth.checked_add(1).ok_or(DecodeError::LimitExceeded)?;
-                Ok(Self::bounded(payload, count, limits, depth))
-            }
-            None => Ok(Self::raw(payload, count)),
+        if count > limits.max_tlv_count {
+            return Err(DecodeError::LimitExceeded);
         }
+        Ok(Self::bounded(&bytes[8..], count, limits, depth))
     }
 
+    #[cfg(test)]
     pub(crate) const fn raw(bytes: &'a [u8], count: u32) -> Self {
         Self {
             bytes,
@@ -868,6 +903,44 @@ impl Sink for SliceSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_fields_constructors_share_count_frame_reserved_and_depth_limits() {
+        let limits = ProtocolLimits {
+            max_frame_bytes: 16,
+            max_tlv_count: 1,
+            max_nesting: 1,
+            ..ProtocolLimits::default()
+        };
+        assert!(Fields::top_level(&[], 1, limits).is_ok());
+        assert_eq!(
+            Fields::top_level(&[], 2, limits).err(),
+            Some(DecodeError::LimitExceeded)
+        );
+        assert_eq!(
+            Fields::top_level(&[0; 17], 0, limits).err(),
+            Some(DecodeError::LimitExceeded)
+        );
+
+        let mut nested = [0_u8; 8];
+        nested[..4].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(Fields::nested_at_depth(&nested, limits, 1).is_ok());
+        assert_eq!(
+            Fields::nested_at_depth(&nested, limits, 2).err(),
+            Some(DecodeError::LimitExceeded)
+        );
+        nested[..4].copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(
+            Fields::nested_at_depth(&nested, limits, 1).err(),
+            Some(DecodeError::LimitExceeded)
+        );
+        nested[..4].copy_from_slice(&0_u32.to_le_bytes());
+        nested[4] = 1;
+        assert_eq!(
+            Fields::nested_at_depth(&nested, limits, 1).err(),
+            Some(DecodeError::NonzeroReserved)
+        );
+    }
 
     #[test]
     fn nested_sinks_enforce_depth_and_restore_it_after_body_errors() {
