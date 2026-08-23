@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/miso-engine-core",
+    "crates/miso-engine-lane",
     "crates/miso-engine-session",
     "crates/miso-engine-source",
     "crates/miso-engine-effect-contract",
@@ -61,6 +62,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 miso-engine-core = { path = "crates/miso-engine-core", version = "0.1.0" }
+miso-engine-lane = { path = "crates/miso-engine-lane", version = "0.1.0" }
 miso-engine-target-smoke = { path = "crates/miso-engine-target-smoke", version = "0.1.0" }
 miso-engine-dsp-reference = { path = "crates/miso-engine-dsp-reference", version = "0.1.0" }
 miso-engine-conformance = { path = "crates/miso-engine-conformance", version = "0.1.0" }
@@ -88,6 +90,7 @@ miso-engine-graph-compiler = { path = "crates/miso-engine-graph-compiler", versi
 miso-engine-native-scheduler = { path = "crates/miso-engine-native-scheduler", version = "0.1.0" }
 miso-engine-scheduler-fixture = { path = "tools/miso-engine-scheduler-fixture", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }
+wide = { version = "=1.6.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -11,6 +11,7 @@ create_fixture() {
     local root="$1"
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
         "$root/crates/miso-engine-core/src/arch" \
+        "$root/crates/miso-engine-lane/src" \
         "$root/crates/miso-engine-capi/src" \
         "$root/crates/miso-engine-capi/tests" \
         "$root/crates/miso-engine-effect-compiler/tests" \
@@ -45,6 +46,10 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn architecture_kernel() {}' \
         >"$root/crates/miso-engine-core/src/arch/x86.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe fn read_mxcsr() {}' \
+        >"$root/crates/miso-engine-lane/src/softfma.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
@@ -150,5 +155,7 @@ expect_failure unsafe-outside-web-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \
     'mkdir -p "$root/hosts/miso-engine-host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/src/ffi/other.rs"'
+expect_failure unsafe-outside-lane-softfma \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/kernels.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

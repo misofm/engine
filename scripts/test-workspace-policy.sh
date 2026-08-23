@@ -97,6 +97,33 @@ mutate_global_isa() {
         >"$root/.cargo/config.toml"
 }
 
+mutate_unscoped_isa_pin() {
+    local root="$1"
+    mkdir -p "$root/.cargo"
+    printf '%s\n' '[build]' 'rustflags = ["-C", "target-feature=+avx2,+fma"]' \
+        >"$root/.cargo/config.toml"
+}
+
+mutate_extra_isa_feature() {
+    local root="$1"
+    mkdir -p "$root/.cargo"
+    printf '%s\n' "[target.'cfg(target_arch = \"x86_64\")']" \
+        'rustflags = ["-C", "target-feature=+avx2,+fma,+avx512f"]' \
+        >"$root/.cargo/config.toml"
+}
+
+allow_approved_isa_pin() {
+    local root="$1"
+    create_valid_fixture "$root"
+    mkdir -p "$root/.cargo"
+    printf '%s\n' \
+        '# Master plan #83 D4: the approved x86-64-v3 pin, with target-feature in a comment.' \
+        "[target.'cfg(target_arch = \"x86_64\")']" \
+        'rustflags = ["-C", "target-feature=+avx2,+fma"]' \
+        >"$root/.cargo/config.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
 valid_root="$scratch_root/valid root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
@@ -107,6 +134,9 @@ expect_failure bin-identifier mutate_bin_identifier
 expect_failure hardware-feature mutate_hardware_feature
 expect_failure track-limit mutate_track_limit
 expect_failure global-isa mutate_global_isa
+expect_failure unscoped-isa-pin mutate_unscoped_isa_pin
+expect_failure extra-isa-feature mutate_extra_isa_feature
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
+allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 
 printf 'workspace policy mutation tests: ok\n'

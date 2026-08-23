@@ -77,8 +77,32 @@ if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
     fail "compiled track-capacity identifiers are forbidden"
 fi
 
-if [[ -d .cargo ]] && rg -n '(target-cpu|target-feature|RUSTFLAGS)' .cargo; then
-    fail "global native CPU or ISA configuration is forbidden"
+# Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
+# x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
+# dispatch (crates/miso-engine-lane refuses to compile without it, and every host attests the CPU
+# at boot). Anything else -- `target-cpu`, a global `[build]` table, another feature set -- stays
+# forbidden: it would make the shipped ISA implicit again.
+approved_isa_pin='^\.cargo/config\.toml:[0-9]+:rustflags = \["-C", "target-feature=\+avx2,\+fma"\]$'
+if [[ -d .cargo ]]; then
+    isa_directives="$({
+        rg -n '(target-cpu|target-feature|rustflags|RUSTFLAGS)' .cargo || true
+    } | rg -v ':[0-9]+:[[:space:]]*#' || true)"
+
+    unapproved_directives="$(printf '%s' "$isa_directives" | rg -v "$approved_isa_pin" || true)"
+    [[ -z "$unapproved_directives" ]] || {
+        printf '%s\n' "$unapproved_directives" >&2
+        fail "global native CPU or ISA configuration is forbidden outside the approved x86-64-v3 pin"
+    }
+
+    if [[ -n "$isa_directives" ]]; then
+        rg -q "^\[target\.'cfg\(target_arch = \"x86_64\"\)'\]\$" .cargo/config.toml || {
+            fail "the approved ISA pin must stay scoped to [target.'cfg(target_arch = \"x86_64\")']"
+        }
+    fi
+
+    if rg -n '^\[build\]' .cargo; then
+        fail "a global [build] rustflags table is forbidden"
+    fi
 fi
 
 printf 'workspace policy: ok\n'

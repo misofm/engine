@@ -1,0 +1,8 @@
+# Master plan #83 D4 (revision 4): native x86-64 is pinned to x86-64-v3 at compile time so that
+# `wide` selects its AVX2 backend and `Lane::fma` is the fused `vfmadd` instruction. There is no
+# runtime SIMD dispatch; `miso_engine_lane::attest_host` refuses to start a host whose CPU lacks
+# the pinned features, and `crates/miso-engine-lane/src/lib.rs` fails to compile without them.
+# This is the only approved global ISA configuration (scripts/check-workspace-policy.sh enforces
+# that exact shape); `-C target-cpu` and a global `[build] rustflags` remain forbidden.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+avx2,+fma"]
