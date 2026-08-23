@@ -169,7 +169,7 @@ why both gates exist.
 
 ```
 test every_case_agrees_at_every_width_and_matches_its_pin ... FAILED
-assertion `left == right` failed: gate/dual-mono/noise: the scalar oracle moved away from its pin
+assertion `left == right` failed: dual_mono/noise: the scalar oracle moved away from its pin
 ```
 
 ### 13 — the D7 `flush` is removed
@@ -192,3 +192,11 @@ allocator aborts on the first armed allocation rather than reporting it, so the 
 SIGABRT (exit 134) instead of printing a report with `allocations > 0`. A first attempt using
 `let _ = Vec::with_capacity(1)` survived: the release build elides an unused allocation, which is
 worth knowing about any allocation-audit mutation.
+
+## Rebase note (2026-08-23)
+
+Rebased onto `origin/main` after #91, #92, #94 and #87 merged. The corpus case names lost their
+redundant `gate/` prefix so that `tools/miso-engine-wasm-gate-corpus` renders them as
+`effect/gate_expander/<name>`, matching the convention soft-clip and parametric-EQ established;
+names are not hashed, so **no digest moved** and every row above still reproduces. Row 12's quoted
+output shows the new name.
