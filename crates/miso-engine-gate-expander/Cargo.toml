@@ -9,12 +9,16 @@ publish.workspace = true
 name = "miso_engine_gate_expander"
 
 [dependencies]
-miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math = { workspace = true, features = ["lane"] }
 
 [dev-dependencies]
 # The independent f64 oracle is test-only and never reachable from production code.
+miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
