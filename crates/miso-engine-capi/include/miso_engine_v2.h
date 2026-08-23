@@ -7,6 +7,44 @@
 extern "C" {
 #endif
 
+/*
+ * Thread ownership (frozen for ABI 1.0; unchanged by any minor version).
+ *
+ *   any thread   miso_engine_v2_abi_version and miso_engine_v2_query_capabilities take no handle
+ *                and may be called from any thread at any time.
+ *   engine       Control thread. At most one thread at a time calls any function taking the engine
+ *                (miso_engine_v2_engine_create, miso_engine_v2_compile_session, and
+ *                miso_engine_v2_last_error on the engine).
+ *   session      Control thread. At most one thread at a time calls
+ *                miso_engine_v2_source_submit_planar_f32, miso_engine_v2_source_seek,
+ *                miso_engine_v2_submit_command, miso_engine_v2_dequeue_event, or
+ *                miso_engine_v2_last_error on the session; they are serialized with each other.
+ *   plan         Split ownership.
+ *                miso_engine_v2_render_f32_planar: render thread only, never concurrently with
+ *                itself, and the exclusive owner of the plan's render state.
+ *                miso_engine_v2_plan_resources and miso_engine_v2_last_error on a plan: any thread,
+ *                at any time while the plan is live, including concurrently with a render call.
+ *                They are pure with respect to the plan handle: the report is copied from the
+ *                plan's frozen resource accounting and the diagnostic is one atomic error word.
+ *                Neither call writes plan render state, allocates, or blocks the render thread.
+ *   *_destroy    miso_engine_v2_engine_destroy, miso_engine_v2_session_destroy and
+ *                miso_engine_v2_plan_destroy require quiescence: no other call on that handle is
+ *                in flight or will start. A session and its plan may be destroyed in either order.
+ *
+ * Borrowed pointers (session TOML, source IDs, request frames, chunk planes, output samples, and
+ * every out pointer) are read or written only for the duration of the call and are never retained.
+ * Every float plane pointer (chunk planes and output samples) must be 4-byte aligned, and the chunk
+ * plane array must be pointer-aligned; a null or misaligned pointer returns
+ * MISO_ENGINE_V2_INVALID_ARGUMENT before any access. No borrowed byte or sample region may exceed
+ * PTRDIFF_MAX bytes; a larger declared length also returns MISO_ENGINE_V2_INVALID_ARGUMENT before
+ * any access.
+ *
+ * miso_engine_v2_last_error on a plan returns a fixed diagnostic selected by the most recent render
+ * call ("render.output.unaligned", "render.contract.rejected", ...) and is empty after a successful
+ * render; on a session or engine it returns the most recent control-thread diagnostic.
+ * MISO_ENGINE_V2_UNSUPPORTED is reserved and is never returned by this ABI.
+ */
+
 #define MISO_ENGINE_V2_ABI_VERSION UINT32_C(0x00010000)
 
 #define MISO_ENGINE_V2_OK UINT32_C(0)

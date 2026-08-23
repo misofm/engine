@@ -297,3 +297,39 @@ A future owner-approved rescope must preserve raw-pointer provenance with a test
 that recovers the pointer inside `std::thread::scope`, and a join before destruction. It must use
 no `.addr()`, integer cast or `with_exposed_provenance`. This record does not authorize that edit,
 a fresh Miri run or production implementation. Issue 103 remains open and blocks Issue-125 Step 0.
+
+## Wave-0 implementation record — 2026-08-23 (owner-authorized restart)
+
+The terminal pre-implementation stop above was lifted by the owner, who authorized one fresh,
+minimal implementation of F2 and F3 on branch `audit-103-wave0` from `origin/main` at `3be899f`.
+The prior Miri capture harness was not inherited, extended, or re-run; the rescope guidance in that
+record was honoured on one point that mattered — the concurrency regression test moves the plan
+pointer through a test-local opaque `SendPlanPtr` with an audited test-only `unsafe impl Send` and
+joins inside `std::thread::scope`, using no integer cast, `.addr()`, or `with_exposed_provenance`,
+so the provenance the test exists to check is not laundered.
+
+What landed, all in `crates/miso-engine-capi`:
+
+- F2. `Plan` is now `header | queries | last_error: AtomicU32 | state`. `queries` is an immutable
+  any-thread projection of the shared plan state; `last_error` is a relaxed atomic index into the
+  frozen `runtime::plan_error` text table; `state` stays exclusive to the render thread. `ffi.rs`
+  reaches those fields only through the `plan_state`/`plan_error_slot`/`plan_queries` raw
+  projections, so no path forms a reference to the whole `Plan`. `miso_engine_v2_plan_resources` is
+  pure — its `clear()` on a `const` plan is gone. The plan no longer retains a `FixedBytes`
+  diagnostic buffer, so `capi_retained_bytes` on the pinned nine-track fixture drops from 144537 to
+  140425 (active CAPI oracle) and the double-live CAPI oracle from 168926 to 164814; the
+  independent live-allocation oracle in `tests/resource_lifecycle.rs` was updated in the same
+  checkpoint and still drives its exact/one-below cap rows. No reported diagnostic string changed.
+- F2 (c). `include/miso_engine_v2.h` gains the frozen "Thread ownership" block, and every exported
+  function in `ffi.rs` carries a one-line thread contract in its `# Safety` doc. The block contains
+  none of the three strings `scripts/test-capi-abi.sh` rewrites.
+- F3. `borrowed_bytes(data, bytes, limit)` rejects null, over-limit, and `> isize::MAX` lengths
+  before the slice exists; `source_submit_planar_f32` rejects a misaligned plane array, an
+  oversized `frames * 4` extent, and any null or misaligned plane; `render_f32_planar` rejects a
+  misaligned `output.samples` with `MISO_ENGINE_V2_INVALID_ARGUMENT` and the new
+  `render.output.unaligned` diagnostic.
+
+Class A throughout: no rendered bit changes, the frozen ABI is untouched (13 symbols, 8 structs,
+codes 0-8/255), and the two-thread parity and barrier tests in `runtime.rs` pass unchanged. Every
+new test landed with its red mutation proven and named in its commit message. F1 and the wave-4
+CAPI/web facade work remain open on this issue.

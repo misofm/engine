@@ -182,6 +182,8 @@ unsafe fn plan_queries(plan: *const Plan) -> *const PlanQueries {
 }
 
 /// Returns the frozen Engine V2 C ABI version.
+///
+/// Thread: any.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_v2_abi_version() -> u32 {
     catch_result(|| ABI_VERSION)
@@ -192,6 +194,8 @@ pub extern "C" fn miso_engine_v2_abi_version() -> u32 {
 /// # Safety
 ///
 /// `out` must satisfy the writable ABI V1 capability-struct contract for this call.
+///
+/// Thread: any.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilities) -> u32 {
     catch_result(|| {
@@ -226,6 +230,8 @@ pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilitie
 /// # Safety
 ///
 /// `config` and `out_engine` must satisfy their readable/writable ABI V1 pointer contracts.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_engine_create(
     config: *const EngineConfig,
@@ -263,6 +269,8 @@ pub unsafe extern "C" fn miso_engine_v2_engine_create(
 /// # Safety
 ///
 /// A nonnull `engine` must be the unique live engine handle returned by this library.
+///
+/// Thread: control, quiescent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
     catch_destroy(|| {
@@ -285,6 +293,8 @@ pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
 /// # Safety
 ///
 /// Every nonnull pointer must satisfy its ABI V1 readable, writable, or live-handle contract.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_compile_session(
     engine: *mut Engine,
@@ -396,6 +406,8 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
 /// # Safety
 ///
 /// Every pointer must satisfy its ABI V1 borrowed-data, output, or live-handle contract.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
     session: *mut Session,
@@ -494,6 +506,8 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
 /// # Safety
 ///
 /// `session` must be live and `source_id` must reference the declared borrowed byte count.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_source_seek(
     session: *mut Session,
@@ -545,6 +559,8 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
 /// # Safety
 ///
 /// Every pointer must satisfy its ABI V1 borrowed-frame, output, or live-handle contract.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_submit_command(
     session: *mut Session,
@@ -626,6 +642,8 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
 /// # Safety
 ///
 /// `session` must be live and `event` must satisfy the ABI V1 bytes-output contract.
+///
+/// Thread: control.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
     session: *mut Session,
@@ -700,6 +718,8 @@ pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
 /// # Safety
 ///
 /// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
+///
+/// Thread: render only, never concurrently with itself.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
     plan: *mut Plan,
@@ -812,6 +832,8 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
 /// # Safety
 ///
 /// `plan` must be live and `out` must satisfy the writable ABI V1 report contract.
+///
+/// Thread: any, concurrent with render.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_plan_resources(
     plan: *const Plan,
@@ -850,6 +872,8 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
 /// # Safety
 ///
 /// `live_handle` must identify a live ABI handle and `out` must satisfy the bytes-output contract.
+///
+/// Thread: any, concurrent with render, for a plan; control for a session or engine.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_last_error(
     live_handle: *const c_void,
@@ -906,6 +930,8 @@ pub unsafe extern "C" fn miso_engine_v2_last_error(
 /// # Safety
 ///
 /// A nonnull `session` must be the unique live session handle returned by this library.
+///
+/// Thread: control, quiescent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
     catch_destroy(|| {
@@ -925,6 +951,8 @@ pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
 /// # Safety
 ///
 /// A nonnull `plan` must be the unique live plan handle returned by this library.
+///
+/// Thread: control, quiescent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v2_plan_destroy(plan: *mut Plan) {
     catch_destroy(|| {
@@ -1196,6 +1224,25 @@ mod tests {
             miso_engine_v2_session_destroy(session);
         }
         destroy(engine);
+    }
+
+    /// Carries one live plan pointer into a scoped thread with its provenance intact.
+    ///
+    /// The ABI's own contract is that a plan may be rendered on one thread while another queries
+    /// it, so the pointer itself must cross the thread boundary. An integer round trip would
+    /// launder the provenance this test exists to check, so the pointer is moved as a pointer.
+    #[derive(Clone, Copy)]
+    struct SendPlanPtr(*mut Plan);
+
+    // SAFETY: The ABI documents plan handles as usable from more than one thread under the split
+    // ownership contract in the C header; this wrapper only moves the pointer, and every call made
+    // through it in this test obeys that contract.
+    unsafe impl Send for SendPlanPtr {}
+
+    impl SendPlanPtr {
+        fn get(self) -> *mut Plan {
+            self.0
+        }
     }
 
     /// A zeroed ABI V1 report with the exact frozen struct size.
@@ -1848,6 +1895,77 @@ mod tests {
             plan_error::text(plan_error::CONTRACT_REJECTED),
             "a const-plan query must not clear the render diagnostic"
         );
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// F2 (a, b): `plan_resources` and `last_error` on a plan are documented as any-thread calls
+    /// that may run concurrently with `render_f32_planar`. They previously reached the plan through
+    /// `&*plan` while render held `&mut *plan`, so the contract was undefined behaviour rather than
+    /// a property of the code. Both queries now project disjoint fields.
+    #[test]
+    fn plan_queries_are_pure_and_concurrent_with_render() {
+        const BLOCKS: u64 = if cfg!(miri) { 16 } else { 2_000 };
+        let (engine, session, plan) = compiled_fixture();
+        let rendering = std::sync::atomic::AtomicBool::new(true);
+        let render_handle = SendPlanPtr(plan);
+        let query_handle = SendPlanPtr(plan);
+        let rendering_ref = &rendering;
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let plan = render_handle.get();
+                let mut pcm = vec![0.0_f32; 256];
+                let output = PlanarOutput {
+                    struct_size: crate::PLANAR_OUTPUT_SIZE,
+                    channels: 2,
+                    samples: pcm.as_mut_ptr(),
+                    sample_capacity: pcm.len() as u64,
+                    frames: 128,
+                    plane_stride_samples: 128,
+                    reserved: [0; 2],
+                };
+                for block in 0..BLOCKS {
+                    assert_eq!(
+                        // SAFETY: This thread is the exclusive render owner of the live plan and
+                        // owns the complete contiguous output region for the call.
+                        unsafe { miso_engine_v2_render_f32_planar(plan, block * 128, &output) },
+                        RESULT_OK
+                    );
+                }
+                rendering_ref.store(false, std::sync::atomic::Ordering::Release);
+            });
+            scope.spawn(move || {
+                let plan = query_handle.get().cast_const();
+                let mut queries = 0_u64;
+                let mut storage = [0_u8; 64];
+                while rendering_ref.load(std::sync::atomic::Ordering::Acquire) || queries == 0 {
+                    let mut resources = empty_report();
+                    assert_eq!(
+                        // SAFETY: The plan is live and this any-thread query only reads the
+                        // immutable `queries` projection and the atomic diagnostic slot.
+                        unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+                        RESULT_OK
+                    );
+                    assert_eq!(resources.quantum_frames, 128);
+                    assert_eq!(resources.sample_rate_hz, 48_000);
+                    assert_eq!(resources.reserved, [0; 4]);
+                    let mut error = BytesOut {
+                        struct_size: BYTES_OUT_SIZE,
+                        reserved0: 0,
+                        data: storage.as_mut_ptr(),
+                        capacity_bytes: storage.len() as u64,
+                        required_bytes: u64::MAX,
+                    };
+                    assert_eq!(
+                        // SAFETY: See above; the diagnostic query loads one atomic word.
+                        unsafe { miso_engine_v2_last_error(plan.cast(), &mut error) },
+                        RESULT_OK
+                    );
+                    assert_eq!(error.required_bytes, 0);
+                    queries += 1;
+                }
+                assert!(queries > 0);
+            });
+        });
         destroy_fixture(engine, session, plan);
     }
 
