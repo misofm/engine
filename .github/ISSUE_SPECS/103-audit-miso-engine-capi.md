@@ -7,15 +7,20 @@ must be legal concurrently with the exclusive render owner, and every caller-own
 output region must be rejected before Rust constructs a slice when its length, extent, or alignment
 is invalid.
 
-**TERMINAL PRE-IMPLEMENTATION STOP — QUALIFICATION UNPROVEN.** Fresh explicit owner authorization
-on 2026-08-23 resumed this slice from synchronized `main` at `3be899f`, but the sole newly
-authorized pre-fix Miri invocation has now been consumed without a persisted completion result.
-Pinned Miri installed, the build succeeded and the exact E1 reported `running 1 test`; the last
-delivered output showed the test still in progress with no setup or provenance failure. The
-implementer's reporting turn was then interrupted by an external platform safety-classifier error.
-No completion output, exit status or final diagnostic was delivered or persisted, and no
-Cargo/Miri process survived for recovery. The invocation is neither an intended red nor a green.
-No rerun, corrected invocation or production implementation is authorized by this stopped brief.
+**OWNER-DIRECTED DURABLE-CAPTURE RESCOPE-3 / READY FOR SYNTHETIC PREFLIGHT — SOL XHIGH PASS.** The
+candid stopped checkpoint is `55bd47c`. It adopts the already tracked E1 scaffold exactly at
+`crates/miso-engine-capi/src/ffi.rs` blob
+`d09e3f289e85770a41335fdd0bfdb58a771173da`; no scaffold or production edit is part of this
+rebrief. All three historical qualification stops and consumed counters below remain immutable.
+The owner explicitly directed a retry rather than moving on. Under the AGENTS.md three-attempt
+rule, this is a materially new durable-capture qualification workflow, not a reclassification,
+amendment or fourth invocation under the stopped brief.
+
+This READY applies only to the harmless detached-capture synthetic preflight defined in the
+rescope-3 authority at the end of this spec. Miri remains HOLD until root, Sol High and Sol XHigh
+have audited that preflight, the prepared intended-red evidence directory, the exact adopted
+`ffi.rs` blob and retention of the production defect. No direct or interactive Miri command is
+authorized.
 
 Issue 103 remains open. After this F2/F3 slice passes, F1 and the later wave-4 CAPI/web facade work
 remain separate scope.
@@ -456,3 +461,253 @@ identity and an explicit interrupted-run classification. It must freeze a new ex
 budget, path fence and stop conditions and receive a fresh Sol XHigh PRE-MIRI review. This terminal
 record itself authorizes no Miri run, scaffold change or production implementation. Issue 103
 remains open and continues to block Issue-125 Step 0.
+
+## Owner-directed durable-capture successor authority — 2026-08-23
+
+This section alone supersedes the stopped brief's prospective no-run language. It preserves every
+fact and counter above. The owner-directed retry is a fresh workflow after a candid stop and a
+material evidence-delivery rescope; it is not a retry under any consumed slot, does not relabel an
+old invocation and does not reset the three historical qualification stops.
+
+### Adopted checkpoint, counters and staged authority
+
+The successor starts from candid stopped checkpoint `55bd47c` on
+`codex/audit-103-f2-f3-rescope-3`. It adopts, without modification, the tracked E1 scaffold at
+exact blob `d09e3f289e85770a41335fdd0bfdb58a771173da`. Its starting counters are exactly the terminal
+counters in **Consumed owner-rescope qualification budget**: three named Miri invocations, two
+exact-name selections, zero valid Miri evidence, three preimplementation qualification stops and
+zero implementation attempts started or failed.
+
+This successor authorizes, in order:
+
+1. exactly one harmless synthetic capture preflight, which must not invoke Cargo, rustc, a test or
+   Miri and does not change a Miri counter;
+2. after the three-party PRE-MIRI audit passes, exactly one new intended-red Miri launch through
+   the detached mechanism below;
+3. only after that launch yields valid intended-red evidence, implementation attempt 1 under the
+   existing F2/F3 tracked-path fence; and
+4. only after implementation and all non-Miri gates are green, exactly one corrected Miri launch
+   through a separately prepared instance of the same detached mechanism.
+
+No other Miri launch, direct invocation, alternate filter, toolchain substitution, evidence
+directory reuse or corrected-run retry is authorized. `rustup component add` is installation, not
+a Miri launch, but must finish before the launch directory is armed.
+
+On complete success, cumulative counters are:
+
+- `miri_named_invocations_total=5`;
+- `invalid_zero_test_miri_invocations=1`;
+- `unrelated_scaffold_failure_miri_invocations=1`;
+- `incomplete_external_reporting_miri_invocations=1`;
+- `exact_named_miri_invocations=4`;
+- `owner_directed_rescope3_pre_fix_launches=1`;
+- `owner_directed_rescope3_corrected_launches=1`;
+- `valid_pre_fix_red_invocations=1`;
+- `valid_corrected_green_invocations=1`;
+- `valid_miri_evidence_invocations=2`;
+- `miri_retries_of_valid_workload=0`;
+- `implementation_attempts_started=1`;
+- `failed_implementation_attempts=0`;
+- `preimplementation_qualification_stops=3`.
+
+The phrase `miri_retries_of_valid_workload=0` remains literal: none of the three historical
+invocations produced a valid workload result. The owner-directed launch is a new rescope-3
+qualification, even though the owner's product instruction was to retry rather than move on.
+
+### Fresh evidence namespace and artifact fence
+
+The exact evidence root is outside the repository:
+
+```text
+/tmp/engine-v2-103-retry.o8pyzA/evidence/issue-103-f2-f3-rescope-3/
+├── capture-preflight-v1/
+├── pre-fix-red-v1/
+└── corrected-green-v1/
+```
+
+The root and each named child must be absent before its one allowed creation. Create them with plain
+`mkdir`, never `mkdir -p`, so pre-existence refuses the workflow. No file or directory in this
+namespace may be deleted, truncated, renamed away, cleaned or reused. The corrected-green child
+must not be created before valid red evidence and the green candidate are ready. Evidence artifacts
+are intentionally untracked and outside the worktree; the only allowed per-run helper is an exact
+`runner.sh` inside its own evidence child. That helper is evidence for one launch, not repository
+tooling, and must never appear in the worktree, Git index or a commit. No other untracked helper is
+allowed.
+
+Every child is append-only while active and sealed read-only after completion or terminal
+classification. An incomplete child may receive exactly one atomically published
+`classification.txt` before sealing; existing artifacts may not be modified. A new workflow may
+use a newly briefed namespace only—it may not remove or recycle any child above.
+
+### One-shot detached capture protocol
+
+The mechanism uses only existing host tools: Bash, `mkdir`, `mv`, `nohup`, `setsid`, `tee`, `cp`,
+`sha256sum`, `ps`, `kill`, `chmod`, `sleep`, `printf` and core file tests. Preflight must first prove
+each command is resolvable. Each run child is prepared with these atomically published files before
+launch:
+
+- `command.txt`: the exact human-readable command, one line;
+- `runner.sh`: the frozen Bash runner with an argv array matching `command.txt` without `eval`;
+- `runner.sha256`, `command.sha256`, `repo-state.txt` and `environment.txt`;
+- an empty, newly created `transcript.partial`.
+
+Write each file to a same-directory unique temporary name and publish it with `mv`. Record the
+absolute worktree path, Git HEAD/tree, branch, `ffi.rs` blob, toolchain, Miri component state, PATH
+and UTC time in `repo-state.txt`/`environment.txt`. Make the prepared command, runner and metadata
+read-only. Root, Sol High and Sol XHigh must compare the argv array with `command.txt` and record the
+runner/command hashes before launch.
+
+The frozen runner body must implement this algorithm, with only the evidence directory and command
+argv differing by phase:
+
+```bash
+#!/usr/bin/env bash
+set -u -o pipefail
+umask 077
+readonly RUN_DIR='ABSOLUTE_PHASE_DIRECTORY'
+readonly WORKTREE='/tmp/engine-v2-103-retry.o8pyzA/worktree'
+readonly -a CMD=( EXACT_ARGV_WITHOUT_EVAL )
+
+cd "$WORKTREE" || exit 125
+printf '%s\n' "$$" >"$RUN_DIR/runner.pid.tmp.$$"
+mv "$RUN_DIR/runner.pid.tmp.$$" "$RUN_DIR/runner.pid"
+ps -o pid=,ppid=,pgid=,sid=,lstart=,args= -p "$$" \
+  >"$RUN_DIR/process.identity.tmp.$$"
+mv "$RUN_DIR/process.identity.tmp.$$" "$RUN_DIR/process.identity"
+while [[ ! -d "$RUN_DIR/START" ]]; do
+  sleep 1
+done
+
+set +e
+"${CMD[@]}" 2>&1 | tee -a "$RUN_DIR/transcript.partial"
+command_status=${PIPESTATUS[0]}
+set -e
+
+cp "$RUN_DIR/transcript.partial" "$RUN_DIR/transcript.final.tmp.$$"
+mv "$RUN_DIR/transcript.final.tmp.$$" "$RUN_DIR/transcript.final"
+sha256sum "$RUN_DIR/transcript.final" >"$RUN_DIR/transcript.sha256.tmp.$$"
+mv "$RUN_DIR/transcript.sha256.tmp.$$" "$RUN_DIR/transcript.sha256"
+printf '%s\n' "$command_status" >"$RUN_DIR/exit.status.tmp.$$"
+mv "$RUN_DIR/exit.status.tmp.$$" "$RUN_DIR/exit.status"
+printf '%s\n' complete >"$RUN_DIR/COMPLETE.tmp.$$"
+mv "$RUN_DIR/COMPLETE.tmp.$$" "$RUN_DIR/COMPLETE"
+chmod -R a-w "$RUN_DIR"
+exit "$command_status"
+```
+
+The launcher must be a short non-Miri shell action. From outside the child, it first executes
+`mkdir "$RUN_DIR/LAUNCH_ONCE"`. That atomic directory creation is the one-shot sentinel and
+consumes the phase's launch slot; failure because it exists is terminal and must never fall through
+to launch. It then runs exactly:
+
+```bash
+nohup setsid bash "$RUN_DIR/runner.sh" </dev/null \
+  >>"$RUN_DIR/launcher.log" 2>&1 &
+launcher_pid=$!
+printf '%s\n' "$launcher_pid" >"$RUN_DIR/launcher.pid.tmp.$launcher_pid"
+mv "$RUN_DIR/launcher.pid.tmp.$launcher_pid" "$RUN_DIR/launcher.pid"
+mkdir "$RUN_DIR/START"
+```
+
+The runner records its identity and waits before invoking its argv. The launcher publishes
+`launcher.pid`, then atomically creates `START`; this prevents an immediate command failure from
+sealing the directory before the recoverable launcher identity exists. The caller returns after
+creating `START`; it does not wait interactively for Miri. If the launcher turn ends between PID
+publication and `START`, root may create the missing `START` only after matching the live recorded
+runner identity; that continues the already consumed launch and is not a rerun.
+
+`nohup` plus the new `setsid` session makes the runner independent of the launching agent/reporting
+turn. `runner.pid`, `process.identity`, `launcher.pid`, the absolute runner path and the recorded
+argv make the live process recoverable. A later observer must compare the recorded identity and
+current `ps` row, not rely on `kill -0` alone because PIDs can be reused. Monitoring reads the
+artifacts and process state only, except for the bounded missing-`START` recovery above; it must
+never invoke the command again.
+
+`transcript.partial` is the live combined stdout/stderr record and remains available during
+execution. The runner publishes `transcript.final`, its digest and `exit.status` by same-directory
+atomic renames, then publishes `COMPLETE` last. These atomic renames protect readers from mistaking
+a partially written final artifact for completion. They are process-lifetime durability, not a
+claim of persistence across host loss.
+
+### Harmless synthetic capture preflight
+
+`capture-preflight-v1` must use the same runner and launcher shape with this exact argv array:
+
+```bash
+readonly -a CMD=(
+  bash -c 'printf "capture.stdout\n"; printf "capture.stderr\n" >&2; sleep 15; exit 23'
+)
+```
+
+Its `command.txt` must represent that argv exactly. It is authorized once and must not call Cargo,
+rustc, any test binary or Miri. While its recorded process identity is live, root must observe both
+tokens in `transcript.partial` and prove that `COMPLETE` and `exit.status` are still absent. After
+completion, `transcript.final` must contain both tokens, match `transcript.partial` and its recorded
+SHA-256, `exit.status` must contain exactly `23`, `COMPLETE` must exist, and the child must be
+read-only. This proves live partial capture, detachment, recovery and atomic final publication
+without consuming a Miri slot. Any mismatch is HOLD: do not prepare or launch the intended red.
+
+### Three-party PRE-MIRI audit and exact launch commands
+
+After the synthetic preflight passes, prepare but do not arm `pre-fix-red-v1`. Root, Sol High and
+Sol XHigh must each record PRE-MIRI PASS for all of the following:
+
+- synthetic artifacts and exit `23` are exact and immutable;
+- the red child is fresh, has no `LAUNCH_ONCE`, and its frozen runner matches the protocol;
+- HEAD/tree and changed-path fence are recorded; `ffi.rs` hashes to
+  `d09e3f289e85770a41335fdd0bfdb58a771173da`;
+- all scaffold additions remain test-only; the exact E1 name occurs once; wrapper provenance,
+  barrier/join/destruction laws and the four unsafe-call comments remain correct;
+- no prohibited provenance operation exists and the production whole-Plan/`RefCell` defect is
+  unchanged; and
+- format, bounded pinned Clippy and exact-name `--list` preflights remain green without running E1.
+
+The red runner's argv and `command.txt` are exactly:
+
+```text
+cargo +nightly-2026-08-20 miri test --locked -p miso-engine-capi --lib -- ffi::tests::plan_queries_are_pure_and_concurrent_with_render --exact --nocapture
+```
+
+Only root may arm and launch the detached red after all three PRE-MIRI passes are recorded. Nobody
+may paste or invoke that command directly in an interactive shell or tool call.
+
+After valid red evidence and implementation attempt 1, prepare `corrected-green-v1` from scratch.
+Root, Sol High and Sol XHigh must again audit the immutable runner/command/repo-state artifacts,
+exact test name/filter/16-iteration Miri branch, unchanged test-only scaffold semantics, the green
+candidate HEAD/tree and all non-Miri gates. Its argv and `command.txt` are byte-for-byte identical
+to the red command above. Only root may create its `LAUNCH_ONCE` and detach it. The directories,
+runner files and artifacts may not be copied from red; their content must be freshly generated and
+hashed so phase identity cannot be confused.
+
+### Artifact classification and terminal rules
+
+For either Miri phase, `LAUNCH_ONCE` means the launch slot is consumed even if `nohup`, `setsid`,
+the runner or Cargo fails. Classify artifacts as follows:
+
+- no `LAUNCH_ONCE`: not launched; on a preparation defect, abandon that unarmed child forever and
+  rebrief a new child name—never correct, delete or reuse it;
+- `LAUNCH_ONCE`, matching live process identity, partial transcript and no `COMPLETE`: still
+  running; recover/monitor the detached process and do not launch anything;
+- `LAUNCH_ONCE`, no matching live process, and missing `COMPLETE`, final transcript or exit status:
+  incomplete infrastructure evidence; preserve and seal partial artifacts, consume the slot and
+  STOP;
+- `COMPLETE` with missing/mismatched final transcript, digest, status, command or identity:
+  corrupt/incomplete evidence; consume the slot and STOP;
+- red completion: valid only when the final transcript reports exactly `running 1 test`, the exit
+  status is nonzero, and the diagnostic specifically reaches the retained production whole-Plan
+  alias/data-race conflict; pass, zero tests or any unrelated failure is terminal;
+- green completion: valid only when the final transcript reports exactly `running 1 test`, exit
+  status is `0`, and the exact E1 passes; any other result is terminal.
+
+Partial transcript text alone never proves red or green, even if it contains an expected fragment.
+If only partial artifacts survive, do not infer completion from the lack of a process. No retry,
+directory cleanup, alternate filter or stale-evidence reuse follows a terminal classification.
+
+If the rescope-3 red launch is invalid/incomplete, cumulative terminal counters are at least
+`miri_named_invocations_total=4`, `owner_directed_rescope3_pre_fix_launches=1`,
+`valid_pre_fix_red_invocations=0`, `valid_miri_evidence_invocations=0`,
+`preimplementation_qualification_stops=4`, `implementation_attempts_started=0` and
+`failed_implementation_attempts=0`; record the exact additional failure-class counter and leave the
+green directory absent. If red is valid but the corrected launch fails, total named invocations are
+five, valid red remains one, valid green remains zero, implementation attempts started/failed are
+one/one, and no further Miri slot exists.
