@@ -241,7 +241,7 @@ pub fn native_source_allocation_layout(
     push_queue::<NativeSourceWorkerEvent>(
         &mut entries,
         "worker.event_queue",
-        NonZeroUsize::new(2).expect("two events"),
+        WORKER_EVENT_QUEUE_ITEMS,
     )?;
     push_queue::<()>(
         &mut entries,
@@ -460,8 +460,9 @@ enum WorkerCommand {
 
 const CONTROL_POLL_WAIT: Duration = Duration::from_micros(100);
 const AUDIT_WORKER_WAIT: Duration = Duration::from_millis(1);
-const EVENT_PUBLICATION_WAIT: Duration = Duration::from_millis(1);
-const EVENT_PUBLICATION_ATTEMPTS: usize = 1_000;
+// SourceReady and one synchronous Snapshot may be outstanding; the third slot is reserved so
+// retirement can always publish Terminal without waiting for the controller to drain events.
+const WORKER_EVENT_QUEUE_ITEMS: NonZeroUsize = NonZeroUsize::new(3).expect("three events");
 const MIN_RENDER_WAIT_NANOS: u128 = 1_000_000;
 const MAX_RENDER_WAIT_NANOS: u128 = 20_000_000;
 
@@ -867,11 +868,9 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
     let (command_sender, command_receiver) =
         bounded_spsc(caps.control_queue_items, QueueGeneration(11))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
-    let (event_sender, event_receiver) = bounded_spsc(
-        NonZeroUsize::new(2).expect("two events"),
-        QueueGeneration(12),
-    )
-    .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let (event_sender, event_receiver) =
+        bounded_spsc(WORKER_EVENT_QUEUE_ITEMS, QueueGeneration(12))
+            .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let initial_generation = request.ring_config.initial_generation;
     let (stop_sender, stop_receiver) =
         bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
@@ -1092,9 +1091,8 @@ fn source_resource_report(
         return Err(NativeSourcePrepareError::ResourceLimit);
     }
     let worker_control_queue = exact_queue_resources::<WorkerCommand>(caps.control_queue_items)?;
-    let worker_event_queue = exact_queue_resources::<NativeSourceWorkerEvent>(
-        NonZeroUsize::new(2).expect("two events"),
-    )?;
+    let worker_event_queue =
+        exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)?;
     let worker_stop_queue = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))?;
     let total_engine_owned_bytes = ring
         .total_engine_owned_bytes
@@ -1127,7 +1125,8 @@ fn source_resource_report(
             .largest_allocation_bytes,
         worker_control_queue_alignment_bytes: worker_control_queue.alignment_bytes,
         worker_event_queue_bytes: worker_event_queue.total_bytes,
-        worker_event_queue_items: 2,
+        worker_event_queue_items: u64::try_from(WORKER_EVENT_QUEUE_ITEMS.get())
+            .expect("usize fits u64"),
         worker_event_queue_largest_allocation_bytes: worker_event_queue.largest_allocation_bytes,
         worker_event_queue_alignment_bytes: worker_event_queue.alignment_bytes,
         worker_stop_queue_bytes: worker_stop_queue.total_bytes,
@@ -1401,19 +1400,8 @@ fn publish_worker_event(
     events: &mut Producer<NativeSourceWorkerEvent>,
     event: NativeSourceWorkerEvent,
 ) {
-    let mut pending = event;
-    for _ in 0..EVENT_PUBLICATION_ATTEMPTS {
-        match events.try_push(pending) {
-            Ok(()) => return,
-            Err(QueueFull { value, .. }) => {
-                pending = value;
-                thread::park_timeout(EVENT_PUBLICATION_WAIT);
-            }
-        }
-    }
-    debug_assert!(
-        false,
-        "worker event queue remained full after bounded publication attempts"
+    events.try_push(event).expect(
+        "three event slots reserve Terminal behind SourceReady and one synchronous Snapshot",
     );
 }
 
@@ -1744,6 +1732,57 @@ mod tests {
         assert_eq!(controller.native_decoder_sanitized_samples(), 2);
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn reserved_event_slot_preserves_terminal_after_ready_and_snapshot() {
+        let samples: Vec<f32> = (0_u16..20).map(f32::from).collect();
+        let mut native_resolver = resolver(&samples, b"exact-identity");
+        let (prepared, mut gate) = prepare_native_source_with_audit_gate(
+            &mut native_resolver,
+            request(NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: 20,
+            }),
+            caps(),
+        )
+        .expect("prepare with reserved terminal event slot");
+        let PreparedNativeSource {
+            mut controller,
+            mut consumer,
+            mut worker,
+            ..
+        } = prepared;
+
+        controller
+            .hold_worker_for_audit()
+            .expect("request deterministic worker hold");
+        let _ = read_one(&mut consumer);
+        gate.wait_until_held()
+            .expect("worker held after source ready");
+        controller
+            .try_send(WorkerCommand::SnapshotSanitation)
+            .expect("queue the one synchronous snapshot");
+        let _ = read_one(&mut consumer);
+        gate.release_and_wait().expect("snapshot command consumed");
+
+        assert_eq!(
+            worker.stop_and_join().expect("prompt retirement join"),
+            NativeSourceWorkerExit::Stopped
+        );
+        assert!(matches!(
+            controller.wait_for_event().expect("source ready"),
+            NativeSourceWorkerEvent::SourceReady { .. }
+        ));
+        assert!(matches!(
+            controller.wait_for_event().expect("snapshot"),
+            NativeSourceWorkerEvent::SanitationSnapshot { .. }
+        ));
+        assert!(matches!(
+            controller.wait_for_event().expect("terminal"),
+            NativeSourceWorkerEvent::Terminal { .. }
+        ));
+    }
+
     #[test]
     fn multiblock_native_watermark_does_not_readd_the_cumulative_decoder_report() {
         let region = NativeWaveRegion {
@@ -1801,10 +1840,8 @@ mod tests {
         let report = initial.resource_report();
         let control = exact_queue_resources::<WorkerCommand>(caps().control_queue_items)
             .expect("control queue layout");
-        let events = exact_queue_resources::<NativeSourceWorkerEvent>(
-            NonZeroUsize::new(2).expect("two events"),
-        )
-        .expect("event queue layout");
+        let events = exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)
+            .expect("event queue layout");
         let stop = exact_queue_resources::<()>(NonZeroUsize::new(1).expect("one stop"))
             .expect("stop queue layout");
         assert_eq!(
@@ -1822,6 +1859,7 @@ mod tests {
             control.alignment_bytes
         );
         assert_eq!(report.worker_event_queue_bytes, events.total_bytes);
+        assert_eq!(report.worker_event_queue_items, 3);
         assert_eq!(
             report.worker_event_queue_largest_allocation_bytes,
             events.largest_allocation_bytes
