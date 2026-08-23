@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Gate G5 (master plan #83 §3.6): the frozen cross-target corpus produces the same digests on this
-# host and inside a WebAssembly module, and the `miso-engine-math` M3 pins replay under wasm.
+# host and inside a WebAssembly module, and the `miso-engine-math` M3 and `miso-engine-effect-
+# runtime` D1 pins replay under wasm.
 #
 # Three legs, one corpus (tools/miso-engine-wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.

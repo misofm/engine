@@ -13,6 +13,7 @@ name = "miso_engine_wasm_gates"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-effect-runtime.workspace = true
 miso-engine-lane.workspace = true
 miso-engine-math = { workspace = true, features = ["lane"] }
 miso-engine-wasm-gate-corpus.workspace = true

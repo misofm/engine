@@ -13,6 +13,7 @@ publish.workspace = true
 name = "miso_engine_wasm_gate_corpus"
 
 [dependencies]
+miso-engine-effect-runtime.workspace = true
 miso-engine-lane.workspace = true
 miso-engine-math = { workspace = true, features = ["lane"] }
 sha2.workspace = true

@@ -20,10 +20,14 @@
 //!    operation order. Changing one of them is a re-pin, permitted only from the scalar `Lane`
 //!    oracle and only with the change stated in the commit message (master plan §8).
 //!
-//! The scalar-math half is not redefined here: cases [`LANE_CASE_COUNT`]..[`CASE_COUNT`] delegate
-//! to [`miso_engine_math::corpus`] and are compared against that crate's own `M3_DIGESTS`, so the
-//! wasm run replays exactly what gate M3 pinned natively instead of a transcription of it.
+//! Two halves of the corpus are not redefined here. Cases past [`LANE_CASE_COUNT`] delegate to
+//! [`miso_engine_math::corpus`] (gate M3) and [`miso_engine_effect_runtime::corpus`] (gate D1) and
+//! are compared against those crates' own pins, so the wasm run replays exactly what M3 and D1
+//! pinned natively rather than a transcription of them. The `effect-runtime` cases are lane
+//! generic — the dB curve a compressor rides, the followers that ride it — so they too are
+//! digested at every width.
 
+use miso_engine_effect_runtime::corpus as runtime_corpus;
 use miso_engine_lane::Lane;
 use miso_engine_lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
@@ -52,8 +56,14 @@ pub const LANE_CASE_COUNT: usize = KERNELS.len() * SIGNALS.len() + ELEMENTWISE.l
 /// Cases delegated to [`miso_engine_math::corpus`] (gate M3, replayed under wasm).
 pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_effect_runtime::corpus`] (gate D1, replayed under wasm).
+///
+/// These are lane-generic — the dB curve a compressor rides, the followers that ride it, and the
+/// level conversions between them — so unlike the math cases they are digested at every width.
+pub const RUNTIME_CASE_COUNT: usize = runtime_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
-pub const CASE_COUNT: usize = LANE_CASE_COUNT + MATH_CASE_COUNT;
+pub const CASE_COUNT: usize = LANE_CASE_COUNT + MATH_CASE_COUNT + RUNTIME_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -237,6 +247,8 @@ enum Case {
     Elementwise(Elementwise),
     /// One case of the `miso-engine-math` M3 corpus.
     Math(usize),
+    /// One case of the `miso-engine-effect-runtime` D1 corpus.
+    Runtime(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -257,20 +269,39 @@ fn case_of(index: usize) -> Case {
     if index < ELEMENTWISE.len() {
         return Case::Elementwise(ELEMENTWISE[index]);
     }
-    Case::Math(index - ELEMENTWISE.len())
+    let index = index - ELEMENTWISE.len();
+    if index < MATH_CASE_COUNT {
+        return Case::Math(index);
+    }
+    Case::Runtime(index - MATH_CASE_COUNT)
 }
 
-/// `true` when the case is a lane case, whose digest must be identical at all three widths.
+/// `true` when the case has a lane instantiation, so its digest must be identical at all three
+/// widths and is compared at each of them.
 ///
-/// The math cases are scalar `f64`/`f32` functions with no lane instantiation, so they are run
-/// once and their digest does not depend on a width.
+/// Only the math cases are excluded: they are scalar `f64`/`f32` functions with no lane
+/// instantiation, so they are run once and their digest cannot depend on a width.
 ///
 /// # Panics
 ///
 /// Panics if `index >= CASE_COUNT`.
 #[must_use]
-pub fn is_lane_case(index: usize) -> bool {
+pub fn is_width_dependent(index: usize) -> bool {
     !matches!(case_of(index), Case::Math(_))
+}
+
+/// `true` when the case is one of this crate's own kernel or element-wise cases, whose per-lane
+/// `f32` results [`lane_case_values`] can return.
+///
+/// The delegated `math` and `effect-runtime` cases produce result *words* through their own
+/// crates' corpus APIs, and the assertions those crates make about their own corpora belong there.
+///
+/// # Panics
+///
+/// Panics if `index >= CASE_COUNT`.
+#[must_use]
+pub fn has_lane_values(index: usize) -> bool {
+    matches!(case_of(index), Case::Kernel(..) | Case::Elementwise(_))
 }
 
 /// Human-readable name of a case, used in the failure reports of both legs.
@@ -284,6 +315,7 @@ pub fn case_name(index: usize) -> String {
         Case::Kernel(kernel, signal) => format!("{}/{}", kernel.name(), signal.name()),
         Case::Elementwise(operation) => operation.name().to_string(),
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
+        Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -315,6 +347,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
     match case_of(index) {
         Case::Kernel(..) | Case::Elementwise(_) => LANE_DIGESTS[index],
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
+        Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
     }
 }
 
@@ -331,6 +364,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
     match case_of(index) {
         Case::Kernel(..) | Case::Elementwise(_) => digest_lanes(&lane_values(index, width, true)),
         Case::Math(case) => digest_math(case),
+        Case::Runtime(case) => match width {
+            0 => digest_runtime::<f32>(case),
+            1 => digest_runtime::<miso_engine_lane::Simd4>(case),
+            _ => digest_runtime::<miso_engine_lane::Simd8>(case),
+        },
     }
 }
 
@@ -388,7 +426,7 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             1 => elementwise_values::<miso_engine_lane::Simd4>(operation, fused),
             _ => elementwise_values::<miso_engine_lane::Simd8>(operation, fused),
         },
-        Case::Math(_) => panic!("case {index} is not a lane case"),
+        Case::Math(_) | Case::Runtime(_) => panic!("case {index} is not a lane-kernel case"),
     }
 }
 
@@ -713,6 +751,18 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
     }
 
     lanes
+}
+
+/// Digests one `miso-engine-effect-runtime` D1 case at width `L::WIDTH`, exactly as that crate's
+/// `tests/determinism.rs` does natively.
+fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; runtime_corpus::POINTS];
+    runtime_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
 }
 
 /// Digests one `miso-engine-math` M3 case, exactly as `tests/m3_determinism.rs` does natively.

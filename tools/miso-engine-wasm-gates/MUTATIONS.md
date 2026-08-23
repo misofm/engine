@@ -5,7 +5,9 @@ Every mutation below was applied, run, recorded and reverted on the delivery hos
 with the one-line change that makes it fail.
 
 The corpus is `tools/miso-engine-wasm-gate-corpus`; the runner is
-`bash scripts/run-wasm-gates.sh`.
+`bash scripts/run-wasm-gates.sh`. Its 92 cases are this crate's own 51 lane cases plus the 32
+`miso-engine-math` M3 cases and the 9 `miso-engine-effect-runtime` D1 cases, which keep their own
+crates' pins.
 
 ## 1. Relaxed SIMD in the wasm `Lane::fma` (master plan §10, G5)
 

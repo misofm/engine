@@ -49,7 +49,7 @@ fn g5_native_digests_match_pins() {
 #[test]
 fn g5_lane_corpus_is_finite() {
     for case in 0..corpus::CASE_COUNT {
-        if !corpus::is_lane_case(case) {
+        if !corpus::has_lane_values(case) {
             continue;
         }
         for width in 0..corpus::WIDTHS {
@@ -142,20 +142,33 @@ fn g5_fma_case_separates_fused_from_unfused() {
     }
 }
 
-/// The math half of the corpus is not a second pin: it is compared against the digests gate M3
-/// wrote in `miso-engine-math`, so the wasm run replays that gate rather than a copy of it.
+/// The delegated halves of the corpus are not second pins: they are compared against the digests
+/// gates M3 and D1 wrote in `miso-engine-math` and `miso-engine-effect-runtime`, so the wasm run
+/// replays those gates rather than a copy of them that could drift away from the originals.
 #[test]
-fn g5_math_cases_use_the_m3_pins() {
+fn g5_delegated_cases_use_the_owning_crates_pins() {
     assert_eq!(
         corpus::MATH_CASE_COUNT,
         miso_engine_math::corpus::CASE_COUNT,
         "the math half must cover every M3 case"
+    );
+    assert_eq!(
+        corpus::RUNTIME_CASE_COUNT,
+        miso_engine_effect_runtime::corpus::CASE_COUNT,
+        "the effect-runtime half must cover every D1 case"
     );
     for case in 0..corpus::MATH_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(corpus::LANE_CASE_COUNT + case),
             miso_engine_math::corpus::M3_DIGESTS[case],
             "math case {case} must be pinned by miso-engine-math, not by this crate"
+        );
+    }
+    for case in 0..corpus::RUNTIME_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(corpus::LANE_CASE_COUNT + corpus::MATH_CASE_COUNT + case),
+            miso_engine_effect_runtime::corpus::D1_DIGESTS[case],
+            "runtime case {case} must be pinned by miso-engine-effect-runtime, not by this crate"
         );
     }
 }
@@ -175,7 +188,7 @@ const ALL_ZERO_CASES: [&str; 1] = ["one_pole_block/subnormal"];
 #[test]
 fn g5_no_case_is_vacuously_zero() {
     for case in 0..corpus::CASE_COUNT {
-        if !corpus::is_lane_case(case) {
+        if !corpus::has_lane_values(case) {
             continue;
         }
         let name = corpus::case_name(case);

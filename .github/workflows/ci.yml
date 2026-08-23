@@ -156,10 +156,11 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
-      # Gate G5 (master plan #83 section 3.6) and the wasm replay of gate M3: the frozen corpus of
-      # tools/miso-engine-wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and inside both
-      # browser artifacts (with and without simd128) under wasmtime 47.0.3, and every digest is
-      # compared to pins generated from the scalar Lane oracle. A mismatch is never re-pinned.
+      # Gate G5 (master plan #83 section 3.6) and the wasm replay of gates M3 and D1: the frozen
+      # corpus of tools/miso-engine-wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and
+      # inside both browser artifacts (with and without simd128) under wasmtime 47.0.3, and every
+      # digest is compared against pins the owning crate generated from the scalar Lane oracle.
+      # A mismatch is never fixed by re-pinning: it means a target stopped agreeing with the oracle.
       - name: Native and WebAssembly cross-target digest gates
         run: bash scripts/run-wasm-gates.sh
       - name: Upload cross-target gate evidence

@@ -167,10 +167,10 @@ pub fn hex(bytes: &[u8; 32]) -> String {
     text
 }
 
-/// The widths a case is compared at: every width for a lane case, the scalar run alone for a math
-/// case, whose functions have no lane instantiation.
+/// The widths a case is compared at: every width for a case with a lane instantiation, the scalar
+/// run alone for a math case, whose functions have none.
 fn widths_of(case: usize) -> std::ops::Range<usize> {
-    if corpus::is_lane_case(case) {
+    if corpus::is_width_dependent(case) {
         0..corpus::WIDTHS
     } else {
         0..1

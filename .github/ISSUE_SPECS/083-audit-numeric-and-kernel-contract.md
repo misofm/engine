@@ -30,8 +30,8 @@ checkpoint (AGENTS.md: no cross-cutting change without an amended issue).
 |---|---|---|
 | 83a | `crates/miso-engine-lane`: the `Lane` trait over `wide`, the ISA pin and boot attestation, the block kernels of §4.2, gates G1-G4/G6/P1, the lane policy scripts, this ISSUE_SPECS sync | merged |
 | 83b | `crates/miso-engine-math`: vendored scalar functions and the lane-wide `exp2`/`log2`, gates M1-M3 | merged |
-| 83c | `crates/miso-engine-effect-runtime`: the scaffolding of master plan §6 and the block boundary check | needs 83a and 83b |
-| 83d | release profiles, CI, the boot-attestation wiring, and the `wasmtime` cross-target gate crates (G5 and the wasm replay of M3) | delivered on branch `audit-083d-ci` |
+| 83c | `crates/miso-engine-effect-runtime`: the scaffolding of master plan §6 and the block boundary check | merged |
+| 83d | release profiles, CI, the boot-attestation wiring, and the `wasmtime` cross-target gate crates (G5 and the wasm replay of M3 and D1) | delivered on branch `audit-083d-ci` |
 
 ## Evidence -- 83a
 
@@ -61,22 +61,24 @@ wasm/Android/iOS package lists; the D4 boot-attestation call in
 `miso_engine_v2_engine_create`; the `check-conformance-boundaries.sh` extension to `lane` and
 `math`; and `tools/miso-engine-wasm-gates/MUTATIONS.md`.
 
-**G5 cross-target digests, and the wasm replay of M3.** One frozen corpus
+**G5 cross-target digests, and the wasm replay of M3 and D1.** One frozen corpus
 (`tools/miso-engine-wasm-gate-corpus`) compiled twice: linked natively, and built for
 `wasm32-unknown-unknown` with and without `simd128` and executed under wasmtime 47.0.3
-(Apache-2.0 WITH LLVM-exception, pinned exactly, a dependency of the host runner alone). 83 cases:
-twelve block kernels x four signals, `lane_fma`, `exp2_lane`, `log2_lane`, and the 32
-`miso-engine-math` M3 cases -- which are compared against that crate's own `M3_DIGESTS` rather than
-a second pin, so the wasm run replays gate M3 instead of a transcription of it. Every lane case is
-digested at `f32`, `Simd4` and `Simd8` on both legs, read back lane-major so the digest describes
-the arithmetic and not the AoSoA layout. The 51 lane pins were generated from the scalar `Lane`
-oracle (master plan §8), never from a vector or wasm run.
+(Apache-2.0 WITH LLVM-exception, pinned exactly, a dependency of the host runner alone). 92 cases:
+twelve block kernels x four signals, `lane_fma`, `exp2_lane`, `log2_lane`, the 32
+`miso-engine-math` M3 cases, and the 9 `miso-engine-effect-runtime` D1 cases. The last two groups
+are compared against those crates' own `M3_DIGESTS` and `D1_DIGESTS` rather than a second pin, so
+the wasm run replays gates M3 and D1 instead of a transcription of them that could drift. Every
+case with a lane instantiation -- which is all of them except the scalar math functions -- is
+digested at `f32`, `Simd4` and `Simd8` on both legs; the kernel cases are read back lane-major so
+the digest describes the arithmetic and not the AoSoA layout. The 51 lane pins were generated from
+the scalar `Lane` oracle (master plan §8), never from a vector or wasm run.
 
 | leg | backend | cases | comparisons | mismatches |
 |---|---|---|---|---|
-| native (`x86-64-v3`) | `Simd8` | 83 | 185 | 0 |
-| wasm, `-simd128` | `Scalar` | 83 | 185 | 0 |
-| wasm, `+simd128` | `Simd4` | 83 | 185 | 0 |
+| native (`x86-64-v3`) | `Simd8` | 92 | 212 | 0 |
+| wasm, `-simd128` | `Scalar` | 92 | 212 | 0 |
+| wasm, `+simd128` | `Simd4` | 92 | 212 | 0 |
 
 The `+simd128` leg is the first execution anywhere of the lane crate's `v128` software FMA
 (master plan §3.5); 83a could only compile-check it.
@@ -115,10 +117,10 @@ link it, which is why the corpus is a separate `rlib` from the guest `cdylib`.
 it. `host-web` is `wasm32`, where the instruction set is a build flag rather than a CPU property,
 so the attestation is a compile-time no-operation and no call is added.
 
-Deferred with owners: 83c's `crates/miso-engine-effect-runtime` was not on `main` at delivery, so
-its dynamics digest is not in the G5 corpus -- a one-commit wiring change in wave 2. The
-`--lane-kernels` flag of `tools/miso-engine-realtime-audit` (eval A1) is not delivered; the
-existing realtime trace still runs unchanged.
+Deferred with an owner: the `--lane-kernels` flag of `tools/miso-engine-realtime-audit` (eval A1)
+is not delivered; the existing realtime allocation and syscall trace still runs unchanged, so the
+lane kernels are not yet inside an audited allocator window. That is a bounded successor, not a
+gate this job weakened.
 
 ---
 
