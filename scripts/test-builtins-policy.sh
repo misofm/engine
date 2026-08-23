@@ -14,7 +14,7 @@ make_fixture() {
         "$fixture/crates/miso-engine-graph" \
         "$fixture/crates/miso-engine-rack"
     printf '[workspace]\nmembers = []\n' >"$fixture/Cargo.toml"
-    printf '[package]\nname = "miso-engine-builtins"\n[lib]\nname = "miso_engine_builtins"\n[dependencies]\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\n' >"$fixture/crates/miso-engine-builtins/Cargo.toml"
+    printf '[package]\nname = "miso-engine-builtins"\n[lib]\nname = "miso_engine_builtins"\n[dependencies]\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-lane.workspace = true\nmiso-engine-math.workspace = true\n' >"$fixture/crates/miso-engine-builtins/Cargo.toml"
     printf '[package]\nname = "miso-engine-builtins-compiler"\n[lib]\nname = "miso_engine_builtins_compiler"\n[dependencies]\nmiso-engine-builtins.workspace = true\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-graph.workspace = true\nmiso-engine-rack.workspace = true\nmiso-engine-session.workspace = true\nsha2.workspace = true\n' >"$fixture/crates/miso-engine-builtins-compiler/Cargo.toml"
     printf '[package]\nname = "miso-engine-core"\n' >"$fixture/crates/miso-engine-core/Cargo.toml"
     printf '[package]\nname = "miso-engine-effect-contract"\n' >"$fixture/crates/miso-engine-effect-contract/Cargo.toml"

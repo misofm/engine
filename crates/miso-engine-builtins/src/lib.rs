@@ -25,6 +25,8 @@ use miso_engine_core::{
     KernelBackendV1, SampleRateHz, is_extended_compatibility_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
+pub mod corpus;
+
 use miso_engine_effect_contract::BankWidth;
 use miso_engine_lane::{
     Lane, Simd4, Simd8,

@@ -8,7 +8,7 @@ paths=(crates/miso-engine-builtins crates/miso-engine-builtins-compiler)
 dependencies() {
     awk '/^\[dependencies\]$/ { in_deps=1; next } /^\[/ { in_deps=0 } in_deps && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ { line=$0; sub(/[[:space:]]*=.*/, "", line); sub(/\.workspace$/, "", line); print line }' "$1" | sort
 }
-expected_builtins=$'miso-engine-core\nmiso-engine-effect-contract'
+expected_builtins=$'miso-engine-core\nmiso-engine-effect-contract\nmiso-engine-lane\nmiso-engine-math'
 [[ "$(dependencies crates/miso-engine-builtins/Cargo.toml)" == "$expected_builtins" ]] || {
     printf 'builtins policy failure: builtins dependency boundary changed\n' >&2; exit 1;
 }

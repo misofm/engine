@@ -2503,8 +2503,7 @@ fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
     let mut right = Vec::with_capacity(128);
     for _ in 0..128 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) =
-            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
@@ -2520,16 +2519,14 @@ fn matrix_retarget_outputs_v1() -> (Vec<f32>, Vec<f32>) {
     let mut right = Vec::with_capacity(12);
     for _ in 0..4 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) =
-            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
     ramp.set_target(identity, 8);
     for _ in 0..8 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) =
-            matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }

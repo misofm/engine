@@ -22,7 +22,6 @@ set -euo pipefail
 #   path                                                  max  owner
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
-crates/miso-engine-builtins/src/lib.rs                     38  85
 crates/miso-engine-compressor/src/lib.rs                    4  88
 crates/miso-engine-true-peak-limiter/src/lib.rs             3  90
 crates/miso-engine-effect-contract/src/lib.rs               4  95

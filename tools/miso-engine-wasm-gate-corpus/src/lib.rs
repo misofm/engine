@@ -33,6 +33,7 @@
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
 //! the same computations.
 
+use miso_engine_builtins::corpus as builtins_corpus;
 use miso_engine_delay::corpus as delay_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
 use miso_engine_gate_expander::corpus as gate_expander_corpus;
@@ -124,6 +125,18 @@ pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 /// D11 word ramp in flight across a block boundary.
 pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_builtins::corpus`] (issue #85), replayed under wasm.
+///
+/// The whole builtin track chain per case, over 256 frames of eight independent tracks: the D7
+/// input sanitisation and its per-lane counter, the folded trim, the two cascaded TPT sections
+/// with `fma` at their recurrence sites and the in-kernel flush, the per-lane output boundary
+/// scan, the fader with its `andnot` mute, and the D11 matrix ramp crossing a block boundary with
+/// each lane's window ending on a different frame. Lane generic, and their pins live in that
+/// crate. This is the only family that renders through a *chain* kernel rather than a sequence of
+/// block kernels, so it is the case that would move if the fusion in `input_chain_block` were not
+/// the scheduling change it claims to be.
+pub const BUILTINS_CASE_COUNT: usize = builtins_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -133,7 +146,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MULTIBAND_CASE_COUNT
     + SOFT_CLIP_CASE_COUNT
     + PARAMETRIC_EQ_CASE_COUNT
-    + GATE_EXPANDER_CASE_COUNT;
+    + GATE_EXPANDER_CASE_COUNT
+    + BUILTINS_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -331,6 +345,8 @@ enum Case {
     ParametricEq(usize),
     /// One case of the `miso-engine-gate-expander` corpus.
     GateExpander(usize),
+    /// One case of the `miso-engine-builtins` chain corpus.
+    Builtins(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -379,7 +395,11 @@ fn case_of(index: usize) -> Case {
     if index < PARAMETRIC_EQ_CASE_COUNT {
         return Case::ParametricEq(index);
     }
-    Case::GateExpander(index - PARAMETRIC_EQ_CASE_COUNT)
+    let index = index - PARAMETRIC_EQ_CASE_COUNT;
+    if index < GATE_EXPANDER_CASE_COUNT {
+        return Case::GateExpander(index);
+    }
+    Case::Builtins(index - GATE_EXPANDER_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -438,6 +458,7 @@ pub fn case_name(index: usize) -> String {
             "effect/gate_expander/{}",
             gate_expander_corpus::CASE_NAMES[case]
         ),
+        Case::Builtins(case) => format!("builtins/{}", builtins_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -478,6 +499,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::SoftClip(case) => soft_clip_corpus::SOFT_CLIP_DIGESTS[case],
         Case::ParametricEq(case) => parametric_eq_corpus::E9_DIGESTS[case],
         Case::GateExpander(case) => gate_expander_corpus::GATE_DIGESTS[case],
+        Case::Builtins(case) => builtins_corpus::BUILTINS_DIGESTS[case],
     }
 }
 
@@ -520,6 +542,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_gate_expander::<f32>(case),
             1 => digest_gate_expander::<miso_engine_lane::Simd4>(case),
             _ => digest_gate_expander::<miso_engine_lane::Simd8>(case),
+        },
+        Case::Builtins(case) => match width {
+            0 => digest_builtins::<f32>(case),
+            1 => digest_builtins::<miso_engine_lane::Simd4>(case),
+            _ => digest_builtins::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -585,7 +612,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::Multiband(_)
         | Case::SoftClip(_)
         | Case::ParametricEq(_)
-        | Case::GateExpander(_) => {
+        | Case::GateExpander(_)
+        | Case::Builtins(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -993,6 +1021,15 @@ fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-builtins` case, exactly as that crate's `tests/determinism.rs` does.
+fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for value in builtins_corpus::case_values::<L>(case) {
+        hasher.update(value.to_bits().to_le_bytes());
     }
     hasher.finalize().into()
 }

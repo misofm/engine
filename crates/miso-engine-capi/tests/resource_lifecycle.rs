@@ -784,8 +784,9 @@ struct InputStageFourMirror {
     lifetime_recovered: [u64; 2],
 }
 
-/// `InputStageKernel`: an enum over the two widths, sized by the larger.
-#[allow(dead_code)]
+/// `InputStageKernel`: an enum over the two widths, sized by the larger. Mirroring production
+/// means mirroring its size decision too, `large_enum_variant` included.
+#[allow(dead_code, clippy::large_enum_variant)]
 enum InputStageKernelMirror {
     Simd4(InputStageFourMirror),
     Simd8(InputStageEightMirror),
