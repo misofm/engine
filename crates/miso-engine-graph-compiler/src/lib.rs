@@ -4030,14 +4030,16 @@ mod tests {
         }
 
         // G3: the ninth track changes the cohort boundary, not the bits of its eight neighbours.
-        for track in 0..8 {
+        for (track, (eight_track, nine_track)) in
+            observed[0].iter().zip(observed[1].iter()).enumerate()
+        {
             assert_eq!(
-                observed[0][track].len(),
+                eight_track.len(),
                 BLOCKS as usize * 128,
                 "every block was observed"
             );
             assert_eq!(
-                observed[0][track], observed[1][track],
+                eight_track, nine_track,
                 "eq{track} bits changed when a ninth track was added"
             );
         }

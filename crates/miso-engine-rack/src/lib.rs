@@ -758,7 +758,7 @@ mod tests {
                 )],
             )
             .expect("chain");
-            let mut out: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); lanes];
+            let mut out: Vec<Vec<f32>> = (0..lanes).map(|_| Vec::with_capacity(frames)).collect();
             let mut first = 0_usize;
             while first < frames {
                 let count = partition.min(frames - first);
@@ -773,8 +773,8 @@ mod tests {
                 chain
                     .run(&mut planes, count as u32, first as u64)
                     .expect("run");
-                for lane in 0..lanes {
-                    out[lane].extend_from_slice(&planes.left[lane]);
+                for (plane, gathered) in out.iter_mut().zip(planes.left.iter()) {
+                    plane.extend_from_slice(gathered);
                 }
                 first += count;
             }

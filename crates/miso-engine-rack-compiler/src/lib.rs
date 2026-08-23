@@ -99,7 +99,6 @@ pub enum RackCompileError {
 
 struct WorkingMember<Id> {
     id: Id,
-    program: RackProgramV1,
     mask: Box<[bool]>,
 }
 
@@ -205,7 +204,6 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
                     match candidate.program.subsequence_mask(&leader_program) {
                         Some(mask) => compatible.push(WorkingMember {
                             id: candidate.id.clone(),
-                            program: candidate.program.clone(),
                             mask,
                         }),
                         None => rest.push(candidate),
