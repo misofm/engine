@@ -7,6 +7,8 @@
 #![allow(unsafe_code)]
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::BTreeSet,
@@ -605,6 +607,7 @@ fn prepare_graph_plan(
     )
     .expect("sealed builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id,
         effects,
         builtins,

@@ -1,6 +1,8 @@
 //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
 #![allow(missing_docs)]
 
+use miso_engine_core::TargetCapabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     env,
     fmt::Write as _,
@@ -281,6 +283,9 @@ fn run_once(fixture: &Fixture) -> Sample {
     let effect_prepare_ns = prepare_started.elapsed().as_nanos();
     let compile_started = Instant::now();
     let artifact = GraphCompiler::compile(GraphCompileRequest {
+        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        )),
         plan_id: 6,
         effects,
         caps: unlimited_graph_caps(),
@@ -605,6 +610,9 @@ mod tests {
         assert_eq!(fixture.effects, 64);
         assert_eq!(fixture.sidechains, 32);
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
+                false, false, false, false,
+            )),
             plan_id: 6,
             effects: prepared_effects(&fixture),
             caps: unlimited_graph_caps(),

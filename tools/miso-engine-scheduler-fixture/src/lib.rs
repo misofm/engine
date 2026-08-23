@@ -9,6 +9,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use core::num::NonZeroUsize;
+    use miso_engine_core::target_capabilities;
+    use miso_engine_graph_compiler::KernelDispatch;
     use std::sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -447,6 +449,7 @@ mod native {
         let builtins = prepare_session_builtins(&session, &[], builtin_caps())
             .map_err(|_| "q128.builtins".to_owned())?;
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: KernelDispatch::select(target_capabilities()),
             plan_id,
             effects,
             builtins,

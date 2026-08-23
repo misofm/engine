@@ -1,6 +1,8 @@
 //! Safe control-plane orchestration behind the raw FFI boundary.
 
 use core::{alloc::Layout, mem::size_of, num::NonZeroUsize};
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -1151,6 +1153,7 @@ fn prepare_runtime(
     })?;
     let builtin_resources = builtins.resource_report();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: 1,
         effects,
         builtins,
