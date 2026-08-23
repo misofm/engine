@@ -8,7 +8,7 @@ mod block;
 mod compressor;
 mod delay;
 mod gate_expander;
-mod multiband_compressor;
+mod lr4;
 mod parametric_eq;
 mod processor;
 mod signals;
@@ -37,7 +37,7 @@ pub use gate_expander::{
     ReferenceGateExpanderError, ReferenceGateExpanderParameters, ReferenceGatePhase,
     reference_gate_expander_gain_reduction_db,
 };
-pub use multiband_compressor::{ReferenceLr4Crossover, ReferenceMultibandError};
+pub use lr4::{ReferenceLr4Crossover, ReferenceMultibandError};
 pub use parametric_eq::{
     ReferenceParametricEqCoefficients, ReferenceParametricEqError, ReferenceParametricEqKind,
     ReferenceParametricEqSection,

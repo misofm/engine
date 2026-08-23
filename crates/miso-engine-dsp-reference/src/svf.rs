@@ -295,23 +295,32 @@ impl ReferenceSvfStateSpace {
         })
     }
 
-    /// Iterates `x' = A x + B u`, `y = C x + D u` from zero state.
+    /// Iterates `x' = A x + B u`, `y = C x + D u` over `input` from zero state.
     ///
     /// This is the second realization the recurrence self-test compares against: it uses the
-    /// state-space words, never the Simper intermediates.
+    /// state-space words, never the Simper intermediates. Cascades filter twice.
     #[must_use]
-    pub fn impulse_response(self, frames: usize) -> Vec<f64> {
-        let mut output = Vec::with_capacity(frames);
+    pub fn filter(self, input: &[f64]) -> Vec<f64> {
+        let mut output = Vec::with_capacity(input.len());
         let (mut x0, mut x1) = (0.0_f64, 0.0_f64);
-        for frame in 0..frames {
-            let input = if frame == 0 { 1.0 } else { 0.0 };
-            output.push(self.d * input + self.c0 * x0 + self.c1 * x1);
-            let next0 = self.a00 * x0 + self.a01 * x1 + self.b0 * input;
-            let next1 = self.a10 * x0 + self.a11 * x1 + self.b1 * input;
+        for sample in input {
+            output.push(self.d * sample + self.c0 * x0 + self.c1 * x1);
+            let next0 = self.a00 * x0 + self.a01 * x1 + self.b0 * sample;
+            let next1 = self.a10 * x0 + self.a11 * x1 + self.b1 * sample;
             x0 = next0;
             x1 = next1;
         }
         output
+    }
+
+    /// Iterates the state space over a unit impulse of `frames` samples.
+    #[must_use]
+    pub fn impulse_response(self, frames: usize) -> Vec<f64> {
+        let mut impulse = vec![0.0_f64; frames];
+        if let Some(first) = impulse.first_mut() {
+            *first = 1.0;
+        }
+        self.filter(&impulse)
     }
 }
 
