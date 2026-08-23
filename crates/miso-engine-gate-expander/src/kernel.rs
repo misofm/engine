@@ -236,6 +236,9 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
     let empty: &[f32] = &[];
     let (side_left, side_right) = sidechain.unwrap_or((empty, empty));
     let base = *cursor;
+    // Hoisted: the gather scratch is written and read within one frame, but zeroing 128 bytes per
+    // frame would cost more than the gather itself.
+    let mut taps = [[0.0_f32; MAX_WIDTH]; 4];
 
     for frame in 0..frames {
         let span = frame * width;
@@ -256,7 +259,6 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
         // Per-lane lookahead is a `PerLane` parameter, so the detector tap differs per lane and
         // the read is a gather: `WIDTH` scalar loads per source, no arithmetic, so the rounding
         // sequence each lane sees is still the scalar one.
-        let mut taps = [[0.0_f32; MAX_WIDTH]; 4];
         let (source_left, source_right) = if CONNECTED {
             (&*ring_left.detector, &*ring_right.detector)
         } else {
