@@ -18,8 +18,8 @@ use miso_engine_gate_expander::{
     STATE_LAYOUT_VERSION,
 };
 use support::{
-    initial_values, prepare, render_scalar_sidechain, request, request_at_rate, sidechain_port,
-    snapshot,
+    Values, initial_values, prepare, render_scalar_sidechain, request, request_at_rate,
+    set_parameter, sidechain_port, snapshot,
 };
 
 const RAMP_WORD: usize = 7;
@@ -474,5 +474,218 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
             .expect("mixed programs validate")
             .is_none(),
         "a cohort with two programs is unbankable, not an error"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The two inclusive comparison boundaries of brief 014, on the production path.
+//
+// "Comparisons at both boundaries are inclusive on the opening/re-arm side" — a closed gate opens
+// at `X >= T`, and an open one re-arms at `X >= T - H`. Both are `ge` in the kernel, and the f64
+// oracle pins the distinction too; but a corpus of noise and tones never produces an *exact* `f32`
+// equality between `level_db` and a threshold, so `>=` and `>` are indistinguishable there. These
+// two tests construct the equality deliberately.
+//
+// The construction is self-verifying, which is what stops it from being a reconstruction of the
+// kernel asserted against itself. Each test runs three renders — at the constructed comparand, one
+// `f32` step above it and one step below — and asserts the behaviour is (open, closed, open). If
+// the constructed level were not exactly on the boundary it would agree with one neighbour and
+// disagree with the other, and the test would fail rather than pass vacuously.
+// ---------------------------------------------------------------------------------------------
+
+/// The detector level in dB that a constant input of `amplitude` produces, in the kernel's exact
+/// operation order: `clamp(log2_lane(max(u, 1e-8)) * 20log10(2), -160, 24)` with the D8 select
+/// forms of `max`/`min`.
+fn detector_level_db(amplitude: f32) -> f32 {
+    use miso_engine_gate_expander::kernel::{
+        DB_PER_OCTAVE, LEVEL_FLOOR, LEVEL_MAX_DB, LEVEL_MIN_DB,
+    };
+    let floored = if amplitude > LEVEL_FLOOR {
+        amplitude
+    } else {
+        LEVEL_FLOOR
+    };
+    let raw = miso_engine_math::log2_lane::<f32>(floored) * DB_PER_OCTAVE;
+    let capped = if raw < LEVEL_MAX_DB {
+        raw
+    } else {
+        LEVEL_MAX_DB
+    };
+    if capped > LEVEL_MIN_DB {
+        capped
+    } else {
+        LEVEL_MIN_DB
+    }
+}
+
+/// Renders `source` through a scalar instance whose threshold is `threshold`, and returns the
+/// output. All other parameters are fixed by the caller's `values`.
+fn render_at_threshold(mut values: Values, threshold: f32, source: &[f32]) -> Vec<f32> {
+    set_parameter(&mut values, 0, threshold, threshold);
+    let mut effect = prepare(request(&values));
+    let mut left = source.to_vec();
+    let mut right = source.to_vec();
+    render_scalar_sidechain(effect.as_mut(), &mut left, &mut right, None, 128, &[], 0);
+    left
+}
+
+#[test]
+fn a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold() {
+    const LATENCY: usize = 480;
+    const HOLD_FRAMES: usize = 4_000;
+    const PROBE: usize = 200;
+
+    // `a` is the level that must sit exactly on the threshold; `b` is a level inside the
+    // hysteresis band, which is where an open gate and a closed one finally differ. At the
+    // trigger level itself they do not: `(rho - 1) * (X - T)` is `+0.0` at equality, so a gate
+    // that failed to open still applies unity there.
+    let trigger = 0.1_f32;
+    let band = 0.070_794_58_f32;
+    let level = detector_level_db(trigger);
+    let band_level = detector_level_db(band);
+
+    let mut values = initial_values();
+    set_parameter(&mut values, 1, 20.0, 20.0); // ratio
+    set_parameter(&mut values, 2, 48.0, 48.0); // range
+    set_parameter(&mut values, 3, 6.0, 6.0); // hysteresis
+    set_parameter(&mut values, 4, 1.0, 1.0); // attack ms
+    set_parameter(&mut values, 5, 0.0, 0.0); // hold ms: no countdown to hide behind
+    set_parameter(&mut values, 6, 5.0, 5.0); // release ms
+    set_parameter(&mut values, 7, 0.0, 0.0); // lookahead 0: the detector tap equals the latency
+
+    assert!(
+        (-80.0..=0.0).contains(&level),
+        "the constructed threshold {level} must be inside the parameter domain"
+    );
+    assert!(
+        band_level < level && band_level > level - 6.0,
+        "the band level {band_level} must sit strictly inside (T - H, T)"
+    );
+
+    // One `f32` step either side of the constructed threshold. Above it the level is strictly
+    // below the threshold; below it, strictly above.
+    let above = level.next_up();
+    let below = level.next_down();
+    assert!(level < above && below < level, "the neighbours bracket it");
+
+    let frames = LATENCY + HOLD_FRAMES + PROBE + 1;
+    let mut source = vec![band; frames];
+    for sample in source.iter_mut().take(HOLD_FRAMES) {
+        *sample = trigger;
+    }
+
+    // The gate is closed by the silent pre-roll the ring starts with (hold is zero, so it closes
+    // on the first sample below the band), then meets the trigger level at frame `LATENCY`.
+    let probe = LATENCY + HOLD_FRAMES + PROBE;
+    let expect = |threshold: f32, open: bool, label: &str| {
+        let out = render_at_threshold(values, threshold, &source);
+        let dry = source[probe - LATENCY];
+        assert_eq!(dry.to_bits(), band.to_bits(), "the probe frame is dry");
+        if open {
+            assert_eq!(
+                out[probe].to_bits(),
+                band.to_bits(),
+                "{label}: the gate opened, so the band level is the exact identity"
+            );
+        } else {
+            assert!(
+                out[probe].abs() < band * 0.5,
+                "{label}: the gate never opened, so the band level is expanded ({} vs {band})",
+                out[probe]
+            );
+        }
+    };
+
+    // `X > T` strictly: both `>=` and `>` open, so this row is the control that the witness is at
+    // the boundary rather than below it.
+    expect(below, true, "threshold one step below the level");
+    // `X < T` strictly: neither opens.
+    expect(above, false, "threshold one step above the level");
+    // `X == T` exactly. This is the row brief 014 pins, and the row a `>` kernel fails.
+    expect(level, true, "threshold exactly equal to the level");
+}
+
+#[test]
+fn an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold() {
+    const LATENCY: usize = 480;
+    const PROBE: usize = 1_000;
+
+    // The comparand here is `T - H`, computed inside the kernel as one `f32` subtraction, so the
+    // threshold is nudged until that subtraction reproduces the level exactly.
+    let hold_level = 0.1_f32;
+    let level = detector_level_db(hold_level);
+    let hysteresis = 6.0_f32;
+
+    let mut threshold = level + hysteresis;
+    while threshold - hysteresis > level {
+        threshold = threshold.next_down();
+    }
+    while threshold - hysteresis < level {
+        threshold = threshold.next_up();
+    }
+    assert_eq!(
+        (threshold - hysteresis).to_bits(),
+        level.to_bits(),
+        "the re-arm boundary must be exactly constructible"
+    );
+    assert!(
+        (-80.0..=0.0).contains(&threshold),
+        "the constructed threshold {threshold} must be inside the parameter domain"
+    );
+
+    // Step the threshold until `T - H` actually moves off the level in each direction: one step of
+    // `T` is not one step of `T - H`, so this searches rather than assuming.
+    let mut above = threshold;
+    while (above - hysteresis).to_bits() == level.to_bits() {
+        above = above.next_up();
+    }
+    let mut below = threshold;
+    while (below - hysteresis).to_bits() == level.to_bits() {
+        below = below.next_down();
+    }
+    assert!(
+        above - hysteresis > level && below - hysteresis < level,
+        "the neighbours bracket the close threshold"
+    );
+
+    let mut values = initial_values();
+    set_parameter(&mut values, 1, 20.0, 20.0); // ratio
+    set_parameter(&mut values, 2, 48.0, 48.0); // range
+    set_parameter(&mut values, 3, hysteresis, hysteresis);
+    set_parameter(&mut values, 4, 1.0, 1.0); // attack ms
+    set_parameter(&mut values, 5, 0.0, 0.0); // hold ms: nothing to keep it open but the re-arm
+    set_parameter(&mut values, 6, 5.0, 5.0); // release ms
+    set_parameter(&mut values, 7, 10.0, 10.0); // full lookahead: the detector taps the live sample
+
+    let frames = LATENCY + PROBE + 1;
+    let source = vec![hold_level; frames];
+    let probe = LATENCY + PROBE;
+
+    let expect = |threshold: f32, open: bool, label: &str| {
+        let out = render_at_threshold(values, threshold, &source);
+        if open {
+            assert_eq!(
+                out[probe].to_bits(),
+                hold_level.to_bits(),
+                "{label}: the gate re-armed, so the output is the exact identity"
+            );
+        } else {
+            assert!(
+                out[probe].abs() < hold_level * 0.5,
+                "{label}: the gate closed, so the level is expanded ({} vs {hold_level})",
+                out[probe]
+            );
+        }
+    };
+
+    // `X > T - H` strictly: both `>=` and `>` re-arm.
+    expect(below, true, "close threshold one step below the level");
+    // `X < T - H` strictly: neither re-arms, and with a zero hold the gate closes at once.
+    expect(above, false, "close threshold one step above the level");
+    // `X == T - H` exactly, the row brief 014 pins.
+    expect(
+        threshold,
+        true,
+        "close threshold exactly equal to the level",
     );
 }
