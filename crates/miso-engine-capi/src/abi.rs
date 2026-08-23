@@ -1,8 +1,8 @@
 //! Fixed-width representations shared by the C header and FFI implementation.
 
-use core::{cell::RefCell, marker::PhantomData};
+use core::{cell::RefCell, marker::PhantomData, sync::atomic::AtomicU32};
 
-use crate::runtime::{FixedBytes, PlanState, SessionState};
+use crate::runtime::{FixedBytes, PlanQueries, PlanState, SessionState, plan_error};
 
 /// Frozen ABI V1 version (`major << 16 | minor`).
 pub const ABI_VERSION: u32 = 0x0001_0000;
@@ -387,24 +387,39 @@ impl Session {
 }
 
 /// Opaque render-plan handle. C consumers only observe pointers to this type.
+///
+/// Field ownership matches the "Thread ownership" block of `include/miso_engine_v2.h`:
+/// `header` and `queries` are immutable after construction, `last_error` is written by the render
+/// thread and read from any thread, and `state` is exclusive to the render thread. `ffi.rs` never
+/// forms a reference to the whole value; it projects the individual fields with `&raw const` and
+/// `&raw mut` so a concurrent query can never alias the render thread's `&mut PlanState`.
 #[repr(C)]
 pub struct Plan {
     header: HandleHeader,
+    pub(crate) queries: PlanQueries,
+    pub(crate) last_error: AtomicU32,
     pub(crate) state: PlanState,
-    pub(crate) last_error: RefCell<FixedBytes>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
 impl Plan {
-    pub(crate) fn new(state: PlanState, last_error: FixedBytes) -> Self {
+    pub(crate) fn new(state: PlanState) -> Self {
         Self {
             header: HandleHeader::new(HANDLE_KIND_PLAN),
+            queries: state.queries(),
+            last_error: AtomicU32::new(plan_error::NONE),
             state,
-            last_error: RefCell::new(last_error),
             not_sync: PhantomData,
         }
     }
 }
+
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Engine>();
+    assert_send::<Session>();
+    assert_send::<Plan>();
+};
 
 #[cfg(test)]
 mod tests {

@@ -269,6 +269,17 @@ struct SharedPlanState {
     render_peak_bits: AtomicU32,
 }
 
+fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
+    let active = shared.active_epoch.load(Ordering::Acquire);
+    shared
+        .reports
+        .lock()
+        .expect("plan resource report lock is not poisoned")
+        .iter()
+        .find_map(|(epoch, report)| (*epoch == active).then_some(*report))
+        .expect("active plan epoch retains its resource report")
+}
+
 pub(crate) struct SessionState {
     controller: ObservedController,
     providers: ProviderEpoch,
@@ -345,7 +356,58 @@ pub(crate) struct CompiledChildren {
     pub(crate) session: SessionState,
     pub(crate) session_error: FixedBytes,
     pub(crate) plan: PlanState,
-    pub(crate) plan_error: FixedBytes,
+}
+
+/// Fixed render diagnostics for a plan handle.
+///
+/// The render thread stores one of these codes into `Plan::last_error`; `miso_engine_v2_last_error`
+/// loads it from any thread and returns the matching `'static` text. A plan diagnostic is therefore
+/// a single relaxed atomic word rather than shared mutable string storage: the render thread never
+/// takes a borrow that a concurrent query could invalidate.
+pub(crate) mod plan_error {
+    /// The most recent render call succeeded.
+    pub(crate) const NONE: u32 = 0;
+    /// The requested plane stride plus frame count overflows `u64`.
+    pub(crate) const OUTPUT_OVERFLOW: u32 = 1;
+    /// The output descriptor does not match the plan's exact-time render contract.
+    pub(crate) const CONTRACT_REJECTED: u32 = 2;
+    /// The required sample extent is not addressable as one slice on this platform.
+    pub(crate) const OUTPUT_PLATFORM: u32 = 3;
+    /// The validated extent was rejected by the core planar-buffer layout check.
+    pub(crate) const OUTPUT_LAYOUT: u32 = 4;
+    /// The prepared plan itself rejected the render call.
+    pub(crate) const PLAN_REJECTED: u32 = 5;
+    /// `output.samples` is not aligned for `f32`.
+    pub(crate) const OUTPUT_UNALIGNED: u32 = 6;
+
+    /// Returns the frozen diagnostic text for `code`.
+    pub(crate) const fn text(code: u32) -> &'static [u8] {
+        match code {
+            NONE => b"",
+            OUTPUT_OVERFLOW => b"render.output.overflow",
+            CONTRACT_REJECTED => b"render.contract.rejected",
+            OUTPUT_PLATFORM => b"render.output.platform",
+            OUTPUT_LAYOUT => b"render.output.rejected",
+            PLAN_REJECTED => b"render.plan.rejected",
+            OUTPUT_UNALIGNED => b"render.output.unaligned",
+            _ => b"render.internal",
+        }
+    }
+}
+
+/// Any-thread projection of a plan's frozen resource accounting.
+///
+/// Held in its own [`crate::Plan`] field, disjoint from the render-thread-exclusive
+/// [`PlanState`], so `miso_engine_v2_plan_resources` can run concurrently with a render call.
+pub(crate) struct PlanQueries {
+    shared: Arc<SharedPlanState>,
+}
+
+impl PlanQueries {
+    /// Copies the resource report of the currently active plan epoch.
+    pub(crate) fn resources(&self) -> PlanResourceReport {
+        active_resources(&self.shared)
+    }
 }
 
 struct PreparedRuntime {
@@ -692,7 +754,6 @@ fn capi_resources(
         .map_err(|_| failure("capi.resource.platform"))?
         / size_of::<u16>();
     let fixed_allocation_rows = [
-        checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
@@ -1376,7 +1437,6 @@ pub(crate) fn compile_children(
         },
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
         plan: PlanState::new(owner, shared, resources.quantum_frames),
-        plan_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
     })
 }
 
@@ -1385,15 +1445,16 @@ impl PlanState {
         self.quantum_frames
     }
 
+    #[cfg(test)]
     pub(crate) fn resources(&self) -> PlanResourceReport {
-        let active = self.shared.active_epoch.load(Ordering::Acquire);
-        self.shared
-            .reports
-            .lock()
-            .expect("plan resource report lock is not poisoned")
-            .iter()
-            .find_map(|(epoch, report)| (*epoch == active).then_some(*report))
-            .expect("active plan epoch retains its resource report")
+        active_resources(&self.shared)
+    }
+
+    /// Clones the any-thread query projection installed in [`crate::Plan::queries`].
+    pub(crate) fn queries(&self) -> PlanQueries {
+        PlanQueries {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     pub(crate) const fn next_absolute_sample(&self) -> u64 {
@@ -2275,10 +2336,7 @@ mod tests {
                 children.session,
                 children.session_error,
             ))),
-            Box::into_raw(Box::new(crate::Plan::new(
-                children.plan,
-                children.plan_error,
-            ))),
+            Box::into_raw(Box::new(crate::Plan::new(children.plan))),
         )
     }
 
@@ -2364,7 +2422,7 @@ mod tests {
             wrapped.session,
             wrapped.session_error,
         )));
-        let c_plan = Box::into_raw(Box::new(crate::Plan::new(wrapped.plan, wrapped.plan_error)));
+        let c_plan = Box::into_raw(Box::new(crate::Plan::new(wrapped.plan)));
         let quantum = 128_usize;
         let mut first_left = vec![0.0_f32; quantum];
         let mut first_right = vec![0.0_f32; quantum];
@@ -3657,10 +3715,7 @@ mod tests {
             children.session,
             children.session_error,
         ))) as usize;
-        let plan = Box::into_raw(Box::new(crate::Plan::new(
-            children.plan,
-            children.plan_error,
-        ))) as usize;
+        let plan = Box::into_raw(Box::new(crate::Plan::new(children.plan))) as usize;
         let submitted = std::sync::Arc::new(std::sync::Barrier::new(2));
         let consumed = std::sync::Arc::new(std::sync::Barrier::new(2));
         std::thread::scope(|scope| {

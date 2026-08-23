@@ -11,9 +11,13 @@ use crate::{
 };
 use core::ffi::c_void;
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::runtime::{CommandError, EventError, EventLane, compile_children, limits_are_valid};
+use crate::runtime::{
+    CommandError, EventError, EventLane, PlanQueries, PlanState, compile_children,
+    limits_are_valid, plan_error,
+};
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RESULT_INTERNAL)
@@ -124,6 +128,38 @@ unsafe fn plan_kind(plan: *const Plan) -> u32 {
     } else {
         RESULT_WRONG_HANDLE
     }
+}
+
+/// Projects the render-thread-exclusive plan state without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `plan` must have passed [`plan_kind`]. The returned pointer aliases only the `state` field, so
+/// the exclusive render borrow it produces stays disjoint from `queries` and `last_error`.
+unsafe fn plan_state(plan: *mut Plan) -> *mut PlanState {
+    // SAFETY: The live-kind check established the concrete representation; a raw field projection
+    // creates no reference to `Plan` itself.
+    unsafe { &raw mut (*plan).state }
+}
+
+/// Projects the any-thread render diagnostic slot without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `plan` must have passed [`plan_kind`].
+unsafe fn plan_error_slot(plan: *const Plan) -> *const AtomicU32 {
+    // SAFETY: See `plan_state`; the projection is disjoint from `state`.
+    unsafe { &raw const (*plan).last_error }
+}
+
+/// Projects the any-thread resource query view without borrowing the whole handle.
+///
+/// # Safety
+///
+/// `plan` must have passed [`plan_kind`].
+unsafe fn plan_queries(plan: *const Plan) -> *const PlanQueries {
+    // SAFETY: See `plan_state`; the projection is disjoint from `state`.
+    unsafe { &raw const (*plan).queries }
 }
 
 /// Returns the frozen Engine V2 C ABI version.
@@ -324,7 +360,7 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
             return written;
         }
         let session = Box::new(Session::new(children.session, children.session_error));
-        let plan = Box::new(Plan::new(children.plan, children.plan_error));
+        let plan = Box::new(Plan::new(children.plan));
         // SAFETY: Both output locations were validated and cleared before compilation. Ownership
         // transfers only after both independent boxes exist, so publication is atomic.
         unsafe {
@@ -660,14 +696,18 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The live-kind check establishes the concrete render-plan representation and the
-        // ABI requires exclusive ownership for this call.
-        let plan = unsafe { &mut *plan };
-        let frames = plan.state.quantum_frames();
+        // ABI requires exclusive ownership of the render-thread state for this call. Both borrows
+        // are disjoint field projections, so a concurrent `plan_resources` or `last_error` query on
+        // another thread never aliases the exclusive `PlanState` borrow.
+        let state = unsafe { &mut *plan_state(plan) };
+        // SAFETY: See above; the diagnostic slot is disjoint from `state`.
+        let error = unsafe { &*plan_error_slot(plan) };
+        let frames = state.quantum_frames();
         let required_samples =
             match u64::from(output.plane_stride_samples).checked_add(u64::from(output.frames)) {
                 Some(value) => value,
                 None => {
-                    plan.last_error.borrow_mut().set(b"render.output.overflow");
+                    error.store(plan_error::OUTPUT_OVERFLOW, Ordering::Relaxed);
                     return RESULT_RENDER_REJECTED;
                 }
             };
@@ -675,11 +715,9 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
             || output.frames != frames
             || output.plane_stride_samples < frames
             || required_samples > output.sample_capacity
-            || absolute_sample != plan.state.next_absolute_sample()
+            || absolute_sample != state.next_absolute_sample()
         {
-            plan.last_error
-                .borrow_mut()
-                .set(b"render.contract.rejected");
+            error.store(plan_error::CONTRACT_REJECTED, Ordering::Relaxed);
             return RESULT_RENDER_REJECTED;
         }
         let required_samples = match usize::try_from(required_samples) {
@@ -691,7 +729,7 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
                 value
             }
             _ => {
-                plan.last_error.borrow_mut().set(b"render.output.platform");
+                error.store(plan_error::OUTPUT_PLATFORM, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
         };
@@ -709,11 +747,11 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         ) {
             Ok(value) => value,
             Err(_) => {
-                plan.last_error.borrow_mut().set(b"render.output.rejected");
+                error.store(plan_error::OUTPUT_LAYOUT, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
         };
-        match plan.state.render(absolute_sample, render_output) {
+        match state.render(absolute_sample, render_output) {
             Ok(()) => {
                 let mut peak = 0.0_f32;
                 for channel in 0..2_usize {
@@ -725,12 +763,12 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
                         peak = peak.max(sample.abs());
                     }
                 }
-                plan.state.publish_render_observation(peak);
-                plan.last_error.borrow_mut().clear();
+                state.publish_render_observation(peak);
+                error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }
             Err(()) => {
-                plan.last_error.borrow_mut().set(b"render.plan.rejected");
+                error.store(plan_error::PLAN_REJECTED, Ordering::Relaxed);
                 RESULT_RENDER_REJECTED
             }
         }
@@ -764,11 +802,13 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
         if struct_size != crate::PLAN_RESOURCE_REPORT_SIZE || reserved != [0; 4] {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: `plan` passed the live-kind check and is borrowed immutably for the copy.
-        let plan = unsafe { &*plan };
+        // SAFETY: `plan` passed the live-kind check. Only the any-thread `queries` field is
+        // projected, so this query never aliases a concurrent render's exclusive `PlanState`
+        // borrow. The call is pure: it writes nothing back through the plan handle.
+        let queries = unsafe { &*plan_queries(plan) };
+        let report = queries.resources();
         // SAFETY: Exact struct size establishes writable ABI V1 report storage.
-        unsafe { out.write(plan.state.resources()) };
-        plan.last_error.borrow_mut().clear();
+        unsafe { out.write(report) };
         RESULT_OK
     })
 }
@@ -816,11 +856,14 @@ pub unsafe extern "C" fn miso_engine_v2_last_error(
                 // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
                 unsafe { write_bytes(out, bytes.as_slice()) }
             } else {
-                // SAFETY: The recognized header identifies the remaining live plan handle.
-                let plan = unsafe { &*live_handle.cast::<Plan>() };
-                let bytes = plan.last_error.borrow();
-                // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
-                unsafe { write_bytes(out, bytes.as_slice()) }
+                // SAFETY: The recognized header identifies the remaining live plan handle. Only
+                // the atomic diagnostic slot is projected, so this query is safe concurrently with
+                // a render call on another thread.
+                let code = unsafe {
+                    (*plan_error_slot(live_handle.cast::<Plan>())).load(Ordering::Relaxed)
+                };
+                // SAFETY: The bytes-output contract was validated by `write_bytes` itself.
+                unsafe { write_bytes(out, plan_error::text(code)) }
             }
         }
     })
@@ -1079,6 +1122,101 @@ mod tests {
             maximum_replay_entries: 16,
             reserved: [0; 4],
         }
+    }
+
+    /// Compiles the pinned nine-track fixture and returns its three live handles.
+    fn compiled_fixture() -> (*mut Engine, *mut Session, *mut Plan) {
+        const TOML: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: u64::MAX,
+        };
+        let mut session = ptr::dangling_mut::<Session>();
+        let mut plan = ptr::dangling_mut::<Plan>();
+        // SAFETY: Every pointer names a complete local ABI value or the immutable fixture bytes.
+        let result = unsafe {
+            miso_engine_v2_compile_session(
+                engine,
+                TOML.as_ptr(),
+                TOML.len() as u64,
+                &limits(),
+                &mut diagnostics,
+                &mut session,
+                &mut plan,
+            )
+        };
+        assert_eq!(result, RESULT_OK);
+        assert!(!session.is_null() && !plan.is_null());
+        (engine, session, plan)
+    }
+
+    /// Destroys the three handles of [`compiled_fixture`] in the documented quiescent order.
+    fn destroy_fixture(engine: *mut Engine, session: *mut Session, plan: *mut Plan) {
+        // SAFETY: Each handle is the unique live handle of its kind and no call is in flight.
+        unsafe {
+            miso_engine_v2_plan_destroy(plan);
+            miso_engine_v2_session_destroy(session);
+        }
+        destroy(engine);
+    }
+
+    /// A zeroed ABI V1 report with the exact frozen struct size.
+    fn empty_report() -> PlanResourceReport {
+        PlanResourceReport {
+            struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
+            abi_version: 0,
+            sample_rate_hz: 0,
+            quantum_frames: 0,
+            source_count: 0,
+            track_count: 0,
+            latency_samples: 0,
+            tail_kind: 0,
+            tail_samples: 0,
+            graph_session_plus_plan_bytes: 0,
+            graph_incremental_plan_bytes: 0,
+            graph_metadata_bytes: 0,
+            graph_delay_bytes: 0,
+            effect_bank_scratch_bytes: 0,
+            effect_bank_runtime_buffer_bytes: 0,
+            effect_bank_metadata_bytes: 0,
+            builtin_bank_bytes: 0,
+            builtin_bank_scratch_bytes: 0,
+            source_pcm_payload_bytes: 0,
+            source_overhead_bytes: 0,
+            source_total_bytes: 0,
+            effect_scalar_state_bytes: 0,
+            effect_scalar_scratch_bytes: 0,
+            builtin_processor_payload_bytes: 0,
+            builtin_meter_payload_bytes: 0,
+            builtin_retained_payload_bytes: 0,
+            capi_retained_bytes: 0,
+            largest_named_allocation_bytes: 0,
+            reserved: [0; 4],
+        }
+    }
+
+    /// Reads a handle diagnostic into an owned buffer sized by its own required-bytes query.
+    fn read_last_error(live_handle: *const c_void) -> Vec<u8> {
+        let mut query = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        let probe = last_error(live_handle, &mut query);
+        assert!(probe == RESULT_OK || probe == RESULT_BUFFER_TOO_SMALL);
+        let mut storage = vec![0_u8; query.required_bytes as usize];
+        query.data = storage.as_mut_ptr();
+        query.capacity_bytes = storage.len() as u64;
+        assert_eq!(last_error(live_handle, &mut query), RESULT_OK);
+        storage
     }
 
     #[test]
@@ -1640,5 +1778,82 @@ mod tests {
         );
         assert_eq!(error_query.required_bytes, diagnostics.required_bytes);
         destroy(engine);
+    }
+
+    /// F2 (a): `miso_engine_v2_plan_resources` takes a `const` plan and must be pure. Before this
+    /// fix it cleared the render diagnostic through a `RefCell` the render thread also writes.
+    #[test]
+    fn plan_resources_does_not_clear_the_render_diagnostic() {
+        let (engine, session, plan) = compiled_fixture();
+        let mut pcm = vec![0.0_f32; 256];
+        let output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: 255,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            // SAFETY: The plan is live; the short declared capacity is rejected before any write.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::CONTRACT_REJECTED)
+        );
+        let mut resources = empty_report();
+        assert_eq!(
+            // SAFETY: The plan is live and `resources` is writable storage of the exact size.
+            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            RESULT_OK
+        );
+        assert_eq!(resources.quantum_frames, 128);
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::CONTRACT_REJECTED),
+            "a const-plan query must not clear the render diagnostic"
+        );
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// F2 (b): the control/render split is a property of the code, not of a comment. Forming a
+    /// reference to the whole `Plan` re-creates the whole-struct borrow that this job removed, so
+    /// no such form may appear in this file.
+    #[test]
+    fn ffi_never_forms_a_whole_plan_reference() {
+        const SOURCE: &str = include_str!("ffi.rs");
+        let production = SOURCE
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("production region precedes the test module");
+        assert!(production.contains("miso_engine_v2_render_f32_planar"));
+        for form in ["&*plan", "&mut *plan", "&(*plan)", "&mut (*plan)"] {
+            let mut hits = Vec::new();
+            for (index, line) in production.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let mut rest = line;
+                while let Some(at) = rest.find(form) {
+                    let tail = &rest[at + form.len()..];
+                    // `&*plan.cast::<HandleHeader>()` borrows only the shared 16-byte header and
+                    // `&*plan_error_slot(..)` names a different item; neither borrows the plan.
+                    let projection = tail
+                        .starts_with(|next: char| next.is_alphanumeric() || next == '_')
+                        || tail.starts_with('.');
+                    if !projection {
+                        hits.push(format!("{}: {}", index + 1, line.trim()));
+                    }
+                    rest = tail;
+                }
+            }
+            assert!(
+                hits.is_empty(),
+                "ffi.rs forms a whole-plan reference {form}: {hits:?}"
+            );
+        }
     }
 }
