@@ -2,12 +2,15 @@
 
 use crate::{EncodeError, ProtocolLimits};
 
+#[cfg(test)]
 pub(crate) const WIRE_U8: u8 = 1;
-pub(crate) const WIRE_U16: u8 = 2;
+#[cfg(test)]
 pub(crate) const WIRE_U32: u8 = 3;
-pub(crate) const WIRE_U64: u8 = 4;
+#[cfg(test)]
 pub(crate) const WIRE_F32: u8 = 6;
+#[cfg(test)]
 pub(crate) const WIRE_BOOL: u8 = 8;
+#[cfg(test)]
 pub(crate) const WIRE_UTF8: u8 = 9;
 pub(crate) const WIRE_MESSAGE: u8 = 11;
 

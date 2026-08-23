@@ -1,8 +1,7 @@
-//! Schema-specific BTLV transaction framing and the first V1 session-edit encoder subset.
+//! Schema-specific BTLV transaction framing for all V1 session-edit opcodes.
 //!
-//! This staged module deliberately has no arbitrary-field escape hatch. It currently encodes the
-//! six session-scalar/profile/limits edit opcodes; subsequent Issue-005 subparts extend this same
-//! canonical builder with the remaining accepted model structures.
+//! This module deliberately has no arbitrary-field escape hatch. Its canonical builders consume
+//! the same field specifications used by validation and decoding.
 
 use miso_engine_session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
@@ -210,11 +209,23 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
 use crate::{
     CommandFrame, DecodeError, DecodeScratch, DecodedFrame, EncodeError, ExpectedRevision, Frame,
     MessageId, ProtocolCodec, RequestId, SessionEditV1,
-    btlv::{
-        CountSink, Sink, SliceSink, WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U16, WIRE_U32,
-        WIRE_U64, WIRE_UTF8,
-    },
+    btlv::{CountSink, Sink, SliceSink},
+    schema::{self, FieldSpec},
 };
+
+macro_rules! one_spec {
+    ($message:expr, $spec:expr $(,)?) => {{
+        let spec = $spec;
+        $message.one(spec.id, spec.wire.raw())
+    }};
+}
+
+macro_rules! values_spec {
+    ($message:expr, $spec:expr $(,)?) => {{
+        let spec = $spec;
+        $message.values(spec.id, spec.wire.raw())
+    }};
+}
 
 /// One typed `SESSION_TRANSACTION_APPLY` command ready for schema-specific BTLV encoding.
 pub struct SessionTransactionFrame<'a> {
@@ -339,12 +350,17 @@ impl ProtocolCodec {
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
         let top = Message::tlvs(outer.frame.payload, header.tlv_count)?;
-        top.schema(&[Rule::repeated(1)])?;
+        top.schema_spec(&schema::session::transaction::SPEC)?;
         if top.fields.is_empty() {
             return Err(DecodeError::InvalidTlv);
         }
-        let mut edits = Vec::with_capacity(top.fields.iter().filter(|field| field.id == 1).count());
-        for value in top.values(1, WIRE_MESSAGE)? {
+        let mut edits = Vec::with_capacity(
+            top.fields
+                .iter()
+                .filter(|field| field.id == schema::session::transaction::EDIT.id)
+                .count(),
+        );
+        for value in values_spec!(top, schema::session::transaction::EDIT)? {
             edits.push(parse_edit(Message::nested(value)?)?);
         }
         Ok(DecodedSessionTransaction {
@@ -367,8 +383,8 @@ impl ProtocolCodec {
             .command()
             .ok_or(DecodeError::MessageKindMismatch)?;
         let top = Message::tlvs(outer.frame.payload, header.tlv_count)?;
-        top.schema(&[Rule::repeated(1)])?;
-        let count = u32::try_from(top.values(1, WIRE_MESSAGE)?.count())
+        top.schema_spec(&schema::session::transaction::SPEC)?;
+        let count = u32::try_from(values_spec!(top, schema::session::transaction::EDIT)?.count())
             .map_err(|_| DecodeError::LimitExceeded)?;
         if count == 0 {
             return Err(DecodeError::InvalidTlv);
@@ -377,7 +393,7 @@ impl ProtocolCodec {
             return Err(DecodeError::LimitExceeded);
         }
         let mut edits = Vec::with_capacity(count as usize);
-        for value in top.values(1, WIRE_MESSAGE)? {
+        for value in values_spec!(top, schema::session::transaction::EDIT)? {
             edits.push(parse_edit(Message::nested(value)?)?);
         }
         Ok(DecodedSessionTransaction {
@@ -385,585 +401,6 @@ impl ProtocolCodec {
             edits,
         })
     }
-}
-
-struct MessageBuilder {
-    fields: Vec<u8>,
-    count: u32,
-}
-
-impl MessageBuilder {
-    fn new() -> Self {
-        Self {
-            fields: Vec::new(),
-            count: 0,
-        }
-    }
-    fn field(&mut self, id: u16, wire: u8, value: &[u8]) -> Result<(), EncodeError> {
-        self.count = self
-            .count
-            .checked_add(1)
-            .ok_or(EncodeError::OutputTooSmall {
-                required: usize::MAX,
-            })?;
-        self.fields.extend_from_slice(&id.to_le_bytes());
-        self.fields.push(wire);
-        self.fields.push(1);
-        self.fields.extend_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| EncodeError::OutputTooSmall {
-                    required: usize::MAX,
-                })?
-                .to_le_bytes(),
-        );
-        self.fields.extend_from_slice(value);
-        self.fields
-            .resize(self.fields.len() + padding(value.len()), 0);
-        Ok(())
-    }
-    fn u8(&mut self, id: u16, value: u8) -> Result<(), EncodeError> {
-        self.field(id, WIRE_U8, &[value])
-    }
-    fn u16(&mut self, id: u16, value: u16) -> Result<(), EncodeError> {
-        self.field(id, WIRE_U16, &value.to_le_bytes())
-    }
-    fn u32(&mut self, id: u16, value: u32) -> Result<(), EncodeError> {
-        self.field(id, WIRE_U32, &value.to_le_bytes())
-    }
-    fn u64(&mut self, id: u16, value: u64) -> Result<(), EncodeError> {
-        self.field(id, WIRE_U64, &value.to_le_bytes())
-    }
-    fn f32(&mut self, id: u16, value: f32) -> Result<(), EncodeError> {
-        self.field(id, WIRE_F32, &value.to_le_bytes())
-    }
-    fn boolean(&mut self, id: u16, value: bool) -> Result<(), EncodeError> {
-        self.field(id, WIRE_BOOL, &[u8::from(value)])
-    }
-    fn id(&mut self, id: u16, value: &StableId) -> Result<(), EncodeError> {
-        self.field(id, WIRE_UTF8, value.as_str().as_bytes())
-    }
-    fn text(&mut self, id: u16, value: &str) -> Result<(), EncodeError> {
-        self.field(id, WIRE_UTF8, value.as_bytes())
-    }
-    fn message(&mut self, id: u16, value: Vec<u8>) -> Result<(), EncodeError> {
-        self.field(id, WIRE_MESSAGE, &value)
-    }
-    fn finish(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(8 + self.fields.len());
-        bytes.extend_from_slice(&self.count.to_le_bytes());
-        bytes.extend_from_slice(&0_u32.to_le_bytes());
-        bytes.extend_from_slice(&self.fields);
-        bytes
-    }
-}
-
-fn transaction_payload(edits: &[SessionEditV1]) -> Result<Vec<u8>, EncodeError> {
-    let mut top = MessageBuilder::new();
-    for edit in edits {
-        top.message(1, edit_message(edit)?)?;
-    }
-    let complete = top.finish();
-    Ok(complete[8..].to_vec())
-}
-
-fn edit_message(edit: &SessionEditV1) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u16(1, edit.opcode().raw())?;
-    message.message(2, edit_payload(edit)?)?;
-    Ok(message.finish())
-}
-
-fn edit_payload(edit: &SessionEditV1) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match edit {
-        SessionEditV1::SetSessionId { session_id } => message.id(1, session_id)?,
-        SessionEditV1::SetSampleRateHz { sample_rate_hz } => message.u32(1, *sample_rate_hz)?,
-        SessionEditV1::SetQuantumFrames { quantum_frames } => message.u32(1, *quantum_frames)?,
-        SessionEditV1::SetRenderProfile { render_profile } => {
-            message.message(1, render_profile_message(render_profile)?)?
-        }
-        SessionEditV1::SetOutputProfile { output_profile } => {
-            message.message(1, output_profile_message(output_profile)?)?
-        }
-        SessionEditV1::SetLimits { limits } => message.message(1, limits_message(limits)?)?,
-        SessionEditV1::UpsertSource { source } => message.message(1, source_message(source)?)?,
-        SessionEditV1::RemoveSource { source_id } => message.id(1, source_id)?,
-        SessionEditV1::SetSourceSampleRateHz {
-            source_id,
-            sample_rate_hz,
-        } => {
-            message.id(1, source_id)?;
-            message.u32(2, *sample_rate_hz)?;
-        }
-        SessionEditV1::SetSourceContent { source_id, content } => {
-            message.id(1, source_id)?;
-            message.message(2, content_message(content)?)?;
-        }
-        SessionEditV1::SetSourceMapping { source_id, mapping } => {
-            message.id(1, source_id)?;
-            message.message(2, mapping_message(mapping)?)?;
-        }
-        SessionEditV1::UpsertTrack { track } => message.message(1, track_message(track)?)?,
-        SessionEditV1::RemoveTrack { track_id } => message.id(1, track_id)?,
-        SessionEditV1::SetTrackSourceAssignment {
-            track_id,
-            source_id,
-            left_source_channel,
-            right_source_channel,
-        } => {
-            message.id(1, track_id)?;
-            message.id(2, source_id)?;
-            message.u8(3, *left_source_channel)?;
-            message.u8(4, *right_source_channel)?;
-        }
-        SessionEditV1::SetTrackBuiltins { track_id, builtins } => {
-            message.id(1, track_id)?;
-            message.message(2, builtins_message(builtins)?)?;
-        }
-        SessionEditV1::SetTrackRack {
-            track_id,
-            rack_name,
-            rack,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.message(3, rack_message(rack)?)?;
-        }
-        SessionEditV1::PutTrackEffect {
-            track_id,
-            rack_name,
-            final_position,
-            effect,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.u32(3, *final_position)?;
-            message.message(4, effect_message(effect)?)?;
-        }
-        SessionEditV1::RemoveTrackEffect {
-            track_id,
-            rack_name,
-            effect_id,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-        }
-        SessionEditV1::SetTrackEffectOrder {
-            track_id,
-            rack_name,
-            effect_ids,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            for effect_id in effect_ids {
-                message.id(3, effect_id)?;
-            }
-        }
-        SessionEditV1::SetEffectIdentity {
-            track_id,
-            rack_name,
-            effect_id,
-            identity,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.message(4, identity_message(identity)?)?;
-        }
-        SessionEditV1::SetEffectQuality {
-            track_id,
-            rack_name,
-            effect_id,
-            quality,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.u8(4, enum_quality(*quality))?;
-        }
-        SessionEditV1::SetEffectBypass {
-            track_id,
-            rack_name,
-            effect_id,
-            bypass,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.boolean(4, *bypass)?;
-        }
-        SessionEditV1::SetEffectLinkMode {
-            track_id,
-            rack_name,
-            effect_id,
-            link_mode,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.u8(4, enum_link(*link_mode))?;
-        }
-        SessionEditV1::SetEffectSidechain {
-            track_id,
-            rack_name,
-            effect_id,
-            sidechain,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.message(4, sidechain_message(sidechain)?)?;
-        }
-        SessionEditV1::UpsertEffectParam {
-            track_id,
-            rack_name,
-            effect_id,
-            param,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.message(4, param_message(param)?)?;
-        }
-        SessionEditV1::RemoveEffectParam {
-            track_id,
-            rack_name,
-            effect_id,
-            parameter_id,
-            channel,
-        } => {
-            message.id(1, track_id)?;
-            message.u8(2, enum_rack(*rack_name))?;
-            message.id(3, effect_id)?;
-            message.u32(4, *parameter_id)?;
-            message.u8(5, enum_channel(*channel))?;
-        }
-        SessionEditV1::SetTrackFader { track_id, fader } => {
-            message.id(1, track_id)?;
-            message.message(2, fader_message(fader)?)?;
-        }
-        SessionEditV1::SetTrackMatrixOrPan {
-            track_id,
-            matrix_or_pan,
-        } => {
-            message.id(1, track_id)?;
-            message.message(2, matrix_or_pan_message(matrix_or_pan)?)?;
-        }
-        SessionEditV1::UpsertSubmix { submix } => message.message(1, submix_message(submix)?)?,
-        SessionEditV1::RemoveSubmix { submix_id } => message.id(1, submix_id)?,
-        SessionEditV1::UpsertOutput { output } => message.message(1, output_message(output)?)?,
-        SessionEditV1::RemoveOutput { output_id } => message.id(1, output_id)?,
-        SessionEditV1::UpsertRoute { route } => message.message(1, route_message(route)?)?,
-        SessionEditV1::RemoveRoute { route_id } => message.id(1, route_id)?,
-        SessionEditV1::SetRouteSource { route_id, source } => {
-            message.id(1, route_id)?;
-            message.message(2, route_source_message(source)?)?;
-        }
-        SessionEditV1::SetRouteDestination {
-            route_id,
-            destination,
-        } => {
-            message.id(1, route_id)?;
-            message.message(2, route_destination_message(destination)?)?;
-        }
-        SessionEditV1::SetRouteChannelMatrix {
-            route_id,
-            channel_matrix,
-        } => {
-            message.id(1, route_id)?;
-            message.message(2, channel_matrix_message(channel_matrix)?)?;
-        }
-        SessionEditV1::SetRouteGainDb { route_id, gain_db } => {
-            message.id(1, route_id)?;
-            message.f32(2, *gain_db)?;
-        }
-        SessionEditV1::UpsertAutomation { automation } => {
-            message.message(1, automation_message(automation)?)?
-        }
-        SessionEditV1::RemoveAutomation { automation_id } => message.id(1, automation_id)?,
-        SessionEditV1::SetAutomationTarget {
-            automation_id,
-            target,
-        } => {
-            message.id(1, automation_id)?;
-            message.message(2, automation_target_message(target)?)?;
-        }
-        SessionEditV1::SetAutomationSegments {
-            automation_id,
-            segments,
-        } => {
-            message.id(1, automation_id)?;
-            for segment in segments {
-                message.message(2, automation_segment_message(segment)?)?;
-            }
-        }
-    }
-    Ok(message.finish())
-}
-
-fn render_profile_message(value: &RenderProfile) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.u8(
-        2,
-        match value.mode {
-            miso_engine_session::RenderMode::SingleThread => 1,
-            miso_engine_session::RenderMode::DependencyWaves => 2,
-        },
-    )?;
-    Ok(message.finish())
-}
-
-fn output_profile_message(value: &OutputProfile) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.u8(2, value.channels)?;
-    message.u8(3, 1)?;
-    Ok(message.finish())
-}
-
-fn limits_message(value: &SessionLimits) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u64(1, value.pcm_ring_frames)?;
-    message.u64(2, value.control_queue_messages)?;
-    message.u64(3, value.memory_bytes)?;
-    Ok(message.finish())
-}
-
-fn content_message(value: &SourceContent) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.text(1, &value.identity)?;
-    message.text(2, &value.locator)?;
-    Ok(message.finish())
-}
-
-fn region_message(value: &SourceRegion) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u64(1, value.start_sample)?;
-    message.u64(2, value.length_samples)?;
-    Ok(message.finish())
-}
-
-fn mapping_message(value: &SourceMapping) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u8(1, value.channel_count)?;
-    message.message(2, region_message(&value.region)?)?;
-    Ok(message.finish())
-}
-
-fn source_message(value: &Source) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.u32(2, value.sample_rate_hz)?;
-    message.message(3, content_message(&value.content)?)?;
-    message.message(4, mapping_message(&value.mapping)?)?;
-    Ok(message.finish())
-}
-
-fn builtins_message(value: &DualMonoBuiltins) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.message(1, channel_builtins_message(&value.left)?)?;
-    message.message(2, channel_builtins_message(&value.right)?)?;
-    Ok(message.finish())
-}
-fn channel_builtins_message(value: &ChannelBuiltins) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.boolean(1, value.polarity_invert)?;
-    message.f32(2, value.trim_db)?;
-    message.f32(3, value.hpf_hz)?;
-    message.f32(4, value.lpf_hz)?;
-    Ok(message.finish())
-}
-fn rack_message(value: &Rack) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    for effect in &value.effects {
-        message.message(1, effect_message(effect)?)?;
-    }
-    Ok(message.finish())
-}
-fn identity_message(value: &EffectIdentity) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match value {
-        EffectIdentity::Native { effect_id } => {
-            message.u8(1, 1)?;
-            message.id(2, effect_id)?;
-        }
-        EffectIdentity::ThirdPartyCid { cid } => {
-            message.u8(1, 2)?;
-            message.text(2, cid)?;
-        }
-    }
-    Ok(message.finish())
-}
-fn route_source_message(value: &RouteSource) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match value {
-        RouteSource::Track { track_id, tap } => {
-            message.u8(1, 1)?;
-            message.id(2, track_id)?;
-            message.u8(3, enum_tap(*tap))?;
-        }
-        RouteSource::SubmixOutput { submix_id } => {
-            message.u8(1, 2)?;
-            message.id(2, submix_id)?;
-        }
-    }
-    Ok(message.finish())
-}
-fn route_destination_message(value: &RouteDestination) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match value {
-        RouteDestination::SubmixInput { submix_id } => {
-            message.u8(1, 1)?;
-            message.id(2, submix_id)?;
-        }
-        RouteDestination::OutputInput { output_id } => {
-            message.u8(1, 2)?;
-            message.id(2, output_id)?;
-        }
-    }
-    Ok(message.finish())
-}
-fn sidechain_message(value: &SidechainDeclaration) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match value {
-        SidechainDeclaration::None => message.u8(1, 1)?,
-        SidechainDeclaration::Routed(value) => {
-            message.u8(1, 2)?;
-            message.message(2, route_source_message(&value.source)?)?;
-            message.id(3, &value.port_id)?;
-        }
-    }
-    Ok(message.finish())
-}
-fn param_message(value: &EffectParam) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u32(1, value.parameter_id)?;
-    message.u8(2, enum_channel(value.channel))?;
-    message.u8(3, enum_unit(value.unit))?;
-    message.f32(4, value.value)?;
-    Ok(message.finish())
-}
-fn effect_message(value: &Effect) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.message(2, identity_message(&value.identity)?)?;
-    message.u8(3, enum_quality(value.quality))?;
-    message.boolean(4, value.bypass)?;
-    message.u8(5, enum_link(value.link_mode))?;
-    for parameter in &value.params {
-        message.message(6, param_message(parameter)?)?;
-    }
-    message.message(7, sidechain_message(&value.sidechain)?)?;
-    Ok(message.finish())
-}
-fn fader_message(value: &DualMonoFader) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.f32(1, value.left_db)?;
-    message.f32(2, value.right_db)?;
-    message.boolean(3, value.left_mute)?;
-    message.boolean(4, value.right_mute)?;
-    Ok(message.finish())
-}
-fn matrix_or_pan_message(value: &MatrixOrPan) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    match value {
-        MatrixOrPan::Pan {
-            left,
-            right,
-            smoothing_samples,
-        } => {
-            message.u8(1, 1)?;
-            message.f32(2, *left)?;
-            message.f32(3, *right)?;
-            message.u32(4, *smoothing_samples)?;
-        }
-        MatrixOrPan::Matrix {
-            ll,
-            lr,
-            rl,
-            rr,
-            smoothing_samples,
-        } => {
-            message.u8(1, 2)?;
-            message.f32(2, *ll)?;
-            message.f32(3, *lr)?;
-            message.f32(4, *rl)?;
-            message.f32(5, *rr)?;
-            message.u32(6, *smoothing_samples)?;
-        }
-    }
-    Ok(message.finish())
-}
-fn track_message(value: &miso_engine_session::Track) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.id(2, &value.source_id)?;
-    message.u8(3, value.left_source_channel)?;
-    message.u8(4, value.right_source_channel)?;
-    message.message(5, builtins_message(&value.builtins)?)?;
-    message.message(6, rack_message(&value.simd1)?)?;
-    message.message(7, rack_message(&value.dynamic)?)?;
-    message.message(8, rack_message(&value.simd2)?)?;
-    message.message(9, fader_message(&value.fader)?)?;
-    message.message(10, matrix_or_pan_message(&value.matrix_or_pan)?)?;
-    Ok(message.finish())
-}
-fn submix_message(value: &Submix) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    Ok(message.finish())
-}
-fn output_message(value: &Output) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    Ok(message.finish())
-}
-fn channel_matrix_message(value: &ChannelMatrix) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.f32(1, value.ll)?;
-    message.f32(2, value.lr)?;
-    message.f32(3, value.rl)?;
-    message.f32(4, value.rr)?;
-    Ok(message.finish())
-}
-fn route_message(value: &Route) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.message(2, route_source_message(&value.source)?)?;
-    message.message(3, route_destination_message(&value.destination)?)?;
-    message.message(4, channel_matrix_message(&value.channel_matrix)?)?;
-    message.f32(5, value.gain_db)?;
-    Ok(message.finish())
-}
-fn automation_target_message(value: &AutomationTarget) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.entity_id)?;
-    message.u8(2, enum_rack(value.rack))?;
-    message.id(3, &value.effect_id)?;
-    message.u32(4, value.parameter_id)?;
-    message.u8(5, enum_channel(value.channel))?;
-    Ok(message.finish())
-}
-fn automation_segment_message(value: &AutomationSegment) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.u8(1, enum_shape(value.shape))?;
-    message.u64(2, value.start_sample)?;
-    message.u64(3, value.end_sample)?;
-    message.f32(4, value.start_value)?;
-    message.f32(5, value.end_value)?;
-    message.u8(6, enum_unit(value.unit))?;
-    Ok(message.finish())
-}
-fn automation_message(value: &Automation) -> Result<Vec<u8>, EncodeError> {
-    let mut message = MessageBuilder::new();
-    message.id(1, &value.id)?;
-    message.message(2, automation_target_message(&value.target)?)?;
-    for segment in &value.segments {
-        message.message(3, automation_segment_message(segment)?)?;
-    }
-    Ok(message.finish())
 }
 
 const fn enum_quality(value: EffectQuality) -> u8 {
@@ -1032,43 +469,43 @@ fn tx_start_message(sink: &mut dyn Sink, count: u32) -> Result<(), EncodeError> 
     sink.message_header(count)
 }
 
-fn tx_field(sink: &mut dyn Sink, id: u16, wire: u8, value: &[u8]) -> Result<(), EncodeError> {
-    sink.field(id, wire, value)
+fn tx_field(sink: &mut dyn Sink, spec: FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
+    sink.field(spec.id, spec.wire.raw(), value)
 }
 
-fn tx_u8(sink: &mut dyn Sink, id: u16, value: u8) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_U8, &[value])
+fn tx_u8(sink: &mut dyn Sink, spec: FieldSpec, value: u8) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &[value])
 }
-fn tx_u16(sink: &mut dyn Sink, id: u16, value: u16) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_U16, &value.to_le_bytes())
+fn tx_u16(sink: &mut dyn Sink, spec: FieldSpec, value: u16) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &value.to_le_bytes())
 }
-fn tx_u32(sink: &mut dyn Sink, id: u16, value: u32) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_U32, &value.to_le_bytes())
+fn tx_u32(sink: &mut dyn Sink, spec: FieldSpec, value: u32) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &value.to_le_bytes())
 }
-fn tx_u64(sink: &mut dyn Sink, id: u16, value: u64) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_U64, &value.to_le_bytes())
+fn tx_u64(sink: &mut dyn Sink, spec: FieldSpec, value: u64) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &value.to_le_bytes())
 }
-fn tx_f32(sink: &mut dyn Sink, id: u16, value: f32) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_F32, &value.to_le_bytes())
+fn tx_f32(sink: &mut dyn Sink, spec: FieldSpec, value: f32) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &value.to_le_bytes())
 }
-fn tx_bool(sink: &mut dyn Sink, id: u16, value: bool) -> Result<(), EncodeError> {
-    tx_field(sink, id, WIRE_BOOL, &[u8::from(value)])
+fn tx_bool(sink: &mut dyn Sink, spec: FieldSpec, value: bool) -> Result<(), EncodeError> {
+    tx_field(sink, spec, &[u8::from(value)])
 }
-fn tx_text(sink: &mut dyn Sink, id: u16, value: &str) -> Result<(), EncodeError> {
+fn tx_text(sink: &mut dyn Sink, spec: FieldSpec, value: &str) -> Result<(), EncodeError> {
     if value.len() > sink.limits().max_string_bytes {
         return Err(EncodeError::LimitExceeded);
     }
-    tx_field(sink, id, WIRE_UTF8, value.as_bytes())
+    tx_field(sink, spec, value.as_bytes())
 }
-fn tx_id(sink: &mut dyn Sink, id: u16, value: &StableId) -> Result<(), EncodeError> {
-    tx_text(sink, id, value.as_str())
+fn tx_id(sink: &mut dyn Sink, spec: FieldSpec, value: &StableId) -> Result<(), EncodeError> {
+    tx_text(sink, spec, value.as_str())
 }
 fn tx_message(
     sink: &mut dyn Sink,
-    id: u16,
+    spec: FieldSpec,
     mut encode: impl FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<(), EncodeError> {
-    sink.nested(id, &mut encode)
+    sink.nested(spec.id, &mut encode)
 }
 
 fn encode_transaction_payload_into(
@@ -1079,18 +516,23 @@ fn encode_transaction_payload_into(
         return Err(EncodeError::LimitExceeded);
     }
     for edit in edits {
-        tx_message(sink, 1, |nested| tx_edit_message(nested, edit))?;
+        tx_message(sink, schema::session::transaction::EDIT, |nested| {
+            tx_edit_message(nested, edit)
+        })?;
     }
     Ok(())
 }
 
 fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_u16(sink, 1, edit.opcode().raw())?;
-    tx_message(sink, 2, |nested| tx_edit_payload(nested, edit))
+    tx_u16(sink, schema::session::edit::OPCODE, edit.opcode().raw())?;
+    tx_message(sink, schema::session::edit::PAYLOAD, |nested| {
+        tx_edit_payload(nested, edit)
+    })
 }
 
 fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
+    let fields = schema::session::payload_spec(edit.opcode()).fields;
     let count = match edit {
         SessionEditV1::SetSessionId { .. }
         | SessionEditV1::SetSampleRateHz { .. }
@@ -1137,58 +579,66 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
     };
     tx_start_message(sink, count)?;
     match edit {
-        SessionEditV1::SetSessionId { session_id } => tx_id(sink, 1, session_id),
-        SessionEditV1::SetSampleRateHz { sample_rate_hz } => tx_u32(sink, 1, *sample_rate_hz),
-        SessionEditV1::SetQuantumFrames { quantum_frames } => tx_u32(sink, 1, *quantum_frames),
+        SessionEditV1::SetSessionId { session_id } => tx_id(sink, fields[0], session_id),
+        SessionEditV1::SetSampleRateHz { sample_rate_hz } => {
+            tx_u32(sink, fields[0], *sample_rate_hz)
+        }
+        SessionEditV1::SetQuantumFrames { quantum_frames } => {
+            tx_u32(sink, fields[0], *quantum_frames)
+        }
         SessionEditV1::SetRenderProfile { render_profile } => {
-            tx_message(sink, 1, |v| tx_render_profile(v, render_profile))
+            tx_message(sink, fields[0], |v| tx_render_profile(v, render_profile))
         }
         SessionEditV1::SetOutputProfile { output_profile } => {
-            tx_message(sink, 1, |v| tx_output_profile(v, output_profile))
+            tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
         }
-        SessionEditV1::SetLimits { limits } => tx_message(sink, 1, |v| tx_limits(v, limits)),
-        SessionEditV1::UpsertSource { source } => tx_message(sink, 1, |v| tx_source(v, source)),
-        SessionEditV1::RemoveSource { source_id } => tx_id(sink, 1, source_id),
+        SessionEditV1::SetLimits { limits } => {
+            tx_message(sink, fields[0], |v| tx_limits(v, limits))
+        }
+        SessionEditV1::UpsertSource { source } => {
+            tx_message(sink, fields[0], |v| tx_source(v, source))
+        }
+        SessionEditV1::RemoveSource { source_id } => tx_id(sink, fields[0], source_id),
         SessionEditV1::SetSourceSampleRateHz {
             source_id,
             sample_rate_hz,
         } => {
-            tx_id(sink, 1, source_id)?;
-            tx_u32(sink, 2, *sample_rate_hz)
+            tx_id(sink, fields[0], source_id)?;
+            tx_u32(sink, fields[1], *sample_rate_hz)
         }
         SessionEditV1::SetSourceContent { source_id, content } => {
-            tx_id(sink, 1, source_id)?;
-            tx_message(sink, 2, |v| tx_content(v, content))
+            tx_id(sink, fields[0], source_id)?;
+            tx_message(sink, fields[1], |v| tx_content(v, content))
         }
         SessionEditV1::SetSourceMapping { source_id, mapping } => {
-            tx_id(sink, 1, source_id)?;
-            tx_message(sink, 2, |v| tx_mapping(v, mapping))
+            tx_id(sink, fields[0], source_id)?;
+            tx_message(sink, fields[1], |v| tx_mapping(v, mapping))
         }
-        SessionEditV1::UpsertTrack { track } => tx_message(sink, 1, |v| tx_track(v, track)),
-        SessionEditV1::RemoveTrack { track_id } => tx_id(sink, 1, track_id),
+        SessionEditV1::UpsertTrack { track } => tx_message(sink, fields[0], |v| tx_track(v, track)),
+        SessionEditV1::RemoveTrack { track_id } => tx_id(sink, fields[0], track_id),
         SessionEditV1::SetTrackSourceAssignment {
             track_id,
             source_id,
             left_source_channel,
             right_source_channel,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_id(sink, 2, source_id)?;
-            tx_u8(sink, 3, *left_source_channel)?;
-            tx_u8(sink, 4, *right_source_channel)
+            tx_id(sink, fields[0], track_id)?;
+            tx_id(sink, fields[1], source_id)?;
+            tx_u8(sink, fields[2], *left_source_channel)?;
+            tx_u8(sink, fields[3], *right_source_channel)
         }
         SessionEditV1::SetTrackBuiltins { track_id, builtins } => {
-            tx_id(sink, 1, track_id)?;
-            tx_message(sink, 2, |v| tx_builtins(v, builtins))
+            tx_id(sink, fields[0], track_id)?;
+            tx_message(sink, fields[1], |v| tx_builtins(v, builtins))
         }
         SessionEditV1::SetTrackRack {
             track_id,
             rack_name,
             rack,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_u8(sink, 2, enum_rack(*rack_name))?;
-            tx_message(sink, 3, |v| tx_rack(v, rack))
+            tx_id(sink, fields[0], track_id)?;
+            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_message(sink, fields[2], |v| tx_rack(v, rack))
         }
         SessionEditV1::PutTrackEffect {
             track_id,
@@ -1196,29 +646,29 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             final_position,
             effect,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_u8(sink, 2, enum_rack(*rack_name))?;
-            tx_u32(sink, 3, *final_position)?;
-            tx_message(sink, 4, |v| tx_effect(v, effect))
+            tx_id(sink, fields[0], track_id)?;
+            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_u32(sink, fields[2], *final_position)?;
+            tx_message(sink, fields[3], |v| tx_effect(v, effect))
         }
         SessionEditV1::RemoveTrackEffect {
             track_id,
             rack_name,
             effect_id,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_u8(sink, 2, enum_rack(*rack_name))?;
-            tx_id(sink, 3, effect_id)
+            tx_id(sink, fields[0], track_id)?;
+            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_id(sink, fields[2], effect_id)
         }
         SessionEditV1::SetTrackEffectOrder {
             track_id,
             rack_name,
             effect_ids,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_u8(sink, 2, enum_rack(*rack_name))?;
+            tx_id(sink, fields[0], track_id)?;
+            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
             for effect_id in effect_ids {
-                tx_id(sink, 3, effect_id)?;
+                tx_id(sink, fields[2], effect_id)?;
             }
             Ok(())
         }
@@ -1227,7 +677,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             rack_name,
             effect_id,
             identity,
-        } => tx_effect_edit_message(sink, track_id, *rack_name, effect_id, |v| {
+        } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_identity(v, identity)
         }),
         SessionEditV1::SetEffectQuality {
@@ -1237,6 +687,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             quality,
         } => tx_effect_edit_scalar(
             sink,
+            fields,
             track_id,
             *rack_name,
             effect_id,
@@ -1248,21 +699,28 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_id,
             bypass,
         } => {
-            tx_effect_edit_prefix(sink, track_id, *rack_name, effect_id)?;
-            tx_bool(sink, 4, *bypass)
+            tx_effect_edit_prefix(sink, fields, track_id, *rack_name, effect_id)?;
+            tx_bool(sink, fields[3], *bypass)
         }
         SessionEditV1::SetEffectLinkMode {
             track_id,
             rack_name,
             effect_id,
             link_mode,
-        } => tx_effect_edit_scalar(sink, track_id, *rack_name, effect_id, enum_link(*link_mode)),
+        } => tx_effect_edit_scalar(
+            sink,
+            fields,
+            track_id,
+            *rack_name,
+            effect_id,
+            enum_link(*link_mode),
+        ),
         SessionEditV1::SetEffectSidechain {
             track_id,
             rack_name,
             effect_id,
             sidechain,
-        } => tx_effect_edit_message(sink, track_id, *rack_name, effect_id, |v| {
+        } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_sidechain(v, sidechain)
         }),
         SessionEditV1::UpsertEffectParam {
@@ -1270,7 +728,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             rack_name,
             effect_id,
             param,
-        } => tx_effect_edit_message(sink, track_id, *rack_name, effect_id, |v| {
+        } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_param(v, param)
         }),
         SessionEditV1::RemoveEffectParam {
@@ -1280,67 +738,71 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             parameter_id,
             channel,
         } => {
-            tx_effect_edit_prefix(sink, track_id, *rack_name, effect_id)?;
-            tx_u32(sink, 4, *parameter_id)?;
-            tx_u8(sink, 5, enum_channel(*channel))
+            tx_effect_edit_prefix(sink, fields, track_id, *rack_name, effect_id)?;
+            tx_u32(sink, fields[3], *parameter_id)?;
+            tx_u8(sink, fields[4], enum_channel(*channel))
         }
         SessionEditV1::SetTrackFader { track_id, fader } => {
-            tx_id(sink, 1, track_id)?;
-            tx_message(sink, 2, |v| tx_fader(v, fader))
+            tx_id(sink, fields[0], track_id)?;
+            tx_message(sink, fields[1], |v| tx_fader(v, fader))
         }
         SessionEditV1::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
         } => {
-            tx_id(sink, 1, track_id)?;
-            tx_message(sink, 2, |v| tx_matrix_or_pan(v, matrix_or_pan))
+            tx_id(sink, fields[0], track_id)?;
+            tx_message(sink, fields[1], |v| tx_matrix_or_pan(v, matrix_or_pan))
         }
-        SessionEditV1::UpsertSubmix { submix } => tx_message(sink, 1, |v| tx_submix(v, submix)),
-        SessionEditV1::RemoveSubmix { submix_id } => tx_id(sink, 1, submix_id),
-        SessionEditV1::UpsertOutput { output } => tx_message(sink, 1, |v| tx_output(v, output)),
-        SessionEditV1::RemoveOutput { output_id } => tx_id(sink, 1, output_id),
-        SessionEditV1::UpsertRoute { route } => tx_message(sink, 1, |v| tx_route(v, route)),
-        SessionEditV1::RemoveRoute { route_id } => tx_id(sink, 1, route_id),
+        SessionEditV1::UpsertSubmix { submix } => {
+            tx_message(sink, fields[0], |v| tx_submix(v, submix))
+        }
+        SessionEditV1::RemoveSubmix { submix_id } => tx_id(sink, fields[0], submix_id),
+        SessionEditV1::UpsertOutput { output } => {
+            tx_message(sink, fields[0], |v| tx_output(v, output))
+        }
+        SessionEditV1::RemoveOutput { output_id } => tx_id(sink, fields[0], output_id),
+        SessionEditV1::UpsertRoute { route } => tx_message(sink, fields[0], |v| tx_route(v, route)),
+        SessionEditV1::RemoveRoute { route_id } => tx_id(sink, fields[0], route_id),
         SessionEditV1::SetRouteSource { route_id, source } => {
-            tx_id(sink, 1, route_id)?;
-            tx_message(sink, 2, |v| tx_route_source(v, source))
+            tx_id(sink, fields[0], route_id)?;
+            tx_message(sink, fields[1], |v| tx_route_source(v, source))
         }
         SessionEditV1::SetRouteDestination {
             route_id,
             destination,
         } => {
-            tx_id(sink, 1, route_id)?;
-            tx_message(sink, 2, |v| tx_route_destination(v, destination))
+            tx_id(sink, fields[0], route_id)?;
+            tx_message(sink, fields[1], |v| tx_route_destination(v, destination))
         }
         SessionEditV1::SetRouteChannelMatrix {
             route_id,
             channel_matrix,
         } => {
-            tx_id(sink, 1, route_id)?;
-            tx_message(sink, 2, |v| tx_channel_matrix(v, channel_matrix))
+            tx_id(sink, fields[0], route_id)?;
+            tx_message(sink, fields[1], |v| tx_channel_matrix(v, channel_matrix))
         }
         SessionEditV1::SetRouteGainDb { route_id, gain_db } => {
-            tx_id(sink, 1, route_id)?;
-            tx_f32(sink, 2, *gain_db)
+            tx_id(sink, fields[0], route_id)?;
+            tx_f32(sink, fields[1], *gain_db)
         }
         SessionEditV1::UpsertAutomation { automation } => {
-            tx_message(sink, 1, |v| tx_automation(v, automation))
+            tx_message(sink, fields[0], |v| tx_automation(v, automation))
         }
-        SessionEditV1::RemoveAutomation { automation_id } => tx_id(sink, 1, automation_id),
+        SessionEditV1::RemoveAutomation { automation_id } => tx_id(sink, fields[0], automation_id),
         SessionEditV1::SetAutomationTarget {
             automation_id,
             target,
         } => {
-            tx_id(sink, 1, automation_id)?;
-            tx_message(sink, 2, |v| tx_automation_target(v, target))
+            tx_id(sink, fields[0], automation_id)?;
+            tx_message(sink, fields[1], |v| tx_automation_target(v, target))
         }
         SessionEditV1::SetAutomationSegments {
             automation_id,
             segments,
         } => {
-            tx_id(sink, 1, automation_id)?;
+            tx_id(sink, fields[0], automation_id)?;
             for segment in segments {
-                tx_message(sink, 2, |v| tx_automation_segment(v, segment))?;
+                tx_message(sink, fields[1], |v| tx_automation_segment(v, segment))?;
             }
             Ok(())
         }
@@ -1349,41 +811,44 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
 
 fn tx_effect_edit_prefix(
     sink: &mut dyn Sink,
+    fields: &[FieldSpec],
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
 ) -> Result<(), EncodeError> {
-    tx_id(sink, 1, track_id)?;
-    tx_u8(sink, 2, enum_rack(rack_name))?;
-    tx_id(sink, 3, effect_id)
+    tx_id(sink, fields[0], track_id)?;
+    tx_u8(sink, fields[1], enum_rack(rack_name))?;
+    tx_id(sink, fields[2], effect_id)
 }
 fn tx_effect_edit_scalar(
     sink: &mut dyn Sink,
+    fields: &[FieldSpec],
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
     value: u8,
 ) -> Result<(), EncodeError> {
-    tx_effect_edit_prefix(sink, track_id, rack_name, effect_id)?;
-    tx_u8(sink, 4, value)
+    tx_effect_edit_prefix(sink, fields, track_id, rack_name, effect_id)?;
+    tx_u8(sink, fields[3], value)
 }
 fn tx_effect_edit_message(
     sink: &mut dyn Sink,
+    fields: &[FieldSpec],
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
     encode: impl FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<(), EncodeError> {
-    tx_effect_edit_prefix(sink, track_id, rack_name, effect_id)?;
-    tx_message(sink, 4, encode)
+    tx_effect_edit_prefix(sink, fields, track_id, rack_name, effect_id)?;
+    tx_message(sink, fields[3], encode)
 }
 
 fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_id(sink, 1, &value.id)?;
+    tx_id(sink, schema::session::render_profile::ID, &value.id)?;
     tx_u8(
         sink,
-        2,
+        schema::session::render_profile::MODE,
         match value.mode {
             miso_engine_session::RenderMode::SingleThread => 1,
             miso_engine_session::RenderMode::DependencyWaves => 2,
@@ -1392,54 +857,114 @@ fn tx_render_profile(sink: &mut dyn Sink, value: &RenderProfile) -> Result<(), E
 }
 fn tx_output_profile(sink: &mut dyn Sink, value: &OutputProfile) -> Result<(), EncodeError> {
     tx_start_message(sink, 3)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_u8(sink, 2, value.channels)?;
-    tx_u8(sink, 3, 1)
+    tx_id(sink, schema::session::output_profile::ID, &value.id)?;
+    tx_u8(
+        sink,
+        schema::session::output_profile::CHANNELS,
+        value.channels,
+    )?;
+    tx_u8(sink, schema::session::output_profile::LAYOUT, 1)
 }
 fn tx_limits(sink: &mut dyn Sink, value: &SessionLimits) -> Result<(), EncodeError> {
     tx_start_message(sink, 3)?;
-    tx_u64(sink, 1, value.pcm_ring_frames)?;
-    tx_u64(sink, 2, value.control_queue_messages)?;
-    tx_u64(sink, 3, value.memory_bytes)
+    tx_u64(
+        sink,
+        schema::session::limits::PCM_RING_FRAMES,
+        value.pcm_ring_frames,
+    )?;
+    tx_u64(
+        sink,
+        schema::session::limits::CONTROL_QUEUE_MESSAGES,
+        value.control_queue_messages,
+    )?;
+    tx_u64(
+        sink,
+        schema::session::limits::MEMORY_BYTES,
+        value.memory_bytes,
+    )
 }
 fn tx_content(sink: &mut dyn Sink, value: &SourceContent) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_text(sink, 1, &value.identity)?;
-    tx_text(sink, 2, &value.locator)
+    tx_text(sink, schema::session::content::IDENTITY, &value.identity)?;
+    tx_text(sink, schema::session::content::LOCATOR, &value.locator)
 }
 fn tx_region(sink: &mut dyn Sink, value: &SourceRegion) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_u64(sink, 1, value.start_sample)?;
-    tx_u64(sink, 2, value.length_samples)
+    tx_u64(
+        sink,
+        schema::session::region::START_SAMPLE,
+        value.start_sample,
+    )?;
+    tx_u64(
+        sink,
+        schema::session::region::LENGTH_SAMPLES,
+        value.length_samples,
+    )
 }
 fn tx_mapping(sink: &mut dyn Sink, value: &SourceMapping) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_u8(sink, 1, value.channel_count)?;
-    tx_message(sink, 2, |v| tx_region(v, &value.region))
+    tx_u8(
+        sink,
+        schema::session::mapping::CHANNEL_COUNT,
+        value.channel_count,
+    )?;
+    tx_message(sink, schema::session::mapping::REGION, |v| {
+        tx_region(v, &value.region)
+    })
 }
 fn tx_source(sink: &mut dyn Sink, value: &Source) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_u32(sink, 2, value.sample_rate_hz)?;
-    tx_message(sink, 3, |v| tx_content(v, &value.content))?;
-    tx_message(sink, 4, |v| tx_mapping(v, &value.mapping))
+    tx_id(sink, schema::session::source::ID, &value.id)?;
+    tx_u32(
+        sink,
+        schema::session::source::SAMPLE_RATE_HZ,
+        value.sample_rate_hz,
+    )?;
+    tx_message(sink, schema::session::source::CONTENT, |v| {
+        tx_content(v, &value.content)
+    })?;
+    tx_message(sink, schema::session::source::MAPPING, |v| {
+        tx_mapping(v, &value.mapping)
+    })
 }
 fn tx_builtins(sink: &mut dyn Sink, value: &DualMonoBuiltins) -> Result<(), EncodeError> {
     tx_start_message(sink, 2)?;
-    tx_message(sink, 1, |v| tx_channel_builtins(v, &value.left))?;
-    tx_message(sink, 2, |v| tx_channel_builtins(v, &value.right))
+    tx_message(sink, schema::session::builtins::LEFT, |v| {
+        tx_channel_builtins(v, &value.left)
+    })?;
+    tx_message(sink, schema::session::builtins::RIGHT, |v| {
+        tx_channel_builtins(v, &value.right)
+    })
 }
 fn tx_channel_builtins(sink: &mut dyn Sink, value: &ChannelBuiltins) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
-    tx_bool(sink, 1, value.polarity_invert)?;
-    tx_f32(sink, 2, value.trim_db)?;
-    tx_f32(sink, 3, value.hpf_hz)?;
-    tx_f32(sink, 4, value.lpf_hz)
+    tx_bool(
+        sink,
+        schema::session::channel_builtins::POLARITY_INVERT,
+        value.polarity_invert,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::channel_builtins::TRIM_DB,
+        value.trim_db,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::channel_builtins::HPF_HZ,
+        value.hpf_hz,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::channel_builtins::LPF_HZ,
+        value.lpf_hz,
+    )
 }
 fn tx_rack(sink: &mut dyn Sink, value: &Rack) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(0, value.effects.len())?)?;
     for effect in &value.effects {
-        tx_message(sink, 1, |v| tx_effect(v, effect))?;
+        tx_message(sink, schema::session::rack::EFFECT, |v| {
+            tx_effect(v, effect)
+        })?;
     }
     Ok(())
 }
@@ -1447,12 +972,12 @@ fn tx_identity(sink: &mut dyn Sink, value: &EffectIdentity) -> Result<(), Encode
     tx_start_message(sink, 2)?;
     match value {
         EffectIdentity::Native { effect_id } => {
-            tx_u8(sink, 1, 1)?;
-            tx_id(sink, 2, effect_id)
+            tx_u8(sink, schema::session::effect_identity::TAG, 1)?;
+            tx_id(sink, schema::session::effect_identity::VALUE, effect_id)
         }
         EffectIdentity::ThirdPartyCid { cid } => {
-            tx_u8(sink, 1, 2)?;
-            tx_text(sink, 2, cid)
+            tx_u8(sink, schema::session::effect_identity::TAG, 2)?;
+            tx_text(sink, schema::session::effect_identity::VALUE, cid)
         }
     }
 }
@@ -1460,14 +985,14 @@ fn tx_route_source(sink: &mut dyn Sink, value: &RouteSource) -> Result<(), Encod
     match value {
         RouteSource::Track { track_id, tap } => {
             tx_start_message(sink, 3)?;
-            tx_u8(sink, 1, 1)?;
-            tx_id(sink, 2, track_id)?;
-            tx_u8(sink, 3, enum_tap(*tap))
+            tx_u8(sink, schema::session::route_source::TAG, 1)?;
+            tx_id(sink, schema::session::route_source::ID, track_id)?;
+            tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
         RouteSource::SubmixOutput { submix_id } => {
             tx_start_message(sink, 2)?;
-            tx_u8(sink, 1, 2)?;
-            tx_id(sink, 2, submix_id)
+            tx_u8(sink, schema::session::route_source::TAG, 2)?;
+            tx_id(sink, schema::session::route_source::ID, submix_id)
         }
     }
 }
@@ -1475,12 +1000,12 @@ fn tx_route_destination(sink: &mut dyn Sink, value: &RouteDestination) -> Result
     tx_start_message(sink, 2)?;
     match value {
         RouteDestination::SubmixInput { submix_id } => {
-            tx_u8(sink, 1, 1)?;
-            tx_id(sink, 2, submix_id)
+            tx_u8(sink, schema::session::route_destination::TAG, 1)?;
+            tx_id(sink, schema::session::route_destination::ID, submix_id)
         }
         RouteDestination::OutputInput { output_id } => {
-            tx_u8(sink, 1, 2)?;
-            tx_id(sink, 2, output_id)
+            tx_u8(sink, schema::session::route_destination::TAG, 2)?;
+            tx_id(sink, schema::session::route_destination::ID, output_id)
         }
     }
 }
@@ -1488,41 +1013,63 @@ fn tx_sidechain(sink: &mut dyn Sink, value: &SidechainDeclaration) -> Result<(),
     match value {
         SidechainDeclaration::None => {
             tx_start_message(sink, 1)?;
-            tx_u8(sink, 1, 1)
+            tx_u8(sink, schema::session::sidechain::TAG, 1)
         }
         SidechainDeclaration::Routed(value) => {
             tx_start_message(sink, 3)?;
-            tx_u8(sink, 1, 2)?;
-            tx_message(sink, 2, |v| tx_route_source(v, &value.source))?;
-            tx_id(sink, 3, &value.port_id)
+            tx_u8(sink, schema::session::sidechain::TAG, 2)?;
+            tx_message(sink, schema::session::sidechain::SOURCE, |v| {
+                tx_route_source(v, &value.source)
+            })?;
+            tx_id(sink, schema::session::sidechain::PORT_ID, &value.port_id)
         }
     }
 }
 fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
-    tx_u32(sink, 1, value.parameter_id)?;
-    tx_u8(sink, 2, enum_channel(value.channel))?;
-    tx_u8(sink, 3, enum_unit(value.unit))?;
-    tx_f32(sink, 4, value.value)
+    tx_u32(
+        sink,
+        schema::session::param::PARAMETER_ID,
+        value.parameter_id,
+    )?;
+    tx_u8(
+        sink,
+        schema::session::param::CHANNEL,
+        enum_channel(value.channel),
+    )?;
+    tx_u8(sink, schema::session::param::UNIT, enum_unit(value.unit))?;
+    tx_f32(sink, schema::session::param::VALUE, value.value)
 }
 fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(6, value.params.len())?)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_message(sink, 2, |v| tx_identity(v, &value.identity))?;
-    tx_u8(sink, 3, enum_quality(value.quality))?;
-    tx_bool(sink, 4, value.bypass)?;
-    tx_u8(sink, 5, enum_link(value.link_mode))?;
+    tx_id(sink, schema::session::effect::ID, &value.id)?;
+    tx_message(sink, schema::session::effect::IDENTITY, |v| {
+        tx_identity(v, &value.identity)
+    })?;
+    tx_u8(
+        sink,
+        schema::session::effect::QUALITY,
+        enum_quality(value.quality),
+    )?;
+    tx_bool(sink, schema::session::effect::BYPASS, value.bypass)?;
+    tx_u8(
+        sink,
+        schema::session::effect::LINK_MODE,
+        enum_link(value.link_mode),
+    )?;
     for param in &value.params {
-        tx_message(sink, 6, |v| tx_param(v, param))?;
+        tx_message(sink, schema::session::effect::PARAM, |v| tx_param(v, param))?;
     }
-    tx_message(sink, 7, |v| tx_sidechain(v, &value.sidechain))
+    tx_message(sink, schema::session::effect::SIDECHAIN, |v| {
+        tx_sidechain(v, &value.sidechain)
+    })
 }
 fn tx_fader(sink: &mut dyn Sink, value: &DualMonoFader) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
-    tx_f32(sink, 1, value.left_db)?;
-    tx_f32(sink, 2, value.right_db)?;
-    tx_bool(sink, 3, value.left_mute)?;
-    tx_bool(sink, 4, value.right_mute)
+    tx_f32(sink, schema::session::fader::LEFT_DB, value.left_db)?;
+    tx_f32(sink, schema::session::fader::RIGHT_DB, value.right_db)?;
+    tx_bool(sink, schema::session::fader::LEFT_MUTE, value.left_mute)?;
+    tx_bool(sink, schema::session::fader::RIGHT_MUTE, value.right_mute)
 }
 fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), EncodeError> {
     match value {
@@ -1532,10 +1079,14 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
             smoothing_samples,
         } => {
             tx_start_message(sink, 4)?;
-            tx_u8(sink, 1, 1)?;
-            tx_f32(sink, 2, *left)?;
-            tx_f32(sink, 3, *right)?;
-            tx_u32(sink, 4, *smoothing_samples)
+            tx_u8(sink, schema::session::matrix_or_pan::TAG, 1)?;
+            tx_f32(sink, schema::session::matrix_or_pan::A, *left)?;
+            tx_f32(sink, schema::session::matrix_or_pan::B, *right)?;
+            tx_u32(
+                sink,
+                schema::session::matrix_or_pan::PAN_SMOOTHING,
+                *smoothing_samples,
+            )
         }
         MatrixOrPan::Matrix {
             ll,
@@ -1545,77 +1096,155 @@ fn tx_matrix_or_pan(sink: &mut dyn Sink, value: &MatrixOrPan) -> Result<(), Enco
             smoothing_samples,
         } => {
             tx_start_message(sink, 6)?;
-            tx_u8(sink, 1, 2)?;
-            tx_f32(sink, 2, *ll)?;
-            tx_f32(sink, 3, *lr)?;
-            tx_f32(sink, 4, *rl)?;
-            tx_f32(sink, 5, *rr)?;
-            tx_u32(sink, 6, *smoothing_samples)
+            tx_u8(sink, schema::session::matrix_or_pan::TAG, 2)?;
+            tx_f32(sink, schema::session::matrix_or_pan::A, *ll)?;
+            tx_f32(sink, schema::session::matrix_or_pan::B, *lr)?;
+            tx_f32(sink, schema::session::matrix_or_pan::C_OR_SMOOTHING, *rl)?;
+            tx_f32(sink, schema::session::matrix_or_pan::D, *rr)?;
+            tx_u32(
+                sink,
+                schema::session::matrix_or_pan::SMOOTHING,
+                *smoothing_samples,
+            )
         }
     }
 }
 fn tx_track(sink: &mut dyn Sink, value: &miso_engine_session::Track) -> Result<(), EncodeError> {
     tx_start_message(sink, 10)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_id(sink, 2, &value.source_id)?;
-    tx_u8(sink, 3, value.left_source_channel)?;
-    tx_u8(sink, 4, value.right_source_channel)?;
-    tx_message(sink, 5, |v| tx_builtins(v, &value.builtins))?;
-    tx_message(sink, 6, |v| tx_rack(v, &value.simd1))?;
-    tx_message(sink, 7, |v| tx_rack(v, &value.dynamic))?;
-    tx_message(sink, 8, |v| tx_rack(v, &value.simd2))?;
-    tx_message(sink, 9, |v| tx_fader(v, &value.fader))?;
-    tx_message(sink, 10, |v| tx_matrix_or_pan(v, &value.matrix_or_pan))
+    tx_id(sink, schema::session::track::ID, &value.id)?;
+    tx_id(sink, schema::session::track::SOURCE_ID, &value.source_id)?;
+    tx_u8(
+        sink,
+        schema::session::track::LEFT_SOURCE_CHANNEL,
+        value.left_source_channel,
+    )?;
+    tx_u8(
+        sink,
+        schema::session::track::RIGHT_SOURCE_CHANNEL,
+        value.right_source_channel,
+    )?;
+    tx_message(sink, schema::session::track::BUILTINS, |v| {
+        tx_builtins(v, &value.builtins)
+    })?;
+    tx_message(sink, schema::session::track::SIMD1, |v| {
+        tx_rack(v, &value.simd1)
+    })?;
+    tx_message(sink, schema::session::track::DYNAMIC, |v| {
+        tx_rack(v, &value.dynamic)
+    })?;
+    tx_message(sink, schema::session::track::SIMD2, |v| {
+        tx_rack(v, &value.simd2)
+    })?;
+    tx_message(sink, schema::session::track::FADER, |v| {
+        tx_fader(v, &value.fader)
+    })?;
+    tx_message(sink, schema::session::track::MATRIX_OR_PAN, |v| {
+        tx_matrix_or_pan(v, &value.matrix_or_pan)
+    })
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
     tx_start_message(sink, 1)?;
-    tx_id(sink, 1, &value.id)
+    tx_id(sink, schema::session::submix::ID, &value.id)
 }
 fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
     tx_start_message(sink, 1)?;
-    tx_id(sink, 1, &value.id)
+    tx_id(sink, schema::session::output::ID, &value.id)
 }
 fn tx_channel_matrix(sink: &mut dyn Sink, value: &ChannelMatrix) -> Result<(), EncodeError> {
     tx_start_message(sink, 4)?;
-    tx_f32(sink, 1, value.ll)?;
-    tx_f32(sink, 2, value.lr)?;
-    tx_f32(sink, 3, value.rl)?;
-    tx_f32(sink, 4, value.rr)
+    tx_f32(sink, schema::session::channel_matrix::LL, value.ll)?;
+    tx_f32(sink, schema::session::channel_matrix::LR, value.lr)?;
+    tx_f32(sink, schema::session::channel_matrix::RL, value.rl)?;
+    tx_f32(sink, schema::session::channel_matrix::RR, value.rr)
 }
 fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
     tx_start_message(sink, 5)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_message(sink, 2, |v| tx_route_source(v, &value.source))?;
-    tx_message(sink, 3, |v| tx_route_destination(v, &value.destination))?;
-    tx_message(sink, 4, |v| tx_channel_matrix(v, &value.channel_matrix))?;
-    tx_f32(sink, 5, value.gain_db)
+    tx_id(sink, schema::session::route::ID, &value.id)?;
+    tx_message(sink, schema::session::route::SOURCE, |v| {
+        tx_route_source(v, &value.source)
+    })?;
+    tx_message(sink, schema::session::route::DESTINATION, |v| {
+        tx_route_destination(v, &value.destination)
+    })?;
+    tx_message(sink, schema::session::route::CHANNEL_MATRIX, |v| {
+        tx_channel_matrix(v, &value.channel_matrix)
+    })?;
+    tx_f32(sink, schema::session::route::GAIN_DB, value.gain_db)
 }
 fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result<(), EncodeError> {
     tx_start_message(sink, 5)?;
-    tx_id(sink, 1, &value.entity_id)?;
-    tx_u8(sink, 2, enum_rack(value.rack))?;
-    tx_id(sink, 3, &value.effect_id)?;
-    tx_u32(sink, 4, value.parameter_id)?;
-    tx_u8(sink, 5, enum_channel(value.channel))
+    tx_id(
+        sink,
+        schema::session::automation_target::ENTITY_ID,
+        &value.entity_id,
+    )?;
+    tx_u8(
+        sink,
+        schema::session::automation_target::RACK,
+        enum_rack(value.rack),
+    )?;
+    tx_id(
+        sink,
+        schema::session::automation_target::EFFECT_ID,
+        &value.effect_id,
+    )?;
+    tx_u32(
+        sink,
+        schema::session::automation_target::PARAMETER_ID,
+        value.parameter_id,
+    )?;
+    tx_u8(
+        sink,
+        schema::session::automation_target::CHANNEL,
+        enum_channel(value.channel),
+    )
 }
 fn tx_automation_segment(
     sink: &mut dyn Sink,
     value: &AutomationSegment,
 ) -> Result<(), EncodeError> {
     tx_start_message(sink, 6)?;
-    tx_u8(sink, 1, enum_shape(value.shape))?;
-    tx_u64(sink, 2, value.start_sample)?;
-    tx_u64(sink, 3, value.end_sample)?;
-    tx_f32(sink, 4, value.start_value)?;
-    tx_f32(sink, 5, value.end_value)?;
-    tx_u8(sink, 6, enum_unit(value.unit))
+    tx_u8(
+        sink,
+        schema::session::automation_segment::SHAPE,
+        enum_shape(value.shape),
+    )?;
+    tx_u64(
+        sink,
+        schema::session::automation_segment::START_SAMPLE,
+        value.start_sample,
+    )?;
+    tx_u64(
+        sink,
+        schema::session::automation_segment::END_SAMPLE,
+        value.end_sample,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::automation_segment::START_VALUE,
+        value.start_value,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::automation_segment::END_VALUE,
+        value.end_value,
+    )?;
+    tx_u8(
+        sink,
+        schema::session::automation_segment::UNIT,
+        enum_unit(value.unit),
+    )
 }
 fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeError> {
     tx_start_message(sink, tx_count(2, value.segments.len())?)?;
-    tx_id(sink, 1, &value.id)?;
-    tx_message(sink, 2, |v| tx_automation_target(v, &value.target))?;
+    tx_id(sink, schema::session::automation::ID, &value.id)?;
+    tx_message(sink, schema::session::automation::TARGET, |v| {
+        tx_automation_target(v, &value.target)
+    })?;
     for segment in &value.segments {
-        tx_message(sink, 3, |v| tx_automation_segment(v, segment))?;
+        tx_message(sink, schema::session::automation::SEGMENT, |v| {
+            tx_automation_segment(v, segment)
+        })?;
     }
     Ok(())
 }
@@ -1630,44 +1259,6 @@ pub(crate) struct Field<'a> {
 
 pub(crate) struct Message<'a> {
     pub(crate) fields: Vec<Field<'a>>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Rule {
-    id: u16,
-    repeated: bool,
-    mandatory: bool,
-}
-
-impl Rule {
-    pub(crate) const fn one(id: u16) -> Self {
-        Self {
-            id,
-            repeated: false,
-            mandatory: true,
-        }
-    }
-    pub(crate) const fn optional(id: u16) -> Self {
-        Self {
-            id,
-            repeated: false,
-            mandatory: false,
-        }
-    }
-    pub(crate) const fn repeated(id: u16) -> Self {
-        Self {
-            id,
-            repeated: true,
-            mandatory: true,
-        }
-    }
-    pub(crate) const fn optional_repeated(id: u16) -> Self {
-        Self {
-            id,
-            repeated: true,
-            mandatory: false,
-        }
-    }
 }
 
 impl<'a> Message<'a> {
@@ -1733,32 +1324,6 @@ impl<'a> Message<'a> {
         Ok(Self { fields })
     }
 
-    pub(crate) fn schema(&self, rules: &[Rule]) -> Result<(), DecodeError> {
-        for field in &self.fields {
-            let rule = rules.iter().find(|rule| rule.id == field.id);
-            match rule {
-                Some(rule) if field.mandatory != rule.mandatory => {
-                    return Err(DecodeError::InvalidTlv);
-                }
-                None if field.mandatory => return Err(DecodeError::UnknownRequiredField),
-                _ => {}
-            }
-        }
-        for rule in rules {
-            if !rule.repeated
-                && self
-                    .fields
-                    .iter()
-                    .filter(|field| field.id == rule.id)
-                    .count()
-                    > 1
-            {
-                return Err(DecodeError::InvalidTlv);
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn schema_spec(
         &self,
         spec: &'static crate::schema::MessageSpec,
@@ -1798,16 +1363,18 @@ impl<'a> Message<'a> {
         Ok(())
     }
 
-    /// Apply a tagged-variant schema. Optional extensions remain skippable, but a field ID that
-    /// belongs to this tagged message and not to the selected variant is never an extension.
-    pub(crate) fn tagged_schema(
+    pub(crate) fn tagged_schema_spec(
         &self,
-        rules: &[Rule],
-        known_ids: &[u16],
+        spec: &'static schema::MessageSpec,
+        known: &'static schema::MessageSpec,
     ) -> Result<(), DecodeError> {
-        self.schema(rules)?;
+        self.schema_spec(spec)?;
         if self.fields.iter().any(|field| {
-            known_ids.contains(&field.id) && !rules.iter().any(|rule| rule.id == field.id)
+            known
+                .fields
+                .iter()
+                .any(|candidate| candidate.id == field.id)
+                && !spec.fields.iter().any(|candidate| candidate.id == field.id)
         }) {
             return Err(DecodeError::InvalidTlv);
         }
@@ -1857,333 +1424,219 @@ impl<'a> Message<'a> {
 }
 
 fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
-    let opcode = read_u16_exact(message.one(1, WIRE_U16)?)?;
-    let payload = Message::nested(message.one(2, WIRE_MESSAGE)?)?;
-    match crate::SessionEditOpcode::from_raw(opcode).ok_or(DecodeError::InvalidTlv)? {
-        crate::SessionEditOpcode::SetSessionId => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetSessionId {
-                session_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetSampleRateHz => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetSampleRateHz {
-                sample_rate_hz: read_u32_exact(payload.one(1, WIRE_U32)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetQuantumFrames => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetQuantumFrames {
-                quantum_frames: read_u32_exact(payload.one(1, WIRE_U32)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetRenderProfile => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetRenderProfile {
-                render_profile: parse_render_profile(Message::nested(
-                    payload.one(1, WIRE_MESSAGE)?,
-                )?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetOutputProfile => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetOutputProfile {
-                output_profile: parse_output_profile(Message::nested(
-                    payload.one(1, WIRE_MESSAGE)?,
-                )?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetLimits => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::SetLimits {
-                limits: parse_limits(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertSource => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertSource {
-                source: parse_source(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveSource => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveSource {
-                source_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
+    message.schema_spec(&schema::session::edit::SPEC)?;
+    let opcode = crate::SessionEditOpcode::from_raw(read_u16_exact(one_spec!(
+        message,
+        schema::session::edit::OPCODE
+    )?)?)
+    .ok_or(DecodeError::InvalidTlv)?;
+    let payload = Message::nested(one_spec!(message, schema::session::edit::PAYLOAD)?)?;
+    let fields = schema::session::payload_spec(opcode).fields;
+    payload.schema_spec(schema::session::payload_spec(opcode))?;
+    match opcode {
+        crate::SessionEditOpcode::SetSessionId => Ok(SessionEditV1::SetSessionId {
+            session_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetSampleRateHz => Ok(SessionEditV1::SetSampleRateHz {
+            sample_rate_hz: read_u32_exact(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetQuantumFrames => Ok(SessionEditV1::SetQuantumFrames {
+            quantum_frames: read_u32_exact(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetRenderProfile => Ok(SessionEditV1::SetRenderProfile {
+            render_profile: parse_render_profile(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetOutputProfile => Ok(SessionEditV1::SetOutputProfile {
+            output_profile: parse_output_profile(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetLimits => Ok(SessionEditV1::SetLimits {
+            limits: parse_limits(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::UpsertSource => Ok(SessionEditV1::UpsertSource {
+            source: parse_source(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveSource => Ok(SessionEditV1::RemoveSource {
+            source_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
         crate::SessionEditOpcode::SetSourceSampleRateHz => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
             Ok(SessionEditV1::SetSourceSampleRateHz {
-                source_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                sample_rate_hz: read_u32_exact(payload.one(2, WIRE_U32)?)?,
+                source_id: stable_id(one_spec!(payload, fields[0])?)?,
+                sample_rate_hz: read_u32_exact(one_spec!(payload, fields[1])?)?,
             })
         }
-        crate::SessionEditOpcode::SetSourceContent => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetSourceContent {
-                source_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                content: parse_content(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetSourceMapping => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetSourceMapping {
-                source_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                mapping: parse_mapping(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertTrack => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertTrack {
-                track: parse_track(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveTrack => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveTrack {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
+        crate::SessionEditOpcode::SetSourceContent => Ok(SessionEditV1::SetSourceContent {
+            source_id: stable_id(one_spec!(payload, fields[0])?)?,
+            content: parse_content(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetSourceMapping => Ok(SessionEditV1::SetSourceMapping {
+            source_id: stable_id(one_spec!(payload, fields[0])?)?,
+            mapping: parse_mapping(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::UpsertTrack => Ok(SessionEditV1::UpsertTrack {
+            track: parse_track(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveTrack => Ok(SessionEditV1::RemoveTrack {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
         crate::SessionEditOpcode::SetTrackSourceAssignment => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
             Ok(SessionEditV1::SetTrackSourceAssignment {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                source_id: stable_id(payload.one(2, WIRE_UTF8)?)?,
-                left_source_channel: read_u8_exact(payload.one(3, WIRE_U8)?)?,
-                right_source_channel: read_u8_exact(payload.one(4, WIRE_U8)?)?,
+                track_id: stable_id(one_spec!(payload, fields[0])?)?,
+                source_id: stable_id(one_spec!(payload, fields[1])?)?,
+                left_source_channel: read_u8_exact(one_spec!(payload, fields[2])?)?,
+                right_source_channel: read_u8_exact(one_spec!(payload, fields[3])?)?,
             })
         }
-        crate::SessionEditOpcode::SetTrackBuiltins => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetTrackBuiltins {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                builtins: parse_builtins(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetTrackRack => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3)])?;
-            Ok(SessionEditV1::SetTrackRack {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                rack_name: parse_rack(read_u8_exact(payload.one(2, WIRE_U8)?)?)?,
-                rack: parse_rack_message(Message::nested(payload.one(3, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::PutTrackEffect => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            Ok(SessionEditV1::PutTrackEffect {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                rack_name: parse_rack(read_u8_exact(payload.one(2, WIRE_U8)?)?)?,
-                final_position: read_u32_exact(payload.one(3, WIRE_U32)?)?,
-                effect: parse_effect(Message::nested(payload.one(4, WIRE_MESSAGE)?)?)?,
-            })
-        }
+        crate::SessionEditOpcode::SetTrackBuiltins => Ok(SessionEditV1::SetTrackBuiltins {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            builtins: parse_builtins(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetTrackRack => Ok(SessionEditV1::SetTrackRack {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            rack: parse_rack_message(Message::nested(one_spec!(payload, fields[2])?)?)?,
+        }),
+        crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEditV1::PutTrackEffect {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            final_position: read_u32_exact(one_spec!(payload, fields[2])?)?,
+            effect: parse_effect(Message::nested(one_spec!(payload, fields[3])?)?)?,
+        }),
         crate::SessionEditOpcode::RemoveTrackEffect => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::RemoveTrackEffect {
                 track_id,
                 rack_name,
                 effect_id,
             })
         }
-        crate::SessionEditOpcode::SetTrackEffectOrder => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::repeated(3)])?;
-            Ok(SessionEditV1::SetTrackEffectOrder {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                rack_name: parse_rack(read_u8_exact(payload.one(2, WIRE_U8)?)?)?,
-                effect_ids: payload
-                    .values(3, WIRE_UTF8)?
-                    .map(stable_id)
-                    .collect::<Result<Vec<_>, _>>()?,
-            })
-        }
+        crate::SessionEditOpcode::SetTrackEffectOrder => Ok(SessionEditV1::SetTrackEffectOrder {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            effect_ids: values_spec!(payload, fields[2])?
+                .map(stable_id)
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
         crate::SessionEditOpcode::SetEffectIdentity => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::SetEffectIdentity {
                 track_id,
                 rack_name,
                 effect_id,
-                identity: parse_identity(Message::nested(payload.one(4, WIRE_MESSAGE)?)?)?,
+                identity: parse_identity(Message::nested(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::SetEffectQuality => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::SetEffectQuality {
                 track_id,
                 rack_name,
                 effect_id,
-                quality: parse_quality(read_u8_exact(payload.one(4, WIRE_U8)?)?)?,
+                quality: parse_quality(read_u8_exact(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::SetEffectBypass => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::SetEffectBypass {
                 track_id,
                 rack_name,
                 effect_id,
-                bypass: parse_bool(payload.one(4, WIRE_BOOL)?)?,
+                bypass: parse_bool(one_spec!(payload, fields[3])?)?,
             })
         }
         crate::SessionEditOpcode::SetEffectLinkMode => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::SetEffectLinkMode {
                 track_id,
                 rack_name,
                 effect_id,
-                link_mode: parse_link(read_u8_exact(payload.one(4, WIRE_U8)?)?)?,
+                link_mode: parse_link(read_u8_exact(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::SetEffectSidechain => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::SetEffectSidechain {
                 track_id,
                 rack_name,
                 effect_id,
-                sidechain: parse_sidechain(Message::nested(payload.one(4, WIRE_MESSAGE)?)?)?,
+                sidechain: parse_sidechain(Message::nested(one_spec!(payload, fields[3])?)?)?,
             })
         }
         crate::SessionEditOpcode::UpsertEffectParam => {
-            payload.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
-            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload)?;
+            let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
             Ok(SessionEditV1::UpsertEffectParam {
                 track_id,
                 rack_name,
                 effect_id,
-                param: parse_param(Message::nested(payload.one(4, WIRE_MESSAGE)?)?)?,
+                param: parse_param(Message::nested(one_spec!(payload, fields[3])?)?)?,
             })
         }
-        crate::SessionEditOpcode::RemoveEffectParam => {
-            payload.schema(&[
-                Rule::one(1),
-                Rule::one(2),
-                Rule::one(3),
-                Rule::one(4),
-                Rule::one(5),
-            ])?;
-            Ok(SessionEditV1::RemoveEffectParam {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                rack_name: parse_rack(read_u8_exact(payload.one(2, WIRE_U8)?)?)?,
-                effect_id: stable_id(payload.one(3, WIRE_UTF8)?)?,
-                parameter_id: read_u32_exact(payload.one(4, WIRE_U32)?)?,
-                channel: parse_channel(read_u8_exact(payload.one(5, WIRE_U8)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetTrackFader => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetTrackFader {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                fader: parse_fader(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetTrackMatrixOrPan => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetTrackMatrixOrPan {
-                track_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                matrix_or_pan: parse_matrix_or_pan(Message::nested(
-                    payload.one(2, WIRE_MESSAGE)?,
-                )?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertSubmix => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertSubmix {
-                submix: parse_submix(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveSubmix => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveSubmix {
-                submix_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertOutput => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertOutput {
-                output: parse_output(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveOutput => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveOutput {
-                output_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertRoute => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertRoute {
-                route: parse_route(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveRoute => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveRoute {
-                route_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetRouteSource => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetRouteSource {
-                route_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                source: parse_route_source(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetRouteDestination => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetRouteDestination {
-                route_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                destination: parse_route_destination(Message::nested(
-                    payload.one(2, WIRE_MESSAGE)?,
-                )?)?,
-            })
-        }
+        crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEditV1::RemoveEffectParam {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            effect_id: stable_id(one_spec!(payload, fields[2])?)?,
+            parameter_id: read_u32_exact(one_spec!(payload, fields[3])?)?,
+            channel: parse_channel(read_u8_exact(one_spec!(payload, fields[4])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetTrackFader => Ok(SessionEditV1::SetTrackFader {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            fader: parse_fader(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetTrackMatrixOrPan => Ok(SessionEditV1::SetTrackMatrixOrPan {
+            track_id: stable_id(one_spec!(payload, fields[0])?)?,
+            matrix_or_pan: parse_matrix_or_pan(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEditV1::UpsertSubmix {
+            submix: parse_submix(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveSubmix => Ok(SessionEditV1::RemoveSubmix {
+            submix_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::UpsertOutput => Ok(SessionEditV1::UpsertOutput {
+            output: parse_output(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveOutput => Ok(SessionEditV1::RemoveOutput {
+            output_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::UpsertRoute => Ok(SessionEditV1::UpsertRoute {
+            route: parse_route(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveRoute => Ok(SessionEditV1::RemoveRoute {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetRouteSource => Ok(SessionEditV1::SetRouteSource {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+            source: parse_route_source(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
+        crate::SessionEditOpcode::SetRouteDestination => Ok(SessionEditV1::SetRouteDestination {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+            destination: parse_route_destination(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
         crate::SessionEditOpcode::SetRouteChannelMatrix => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
             Ok(SessionEditV1::SetRouteChannelMatrix {
-                route_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                channel_matrix: parse_channel_matrix(Message::nested(
-                    payload.one(2, WIRE_MESSAGE)?,
-                )?)?,
+                route_id: stable_id(one_spec!(payload, fields[0])?)?,
+                channel_matrix: parse_channel_matrix(Message::nested(one_spec!(
+                    payload, fields[1]
+                )?)?)?,
             })
         }
-        crate::SessionEditOpcode::SetRouteGainDb => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetRouteGainDb {
-                route_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                gain_db: read_f32_exact(payload.one(2, WIRE_F32)?)?,
-            })
-        }
-        crate::SessionEditOpcode::UpsertAutomation => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::UpsertAutomation {
-                automation: parse_automation(Message::nested(payload.one(1, WIRE_MESSAGE)?)?)?,
-            })
-        }
-        crate::SessionEditOpcode::RemoveAutomation => {
-            payload.schema(&[Rule::one(1)])?;
-            Ok(SessionEditV1::RemoveAutomation {
-                automation_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-            })
-        }
-        crate::SessionEditOpcode::SetAutomationTarget => {
-            payload.schema(&[Rule::one(1), Rule::one(2)])?;
-            Ok(SessionEditV1::SetAutomationTarget {
-                automation_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                target: parse_automation_target(Message::nested(payload.one(2, WIRE_MESSAGE)?)?)?,
-            })
-        }
+        crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEditV1::SetRouteGainDb {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+            gain_db: read_f32_exact(one_spec!(payload, fields[1])?)?,
+        }),
+        crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEditV1::UpsertAutomation {
+            automation: parse_automation(Message::nested(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveAutomation => Ok(SessionEditV1::RemoveAutomation {
+            automation_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetAutomationTarget => Ok(SessionEditV1::SetAutomationTarget {
+            automation_id: stable_id(one_spec!(payload, fields[0])?)?,
+            target: parse_automation_target(Message::nested(one_spec!(payload, fields[1])?)?)?,
+        }),
         crate::SessionEditOpcode::SetAutomationSegments => {
-            payload.schema(&[Rule::one(1), Rule::repeated(2)])?;
             Ok(SessionEditV1::SetAutomationSegments {
-                automation_id: stable_id(payload.one(1, WIRE_UTF8)?)?,
-                segments: payload
-                    .values(2, WIRE_MESSAGE)?
+                automation_id: stable_id(one_spec!(payload, fields[0])?)?,
+                segments: values_spec!(payload, fields[1])?
                     .map(|value| parse_automation_segment(Message::nested(value)?))
                     .collect::<Result<Vec<_>, _>>()?,
             })
@@ -2192,188 +1645,252 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
 }
 
 fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
-    let mode = match read_u8_exact(message.one(2, WIRE_U8)?)? {
+    message.schema_spec(&schema::session::render_profile::SPEC)?;
+    let mode = match read_u8_exact(one_spec!(message, schema::session::render_profile::MODE)?)? {
         1 => miso_engine_session::RenderMode::SingleThread,
         2 => miso_engine_session::RenderMode::DependencyWaves,
         _ => return Err(DecodeError::InvalidTlv),
     };
     Ok(RenderProfile {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
+        id: stable_id(one_spec!(message, schema::session::render_profile::ID)?)?,
         mode,
     })
 }
 
 fn parse_output_profile(message: Message<'_>) -> Result<OutputProfile, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3)])?;
-    if read_u8_exact(message.one(3, WIRE_U8)?)? != 1 {
+    message.schema_spec(&schema::session::output_profile::SPEC)?;
+    if read_u8_exact(one_spec!(message, schema::session::output_profile::LAYOUT)?)? != 1 {
         return Err(DecodeError::InvalidTlv);
     }
     Ok(OutputProfile {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        channels: read_u8_exact(message.one(2, WIRE_U8)?)?,
+        id: stable_id(one_spec!(message, schema::session::output_profile::ID)?)?,
+        channels: read_u8_exact(one_spec!(
+            message,
+            schema::session::output_profile::CHANNELS
+        )?)?,
         sample_format: miso_engine_session::SampleFormat::F32Planar,
     })
 }
 
 fn parse_limits(message: Message<'_>) -> Result<SessionLimits, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3)])?;
+    message.schema_spec(&schema::session::limits::SPEC)?;
     Ok(SessionLimits {
-        pcm_ring_frames: read_u64_exact(message.one(1, WIRE_U64)?)?,
-        control_queue_messages: read_u64_exact(message.one(2, WIRE_U64)?)?,
-        memory_bytes: read_u64_exact(message.one(3, WIRE_U64)?)?,
+        pcm_ring_frames: read_u64_exact(one_spec!(
+            message,
+            schema::session::limits::PCM_RING_FRAMES
+        )?)?,
+        control_queue_messages: read_u64_exact(one_spec!(
+            message,
+            schema::session::limits::CONTROL_QUEUE_MESSAGES
+        )?)?,
+        memory_bytes: read_u64_exact(one_spec!(message, schema::session::limits::MEMORY_BYTES)?)?,
     })
 }
 
 fn parse_content(message: Message<'_>) -> Result<SourceContent, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
+    message.schema_spec(&schema::session::content::SPEC)?;
     Ok(SourceContent {
-        identity: utf8(message.one(1, WIRE_UTF8)?)?,
-        locator: utf8(message.one(2, WIRE_UTF8)?)?,
+        identity: utf8(one_spec!(message, schema::session::content::IDENTITY)?)?,
+        locator: utf8(one_spec!(message, schema::session::content::LOCATOR)?)?,
     })
 }
 
 fn parse_region(message: Message<'_>) -> Result<SourceRegion, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
+    message.schema_spec(&schema::session::region::SPEC)?;
     Ok(SourceRegion {
-        start_sample: read_u64_exact(message.one(1, WIRE_U64)?)?,
-        length_samples: read_u64_exact(message.one(2, WIRE_U64)?)?,
+        start_sample: read_u64_exact(one_spec!(message, schema::session::region::START_SAMPLE)?)?,
+        length_samples: read_u64_exact(one_spec!(
+            message,
+            schema::session::region::LENGTH_SAMPLES
+        )?)?,
     })
 }
 
 fn parse_mapping(message: Message<'_>) -> Result<SourceMapping, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
+    message.schema_spec(&schema::session::mapping::SPEC)?;
     Ok(SourceMapping {
-        channel_count: read_u8_exact(message.one(1, WIRE_U8)?)?,
-        region: parse_region(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
+        channel_count: read_u8_exact(one_spec!(message, schema::session::mapping::CHANNEL_COUNT)?)?,
+        region: parse_region(Message::nested(one_spec!(
+            message,
+            schema::session::mapping::REGION
+        )?)?)?,
     })
 }
 
 fn parse_source(message: Message<'_>) -> Result<Source, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::session::source::SPEC)?;
     Ok(Source {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        sample_rate_hz: read_u32_exact(message.one(2, WIRE_U32)?)?,
-        content: parse_content(Message::nested(message.one(3, WIRE_MESSAGE)?)?)?,
-        mapping: parse_mapping(Message::nested(message.one(4, WIRE_MESSAGE)?)?)?,
+        id: stable_id(one_spec!(message, schema::session::source::ID)?)?,
+        sample_rate_hz: read_u32_exact(one_spec!(
+            message,
+            schema::session::source::SAMPLE_RATE_HZ
+        )?)?,
+        content: parse_content(Message::nested(one_spec!(
+            message,
+            schema::session::source::CONTENT
+        )?)?)?,
+        mapping: parse_mapping(Message::nested(one_spec!(
+            message,
+            schema::session::source::MAPPING
+        )?)?)?,
     })
 }
 
 fn parse_builtins(message: Message<'_>) -> Result<DualMonoBuiltins, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
+    message.schema_spec(&schema::session::builtins::SPEC)?;
     Ok(DualMonoBuiltins {
-        left: parse_channel_builtins(Message::nested(message.one(1, WIRE_MESSAGE)?)?)?,
-        right: parse_channel_builtins(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
+        left: parse_channel_builtins(Message::nested(one_spec!(
+            message,
+            schema::session::builtins::LEFT
+        )?)?)?,
+        right: parse_channel_builtins(Message::nested(one_spec!(
+            message,
+            schema::session::builtins::RIGHT
+        )?)?)?,
     })
 }
 fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::session::channel_builtins::SPEC)?;
     Ok(ChannelBuiltins {
-        polarity_invert: parse_bool(message.one(1, WIRE_BOOL)?)?,
-        trim_db: read_f32_exact(message.one(2, WIRE_F32)?)?,
-        hpf_hz: read_f32_exact(message.one(3, WIRE_F32)?)?,
-        lpf_hz: read_f32_exact(message.one(4, WIRE_F32)?)?,
+        polarity_invert: parse_bool(one_spec!(
+            message,
+            schema::session::channel_builtins::POLARITY_INVERT
+        )?)?,
+        trim_db: read_f32_exact(one_spec!(
+            message,
+            schema::session::channel_builtins::TRIM_DB
+        )?)?,
+        hpf_hz: read_f32_exact(one_spec!(
+            message,
+            schema::session::channel_builtins::HPF_HZ
+        )?)?,
+        lpf_hz: read_f32_exact(one_spec!(
+            message,
+            schema::session::channel_builtins::LPF_HZ
+        )?)?,
     })
 }
 fn parse_track(message: Message<'_>) -> Result<miso_engine_session::Track, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-        Rule::one(6),
-        Rule::one(7),
-        Rule::one(8),
-        Rule::one(9),
-        Rule::one(10),
-    ])?;
+    message.schema_spec(&schema::session::track::SPEC)?;
     Ok(miso_engine_session::Track {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        source_id: stable_id(message.one(2, WIRE_UTF8)?)?,
-        left_source_channel: read_u8_exact(message.one(3, WIRE_U8)?)?,
-        right_source_channel: read_u8_exact(message.one(4, WIRE_U8)?)?,
-        builtins: parse_builtins(Message::nested(message.one(5, WIRE_MESSAGE)?)?)?,
-        simd1: parse_rack_message(Message::nested(message.one(6, WIRE_MESSAGE)?)?)?,
-        dynamic: parse_rack_message(Message::nested(message.one(7, WIRE_MESSAGE)?)?)?,
-        simd2: parse_rack_message(Message::nested(message.one(8, WIRE_MESSAGE)?)?)?,
-        fader: parse_fader(Message::nested(message.one(9, WIRE_MESSAGE)?)?)?,
-        matrix_or_pan: parse_matrix_or_pan(Message::nested(message.one(10, WIRE_MESSAGE)?)?)?,
+        id: stable_id(one_spec!(message, schema::session::track::ID)?)?,
+        source_id: stable_id(one_spec!(message, schema::session::track::SOURCE_ID)?)?,
+        left_source_channel: read_u8_exact(one_spec!(
+            message,
+            schema::session::track::LEFT_SOURCE_CHANNEL
+        )?)?,
+        right_source_channel: read_u8_exact(one_spec!(
+            message,
+            schema::session::track::RIGHT_SOURCE_CHANNEL
+        )?)?,
+        builtins: parse_builtins(Message::nested(one_spec!(
+            message,
+            schema::session::track::BUILTINS
+        )?)?)?,
+        simd1: parse_rack_message(Message::nested(one_spec!(
+            message,
+            schema::session::track::SIMD1
+        )?)?)?,
+        dynamic: parse_rack_message(Message::nested(one_spec!(
+            message,
+            schema::session::track::DYNAMIC
+        )?)?)?,
+        simd2: parse_rack_message(Message::nested(one_spec!(
+            message,
+            schema::session::track::SIMD2
+        )?)?)?,
+        fader: parse_fader(Message::nested(one_spec!(
+            message,
+            schema::session::track::FADER
+        )?)?)?,
+        matrix_or_pan: parse_matrix_or_pan(Message::nested(one_spec!(
+            message,
+            schema::session::track::MATRIX_OR_PAN
+        )?)?)?,
     })
 }
 fn parse_rack_message(message: Message<'_>) -> Result<Rack, DecodeError> {
-    message.schema(&[Rule::repeated(1)])?;
+    message.schema_spec(&schema::session::rack::SPEC)?;
     Ok(Rack {
-        effects: message
-            .values(1, WIRE_MESSAGE)?
+        effects: values_spec!(message, schema::session::rack::EFFECT)?
             .map(|value| parse_effect(Message::nested(value)?))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn parse_identity(message: Message<'_>) -> Result<EffectIdentity, DecodeError> {
-    match read_u8_exact(message.one(1, WIRE_U8)?)? {
-        1 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2)], &[1, 2])?;
-            Ok(EffectIdentity::Native {
-                effect_id: stable_id(message.one(2, WIRE_UTF8)?)?,
-            })
-        }
-        2 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2)], &[1, 2])?;
-            Ok(EffectIdentity::ThirdPartyCid {
-                cid: utf8(message.one(2, WIRE_UTF8)?)?,
-            })
-        }
+    message.schema_spec(&schema::session::effect_identity::SPEC)?;
+    match read_u8_exact(one_spec!(message, schema::session::effect_identity::TAG)?)? {
+        1 => Ok(EffectIdentity::Native {
+            effect_id: stable_id(one_spec!(message, schema::session::effect_identity::VALUE)?)?,
+        }),
+        2 => Ok(EffectIdentity::ThirdPartyCid {
+            cid: utf8(one_spec!(message, schema::session::effect_identity::VALUE)?)?,
+        }),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
 fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> {
-    match read_u8_exact(message.one(1, WIRE_U8)?)? {
+    let tag = read_u8_exact(one_spec!(message, schema::session::route_source::TAG)?)?;
+    match tag {
         1 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2), Rule::one(3)], &[1, 2, 3])?;
+            message.tagged_schema_spec(
+                &schema::session::route_source::TRACK,
+                &schema::session::route_source::KNOWN,
+            )?;
             Ok(RouteSource::Track {
-                track_id: stable_id(message.one(2, WIRE_UTF8)?)?,
-                tap: parse_tap(read_u8_exact(message.one(3, WIRE_U8)?)?)?,
+                track_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
+                tap: parse_tap(read_u8_exact(one_spec!(
+                    message,
+                    schema::session::route_source::TAP
+                )?)?)?,
             })
         }
         2 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2)], &[1, 2, 3])?;
+            message.tagged_schema_spec(
+                &schema::session::route_source::SUBMIX,
+                &schema::session::route_source::KNOWN,
+            )?;
             Ok(RouteSource::SubmixOutput {
-                submix_id: stable_id(message.one(2, WIRE_UTF8)?)?,
+                submix_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
             })
         }
         _ => Err(DecodeError::InvalidTlv),
     }
 }
 fn parse_route_destination(message: Message<'_>) -> Result<RouteDestination, DecodeError> {
-    match read_u8_exact(message.one(1, WIRE_U8)?)? {
-        1 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2)], &[1, 2])?;
-            Ok(RouteDestination::SubmixInput {
-                submix_id: stable_id(message.one(2, WIRE_UTF8)?)?,
-            })
-        }
-        2 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2)], &[1, 2])?;
-            Ok(RouteDestination::OutputInput {
-                output_id: stable_id(message.one(2, WIRE_UTF8)?)?,
-            })
-        }
+    message.schema_spec(&schema::session::route_destination::SPEC)?;
+    match read_u8_exact(one_spec!(message, schema::session::route_destination::TAG)?)? {
+        1 => Ok(RouteDestination::SubmixInput {
+            submix_id: stable_id(one_spec!(message, schema::session::route_destination::ID)?)?,
+        }),
+        2 => Ok(RouteDestination::OutputInput {
+            output_id: stable_id(one_spec!(message, schema::session::route_destination::ID)?)?,
+        }),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
 fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeError> {
-    match read_u8_exact(message.one(1, WIRE_U8)?)? {
+    let tag = read_u8_exact(one_spec!(message, schema::session::sidechain::TAG)?)?;
+    match tag {
         1 => {
-            message.tagged_schema(&[Rule::one(1)], &[1, 2, 3])?;
+            message.tagged_schema_spec(
+                &schema::session::sidechain::NONE,
+                &schema::session::sidechain::KNOWN,
+            )?;
             Ok(SidechainDeclaration::None)
         }
         2 => {
-            message.tagged_schema(&[Rule::one(1), Rule::one(2), Rule::one(3)], &[1, 2, 3])?;
+            message.tagged_schema_spec(
+                &schema::session::sidechain::ROUTED,
+                &schema::session::sidechain::KNOWN,
+            )?;
             Ok(SidechainDeclaration::Routed(
                 miso_engine_session::Sidechain {
-                    source: parse_route_source(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
-                    port_id: stable_id(message.one(3, WIRE_UTF8)?)?,
+                    source: parse_route_source(Message::nested(one_spec!(
+                        message,
+                        schema::session::sidechain::SOURCE
+                    )?)?)?,
+                    port_id: stable_id(one_spec!(message, schema::session::sidechain::PORT_ID)?)?,
                 },
             ))
         }
@@ -2381,171 +1898,209 @@ fn parse_sidechain(message: Message<'_>) -> Result<SidechainDeclaration, DecodeE
     }
 }
 fn parse_param(message: Message<'_>) -> Result<EffectParam, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::session::param::SPEC)?;
     Ok(EffectParam {
-        parameter_id: read_u32_exact(message.one(1, WIRE_U32)?)?,
-        channel: parse_channel(read_u8_exact(message.one(2, WIRE_U8)?)?)?,
-        unit: parse_unit(read_u8_exact(message.one(3, WIRE_U8)?)?)?,
-        value: read_f32_exact(message.one(4, WIRE_F32)?)?,
+        parameter_id: read_u32_exact(one_spec!(message, schema::session::param::PARAMETER_ID)?)?,
+        channel: parse_channel(read_u8_exact(one_spec!(
+            message,
+            schema::session::param::CHANNEL
+        )?)?)?,
+        unit: parse_unit(read_u8_exact(one_spec!(
+            message,
+            schema::session::param::UNIT
+        )?)?)?,
+        value: read_f32_exact(one_spec!(message, schema::session::param::VALUE)?)?,
     })
 }
 fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-        Rule::repeated(6),
-        Rule::one(7),
-    ])?;
+    message.schema_spec(&schema::session::effect::SPEC)?;
     Ok(Effect {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        identity: parse_identity(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
-        quality: parse_quality(read_u8_exact(message.one(3, WIRE_U8)?)?)?,
-        bypass: parse_bool(message.one(4, WIRE_BOOL)?)?,
-        link_mode: parse_link(read_u8_exact(message.one(5, WIRE_U8)?)?)?,
-        params: message
-            .values(6, WIRE_MESSAGE)?
+        id: stable_id(one_spec!(message, schema::session::effect::ID)?)?,
+        identity: parse_identity(Message::nested(one_spec!(
+            message,
+            schema::session::effect::IDENTITY
+        )?)?)?,
+        quality: parse_quality(read_u8_exact(one_spec!(
+            message,
+            schema::session::effect::QUALITY
+        )?)?)?,
+        bypass: parse_bool(one_spec!(message, schema::session::effect::BYPASS)?)?,
+        link_mode: parse_link(read_u8_exact(one_spec!(
+            message,
+            schema::session::effect::LINK_MODE
+        )?)?)?,
+        params: values_spec!(message, schema::session::effect::PARAM)?
             .map(|value| parse_param(Message::nested(value)?))
             .collect::<Result<Vec<_>, _>>()?,
-        sidechain: parse_sidechain(Message::nested(message.one(7, WIRE_MESSAGE)?)?)?,
+        sidechain: parse_sidechain(Message::nested(one_spec!(
+            message,
+            schema::session::effect::SIDECHAIN
+        )?)?)?,
     })
 }
 fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::session::fader::SPEC)?;
     Ok(DualMonoFader {
-        left_db: read_f32_exact(message.one(1, WIRE_F32)?)?,
-        right_db: read_f32_exact(message.one(2, WIRE_F32)?)?,
-        left_mute: parse_bool(message.one(3, WIRE_BOOL)?)?,
-        right_mute: parse_bool(message.one(4, WIRE_BOOL)?)?,
+        left_db: read_f32_exact(one_spec!(message, schema::session::fader::LEFT_DB)?)?,
+        right_db: read_f32_exact(one_spec!(message, schema::session::fader::RIGHT_DB)?)?,
+        left_mute: parse_bool(one_spec!(message, schema::session::fader::LEFT_MUTE)?)?,
+        right_mute: parse_bool(one_spec!(message, schema::session::fader::RIGHT_MUTE)?)?,
     })
 }
 fn parse_matrix_or_pan(message: Message<'_>) -> Result<MatrixOrPan, DecodeError> {
-    match read_u8_exact(message.one(1, WIRE_U8)?)? {
+    let tag = read_u8_exact(one_spec!(message, schema::session::matrix_or_pan::TAG)?)?;
+    match tag {
         1 => {
-            message.tagged_schema(
-                &[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)],
-                &[1, 2, 3, 4, 5, 6],
+            message.tagged_schema_spec(
+                &schema::session::matrix_or_pan::PAN,
+                &schema::session::matrix_or_pan::KNOWN,
             )?;
             Ok(MatrixOrPan::Pan {
-                left: read_f32_exact(message.one(2, WIRE_F32)?)?,
-                right: read_f32_exact(message.one(3, WIRE_F32)?)?,
-                smoothing_samples: read_u32_exact(message.one(4, WIRE_U32)?)?,
+                left: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
+                right: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
+                smoothing_samples: read_u32_exact(one_spec!(
+                    message,
+                    schema::session::matrix_or_pan::PAN_SMOOTHING
+                )?)?,
             })
         }
         2 => {
-            message.tagged_schema(
-                &[
-                    Rule::one(1),
-                    Rule::one(2),
-                    Rule::one(3),
-                    Rule::one(4),
-                    Rule::one(5),
-                    Rule::one(6),
-                ],
-                &[1, 2, 3, 4, 5, 6],
+            message.tagged_schema_spec(
+                &schema::session::matrix_or_pan::MATRIX,
+                &schema::session::matrix_or_pan::KNOWN,
             )?;
             Ok(MatrixOrPan::Matrix {
-                ll: read_f32_exact(message.one(2, WIRE_F32)?)?,
-                lr: read_f32_exact(message.one(3, WIRE_F32)?)?,
-                rl: read_f32_exact(message.one(4, WIRE_F32)?)?,
-                rr: read_f32_exact(message.one(5, WIRE_F32)?)?,
-                smoothing_samples: read_u32_exact(message.one(6, WIRE_U32)?)?,
+                ll: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::A)?)?,
+                lr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::B)?)?,
+                rl: read_f32_exact(one_spec!(
+                    message,
+                    schema::session::matrix_or_pan::C_OR_SMOOTHING
+                )?)?,
+                rr: read_f32_exact(one_spec!(message, schema::session::matrix_or_pan::D)?)?,
+                smoothing_samples: read_u32_exact(one_spec!(
+                    message,
+                    schema::session::matrix_or_pan::SMOOTHING
+                )?)?,
             })
         }
         _ => Err(DecodeError::InvalidTlv),
     }
 }
 fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
-    message.schema(&[Rule::one(1)])?;
+    message.schema_spec(&schema::session::submix::SPEC)?;
     Ok(Submix {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
+        id: stable_id(one_spec!(message, schema::session::submix::ID)?)?,
     })
 }
 fn parse_output(message: Message<'_>) -> Result<Output, DecodeError> {
-    message.schema(&[Rule::one(1)])?;
+    message.schema_spec(&schema::session::output::SPEC)?;
     Ok(Output {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
+        id: stable_id(one_spec!(message, schema::session::output::ID)?)?,
     })
 }
 fn parse_channel_matrix(message: Message<'_>) -> Result<ChannelMatrix, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::session::channel_matrix::SPEC)?;
     Ok(ChannelMatrix {
-        ll: read_f32_exact(message.one(1, WIRE_F32)?)?,
-        lr: read_f32_exact(message.one(2, WIRE_F32)?)?,
-        rl: read_f32_exact(message.one(3, WIRE_F32)?)?,
-        rr: read_f32_exact(message.one(4, WIRE_F32)?)?,
+        ll: read_f32_exact(one_spec!(message, schema::session::channel_matrix::LL)?)?,
+        lr: read_f32_exact(one_spec!(message, schema::session::channel_matrix::LR)?)?,
+        rl: read_f32_exact(one_spec!(message, schema::session::channel_matrix::RL)?)?,
+        rr: read_f32_exact(one_spec!(message, schema::session::channel_matrix::RR)?)?,
     })
 }
 fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-    ])?;
+    message.schema_spec(&schema::session::route::SPEC)?;
     Ok(Route {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        source: parse_route_source(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
-        destination: parse_route_destination(Message::nested(message.one(3, WIRE_MESSAGE)?)?)?,
-        channel_matrix: parse_channel_matrix(Message::nested(message.one(4, WIRE_MESSAGE)?)?)?,
-        gain_db: read_f32_exact(message.one(5, WIRE_F32)?)?,
+        id: stable_id(one_spec!(message, schema::session::route::ID)?)?,
+        source: parse_route_source(Message::nested(one_spec!(
+            message,
+            schema::session::route::SOURCE
+        )?)?)?,
+        destination: parse_route_destination(Message::nested(one_spec!(
+            message,
+            schema::session::route::DESTINATION
+        )?)?)?,
+        channel_matrix: parse_channel_matrix(Message::nested(one_spec!(
+            message,
+            schema::session::route::CHANNEL_MATRIX
+        )?)?)?,
+        gain_db: read_f32_exact(one_spec!(message, schema::session::route::GAIN_DB)?)?,
     })
 }
 fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-    ])?;
+    message.schema_spec(&schema::session::automation_target::SPEC)?;
     Ok(AutomationTarget {
-        entity_id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        rack: parse_rack(read_u8_exact(message.one(2, WIRE_U8)?)?)?,
-        effect_id: stable_id(message.one(3, WIRE_UTF8)?)?,
-        parameter_id: read_u32_exact(message.one(4, WIRE_U32)?)?,
-        channel: parse_channel(read_u8_exact(message.one(5, WIRE_U8)?)?)?,
+        entity_id: stable_id(one_spec!(
+            message,
+            schema::session::automation_target::ENTITY_ID
+        )?)?,
+        rack: parse_rack(read_u8_exact(one_spec!(
+            message,
+            schema::session::automation_target::RACK
+        )?)?)?,
+        effect_id: stable_id(one_spec!(
+            message,
+            schema::session::automation_target::EFFECT_ID
+        )?)?,
+        parameter_id: read_u32_exact(one_spec!(
+            message,
+            schema::session::automation_target::PARAMETER_ID
+        )?)?,
+        channel: parse_channel(read_u8_exact(one_spec!(
+            message,
+            schema::session::automation_target::CHANNEL
+        )?)?)?,
     })
 }
 fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-        Rule::one(6),
-    ])?;
+    message.schema_spec(&schema::session::automation_segment::SPEC)?;
     Ok(AutomationSegment {
-        shape: parse_shape(read_u8_exact(message.one(1, WIRE_U8)?)?)?,
-        start_sample: read_u64_exact(message.one(2, WIRE_U64)?)?,
-        end_sample: read_u64_exact(message.one(3, WIRE_U64)?)?,
-        start_value: read_f32_exact(message.one(4, WIRE_F32)?)?,
-        end_value: read_f32_exact(message.one(5, WIRE_F32)?)?,
-        unit: parse_unit(read_u8_exact(message.one(6, WIRE_U8)?)?)?,
+        shape: parse_shape(read_u8_exact(one_spec!(
+            message,
+            schema::session::automation_segment::SHAPE
+        )?)?)?,
+        start_sample: read_u64_exact(one_spec!(
+            message,
+            schema::session::automation_segment::START_SAMPLE
+        )?)?,
+        end_sample: read_u64_exact(one_spec!(
+            message,
+            schema::session::automation_segment::END_SAMPLE
+        )?)?,
+        start_value: read_f32_exact(one_spec!(
+            message,
+            schema::session::automation_segment::START_VALUE
+        )?)?,
+        end_value: read_f32_exact(one_spec!(
+            message,
+            schema::session::automation_segment::END_VALUE
+        )?)?,
+        unit: parse_unit(read_u8_exact(one_spec!(
+            message,
+            schema::session::automation_segment::UNIT
+        )?)?)?,
     })
 }
 fn parse_automation(message: Message<'_>) -> Result<Automation, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::repeated(3)])?;
+    message.schema_spec(&schema::session::automation::SPEC)?;
     Ok(Automation {
-        id: stable_id(message.one(1, WIRE_UTF8)?)?,
-        target: parse_automation_target(Message::nested(message.one(2, WIRE_MESSAGE)?)?)?,
-        segments: message
-            .values(3, WIRE_MESSAGE)?
+        id: stable_id(one_spec!(message, schema::session::automation::ID)?)?,
+        target: parse_automation_target(Message::nested(one_spec!(
+            message,
+            schema::session::automation::TARGET
+        )?)?)?,
+        segments: values_spec!(message, schema::session::automation::SEGMENT)?
             .map(|value| parse_automation_segment(Message::nested(value)?))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn parse_track_effect_ref(
     message: &Message<'_>,
+    fields: &[FieldSpec],
 ) -> Result<(StableId, RackName, StableId), DecodeError> {
     Ok((
-        stable_id(message.one(1, WIRE_UTF8)?)?,
-        parse_rack(read_u8_exact(message.one(2, WIRE_U8)?)?)?,
-        stable_id(message.one(3, WIRE_UTF8)?)?,
+        stable_id(one_spec!(message, fields[0])?)?,
+        parse_rack(read_u8_exact(one_spec!(message, fields[1])?)?)?,
+        stable_id(one_spec!(message, fields[2])?)?,
     ))
 }
 fn parse_quality(value: u8) -> Result<EffectQuality, DecodeError> {
@@ -2690,6 +2245,7 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_U8, WIRE_U32, WIRE_UTF8};
     use miso_engine_session::{
         LinkMode, ParameterChannel, ParameterUnit, RenderMode, SampleFormat, SendTap, Sidechain,
         Track, parse_session_toml,
@@ -2697,6 +2253,21 @@ mod tests {
 
     fn id(value: &str) -> StableId {
         StableId::parse(value).expect("stable ID")
+    }
+
+    fn raw_message(fields: Vec<(u16, u8, bool, Vec<u8>)>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        for (id, wire, mandatory, value) in fields {
+            bytes.extend_from_slice(&id.to_le_bytes());
+            bytes.push(wire);
+            bytes.push(u8::from(mandatory));
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&value);
+            bytes.resize(bytes.len() + padding(value.len()), 0);
+        }
+        bytes
     }
 
     #[test]
@@ -3075,8 +2646,7 @@ mod tests {
         codec
             .encode_session_transaction(&transaction, &mut output)
             .expect("initial direct encode");
-        let legacy = transaction_payload(&edits).expect("allocating convenience payload");
-        assert_eq!(&output[crate::OUTER_HEADER_BYTES..], legacy);
+        let canonical = output.clone();
         let mut scratch = [0_u16; 64];
         let decoded = codec
             .decode_session_transaction(&output, &mut DecodeScratch::new(&mut scratch))
@@ -3092,7 +2662,7 @@ mod tests {
                 codec.encode_session_transaction(&transaction, &mut output),
                 Ok(required)
             );
-            assert_eq!(&output[crate::OUTER_HEADER_BYTES..], legacy);
+            assert_eq!(output, canonical);
         }
     }
 
@@ -3473,30 +3043,29 @@ mod tests {
 
     #[test]
     fn track_effect_schema_rejects_duplicate_type_order_and_variant_errors() {
-        let mut duplicate = MessageBuilder::new();
-        duplicate.boolean(1, false).expect("field");
-        duplicate.boolean(1, false).expect("duplicate field");
-        duplicate.f32(2, 0.0).expect("field");
-        duplicate.f32(3, 20.0).expect("field");
-        duplicate.f32(4, 20_000.0).expect("field");
-        assert!(
-            parse_channel_builtins(Message::nested(&duplicate.finish()).expect("nested")).is_err()
-        );
+        let duplicate = raw_message(vec![
+            (1, WIRE_BOOL, true, vec![0]),
+            (1, WIRE_BOOL, true, vec![0]),
+            (2, WIRE_F32, true, 0.0_f32.to_le_bytes().to_vec()),
+            (3, WIRE_F32, true, 20.0_f32.to_le_bytes().to_vec()),
+            (4, WIRE_F32, true, 20_000.0_f32.to_le_bytes().to_vec()),
+        ]);
+        assert!(parse_channel_builtins(Message::nested(&duplicate).expect("nested")).is_err());
 
-        let mut wrong_type = MessageBuilder::new();
-        wrong_type.u8(1, 0).expect("bad type");
-        wrong_type.f32(2, 0.0).expect("field");
-        wrong_type.f32(3, 20.0).expect("field");
-        wrong_type.f32(4, 20_000.0).expect("field");
-        assert!(
-            parse_channel_builtins(Message::nested(&wrong_type.finish()).expect("nested")).is_err()
-        );
+        let wrong_type = raw_message(vec![
+            (1, WIRE_U8, true, vec![0]),
+            (2, WIRE_F32, true, 0.0_f32.to_le_bytes().to_vec()),
+            (3, WIRE_F32, true, 20.0_f32.to_le_bytes().to_vec()),
+            (4, WIRE_F32, true, 20_000.0_f32.to_le_bytes().to_vec()),
+        ]);
+        assert!(parse_channel_builtins(Message::nested(&wrong_type).expect("nested")).is_err());
 
-        let mut unknown = MessageBuilder::new();
-        unknown.u8(1, 1).expect("tag");
-        unknown.u8(2, 7).expect("known-incompatible field");
+        let unknown = raw_message(vec![
+            (1, WIRE_U8, true, vec![1]),
+            (2, WIRE_U8, true, vec![7]),
+        ]);
         assert_eq!(
-            parse_sidechain(Message::nested(&unknown.finish()).expect("nested")),
+            parse_sidechain(Message::nested(&unknown).expect("nested")),
             Err(DecodeError::UnknownRequiredField)
         );
 
@@ -3525,7 +3094,12 @@ mod tests {
                 track_id: id("vocal"),
                 tap,
             };
-            let encoded = route_source_message(&source).expect("encode route source");
+            let limits = ProtocolCodec::default().limits();
+            let mut count = CountSink::new(limits);
+            tx_route_source(&mut count, &source).expect("size route source");
+            let mut encoded = vec![0; count.written()];
+            let mut writer = SliceSink::new(&mut encoded, limits);
+            tx_route_source(&mut writer, &source).expect("encode route source");
             assert_eq!(
                 parse_route_source(Message::nested(&encoded).expect("nested route source")),
                 Ok(source)
@@ -3665,12 +3239,11 @@ mod tests {
 
     #[test]
     fn route_and_automation_unknown_optional_fields_are_canonicalized_away() {
-        let mut destination = MessageBuilder::new();
-        destination.u8(1, 2).expect("kind");
-        destination.id(2, &id("main-out")).expect("output");
-        let mut bytes = destination.finish();
-        bytes.extend_from_slice(&[99, 0, WIRE_U8, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0]);
-        bytes[0..4].copy_from_slice(&3_u32.to_le_bytes());
+        let bytes = raw_message(vec![
+            (1, WIRE_U8, true, vec![2]),
+            (2, WIRE_UTF8, true, b"main-out".to_vec()),
+            (99, WIRE_U8, false, vec![7]),
+        ]);
         assert_eq!(
             parse_route_destination(Message::nested(&bytes).expect("nested destination")),
             Ok(RouteDestination::OutputInput {
