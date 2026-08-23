@@ -820,11 +820,7 @@ fn active_output(
     let high = flushed(
         frame.high * band_amplitude(lane, HIGH_BAND, detector_high, metadata.sample_rate)?,
     )?;
-    let identity = lane.gains[LOW_BAND].to_bits() == 0
-        && lane.gains[HIGH_BAND].to_bits() == 0
-        && lane.ramps[4].current.to_bits() == 0
-        && lane.ramps[9].current.to_bits() == 0;
-    if metadata.bypass || identity {
+    if metadata.bypass {
         Some(frame.dry)
     } else {
         flushed(low + high)
@@ -1196,7 +1192,6 @@ fn finish_bank_side<const W: usize>(
     let dry_mask = [0_u32; W];
     let wet_mask = [u32::MAX; W];
     let mut dry = [0.0; W];
-    let mut identity = [false; W];
     let mut recovered = [false; W];
     for track in 0..W {
         let counter = if left_lane {
@@ -1229,10 +1224,6 @@ fn finish_bank_side<const W: usize>(
             (Some(low_value), Some(high_value)) => {
                 low_gain[track] = low_value;
                 high_gain[track] = high_value;
-                identity[track] = lanes[track].gains[LOW_BAND].to_bits() == 0
-                    && lanes[track].gains[HIGH_BAND].to_bits() == 0
-                    && lanes[track].ramps[4].current.to_bits() == 0
-                    && lanes[track].ramps[9].current.to_bits() == 0;
             }
             _ => {
                 output[track] = lanes[track].recover(counter);
@@ -1257,7 +1248,7 @@ fn finish_bank_side<const W: usize>(
         };
         if !kernels_ok {
             output[track] = lanes[track].recover(counter);
-        } else if metadata.bypass || identity[track] {
+        } else if metadata.bypass {
             output[track] = dry[track];
         } else if let Some(value) = flushed(low[track] + high[track]) {
             output[track] = value;
@@ -1787,6 +1778,145 @@ mod tests {
         }
     }
 
+    /// A settled LR4 all-pass sine at 1 kHz can change by at most 0.065479 per
+    /// sample at 0.5 amplitude and +0.01 dB makeup. The 64-sample makeup ramp
+    /// adds less than 0.000009 and f32 rounding less than 0.000001, so 0.0656
+    /// leaves a conservative bound while rejecting a dry/LR4 phase switch.
+    #[test]
+    fn unity_gain_transition_has_no_step_at_crossover() {
+        let mut initial = values();
+        for lane in 0..2 {
+            initial[2 * 2 + lane].value = 0.0;
+            initial[7 * 2 + lane].value = 0.0;
+        }
+        let mut effect = MultibandCompressorFactory
+            .prepare(request(&initial))
+            .expect("unity-gain effect");
+        let mut left = (0..12_288)
+            .map(|index| 0.5 * (core::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin())
+            .collect::<Vec<_>>();
+        let mut right = left.clone();
+
+        for block in 0..96 {
+            let start = block * 128;
+            let value = match block {
+                40 => Some(0.01),
+                60 => Some(0.0),
+                _ => None,
+            };
+            let spans = value.map(|value| {
+                [
+                    PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: ParameterChannel::Left,
+                        parameter_index: 6,
+                        start_sample: start as u64,
+                        end_sample: start as u64,
+                        start_value: value,
+                        end_value: value,
+                    },
+                    PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: ParameterChannel::Right,
+                        parameter_index: 6,
+                        start_sample: start as u64,
+                        end_sample: start as u64,
+                        start_value: value,
+                        end_value: value,
+                    },
+                    PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: ParameterChannel::Left,
+                        parameter_index: 11,
+                        start_sample: start as u64,
+                        end_sample: start as u64,
+                        start_value: value,
+                        end_value: value,
+                    },
+                    PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: ParameterChannel::Right,
+                        parameter_index: 11,
+                        start_sample: start as u64,
+                        end_sample: start as u64,
+                        start_value: value,
+                        end_value: value,
+                    },
+                ]
+            });
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left[start..start + 128],
+                    &mut right[start..start + 128],
+                    None,
+                    start as u64,
+                    spans.as_ref().map_or(&[], |spans| &spans[..]),
+                    128,
+                )
+                .expect("unity-gain block"),
+            );
+        }
+
+        for index in 4_800..12_288 {
+            let delta = (left[index] - left[index - 1]).abs();
+            assert!(
+                delta <= 0.0656,
+                "index={index} delta={delta} previous={} output={}",
+                left[index - 1],
+                left[index]
+            );
+        }
+    }
+
+    #[test]
+    fn unity_gain_output_is_the_delayed_lr4_sum() {
+        let mut initial = values();
+        for lane in 0..2 {
+            initial[2 * 2 + lane].value = 0.0;
+            initial[7 * 2 + lane].value = 0.0;
+        }
+        let input = (0..8_192)
+            .map(|index| 0.5 * (core::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin())
+            .collect::<Vec<_>>();
+        let mut left = input.clone();
+        let mut right = input.clone();
+        let mut effect = MultibandCompressorFactory
+            .prepare(request(&initial))
+            .expect("unity-gain effect");
+        for block in 0..64 {
+            let start = block * 128;
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left[start..start + 128],
+                    &mut right[start..start + 128],
+                    None,
+                    start as u64,
+                    &[],
+                    128,
+                )
+                .expect("unity-gain block"),
+            );
+        }
+
+        let mut reference = ReferenceLr4Crossover::new(48_000.0, 1_000.0).expect("reference");
+        let reference_sum = input
+            .iter()
+            .map(|sample| {
+                let (low, high) = reference.process_sample(f64::from(*sample));
+                low + high
+            })
+            .collect::<Vec<_>>();
+        for index in 4_096..8_192 {
+            let expected = reference_sum[index - 960] as f32;
+            let error = (left[index] - expected).abs();
+            assert!(
+                error <= 2.0e-5,
+                "index={index} error={error} actual={} expected={expected}",
+                left[index]
+            );
+        }
+    }
+
     #[test]
     fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
         for (frequency, active_base) in [(120.0_f32, 0_usize), (4_000.0_f32, 5_usize)] {
@@ -1855,6 +1985,7 @@ mod tests {
         let mut left = vec![0.0; 128];
         let mut right = vec![0.0; 128];
         left[0] = -0.5;
+        left[1] = -0.0;
         right[0] = 0.25;
         let span = PreparedAutomationSpan {
             kind: AutomationSpanKind::Point,
@@ -1889,6 +2020,7 @@ mod tests {
         }
         assert!(output[..960].iter().all(|sample| *sample == 0.0));
         assert_eq!(output[960].to_bits(), (-0.5_f32).to_bits());
+        assert_eq!(output[961].to_bits(), (-0.0_f32).to_bits());
         let mut saved_left = vec![0_u8; sizes.left_bytes as usize];
         let mut saved_right = vec![0_u8; sizes.right_bytes as usize];
         effect
@@ -2025,7 +2157,6 @@ mod tests {
                 end_value: -30.0,
             }];
             let automation_offsets = [0_u32, 1, 1, 1, 1, 1, 1, 1, 1];
-            let mut signed_zero_output = None;
             for block_index in 0..12_usize {
                 let first_sample = (block_index * 128) as u64;
                 let mut bank_left = vec![0.0_f32; 128 * 8];
@@ -2118,13 +2249,9 @@ mod tests {
                                 );
                             }
                         }
-                        if track == 7 && first_sample as usize + frame == 980 {
-                            signed_zero_output = Some(bank_left[frame * 8 + track].to_bits());
-                        }
                     }
                 }
             }
-            assert_eq!(signed_zero_output, Some((-0.0_f32).to_bits()));
             if exact {
                 let saved = scalars
                     .iter()

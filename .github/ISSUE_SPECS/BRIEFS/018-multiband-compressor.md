@@ -130,9 +130,9 @@ Standard bounded `f32` `log10`/`exp`/`powf` run lane-locally; production imports
 Advance ten ramps in descriptor order. A Point starts update one at `first_sample`, reaches its
 target on update 64 and retargets from current.
 
-Bypass returns `z_dry` bits while warming all state. When both `G` values and makeups are positive
-zero, also return `z_dry` bits exactly. Otherwise return low plus high. Raw crossover-sum tests run
-before this identity selection.
+Bypass returns `z_dry` bits while warming all state. The enabled path always returns low plus high,
+including when both `G` values and makeups are positive zero. Raw crossover-sum tests run before
+this output selection.
 
 ## Automation, reset, recovery and restore
 
@@ -142,7 +142,7 @@ and invalid values. Count each invalid span saturatingly, retain other valid tar
 descriptor/lane order and normalize accepted parameter zero positive.
 
 The accepted sanitizer converts nonfinite/subnormal input to positive zero and counts once; finite
-signed audio zero survives rings/identity. Flush finite computed subnormal state/gain/output without
+signed audio zero survives rings/bypass. Flush finite computed subnormal state/gain/output without
 recovery. A nonfinite crossover state/output, curve, coefficient, `G`, gain or active output resets
 only that lane's four sections and two gains, emits `z_dry` and counts one lane recovery. Rings and
 other lanes/tracks remain untouched; valid fixtures recover zero lanes.

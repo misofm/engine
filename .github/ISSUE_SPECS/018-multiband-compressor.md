@@ -102,9 +102,10 @@ mutation occurs here. `timed_benchmark_invocations=0`.
 ## Hazards/decisions
 
 LP and HP branches require independent histories; sharing their first section changes the transfer.
-Their sum is all-pass, not zero-phase or sample-identical dry, so identity/bypass selects a separate
-delayed-dry ring while crossover tests inspect the unmasked band sum. Crossover coefficients are
-prepared, never automated. Research authority is `[REISS-COMP]`, `[ORFANIDIS-ISP]`,
+Their sum is all-pass, not zero-phase or sample-identical dry, so only the prepare-time `bypass`
+path selects the delayed-dry ring; the enabled path always outputs the band sum (`low + high`),
+including at unity gain. A runtime dry/sum switch is a discontinuity (audit #94 F1). Crossover
+coefficients are prepared, never automated. Research authority is `[REISS-COMP]`, `[ORFANIDIS-ISP]`,
 `[SMITH-SASP]` and `[VST3-LATENCY]` plus the accepted builtin TPT evidence.
 
 ## Acceptance gates with objective measurements
@@ -116,9 +117,10 @@ prepared, never automated. Research authority is `[REISS-COMP]`, `[ORFANIDIS-ISP
 3. Representative ratio-identity, low-only, high-only and both-band fixtures meet 0.01 dB curve,
    0.005 dB envelope and greater-of-one-sample-or-2% time-constant gates.
 4. Lookahead 0/5/20 ms enabled/bypass impulses land at `Fs/50`; link modes distinguish correctly;
-   whole-effect identity/bypass returns delayed-dry bits exactly.
+   whole-effect bypass returns delayed-dry bits exactly; the enabled unity-gain path returns the
+   delayed LR4 sum within the crossover gate and has no step at unity-gain transitions.
 5. Exact 64-update automation, both resets, transactional continuation restore, signed-zero
-   identity, sanitation, lane-local recovery and L/R/track isolation pass.
+   bypass, sanitation, lane-local recovery and L/R/track isolation pass.
 6. Scalar, Wasm/NEON W4 and base-AVX2 W8 TPT/gain paths are bit-exact for finite-normal inputs.
    Existing AVX2+FMA retains exactly the accepted three TPT contractions and frozen
    `abs(error) <= 1e-6 + 2e-5*abs(scalar)` tolerance; its compressor gain kernel remains
@@ -234,3 +236,27 @@ final Sol verdicts; successor link; and `timed_benchmark_invocations=0`.
   051 exclusively retains expanded topology/qualification/audit/target/object/benchmark/listening
   work. No audit main, target matrix, object inspection, benchmark, timing or listening command
   ran; `timed_benchmark_invocations=0`.
+
+## Audit #94 wave 0 — F1
+
+- Deleted the scalar and W4/W8 enabled unity-gain dry/identity selections. Only immutable
+  prepare-time bypass now selects delayed dry; enabled processing always emits the flushed LR4
+  `low + high` sum. Dry rings, state layout and recovery are unchanged.
+- Added `unity_gain_transition_has_no_step_at_crossover` (E0), whose pre-fix run failed at sample
+  5120 with consecutive delta `0.8296956` against `0.0656`, and
+  `unity_gain_output_is_the_delayed_lr4_sum` (E0b), whose independent four-section `f64` oracle
+  run failed pre-fix with dry/LR4 error `0.8660186` at 1 kHz/48 kHz against `2e-5`.
+- Amended `bypass_latency_automation_and_restore_are_transactional` (E0c) to preserve delayed
+  bypass `-0.0` bits at sample 961. Canonicalizing sanitizer `-0.0` to `+0.0` made the gate fail
+  with actual bits `0` against expected bits `2147483648`; the mutation was reverted.
+- PASS: `cargo fmt --all -- --check`; `cargo clippy --locked -p
+  miso-engine-multiband-compressor --all-targets -- -D warnings`; `cargo test --locked -p
+  miso-engine-multiband-compressor`; `cargo test --locked -p miso-engine-graph-compiler
+  launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps`;
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p
+  miso-engine-multiband-compressor`; `bash scripts/check-realtime-policy.sh`; `bash
+  scripts/check-effect-runtime-policy.sh`; `bash scripts/check-workspace-policy.sh`; and `git diff
+  --check`. The policy sources have no executable bit in this checkout, so they were invoked via
+  `bash` without changing their modes. The identity-branch and signed-zero mutations were each
+  executed once and reverted. No fixture was re-pinned, and no benchmark, timing, target matrix or
+  listening command ran; `timed_benchmark_invocations=0`.
