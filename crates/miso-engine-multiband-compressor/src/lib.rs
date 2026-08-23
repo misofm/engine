@@ -1171,10 +1171,9 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         let samples = frames as u64;
         for (track, report) in reports.iter_mut().enumerate().take(W) {
             if mask & (1 << track) != 0 {
-                report.recovered_left_samples =
-                    report.recovered_left_samples.saturating_add(samples);
-                report.recovered_right_samples =
-                    report.recovered_right_samples.saturating_add(samples);
+                report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(samples);
+                report.nonfinite_right_blocks =
+                    report.nonfinite_right_blocks.saturating_add(samples);
             }
         }
     }

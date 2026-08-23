@@ -916,13 +916,13 @@ impl PreparedDelay {
             &mut self.left,
             io_left,
             window,
-            &mut report.recovered_left_samples,
+            &mut report.nonfinite_left_blocks,
         );
         recover_lane(
             &mut self.right,
             io_right,
             window,
-            &mut report.recovered_right_samples,
+            &mut report.nonfinite_right_blocks,
         );
     }
 }
@@ -2197,8 +2197,8 @@ mod tests {
                 .expect("clean block"),
         );
 
-        assert_eq!(report.recovered_left_samples, 1);
-        assert_eq!(report.recovered_right_samples, 0);
+        assert_eq!(report.nonfinite_left_blocks, 1);
+        assert_eq!(report.nonfinite_right_blocks, 0);
         assert_eq!(report.sanitized_main_samples, 0);
         assert!(injected_left.iter().all(|sample| sample.to_bits() == 0));
         assert_eq!(injected.left.valid_history, 0);
@@ -2230,8 +2230,8 @@ mod tests {
         let report = crossed.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 128, &[], 128).expect("crossed"),
         );
-        assert_eq!(report.recovered_left_samples, 1);
-        assert_eq!(report.recovered_right_samples, 1);
+        assert_eq!(report.nonfinite_left_blocks, 1);
+        assert_eq!(report.nonfinite_right_blocks, 1);
         assert!(
             left.iter()
                 .chain(&right)
@@ -2247,8 +2247,8 @@ mod tests {
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("nan input"),
         );
         assert_eq!(report.sanitized_main_samples, 0);
-        assert_eq!(report.recovered_left_samples, 1);
-        assert_eq!(report.recovered_right_samples, 0);
+        assert_eq!(report.nonfinite_left_blocks, 1);
+        assert_eq!(report.nonfinite_right_blocks, 0);
         assert_eq!(left.map(f32::to_bits), [0, 0]);
     }
 

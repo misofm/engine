@@ -75,18 +75,18 @@ fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
     let tripped: Vec<usize> = blocks
         .iter()
         .enumerate()
-        .filter(|(_, report)| report.recovered_right_samples != 0)
+        .filter(|(_, report)| report.nonfinite_right_blocks != 0)
         .map(|(index, _)| index)
         .collect();
     assert_eq!(tripped, vec![7], "one rejected block, at the latency");
     assert_eq!(
-        blocks[7].recovered_right_samples, 1,
+        blocks[7].nonfinite_right_blocks, 1,
         "the counter counts blocks"
     );
     assert!(
         blocks
             .iter()
-            .all(|report| report.recovered_left_samples == 0),
+            .all(|report| report.nonfinite_left_blocks == 0),
         "the left channel never tripped"
     );
     assert!(
@@ -166,7 +166,7 @@ fn a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor() {
             )
             .expect("block"),
         );
-        trips += report.recovered_left_samples + report.recovered_right_samples;
+        trips += report.nonfinite_left_blocks + report.nonfinite_right_blocks;
         offset += 128;
     }
     assert_eq!(trips, 0, "a NaN detector level is clamped, not propagated");
@@ -200,7 +200,7 @@ fn the_boundary_limit_rejects_a_finite_but_absurd_value() {
             )
             .expect("block"),
         );
-        trips += report.recovered_left_samples;
+        trips += report.nonfinite_left_blocks;
         offset += 128;
     }
     assert_eq!(trips, 1, "1e31 is above the 1e30 boundary limit");
@@ -224,7 +224,7 @@ fn the_boundary_limit_rejects_a_finite_but_absurd_value() {
             )
             .expect("block"),
         );
-        trips += report.recovered_left_samples;
+        trips += report.nonfinite_left_blocks;
         offset += 128;
     }
     assert_eq!(trips, 0, "9.9e29 is below the limit and passes through");

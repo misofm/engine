@@ -207,12 +207,12 @@ pub fn accumulate(total: &mut ProcessReport, report: ProcessReport) {
         .sanitized_sidechain_samples
         .saturating_add(report.sanitized_sidechain_samples);
     total.invalid_spans = total.invalid_spans.saturating_add(report.invalid_spans);
-    total.recovered_left_samples = total
-        .recovered_left_samples
-        .saturating_add(report.recovered_left_samples);
-    total.recovered_right_samples = total
-        .recovered_right_samples
-        .saturating_add(report.recovered_right_samples);
+    total.nonfinite_left_blocks = total
+        .nonfinite_left_blocks
+        .saturating_add(report.nonfinite_left_blocks);
+    total.nonfinite_right_blocks = total
+        .nonfinite_right_blocks
+        .saturating_add(report.nonfinite_right_blocks);
 }
 
 /// The two channel sections of a scalar instance's payload.

@@ -181,7 +181,7 @@ broad fixture framework was added. `timed_benchmark_invocations=0`.
 Issue 042 does not have an overall PASS. The complete retained-transfer grid and 1,104 exact
 cutoff/center/shelf-midpoint/notch-minimum searches pass, but the first frozen one-second
 time-domain row fails before its DFT comparison. At 44.1 kHz, a legal bell at `f0=10 Hz`,
-`gain=-24 dB`, `Q=0.1`, `S=0.1` reports `recovered_left_samples=1`; the gate requires zero.
+`gain=-24 dB`, `Q=0.1`, `S=0.1` reports `nonfinite_left_blocks=1`; the gate requires zero.
 The input and parameters are legal, and the recovery is emitted by the production scalar
 recurrence's own normal-or-zero state/output predicate. It is therefore neither an oracle nor a
 frequency-search defect.

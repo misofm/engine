@@ -286,13 +286,12 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
                 let (left, recover_left) = self.lanes[lane].process_lane(0, left, sample);
                 let (right, recover_right) = self.lanes[lane].process_lane(1, right, sample);
                 if recover_left {
-                    report.reports[lane].recovered_left_samples = report.reports[lane]
-                        .recovered_left_samples
-                        .saturating_add(1);
+                    report.reports[lane].nonfinite_left_blocks =
+                        report.reports[lane].nonfinite_left_blocks.saturating_add(1);
                 }
                 if recover_right {
-                    report.reports[lane].recovered_right_samples = report.reports[lane]
-                        .recovered_right_samples
+                    report.reports[lane].nonfinite_right_blocks = report.reports[lane]
+                        .nonfinite_right_blocks
                         .saturating_add(1);
                 }
                 block.left[index] = left;
@@ -473,10 +472,10 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
                 left = f32::NAN;
             }
             if recover_left {
-                report.recovered_left_samples = report.recovered_left_samples.saturating_add(1);
+                report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(1);
             }
             if recover_right {
-                report.recovered_right_samples = report.recovered_right_samples.saturating_add(1);
+                report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(1);
             }
             block.left[frame] = left;
             block.right[frame] = right;

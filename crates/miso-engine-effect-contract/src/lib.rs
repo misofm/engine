@@ -806,13 +806,22 @@ pub struct PreparedBankMetadata {
     pub width: BankWidth,
     pub program_key: EffectProgramKeyV1,
 }
+/// What one `process` call observed. Every counter here counts **blocks**, never samples
+/// (decision D7): an effect classifies no individual sample, so a per-sample count would have no
+/// definition. `nonfinite_left_blocks` / `nonfinite_right_blocks` are the D7 output boundary check
+/// -- one vector compare per channel per block -- and were named `recovered_*_samples` until #96
+/// renamed them to what wave 2 already stores in them.
+///
+/// `sanitized_main_samples` and `sanitized_sidechain_samples` have no production writer: input
+/// sanitisation happens once per track per block at the track input stage. They are retained for
+/// the conformance reference mock, which is deliberately the permissive end of the contract.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProcessReport {
     pub sanitized_main_samples: u64,
     pub sanitized_sidechain_samples: u64,
     pub invalid_spans: u64,
-    pub recovered_left_samples: u64,
-    pub recovered_right_samples: u64,
+    pub nonfinite_left_blocks: u64,
+    pub nonfinite_right_blocks: u64,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BankProcessReport {
@@ -827,8 +836,8 @@ impl BankProcessReport {
                 sanitized_main_samples: 0,
                 sanitized_sidechain_samples: 0,
                 invalid_spans: 0,
-                recovered_left_samples: 0,
-                recovered_right_samples: 0,
+                nonfinite_left_blocks: 0,
+                nonfinite_right_blocks: 0,
             }; 8],
         }
     }

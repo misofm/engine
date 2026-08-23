@@ -211,7 +211,7 @@ pub fn run_case(case: usize, out: &mut [u32]) {
         );
         assert_eq!(report.invalid_spans, 0, "corpus automation must be legal");
         assert_eq!(
-            report.recovered_left_samples + report.recovered_right_samples,
+            report.nonfinite_left_blocks + report.nonfinite_right_blocks,
             0,
             "corpus must stay finite"
         );

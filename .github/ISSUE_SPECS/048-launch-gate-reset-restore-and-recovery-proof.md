@@ -53,7 +53,7 @@ For signed-zero identity, keep `G=+0` through the delayed sample, send `-0` left
 and require exact output bits at sample 480 with zero sanitation/recovery. For recovery, warm the
 delay with nonzero finite audio, test-only inject a nonfinite `G` into exactly one left lane, and
 process one frame. Scalar must emit that lane's delayed dry sample, reset only that lane to
-Open/K/+0 and increment only `recovered_left_samples`. An executed W8 bank with the same injected
+Open/K/+0 and increment only `nonfinite_left_blocks`. An executed W8 bank with the same injected
 track/lane must match eight scalar peers exactly for output, per-track payload and reports; every
 other track/right lane remains unchanged. A skipped/unavailable W8 path is not PASS evidence.
 

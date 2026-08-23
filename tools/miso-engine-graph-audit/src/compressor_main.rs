@@ -166,8 +166,8 @@ fn main() {
             assert_eq!(report.sanitized_main_samples, 0);
             assert_eq!(report.sanitized_sidechain_samples, 0);
             assert_eq!(report.invalid_spans, 0);
-            assert_eq!(report.recovered_left_samples, 0);
-            assert_eq!(report.recovered_right_samples, 0);
+            assert_eq!(report.nonfinite_left_blocks, 0);
+            assert_eq!(report.nonfinite_right_blocks, 0);
 
             if let (Some(bank), Some((_, width))) = (prepared.bank.as_mut(), width) {
                 bank_left.fill(if block & 1 == 0 { 0.125 } else { -0.375 });
@@ -195,8 +195,8 @@ fn main() {
                     .expect("prepared bank block"),
                 );
                 for track in bank_report.reports {
-                    assert_eq!(track.recovered_left_samples, 0);
-                    assert_eq!(track.recovered_right_samples, 0);
+                    assert_eq!(track.nonfinite_left_blocks, 0);
+                    assert_eq!(track.nonfinite_right_blocks, 0);
                 }
             }
         }

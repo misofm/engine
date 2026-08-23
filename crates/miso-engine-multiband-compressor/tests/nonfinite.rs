@@ -57,7 +57,7 @@ fn run(injected: Option<(usize, f32)>, blocks: usize) -> (Vec<f32>, Vec<u64>) {
             )
             .expect("block"),
         );
-        recovered.push(report.recovered_left_samples);
+        recovered.push(report.nonfinite_left_blocks);
     }
     (left, recovered)
 }
@@ -189,7 +189,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
             .expect("block"),
         );
         assert_eq!(
-            report.recovered_left_samples, 0,
+            report.nonfinite_left_blocks, 0,
             "1e29 is below the 1e30 limit and must pass (block {block})"
         );
     }
@@ -225,7 +225,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
                 report
                     .reports
                     .iter()
-                    .all(|track| track.recovered_left_samples == 0),
+                    .all(|track| track.nonfinite_left_blocks == 0),
                 "block {block} should be clean"
             );
             continue;
@@ -237,11 +237,11 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
                 .all(|sample| *sample == 0.0),
             "a bank shares its reset, so a failing lane zeroes the whole block"
         );
-        assert_eq!(report.reports[3].recovered_left_samples, FRAMES as u64);
+        assert_eq!(report.reports[3].nonfinite_left_blocks, FRAMES as u64);
         for (track, item) in report.reports.iter().enumerate() {
             if track != 3 {
                 assert_eq!(
-                    item.recovered_left_samples, 0,
+                    item.nonfinite_left_blocks, 0,
                     "track {track} was not the failing lane"
                 );
             }

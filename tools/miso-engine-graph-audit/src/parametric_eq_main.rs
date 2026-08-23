@@ -110,8 +110,8 @@ fn main() {
             );
             assert_eq!(report.sanitized_main_samples, 0);
             assert_eq!(report.invalid_spans, 0);
-            assert_eq!(report.recovered_left_samples, 0);
-            assert_eq!(report.recovered_right_samples, 0);
+            assert_eq!(report.nonfinite_left_blocks, 0);
+            assert_eq!(report.nonfinite_right_blocks, 0);
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     });

@@ -19,7 +19,7 @@ Mutations are listed in the order the gates appear in the issue-#93 plan's eval 
 | M7a | P1 | `delay_chunk`: the damping states stay in locals and are never written back | `partition_invariance_over_1_7_64_128_512` | the left output differs from the reference at block size 1 |
 | M7b | P1 | `chunk_frames`: the `transition_remaining` bound is dropped | `partition_invariance_over_1_7_64_128_512` | `transition_remaining -= advanced` underflows: a crossfade ran past its end |
 | M7c | P1 | `DelayLane::history_bound` always returns `usize::MAX`, dropping the `D - valid_history` bound | `partition_invariance_over_1_7_64_128_512` | the left output differs from the reference at block size 1, where the 13 ms tap turns valid |
-| M8 | E7 | `recover_lane` no longer scans the ring cells the block wrote | `nonfinite_state_recovers_per_block_lane_locally_at_p_zero` | the injected infinity escapes for a block: `recovered_left_samples` is 0 |
+| M8 | E7 | `recover_lane` no longer scans the ring cells the block wrote | `nonfinite_state_recovers_per_block_lane_locally_at_p_zero` | the injected infinity escapes for a block: `nonfinite_left_blocks` is 0 |
 | M9 | E8 | `restore_state_payload` commits the left lane before validating the right | `invalid_restore_is_atomic_and_both_resets_are_word_exact` | a rejected restore leaves a mixture of the old and the new state |
 | M10 | E9 | the D7 `flush` is removed from the ring write | `dry_identities_warm_histories_with_canonical_zero_state` | the ring keeps `1e-30` and `-0.0` instead of canonical `+0.0` |
 | M11 | specs | `PARAMETER_SPECS[1]` is derived from the delay-time descriptor | `descriptor_and_specs_agree` | spec minimum 1.0 against descriptor minimum -0.95 |

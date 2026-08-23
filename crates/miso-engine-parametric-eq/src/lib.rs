@@ -1428,8 +1428,8 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         }
         let frames = block.left.len();
         let failures = self.render(block.left, block.right, frames);
-        report.recovered_left_samples = u64::from(failures[0][0]);
-        report.recovered_right_samples = u64::from(failures[1][0]);
+        report.nonfinite_left_blocks = u64::from(failures[0][0]);
+        report.nonfinite_right_blocks = u64::from(failures[1][0]);
         report
     }
 
@@ -1489,8 +1489,8 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         let frames = block.frames as usize;
         let failures = self.render(block.left, block.right, frames);
         for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
-            entry.recovered_left_samples = u64::from(failures[0][track]);
-            entry.recovered_right_samples = u64::from(failures[1][track]);
+            entry.nonfinite_left_blocks = u64::from(failures[0][track]);
+            entry.nonfinite_right_blocks = u64::from(failures[1][track]);
         }
         report
     }

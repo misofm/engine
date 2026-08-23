@@ -681,11 +681,10 @@ impl PreparedNativeEffect for PreparedCompressor {
             frames,
             |_, left_failed, right_failed| {
                 if left_failed {
-                    report.recovered_left_samples = report.recovered_left_samples.saturating_add(1);
+                    report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(1);
                 }
                 if right_failed {
-                    report.recovered_right_samples =
-                        report.recovered_right_samples.saturating_add(1);
+                    report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(1);
                 }
             },
         );
@@ -757,13 +756,12 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
             frames,
             |lane, left_failed, right_failed| {
                 if left_failed {
-                    report.reports[lane].recovered_left_samples = report.reports[lane]
-                        .recovered_left_samples
-                        .saturating_add(1);
+                    report.reports[lane].nonfinite_left_blocks =
+                        report.reports[lane].nonfinite_left_blocks.saturating_add(1);
                 }
                 if right_failed {
-                    report.reports[lane].recovered_right_samples = report.reports[lane]
-                        .recovered_right_samples
+                    report.reports[lane].nonfinite_right_blocks = report.reports[lane]
+                        .nonfinite_right_blocks
                         .saturating_add(1);
                 }
             },

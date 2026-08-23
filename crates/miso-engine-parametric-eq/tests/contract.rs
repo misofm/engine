@@ -619,7 +619,7 @@ fn bypass_copies_dry_bits_and_leaves_the_state_alone() {
     assert_eq!(right[0].to_bits(), (-0.0_f32).to_bits());
     assert_eq!(left[2].to_bits(), 0.25_f32.to_bits());
     assert_eq!(report.sanitized_main_samples, 0);
-    assert_eq!(report.recovered_left_samples, 0);
+    assert_eq!(report.nonfinite_left_blocks, 0);
     assert_eq!(snapshot(effect.as_ref()), before);
 }
 

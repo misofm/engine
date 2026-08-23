@@ -152,8 +152,8 @@ fn main() {
                     .expect("prepared 128-frame bank block"),
                 );
                 for lane in 0..WIDTH {
-                    assert_eq!(report.reports[lane].recovered_left_samples, 0);
-                    assert_eq!(report.reports[lane].recovered_right_samples, 0);
+                    assert_eq!(report.reports[lane].nonfinite_left_blocks, 0);
+                    assert_eq!(report.reports[lane].nonfinite_right_blocks, 0);
                     assert_eq!(report.reports[lane].invalid_spans, 0);
                 }
                 assert!(bank_left.iter().all(|sample| sample.is_finite()));
@@ -169,8 +169,8 @@ fn main() {
                 )
                 .expect("prepared 128-frame block"),
             );
-            assert_eq!(report.recovered_left_samples, 0);
-            assert_eq!(report.recovered_right_samples, 0);
+            assert_eq!(report.nonfinite_left_blocks, 0);
+            assert_eq!(report.nonfinite_right_blocks, 0);
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     });

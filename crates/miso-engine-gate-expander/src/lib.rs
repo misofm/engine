@@ -752,9 +752,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 self.reset_lane_full(channel, lane);
                 let report = &mut reports[lane];
                 let counter = if channel == 0 {
-                    &mut report.recovered_left_samples
+                    &mut report.nonfinite_left_blocks
                 } else {
-                    &mut report.recovered_right_samples
+                    &mut report.nonfinite_right_blocks
                 };
                 *counter = counter.saturating_add(frames as u64);
             }
@@ -1395,8 +1395,8 @@ mod tests {
             }
             assert_eq!(bank_reports[track], peer_reports[track], "report {track}");
             if track == 3 {
-                assert_eq!(bank_reports[track].recovered_left_samples, FRAMES as u64);
-                assert_eq!(bank_reports[track].recovered_right_samples, 0);
+                assert_eq!(bank_reports[track].nonfinite_left_blocks, FRAMES as u64);
+                assert_eq!(bank_reports[track].nonfinite_right_blocks, 0);
                 for frame in 0..FRAMES {
                     assert_eq!(bank_left[frame * MAX_WIDTH + track].to_bits(), 0);
                 }

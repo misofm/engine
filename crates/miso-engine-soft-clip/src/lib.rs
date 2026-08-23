@@ -971,8 +971,8 @@ impl PreparedNativeEffect for PreparedSoftClip {
         let bypass = self.inner.metadata.bypass;
         if !self.inner.process(block.left, block.right, frames, bypass) {
             let count = frames as u64;
-            report.recovered_left_samples = report.recovered_left_samples.saturating_add(count);
-            report.recovered_right_samples = report.recovered_right_samples.saturating_add(count);
+            report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(count);
+            report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(count);
         }
         report
     }
@@ -1033,11 +1033,11 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         if !self.inner.process(block.left, block.right, frames, bypass) {
             let count = frames as u64;
             for lane in 0..L::WIDTH {
-                report.reports[lane].recovered_left_samples = report.reports[lane]
-                    .recovered_left_samples
+                report.reports[lane].nonfinite_left_blocks = report.reports[lane]
+                    .nonfinite_left_blocks
                     .saturating_add(count);
-                report.reports[lane].recovered_right_samples = report.reports[lane]
-                    .recovered_right_samples
+                report.reports[lane].nonfinite_right_blocks = report.reports[lane]
+                    .nonfinite_right_blocks
                     .saturating_add(count);
             }
         }

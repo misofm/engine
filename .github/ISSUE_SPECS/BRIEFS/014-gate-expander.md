@@ -173,8 +173,8 @@ scanning the block alone would never see.
 
 A failing block resets **only the failing lanes of the failing channel** to `Open`,
 `hold_remaining=K`, `G=+0` with resting ramps, zeroes that lane's column of that channel's block
-and of its rings, and adds the block's frame count to that track's `recovered_left_samples` or
-`recovered_right_samples`. The other lanes, the other channel and the other tracks are
+and of its rings, and adds the block's frame count to that track's `nonfinite_left_blocks` or
+`nonfinite_right_blocks`. The other lanes, the other channel and the other tracks are
 bit-unchanged. This supersedes issue 048's "preserve advanced finite rings on recovery": under D7 a
 lane reset clears the rings, because a ring that carried the fault is not a history worth keeping.
 

@@ -44,8 +44,8 @@ fn a_non_finite_block_is_zeroed_reset_and_counted_once() {
         right.iter().all(|sample| sample.to_bits() == 0),
         "and its right output, because the two share a reset"
     );
-    assert_eq!(report.recovered_left_samples, FRAMES as u64);
-    assert_eq!(report.recovered_right_samples, FRAMES as u64);
+    assert_eq!(report.nonfinite_left_blocks, FRAMES as u64);
+    assert_eq!(report.nonfinite_right_blocks, FRAMES as u64);
     assert_eq!(report.sanitized_main_samples, 0, "D7: nothing is sanitised");
 
     // After the reset the effect is a fresh instance, bit for bit.
@@ -83,7 +83,7 @@ fn a_finite_but_out_of_range_block_also_fails() {
     left[0] = 1.0e35;
     let report = process(effect.as_mut(), &mut left, &mut right, 0, &[]);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
-    assert_eq!(report.recovered_left_samples, FRAMES as u64);
+    assert_eq!(report.nonfinite_left_blocks, FRAMES as u64);
 }
 
 /// A bank counts the failure once per block for every lane, and comes back as a fresh bank.
@@ -137,8 +137,8 @@ fn a_bank_block_fails_and_recovers_as_a_unit() {
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert!(right.iter().all(|sample| sample.to_bits() == 0));
     for lane in 0..lanes {
-        assert_eq!(report.reports[lane].recovered_left_samples, FRAMES as u64);
-        assert_eq!(report.reports[lane].recovered_right_samples, FRAMES as u64);
+        assert_eq!(report.reports[lane].nonfinite_left_blocks, FRAMES as u64);
+        assert_eq!(report.reports[lane].nonfinite_right_blocks, FRAMES as u64);
     }
 
     let fresh = prepare_bank(width, &per_lane).expect("bank binds");

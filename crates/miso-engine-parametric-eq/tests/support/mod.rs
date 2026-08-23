@@ -345,8 +345,8 @@ pub fn one_second_impulse(
             )
             .expect("one-second block"),
         );
-        recovered_left += report.recovered_left_samples;
-        recovered_right += report.recovered_right_samples;
+        recovered_left += report.nonfinite_left_blocks;
+        recovered_right += report.nonfinite_right_blocks;
     }
     (left, recovered_left, recovered_right)
 }

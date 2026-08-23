@@ -440,13 +440,10 @@ fn nonfinite_input_recovers_lane_locally_at_the_block_boundary() {
         assert_eq!(sample.to_bits(), 0, "the recovered block is all +0");
     }
     assert_eq!(
-        reports[hit].recovered_left_samples, BLOCK as u64,
+        reports[hit].nonfinite_left_blocks, BLOCK as u64,
         "one report per frame of the failing block"
     );
-    assert_eq!(
-        reports[hit].recovered_right_samples, 0,
-        "right is untouched"
-    );
+    assert_eq!(reports[hit].nonfinite_right_blocks, 0, "right is untouched");
     assert_bits_eq(
         &right[hit * BLOCK..(hit + 1) * BLOCK],
         &control_right[hit * BLOCK..(hit + 1) * BLOCK],
@@ -523,10 +520,10 @@ fn nonfinite_input_recovers_one_lane_of_a_bank() {
                 0
             };
             assert_eq!(
-                report.reports[track].recovered_left_samples, expected,
+                report.reports[track].nonfinite_left_blocks, expected,
                 "block {block} track {track}"
             );
-            assert_eq!(report.reports[track].recovered_right_samples, 0);
+            assert_eq!(report.reports[track].nonfinite_right_blocks, 0);
         }
     }
     for track in 0..8 {

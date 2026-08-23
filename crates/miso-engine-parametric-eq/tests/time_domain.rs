@@ -132,7 +132,7 @@ fn flush_keeps_decaying_state_out_of_the_subnormal_range() {
             )
             .expect("block"),
         );
-        recovered += report.recovered_left_samples + report.recovered_right_samples;
+        recovered += report.nonfinite_left_blocks + report.nonfinite_right_blocks;
         let (_, left_state, right_state) = snapshot(effect.as_ref());
         for payload in [&left_state[..], &right_state[..]] {
             for band in 0..SECTIONS {
@@ -199,7 +199,7 @@ fn forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery() {
                         )
                         .expect("million-sample block"),
                     );
-                    recovered += report.recovered_left_samples + report.recovered_right_samples;
+                    recovered += report.nonfinite_left_blocks + report.nonfinite_right_blocks;
                     sanitized += report.sanitized_main_samples;
                     assert!(
                         left[..frames].iter().copied().all(f32::is_finite)
@@ -261,8 +261,8 @@ fn a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_cle
     left[3] = f32::NAN;
     let report = effect
         .process(EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"));
-    assert_eq!(report.recovered_left_samples, 1);
-    assert_eq!(report.recovered_right_samples, 0);
+    assert_eq!(report.nonfinite_left_blocks, 1);
+    assert_eq!(report.nonfinite_right_blocks, 0);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert!(right.iter().any(|sample| sample.to_bits() != 0));
     let (_, left_state, _) = snapshot(effect.as_ref());
@@ -276,7 +276,7 @@ fn a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_cle
     let report = effect.process(
         EffectProcessBlock::new(&mut next_left, &mut next_right, None, 8, &[], 128).expect("block"),
     );
-    assert_eq!(report.recovered_left_samples, 0);
+    assert_eq!(report.nonfinite_left_blocks, 0);
     assert!(next_left.iter().all(|sample| sample.is_finite()));
 }
 
