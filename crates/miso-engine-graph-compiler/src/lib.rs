@@ -498,7 +498,11 @@ impl GraphCompiler {
         if !diagnostics.is_empty() {
             return Err(failure(effects, diagnostics));
         }
-        let (schedule, levels) = topo(&nodes, &edges).expect("acyclic graph has schedule");
+        let levels = topo(&nodes, &edges).expect("acyclic graph has schedule");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         if schedule.len() as u64 > caps.maximum_schedule_items
             || levels.len() as u64 > caps.maximum_dependency_levels
         {
@@ -1276,10 +1280,7 @@ fn max_tail(a: TailSamples, b: TailSamples) -> TailSamples {
         (TailSamples::Finite(a), TailSamples::Finite(b)) => TailSamples::Finite(a.max(b)),
     }
 }
-fn topo(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Option<(Vec<GraphNodeId>, Vec<DependencyLevel>)> {
+fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
     let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
     let mut successors: BTreeMap<_, Vec<_>> = nodes
         .iter()
@@ -1302,7 +1303,7 @@ fn topo(
         .iter()
         .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
         .collect();
-    let mut schedule = Vec::new();
+    let mut processed = 0_usize;
     let mut levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
     let mut node_levels = BTreeMap::new();
     while let Some(node) = ready.pop_first() {
@@ -1314,7 +1315,7 @@ fn topo(
             .map_or(0, |value| value + 1);
         node_levels.insert(node.clone(), level);
         levels.entry(level).or_default().push(node.clone());
-        schedule.push(node.clone());
+        processed += 1;
         for successor in &successors[&node] {
             let degree = degree.get_mut(successor)?;
             *degree -= 1;
@@ -1323,19 +1324,18 @@ fn topo(
             }
         }
     }
-    if schedule.len() != nodes.len() {
+    if processed != nodes.len() {
         None
     } else {
         for nodes in levels.values_mut() {
             nodes.sort();
         }
-        Some((
-            schedule,
+        Some(
             levels
                 .into_iter()
                 .map(|(level, nodes)| DependencyLevel { level, nodes })
                 .collect(),
-        ))
+        )
     }
 }
 #[cfg(test)]
@@ -2086,9 +2086,10 @@ mod tests {
         PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
     use miso_engine_graph::{
-        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
-        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, NativeGraphBindConfigV1,
-        NativeGraphRenderModeV1, NativeSchedulerConfigV1, SchedulerSelectionV1,
+        FallbackReasonV1, GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding,
+        GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
+        NativeGraphBindConfigV1, NativeGraphRenderModeV1, NativeSchedulerConfigV1,
+        SchedulerSelectionV1,
     };
     use miso_engine_session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
@@ -2915,6 +2916,14 @@ mod tests {
         {
             return Err("edge dependency");
         }
+        if report.sequential_schedule
+            != levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect::<Vec<_>>()
+        {
+            return Err("schedule level order");
+        }
         Ok(())
     }
 
@@ -3069,16 +3078,16 @@ mod tests {
             "route:to-a-submix",
             "route:to-z-submix",
             "submix:a-submix",
-            "route:z-downstream",
             "submix:z-submix",
             "route:a-downstream",
+            "route:z-downstream",
             "output:main-out",
         ];
         reverse_fixture_identity_contract(
             &baseline.report,
             &baseline.report.dependency_levels,
             &expected_schedule,
-            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
@@ -3122,62 +3131,42 @@ mod tests {
         ];
         assert_eq!(level_transcript, expected_levels);
 
-        let levels_by_node: BTreeMap<_, _> = baseline
-            .report
-            .dependency_levels
-            .iter()
-            .flat_map(|level| {
-                level
-                    .nodes
-                    .iter()
-                    .cloned()
-                    .map(move |node| (node, level.level))
-            })
-            .collect();
-        let mut legacy_levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
-        for node in &baseline.report.sequential_schedule {
-            legacy_levels
-                .entry(levels_by_node[node])
-                .or_default()
-                .push(node.clone());
-        }
-        let legacy_levels: Vec<_> = legacy_levels
-            .into_iter()
-            .map(|(level, nodes)| DependencyLevel { level, nodes })
-            .collect();
+        let mut legacy_report = baseline.report.clone();
+        legacy_report.sequential_schedule.swap(11, 12);
+        legacy_report.sequential_schedule.swap(10, 11);
         assert_eq!(
-            legacy_levels[9]
-                .nodes
+            legacy_report
+                .sequential_schedule
                 .iter()
                 .map(node_text)
                 .collect::<Vec<_>>(),
-            ["route:z-downstream", "route:a-downstream"]
+            [
+                "track:vocal:input",
+                "track:vocal:post-input-builtins",
+                "track:vocal:post-simd1",
+                "track:vocal:post-dynamic",
+                "track:vocal:post-simd2-pre-fader",
+                "track:vocal:post-fader",
+                "track:vocal:post-matrix",
+                "route:to-a-submix",
+                "route:to-z-submix",
+                "submix:a-submix",
+                "route:z-downstream",
+                "submix:z-submix",
+                "route:a-downstream",
+                "output:main-out",
+            ]
         );
         assert_eq!(
-            dependency_level_contract(&baseline.report, &legacy_levels),
-            Err("member order")
+            dependency_level_contract(&legacy_report, &legacy_report.dependency_levels),
+            Err("schedule level order")
         );
-        let legacy_canonical = canonical_with_levels(&baseline.report, &legacy_levels);
-        let without_levels = |bytes: &[u8]| {
-            core::str::from_utf8(bytes)
-                .expect("canonical UTF-8")
-                .lines()
-                .filter(|line| !line.starts_with("level\t"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            without_levels(&legacy_canonical),
-            without_levels(&baseline.report.canonical_debug_bytes)
-        );
+        let legacy_canonical =
+            canonical_with_levels(&legacy_report, &legacy_report.dependency_levels);
         assert_ne!(legacy_canonical, baseline.report.canonical_debug_bytes);
         assert_eq!(
-            hex_sha256(&legacy_canonical),
-            "6676779806af8bb20c9abb287a39488512fc7c0972e96f6cd300f469539bd770"
-        );
-        assert_eq!(
             baseline.report.sha256,
-            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce"
+            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5"
         );
         let mut reversed = baseline.report.dependency_levels.clone();
         reversed[9].nodes.reverse();
@@ -3205,9 +3194,9 @@ mod tests {
                 &schedule_corruption,
                 &schedule_corruption.dependency_levels,
                 &expected_schedule,
-                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
-            Err("schedule identity")
+            Err("schedule level order")
         );
         let mut canonical_corruption = baseline.report.clone();
         canonical_corruption.canonical_debug_bytes[0] ^= 1;
@@ -3216,7 +3205,7 @@ mod tests {
                 &canonical_corruption,
                 &canonical_corruption.dependency_levels,
                 &expected_schedule,
-                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
             Err("canonical identity")
         );
@@ -6392,7 +6381,7 @@ mod tests {
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
-        model.tracks = (0..8)
+        model.tracks = (0..12)
             .map(|index| {
                 let mut track = base_track.clone();
                 track.id = StableId::parse(&format!("bank{index}")).expect("id");
@@ -6428,39 +6417,75 @@ mod tests {
             },
         )
         .expect("compiled");
-        let builtins = prepare_session_builtins(
-            &compiled,
-            &[],
-            BuiltinCompileCaps {
-                maximum_total_state_bytes: u64::MAX,
-                maximum_total_retained_payload_bytes: u64::MAX,
-                maximum_total_meter_items: u64::MAX,
-                maximum_total_meter_bytes: u64::MAX,
-                maximum_single_allocation_bytes: u64::MAX,
-                maximum_meter_streams: u64::MAX,
-                maximum_period_frames: u32::MAX,
-                maximum_peak_hold_frames: u32::MAX,
-                maximum_smoothing_samples: u32::MAX,
-            },
-        )
-        .expect("builtins");
-        let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            plan_id: 78,
-            effects: EffectPreparedSession {
-                session: compiled,
-                entries: Vec::new(),
-            },
-            builtins,
-            caps: integration_caps(),
-        }) {
-            Ok(artifact) => artifact,
-            Err(_) => panic!("graph"),
+        let prepare_artifact = |plan_id, session: miso_engine_session::CompiledSession| {
+            let builtins = prepare_session_builtins(
+                &session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("builtins");
+            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                plan_id,
+                effects: EffectPreparedSession {
+                    session,
+                    entries: Vec::new(),
+                },
+                builtins,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|_| panic!("graph"))
         };
+        let artifact = prepare_artifact(78, compiled.clone());
+        let native_artifact = prepare_artifact(79, compiled);
         let dispatch = KernelDispatch::select(target_capabilities());
         let expected_banks = dispatch
             .bank_width()
-            .map_or(0, |width| 8 / width.lanes() as usize);
+            .map_or(0, |width| 12 / width.lanes() as usize);
+        let expected_tail = dispatch
+            .bank_width()
+            .map_or(12, |width| 12 % width.lanes() as usize);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+        assert_eq!(
+            native_artifact.prepared_builtin_bank_count(),
+            expected_banks
+        );
+        assert_eq!(
+            artifact.report().sequential_schedule,
+            artifact
+                .report()
+                .dependency_levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            artifact.report().sequential_schedule,
+            native_artifact.report().sequential_schedule
+        );
+        let assigned: BTreeMap<_, _> = artifact
+            .report()
+            .buffer_assignments
+            .iter()
+            .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
+            .collect();
+        for bank in artifact.prepared_builtin_banks() {
+            let colors: BTreeSet<_> = bank.members.iter().map(|member| assigned[member]).collect();
+            assert_eq!(
+                colors.len(),
+                bank.members.len(),
+                "simultaneously active builtin-bank members have distinct colors"
+            );
+        }
         let member_ids: Vec<_> = artifact
             .prepared_builtin_banks()
             .flat_map(|bank| {
@@ -6476,14 +6501,16 @@ mod tests {
                 })
             })
             .collect();
-        let mut expected_member_ids: Vec<_> = (0..expected_banks
-            * dispatch
-                .bank_width()
-                .map_or(0, |width| width.lanes() as usize))
-            .map(|index| format!("bank{index}"))
-            .collect();
+        let mut expected_member_ids: Vec<_> = (0..12).map(|index| format!("bank{index}")).collect();
         expected_member_ids.sort();
+        expected_member_ids.truncate(
+            expected_banks
+                * dispatch
+                    .bank_width()
+                    .map_or(0, |width| width.lanes() as usize),
+        );
         assert_eq!(member_ids, expected_member_ids);
+        assert_eq!(12 - expected_member_ids.len(), expected_tail);
         let resource = artifact.graph_resource_estimate();
         assert_eq!(resource.builtin_bank_count, expected_banks as u64);
         if expected_banks != 0 {
@@ -6509,14 +6536,37 @@ mod tests {
                 GraphNodeBinding::new(node, processor)
             })
             .collect();
-        let bound = match artifact.into_bound_native(
+        let bound = match artifact.into_bound(GraphRuntimeBindings {
+            envelope,
+            nodes,
+            observers: Vec::new(),
+        }) {
+            Ok(bound) => bound,
+            Err(_) => panic!("sealed builtin bank bind"),
+        };
+        let native_envelope = native_artifact.envelope();
+        let native_nodes = native_artifact
+            .external_binding_nodes()
+            .cloned()
+            .map(|node| {
+                let processor = match node {
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    } => asymmetric_input_binding(&node),
+                    _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
+                };
+                GraphNodeBinding::new(node, processor)
+            })
+            .collect();
+        let native_bound = match native_artifact.into_bound_native(
             GraphRuntimeBindings {
-                envelope,
-                nodes,
+                envelope: native_envelope,
+                nodes: native_nodes,
                 observers: Vec::new(),
             },
             NativeGraphBindConfigV1 {
-                render_mode: NativeGraphRenderModeV1::DependencyWaves,
+                render_mode: NativeGraphRenderModeV1::SingleThread,
                 scheduler: NativeSchedulerConfigV1::new(
                     NonZeroUsize::new(4).expect("four lanes"),
                     true,
@@ -6525,25 +6575,57 @@ mod tests {
             },
         ) {
             Ok(bound) => bound,
-            Err(_) => panic!("sealed builtin bank bind"),
+            Err(_) => panic!("sealed native builtin bank bind"),
         };
         assert_eq!(
-            bound.prepared.metadata.selection,
-            SchedulerSelectionV1::Parallel
+            native_bound.prepared.metadata.selection,
+            SchedulerSelectionV1::Sequential(FallbackReasonV1::SingleThread)
         );
-        assert_eq!(bound.prepared.metadata.resources.scheduler.worker_count, 3);
-        let mut plan = bound.prepared.into_plan();
+        let mut plan = bound.plan;
+        let mut native_plan = native_bound.prepared.into_plan();
         let frames = envelope.quantum.0 as usize;
-        let mut pcm = vec![0.0; frames * 2];
-        plan.render(
-            RenderIo {
-                input: None,
-                output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
-            },
-            RenderTime { absolute_sample: 0 },
-        )
-        .expect("production builtin-bank render");
-        assert!(pcm.iter().any(|sample| *sample != 0.0));
+        let mut pcm = vec![0.0; frames * 2 * 3];
+        let mut native_pcm = vec![0.0; frames * 2 * 3];
+        for block in 0..3 {
+            let range = block * frames * 2..(block + 1) * frames * 2;
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm[range.clone()], 2, frames, frames)
+                        .expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: (block * frames) as u64,
+                },
+            )
+            .expect("production builtin-bank render");
+            native_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut native_pcm[range], 2, frames, frames)
+                            .expect("native output"),
+                    },
+                    RenderTime {
+                        absolute_sample: (block * frames) as u64,
+                    },
+                )
+                .expect("native production builtin-bank render");
+        }
+        assert!(pcm[..frames * 2].iter().any(|sample| *sample != 0.0));
+        assert_eq!(
+            pcm.iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            native_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            plan.qualification_counters(),
+            native_plan.qualification_counters()
+        );
     }
 
     #[test]
@@ -6761,7 +6843,7 @@ mod tests {
             let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 plan_id: u64::from(layout) + 50_000,
                 effects: EffectPreparedSession {
-                    session: compiled,
+                    session: compiled.clone(),
                     entries: Vec::new(),
                 },
                 builtins,
@@ -6770,10 +6852,54 @@ mod tests {
                 Ok(artifact) => artifact,
                 Err(_) => panic!("seeded graph"),
             };
+            let native_builtins = prepare_session_builtins(
+                &compiled,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("independently prepared native seeded builtins");
+            let native_artifact =
+                GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    plan_id: u64::from(layout) + 60_000,
+                    effects: EffectPreparedSession {
+                        session: compiled,
+                        entries: Vec::new(),
+                    },
+                    builtins: native_builtins,
+                    caps: integration_caps(),
+                })
+                .unwrap_or_else(|_| panic!("native seeded graph"));
             let width = KernelDispatch::select(target_capabilities()).bank_width();
             let expected_banks = width.map_or(0, |width| count / width.lanes() as usize);
             let expected_tail = width.map_or(count, |width| count % width.lanes() as usize);
             assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
+            assert_eq!(
+                native_artifact.prepared_builtin_bank_count(),
+                expected_banks
+            );
+            assert_eq!(
+                artifact.report().sequential_schedule,
+                artifact
+                    .report()
+                    .dependency_levels
+                    .iter()
+                    .flat_map(|level| level.nodes.iter().cloned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                artifact.report().sequential_schedule,
+                native_artifact.report().sequential_schedule
+            );
             let envelope = artifact.envelope();
             let nodes = artifact
                 .external_binding_nodes()
@@ -6797,8 +6923,46 @@ mod tests {
                 Ok(bound) => bound.plan,
                 Err(_) => panic!("seeded bind"),
             };
+            let native_envelope = native_artifact.envelope();
+            let native_nodes = native_artifact
+                .external_binding_nodes()
+                .cloned()
+                .map(|node| {
+                    let processor = match node {
+                        GraphNodeId::TrackStage {
+                            stage: TrackStage::Input,
+                            ..
+                        } => asymmetric_input_binding(&node),
+                        _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
+                    };
+                    GraphNodeBinding::new(node, processor)
+                })
+                .collect();
+            let native_bound = native_artifact
+                .into_bound_native(
+                    GraphRuntimeBindings {
+                        envelope: native_envelope,
+                        nodes: native_nodes,
+                        observers: Vec::new(),
+                    },
+                    NativeGraphBindConfigV1 {
+                        render_mode: NativeGraphRenderModeV1::SingleThread,
+                        scheduler: NativeSchedulerConfigV1::new(
+                            NonZeroUsize::new(4).expect("four lanes"),
+                            true,
+                        ),
+                        maximum_retained_bytes: 1 << 28,
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("native seeded bind: {}", failure.code));
+            assert!(matches!(
+                native_bound.prepared.metadata.selection,
+                SchedulerSelectionV1::Sequential(_)
+            ));
+            let mut native_plan = native_bound.prepared.into_plan();
             let frames = envelope.quantum.0 as usize;
             let mut pcm = vec![0.0; frames * 2];
+            let mut native_pcm = vec![0.0; frames * 2];
             plan.render(
                 RenderIo {
                     input: None,
@@ -6808,15 +6972,38 @@ mod tests {
                 RenderTime { absolute_sample: 0 },
             )
             .expect("seeded render");
+            native_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
+                            .expect("native seeded output"),
+                    },
+                    RenderTime { absolute_sample: 0 },
+                )
+                .expect("native seeded render");
             let counters = plan.qualification_counters();
+            let native_counters = native_plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
             assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0) * 4);
-            let pcm_hash = pcm.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
-                (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
-            });
+            assert_eq!(counters, native_counters);
+            assert_eq!(
+                pcm.iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                native_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            let pcm_hash = native_pcm
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
+                    (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
+                });
             for byte in format!(
                 "{layout}:{value:016x}:{count}:{expected_banks}:{expected_tail}:{pcm_hash:016x}:{:?}",
-                counters
+                native_counters
             )
             .bytes()
             {
@@ -6827,7 +7014,7 @@ mod tests {
         }
         assert_eq!(completed, 100);
         assert_eq!(
-            transcript, 0xc85b_2209_8007_7824,
+            transcript, 0x4965_aa76_4307_e393,
             "frozen Issue-037 seeded layout transcript"
         );
     }
@@ -7078,7 +7265,11 @@ mod tests {
             graph_node("effect", 3, TailSamples::Finite(5)),
         ];
         let edges = [edge("serial", "source", "effect")];
-        let (schedule, _) = topo(&nodes, &edges).expect("acyclic");
+        let levels = topo(&nodes, &edges).expect("acyclic");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         let latencies = nodes
             .iter()
             .map(|node| (node.id.clone(), node.latency))
@@ -7135,7 +7326,11 @@ mod tests {
                 path: "$.routes[id=late-main]".to_owned(),
             },
         ];
-        let (schedule, _) = topo(&nodes, &edges).expect("acyclic output graph");
+        let levels = topo(&nodes, &edges).expect("acyclic output graph");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         let latencies = nodes
             .iter()
             .map(|node| (node.id.clone(), node.latency))
@@ -7217,6 +7412,85 @@ mod tests {
         assert_eq!(assigned[&route_a], 1);
         assert_eq!(assigned[&route_b], 2);
         assert_eq!(assigned[&output], 0);
+    }
+
+    #[test]
+    fn level_major_compiler_coloring_matches_independent_live_intervals() {
+        let artifact = compile_reverse_route_submix_fixture(123_200);
+        let report = artifact.report;
+        let flattened: Vec<_> = report
+            .dependency_levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+        assert_eq!(report.sequential_schedule, flattened);
+        assert_eq!(
+            report.buffer_assignments,
+            buffer_assignments(&flattened, &report.edges)
+        );
+
+        let mut old_kahn = flattened.clone();
+        old_kahn.swap(11, 12);
+        old_kahn.swap(10, 11);
+        assert_ne!(old_kahn, flattened);
+        assert_ne!(
+            buffer_assignments(&old_kahn, &report.edges),
+            report.buffer_assignments,
+            "old Kahn coloring cannot be retained under level-major execution"
+        );
+
+        let positions: BTreeMap<_, _> = flattened
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(position, node)| (node, position))
+            .collect();
+        let assigned: BTreeMap<_, _> = report
+            .buffer_assignments
+            .iter()
+            .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
+            .collect();
+        let intervals: Vec<_> = flattened
+            .iter()
+            .map(|node| {
+                let start = positions[node];
+                let end = report
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.source.node == *node)
+                    .map(|edge| positions[&edge.destination.node])
+                    .max()
+                    .unwrap_or(start);
+                (node, assigned[node], start, end)
+            })
+            .collect();
+        for (index, left) in intervals.iter().enumerate() {
+            for right in &intervals[index + 1..] {
+                if left.1 != right.1 || left.3 < right.2 {
+                    continue;
+                }
+                let aliases_identity_boundary = is_identity_boundary(right.0)
+                    && report
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.destination.node == *right.0)
+                        .count()
+                        == 1
+                    && report
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.source.node == *left.0)
+                        .count()
+                        == 1
+                    && report.edges.iter().any(|edge| {
+                        edge.source.node == *left.0 && edge.destination.node == *right.0
+                    });
+                assert!(
+                    aliases_identity_boundary,
+                    "overlapping non-alias live intervals"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7411,10 +7685,18 @@ mod tests {
             let second_cycle = cycle_witness(&nodes, &edges);
             assert_eq!(first_cycle, second_cycle);
             if first_cycle.is_none() {
-                let (first_schedule, first_levels) = topo(&nodes, &edges).expect("acyclic");
-                let (second_schedule, second_levels) = topo(&nodes, &edges).expect("repeat");
-                assert_eq!(first_schedule, second_schedule);
+                let first_levels = topo(&nodes, &edges).expect("acyclic");
+                let second_levels = topo(&nodes, &edges).expect("repeat");
                 assert_eq!(first_levels, second_levels);
+                let first_schedule: Vec<_> = first_levels
+                    .iter()
+                    .flat_map(|level| level.nodes.iter().cloned())
+                    .collect();
+                let second_schedule: Vec<_> = second_levels
+                    .iter()
+                    .flat_map(|level| level.nodes.iter().cloned())
+                    .collect();
+                assert_eq!(first_schedule, second_schedule);
                 let latencies = nodes
                     .iter()
                     .map(|node| (node.id.clone(), node.latency))
