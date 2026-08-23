@@ -13,6 +13,8 @@ use crate::{
     schema::{self, descriptor, enum_choice},
 };
 
+pub use miso_engine_session::{ParameterChannel, ParameterUnit, RackName as ParameterRack};
+
 #[cfg(test)]
 const WIRE_U8: u8 = 1;
 #[cfg(test)]
@@ -190,36 +192,6 @@ pub enum ParameterDomain {
 #[allow(missing_docs)]
 pub enum ParameterValueKind {
     F32 = 1,
-}
-/// Fixed B2a rack registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterRack {
-    Simd1 = 1,
-    Dynamic = 2,
-    Simd2 = 3,
-}
-/// Fixed B2a parameter channel registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterChannel {
-    Left = 1,
-    Right = 2,
-    Both = 3,
-}
-/// Fixed B2a unit registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-#[allow(missing_docs)]
-pub enum ParameterUnit {
-    Db = 1,
-    Hz = 2,
-    Milliseconds = 3,
-    Samples = 4,
-    Linear = 5,
-    Ratio = 6,
 }
 /// Fixed B2a mapping registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2729,16 +2701,28 @@ fn write_descriptor(
         sink.message_header(fields)?;
         write_spec!(sink, descriptor::HANDLE, &value.handle.to_le_bytes())?;
         write_spec!(sink, descriptor::TRACK_ID, value.track_id.as_bytes())?;
-        write_spec!(sink, descriptor::RACK, &[value.rack as u8])?;
+        write_spec!(
+            sink,
+            descriptor::RACK,
+            &[schema::parameter_rack_wire(value.rack)]
+        )?;
         write_spec!(sink, descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
         write_spec!(
             sink,
             descriptor::PARAMETER_ID,
             &value.parameter_id.to_le_bytes()
         )?;
-        write_spec!(sink, descriptor::CHANNEL, &[value.channel as u8])?;
+        write_spec!(
+            sink,
+            descriptor::CHANNEL,
+            &[schema::parameter_channel_wire(value.channel)]
+        )?;
         write_spec!(sink, descriptor::VALUE_KIND, &[value.value_kind as u8])?;
-        write_spec!(sink, descriptor::UNIT, &[value.unit as u8])?;
+        write_spec!(
+            sink,
+            descriptor::UNIT,
+            &[schema::parameter_unit_wire(value.unit)]
+        )?;
         write_spec!(sink, descriptor::DOMAIN, &[value.domain as u8])?;
         if let Some(v) = value.minimum {
             write_spec!(sink, descriptor::MINIMUM, &v.to_le_bytes())?;
@@ -2826,12 +2810,15 @@ fn decode_descriptor(
     let value = ParameterDescriptor {
         handle: read_u32(one_spec!(message, descriptor::HANDLE)?)?,
         track_id: read_string(codec, one_spec!(message, descriptor::TRACK_ID)?)?.to_owned(),
-        rack: parse_rack(read_u8(one_spec!(message, descriptor::RACK)?)?)?,
+        rack: schema::parameter_rack_from_wire(read_u8(one_spec!(message, descriptor::RACK)?)?)?,
         effect_id: read_string(codec, one_spec!(message, descriptor::EFFECT_ID)?)?.to_owned(),
         parameter_id: read_u32(one_spec!(message, descriptor::PARAMETER_ID)?)?,
-        channel: parse_channel(read_u8(one_spec!(message, descriptor::CHANNEL)?)?)?,
+        channel: schema::parameter_channel_from_wire(read_u8(one_spec!(
+            message,
+            descriptor::CHANNEL
+        )?)?)?,
         value_kind: parse_value_kind(read_u8(one_spec!(message, descriptor::VALUE_KIND)?)?)?,
-        unit: parse_unit(read_u8(one_spec!(message, descriptor::UNIT)?)?)?,
+        unit: schema::parameter_unit_from_wire(read_u8(one_spec!(message, descriptor::UNIT)?)?)?,
         domain: parse_domain(read_u8(one_spec!(message, descriptor::DOMAIN)?)?)?,
         minimum: optional_spec!(message, descriptor::MINIMUM)?
             .map(read_f32)
@@ -2933,33 +2920,6 @@ fn parse_value_kind(v: u8) -> Result<ParameterValueKind, DecodeError> {
         Ok(ParameterValueKind::F32)
     } else {
         Err(DecodeError::InvalidTlv)
-    }
-}
-fn parse_rack(v: u8) -> Result<ParameterRack, DecodeError> {
-    match v {
-        1 => Ok(ParameterRack::Simd1),
-        2 => Ok(ParameterRack::Dynamic),
-        3 => Ok(ParameterRack::Simd2),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_channel(v: u8) -> Result<ParameterChannel, DecodeError> {
-    match v {
-        1 => Ok(ParameterChannel::Left),
-        2 => Ok(ParameterChannel::Right),
-        3 => Ok(ParameterChannel::Both),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_unit(v: u8) -> Result<ParameterUnit, DecodeError> {
-    match v {
-        1 => Ok(ParameterUnit::Db),
-        2 => Ok(ParameterUnit::Hz),
-        3 => Ok(ParameterUnit::Milliseconds),
-        4 => Ok(ParameterUnit::Samples),
-        5 => Ok(ParameterUnit::Linear),
-        6 => Ok(ParameterUnit::Ratio),
-        _ => Err(DecodeError::InvalidTlv),
     }
 }
 fn parse_mapping(v: u8) -> Result<ParameterMapping, DecodeError> {

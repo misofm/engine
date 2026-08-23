@@ -3,6 +3,69 @@
 //! Every typed payload family consumes this metadata through the shared bounded reader. The
 //! registry is never a second encoder or decoder.
 
+use miso_engine_session::{ParameterChannel, ParameterUnit, RackName};
+
+pub(crate) const fn parameter_rack_wire(value: RackName) -> u8 {
+    match value {
+        RackName::Simd1 => 1,
+        RackName::Dynamic => 2,
+        RackName::Simd2 => 3,
+    }
+}
+
+pub(crate) const fn parameter_rack_from_wire(value: u8) -> Result<RackName, crate::DecodeError> {
+    match value {
+        1 => Ok(RackName::Simd1),
+        2 => Ok(RackName::Dynamic),
+        3 => Ok(RackName::Simd2),
+        _ => Err(crate::DecodeError::InvalidTlv),
+    }
+}
+
+pub(crate) const fn parameter_channel_wire(value: ParameterChannel) -> u8 {
+    match value {
+        ParameterChannel::Left => 1,
+        ParameterChannel::Right => 2,
+        ParameterChannel::Both => 3,
+    }
+}
+
+pub(crate) const fn parameter_channel_from_wire(
+    value: u8,
+) -> Result<ParameterChannel, crate::DecodeError> {
+    match value {
+        1 => Ok(ParameterChannel::Left),
+        2 => Ok(ParameterChannel::Right),
+        3 => Ok(ParameterChannel::Both),
+        _ => Err(crate::DecodeError::InvalidTlv),
+    }
+}
+
+pub(crate) const fn parameter_unit_wire(value: ParameterUnit) -> u8 {
+    match value {
+        ParameterUnit::Db => 1,
+        ParameterUnit::Hz => 2,
+        ParameterUnit::Milliseconds => 3,
+        ParameterUnit::Samples => 4,
+        ParameterUnit::Linear => 5,
+        ParameterUnit::Ratio => 6,
+    }
+}
+
+pub(crate) const fn parameter_unit_from_wire(
+    value: u8,
+) -> Result<ParameterUnit, crate::DecodeError> {
+    match value {
+        1 => Ok(ParameterUnit::Db),
+        2 => Ok(ParameterUnit::Hz),
+        3 => Ok(ParameterUnit::Milliseconds),
+        4 => Ok(ParameterUnit::Samples),
+        5 => Ok(ParameterUnit::Linear),
+        6 => Ok(ParameterUnit::Ratio),
+        _ => Err(crate::DecodeError::InvalidTlv),
+    }
+}
+
 /// Frozen BTLV wire type.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1292,6 +1355,49 @@ mod tests {
         assert!(wires.into_iter().enumerate().all(|(index, wire)| {
             wire.raw() == u8::try_from(index + 1).expect("wire registry fits u8")
         }));
+    }
+
+    #[test]
+    fn parameter_enum_wire_mappings_are_exhaustive_and_roundtrip() {
+        for (value, wire) in [
+            (RackName::Simd1, 1),
+            (RackName::Dynamic, 2),
+            (RackName::Simd2, 3),
+        ] {
+            assert_eq!(parameter_rack_wire(value), wire);
+            assert_eq!(parameter_rack_from_wire(wire), Ok(value));
+        }
+        for (value, wire) in [
+            (ParameterChannel::Left, 1),
+            (ParameterChannel::Right, 2),
+            (ParameterChannel::Both, 3),
+        ] {
+            assert_eq!(parameter_channel_wire(value), wire);
+            assert_eq!(parameter_channel_from_wire(wire), Ok(value));
+        }
+        for (value, wire) in [
+            (ParameterUnit::Db, 1),
+            (ParameterUnit::Hz, 2),
+            (ParameterUnit::Milliseconds, 3),
+            (ParameterUnit::Samples, 4),
+            (ParameterUnit::Linear, 5),
+            (ParameterUnit::Ratio, 6),
+        ] {
+            assert_eq!(parameter_unit_wire(value), wire);
+            assert_eq!(parameter_unit_from_wire(wire), Ok(value));
+        }
+        assert_eq!(
+            parameter_rack_from_wire(0),
+            Err(crate::DecodeError::InvalidTlv)
+        );
+        assert_eq!(
+            parameter_channel_from_wire(4),
+            Err(crate::DecodeError::InvalidTlv)
+        );
+        assert_eq!(
+            parameter_unit_from_wire(7),
+            Err(crate::DecodeError::InvalidTlv)
+        );
     }
 
     #[test]

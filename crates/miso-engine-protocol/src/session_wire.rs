@@ -429,30 +429,6 @@ const fn enum_link(value: miso_engine_session::LinkMode) -> u8 {
         miso_engine_session::LinkMode::Average => 3,
     }
 }
-const fn enum_channel(value: miso_engine_session::ParameterChannel) -> u8 {
-    match value {
-        miso_engine_session::ParameterChannel::Left => 1,
-        miso_engine_session::ParameterChannel::Right => 2,
-        miso_engine_session::ParameterChannel::Both => 3,
-    }
-}
-const fn enum_unit(value: miso_engine_session::ParameterUnit) -> u8 {
-    match value {
-        miso_engine_session::ParameterUnit::Db => 1,
-        miso_engine_session::ParameterUnit::Hz => 2,
-        miso_engine_session::ParameterUnit::Milliseconds => 3,
-        miso_engine_session::ParameterUnit::Samples => 4,
-        miso_engine_session::ParameterUnit::Linear => 5,
-        miso_engine_session::ParameterUnit::Ratio => 6,
-    }
-}
-const fn enum_rack(value: RackName) -> u8 {
-    match value {
-        RackName::Simd1 => 1,
-        RackName::Dynamic => 2,
-        RackName::Simd2 => 3,
-    }
-}
 const fn enum_tap(value: miso_engine_session::SendTap) -> u8 {
     match value {
         miso_engine_session::SendTap::Input => 1,
@@ -649,7 +625,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             rack,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
             tx_message(sink, fields[2], |v| tx_rack(v, rack))
         }
         SessionEditV1::PutTrackEffect {
@@ -659,7 +635,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
             tx_u32(sink, fields[2], *final_position)?;
             tx_message(sink, fields[3], |v| tx_effect(v, effect))
         }
@@ -669,7 +645,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_id,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
             tx_id(sink, fields[2], effect_id)
         }
         SessionEditV1::SetTrackEffectOrder {
@@ -678,7 +654,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_ids,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], enum_rack(*rack_name))?;
+            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
             for effect_id in effect_ids {
                 tx_id(sink, fields[2], effect_id)?;
             }
@@ -752,7 +728,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
         } => {
             tx_effect_edit_prefix(sink, fields, track_id, *rack_name, effect_id)?;
             tx_u32(sink, fields[3], *parameter_id)?;
-            tx_u8(sink, fields[4], enum_channel(*channel))
+            tx_u8(sink, fields[4], schema::parameter_channel_wire(*channel))
         }
         SessionEditV1::SetTrackFader { track_id, fader } => {
             tx_id(sink, fields[0], track_id)?;
@@ -829,7 +805,7 @@ fn tx_effect_edit_prefix(
     effect_id: &StableId,
 ) -> Result<(), EncodeError> {
     tx_id(sink, fields[0], track_id)?;
-    tx_u8(sink, fields[1], enum_rack(rack_name))?;
+    tx_u8(sink, fields[1], schema::parameter_rack_wire(rack_name))?;
     tx_id(sink, fields[2], effect_id)
 }
 fn tx_effect_edit_scalar(
@@ -1047,9 +1023,13 @@ fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError>
     tx_u8(
         sink,
         schema::session::param::CHANNEL,
-        enum_channel(value.channel),
+        schema::parameter_channel_wire(value.channel),
     )?;
-    tx_u8(sink, schema::session::param::UNIT, enum_unit(value.unit))?;
+    tx_u8(
+        sink,
+        schema::session::param::UNIT,
+        schema::parameter_unit_wire(value.unit),
+    )?;
     tx_f32(sink, schema::session::param::VALUE, value.value)
 }
 fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
@@ -1193,7 +1173,7 @@ fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result
     tx_u8(
         sink,
         schema::session::automation_target::RACK,
-        enum_rack(value.rack),
+        schema::parameter_rack_wire(value.rack),
     )?;
     tx_id(
         sink,
@@ -1208,7 +1188,7 @@ fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result
     tx_u8(
         sink,
         schema::session::automation_target::CHANNEL,
-        enum_channel(value.channel),
+        schema::parameter_channel_wire(value.channel),
     )
 }
 fn tx_automation_segment(
@@ -1244,7 +1224,7 @@ fn tx_automation_segment(
     tx_u8(
         sink,
         schema::session::automation_segment::UNIT,
-        enum_unit(value.unit),
+        schema::parameter_unit_wire(value.unit),
     )
 }
 fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeError> {
@@ -1330,12 +1310,16 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }),
         crate::SessionEditOpcode::SetTrackRack => Ok(SessionEditV1::SetTrackRack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+                payload, fields[1]
+            )?)?)?,
             rack: parse_rack_message(Message::nested(one_spec!(payload, fields[2])?)?)?,
         }),
         crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEditV1::PutTrackEffect {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+                payload, fields[1]
+            )?)?)?,
             final_position: read_u32_exact(one_spec!(payload, fields[2])?)?,
             effect: parse_effect(Message::nested(one_spec!(payload, fields[3])?)?)?,
         }),
@@ -1349,7 +1333,9 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetTrackEffectOrder => Ok(SessionEditV1::SetTrackEffectOrder {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+                payload, fields[1]
+            )?)?)?,
             effect_ids: values_spec!(payload, fields[2])?
                 .map(stable_id)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -1410,10 +1396,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEditV1::RemoveEffectParam {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: parse_rack(read_u8_exact(one_spec!(payload, fields[1])?)?)?,
+            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+                payload, fields[1]
+            )?)?)?,
             effect_id: stable_id(one_spec!(payload, fields[2])?)?,
             parameter_id: read_u32_exact(one_spec!(payload, fields[3])?)?,
-            channel: parse_channel(read_u8_exact(one_spec!(payload, fields[4])?)?)?,
+            channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
+                payload, fields[4]
+            )?)?)?,
         }),
         crate::SessionEditOpcode::SetTrackFader => Ok(SessionEditV1::SetTrackFader {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
@@ -1745,11 +1735,11 @@ fn parse_param(message: Message<'_>) -> Result<EffectParam, DecodeError> {
     let message = message.schema_spec(&schema::session::param::SPEC)?;
     Ok(EffectParam {
         parameter_id: read_u32_exact(one_spec!(message, schema::session::param::PARAMETER_ID)?)?,
-        channel: parse_channel(read_u8_exact(one_spec!(
+        channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::param::CHANNEL
         )?)?)?,
-        unit: parse_unit(read_u8_exact(one_spec!(
+        unit: schema::parameter_unit_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::param::UNIT
         )?)?)?,
@@ -1880,7 +1870,7 @@ fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, Dec
             message,
             schema::session::automation_target::ENTITY_ID
         )?)?,
-        rack: parse_rack(read_u8_exact(one_spec!(
+        rack: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_target::RACK
         )?)?)?,
@@ -1892,7 +1882,7 @@ fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, Dec
             message,
             schema::session::automation_target::PARAMETER_ID
         )?)?,
-        channel: parse_channel(read_u8_exact(one_spec!(
+        channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_target::CHANNEL
         )?)?)?,
@@ -1921,7 +1911,7 @@ fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, D
             message,
             schema::session::automation_segment::END_VALUE
         )?)?,
-        unit: parse_unit(read_u8_exact(one_spec!(
+        unit: schema::parameter_unit_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_segment::UNIT
         )?)?)?,
@@ -1946,7 +1936,7 @@ fn parse_track_effect_ref(
 ) -> Result<(StableId, RackName, StableId), DecodeError> {
     Ok((
         stable_id(one_spec!(message, fields[0])?)?,
-        parse_rack(read_u8_exact(one_spec!(message, fields[1])?)?)?,
+        schema::parameter_rack_from_wire(read_u8_exact(one_spec!(message, fields[1])?)?)?,
         stable_id(one_spec!(message, fields[2])?)?,
     ))
 }
@@ -1963,33 +1953,6 @@ fn parse_link(value: u8) -> Result<miso_engine_session::LinkMode, DecodeError> {
         1 => Ok(miso_engine_session::LinkMode::DualMono),
         2 => Ok(miso_engine_session::LinkMode::Maximum),
         3 => Ok(miso_engine_session::LinkMode::Average),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_channel(value: u8) -> Result<miso_engine_session::ParameterChannel, DecodeError> {
-    match value {
-        1 => Ok(miso_engine_session::ParameterChannel::Left),
-        2 => Ok(miso_engine_session::ParameterChannel::Right),
-        3 => Ok(miso_engine_session::ParameterChannel::Both),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_unit(value: u8) -> Result<miso_engine_session::ParameterUnit, DecodeError> {
-    match value {
-        1 => Ok(miso_engine_session::ParameterUnit::Db),
-        2 => Ok(miso_engine_session::ParameterUnit::Hz),
-        3 => Ok(miso_engine_session::ParameterUnit::Milliseconds),
-        4 => Ok(miso_engine_session::ParameterUnit::Samples),
-        5 => Ok(miso_engine_session::ParameterUnit::Linear),
-        6 => Ok(miso_engine_session::ParameterUnit::Ratio),
-        _ => Err(DecodeError::InvalidTlv),
-    }
-}
-fn parse_rack(value: u8) -> Result<RackName, DecodeError> {
-    match value {
-        1 => Ok(RackName::Simd1),
-        2 => Ok(RackName::Dynamic),
-        3 => Ok(RackName::Simd2),
         _ => Err(DecodeError::InvalidTlv),
     }
 }
