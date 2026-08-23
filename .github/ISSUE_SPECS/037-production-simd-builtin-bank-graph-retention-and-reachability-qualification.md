@@ -213,3 +213,34 @@ Final gates passed on the same working candidate:
 The corrected release command was a fixed functional audit, not a benchmark. No Issue-037
 benchmark command or artifact was created: `timed_benchmark_invocations=0`. Issue 038 remains the
 sole owner of real-audio timing.
+
+## Amendment 2026-08-23 (#83 master plan D4/D10, #86 Phase A)
+
+The historical evidence above is preserved as written; three of its contract statements are
+superseded by the audit workstream and are restated here.
+
+- **Partial cohorts are padded, not left scalar.** Issue-037 banked only exact-width chunks
+  ("No padding or track ceiling was introduced"), so an AVX2 session of 1–7 tracks and the
+  `T mod W` remainder of every dependency level ran scalar. Under #86 F3 every post-input node in
+  a level with a vector backend is a bank member: a level of `n` nodes becomes `n.div_ceil(W)`
+  banks and the last one is padded with **identity lanes** carried by the bank itself
+  (`miso-engine-builtins`, frozen in #85). Lane `l` is active iff `l < members.len()`; there is
+  no stored mask anywhere, and `GraphPreparedBuiltinBank::active_mask` is deleted. Scalar
+  `InputProcessor` bindings survive only when the backend has no bank width — which, under D4,
+  now includes AVX2-without-FMA. There is still no compiled track ceiling.
+- **Builtin-bank scratch is two planes.** Issue-037 charged "all four owned AoSoA planes". A
+  post-input builtin bank is a fixed graph stage with no automation and no sidechain port, so the
+  two sidechain planes were dead bytes it could never reach. `AoSoaScratch::new_main_only`
+  allocates two, and `gather_sidechain` / `process(.., sidechain = true)` reject such a scratch.
+- **The qualification counter pair is `[process_calls, frames_processed]`.** The
+  `architecture_tpt_kernel_calls=51200000` figure counted a per-sample `#[inline(never)]` kernel
+  entry that D10 deleted; there is now one block kernel call per bank per block. The counter
+  identity is `counters[1] == counters[0] * quantum`.
+
+Consequently two constants in the historical text no longer hold and their current values live in
+the tests: the seeded transcript is `0fc9bdc8ff120f6e` (it folds the bank/tail counts, and all 100
+per-layout PCM hashes are byte-identical to the pre-padding render), and the release-only
+`MISO_ENGINE_ISSUE37_AUDIT=1` PCM hash is `2fd85286518fd13b` — measured on `main` **before** the
+#86 change and unchanged by it, which is the proof that a track's bits do not depend on whether it
+sits in a bank, in a padded bank, or in a scalar tail. The old `9f30db0220656d79` had already
+drifted on `main` because that audit is release-and-env-gated and is not run by CI.
