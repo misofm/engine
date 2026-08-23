@@ -1171,14 +1171,16 @@ fn graph_metadata_bytes(
             timing.delays.len(),
             core::mem::size_of::<InsertedDelay>(),
         )?)?;
+    // Lengths are computed arithmetically: this runs on every production compile and must not
+    // allocate a `String` per node and three per edge only to read `.len()` (#99 F5).
     for node in nodes {
-        total = total.checked_add(u64::try_from(node_text(&node.id).len()).ok()?)?;
+        total = total.checked_add(u64::try_from(node_text_len(&node.id)).ok()?)?;
     }
     for edge in edges {
         total = total
             .checked_add(u64::try_from(edge.path.len()).ok()?)?
-            .checked_add(u64::try_from(node_text(&edge.source.node).len()).ok()?)?
-            .checked_add(u64::try_from(node_text(&edge.destination.node).len()).ok()?)?;
+            .checked_add(u64::try_from(node_text_len(&edge.source.node)).ok()?)?
+            .checked_add(u64::try_from(node_text_len(&edge.destination.node)).ok()?)?;
     }
     Some(total)
 }
@@ -1911,6 +1913,54 @@ fn node_text(node: &GraphNodeId) -> String {
         GraphNodeId::Submix { submix_id } => format!("submix:{}", submix_id.as_str()),
         GraphNodeId::Output { output_id } => format!("output:{}", output_id.as_str()),
         GraphNodeId::CompensationDelay { edge_id } => format!("delay:{}", edge_text(edge_id)),
+    }
+}
+/// Byte length of [`node_text`] without building it (#99 F5).
+///
+/// `graph_metadata_bytes` needs three node lengths per edge and one per node, and used to reach
+/// them by formatting a heap `String` and throwing it away -- four allocations per edge on every
+/// production compile, at 65,537 tracks nearly 1.6 M of them, for a `usize`. Every arm mirrors
+/// the corresponding `node_text` arm exactly; `node_text_len_matches_node_text_for_every_variant`
+/// is the gate that keeps them in step.
+fn node_text_len(node: &GraphNodeId) -> usize {
+    match node {
+        // "track:{track}:{stage}"
+        GraphNodeId::TrackStage { track_id, stage } => {
+            "track:".len() + track_id.as_str().len() + 1 + stage_token(*stage).len()
+        }
+        // "effect:{track}:{rack}:{effect}"
+        GraphNodeId::Effect(effect) => {
+            "effect:".len()
+                + effect.track_id.as_str().len()
+                + 1
+                + rack_token(effect.rack).len()
+                + 1
+                + effect.effect_id.as_str().len()
+        }
+        GraphNodeId::Route { route_id } => "route:".len() + route_id.as_str().len(),
+        GraphNodeId::Submix { submix_id } => "submix:".len() + submix_id.as_str().len(),
+        GraphNodeId::Output { output_id } => "output:".len() + output_id.as_str().len(),
+        GraphNodeId::CompensationDelay { edge_id } => "delay:".len() + edge_text_len(edge_id),
+    }
+}
+/// Byte length of [`edge_text`] without building it. See [`node_text_len`].
+fn edge_text_len(edge: &GraphEdgeId) -> usize {
+    match edge {
+        GraphEdgeId::TrackMain { target } => "track-main:".len() + node_text_len(target),
+        GraphEdgeId::RouteSource { route_id } => "route-source:".len() + route_id.as_str().len(),
+        GraphEdgeId::RouteDestination { route_id } => {
+            "route-destination:".len() + route_id.as_str().len()
+        }
+        GraphEdgeId::EffectSidechain { effect, port } => {
+            "effect-sidechain:".len()
+                + effect.track_id.as_str().len()
+                + 1
+                + rack_token(effect.rack).len()
+                + 1
+                + effect.effect_id.as_str().len()
+                + 1
+                + port.len()
+        }
     }
 }
 fn node_kind_token(node: &GraphNodeId) -> &'static str {
@@ -2854,6 +2904,84 @@ mod tests {
             destination: port(node(destination), GraphPortKind::MainInput),
             path: format!("$.routes[id={name}]"),
         }
+    }
+
+    /// #99 F5: `node_text_len`/`edge_text_len` agree with the formatters they replace, on every
+    /// variant and on ids of every length.
+    ///
+    /// `graph_metadata_bytes` feeds `incremental_plan_bytes` and `session_plus_plan_bytes`, both
+    /// of which are checked against caps and against `limits.memory_bytes` -- so a wrong length is
+    /// a wrong admission decision, not a cosmetic drift. The two functions are separate code paths
+    /// by design (one allocates, one does not), so they need a gate that keeps them in step.
+    #[test]
+    fn node_text_len_matches_node_text_for_every_variant() {
+        let mut state = 0x1f2e_3d4c_5b6a_7988_u64;
+        let mut checked = 0_usize;
+        for _ in 0..1_000 {
+            let length = (state % 24) as usize + 1;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let a = "a".repeat(length);
+            let b = "b".repeat((length % 7) + 1);
+            let c = "c".repeat((length % 11) + 1);
+            let effect = EffectNodeId {
+                track_id: gid(&a),
+                rack: match state % 3 {
+                    0 => RackId::Simd1,
+                    1 => RackId::Dynamic,
+                    _ => RackId::Simd2,
+                },
+                effect_id: gid(&c),
+            };
+            let stage = stages()[(state % 7) as usize];
+            let variants = [
+                GraphNodeId::TrackStage {
+                    track_id: gid(&a),
+                    stage,
+                },
+                GraphNodeId::Effect(effect.clone()),
+                GraphNodeId::Route { route_id: gid(&b) },
+                GraphNodeId::Submix { submix_id: gid(&b) },
+                GraphNodeId::Output { output_id: gid(&c) },
+                GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(GraphEdgeId::TrackMain {
+                        target: GraphNodeId::TrackStage {
+                            track_id: gid(&a),
+                            stage,
+                        },
+                    }),
+                },
+            ];
+            for node in &variants {
+                assert_eq!(
+                    node_text_len(node),
+                    node_text(node).len(),
+                    "node_text_len disagrees for {node:?}"
+                );
+                checked += 1;
+            }
+            let edges = [
+                GraphEdgeId::TrackMain {
+                    target: variants[1].clone(),
+                },
+                GraphEdgeId::RouteSource { route_id: gid(&b) },
+                GraphEdgeId::RouteDestination { route_id: gid(&b) },
+                GraphEdgeId::EffectSidechain {
+                    effect: effect.clone(),
+                    port: b.clone(),
+                },
+            ];
+            for edge in &edges {
+                assert_eq!(
+                    edge_text_len(edge),
+                    edge_text(edge).len(),
+                    "edge_text_len disagrees for {edge:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 10_000);
     }
 
     /// Deterministic xorshift64: the same 500 graphs on every host, every run.

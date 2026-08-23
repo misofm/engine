@@ -115,3 +115,17 @@ it lands here. `direct-route` cannot see this bug: it is a chain with one node p
 * Command: `cargo test -p miso-engine-graph-compiler --lib random_dags`
 * Red: `graph 0: level of Submix { submix_id: StableGraphId("n03") }` — the in-test longest-path
   recomputation disagrees.
+
+---
+
+## F5 — evidence and allocation off the compile path
+
+### M-13 — wrong token length in `node_text_len`
+* Mutation: `"route".len()` instead of `"route:".len()` in the `Route` arm.
+* Command: `cargo test -p miso-engine-graph-compiler --lib node_text_len`
+* Red: `node_text_len disagrees for Route { route_id: StableGraphId("bbb") }`.
+
+### M-14 — drop a separator in the `Effect` arm
+* Mutation: remove one `+ 1` between `rack_token` and the effect id.
+* Command: `cargo test -p miso-engine-graph-compiler --lib node_text_len`
+* Red: `node_text_len disagrees for Effect(EffectNodeId { .., rack: Simd1, .. })`.
