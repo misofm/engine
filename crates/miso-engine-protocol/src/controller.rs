@@ -1085,9 +1085,8 @@ pub struct ControllerResponse {
     /// Observed or newly committed authoritative revision.
     pub revision: SessionRevision,
     /// One complete canonical response frame retained for exact replay and payload projection.
-    frame: Vec<u8>,
-    /// Validated payload extent within `frame`; no second payload allocation is retained.
-    payload: Range<usize>,
+    /// This is the response's sole byte backing allocation.
+    pub frame: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -1131,22 +1130,18 @@ impl ControllerResponse {
         revision: SessionRevision,
         frame: Vec<u8>,
     ) -> Self {
-        let payload = if frame.len() >= crate::OUTER_HEADER_BYTES {
-            crate::OUTER_HEADER_BYTES..frame.len()
-        } else {
-            0..0
-        };
         Self {
             request_id,
             status,
             revision,
             frame,
-            payload,
         }
     }
 
     fn payload(&self) -> &[u8] {
-        &self.frame[self.payload.clone()]
+        self.frame
+            .get(crate::OUTER_HEADER_BYTES..)
+            .unwrap_or_default()
     }
 
     fn complete_frame(&self) -> &[u8] {
@@ -1156,7 +1151,7 @@ impl ControllerResponse {
     /// Return the exact caller-buffer byte count for the canonical typed response payload.
     #[must_use]
     pub const fn payload_len(&self) -> usize {
-        self.payload.end - self.payload.start
+        self.frame.len().saturating_sub(crate::OUTER_HEADER_BYTES)
     }
 
     /// Copy the already canonical typed response into caller-owned output without exposing a raw
@@ -4883,7 +4878,10 @@ mod tests {
         fn assert_shared_payload_backing(response: &ControllerResponse) {
             assert_eq!(
                 response.payload().as_ptr(),
-                response.frame.as_ptr().wrapping_add(response.payload.start),
+                response
+                    .frame
+                    .as_ptr()
+                    .wrapping_add(crate::OUTER_HEADER_BYTES),
                 "payload must be a range into the sole complete-frame backing"
             );
             assert_eq!(
@@ -4913,8 +4911,18 @@ mod tests {
         assert_shared_payload_backing(&cached);
 
         let cloned = cached.clone();
-        assert_eq!(cloned, cached, "Clone/Eq preserve complete frame and range");
+        assert_eq!(cloned, cached, "Clone/Eq preserve complete frame bytes");
         assert_shared_payload_backing(&cloned);
+
+        let malformed = ControllerResponse::from_complete_frame(
+            id(99),
+            StatusCode::Internal,
+            SessionRevision(7),
+            vec![0xa5; crate::OUTER_HEADER_BYTES - 1],
+        );
+        assert_eq!(malformed.payload_len(), 0);
+        assert_eq!(malformed.payload(), &[]);
+        assert_eq!(malformed.encode_payload(&mut []), Ok(0));
     }
 
     #[test]
