@@ -10,11 +10,15 @@ name = "miso_engine_delay"
 
 [dependencies]
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math.workspace = true
 
 [dev-dependencies]
 # The independent f64 delay oracle is test-only and unreachable from production rendering.
 miso-engine-dsp-reference.workspace = true
 miso-engine-core.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

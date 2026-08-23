@@ -117,6 +117,8 @@ pub struct ReferenceDelayPair {
     sample_rate_hz: f64,
     cursor: usize,
     parameters: ReferenceDelayParameters,
+    left_damping_g: f64,
+    right_damping_g: f64,
     left: ReferenceLane,
     right: ReferenceLane,
 }
@@ -137,6 +139,8 @@ impl ReferenceDelayPair {
             sample_rate_hz,
             cursor: 0,
             parameters,
+            left_damping_g: damping_coefficient(parameters.left_damping, sample_rate_hz),
+            right_damping_g: damping_coefficient(parameters.right_damping, sample_rate_hz),
             left: ReferenceLane::new(parameters.left_delay_ms, sample_rate_hz, ring_length),
             right: ReferenceLane::new(parameters.right_delay_ms, sample_rate_hz, ring_length),
         })
@@ -160,16 +164,8 @@ impl ReferenceDelayPair {
         self.right.start_transition();
         let left_tap = self.left.read_transition(self.cursor);
         let right_tap = self.right.read_transition(self.cursor);
-        let left_filtered = damp(
-            left_tap,
-            self.parameters.left_damping,
-            &mut self.left.damping_state,
-        );
-        let right_filtered = damp(
-            right_tap,
-            self.parameters.right_damping,
-            &mut self.right.damping_state,
-        );
+        let left_filtered = damp(left_tap, self.left_damping_g, &mut self.left.damping_state);
+        let right_filtered = damp(right_tap, self.right_damping_g, &mut self.right.damping_state);
         let left_gain = self.parameters.left_feedback * left_filtered;
         let right_gain = self.parameters.right_feedback * right_filtered;
         let (left_feedback, right_feedback) =
@@ -233,14 +229,42 @@ fn delay_samples(milliseconds: f64, sample_rate_hz: f64) -> Result<usize, Refere
     }
 }
 
-fn damp(tap: f64, damping: f64, state: &mut f64) -> f64 {
-    let value = if damping == 0.0 {
-        tap
-    } else {
-        (1.0 - damping) * tap + damping * *state
-    };
-    *state = value;
-    value
+/// Topology-preserving one-pole low pass, written from the equations.
+///
+/// Zavalishin, *The Art of VA Filter Design*, chapter 3: the trapezoidal integrator of a one-pole
+/// low pass with `g = G / (1 + G)` resolved for its instantaneous feedback is
+/// `v = g * (x - s)`, `y = s + v`, `s' = y + v`. `g == 0` is the exact identity.
+fn damp(tap: f64, g: f64, state: &mut f64) -> f64 {
+    if g == 0.0 {
+        *state = tap;
+        return tap;
+    }
+    let v = g * (tap - *state);
+    let out = *state + v;
+    *state = out + v;
+    out
+}
+
+/// Sample rate the frozen damping control keeps its meaning at.
+const DAMPING_REFERENCE_RATE_HZ: f64 = 48_000.0;
+
+/// `0.45 * 44_100`: strictly below Nyquist at every launch rate.
+const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
+
+/// Maps the frozen linear damping control to the one-pole coefficient at `sample_rate_hz`.
+///
+/// The frozen `y = (1 - c) * x + c * y` recurrence has its pole at `-ln(c) * fs / (2 pi)`; holding
+/// that cutoff — evaluated once at the 48 kHz reference rate — fixed in hertz is what makes the
+/// control rate invariant. Written here from the definition, with the platform `ln` and `tan`, so
+/// that the oracle shares no code with the engine.
+fn damping_coefficient(c: f64, sample_rate_hz: f64) -> f64 {
+    if c == 0.0 {
+        return 0.0;
+    }
+    let cutoff =
+        (-c.ln() * DAMPING_REFERENCE_RATE_HZ / (2.0 * core::f64::consts::PI)).min(DAMPING_MAX_CUTOFF_HZ);
+    let big_g = (core::f64::consts::PI * cutoff / sample_rate_hz).tan();
+    big_g / (1.0 + big_g)
 }
 
 fn matrix(cross_feedback: f64, left: f64, right: f64) -> (f64, f64) {

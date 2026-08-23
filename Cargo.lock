@@ -771,6 +771,10 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
+ "miso-engine-effect-runtime",
+ "miso-engine-lane",
+ "miso-engine-math",
+ "sha2 0.11.0",
 ]
 
 [[package]]
