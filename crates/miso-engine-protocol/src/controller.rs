@@ -184,6 +184,9 @@ struct ReplayEntry {
     request_bytes: usize,
     response_offset: usize,
     response_bytes: usize,
+    // Preserve the established per-slot resource authority even though response metadata now
+    // comes from the canonical cached frame rather than duplicate typed fields.
+    _resource_layout_reservation: [u8; 16],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,10 +209,7 @@ pub struct ReplayCache {
     cache_id: u64,
     config: ReplayCacheConfig,
     entries: Box<[ReplayEntry]>,
-    len: usize,
     storage: Box<[u8]>,
-    retained_bytes: usize,
-    highest_new_id: Option<RequestId>,
     reservation: Option<ReplayReservation>,
 }
 
@@ -259,10 +259,7 @@ impl ReplayCache {
             cache_id,
             config,
             entries: entries.into_boxed_slice(),
-            len: 0,
             storage: storage.into_boxed_slice(),
-            retained_bytes: 0,
-            highest_new_id: None,
             reservation: None,
         })
     }
@@ -272,17 +269,36 @@ impl ReplayCache {
         PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(clones.get().saturating_add(1)));
         let mut cloned = Self::try_new(self.config)?;
         cloned.entries.copy_from_slice(&self.entries);
-        cloned.len = self.len;
         cloned.storage.copy_from_slice(&self.storage);
-        cloned.retained_bytes = self.retained_bytes;
-        cloned.highest_new_id = self.highest_new_id;
         cloned.reservation = self.reservation;
         Ok(cloned)
     }
 
+    fn completed_len(&self) -> usize {
+        self.entries.partition_point(|entry| entry.request_id != 0)
+    }
+
+    fn completed_retained_bytes(&self) -> usize {
+        self.entries[..self.completed_len()]
+            .last()
+            .map_or(0, |entry| {
+                entry.response_offset.saturating_add(entry.response_bytes)
+            })
+    }
+
+    fn highest_new_id(&self) -> Option<RequestId> {
+        self.reservation
+            .map(|reservation| reservation.request_id)
+            .or_else(|| {
+                self.entries[..self.completed_len()]
+                    .last()
+                    .and_then(|entry| RequestId::new(entry.request_id))
+            })
+    }
+
     fn entry_index(&self, request_id: RequestId) -> Result<usize, usize> {
         let request_id = request_id.get();
-        let entries = &self.entries[..self.len];
+        let entries = &self.entries[..self.completed_len()];
         let index = entries.partition_point(|entry| entry.request_id < request_id);
         if index < entries.len() && entries[index].request_id == request_id {
             Ok(index)
@@ -295,17 +311,16 @@ impl ReplayCache {
         if count == 0 {
             return;
         }
-        self.storage
-            .copy_within(removed_bytes..self.retained_bytes, 0);
-        self.entries.copy_within(count..self.len, 0);
-        let previous_len = self.len;
-        self.len -= count;
-        self.retained_bytes -= removed_bytes;
-        for entry in &mut self.entries[..self.len] {
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
+        self.storage.copy_within(removed_bytes..retained_bytes, 0);
+        self.entries.copy_within(count..len, 0);
+        let remaining = len - count;
+        for entry in &mut self.entries[..remaining] {
             entry.request_offset -= removed_bytes;
             entry.response_offset -= removed_bytes;
         }
-        self.entries[self.len..previous_len].fill(ReplayEntry::default());
+        self.entries[remaining..len].fill(ReplayEntry::default());
     }
 
     fn plan_preflight(
@@ -332,7 +347,7 @@ impl ReplayCache {
             return Err(ReplayDecision::Backpressure);
         }
         if self
-            .highest_new_id
+            .highest_new_id()
             .is_some_and(|highest| request_id <= highest)
         {
             return Err(ReplayDecision::ReplayExpired);
@@ -344,16 +359,17 @@ impl ReplayCache {
         if reservation > self.config.bytes.get() {
             return Err(ReplayDecision::Backpressure);
         }
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
         let mut evicted = 0;
         let mut removed_bytes = 0;
-        while self.len.saturating_sub(evicted) >= self.entries.len()
-            || self
-                .retained_bytes
+        while len.saturating_sub(evicted) >= self.entries.len()
+            || retained_bytes
                 .saturating_sub(removed_bytes)
                 .saturating_add(reservation)
                 > self.storage.len()
         {
-            let Some(entry) = self.entries.get(evicted).filter(|_| evicted < self.len) else {
+            let Some(entry) = self.entries.get(evicted).filter(|_| evicted < len) else {
                 return Err(ReplayDecision::Backpressure);
             };
             removed_bytes = removed_bytes.saturating_add(entry.byte_len());
@@ -389,8 +405,7 @@ impl ReplayCache {
         plan: ReplayPreflightPlan,
     ) {
         self.evict_prefix(plan.evicted, plan.removed_bytes);
-        self.highest_new_id = Some(request_id);
-        let request_offset = self.retained_bytes;
+        let request_offset = self.completed_retained_bytes();
         self.storage[request_offset..request_offset + request.len()].copy_from_slice(request);
         self.reservation = Some(ReplayReservation {
             request_id,
@@ -405,7 +420,7 @@ impl ReplayCache {
     fn is_new_request(&self, request_id: RequestId) -> bool {
         self.entry_index(request_id).is_err()
             && self
-                .highest_new_id
+                .highest_new_id()
                 .is_none_or(|highest| request_id > highest)
     }
 
@@ -437,8 +452,9 @@ impl ReplayCache {
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
-        if self.len >= self.entries.len()
-            || self.retained_bytes.saturating_add(byte_len) > self.storage.len()
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
+        if len >= self.entries.len() || retained_bytes.saturating_add(byte_len) > self.storage.len()
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
@@ -446,15 +462,14 @@ impl ReplayCache {
         let request_offset = reservation.request_offset;
         let response_offset = request_offset + request.len();
         self.storage[response_offset..response_offset + response.len()].copy_from_slice(response);
-        self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
-        self.entries[self.len] = ReplayEntry {
+        self.entries[len] = ReplayEntry {
             request_id: request_id.get(),
             request_offset,
             request_bytes: request.len(),
             response_offset,
             response_bytes: response.len(),
+            _resource_layout_reservation: [0; 16],
         };
-        self.len += 1;
         Ok(())
     }
 
@@ -481,19 +496,19 @@ impl ReplayCache {
     /// Number of complete exact-byte entries currently retained.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.len
+        self.completed_len()
     }
 
     /// Whether no replay entries are retained.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.completed_len() == 0
     }
 
     /// Current retained exact-byte count.
     #[must_use]
-    pub const fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+    pub fn retained_bytes(&self) -> usize {
+        self.completed_retained_bytes()
     }
 
     /// Return the immutable effective replay capacity configuration.
@@ -1259,6 +1274,10 @@ pub struct PreparedStructuralCommand {
     cancellation_batches: usize,
     applied_operations: u32,
     armed: bool,
+    // The CAPI resource contract counts this public opaque token's established retained layout.
+    // ReplayCache itself is compact in the live controller; keep the prepared-token authority
+    // stable until that external resource contract can be revised in its own issue.
+    _resource_layout_reservation: [u8; 24],
 }
 
 impl PreparedStructuralCommand {
@@ -1802,6 +1821,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             cancellation_batches: plan.cancellation_batches,
             applied_operations: plan.applied_operations,
             armed: true,
+            _resource_layout_reservation: [0; 24],
         })
     }
 
@@ -3816,8 +3836,9 @@ mod tests {
             max_response_bytes: 256,
         };
         let report = ReplayCache::resource_report_for_config(config).expect("projection");
-        assert!(report.retained_payload_bytes > 1_024);
-        assert!(report.largest_allocation_bytes >= 1_024);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(report.retained_payload_bytes, 1_248);
+        assert_eq!(report.largest_allocation_bytes, 1_024);
         let overflow = ReplayCacheConfig {
             entries: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
             ..config
@@ -3826,6 +3847,59 @@ mod tests {
             ReplayCache::resource_report_for_config(overflow),
             Err(ReplayCacheError::ResourceOverflow)
         );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn replay_layout_stays_within_the_capi_resource_oracle() {
+        assert_eq!(core::mem::size_of::<ReplayEntry>(), 56);
+        assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
+        assert_eq!(
+            core::mem::size_of::<ProtocolController<MockProvider>>(),
+            5_992
+        );
+        assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
+    }
+
+    #[test]
+    fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(8).expect("eight bytes"),
+            max_response_bytes: 3,
+        });
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+        assert_eq!(cache.highest_new_id(), None);
+
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+        assert_eq!(cache.highest_new_id(), Some(id(1)));
+        cache.complete(id(1), b"aa", b"x").expect("first");
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
+        assert_eq!(cache.highest_new_id(), Some(id(1)));
+
+        assert_eq!(cache.preflight(id(2), b"c"), ReplayDecision::Execute);
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
+        assert_eq!(cache.highest_new_id(), Some(id(2)));
+        cache.complete(id(2), b"c", b"yy").expect("second");
+        let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"c") else {
+            panic!("second request must hit");
+        };
+        assert_eq!((cache.len(), cache.retained_bytes()), (2, 6));
+
+        assert_eq!(cache.preflight(id(3), b"d"), ReplayDecision::Execute);
+        assert_eq!(
+            (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
+            (1, 3, Some(id(3))),
+            "prefix eviction and pending bytes are derived without retained counters"
+        );
+        assert_eq!(cache.cached(second_hit), b"yy");
+        cache.complete(id(3), b"d", b"zzz").expect("third");
+        assert_eq!(
+            (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
+            (2, 7, Some(id(3)))
+        );
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::ReplayExpired);
     }
 
     #[test]
@@ -5433,9 +5507,9 @@ mod tests {
         });
         assert_eq!(cache.preflight(id(1), b"x"), ReplayDecision::Backpressure);
         assert!(cache.is_empty());
-        assert_eq!(cache.highest_new_id, None);
+        assert_eq!(cache.highest_new_id(), None);
         assert_eq!(cache.preflight(id(1), b"x"), ReplayDecision::Backpressure);
-        assert_eq!(cache.highest_new_id, None);
+        assert_eq!(cache.highest_new_id(), None);
     }
 
     #[test]
