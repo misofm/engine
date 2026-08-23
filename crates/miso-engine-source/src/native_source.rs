@@ -968,11 +968,18 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
     }
     validate_region(metadata, request.region)?;
     let report = source_resource_report(metadata, request.ring_config, caps)?;
+    let (frames_per_read, decoder_read_scratch_bytes) =
+        worker_decode_buffer_shape(metadata, request.ring_config, caps)?;
+    debug_assert_eq!(
+        report.decoder_read_scratch_bytes,
+        decoder_read_scratch_bytes
+    );
     let quantum = usize::try_from(request.ring_config.quantum_frames.0)
         .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
     let quantum = NonZeroUsize::new(quantum).ok_or(NativeSourcePrepareError::ResourceLimit)?;
-    let decoder = NativeWaveDecoder::prepare(asset.reader, metadata, request.region, quantum)
-        .map_err(NativeSourcePrepareError::Wave)?;
+    let decoder =
+        NativeWaveDecoder::prepare(asset.reader, metadata, request.region, frames_per_read)
+            .map_err(NativeSourcePrepareError::Wave)?;
     let staging_samples = usize::from(metadata.channel_count)
         .checked_mul(quantum.get())
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
@@ -1376,18 +1383,13 @@ fn source_resource_report(
 ) -> Result<NativeSourceResourceReport, NativeSourcePrepareError> {
     let ring =
         PcmSourceRing::resource_report(ring_config).map_err(NativeSourcePrepareError::Ring)?;
-    let decoder_read_scratch_bytes = u64::from(ring_config.quantum_frames.0)
-        .checked_mul(u64::from(metadata.block_align_bytes))
-        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    let (_, decoder_read_scratch_bytes) = worker_decode_buffer_shape(metadata, ring_config, caps)?;
     let worker_planar_staging_bytes = u64::from(ring_config.quantum_frames.0)
         .checked_mul(u64::from(metadata.channel_count))
         .and_then(|samples| {
             samples.checked_mul(u64::try_from(core::mem::size_of::<f32>()).expect("f32 size"))
         })
         .ok_or(NativeSourcePrepareError::ResourceLimit)?;
-    if decoder_read_scratch_bytes > caps.max_worker_read_scratch_bytes {
-        return Err(NativeSourcePrepareError::ResourceLimit);
-    }
     let worker_control_queue = exact_queue_resources::<WorkerCommand>(caps.control_queue_items)?;
     let worker_event_queue =
         exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)?;
@@ -1428,6 +1430,38 @@ fn source_resource_report(
         total_engine_owned_bytes,
         largest_allocation_bytes,
     })
+}
+
+fn worker_decode_buffer_shape(
+    metadata: NativeWaveMetadata,
+    ring_config: PcmSourceRingConfig,
+    caps: NativeSourcePrepareCaps,
+) -> Result<(NonZeroUsize, u64), NativeSourcePrepareError> {
+    const TARGET_READ_BYTES: u64 = 65_536;
+
+    let quantum_frames = u64::from(ring_config.quantum_frames.0);
+    let quantum_bytes = quantum_frames
+        .checked_mul(u64::from(metadata.block_align_bytes))
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    if quantum_bytes == 0 || quantum_bytes > caps.max_worker_read_scratch_bytes {
+        return Err(NativeSourcePrepareError::ResourceLimit);
+    }
+    let target_bytes = caps
+        .max_worker_read_scratch_bytes
+        .min(TARGET_READ_BYTES)
+        .max(quantum_bytes);
+    let quanta_per_read = target_bytes / quantum_bytes;
+    let frames_per_read = quantum_frames
+        .checked_mul(quanta_per_read)
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    let scratch_bytes = frames_per_read
+        .checked_mul(u64::from(metadata.block_align_bytes))
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    let frames_per_read = usize::try_from(frames_per_read)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or(NativeSourcePrepareError::ResourceLimit)?;
+    Ok((frames_per_read, scratch_bytes))
 }
 
 fn fold_worker_resources(
@@ -2000,6 +2034,14 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(cap_error, NativeSourcePrepareError::ResourceLimit);
+
+        let mut rounded = resolver(&[0.0; 4], b"exact-identity");
+        let mut rounded_caps = caps();
+        rounded_caps.max_worker_read_scratch_bytes = 50;
+        let rounded = prepare_native_source_job(&mut rounded, request(region), rounded_caps, None)
+            .expect("whole-quantum read buffer below cap");
+        assert_eq!(rounded.resources.decoder_read_scratch_bytes, 48);
+        assert_eq!(rounded.job.planar_staging.len(), 4);
     }
 
     #[test]
@@ -2013,7 +2055,7 @@ mod tests {
         let (mut controller, mut worker, mut native_consumer, report) =
             prepare_native_source_parts(&mut native_resolver, request(region), caps())
                 .expect("prepare");
-        assert_eq!(report.decoder_read_scratch_bytes, 16);
+        assert_eq!(report.decoder_read_scratch_bytes, 64);
         assert_eq!(report.worker_planar_staging_bytes, 16);
         assert!(matches!(
             controller.wait_for_event().expect("ready"),

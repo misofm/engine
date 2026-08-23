@@ -159,6 +159,10 @@ pub struct NativeWaveDecoder<R: Read + Seek> {
     next_region_frame: u64,
     max_frames_per_decode: NonZeroUsize,
     scratch: Box<[u8]>,
+    reader_position: Option<u64>,
+    buffer_region_frame: u64,
+    buffer_frames: usize,
+    buffer_cursor: usize,
     sanitized_sample_count: u64,
 }
 
@@ -187,6 +191,10 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
             next_region_frame: 0,
             max_frames_per_decode,
             scratch: scratch.into_boxed_slice(),
+            reader_position: None,
+            buffer_region_frame: 0,
+            buffer_frames: 0,
+            buffer_cursor: 0,
             sanitized_sample_count: 0,
         })
     }
@@ -210,10 +218,22 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         );
         let decoded_frames_usize =
             usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
-        if decoded_frames_usize != 0 {
-            self.read_decoded_frames(decoded_frames_usize)?;
-            self.copy_decoded(output_planes, decoded_frames_usize)?;
-            self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
+        let mut copied = 0;
+        while copied < decoded_frames_usize {
+            if self.buffer_cursor == self.buffer_frames {
+                self.fill_buffer()?;
+            }
+            let chunk = cmp::min(
+                decoded_frames_usize - copied,
+                self.buffer_frames - self.buffer_cursor,
+            );
+            self.copy_decoded(output_planes, self.buffer_cursor, copied, chunk)?;
+            self.buffer_cursor += chunk;
+            copied += chunk;
+            self.next_region_frame = self
+                .next_region_frame
+                .checked_add(u64::try_from(chunk).expect("usize fits u64"))
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
         }
         Ok(NativeDecodeReport {
             decoded_frames: u32::try_from(decoded_frames_usize)
@@ -262,7 +282,20 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         if frame.0 < self.region.start_frame.0 || frame.0 > region_end {
             return Err(NativeWaveError::RegionOutOfBounds);
         }
-        self.next_region_frame = frame.0 - self.region.start_frame.0;
+        let target = frame.0 - self.region.start_frame.0;
+        let buffered_end = self
+            .buffer_region_frame
+            .checked_add(u64::try_from(self.buffer_frames).expect("usize fits u64"))
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        if target >= self.buffer_region_frame && target < buffered_end {
+            self.buffer_cursor = usize::try_from(target - self.buffer_region_frame)
+                .map_err(|_| NativeWaveError::ArithmeticOverflow)?;
+        } else {
+            self.buffer_region_frame = target;
+            self.buffer_frames = 0;
+            self.buffer_cursor = 0;
+        }
+        self.next_region_frame = target;
         Ok(())
     }
 
@@ -272,11 +305,12 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         &mut self,
         planar_quantum: &mut [f32],
     ) -> Result<NativeDecodeReport, NativeWaveError> {
-        let quantum = self.max_frames_per_decode.get();
-        let expected_samples = usize::from(self.metadata.channel_count)
-            .checked_mul(quantum)
-            .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        if planar_quantum.len() != expected_samples {
+        let channels = usize::from(self.metadata.channel_count);
+        if channels == 0 || !planar_quantum.len().is_multiple_of(channels) {
+            return Err(NativeWaveError::OutputShape);
+        }
+        let quantum = planar_quantum.len() / channels;
+        if quantum == 0 || quantum > self.max_frames_per_decode.get() {
             return Err(NativeWaveError::OutputShape);
         }
         let remaining = self
@@ -286,10 +320,28 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         let decoded_frames = cmp::min(u64::try_from(quantum).expect("usize fits u64"), remaining);
         let decoded_frames_usize =
             usize::try_from(decoded_frames).map_err(|_| NativeWaveError::ArithmeticOverflow)?;
-        if decoded_frames_usize != 0 {
-            self.read_decoded_frames(decoded_frames_usize)?;
-            self.copy_decoded_to_planar(planar_quantum, decoded_frames_usize)?;
-            self.next_region_frame = self.next_region_frame.saturating_add(decoded_frames);
+        let mut copied = 0;
+        while copied < decoded_frames_usize {
+            if self.buffer_cursor == self.buffer_frames {
+                self.fill_buffer()?;
+            }
+            let chunk = cmp::min(
+                decoded_frames_usize - copied,
+                self.buffer_frames - self.buffer_cursor,
+            );
+            self.copy_decoded_to_planar(
+                planar_quantum,
+                quantum,
+                self.buffer_cursor,
+                copied,
+                chunk,
+            )?;
+            self.buffer_cursor += chunk;
+            copied += chunk;
+            self.next_region_frame = self
+                .next_region_frame
+                .checked_add(u64::try_from(chunk).expect("usize fits u64"))
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
         }
         Ok(NativeDecodeReport {
             decoded_frames: u32::try_from(decoded_frames_usize)
@@ -321,12 +373,17 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
     fn copy_decoded(
         &mut self,
         output_planes: &mut [&mut [f32]],
-        decoded_frames: usize,
+        source_start: usize,
+        destination_start: usize,
+        frame_count: usize,
     ) -> Result<(), NativeWaveError> {
         let sample_bytes = usize::from(self.metadata.encoding.bytes_per_sample());
         let block_align = usize::from(self.metadata.block_align_bytes);
-        for frame in 0..decoded_frames {
-            let frame_start = frame
+        for frame in 0..frame_count {
+            let source_frame = source_start
+                .checked_add(frame)
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
+            let frame_start = source_frame
                 .checked_mul(block_align)
                 .ok_or(NativeWaveError::ArithmeticOverflow)?;
             for (channel, output) in output_planes.iter_mut().enumerate() {
@@ -342,7 +399,7 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
                     .ok_or(NativeWaveError::ArithmeticOverflow)?;
                 let (sample, sanitized) =
                     decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
-                output[frame] = sample;
+                output[destination_start + frame] = sample;
                 if sanitized {
                     self.sanitized_sample_count = self.sanitized_sample_count.saturating_add(1);
                 }
@@ -351,7 +408,22 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         Ok(())
     }
 
-    fn read_decoded_frames(&mut self, decoded_frames: usize) -> Result<(), NativeWaveError> {
+    fn fill_buffer(&mut self) -> Result<(), NativeWaveError> {
+        let remaining = self
+            .region
+            .length_frames
+            .checked_sub(self.next_region_frame)
+            .ok_or(NativeWaveError::ArithmeticOverflow)?;
+        let decoded_frames = cmp::min(
+            self.max_frames_per_decode.get(),
+            usize::try_from(remaining).unwrap_or(usize::MAX),
+        );
+        if decoded_frames == 0 {
+            self.buffer_region_frame = self.next_region_frame;
+            self.buffer_frames = 0;
+            self.buffer_cursor = 0;
+            return Ok(());
+        }
         let source_frame = self
             .region
             .start_frame
@@ -365,24 +437,42 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
         let read_bytes = decoded_frames
             .checked_mul(usize::from(self.metadata.block_align_bytes))
             .ok_or(NativeWaveError::ArithmeticOverflow)?;
-        self.reader
-            .seek(SeekFrom::Start(byte_offset))
-            .map_err(io_error)?;
-        self.reader
-            .read_exact(&mut self.scratch[..read_bytes])
-            .map_err(io_error)
+        if self.reader_position != Some(byte_offset)
+            && let Err(error) = self.reader.seek(SeekFrom::Start(byte_offset))
+        {
+            self.reader_position = None;
+            return Err(io_error(error));
+        }
+        if let Err(error) = self.reader.read_exact(&mut self.scratch[..read_bytes]) {
+            self.reader_position = None;
+            return Err(io_error(error));
+        }
+        self.reader_position = Some(
+            byte_offset
+                .checked_add(u64::try_from(read_bytes).expect("usize fits u64"))
+                .ok_or(NativeWaveError::ArithmeticOverflow)?,
+        );
+        self.buffer_region_frame = self.next_region_frame;
+        self.buffer_frames = decoded_frames;
+        self.buffer_cursor = 0;
+        Ok(())
     }
 
     fn copy_decoded_to_planar(
         &mut self,
         planar_quantum: &mut [f32],
-        decoded_frames: usize,
+        quantum: usize,
+        source_start: usize,
+        destination_start: usize,
+        frame_count: usize,
     ) -> Result<(), NativeWaveError> {
         let sample_bytes = usize::from(self.metadata.encoding.bytes_per_sample());
         let block_align = usize::from(self.metadata.block_align_bytes);
-        let quantum = self.max_frames_per_decode.get();
-        for frame in 0..decoded_frames {
-            let frame_start = frame
+        for frame in 0..frame_count {
+            let source_frame = source_start
+                .checked_add(frame)
+                .ok_or(NativeWaveError::ArithmeticOverflow)?;
+            let frame_start = source_frame
                 .checked_mul(block_align)
                 .ok_or(NativeWaveError::ArithmeticOverflow)?;
             for channel in 0..usize::from(self.metadata.channel_count) {
@@ -400,6 +490,7 @@ impl<R: Read + Seek> NativeWaveDecoder<R> {
                     decode_sample(self.metadata.encoding, &self.scratch[offset..end]);
                 let destination = channel
                     .checked_mul(quantum)
+                    .and_then(|offset| offset.checked_add(destination_start))
                     .and_then(|offset| offset.checked_add(frame))
                     .ok_or(NativeWaveError::ArithmeticOverflow)?;
                 planar_quantum[destination] = sample;
@@ -808,12 +899,146 @@ fn io_error(error: std::io::Error) -> NativeWaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{self, Cursor};
 
     const CAPS: NativeWaveParseCaps = NativeWaveParseCaps {
         max_chunk_count: 16,
         max_skipped_metadata_bytes: 128,
     };
+
+    struct CountingReader {
+        cursor: Cursor<Vec<u8>>,
+        reads: usize,
+        seeks: usize,
+        fail_next_read: bool,
+        fail_next_seek: bool,
+    }
+
+    impl CountingReader {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                cursor: Cursor::new(bytes),
+                reads: 0,
+                seeks: 0,
+                fail_next_read: false,
+                fail_next_seek: false,
+            }
+        }
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if core::mem::take(&mut self.fail_next_read) {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.cursor.read(buffer)
+        }
+    }
+
+    impl Seek for CountingReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.seeks += 1;
+            if core::mem::take(&mut self.fail_next_seek) {
+                return Err(io::Error::other("injected seek failure"));
+            }
+            self.cursor.seek(position)
+        }
+    }
+
+    fn buffered_float_decoder(frame_count: usize) -> NativeWaveDecoder<CountingReader> {
+        let data: Vec<_> = (0..frame_count)
+            .flat_map(|frame| (frame as f32).to_le_bytes())
+            .collect();
+        let bytes = riff_wave(format_chunk(NativeWaveEncoding::Float32, false), &data, &[]);
+        let mut metadata_cursor = Cursor::new(bytes.clone());
+        let metadata = parse_native_wave(&mut metadata_cursor, CAPS).expect("metadata");
+        NativeWaveDecoder::prepare(
+            CountingReader::new(bytes),
+            metadata,
+            NativeWaveRegion {
+                start_frame: SourceFrame(0),
+                length_frames: u64::try_from(frame_count).expect("frame count"),
+            },
+            NonZeroUsize::new(16).expect("buffer frames"),
+        )
+        .expect("decoder")
+    }
+
+    #[test]
+    fn buffered_quanta_seek_and_straddled_refill_preserve_exact_pcm() {
+        let mut decoder = buffered_float_decoder(24);
+        for quantum in 0..4 {
+            let mut planar = [0.0; 4];
+            decoder
+                .decode_quantum_into_planar(&mut planar)
+                .expect("buffered quantum");
+            assert_eq!(
+                planar,
+                core::array::from_fn(|frame| (quantum * 4 + frame) as f32)
+            );
+        }
+        assert_eq!(decoder.reader.reads, 1, "four quanta share one fill");
+        assert_eq!(decoder.reader.seeks, 1, "initial fill seeks once");
+
+        decoder
+            .seek_to_source_frame(SourceFrame(3))
+            .expect("in-buffer seek");
+        let mut in_buffer = [0.0; 4];
+        decoder
+            .decode_quantum_into_planar(&mut in_buffer)
+            .expect("in-buffer decode");
+        assert_eq!(in_buffer, [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(decoder.reader.reads, 1);
+        assert_eq!(decoder.reader.seeks, 1);
+
+        decoder
+            .seek_to_source_frame(SourceFrame(14))
+            .expect("nonaligned buffered seek");
+        let mut straddled = [0.0; 4];
+        decoder
+            .decode_quantum_into_planar(&mut straddled)
+            .expect("straddled refill");
+        assert_eq!(straddled, [14.0, 15.0, 16.0, 17.0]);
+        assert_eq!(decoder.reader.reads, 2, "straddle performs one refill");
+        assert_eq!(
+            decoder.reader.seeks, 1,
+            "contiguous refill retains reader position"
+        );
+    }
+
+    #[test]
+    fn failed_io_forgets_reader_position_and_retry_reseeks() {
+        let mut decoder = buffered_float_decoder(24);
+        decoder.reader.fail_next_seek = true;
+        let mut first = [0.0; 4];
+        assert_eq!(
+            decoder.decode_quantum_into_planar(&mut first),
+            Err(NativeWaveError::Io(io::ErrorKind::Other))
+        );
+        assert_eq!(decoder.reader_position, None);
+        decoder
+            .decode_quantum_into_planar(&mut first)
+            .expect("retry after seek failure");
+        assert_eq!(decoder.reader.seeks, 2);
+
+        decoder
+            .seek_to_source_frame(SourceFrame(18))
+            .expect("outside buffer");
+        decoder.reader.fail_next_read = true;
+        let seeks_before_read_failure = decoder.reader.seeks;
+        let mut second = [0.0; 4];
+        assert_eq!(
+            decoder.decode_quantum_into_planar(&mut second),
+            Err(NativeWaveError::Io(io::ErrorKind::Other))
+        );
+        assert_eq!(decoder.reader_position, None);
+        decoder
+            .decode_quantum_into_planar(&mut second)
+            .expect("retry after read failure");
+        assert_eq!(decoder.reader.seeks, seeks_before_read_failure + 2);
+        assert_eq!(second, [18.0, 19.0, 20.0, 21.0]);
+    }
 
     #[test]
     fn classic_formats_decode_with_exact_pcm_scaling_and_float_sanitation() {
