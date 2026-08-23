@@ -139,7 +139,8 @@ impl MessageId {
         self as u16
     }
 
-    fn parse(value: u16) -> Result<Self, DecodeError> {
+    /// Parse one frozen numeric message ID, rejecting unassigned and media-reserved values.
+    pub const fn from_raw(value: u16) -> Result<Self, DecodeError> {
         let message = match value {
             0x0001 => Self::CapabilitiesGet,
             0x0002 => Self::SessionSnapshotGet,
@@ -602,7 +603,7 @@ impl ProtocolCodec {
         if flags & !KNOWN_FLAG_BITS != 0 {
             return Err(DecodeError::InvalidFlags);
         }
-        let message_id = MessageId::parse(read_u16(header_bytes, 16)?)?;
+        let message_id = MessageId::from_raw(read_u16(header_bytes, 16)?)?;
         if !message_id.permits_kind(kind) {
             return Err(DecodeError::MessageKindMismatch);
         }
@@ -701,12 +702,9 @@ impl ProtocolCodec {
     ///
     /// This deliberately stops before TLV validation.  The controller uses it to return a
     /// canonical non-OK response for a malformed *payload* only after the complete command
-    /// header has established a real request ID.  It is crate-visible rather than a second
-    /// public wire surface: callers must use [`Self::decode`] or the schema-closed typed decoder.
-    pub(crate) fn decode_correlatable_command_header(
-        &self,
-        input: &[u8],
-    ) -> Result<CommandHeader, DecodeError> {
+    /// header has established a real request ID. Controllers and hosts can use this header-only
+    /// operation to correlate a request before validating its payload.
+    pub fn decode_command_header(&self, input: &[u8]) -> Result<CommandHeader, DecodeError> {
         if input.len() > self.limits.max_frame_bytes {
             return Err(DecodeError::LimitExceeded);
         }
@@ -733,7 +731,7 @@ impl ProtocolCodec {
         if flags & !KNOWN_FLAG_BITS != 0 {
             return Err(DecodeError::InvalidFlags);
         }
-        let message_id = MessageId::parse(read_u16(header, 16)?)?;
+        let message_id = MessageId::from_raw(read_u16(header, 16)?)?;
         if !message_id.permits_kind(FrameKind::Command) {
             return Err(DecodeError::MessageKindMismatch);
         }
@@ -952,6 +950,37 @@ mod tests {
         let mut encoded = [0xff; OUTER_HEADER_BYTES];
         assert_eq!(codec.encode(&frame, &mut encoded), Ok(OUTER_HEADER_BYTES));
         assert_eq!(encoded, EMPTY_CAPABILITIES_ANY);
+    }
+
+    #[test]
+    fn public_command_header_peek_stops_before_payload_validation() {
+        assert_eq!(
+            MessageId::from_raw(MessageId::TransportGet.raw()),
+            Ok(MessageId::TransportGet)
+        );
+        assert_eq!(MessageId::from_raw(0x6000), Err(DecodeError::PcmForbidden));
+        assert_eq!(
+            MessageId::from_raw(0x7000),
+            Err(DecodeError::UnsupportedMessage)
+        );
+
+        let codec = ProtocolCodec::default();
+        let mut frame = EMPTY_CAPABILITIES_ANY.to_vec();
+        frame[20..24].copy_from_slice(&16_u32.to_le_bytes());
+        frame[40..44].copy_from_slice(&1_u32.to_le_bytes());
+        frame.extend_from_slice(&[1, 0, 1, 1, 1, 0, 0, 0]);
+        frame.extend_from_slice(&[0; 8]);
+        let header = codec
+            .decode_command_header(&frame)
+            .expect("complete command header remains correlatable");
+        assert_eq!(header.request_id, RequestId::new(1).expect("nonzero"));
+        assert_eq!(header.message_id, MessageId::CapabilitiesGet);
+        assert_eq!(header.payload_len, 16);
+        assert_eq!(header.tlv_count, 1);
+        assert_eq!(
+            codec.decode(&frame, &mut DecodeScratch::new(&mut [0_u16; 1])),
+            Err(DecodeError::UnknownRequiredField)
+        );
     }
 
     #[test]

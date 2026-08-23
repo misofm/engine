@@ -5,7 +5,6 @@
 //! a renderer, and this module has no plan-publication capability.
 
 use core::{alloc::Layout, fmt, num::NonZeroUsize, ops::Range};
-use std::collections::VecDeque;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -148,7 +147,7 @@ pub enum ReplayDecision {
     /// The request is new and has reserved enough configured replay capacity to execute.
     Execute,
     /// An exact same-ID/same-byte request returns this cached response with no execution.
-    Cached(ControllerResponse),
+    Cached(ReplayHit),
     /// Same request ID had different canonical bytes.
     RequestIdReuse,
     /// Request ID was retired, evicted, or was not strictly increasing as a new request.
@@ -158,26 +157,41 @@ pub enum ReplayDecision {
     Backpressure,
 }
 
+/// Opaque location of one exact cached response.
+///
+/// A hit is valid until the cache is mutated. Call [`ReplayCache::cached`] immediately after
+/// [`ReplayCache::preflight`] to borrow the exact response bytes without cloning or allocating.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplayHit {
+    offset: usize,
+    len: usize,
+}
+
 /// One cached exact request/response byte pair.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ReplayEntry {
-    request_id: RequestId,
+    request_id: u64,
     request_offset: usize,
     request_bytes: usize,
     response_offset: usize,
     response_bytes: usize,
-    response_status: StatusCode,
-    response_revision: SessionRevision,
-    framed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReplayReservation {
+    request_id: RequestId,
+    request_bytes: usize,
 }
 
 /// Bounded exact-byte replay cache. It intentionally covers one endpoint lifetime only.
 pub struct ReplayCache {
     config: ReplayCacheConfig,
-    entries: VecDeque<ReplayEntry>,
+    entries: Box<[ReplayEntry]>,
+    len: usize,
     storage: Box<[u8]>,
     retained_bytes: usize,
     highest_new_id: Option<RequestId>,
+    reservation: Option<ReplayReservation>,
 }
 
 impl ReplayCache {
@@ -209,10 +223,11 @@ impl ReplayCache {
     /// Fallibly allocate the complete replay metadata and byte arena before endpoint publication.
     pub fn try_new(config: ReplayCacheConfig) -> Result<Self, ReplayCacheError> {
         Self::resource_report_for_config(config)?;
-        let mut entries = VecDeque::new();
+        let mut entries = Vec::new();
         entries
             .try_reserve_exact(config.entries.get())
             .map_err(|_| ReplayCacheError::ResourceAllocation)?;
+        entries.resize(config.entries.get(), ReplayEntry::default());
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(config.bytes.get())
@@ -220,54 +235,52 @@ impl ReplayCache {
         storage.resize(config.bytes.get(), 0);
         Ok(Self {
             config,
-            entries,
+            entries: entries.into_boxed_slice(),
+            len: 0,
             storage: storage.into_boxed_slice(),
             retained_bytes: 0,
             highest_new_id: None,
+            reservation: None,
         })
     }
 
     fn try_clone_eager(&self) -> Result<Self, ReplayCacheError> {
         let mut cloned = Self::try_new(self.config)?;
-        cloned.entries.extend(self.entries.iter().cloned());
+        cloned.entries.copy_from_slice(&self.entries);
+        cloned.len = self.len;
         cloned.storage.copy_from_slice(&self.storage);
         cloned.retained_bytes = self.retained_bytes;
         cloned.highest_new_id = self.highest_new_id;
+        cloned.reservation = self.reservation;
         Ok(cloned)
     }
 
-    fn cached_response(&self, entry: &ReplayEntry) -> ControllerResponse {
-        let response = self.storage
-            [entry.response_offset..entry.response_offset + entry.response_bytes]
-            .to_vec();
-        ControllerResponse {
-            request_id: entry.request_id,
-            status: entry.response_status,
-            revision: entry.response_revision,
-            bytes: if entry.framed {
-                Vec::new()
-            } else {
-                response.clone()
-            },
-            frame_bytes: entry.framed.then_some(response),
+    fn entry_index(&self, request_id: RequestId) -> Result<usize, usize> {
+        let request_id = request_id.get();
+        let entries = &self.entries[..self.len];
+        let index = entries.partition_point(|entry| entry.request_id < request_id);
+        if index < entries.len() && entries[index].request_id == request_id {
+            Ok(index)
+        } else {
+            Err(index)
         }
     }
 
-    fn compact(&mut self) {
-        let mut cursor = 0;
-        for entry in &mut self.entries {
-            let request_end = entry.request_offset + entry.request_bytes;
-            self.storage
-                .copy_within(entry.request_offset..request_end, cursor);
-            entry.request_offset = cursor;
-            cursor += entry.request_bytes;
-            let response_end = entry.response_offset + entry.response_bytes;
-            self.storage
-                .copy_within(entry.response_offset..response_end, cursor);
-            entry.response_offset = cursor;
-            cursor += entry.response_bytes;
+    fn evict_prefix(&mut self, count: usize, removed_bytes: usize) {
+        if count == 0 {
+            return;
         }
-        debug_assert_eq!(cursor, self.retained_bytes);
+        self.storage
+            .copy_within(removed_bytes..self.retained_bytes, 0);
+        self.entries.copy_within(count..self.len, 0);
+        let previous_len = self.len;
+        self.len -= count;
+        self.retained_bytes -= removed_bytes;
+        for entry in &mut self.entries[..self.len] {
+            entry.request_offset -= removed_bytes;
+            entry.response_offset -= removed_bytes;
+        }
+        self.entries[self.len..previous_len].fill(ReplayEntry::default());
     }
 
     /// Inspect/capacity-reserve a request before execution. An `Execute` result makes enough
@@ -277,15 +290,16 @@ impl ReplayCache {
     /// increasing new-request frontier nor creates a replay entry. This is the endpoint's one
     /// replay-preflight policy, so the same ID remains reusable if capacity later permits it.
     pub fn preflight(&mut self, request_id: RequestId, request: &[u8]) -> ReplayDecision {
-        if let Some(entry) = self
-            .entries
-            .iter()
-            .find(|entry| entry.request_id == request_id)
-        {
+        self.reservation = None;
+        if let Ok(index) = self.entry_index(request_id) {
+            let entry = self.entries[index];
             return if self.storage[entry.request_offset..entry.request_offset + entry.request_bytes]
                 == *request
             {
-                ReplayDecision::Cached(self.cached_response(entry))
+                ReplayDecision::Cached(ReplayHit {
+                    offset: entry.response_offset,
+                    len: entry.response_bytes,
+                })
             } else {
                 ReplayDecision::RequestIdReuse
             };
@@ -303,15 +317,27 @@ impl ReplayCache {
         if reservation > self.config.bytes.get() {
             return ReplayDecision::Backpressure;
         }
-        while self.entries.len() >= self.config.entries.get()
-            || self.retained_bytes.saturating_add(reservation) > self.config.bytes.get()
+        let mut evicted = 0;
+        let mut removed_bytes = 0;
+        while self.len.saturating_sub(evicted) >= self.entries.len()
+            || self
+                .retained_bytes
+                .saturating_sub(removed_bytes)
+                .saturating_add(reservation)
+                > self.storage.len()
         {
-            let Some(entry) = self.entries.pop_front() else {
+            let Some(entry) = self.entries.get(evicted).filter(|_| evicted < self.len) else {
                 return ReplayDecision::Backpressure;
             };
-            self.retained_bytes = self.retained_bytes.saturating_sub(entry.byte_len());
+            removed_bytes = removed_bytes.saturating_add(entry.byte_len());
+            evicted += 1;
         }
+        self.evict_prefix(evicted, removed_bytes);
         self.highest_new_id = Some(request_id);
+        self.reservation = Some(ReplayReservation {
+            request_id,
+            request_bytes: request.len(),
+        });
         ReplayDecision::Execute
     }
 
@@ -319,10 +345,7 @@ impl ReplayCache {
     /// result. This is intentionally read-only so caller-output reservation can happen before
     /// preflight advances the endpoint's new-request frontier.
     fn is_new_request(&self, request_id: RequestId) -> bool {
-        !self
-            .entries
-            .iter()
-            .any(|entry| entry.request_id == request_id)
+        self.entry_index(request_id).is_err()
             && self
                 .highest_new_id
                 .is_none_or(|highest| request_id > highest)
@@ -334,54 +357,58 @@ impl ReplayCache {
         &mut self,
         request_id: RequestId,
         request: &[u8],
-        response: ControllerResponse,
+        response: &[u8],
     ) -> Result<(), ReplayCacheError> {
-        if response.replay_byte_len() > self.config.max_response_bytes {
+        if response.len() > self.config.max_response_bytes {
             return Err(ReplayCacheError::ResponseTooLarge);
         }
         let byte_len = request
             .len()
-            .checked_add(response.replay_byte_len())
+            .checked_add(response.len())
             .ok_or(ReplayCacheError::ResponseTooLarge)?;
-        if self.entries.len() >= self.config.entries.get()
-            || self.retained_bytes.saturating_add(byte_len) > self.config.bytes.get()
+        let Some(reservation) = self.reservation.take() else {
+            return Err(ReplayCacheError::ReservationMissing);
+        };
+        if reservation.request_id != request_id || reservation.request_bytes != request.len() {
+            return Err(ReplayCacheError::ReservationMissing);
+        }
+        if self.len >= self.entries.len()
+            || self.retained_bytes.saturating_add(byte_len) > self.storage.len()
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
-        self.compact();
         let request_offset = self.retained_bytes;
         let response_offset = request_offset + request.len();
-        let response_bytes = response
-            .frame_bytes
-            .as_deref()
-            .unwrap_or(response.bytes.as_slice());
         self.storage[request_offset..response_offset].copy_from_slice(request);
-        self.storage[response_offset..response_offset + response_bytes.len()]
-            .copy_from_slice(response_bytes);
+        self.storage[response_offset..response_offset + response.len()].copy_from_slice(response);
         self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
-        self.entries.push_back(ReplayEntry {
-            request_id,
+        self.entries[self.len] = ReplayEntry {
+            request_id: request_id.get(),
             request_offset,
             request_bytes: request.len(),
             response_offset,
-            response_bytes: response_bytes.len(),
-            response_status: response.status,
-            response_revision: response.revision,
-            framed: response.frame_bytes.is_some(),
-        });
+            response_bytes: response.len(),
+        };
+        self.len += 1;
         Ok(())
+    }
+
+    /// Borrow the exact cached response bytes represented by a hit from [`Self::preflight`].
+    #[must_use]
+    pub fn cached(&self, hit: ReplayHit) -> &[u8] {
+        &self.storage[hit.offset..hit.offset + hit.len]
     }
 
     /// Number of complete exact-byte entries currently retained.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     /// Whether no replay entries are retained.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len == 0
     }
 
     /// Current retained exact-byte count.
@@ -399,7 +426,7 @@ impl ReplayCache {
     /// Inspect eager metadata and byte-arena capacities without exposing replay contents.
     #[must_use]
     pub fn retained_storage_capacities(&self) -> (usize, usize) {
-        (self.entries.capacity(), self.storage.len())
+        (self.entries.len(), self.storage.len())
     }
 }
 
@@ -981,10 +1008,9 @@ pub struct ControllerResponse {
     pub revision: SessionRevision,
     /// Canonical response bytes remain private replay storage; callers use `encode_payload`.
     bytes: Vec<u8>,
-    /// Complete canonical response bytes for the schema-closed full-frame ingress path.
-    ///
-    /// Older payload-only controller callers intentionally leave this absent.  Keeping this
-    /// internal preserves their compatibility without introducing a public raw-frame escape.
+    /// Complete canonical response bytes retained internally for exact replay.
+    /// Keeping this internal preserves payload-only caller compatibility without exposing a raw
+    /// provider response path.
     frame_bytes: Option<Vec<u8>>,
 }
 
@@ -1038,10 +1064,6 @@ impl ControllerResponse {
         }
         output[..required].copy_from_slice(&self.bytes);
         Ok(required)
-    }
-
-    fn replay_byte_len(&self) -> usize {
-        self.frame_bytes.as_ref().map_or(self.bytes.len(), Vec::len)
     }
 }
 
@@ -1385,7 +1407,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             .replay
             .preflight(request.request_id, request.canonical_bytes)
         {
-            ReplayDecision::Cached(response) => return response,
+            ReplayDecision::Cached(hit) => {
+                return self.compatibility_cached_response(message_id, request.request_id, hit);
+            }
             ReplayDecision::RequestIdReuse => {
                 return self.compatibility_response(
                     message_id,
@@ -1411,11 +1435,17 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         let outcome = self.execute(&request);
         let response = self.compatibility_response(message_id, request.request_id, outcome);
-        match self.replay.complete(
-            request.request_id,
-            request.canonical_bytes,
-            response.clone(),
-        ) {
+        let Some(frame) = response.frame_bytes.as_deref() else {
+            return self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.non_ok(StatusCode::Internal, None),
+            );
+        };
+        match self
+            .replay
+            .complete(request.request_id, request.canonical_bytes, frame)
+        {
             Ok(()) => response,
             Err(_) => self.compatibility_response(
                 message_id,
@@ -1571,7 +1601,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         let header = self
             .codec
-            .decode_correlatable_command_header(input)
+            .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         if header.message_id != MessageId::SessionTransactionApply {
             return self.process_immediate_command(input, scratch, output_capacity);
@@ -1667,7 +1697,14 @@ impl<P: ControlProvider> ProtocolController<P> {
             frame_bytes: Some(frame),
         };
         prospective_replay
-            .complete(header.request_id, input, response.clone())
+            .complete(
+                header.request_id,
+                input,
+                response
+                    .frame_bytes
+                    .as_deref()
+                    .ok_or(CommandFrameProcessError::Internal)?,
+            )
             .map_err(|_| CommandFrameProcessError::Internal)?;
         let event_reservations = match self.queues.reserve_reliable_events(required_events) {
             Ok(reservations) => reservations,
@@ -1788,7 +1825,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
-            .decode_correlatable_command_header(input)
+            .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
 
         // A new command must prove that its caller owns enough room for the endpoint's whole
@@ -1803,12 +1840,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
         }
         match self.replay.preflight(header.request_id, input) {
-            ReplayDecision::Cached(response) => {
-                let bytes = response
-                    .frame_bytes
-                    .as_deref()
-                    .ok_or(CommandFrameProcessError::Internal)?;
-                return copy_complete_frame(bytes, output)
+            ReplayDecision::Cached(hit) => {
+                return copy_complete_frame(self.replay.cached(hit), output)
                     .map_err(CommandFrameProcessError::Encode);
             }
             ReplayDecision::RequestIdReuse => {
@@ -1831,18 +1864,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
             Err(error) => self.non_ok(error.status(), None),
         };
-        let (written, status, revision) = self
+        let (written, _, _) = self
             .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
             .map_err(CommandFrameProcessError::Encode)?;
-        let response = ControllerResponse {
-            request_id: header.request_id,
-            status,
-            revision,
-            bytes: Vec::new(),
-            frame_bytes: Some(output[..written].to_vec()),
-        };
         self.replay
-            .complete(header.request_id, input, response)
+            .complete(header.request_id, input, &output[..written])
             .map_err(|_| CommandFrameProcessError::Internal)?;
         Ok(written)
     }
@@ -2117,7 +2143,38 @@ impl<P: ControlProvider> ProtocolController<P> {
             status,
             revision,
             bytes,
-            frame_bytes: None,
+            frame_bytes: Some(frame),
+        }
+    }
+
+    fn compatibility_cached_response(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        hit: ReplayHit,
+    ) -> ControllerResponse {
+        let frame = self.replay.cached(hit);
+        let mut field_ids = vec![0_u16; frame.len() / crate::TLV_PREFIX_BYTES];
+        let decoded = self
+            .codec
+            .decode(frame, &mut DecodeScratch::new(&mut field_ids));
+        let Ok(crate::DecodedFrame {
+            header: crate::FrameHeader::Response(header),
+            payload,
+        }) = decoded
+        else {
+            return self.compatibility_response(
+                message_id,
+                request_id,
+                self.non_ok(StatusCode::Internal, None),
+            );
+        };
+        ControllerResponse {
+            request_id: header.request_id,
+            status: header.status,
+            revision: header.revision,
+            bytes: payload.to_vec(),
+            frame_bytes: Some(frame.to_vec()),
         }
     }
     /// Borrow authoritative control-plane session state.
@@ -3451,6 +3508,71 @@ mod tests {
             ReplayCache::resource_report_for_config(overflow),
             Err(ReplayCacheError::ResourceOverflow)
         );
+    }
+
+    #[test]
+    fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(18).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(cache.retained_storage_capacities(), (2, 18));
+
+        assert_eq!(cache.preflight(id(1), b"one"), ReplayDecision::Execute);
+        cache.complete(id(1), b"one", b"1111").expect("first");
+        assert_eq!(cache.preflight(id(2), b"two"), ReplayDecision::Execute);
+        cache.complete(id(2), b"two", b"22").expect("second");
+
+        let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"two") else {
+            panic!("second request must hit");
+        };
+        assert_eq!(cache.cached(second_hit), b"22");
+        assert_eq!(
+            cache.preflight(id(2), b"changed"),
+            ReplayDecision::RequestIdReuse
+        );
+
+        assert_eq!(cache.preflight(id(3), b"three"), ReplayDecision::Execute);
+        cache.complete(id(3), b"three", b"333").expect("third");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.preflight(id(1), b"one"),
+            ReplayDecision::ReplayExpired
+        );
+        let ReplayDecision::Cached(compacted_second_hit) = cache.preflight(id(2), b"two") else {
+            panic!("second request must survive prefix compaction");
+        };
+        assert_eq!(cache.cached(compacted_second_hit), b"22");
+        let ReplayDecision::Cached(third_hit) = cache.preflight(id(3), b"three") else {
+            panic!("third request must hit");
+        };
+        assert_eq!(cache.cached(third_hit), b"333");
+        assert_eq!(cache.retained_storage_capacities(), (2, 18));
+    }
+
+    #[test]
+    fn fixed_replay_arena_reports_response_and_reservation_bounds() {
+        let config = ReplayCacheConfig {
+            entries: NonZeroUsize::new(1).expect("one entry"),
+            bytes: NonZeroUsize::new(8).expect("arena bytes"),
+            max_response_bytes: 4,
+        };
+        let mut cache = ReplayCache::new(config);
+        assert_eq!(
+            cache.complete(id(1), b"x", b"12345"),
+            Err(ReplayCacheError::ResponseTooLarge)
+        );
+        assert_eq!(
+            cache.complete(id(1), b"123456789", b""),
+            Err(ReplayCacheError::ReservationMissing)
+        );
+        assert_eq!(
+            cache.preflight(id(1), b"12345"),
+            ReplayDecision::Backpressure
+        );
+        assert!(cache.is_empty());
+        assert_eq!(cache.retained_bytes(), 0);
     }
 
     fn controller(
