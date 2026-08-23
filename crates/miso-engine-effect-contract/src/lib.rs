@@ -290,17 +290,36 @@ impl DescriptorErrorSet {
 fn valid_text(v: &str) -> bool {
     !v.is_empty() && v.len() <= 255 && !v.chars().any(|c| c == '\0' || c == '\r' || c.is_control())
 }
-fn bits(v: f32) -> u32 {
+/// `to_bits`, with both zeros canonicalised to `+0.0`.
+///
+/// Every identity comparison in this crate goes through it, so `-0.0` and `+0.0` are one value
+/// wherever a descriptor, an enum choice or a span endpoint is compared.
+#[must_use]
+pub fn canonical_bits(v: f32) -> u32 {
     if v == 0.0 {
         0.0f32.to_bits()
     } else {
         v.to_bits()
     }
 }
-fn is_negative_zero(v: f32) -> bool {
+/// `+0.0` for either zero, the value unchanged otherwise.
+#[must_use]
+pub fn normalize_zero(v: f32) -> f32 {
+    if v == 0.0 { 0.0 } else { v }
+}
+/// `true` if `v` is the negative-zero bit pattern.
+#[must_use]
+pub fn is_negative_zero(v: f32) -> bool {
     v.to_bits() == (-0.0_f32).to_bits()
 }
-fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
+/// `true` if `v` is inside the descriptor parameter's declared domain.
+///
+/// The descriptor-domain predicate. `miso_engine_effect_runtime::params::parameter_value_valid` is
+/// the render-side crate's predicate over its own small `ParameterSpec`; the two state the same
+/// law over two descriptions and cannot be one function while the contract is `std` and
+/// `effect-runtime` is `no_std` (see `scripts/check-effect-runtime-policy.sh`).
+#[must_use]
+pub fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
     if !v.is_finite() {
         return false;
     }
@@ -309,8 +328,8 @@ fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
             .minimum
             .zip(p.maximum)
             .is_some_and(|(a, b)| v >= a && v <= b),
-        ParameterDomain::Boolean => bits(v) == bits(0.0) || bits(v) == bits(1.0),
-        ParameterDomain::Enumeration => p.enum_choices.iter().any(|c| bits(c.value) == bits(v)),
+        ParameterDomain::Boolean => canonical_bits(v) == canonical_bits(0.0) || canonical_bits(v) == canonical_bits(1.0),
+        ParameterDomain::Enumeration => p.enum_choices.iter().any(|c| canonical_bits(c.value) == canonical_bits(v)),
     }
 }
 fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
@@ -541,10 +560,10 @@ pub fn inverse_map_normalized(m: ParameterMapping, a: f32, b: f32, v: f32) -> Op
     if !(a.is_finite() && b.is_finite() && a < b && v.is_finite() && v >= a && v <= b) {
         return None;
     }
-    if bits(v) == bits(a) {
+    if canonical_bits(v) == canonical_bits(a) {
         return Some(0.0);
     }
-    if bits(v) == bits(b) {
+    if canonical_bits(v) == canonical_bits(b) {
         return Some(1.0);
     }
     match m {
@@ -582,7 +601,7 @@ pub fn inverse_map_stepped_normalized(choices: &[f32], value: f32) -> Option<f32
     }
     choices
         .iter()
-        .position(|choice| bits(*choice) == bits(value))
+        .position(|choice| canonical_bits(*choice) == canonical_bits(value))
         .map(|index| index as f32 / (choices.len() - 1) as f32)
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -829,13 +848,6 @@ impl<'a> EffectBankProcessBlock<'a> {
         })
     }
 }
-pub fn sanitize_sample(value: f32) -> Option<f32> {
-    if value.is_finite() && (value == 0.0 || value.is_normal()) {
-        Some(value)
-    } else {
-        None
-    }
-}
 pub fn valid_runtime_span(
     s: &PreparedAutomationSpan,
     m: PreparedEffectMetadata,
@@ -860,7 +872,7 @@ pub fn valid_runtime_span(
     }
     match s.kind {
         AutomationSpanKind::Point => {
-            s.start_sample == s.end_sample && bits(s.start_value) == bits(s.end_value)
+            s.start_sample == s.end_sample && canonical_bits(s.start_value) == canonical_bits(s.end_value)
         }
         AutomationSpanKind::Step | AutomationSpanKind::Linear => s.end_sample > s.start_sample,
         AutomationSpanKind::Exponential => {
@@ -899,7 +911,7 @@ pub fn validate_automation_block(
             previous.parameter_index == span.parameter_index && previous.channel == span.channel
         }) && (span.start_sample < previous.end_sample
             || (span.start_sample == previous.end_sample
-                && bits(span.start_value) != bits(previous.end_value)))
+                && canonical_bits(span.start_value) != canonical_bits(previous.end_value)))
         {
             return Err(ProcessBlockError::Automation);
         }
@@ -915,15 +927,35 @@ pub fn validate_automation_block(
     Ok(())
 }
 
-/// Allocation-free parameter smoother implementing the frozen update-count semantics.
+/// Allocation-free control-plane parameter smoother, in the decision-D11 form.
+///
+/// # This is the law, not the render-path implementation
+///
+/// `miso_engine_effect_runtime::ramp::LinearRamp` is the **one** implementation a render path
+/// uses: it is lane-generic, it drives `miso_engine_lane::kernels::ramp_block`, and every effect
+/// crate ramps through it. This type stays because the contract has to state what
+/// [`SmoothingRule`] *means* without depending on the render-side crate — the contract is `std`
+/// and control-plane, `effect-runtime` is `no_std` and lane-generic, and neither may depend on the
+/// other. The two are proven bit-for-bit identical for [`SmoothingRule::Linear`] by
+/// `crates/miso-engine-effect-runtime/tests/contract_ramp_identity.rs`; if that test ever goes
+/// red, this type is wrong and `LinearRamp` wins.
+///
+/// # D11
+///
+/// One division, at the moment the target changes: `step = (target - current) / N`. Then
+/// `current += step` per sample, and an exact assignment of `target` on update `N`. The audited
+/// form divided by `remaining` on **every** sample (issue #95 finding F2); that is deleted here.
+/// [`SmoothingRule::OnePole99`] likewise precomputes `a` and `1 - a` once, at construction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParameterSmoother {
     current: f32,
     target: f32,
+    step: f32,
     remaining: u32,
     total: u32,
     rule: SmoothingRule,
     one_pole_a: f32,
+    one_pole_k: f32,
 }
 impl ParameterSmoother {
     pub fn new(initial: f32, rule: SmoothingRule, samples: u32) -> Option<Self> {
@@ -935,54 +967,78 @@ impl ParameterSmoother {
         } else {
             0.0
         };
+        let initial = normalize_zero(initial);
         Some(Self {
-            current: if initial == 0.0 { 0.0 } else { initial },
-            target: if initial == 0.0 { 0.0 } else { initial },
+            current: initial,
+            target: initial,
+            step: 0.0,
             remaining: 0,
             total: samples,
             rule,
             one_pole_a,
+            one_pole_k: 1.0 - one_pole_a,
         })
     }
+    /// Points the smoother at `target`. **This is the only division** (D11).
     pub fn set_target(&mut self, target: f32) -> bool {
         if !target.is_finite() {
             return false;
         }
-        self.target = if target == 0.0 { 0.0 } else { target };
+        self.target = normalize_zero(target);
         if self.rule == SmoothingRule::None {
             self.current = self.target;
+            self.step = 0.0;
             self.remaining = 0;
         } else {
+            // Frozen operation order, identical to `LinearRamp::set_target`.
+            self.step = (self.target - self.current) / self.total as f32;
             self.remaining = self.total;
         }
         true
     }
+    /// Produces the next update's value and advances the state.
+    ///
+    /// * `remaining == 0` — at rest: returns `current` unchanged.
+    /// * `remaining == 1` — the final update: assigns `target` exactly (the D11 snap).
+    /// * otherwise — `current += step` for [`SmoothingRule::Linear`], one precomputed-coefficient
+    ///   product for [`SmoothingRule::OnePole99`]. No division on either path.
     pub fn next_value(&mut self) -> f32 {
-        if self.remaining == 0 {
-            return self.current;
+        match self.remaining {
+            0 => self.current,
+            1 => {
+                self.current = self.target;
+                self.step = 0.0;
+                self.remaining = 0;
+                self.current
+            }
+            _ => {
+                self.current = match self.rule {
+                    SmoothingRule::None => self.target,
+                    SmoothingRule::Linear => self.current + self.step,
+                    SmoothingRule::OnePole99 => {
+                        self.one_pole_a * self.current + self.one_pole_k * self.target
+                    }
+                };
+                self.remaining -= 1;
+                self.current
+            }
         }
-        if self.remaining == 1 {
-            self.current = self.target;
-        } else {
-            self.current = match self.rule {
-                SmoothingRule::None => self.target,
-                SmoothingRule::Linear => {
-                    self.current + (self.target - self.current) / self.remaining as f32
-                }
-                SmoothingRule::OnePole99 => {
-                    self.one_pole_a * self.current + (1.0 - self.one_pole_a) * self.target
-                }
-            };
-        }
-        self.remaining -= 1;
-        self.current
     }
     pub fn snap(&mut self) {
         self.current = self.target;
+        self.step = 0.0;
         self.remaining = 0;
     }
     pub const fn current(self) -> f32 {
         self.current
+    }
+    /// Per-update increment in force, or `0.0` when the smoother is at rest.
+    pub const fn step(self) -> f32 {
+        self.step
+    }
+    /// Updates still to be produced before the smoother is at its target.
+    pub const fn remaining(self) -> u32 {
+        self.remaining
     }
 }
 

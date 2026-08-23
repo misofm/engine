@@ -857,6 +857,7 @@ dependencies = [
 name = "miso-engine-effect-runtime"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-effect-contract",
  "miso-engine-lane",
  "miso-engine-math",
  "sha2 0.11.0",

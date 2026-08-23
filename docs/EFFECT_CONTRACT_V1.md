@@ -13,10 +13,29 @@ contains these fields directly and is not a digest or persistence identity.
 
 The callback receives disjoint in-place planar L/R slices and optional planar sidechain slices.
 It performs no allocation/free, synchronization, I/O, network, logging, syscall, dynamic loading,
-feature detection, panic, callbacks, or unbounded work. Nonfinite and subnormal input, sidechain,
-internal, and output values become `+0.0`; signed finite zero is retained. `ProcessReport` uses
-saturating counters. Bypass is an immutable prepared configuration and delays dry input by the same
-declared latency as enabled processing.
+feature detection, panic, callbacks, or unbounded work.
+
+**An effect classifies no individual sample** (master plan #83 decision D7). The audited V1 text
+froze the opposite — "nonfinite and subnormal input, sidechain, internal, and output values become
+`+0.0`", with saturating per-sample counters — and that is withdrawn by issue #95 finding F1: it
+cost four to six scalar classify-and-branch sequences per frame per effect, it prevented the frame
+loop from vectorising, and both production callers discarded the counters. The replacement is
+three separate mechanisms, each where its hazard is:
+
+* **Denormals** — `flush(x) = andnot(|x| < 1e-20, x)`, applied to each recursive state word once
+  per sample *inside* the kernel (`miso_engine_lane::flush`). A subnormal *input* sample is no
+  longer replaced by zero; it renders, and it cannot reach a recurrence because the flush band
+  strictly contains the subnormal band.
+* **Divergence** — output finiteness is checked **once per block per bank** with one vector
+  compare, `x == x` and `|x| < 1e30` (`miso_engine_effect_runtime::bank::check_block`). A failing
+  block zeroes its output, resets that effect's state to prepared defaults, and increments a
+  **block** counter. The contract's report counts blocks, never samples.
+* **Input sanitisation** — once per track per block at the track input stage, never inside an
+  effect.
+
+Signed finite zero is retained on every non-recursive path. Bypass is an immutable prepared
+configuration, is **not** part of `EffectProgramKeyV1`, and outputs the dry input delayed by
+exactly the declared latency.
 
 ## Parameters and automation
 
@@ -25,12 +44,29 @@ mapping is `min + (max-min)x^2`; exact endpoints are assigned explicitly. Steppe
 the closest legal value and resolves ties toward the lower value. Inputs outside finite `[0,1]`
 and invalid domain values reject rather than clamp.
 
-For `N` smoothing updates, linear adds `(target-current)/remaining` and assigns the exact target
-on update `N`. One-pole-99 uses `a = exp(ln(0.01)/N)` and
-`y = a*y_previous + (1-a)*target`, then assigns the exact target on update `N`. A new target
-restarts from the current value. Linear/exponential spans bypass the smoother while active and
-assign their exact endpoint at `end_sample`. Malformed render spans are ignored, counted once, and
-do not change the last valid target.
+Smoothing length is `smoothing_samples` from the parameter descriptor; it is binding, and no
+effect may substitute a literal.
+
+For `N` smoothing updates, **linear precomputes its increment once, at the moment the target
+changes** (master plan decision D11): `step = (target - current) / N`, then `current += step` per
+update, and the exact target is assigned on update `N`. There is no per-sample division anywhere
+in the engine. The audited rule — "linear adds `(target-current)/remaining`" — is withdrawn by
+issue #95 finding F2: it cost one integer-to-float convert and one `fdiv` per parameter per lane
+per sample for the whole length of every ramp. One-pole-99 likewise precomputes `a =
+exp(ln(0.01)/N)` and `1-a` once, then `y = a*y_previous + (1-a)*target`, and assigns the exact
+target on update `N`. `None` assigns immediately. A new target restarts from the current value.
+
+`miso_engine_effect_runtime::ramp::LinearRamp` is the one render-path implementation;
+`miso_engine_effect_contract::ParameterSmoother` states the same law for the control plane, and
+`miso-engine-effect-runtime/tests/contract_ramp_identity.rs` proves the two agree bit for bit.
+
+V1 runtime automation is `Point` spans whose `start_sample` equals the block's first sample,
+validated off render by `validate_automation_block`; an effect trusts the slice it is given.
+`Step`, `Linear` and `Exponential` spans and `AutomationRate::Sample` are descriptor and protocol
+vocabulary — `valid_runtime_span` and `automation_segment_value` define their meaning for the
+control plane and for the conformance reference mock — whose sample-accurate render-path delivery
+is a later protocol capability. Malformed render spans are ignored, counted once, and do not
+change the last valid target.
 
 ## State and lane isolation
 
@@ -75,7 +111,8 @@ declared quality must have 44,100, 48,000, 88,200, and 96,000 Hz rows; unique or
 launch gates cover the first four rates and report optional extended rows separately; neither
 descriptor rows nor probes for the latter four create engine, host, or release support. It checks
 every declared quality/link mode, enabled/bypass, metadata immutability,
-sanitization, deterministic state restore, and lane isolation. Separate faulty mocks exercise
+D7 output-block bounds under poisoned input and sidechain, deterministic state restore, and lane
+isolation. Separate faulty mocks exercise
 allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, changing
 latency/tail/resources, bypass latency, malformed automation, NaN propagation, partial or
 nondeterministic snapshot, and rejected restore. Deterministic tests execute at least 10,000

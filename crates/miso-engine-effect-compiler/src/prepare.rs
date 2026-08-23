@@ -898,7 +898,7 @@ pub fn prepare_native_session_effects(
                             initial.push(InitialParameterValue {
                                 parameter_index: index as u32,
                                 channel: ParameterChannel::Both,
-                                value: normalize_zero(
+                                value: miso_engine_effect_contract::normalize_zero(
                                     values
                                         .first()
                                         .map_or(parameter.default_value, |item| item.value),
@@ -953,7 +953,7 @@ pub fn prepare_native_session_effects(
                                 initial.push(InitialParameterValue {
                                     parameter_index: index as u32,
                                     channel,
-                                    value: normalize_zero(
+                                    value: miso_engine_effect_contract::normalize_zero(
                                         requested.or(both).unwrap_or(parameter.default_value),
                                     ),
                                 });
@@ -965,7 +965,7 @@ pub fn prepare_native_session_effects(
                     continue;
                 }
                 if let Some(item) = initial.iter().find(|item| {
-                    !parameter_value_is_valid(
+                    !miso_engine_effect_contract::parameter_value_valid(
                         &descriptor.parameters[item.parameter_index as usize],
                         item.value,
                     )
@@ -1120,30 +1120,6 @@ pub fn prepare_native_session_effects(
     }
 }
 
-fn normalize_zero(value: f32) -> f32 {
-    if value == 0.0 { 0.0 } else { value }
-}
-
-fn parameter_value_is_valid(
-    descriptor: &miso_engine_effect_contract::ParameterDescriptorV1,
-    value: f32,
-) -> bool {
-    if !value.is_finite() {
-        return false;
-    }
-    match descriptor.domain {
-        miso_engine_effect_contract::ParameterDomain::Continuous => descriptor
-            .minimum
-            .zip(descriptor.maximum)
-            .is_some_and(|(minimum, maximum)| value >= minimum && value <= maximum),
-        miso_engine_effect_contract::ParameterDomain::Boolean => value == 0.0 || value == 1.0,
-        miso_engine_effect_contract::ParameterDomain::Enumeration => {
-            descriptor.enum_choices.iter().any(|choice| {
-                normalize_zero(choice.value).to_bits() == normalize_zero(value).to_bits()
-            })
-        }
-    }
-}
 fn same_unit(session: SessionUnit, contract: ParameterUnit) -> bool {
     matches!(
         (session, contract),

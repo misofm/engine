@@ -20,7 +20,7 @@ use miso_engine_effect_contract::{
     PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
     ProcessReport, QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, sanitize_sample, valid_runtime_span, validate_descriptor_v1,
+    expected_prepared_metadata, valid_runtime_span, validate_descriptor_v1,
 };
 
 const MOCK_ID: EffectId = match EffectId::new("conformance.delay") {
@@ -271,13 +271,13 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
                 let sample = block.first_sample + frame as u64;
                 let mut left = block.left[index];
                 let mut right = block.right[index];
-                if sanitize_sample(left).is_none() {
+                if !canonical_finite(left) {
                     left = 0.0;
                     report.reports[lane].sanitized_main_samples = report.reports[lane]
                         .sanitized_main_samples
                         .saturating_add(1);
                 }
-                if sanitize_sample(right).is_none() {
+                if !canonical_finite(right) {
                     right = 0.0;
                     report.reports[lane].sanitized_main_samples = report.reports[lane]
                         .sanitized_main_samples
@@ -375,7 +375,7 @@ impl DualAccumulatorDelay {
             delayed * self.gain[lane]
         };
         self.accumulator[lane] += output.abs();
-        if sanitize_sample(output).is_none() || sanitize_sample(self.accumulator[lane]).is_none() {
+        if !canonical_finite(output) || !canonical_finite(self.accumulator[lane]) {
             self.accumulator[lane] = 0.0;
             (0.0, true)
         } else {
@@ -451,14 +451,14 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
             let sample = block.first_sample + frame as u64;
             let mut input = [block.left[frame], block.right[frame]];
             for value in &mut input {
-                if sanitize_sample(*value).is_none() {
+                if !canonical_finite(*value) {
                     *value = 0.0;
                     report.sanitized_main_samples = report.sanitized_main_samples.saturating_add(1);
                 }
             }
             if let Some((left, right)) = block.sidechain.as_mut() {
                 for value in [left[frame], right[frame]] {
-                    if sanitize_sample(value).is_none() {
+                    if !canonical_finite(value) {
                         report.sanitized_sidechain_samples =
                             report.sanitized_sidechain_samples.saturating_add(1);
                     }
@@ -589,7 +589,7 @@ fn decode_lane(input: &[u8]) -> Result<LaneState, StatePayloadError> {
     if delay
         .iter()
         .chain([&gain, &accumulator])
-        .any(|v| sanitize_sample(*v).is_none())
+        .any(|v| !canonical_finite(*v))
     {
         return Err(StatePayloadError {
             code: "effect.state.invalid",
@@ -763,12 +763,8 @@ pub fn run_effect_conformance(
                     tier.failures.push("process.realtime_or_panic");
                     continue;
                 }
-                if left
-                    .iter()
-                    .chain(&right)
-                    .any(|v| sanitize_sample(*v).is_none())
-                {
-                    tier.failures.push("process.sanitization");
+                if !block_is_within_bounds(&left) || !block_is_within_bounds(&right) {
+                    tier.failures.push("process.block_bounds");
                 }
                 if left.iter().position(|v| *v != 0.0) != usize::try_from(expected.latency.0).ok() {
                     tier.failures.push("latency.impulse");
@@ -893,6 +889,28 @@ fn impulse_sequence(
         && effect.metadata().program_key() == expected.program_key()
 }
 
+/// The mock's own per-value canonical-finite predicate.
+///
+/// Issue #95 deleted `miso_engine_effect_contract::sanitize_sample`: decision D7 says no
+/// production effect classifies an individual sample, so the contract no longer offers a helper
+/// for doing so. The reference mock still does it, deliberately — it is the *permissive* end of
+/// the contract, and the faulty-mock corpus needs a mock that reacts to a poisoned sample. What is
+/// gated for a real effect is the D7 property below (`block_is_within_bounds`), not this.
+fn canonical_finite(value: f32) -> bool {
+    value.is_finite() && (value == 0.0 || value.is_normal())
+}
+
+/// Decision D7 / master plan §4.4: what every effect's output block must satisfy.
+///
+/// `x == x` rejects NaN, `|x| < 1e30` rejects an infinity and a diverging recurrence. This is the
+/// block-granular property the bank driver checks with one vector compare; the harness asserts it
+/// on the values the effect actually produced.
+fn block_is_within_bounds(values: &[f32]) -> bool {
+    values
+        .iter()
+        .all(|value| *value == *value && value.abs() < 1.0e30)
+}
+
 fn sanitization_probe(
     factory: &dyn NativeEffectFactory,
     request: PrepareEffectRequest<'_>,
@@ -913,11 +931,12 @@ fn sanitization_probe(
         return false;
     };
     *process_calls = process_calls.saturating_add(1);
-    report.sanitized_main_samples == 3
-        && left
-            .iter()
-            .chain(&right)
-            .all(|value| sanitize_sample(*value).is_some())
+    // D7: the gate is that a block containing NaN, an infinity and a subnormal leaves the effect
+    // within bounds and does not poison it — not that the effect counted three individual
+    // samples. A production effect classifies nothing per value (issue #95 F1), so the audited
+    // `report.sanitized_main_samples == 3` assertion would have failed every real effect.
+    let _ = report;
+    block_is_within_bounds(&left) && block_is_within_bounds(&right)
 }
 
 fn sidechain_probe(
@@ -954,7 +973,10 @@ fn sidechain_probe(
         return false;
     };
     *process_calls = process_calls.saturating_add(1);
-    report.sanitized_sidechain_samples == 2
+    // D7, as in `sanitization_probe`: a poisoned sidechain must leave the main output within
+    // bounds. Counting sidechain samples was the deleted per-value contract.
+    let _ = report;
+    block_is_within_bounds(&left) && block_is_within_bounds(&right)
 }
 
 fn reset_probe(
