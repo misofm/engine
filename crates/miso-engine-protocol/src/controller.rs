@@ -10,6 +10,11 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(test)]
+std::thread_local! {
+    static PREPARED_IMMEDIATE_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
@@ -1540,14 +1545,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                 codec.decode_capabilities_request(frame.payload, header.tlv_count)?;
                 ControlCommand::CapabilitiesGet
             }
-            MessageId::SessionSnapshotGet => ControlCommand::SessionSnapshotGet {
-                offset: codec
-                    .decode_snapshot_request(frame.payload, header.tlv_count)?
-                    .offset,
-                max_bytes: codec
-                    .decode_snapshot_request(frame.payload, header.tlv_count)?
-                    .maximum_bytes,
-            },
+            MessageId::SessionSnapshotGet => {
+                let request = codec.decode_snapshot_request(frame.payload, header.tlv_count)?;
+                ControlCommand::SessionSnapshotGet {
+                    offset: request.offset,
+                    max_bytes: request.maximum_bytes,
+                }
+            }
             MessageId::SessionTransactionApply => {
                 return self.process_session_transaction_btlv(&codec, input, scratch);
             }
@@ -1610,6 +1614,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        if header.message_id != MessageId::SessionTransactionApply {
+            return self.process_command_frame_into_legacy(input, scratch, output);
+        }
         match self.prepare_command_frame(input, scratch, output.len())? {
             PreparedCommandFrame::Immediate(response) => response
                 .write_into(output)
@@ -1780,6 +1794,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        #[cfg(test)]
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
         let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
@@ -4108,6 +4124,48 @@ mod tests {
             }
             crate::DecodedTypedResponseFrame::Success { .. } => panic!("changed ID was executed"),
         }
+    }
+
+    #[test]
+    fn public_immediate_frame_path_never_builds_a_prepared_vec() {
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
+        let mut endpoint = controller(8, 2);
+        let input = full_command(
+            1,
+            ExpectedRevision::Any,
+            crate::CommandPayload::CapabilitiesGet,
+        );
+        let first = process_full_command(&mut endpoint, &input);
+        assert_eq!(
+            process_full_command(&mut endpoint, &input),
+            first,
+            "replay bytes"
+        );
+
+        let changed = full_command(
+            1,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        );
+        let _reuse = process_full_command(&mut endpoint, &changed);
+
+        let mut malformed = full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::CapabilitiesGet,
+        );
+        malformed[20..24].copy_from_slice(&8_u32.to_le_bytes());
+        malformed[40..44].copy_from_slice(&1_u32.to_le_bytes());
+        malformed.extend_from_slice(&[1, 0, 1, 0, 1, 0, 0, 0]);
+        let _non_ok = process_full_command(&mut endpoint, &malformed);
+
+        PREPARED_IMMEDIATE_CALLS.with(|calls| {
+            assert_eq!(
+                calls.get(),
+                0,
+                "public immediate, replay, reuse, and correlatable-error paths write directly"
+            );
+        });
     }
 
     #[test]
