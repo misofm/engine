@@ -140,6 +140,8 @@ enum StructuralSourceStatePolicy {
 
 const STRUCTURAL_SOURCE_STATE_POLICY: StructuralSourceStatePolicy =
     StructuralSourceStatePolicy::ResetAtReplacementBoundary;
+const RENDER_DIAGNOSTIC_SLOTS: usize = 2;
+const RENDER_DIAGNOSTIC_CODE: &str = "capi.render.activity";
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -280,6 +282,10 @@ pub(crate) struct SessionState {
     response_scratch: Box<[u8]>,
     shared: Arc<SharedPlanState>,
     observed_render_sequence: u64,
+    render_diagnostics: Box<[RenderDiagnosticSlot]>,
+    render_diagnostic_head: usize,
+    render_diagnostic_len: usize,
+    protocol_reliable_pending: bool,
 }
 
 pub(crate) struct PlanState {
@@ -347,6 +353,49 @@ struct PreparedRuntime {
     sources: Box<[ControlSource]>,
     plan: PreparedRenderPlan,
     resources: PlanResourceReport,
+}
+
+struct RenderDiagnosticSlot {
+    diagnostic: miso_engine_protocol::Diagnostic,
+    reservation: Option<miso_engine_protocol::ReliableEventReservation>,
+    protocol_events_before: u64,
+    revision: miso_engine_protocol::SessionRevision,
+    occupied: bool,
+}
+
+impl RenderDiagnosticSlot {
+    fn try_new() -> Result<Self, CompileFailure> {
+        let mut code = String::new();
+        code.try_reserve_exact(RENDER_DIAGNOSTIC_CODE.len())
+            .map_err(|_| failure("capi.resource.allocation"))?;
+        code.push_str(RENDER_DIAGNOSTIC_CODE);
+        Ok(Self {
+            diagnostic: miso_engine_protocol::Diagnostic {
+                code,
+                severity: miso_engine_protocol::DiagnosticSeverity::Info,
+                path: Vec::new(),
+                detail: None,
+                operation_index: None,
+                sample_time: None,
+                provider_sequence: None,
+            },
+            reservation: None,
+            protocol_events_before: 0,
+            revision: miso_engine_protocol::SessionRevision(0),
+            occupied: false,
+        })
+    }
+}
+
+fn prepare_render_diagnostic_slots() -> Result<Box<[RenderDiagnosticSlot]>, CompileFailure> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(RENDER_DIAGNOSTIC_SLOTS)
+        .map_err(|_| failure("capi.resource.allocation"))?;
+    for _ in 0..RENDER_DIAGNOSTIC_SLOTS {
+        slots.push(RenderDiagnosticSlot::try_new()?);
+    }
+    Ok(slots.into_boxed_slice())
 }
 
 struct ObservedPreparedToken {
@@ -564,6 +613,12 @@ struct SharedArcAllocation<T> {
     value: T,
 }
 
+#[allow(dead_code)]
+enum RetainedDiagnosticSlotMirror {
+    Empty,
+    Owned(miso_engine_protocol::Diagnostic),
+}
+
 fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
     rows.iter().try_fold(0_u64, |total, row| {
         total
@@ -643,7 +698,9 @@ fn capi_resources(
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState>>(1)?,
-        checked_layout::<miso_engine_protocol::RetainedDiagnosticSlot>(2)?,
+        checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
+        checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
+        checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and MockProvider each retain their own complete telemetry config.
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
@@ -1312,6 +1369,10 @@ pub(crate) fn compile_children(
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
             shared: Arc::clone(&shared),
             observed_render_sequence: 0,
+            render_diagnostics: prepare_render_diagnostic_slots()?,
+            render_diagnostic_head: 0,
+            render_diagnostic_len: 0,
+            protocol_reliable_pending: false,
         },
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
         plan: PlanState::new(owner, shared, resources.quantum_frames),
@@ -1513,13 +1574,40 @@ impl SessionState {
                 },
             );
         }
-        let _ = self.controller.enqueue_retained_diagnostic_event(
-            revision,
-            miso_engine_protocol::RetainedDiagnosticSlot::RenderObservation {
-                observed_sample,
-                render_sequence: sequence,
-            },
-        );
+        let diagnostics_enabled = {
+            let configuration = self.controller.telemetry_configuration();
+            configuration.diagnostics_enabled
+                && (miso_engine_protocol::DiagnosticSeverity::Info as u8)
+                    >= (configuration.minimum_diagnostic_severity as u8)
+        };
+        if !diagnostics_enabled || self.render_diagnostic_len == self.render_diagnostics.len() {
+            return;
+        }
+
+        // A reliable-event reservation is the capacity credit for this CAPI-owned event. The
+        // barrier records already-published protocol events, preserving their FIFO order while
+        // the diagnostic itself remains in fixed, eagerly allocated CAPI storage.
+        let protocol_events_before = self
+            .controller
+            .queues()
+            .report(miso_engine_protocol::QueueKind::ReliableEvent)
+            .occupancy
+            .saturating_add(u64::from(self.protocol_reliable_pending));
+        let Ok(reservation) = self.controller.queues_mut().reserve_reliable_event() else {
+            return;
+        };
+        let tail = (self.render_diagnostic_head + self.render_diagnostic_len)
+            % self.render_diagnostics.len();
+        let slot = &mut self.render_diagnostics[tail];
+        debug_assert!(!slot.occupied);
+        debug_assert!(slot.reservation.is_none());
+        slot.diagnostic.sample_time = Some(observed_sample.0);
+        slot.diagnostic.provider_sequence = Some(sequence);
+        slot.revision = revision;
+        slot.protocol_events_before = protocol_events_before;
+        slot.reservation = Some(reservation);
+        slot.occupied = true;
+        self.render_diagnostic_len += 1;
     }
 
     #[cfg(test)]
@@ -1846,12 +1934,77 @@ impl SessionState {
         let capacity = usize::try_from(output_capacity)
             .unwrap_or(usize::MAX)
             .min(self.response_scratch.len());
-        let output = &mut self.response_scratch[..capacity];
         let result = match lane {
-            EventLane::Reliable => self.controller.dequeue_reliable_event_frame_into(output),
-            EventLane::Lossy => self.controller.dequeue_lossy_event_frame_into(output),
+            EventLane::Reliable => self.dequeue_reliable_event(capacity),
+            EventLane::Lossy => self
+                .controller
+                .dequeue_lossy_event_frame_into(&mut self.response_scratch[..capacity]),
         };
         result.map_err(map_event_egress_error)
+    }
+
+    fn dequeue_reliable_event(
+        &mut self,
+        output_capacity: usize,
+    ) -> Result<Option<usize>, EventEgressError> {
+        if self.render_diagnostic_len == 0 {
+            let result = self
+                .controller
+                .dequeue_reliable_event_frame_into(&mut self.response_scratch[..output_capacity]);
+            self.protocol_reliable_pending = matches!(
+                result,
+                Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
+            );
+            return result;
+        }
+
+        let head = self.render_diagnostic_head;
+        if self.render_diagnostics[head].protocol_events_before != 0 {
+            let result = self
+                .controller
+                .dequeue_reliable_event_frame_into(&mut self.response_scratch[..output_capacity]);
+            match result {
+                Ok(Some(bytes)) => {
+                    self.render_diagnostics[head].protocol_events_before -= 1;
+                    self.protocol_reliable_pending = false;
+                    return Ok(Some(bytes));
+                }
+                Ok(None) => {
+                    self.protocol_reliable_pending = false;
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.protocol_reliable_pending = matches!(
+                        error,
+                        EventEgressError::Encode(EncodeError::OutputTooSmall { .. })
+                    );
+                    return Err(error);
+                }
+            }
+        }
+
+        let slot = &mut self.render_diagnostics[head];
+        let result = ProtocolCodec::default().encode_event_frame_into(
+            &miso_engine_protocol::TypedEventFrame {
+                revision: slot.revision,
+                payload: miso_engine_protocol::EventPayload::Diagnostic(&slot.diagnostic),
+            },
+            &mut self.response_scratch[..output_capacity],
+        );
+        match result {
+            Ok(bytes) => {
+                drop(slot.reservation.take());
+                slot.diagnostic.sample_time = None;
+                slot.diagnostic.provider_sequence = None;
+                slot.protocol_events_before = 0;
+                slot.occupied = false;
+                self.render_diagnostic_head =
+                    (self.render_diagnostic_head + 1) % self.render_diagnostics.len();
+                self.render_diagnostic_len -= 1;
+                Ok(Some(bytes))
+            }
+            Err(error) => Err(EventEgressError::Encode(error)),
+        }
     }
 
     pub(crate) fn event_response(&self, bytes: usize) -> &[u8] {

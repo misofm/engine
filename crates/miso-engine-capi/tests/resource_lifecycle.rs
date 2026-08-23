@@ -5,20 +5,21 @@
 use core::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
+    marker::PhantomData,
     mem::{MaybeUninit, size_of},
     ptr,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
 };
 use std::alloc::{GlobalAlloc, System};
-use std::sync::Mutex;
+use std::{sync::Mutex, thread::JoinHandle};
 
 use miso_engine_capi::*;
-use miso_engine_core::realtime::{PlanEpoch, PreparedRenderPlan, QueueGeneration};
+use miso_engine_core::realtime::{PlanEpoch, PreparedRenderPlan, Producer, QueueGeneration};
 use miso_engine_protocol::{
     AUTOMATION_BATCH_RECORDS, AutomationBatchSlot, AutomationRecord, CommandPayload,
     ControlCommandSlot, CounterId, CounterTelemetryRecord, CounterValue, ExpectedRevision,
-    ProtocolCodec, ReliableSlot, RequestId, RetainedDiagnosticSlot, SessionEditV1, SessionRevision,
-    StatusCode, TelemetryRecord, TypedCommandFrame,
+    ProtocolCodec, ReliableSlot, RequestId, SessionEditV1, SessionRevision, StatusCode,
+    TelemetryRecord, TypedCommandFrame,
 };
 use miso_engine_session::StableId;
 use miso_engine_source::HostChunkProvider;
@@ -507,6 +508,68 @@ struct SharedArcMirror<T> {
 }
 
 #[allow(dead_code)]
+enum RetainedDiagnosticSlotMirror {
+    Empty,
+    Owned(miso_engine_protocol::Diagnostic),
+}
+
+#[allow(dead_code)]
+struct RenderDiagnosticSlotMirror {
+    diagnostic: miso_engine_protocol::Diagnostic,
+    reservation: Option<miso_engine_protocol::ReliableEventReservation>,
+    protocol_events_before: u64,
+    revision: SessionRevision,
+    occupied: bool,
+}
+
+#[allow(dead_code)]
+struct CompiledIndexNodeMirror {
+    entries: [(StableId, u64); 4],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct CompiledControlQueueItemMirror {
+    request_id: RequestId,
+    revision: SessionRevision,
+    command_sequence: u64,
+    absolute_sample: u64,
+    payload_offset: usize,
+    payload_bytes: usize,
+    admitted_bytes: u64,
+    provider_sequence: u64,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct CanonicalEscapedByteMirror {
+    escape: u8,
+    unicode_tag: u8,
+    opening_brace: u8,
+    digits: [u8; 6],
+    closing_brace: u8,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+struct CanonicalFieldScratchMirror {
+    key: [u8; 32],
+    separator: [u8; 8],
+    value: [u8; 72],
+    terminator: [u8; 16],
+}
+
+#[allow(dead_code)]
+struct CanonicalStructuralItemMirror {
+    fields: [CanonicalFieldScratchMirror; 8],
+}
+
+#[allow(dead_code)]
+struct CanonicalDocumentPreludeMirror {
+    frames: [CanonicalStructuralItemMirror; 4],
+}
+
+#[allow(dead_code)]
 struct SharedPlanStateMirror {
     plan_alive: AtomicBool,
     active_epoch: AtomicU64,
@@ -572,6 +635,139 @@ struct ProviderEpochMirror {
     sources: Box<[ControlSourceMirror]>,
 }
 
+#[allow(dead_code)]
+struct TransferBlockMirror {
+    generation: miso_engine_source::SourceGeneration,
+    start_frame: miso_engine_source::SourceFrame,
+    frames: u32,
+    end_of_region: bool,
+    native_decoder_sanitized_samples: u64,
+    samples: Box<[f32]>,
+}
+
+#[allow(dead_code)]
+struct NativeSourceWorkerMirror {
+    join: Option<JoinHandle<miso_engine_source::NativeSourceWorkerExit>>,
+    stopped: bool,
+    stop: Producer<()>,
+    not_sync: PhantomData<Cell<()>>,
+}
+
+#[allow(dead_code)]
+struct GraphSourceEntryMirror {
+    consumer: miso_engine_source::PcmSourceConsumer,
+    channel_count: u32,
+    planes: Box<[f32]>,
+    retirement_worker: Option<NativeSourceWorkerMirror>,
+}
+
+#[allow(dead_code)]
+struct SourceGraphSourceSetDriverMirror {
+    sources: Box<[GraphSourceEntryMirror]>,
+    mappings: Box<[miso_engine_source::SourceGraphTrackMapping]>,
+    quantum_frames: u32,
+}
+
+#[allow(dead_code)]
+struct TptSvfMirror {
+    c1: f32,
+    a2: f32,
+    a3: f32,
+    k: f32,
+    s1: f32,
+    s2: f32,
+    high_pass: bool,
+    enabled: bool,
+}
+
+#[allow(dead_code)]
+struct InputLaneMirror {
+    polarity: bool,
+    trim: f32,
+    hpf: TptSvfMirror,
+    lpf: TptSvfMirror,
+}
+
+#[allow(dead_code)]
+struct InputBuiltinsMirror {
+    left: InputLaneMirror,
+    right: InputLaneMirror,
+    lifetime_recovered_left: u64,
+    lifetime_recovered_right: u64,
+}
+
+#[allow(dead_code)]
+struct FaderLaneMirror {
+    gain: f32,
+    muted: bool,
+}
+
+#[allow(dead_code)]
+struct FaderBuiltinsMirror {
+    left: FaderLaneMirror,
+    right: FaderLaneMirror,
+}
+
+#[allow(dead_code)]
+struct Matrix2x2Mirror {
+    ll: f32,
+    lr: f32,
+    rl: f32,
+    rr: f32,
+}
+
+#[allow(dead_code)]
+struct MatrixBuiltinsMirror {
+    current: Matrix2x2Mirror,
+    target: Matrix2x2Mirror,
+    smoothing_samples: u32,
+    remaining_updates: u32,
+}
+
+#[allow(dead_code)]
+enum BuiltinTailMirror {
+    FiniteZero,
+    Infinite,
+}
+
+#[allow(dead_code)]
+struct BuiltinFilterBankMirror {
+    coefficients_and_state: [[f32; 8]; 6],
+    high_pass_mask: [u32; 8],
+    enabled: [bool; 8],
+}
+
+#[allow(dead_code)]
+struct BuiltinChannelBankMirror {
+    polarity: [bool; 8],
+    trim: [f32; 8],
+    hpf: BuiltinFilterBankMirror,
+    lpf: BuiltinFilterBankMirror,
+}
+
+#[allow(dead_code)]
+struct PreparedTptBankKernelMirror {
+    backend: miso_engine_core::KernelBackendV1,
+    process: fn(),
+}
+
+#[allow(dead_code)]
+struct BuiltinInputBankMirror {
+    backend: miso_engine_core::KernelBackendV1,
+    width: miso_engine_effect_contract::BankWidth,
+    kernel: PreparedTptBankKernelMirror,
+    left: BuiltinChannelBankMirror,
+    right: BuiltinChannelBankMirror,
+    active: [bool; 8],
+}
+
+#[allow(dead_code)]
+struct BuiltinBankProcessorMirror {
+    bank: BuiltinInputBankMirror,
+    process_calls: u64,
+    tpt_kernel_calls: u64,
+}
+
 #[derive(Clone, Copy)]
 struct PrimitiveOwner {
     name: &'static str,
@@ -595,7 +791,55 @@ fn spsc<T>(capacity: usize, name: &'static str) -> [PrimitiveOwner; 2] {
     ]
 }
 
-fn complete_capi_owners() -> (u64, u64, u64, u64) {
+fn owner_total(rows: &[PrimitiveOwner]) -> u64 {
+    rows.iter().map(|owner| owner.bytes).sum()
+}
+
+fn fixture_usize(key: &str) -> usize {
+    SESSION
+        .lines()
+        .flat_map(|line| line.split([',', '{', '}']))
+        .find_map(|field| {
+            let (name, value) = field.split_once('=')?;
+            (name.trim() == key).then(|| {
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .expect("fixture numeric field")
+            })
+        })
+        .unwrap_or_else(|| panic!("missing fixture numeric field {key}"))
+}
+
+fn assert_effective_owner_mutations(rows: &[PrimitiveOwner], production: u64, group: &str) {
+    assert_eq!(owner_total(rows), production, "{group} authority");
+    for index in 0..rows.len() {
+        let mut omitted = rows.to_vec();
+        let removed = omitted.remove(index);
+        assert_ne!(
+            owner_total(&omitted),
+            production,
+            "{group} omitted {}",
+            removed.name
+        );
+        let mut miscounted = rows.to_vec();
+        miscounted[index].bytes = miscounted[index]
+            .bytes
+            .checked_add(1)
+            .expect("one-byte mutation");
+        assert_ne!(
+            owner_total(&miscounted),
+            production,
+            "{group} miscounted {}",
+            rows[index].name
+        );
+    }
+}
+
+fn complete_capi_owners(
+    current_canonical: usize,
+    candidate_canonical: usize,
+) -> (u64, u64, u64, u64) {
     let configuration_items = 4_096 / size_of::<u16>();
     let mut active = Vec::new();
     for owner in spsc::<ControlCommandSlot>(1, "control queue")
@@ -682,7 +926,15 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
         },
         PrimitiveOwner {
             name: "diagnostic retained slots",
-            bytes: bytes::<RetainedDiagnosticSlot>(2),
+            bytes: bytes::<RetainedDiagnosticSlotMirror>(2),
+        },
+        PrimitiveOwner {
+            name: "CAPI render diagnostic slots",
+            bytes: bytes::<RenderDiagnosticSlotMirror>(2),
+        },
+        PrimitiveOwner {
+            name: "CAPI render diagnostic code payloads",
+            bytes: 2 * "capi.render.activity".len() as u64,
         },
         PrimitiveOwner {
             name: "provider meter config",
@@ -730,7 +982,7 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
         },
         PrimitiveOwner {
             name: "current canonical TOML",
-            bytes: 10_200,
+            bytes: current_canonical as u64,
         },
         PrimitiveOwner {
             name: "current source controls",
@@ -741,23 +993,13 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
             bytes: 14,
         },
     ]);
-    let active_total = active.iter().map(|owner| owner.bytes).sum::<u64>();
-    assert_eq!(active_total, 144_121, "complete active CAPI owner sum");
-    for index in 0..active.len() {
-        let omitted = active
-            .iter()
-            .enumerate()
-            .filter_map(|(other, owner)| (other != index).then_some(owner.bytes))
-            .sum::<u64>();
-        assert_ne!(omitted, active_total, "omitted {}", active[index].name);
-        let miscounted = active_total - active[index].bytes + active[index].bytes + 1;
-        assert_ne!(miscounted, active_total, "miscount {}", active[index].name);
-    }
+    let active_total = owner_total(&active);
+    assert_effective_owner_mutations(&active, 144_537, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
             name: "candidate canonical TOML",
-            bytes: 10_191,
+            bytes: candidate_canonical as u64,
         },
         PrimitiveOwner {
             name: "candidate source controls",
@@ -768,10 +1010,7 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
             bytes: 14,
         },
     ];
-    let candidate_epoch = candidate_epoch_rows
-        .iter()
-        .map(|owner| owner.bytes)
-        .sum::<u64>();
+    let candidate_epoch = owner_total(&candidate_epoch_rows);
     let prepared_rows = [
         PrimitiveOwner {
             name: "prepared response",
@@ -790,21 +1029,9 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
             bytes: 8_192,
         },
     ];
-    let prepared = prepared_rows.iter().map(|owner| owner.bytes).sum::<u64>();
-    for rows in [&candidate_epoch_rows[..], &prepared_rows[..]] {
-        let total = rows.iter().map(|owner| owner.bytes).sum::<u64>();
-        for index in 0..rows.len() {
-            assert_ne!(
-                rows.iter()
-                    .enumerate()
-                    .filter_map(|(other, owner)| (other != index).then_some(owner.bytes))
-                    .sum::<u64>(),
-                total,
-                "omitted {}",
-                rows[index].name
-            );
-        }
-    }
+    let prepared = owner_total(&prepared_rows);
+    assert_effective_owner_mutations(&candidate_epoch_rows, 10_429, "candidate CAPI epoch");
+    assert_effective_owner_mutations(&prepared_rows, 13_960, "prepared protocol");
     let largest = active
         .iter()
         .chain(candidate_epoch_rows.iter())
@@ -815,181 +1042,604 @@ fn complete_capi_owners() -> (u64, u64, u64, u64) {
     (active_total, candidate_epoch, prepared, largest)
 }
 
-fn owner_sum(rows: &[PrimitiveOwner], expected: u64) -> u64 {
-    let total = rows.iter().map(|owner| owner.bytes).sum::<u64>();
-    assert_eq!(total, expected);
-    for index in 0..rows.len() {
-        let omitted = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(other, owner)| (other != index).then_some(owner.bytes))
-            .sum::<u64>();
-        assert_ne!(omitted, total, "omitted {}", rows[index].name);
-        let miscounted = total - rows[index].bytes + rows[index].bytes + 1;
-        assert_ne!(miscounted, total, "miscounted {}", rows[index].name);
-    }
-    total
+fn compiled_model_owners(session_id: &str, canonical: &str) -> Vec<PrimitiveOwner> {
+    let sources = 1_u64;
+    let tracks = 9_u64;
+    let outputs = 1_u64;
+    let effects = 9_u64;
+    let parameters = 18_u64;
+    vec![
+        PrimitiveOwner {
+            name: "source declarations",
+            bytes: bytes::<miso_engine_session::Source>(1),
+        },
+        PrimitiveOwner {
+            name: "track declarations",
+            bytes: bytes::<miso_engine_session::Track>(tracks as usize),
+        },
+        PrimitiveOwner {
+            name: "output declarations",
+            bytes: bytes::<miso_engine_session::Output>(1),
+        },
+        PrimitiveOwner {
+            name: "route declarations",
+            bytes: bytes::<miso_engine_session::Route>(9),
+        },
+        PrimitiveOwner {
+            name: "effect declarations",
+            bytes: bytes::<miso_engine_session::Effect>(effects as usize),
+        },
+        PrimitiveOwner {
+            name: "effect parameter declarations",
+            bytes: bytes::<miso_engine_session::EffectParam>(parameters as usize),
+        },
+        PrimitiveOwner {
+            name: "session ID",
+            bytes: session_id.len() as u64,
+        },
+        PrimitiveOwner {
+            name: "render profile ID",
+            bytes: "native".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "output profile ID",
+            bytes: "main".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "source ID",
+            bytes: "fixture-source".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "source content identity",
+            bytes: "sha256:parametric-eq-nine-track".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "source locator",
+            bytes: "host:parametric-eq-nine-track".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "track IDs",
+            bytes: tracks * 3,
+        },
+        PrimitiveOwner {
+            name: "track source IDs",
+            bytes: tracks * "fixture-source".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "effect slot IDs",
+            bytes: effects * "soft-clip".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "native effect IDs",
+            bytes: effects * "miso.soft-clip".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "output IDs",
+            bytes: "main-out".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "route IDs",
+            bytes: 9 * "eq0-main".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "route source track IDs",
+            bytes: tracks * 3,
+        },
+        PrimitiveOwner {
+            name: "route output IDs",
+            bytes: 9 * "main-out".len() as u64,
+        },
+        PrimitiveOwner {
+            name: "compiled source index node storage",
+            bytes: bytes::<CompiledIndexNodeMirror>(sources as usize),
+        },
+        PrimitiveOwner {
+            name: "compiled graph-entity index node storage",
+            bytes: bytes::<CompiledIndexNodeMirror>((tracks + outputs) as usize),
+        },
+        PrimitiveOwner {
+            name: "canonical session snapshot",
+            bytes: canonical.len() as u64,
+        },
+    ]
 }
 
-fn primitive_replacement_oracle() -> PrimitiveReplacementOracle {
-    // These are independently pinned owner rows for this exact canonical fixture. They do not
-    // invoke a compiled session, plan/resource report, queue/replay/exchange projection, or CAPI
-    // admission helper. Both compiled models remain separate admission-only owners.
-    let graph_owners = [
-        PrimitiveOwner {
-            name: "compiled graph session envelope",
-            bytes: 12_288,
-        },
-        PrimitiveOwner {
-            name: "plan audio buffers",
-            bytes: 93_220,
-        },
-        PrimitiveOwner {
-            name: "declared effect state",
-            bytes: 12_168,
-        },
-        PrimitiveOwner {
-            name: "declared effect scratch",
-            bytes: 216,
-        },
-        PrimitiveOwner {
-            name: "graph nodes/edges/schedule/levels/reductions metadata",
-            bytes: 49_943,
-        },
-        PrimitiveOwner {
-            name: "effect-bank scratch",
-            bytes: 16_384,
-        },
-        PrimitiveOwner {
-            name: "effect-bank runtime buffers",
-            bytes: 8_192,
-        },
-        PrimitiveOwner {
-            name: "builtin bank",
-            bytes: 1_536,
-        },
-        PrimitiveOwner {
-            name: "builtin-bank scratch",
-            bytes: 16_384,
-        },
-    ];
-    let current_graph = owner_sum(&graph_owners, 210_331);
-    let prospective_graph = owner_sum(&graph_owners, 210_331);
-    let current_model = owner_sum(
-        &[PrimitiveOwner {
-            name: "current compiled model",
-            bytes: 16_631,
-        }],
-        16_631,
-    );
-    let prospective_model = owner_sum(
-        &[PrimitiveOwner {
-            name: "prospective compiled model",
-            bytes: 16_613,
-        }],
-        16_613,
-    );
-    let source_owners = [
-        PrimitiveOwner {
-            name: "source PCM ring",
-            bytes: 8_192,
-        },
-        PrimitiveOwner {
-            name: "source ring/control overhead",
-            bytes: 3_366,
-        },
-    ];
-    let current_source_total = owner_sum(&source_owners, 11_558);
-    let prospective_source_total = owner_sum(&source_owners, 11_558);
-    let current_source_overhead = owner_sum(&source_owners[1..], 3_366);
-    let prospective_source_overhead = owner_sum(&source_owners[1..], 3_366);
-    let effect_state_owners = [PrimitiveOwner {
-        name: "nine scalar effect states",
-        bytes: 9 * 1_352,
-    }];
-    let effect_scratch_owners = [PrimitiveOwner {
-        name: "nine scalar effect scratch regions",
-        bytes: 9 * 24,
-    }];
-    let current_effect_state = owner_sum(&effect_state_owners, 12_168);
-    let prospective_effect_state = owner_sum(&effect_state_owners, 12_168);
-    let current_effect_scratch = owner_sum(&effect_scratch_owners, 216);
-    let prospective_effect_scratch = owner_sum(&effect_scratch_owners, 216);
-    let builtin_owners = [PrimitiveOwner {
-        name: "nine builtin processor payloads",
-        bytes: 9 * 742,
-    }];
-    let current_builtin = owner_sum(&builtin_owners, 6_678);
-    let prospective_builtin = owner_sum(&builtin_owners, 6_678);
-
-    // Candidate CAPI epoch is canonical bytes + one ControlSource + source-ID bytes:
-    // 10_191 + 224 + 14 = 10_429. Prepared protocol is a 4 KiB response, a 776-byte
-    // affine token, and the independently pinned 9_088-byte candidate replay arena.
-    let (current_capi, candidate_epoch, prepared_protocol, capi_largest) = complete_capi_owners();
-    assert_eq!(candidate_epoch, 10_429);
-    assert_eq!(prepared_protocol, 13_960);
-
-    let aggregate = |rows: &[u64]| rows.iter().copied().sum::<u64>();
-    let graph = aggregate(&[
-        current_graph,
-        prospective_graph,
-        current_model,
-        prospective_model,
-    ]);
-    let source_total = aggregate(&[current_source_total, prospective_source_total]);
-    let source_overhead = aggregate(&[current_source_overhead, prospective_source_overhead]);
-    let effect_state = aggregate(&[current_effect_state, prospective_effect_state]);
-    let effect_scratch = aggregate(&[current_effect_scratch, prospective_effect_scratch]);
-    let builtin = aggregate(&[current_builtin, prospective_builtin]);
-    let capi = aggregate(&[current_capi, candidate_epoch, prepared_protocol]);
-    let largest = [49_167_u64, 49_167, capi_largest, 58_694, 58_694]
-        .into_iter()
-        .max()
-        .expect("nonempty primitive max");
-
-    // Effective mutations: every omitted owner and aggregate/max confusion changes authority.
-    for (index, _) in [
-        current_graph,
-        prospective_graph,
-        current_model,
-        prospective_model,
-    ]
-    .iter()
-    .enumerate()
-    {
-        let mut rows = [
-            current_graph,
-            prospective_graph,
-            current_model,
-            prospective_model,
+fn graph_owners() -> Vec<PrimitiveOwner> {
+    let tracks = 9_u64;
+    let nodes = tracks * 8 + 9 + 1;
+    let edges = tracks * 7 + 9 * 2;
+    let schedule = nodes;
+    let dependency_levels = 10_u64;
+    let buffers = nodes;
+    let route_timings = 9_u64;
+    let quantum = fixture_usize("quantum_frames") as u64;
+    let control_queue_items = fixture_usize("control_queue_messages");
+    let source_ring_frames = fixture_usize("pcm_ring_frames") as u64;
+    let colored_outputs = 10_u64;
+    let maximum_inputs = 9_u64;
+    let bank_lanes = 8_u64;
+    let node_text_bytes = tracks
+        * ([
+            "input",
+            "post-input-builtins",
+            "post-simd1",
+            "post-dynamic",
+            "post-simd2-pre-fader",
+            "post-fader",
+            "post-matrix",
+        ]
+        .iter()
+        .map(|stage| "track:".len() as u64 + 3 + 1 + stage.len() as u64)
+        .sum::<u64>()
+            + "effect:".len() as u64
+            + 3
+            + 1
+            + "simd1".len() as u64
+            + 1
+            + "soft-clip".len() as u64
+            + "route:".len() as u64
+            + "eq0-main".len() as u64)
+        + "output:main-out".len() as u64;
+    let track_edge_text = {
+        let stage_text = |stage: &str| "track:".len() as u64 + 3 + 1 + stage.len() as u64;
+        let effect_text = "effect:eq0:simd1:soft-clip".len() as u64;
+        let chain = [
+            stage_text("input"),
+            stage_text("post-input-builtins"),
+            effect_text,
+            stage_text("post-simd1"),
+            stage_text("post-dynamic"),
+            stage_text("post-simd2-pre-fader"),
+            stage_text("post-fader"),
+            stage_text("post-matrix"),
         ];
-        rows[index] = 0;
-        assert_ne!(aggregate(&rows), graph, "graph/model owner {index}");
+        (0..7)
+            .map(|index| {
+                chain[index]
+                    + chain[index + 1]
+                    + if index == 1 {
+                        "$.tracks[id=eq0].simd1.effects[id=soft-clip]".len() as u64
+                    } else {
+                        "$.tracks".len() as u64
+                    }
+            })
+            .sum::<u64>()
+    };
+    let route_edge_text = "track:eq0:post-matrix".len() as u64
+        + "route:eq0-main".len() as u64
+        + "$.routes[id=eq0-main].source".len() as u64
+        + "route:eq0-main".len() as u64
+        + "output:main-out".len() as u64
+        + "$.routes[id=eq0-main].destination".len() as u64;
+    let audio_samples = (colored_outputs + edges) * 2 * quantum + maximum_inputs;
+    let effect_lane_state = 169_u64 * size_of::<f32>() as u64;
+    let effect_bank_plane = quantum * bank_lanes * size_of::<f32>() as u64;
+    let builtin_bank_processor = bytes::<BuiltinBankProcessorMirror>(1);
+    assert_eq!(
+        builtin_bank_processor, 1_056,
+        "primitive builtin bank processor"
+    );
+    vec![
+        PrimitiveOwner {
+            name: "control queue typed item storage",
+            bytes: bytes::<CompiledControlQueueItemMirror>(control_queue_items),
+        },
+        PrimitiveOwner {
+            name: "session source PCM runtime envelope",
+            bytes: source_ring_frames * 2 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph planar audio buffers",
+            bytes: audio_samples * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "effect left state words",
+            bytes: tracks * effect_lane_state,
+        },
+        PrimitiveOwner {
+            name: "effect right state words",
+            bytes: tracks * effect_lane_state,
+        },
+        PrimitiveOwner {
+            name: "effect fixed scratch",
+            bytes: tracks * 24,
+        },
+        PrimitiveOwner {
+            name: "graph node array",
+            bytes: nodes * size_of::<miso_engine_graph::GraphNode>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph edge array",
+            bytes: edges * size_of::<miso_engine_graph::GraphEdge>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph schedule array",
+            bytes: schedule * size_of::<miso_engine_graph::GraphNodeId>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph dependency levels",
+            bytes: dependency_levels * size_of::<miso_engine_graph::DependencyLevel>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph buffer assignments",
+            bytes: buffers * size_of::<miso_engine_graph::BufferAssignment>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph route timings",
+            bytes: route_timings * size_of::<miso_engine_graph::RouteTiming>() as u64,
+        },
+        PrimitiveOwner {
+            name: "graph node stable-ID text",
+            bytes: node_text_bytes,
+        },
+        PrimitiveOwner {
+            name: "graph edge path and endpoint text",
+            bytes: tracks * track_edge_text + 9 * route_edge_text,
+        },
+        PrimitiveOwner {
+            name: "effect-bank descriptor array",
+            bytes: bytes::<miso_engine_graph::GraphPreparedEffectBank>(1),
+        },
+        PrimitiveOwner {
+            name: "effect-bank member IDs",
+            bytes: bytes::<miso_engine_graph::EffectNodeId>(bank_lanes as usize),
+        },
+        PrimitiveOwner {
+            name: "effect-bank member strings",
+            bytes: bank_lanes * (3 + "soft-clip".len() as u64),
+        },
+        PrimitiveOwner {
+            name: "effect-bank four-plane scratch",
+            bytes: effect_bank_plane * 4,
+        },
+        PrimitiveOwner {
+            name: "effect-bank two-plane runtime",
+            bytes: effect_bank_plane * 2,
+        },
+        PrimitiveOwner {
+            name: "builtin-bank descriptor array",
+            bytes: bytes::<miso_engine_graph::GraphPreparedBuiltinBank>(1),
+        },
+        PrimitiveOwner {
+            name: "builtin-bank member IDs",
+            bytes: bytes::<miso_engine_graph::GraphNodeId>(bank_lanes as usize),
+        },
+        PrimitiveOwner {
+            name: "builtin-bank active mask",
+            bytes: bytes::<bool>(bank_lanes as usize),
+        },
+        PrimitiveOwner {
+            name: "builtin-bank member strings",
+            bytes: bank_lanes * 3,
+        },
+        PrimitiveOwner {
+            name: "builtin-bank processor",
+            bytes: builtin_bank_processor,
+        },
+        PrimitiveOwner {
+            name: "builtin-bank four-plane scratch",
+            bytes: effect_bank_plane * 4,
+        },
+    ]
+}
+
+fn source_owners() -> Vec<PrimitiveOwner> {
+    let blocks = 1_024_usize / 128;
+    let channels = 2_usize;
+    let mappings = 9_usize;
+    let data = spsc::<Box<TransferBlockMirror>>(blocks, "source data queue");
+    let recycle = spsc::<Box<TransferBlockMirror>>(blocks, "source recycle queue");
+    let command = spsc::<miso_engine_source::SourceCommand>(1, "source command queue");
+    vec![
+        PrimitiveOwner {
+            name: "source PCM transfer blocks",
+            bytes: bytes::<f32>(1_024 * channels),
+        },
+        data[0],
+        data[1],
+        recycle[0],
+        recycle[1],
+        command[0],
+        command[1],
+        PrimitiveOwner {
+            name: "source transfer-block metadata",
+            bytes: bytes::<TransferBlockMirror>(blocks),
+        },
+        PrimitiveOwner {
+            name: "graph source entries",
+            bytes: bytes::<GraphSourceEntryMirror>(1),
+        },
+        PrimitiveOwner {
+            name: "graph source mappings",
+            bytes: bytes::<miso_engine_source::SourceGraphTrackMapping>(mappings),
+        },
+        PrimitiveOwner {
+            name: "graph source claims",
+            bytes: bytes::<miso_engine_graph::GraphSourceInputClaim>(mappings),
+        },
+        PrimitiveOwner {
+            name: "graph source driver",
+            bytes: bytes::<SourceGraphSourceSetDriverMirror>(1),
+        },
+        PrimitiveOwner {
+            name: "graph source coordinator planes",
+            bytes: bytes::<f32>(channels * 128),
+        },
+        PrimitiveOwner {
+            name: "graph source mapping stable IDs",
+            bytes: (mappings * 2 * 3) as u64,
+        },
+    ]
+}
+
+fn builtin_owners() -> Vec<PrimitiveOwner> {
+    let tracks = 9_usize;
+    let processors = tracks * 3;
+    vec![
+        PrimitiveOwner {
+            name: "builtin graph bindings",
+            bytes: bytes::<miso_engine_graph::GraphNodeBinding>(processors),
+        },
+        PrimitiveOwner {
+            name: "builtin bank-input table",
+            bytes: bytes::<(Box<str>, InputBuiltinsMirror)>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin tail table",
+            bytes: bytes::<(Box<str>, BuiltinTailMirror)>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin track seal",
+            bytes: bytes::<Box<str>>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin processor seal",
+            bytes: bytes::<(Box<str>, miso_engine_graph::TrackStage)>(processors),
+        },
+        PrimitiveOwner {
+            name: "builtin cloned tail seal",
+            bytes: bytes::<(Box<str>, BuiltinTailMirror)>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin stable-ID payload copies",
+            bytes: (tracks * 10 * 3) as u64,
+        },
+        PrimitiveOwner {
+            name: "builtin input processors",
+            bytes: bytes::<InputBuiltinsMirror>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin fader processors",
+            bytes: bytes::<FaderBuiltinsMirror>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin matrix processors",
+            bytes: bytes::<MatrixBuiltinsMirror>(tracks),
+        },
+    ]
+}
+
+fn canonical_writer_owners(session_id: &str) -> Vec<PrimitiveOwner> {
+    let tracks = 9;
+    let effects = 9;
+    let parameters = 18;
+    let mut owners = vec![PrimitiveOwner {
+        name: "canonical document prelude frames",
+        bytes: bytes::<CanonicalDocumentPreludeMirror>(1),
+    }];
+    for owner in compiled_model_owners(session_id, "")
+        .into_iter()
+        .skip(6)
+        .take(14)
+    {
+        owners.push(PrimitiveOwner {
+            name: owner.name,
+            bytes: bytes::<CanonicalEscapedByteMirror>(owner.bytes as usize),
+        });
     }
+    owners.extend([
+        PrimitiveOwner {
+            name: "canonical source structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(1),
+        },
+        PrimitiveOwner {
+            name: "canonical track structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(tracks),
+        },
+        PrimitiveOwner {
+            name: "canonical output structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(1),
+        },
+        PrimitiveOwner {
+            name: "canonical route structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(tracks),
+        },
+        PrimitiveOwner {
+            name: "canonical effect structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(effects),
+        },
+        PrimitiveOwner {
+            name: "canonical parameter structural storage",
+            bytes: bytes::<CanonicalStructuralItemMirror>(parameters),
+        },
+    ]);
+    owners
+}
+
+fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveReplacementOracle {
+    let mut graph = graph_owners();
+    let prospective_graph = graph.clone();
+    graph.extend(prospective_graph);
+    let current_model = compiled_model_owners("parametric-eq-nine-track", current);
+    let prospective_model = compiled_model_owners("double-live-cap", prospective);
+    graph.extend(current_model);
+    graph.extend(prospective_model);
+    assert_effective_owner_mutations(&graph, 453_906, "double-live graph/model");
+
+    let source = source_owners();
+    assert_eq!(owner_total(&source), 11_558, "primitive source total");
+    let source_overhead_rows = source[1..].to_vec();
+    assert_effective_owner_mutations(&source_overhead_rows, 3_366, "source overhead");
+    let mut source_total_rows = source.clone();
+    source_total_rows.extend(source.clone());
+    assert_effective_owner_mutations(&source_total_rows, 23_116, "double-live source total");
+    let mut double_source_overhead = source_overhead_rows.clone();
+    double_source_overhead.extend(source_overhead_rows);
+    assert_effective_owner_mutations(
+        &double_source_overhead,
+        6_732,
+        "double-live source overhead",
+    );
+
+    let effect_state_rows = vec![
+        PrimitiveOwner {
+            name: "current effect left state",
+            bytes: 9 * 169 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "current effect right state",
+            bytes: 9 * 169 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "prospective effect left state",
+            bytes: 9 * 169 * size_of::<f32>() as u64,
+        },
+        PrimitiveOwner {
+            name: "prospective effect right state",
+            bytes: 9 * 169 * size_of::<f32>() as u64,
+        },
+    ];
+    assert_effective_owner_mutations(&effect_state_rows, 24_336, "double-live effect state");
+    let effect_scratch_rows = vec![
+        PrimitiveOwner {
+            name: "current effect fixed scratch",
+            bytes: 9 * 24,
+        },
+        PrimitiveOwner {
+            name: "prospective effect fixed scratch",
+            bytes: 9 * 24,
+        },
+    ];
+    assert_effective_owner_mutations(&effect_scratch_rows, 432, "double-live effect scratch");
+    let builtin = builtin_owners();
+    assert_effective_owner_mutations(&builtin, 6_678, "current builtin payload");
+    let mut double_builtin = builtin.clone();
+    double_builtin.extend(builtin);
+    assert_effective_owner_mutations(&double_builtin, 13_356, "double-live builtin payload");
+
+    let (current_capi, candidate_epoch, prepared_protocol, capi_largest) =
+        complete_capi_owners(current.len(), prospective.len());
+    let capi_rows = [
+        PrimitiveOwner {
+            name: "current CAPI retained owners",
+            bytes: current_capi,
+        },
+        PrimitiveOwner {
+            name: "candidate CAPI epoch",
+            bytes: candidate_epoch,
+        },
+        PrimitiveOwner {
+            name: "prepared protocol owner",
+            bytes: prepared_protocol,
+        },
+    ];
+    assert_effective_owner_mutations(&capi_rows, 168_926, "double-live CAPI");
+
+    let graph_rows = graph_owners();
+    let graph_largest = owner_total(&graph_rows[6..14]);
+    assert_eq!(graph_largest, 49_167, "primitive graph metadata allocation");
+    let source_largest = source
+        .iter()
+        .skip(1)
+        .map(|owner| owner.bytes)
+        .chain(core::iter::once(bytes::<f32>(2 * 128)))
+        .max()
+        .expect("source owner");
+    let current_canonical_writer = canonical_writer_owners("parametric-eq-nine-track");
+    let prospective_canonical_writer = canonical_writer_owners("double-live-cap");
+    let current_canonical_maximum = owner_total(&current_canonical_writer);
+    let prospective_canonical_maximum = owner_total(&prospective_canonical_writer);
+    let largest_candidates = [
+        graph_largest,
+        source_largest,
+        capi_largest,
+        current_canonical_maximum,
+        prospective_canonical_maximum,
+    ];
+    let largest = largest_candidates.into_iter().max().expect("largest owner");
+    assert_eq!(largest, 58_694, "primitive maximum-single authority");
+    assert_effective_owner_mutations(
+        &current_canonical_writer,
+        largest,
+        "current canonical writer maximum",
+    );
+    for index in 0..current_canonical_writer.len() {
+        let mut omitted = current_canonical_writer.clone();
+        omitted.remove(index);
+        let actual = [
+            graph_largest,
+            source_largest,
+            capi_largest,
+            owner_total(&omitted),
+            prospective_canonical_maximum,
+        ]
+        .into_iter()
+        .max();
+        assert_ne!(
+            actual,
+            Some(largest),
+            "omitting canonical primitive owner {index} reaches final production cap comparison"
+        );
+        let mut miscounted = current_canonical_writer.clone();
+        miscounted[index].bytes += 1;
+        let actual = [
+            graph_largest,
+            source_largest,
+            capi_largest,
+            owner_total(&miscounted),
+            prospective_canonical_maximum,
+        ]
+        .into_iter()
+        .max();
+        assert_ne!(
+            actual,
+            Some(largest),
+            "miscounting canonical primitive owner {index} reaches final production cap comparison"
+        );
+    }
+    let mut omitted_maximum = largest_candidates.to_vec();
+    omitted_maximum.remove(3);
     assert_ne!(
-        [current_capi, candidate_epoch, prepared_protocol]
-            .into_iter()
-            .max()
-            .expect("CAPI max"),
-        capi,
-        "aggregate cannot be replaced by max-single"
+        omitted_maximum.into_iter().max(),
+        Some(largest),
+        "omitting the current compiled-model maximum reaches the production comparison"
+    );
+    let mut miscounted_maximum = largest_candidates;
+    miscounted_maximum[3] += 1;
+    assert_ne!(
+        miscounted_maximum.into_iter().max(),
+        Some(largest),
+        "miscounting the current compiled-model maximum reaches the production comparison"
     );
     assert_ne!(
-        [49_167_u64, 49_167, 32_768, 58_694, 58_694]
-            .into_iter()
-            .sum::<u64>(),
+        largest_candidates.into_iter().sum::<u64>(),
         largest,
-        "max-single cannot be replaced by aggregate"
+        "maximum is not aggregate"
+    );
+    assert_ne!(
+        capi_rows.iter().map(|owner| owner.bytes).max(),
+        Some(168_926),
+        "CAPI aggregate is not max-single"
     );
 
     PrimitiveReplacementOracle {
-        graph,
-        source_total,
-        source_overhead,
-        effect_state,
-        effect_scratch,
-        builtin,
-        capi,
+        graph: owner_total(&graph),
+        source_total: owner_total(&source_total_rows),
+        source_overhead: owner_total(&double_source_overhead),
+        effect_state: owner_total(&effect_state_rows),
+        effect_scratch: owner_total(&effect_scratch_rows),
+        builtin: owner_total(&double_builtin),
+        capi: owner_total(&capi_rows),
         largest,
     }
 }
@@ -1092,16 +1742,107 @@ unsafe fn compile_rejected_c(session_toml: &str, compile_limits: &CompileLimits)
 }
 
 #[test]
+fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
+    // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
+    let (session, plan) = unsafe { compile_c(SESSION, &limits()) };
+    let mut pcm = [f32::NAN; 256];
+    let output = PlanarOutput {
+        struct_size: PLANAR_OUTPUT_SIZE,
+        channels: 2,
+        samples: pcm.as_mut_ptr(),
+        sample_capacity: pcm.len() as u64,
+        frames: 128,
+        plane_stride_samples: 128,
+        reserved: [0; 2],
+    };
+    let mut event_storage = [0xa5_u8; 4_096];
+    let mut event = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: event_storage.as_mut_ptr(),
+        capacity_bytes: event_storage.len() as u64,
+        required_bytes: 0,
+    };
+    let configuration = miso_engine_protocol::TelemetryConfiguration {
+        meter_handles: Vec::new(),
+        meter_period_blocks: 0,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: true,
+        minimum_diagnostic_severity: miso_engine_protocol::DiagnosticSeverity::Info,
+    };
+    let mut configure = vec![0_u8; 4_096];
+    let configure_len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("request ID"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(42)),
+                payload: CommandPayload::TelemetryConfigure(&configuration),
+            },
+            &mut configure,
+        )
+        .expect("telemetry configuration");
+    configure.truncate(configure_len);
+    let mut response = [0_u8; 4_096];
+    // SAFETY: The session and all caller-owned command buffers remain live for the call.
+    let configure_result = unsafe { submit(session, &configure, &mut response) };
+    assert_eq!(configure_result, RESULT_OK);
+
+    begin();
+    // SAFETY: Both live handles and caller-owned buffers remain valid for each complete call.
+    let (render_result, event_result) = unsafe {
+        (
+            miso_engine_v2_render_f32_planar(plan, 0, &output),
+            miso_engine_v2_dequeue_event(session, EVENT_LANE_RELIABLE, &mut event),
+        )
+    };
+    let observed = finish();
+    assert_eq!(render_result, RESULT_OK);
+    assert_eq!(event_result, RESULT_OK);
+    assert!(
+        event.required_bytes > 0,
+        "render diagnostic crossed C egress"
+    );
+    assert_eq!(
+        observed,
+        Snapshot {
+            allocations: 0,
+            deallocations: 0,
+            allocated_bytes: 0,
+            deallocated_bytes: 0,
+        },
+        "render observation and diagnostic egress use only eager retained storage"
+    );
+
+    // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
+    unsafe {
+        miso_engine_v2_session_destroy(session);
+        miso_engine_v2_plan_destroy(plan);
+    }
+}
+
+#[test]
 fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_toml = scratch_session();
-    let oracle = primitive_replacement_oracle();
+    let prospective_toml = session_toml.replacen(
+        "session_id = \"parametric-eq-nine-track\"",
+        "session_id = \"double-live-cap\"",
+        1,
+    );
+    assert_eq!(session_toml.len(), 10_200, "current canonical fixture");
+    assert_eq!(
+        prospective_toml.len(),
+        10_191,
+        "prospective canonical fixture"
+    );
+    let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
     assert_eq!(oracle.graph, 453_906);
     assert_eq!(oracle.source_total, 23_116);
     assert_eq!(oracle.source_overhead, 6_732);
     assert_eq!(oracle.effect_state, 24_336);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 13_356);
-    assert_eq!(oracle.capi, 168_510);
+    assert_eq!(oracle.capi, 168_926);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -1132,7 +1873,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(144_121));
+            assert_eq!(resources_c(plan), frozen_scratch_report(144_537));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -1150,7 +1891,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(144_112));
+            assert_eq!(resources_c(plan), frozen_scratch_report(144_528));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }

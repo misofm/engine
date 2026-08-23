@@ -1184,22 +1184,9 @@ enum PendingTelemetryEvent {
 }
 
 /// One eagerly allocated reliable-diagnostic storage cell.
-///
-/// The render-observation form retains only fixed fields; its diagnostic text is materialized
-/// transiently on the control thread during encoding.
-#[doc(hidden)]
-pub enum RetainedDiagnosticSlot {
-    /// The cell is available.
+enum RetainedDiagnosticSlot {
     Empty,
-    /// An ordinary provider-owned diagnostic retained until successful egress.
     Owned(Diagnostic),
-    /// A fixed CAPI render observation retained without heap growth.
-    RenderObservation {
-        /// Endpoint sample observed at the render boundary.
-        observed_sample: SampleTime,
-        /// Monotonic render observation sequence.
-        render_sequence: u64,
-    },
 }
 
 impl RetainedDiagnosticSlot {
@@ -2237,54 +2224,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(())
     }
 
-    /// Queue one already-constructed fixed retained diagnostic cell.
-    ///
-    /// This is a storage seam: event meaning and production trigger ownership remain with the
-    /// caller, while the controller preserves reliable queue and retry semantics.
-    pub fn enqueue_retained_diagnostic_event(
-        &mut self,
-        revision: SessionRevision,
-        retained: RetainedDiagnosticSlot,
-    ) -> Result<(), EventEgressError> {
-        if !matches!(&retained, RetainedDiagnosticSlot::RenderObservation { .. }) {
-            return Err(EventEgressError::Encode(EncodeError::LimitExceeded));
-        }
-        if self.structural_outstanding() {
-            return Err(EventEgressError::ReliableQueueFull(
-                self.queues.report(crate::QueueKind::ReliableEvent),
-            ));
-        }
-        if !self.config.provider_features.diagnostics
-            || !self.telemetry_configuration.diagnostics_enabled
-            || (crate::DiagnosticSeverity::Info as u8)
-                < (self.telemetry_configuration.minimum_diagnostic_severity as u8)
-        {
-            return Err(EventEgressError::Disabled);
-        }
-        let Some(index) = self
-            .diagnostic_event_slots
-            .iter()
-            .position(RetainedDiagnosticSlot::is_empty)
-        else {
-            return Err(EventEgressError::DiagnosticStorageFull);
-        };
-        let slot = u32::try_from(index).map_err(|_| EventEgressError::DiagnosticStorageFull)?;
-        self.diagnostic_event_slots[index] = retained;
-        let queued = ReliableSlot {
-            header: crate::ReliableHeader::Event,
-            revision,
-            message_id: MessageId::Diagnostic,
-            payload: ReliablePayload::Diagnostic {
-                diagnostic_slot: slot,
-            },
-        };
-        if let Err(error) = self.queues.try_enqueue_event(queued) {
-            self.diagnostic_event_slots[index] = RetainedDiagnosticSlot::Empty;
-            return Err(EventEgressError::ReliableQueueFull(error.report));
-        }
-        Ok(())
-    }
-
     /// Dequeue and encode one complete reliable event frame. A short caller output buffer leaves
     /// the exact queued event pending, so retrying with the required size neither loses nor
     /// reorders reliable events.
@@ -2427,18 +2366,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     .map_err(|_| EventEgressError::DiagnosticStorageFull)?;
                 let diagnostic = match self.diagnostic_event_slots.get(index) {
                     Some(RetainedDiagnosticSlot::Owned(diagnostic)) => diagnostic.clone(),
-                    Some(RetainedDiagnosticSlot::RenderObservation {
-                        observed_sample,
-                        render_sequence,
-                    }) => Diagnostic {
-                        code: "capi.render.activity".to_owned(),
-                        severity: crate::DiagnosticSeverity::Info,
-                        path: Vec::new(),
-                        detail: None,
-                        operation_index: None,
-                        sample_time: Some(observed_sample.0),
-                        provider_sequence: Some(*render_sequence),
-                    },
                     Some(RetainedDiagnosticSlot::Empty) | None => {
                         return Err(EventEgressError::DiagnosticStorageFull);
                     }
