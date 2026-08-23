@@ -83,9 +83,9 @@ pub struct NativeSourcePrepareCaps {
     pub parser: NativeWaveParseCaps,
     /// Maximum fixed native decoder interleaved read scratch bytes.
     pub max_worker_read_scratch_bytes: u64,
-    /// Maximum exact ring plus fixed native worker allocation total.
+    /// Maximum exact base source plus once-per-thread stop queue and job-array total.
     pub max_total_engine_owned_bytes: u64,
-    /// Maximum exact source-ring, decoder, or staging allocation.
+    /// Maximum exact ring, decoder, staging, queue, or typed boxed job-array allocation.
     pub max_largest_allocation_bytes: u64,
     /// Bounded worker command queue item count.
     pub control_queue_items: NonZeroUsize,
@@ -117,13 +117,12 @@ pub struct NativeSourceResourceReport {
     pub worker_event_queue_largest_allocation_bytes: u64,
     /// Maximum required alignment among worker-event queue allocations.
     pub worker_event_queue_alignment_bytes: u64,
-    /// Exact once-per-thread worker allocation accounting folded into this report.
+    /// Exact once-per-thread stop queue and typed boxed job-array accounting when folded.
     pub worker: NativeWorkerResourceReport,
-    /// Exact source ring plus fixed decoder/staging allocation total.
+    /// Exact base source plus folded once-per-thread stop queue and job-array total.
     pub total_engine_owned_bytes: u64,
-    /// Largest exact allocation among ring, decoder, staging, and native worker queues.
+    /// Largest exact ring, decoder, staging, queue, or typed boxed job-array allocation.
     pub largest_allocation_bytes: u64,
-    base_largest_allocation_bytes: u64,
 }
 
 /// Exact once-per-thread native worker allocation accounting.
@@ -1347,7 +1346,6 @@ fn source_resource_report(
         worker: EMPTY_WORKER_RESOURCE_REPORT,
         total_engine_owned_bytes,
         largest_allocation_bytes,
-        base_largest_allocation_bytes: largest_allocation_bytes,
     })
 }
 
@@ -1372,7 +1370,13 @@ fn base_source_resources(
         .total_engine_owned_bytes
         .checked_sub(folded.worker.total_engine_owned_bytes()?)?;
     folded.worker = EMPTY_WORKER_RESOURCE_REPORT;
-    folded.largest_allocation_bytes = folded.base_largest_allocation_bytes;
+    folded.largest_allocation_bytes = folded
+        .ring
+        .largest_allocation_bytes
+        .max(folded.decoder_read_scratch_bytes)
+        .max(folded.worker_planar_staging_bytes)
+        .max(folded.worker_control_queue_largest_allocation_bytes)
+        .max(folded.worker_event_queue_largest_allocation_bytes);
     Some(folded)
 }
 
@@ -2119,6 +2123,12 @@ mod tests {
         let initial = prepare_native_source(&mut initial_resolver, request(region), caps())
             .expect("initial preparation");
         let report = initial.resource_report();
+        let base = base_source_resources(report).expect("remove folded worker resources");
+        assert_eq!(base.worker, EMPTY_WORKER_RESOURCE_REPORT);
+        assert_eq!(
+            fold_worker_resources(base, report.worker).expect("refold worker resources"),
+            report
+        );
         let control = exact_queue_resources::<WorkerCommand>(caps().control_queue_items)
             .expect("control queue layout");
         let events = exact_queue_resources::<NativeSourceWorkerEvent>(WORKER_EVENT_QUEUE_ITEMS)
