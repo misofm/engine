@@ -28,7 +28,6 @@
 //! digested at every width.
 
 use miso_engine_delay::corpus as delay_corpus;
-use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
 use miso_engine_lane::Lane;
 use miso_engine_lane::kernels::{
@@ -38,6 +37,7 @@ use miso_engine_lane::kernels::{
 };
 use miso_engine_math::corpus as math_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
+use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
 
 /// Independent single-lane signals in every lane case; a multiple of the widest backend.
