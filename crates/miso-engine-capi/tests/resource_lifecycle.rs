@@ -441,14 +441,14 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         latency_samples: 31,
         tail_kind: TAIL_INFINITE,
         tail_samples: 0,
-        graph_session_plus_plan_bytes: 205_915,
-        graph_incremental_plan_bytes: 193_627,
-        graph_metadata_bytes: 49_943,
+        graph_session_plus_plan_bytes: 207_310,
+        graph_incremental_plan_bytes: 195_022,
+        graph_metadata_bytes: 50_039,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 16_384,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
-        builtin_bank_bytes: 1_728,
+        builtin_bank_bytes: 3_027,
         builtin_bank_scratch_bytes: 16_384,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 3_366,
@@ -1252,6 +1252,7 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let effect_lane_state = 104_u64 * size_of::<f32>() as u64;
     let effect_common_state = 2_u64 * size_of::<f32>() as u64;
     let effect_bank_plane = quantum * bank_lanes * size_of::<f32>() as u64;
+    let builtin_banks = tracks.div_ceil(bank_lanes);
     let builtin_bank_processor = bytes::<BuiltinBankProcessorMirror>(1);
     assert_eq!(
         builtin_bank_processor, 1_248,
@@ -1338,29 +1339,29 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
             name: "effect-bank two-plane runtime",
             bytes: effect_bank_plane * 2,
         },
+        // #86 F3/F4: the nine post-input nodes are one full eight-lane bank plus a one-member
+        // bank padded with seven identity lanes -- `9.div_ceil(8) == 2` -- and each bank owns
+        // two main planes, not four (a fixed stage has no sidechain surface). No lane mask is
+        // stored anywhere: membership is the mask.
         PrimitiveOwner {
             name: "builtin-bank descriptor array",
-            bytes: bytes::<miso_engine_graph::GraphPreparedBuiltinBank>(1),
+            bytes: bytes::<miso_engine_graph::GraphPreparedBuiltinBank>(builtin_banks as usize),
         },
         PrimitiveOwner {
             name: "builtin-bank member IDs",
-            bytes: bytes::<miso_engine_graph::GraphNodeId>(bank_lanes as usize),
-        },
-        PrimitiveOwner {
-            name: "builtin-bank active mask",
-            bytes: bytes::<bool>(bank_lanes as usize),
+            bytes: bytes::<miso_engine_graph::GraphNodeId>(tracks as usize),
         },
         PrimitiveOwner {
             name: "builtin-bank member strings",
-            bytes: bank_lanes * 3,
+            bytes: tracks * 3,
         },
         PrimitiveOwner {
-            name: "builtin-bank processor",
-            bytes: builtin_bank_processor,
+            name: "builtin-bank processors",
+            bytes: builtin_bank_processor * builtin_banks,
         },
         PrimitiveOwner {
-            name: "builtin-bank four-plane scratch",
-            bytes: effect_bank_plane * 4,
+            name: "builtin-bank two-plane scratch",
+            bytes: effect_bank_plane * 2 * builtin_banks,
         },
     ]
 }
@@ -1516,7 +1517,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     let prospective_model = compiled_model_owners("double-live-cap", prospective);
     graph.extend(current_model);
     graph.extend(prospective_model);
-    assert_effective_owner_mutations(&graph, 445_074, "double-live graph/model");
+    assert_effective_owner_mutations(&graph, 447_864, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_558, "primitive source total");
@@ -1888,7 +1889,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
-    assert_eq!(oracle.graph, 445_074);
+    assert_eq!(oracle.graph, 447_864);
     assert_eq!(oracle.source_total, 23_116);
     assert_eq!(oracle.source_overhead, 6_732);
     assert_eq!(oracle.effect_state, 15_120);

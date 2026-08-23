@@ -209,6 +209,8 @@ mod native {
         pub pdc_samples: u64,
         pub prepared_builtin_bank_count: usize,
         pub prepared_builtin_bank_member_count: usize,
+        /// Lanes of the host-selected builtin bank width, or `0` when the host has none.
+        pub prepared_builtin_bank_lanes: usize,
         pub scalar_builtin_tail_count: usize,
         transcript: Arc<Transcript>,
     }
@@ -456,6 +458,10 @@ mod native {
             .prepared_builtin_banks()
             .map(|bank| bank.members.len())
             .sum();
+        let prepared_builtin_bank_lanes = artifact
+            .prepared_builtin_banks()
+            .next()
+            .map_or(0, |bank| bank.width.lanes() as usize);
         let scalar_builtin_tail_count = track_count
             .checked_sub(prepared_builtin_bank_member_count)
             .ok_or_else(|| "q128.builtin_bank_members".to_owned())?;
@@ -539,6 +545,7 @@ mod native {
             pdc_samples,
             prepared_builtin_bank_count,
             prepared_builtin_bank_member_count,
+            prepared_builtin_bank_lanes,
             scalar_builtin_tail_count,
             transcript,
         })
@@ -819,6 +826,27 @@ mod tests {
                 track_count,
                 "retained builtin banks and scalar tails cover every track"
             );
+            // #86 F3: on a vector host every post-input node is a bank member, the last bank of
+            // the level is padded with identity lanes, and no scalar tail survives.  Hand table
+            // for [1, 3, 4, 5, 12, 17]: W8 -> [1, 1, 1, 1, 2, 3], W4 -> [1, 1, 1, 2, 3, 5].
+            if prepared.prepared_builtin_bank_lanes == 0 {
+                assert_eq!(prepared.prepared_builtin_bank_count, 0);
+                assert_eq!(prepared.scalar_builtin_tail_count, track_count);
+            } else {
+                assert_eq!(
+                    prepared.prepared_builtin_bank_count,
+                    track_count.div_ceil(prepared.prepared_builtin_bank_lanes),
+                    "padded bank count for track count {track_count}"
+                );
+                assert_eq!(
+                    prepared.prepared_builtin_bank_member_count, track_count,
+                    "every track is a bank member for track count {track_count}"
+                );
+                assert_eq!(
+                    prepared.scalar_builtin_tail_count, 0,
+                    "no scalar post-input tail for track count {track_count}"
+                );
+            }
             assert_eq!(
                 transcript.retained_builtin_bank_units, prepared.prepared_builtin_bank_count,
                 "builtin banks stay indivisible for track count {track_count}"
@@ -851,17 +879,26 @@ mod tests {
         assert_eq!(accepted_preparations, 100);
         assert!(count_observations.iter().all(|count| *count != 0));
         let q128_transcript = transcript_by_count[4].expect("twelve-track transcript");
+        // Both constants are re-derived structurally for #86 F3: the only inputs that moved are
+        // the builtin bank/tail counts these transcripts fold (12 tracks at W8: 1 full bank +
+        // 4 scalar tails -> 2 banks, the second padded, 0 tails; the table above is the hand
+        // count for every track count).  The PCM gates in this crate --
+        // `q128_is_byte_identical_at_every_launch_rate_and_lane_count` and the perturbation
+        // suite -- are unchanged and green.
         assert_eq!(
-            q128_transcript.hash, 0x6bc6_42d3_3017_a164,
+            q128_transcript.hash, 0x1364_823e_5403_eca7,
             "frozen q128 native wave/unit/partition transcript"
         );
         assert_eq!(
-            aggregate_hash, 0x4325_aad7_1bb5_e746,
+            aggregate_hash, 0xebbc_a7d9_be93_d1ca,
             "frozen exact-100 preparation matrix transcript after nine-category worker audit storage"
         );
         let reference = reference.expect("one twelve-track preparation");
         assert!(reference.prepared_builtin_bank_count > 0);
-        assert!(reference.scalar_builtin_tail_count > 0);
+        assert_eq!(
+            reference.scalar_builtin_tail_count, 0,
+            "twelve tracks are two padded banks on a vector host, with no scalar tail"
+        );
 
         let cap = reference
             .metadata

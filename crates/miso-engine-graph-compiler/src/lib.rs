@@ -3698,13 +3698,19 @@ mod tests {
             let expected_scalar_tails = audit_backend
                 .bank_width()
                 .map_or(12, |width| 12 % width.lanes() as usize);
-            let expected_builtin_banks = expected_effect_banks;
+            // #86 F3: every post-input node is a bank member, so the count is `T.div_ceil(W)`
+            // (12 tracks: 2 banks at W8, one of them padded to 8 with 4 identity lanes;
+            // 3 banks at W4) and there is no scalar tail at all on a vector host.
+            let expected_builtin_banks = audit_backend
+                .bank_width()
+                .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
+            let expected_builtin_tails = audit_backend.bank_width().map_or(12, |_| 0);
             assert_eq!(
                 audit_artifact.prepared_builtin_bank_count(),
                 expected_builtin_banks
             );
             assert_eq!(
-                expected_builtin_banks
+                expected_effect_banks
                     * audit_backend
                         .bank_width()
                         .map_or(0, |width| width.lanes() as usize)
@@ -3720,7 +3726,8 @@ mod tests {
                 .flat_map(|bank| {
                     assert_eq!(bank.backend, audit_backend.backend());
                     assert_eq!(Some(bank.width), audit_backend.bank_width());
-                    assert!(bank.active_mask.iter().all(|active| *active));
+                    assert!(!bank.members.is_empty());
+                    assert!(bank.members.len() <= bank.width.lanes() as usize);
                     bank.members.iter().map(|member| match member {
                         GraphNodeId::TrackStage { track_id, stage } => {
                             assert_eq!(*stage, TrackStage::PostInputBuiltins);
@@ -3733,14 +3740,8 @@ mod tests {
             let mut expected_members: Vec<_> =
                 (0..12).map(|index| format!("bank{index}")).collect();
             expected_members.sort();
-            expected_members.truncate(
-                expected_builtin_banks
-                    * audit_backend
-                        .bank_width()
-                        .expect("audit bank width")
-                        .lanes() as usize,
-            );
             assert_eq!(actual_members, expected_members);
+            assert_eq!(12 - actual_members.len(), expected_builtin_tails);
             let audit_envelope = audit_artifact.envelope();
             let audit_nodes = audit_artifact
                 .external_binding_nodes()
@@ -3792,11 +3793,18 @@ mod tests {
             );
             assert_eq!(
                 counters[1],
-                counters[0] * u64::from(audit_envelope.quantum.0) * 4,
-                "exact real HPF/LPF TPT kernel calls for independent L/R lanes"
+                counters[0] * u64::from(audit_envelope.quantum.0),
+                "exact frames processed by the retained builtin banks"
             );
+            // Re-pinned on this branch. The old 0x9f30_db02_2065_6d79 was already stale on
+            // `origin/main` before this branch existed (this audit is explicit-release-only and
+            // is not run by CI, so #85's class-B kernel re-land moved it unobserved); the value
+            // below was measured at `origin/main` @ b60f9b8 *before* any #86 edit, and it is
+            // **unchanged** by the padding switch -- with 12 tracks over 100,000 blocks the PCM
+            // is bit-identical whether tracks 8..11 render as scalar tails or as lanes 0..3 of
+            // a padded second bank. That is the F2/F3 gate at scale.
             assert_eq!(
-                output_hash, 0x9f30_db02_2065_6d79,
+                output_hash, 0x2fd8_5286_518f_d13b,
                 "deterministic mixed output hash"
             );
         }
@@ -6448,12 +6456,12 @@ mod tests {
         let artifact = prepare_artifact(78, compiled.clone());
         let native_artifact = prepare_artifact(79, compiled);
         let dispatch = KernelDispatch::select(target_capabilities());
+        // #86 F3: `T.div_ceil(W)` banks, the last one padded with identity lanes, and no
+        // scalar post-input tail on a vector host.
         let expected_banks = dispatch
             .bank_width()
-            .map_or(0, |width| 12 / width.lanes() as usize);
-        let expected_tail = dispatch
-            .bank_width()
-            .map_or(12, |width| 12 % width.lanes() as usize);
+            .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
+        let expected_tail = dispatch.bank_width().map_or(12, |_| 0);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
         assert_eq!(
             native_artifact.prepared_builtin_bank_count(),
@@ -6491,7 +6499,8 @@ mod tests {
             .flat_map(|bank| {
                 assert_eq!(bank.backend, dispatch.backend());
                 assert_eq!(Some(bank.width), dispatch.bank_width());
-                assert!(bank.active_mask.iter().all(|active| *active));
+                assert!(!bank.members.is_empty());
+                assert!(bank.members.len() <= bank.width.lanes() as usize);
                 bank.members.iter().map(|member| match member {
                     GraphNodeId::TrackStage { track_id, stage } => {
                         assert_eq!(*stage, TrackStage::PostInputBuiltins);
@@ -6503,12 +6512,9 @@ mod tests {
             .collect();
         let mut expected_member_ids: Vec<_> = (0..12).map(|index| format!("bank{index}")).collect();
         expected_member_ids.sort();
-        expected_member_ids.truncate(
-            expected_banks
-                * dispatch
-                    .bank_width()
-                    .map_or(0, |width| width.lanes() as usize),
-        );
+        if dispatch.bank_width().is_none() {
+            expected_member_ids.clear();
+        }
         assert_eq!(member_ids, expected_member_ids);
         assert_eq!(12 - expected_member_ids.len(), expected_tail);
         let resource = artifact.graph_resource_estimate();
@@ -6516,9 +6522,10 @@ mod tests {
         if expected_banks != 0 {
             assert!(resource.builtin_bank_bytes != 0);
             let width = u64::from(dispatch.bank_width().expect("bank width").lanes());
+            // Two planes, not four: a fixed-stage bank has no sidechain surface (#86 F4).
             assert_eq!(
                 resource.builtin_bank_scratch_bytes,
-                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 4 * 4
+                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 4 * 2
             );
         }
         let envelope = artifact.envelope();
@@ -6880,8 +6887,9 @@ mod tests {
                 })
                 .unwrap_or_else(|_| panic!("native seeded graph"));
             let width = KernelDispatch::select(target_capabilities()).bank_width();
-            let expected_banks = width.map_or(0, |width| count / width.lanes() as usize);
-            let expected_tail = width.map_or(count, |width| count % width.lanes() as usize);
+            // #86 F3: `count.div_ceil(W)` banks per level (one level here), last one padded.
+            let expected_banks = width.map_or(0, |width| count.div_ceil(width.lanes() as usize));
+            let expected_tail = width.map_or(count, |_| 0);
             assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
             assert_eq!(
                 native_artifact.prepared_builtin_bank_count(),
@@ -6985,7 +6993,7 @@ mod tests {
             let counters = plan.qualification_counters();
             let native_counters = native_plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
-            assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0) * 4);
+            assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0));
             assert_eq!(counters, native_counters);
             assert_eq!(
                 pcm.iter()
@@ -7013,8 +7021,12 @@ mod tests {
             completed += 1;
         }
         assert_eq!(completed, 100);
+        // Structural re-derivation only: the transcript string folds `expected_banks`,
+        // `expected_tail` and the counters, and all three moved by hand-counted formulas
+        // (`count.div_ceil(W)`, `0`, `calls * quantum`). Every one of the 100 per-layout
+        // `pcm_hash` values is byte-identical to the pre-change render.
         assert_eq!(
-            transcript, 0xb1ae_c052_8b29_a148,
+            transcript, 0x0fc9_bdc8_ff12_0f6e,
             "frozen Issue-037 seeded layout transcript"
         );
     }
