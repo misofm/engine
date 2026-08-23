@@ -374,6 +374,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-effect-runtime"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-lane",
+ "miso-engine-math",
+ "sha2",
+]
+
+[[package]]
 name = "miso-engine-gate-expander"
 version = "0.1.0"
 dependencies = [

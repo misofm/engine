@@ -85,13 +85,17 @@ impl LinearRamp {
 
     /// Produces the next sample's value and advances the state.
     ///
+    /// Named `next_value` rather than `next`, matching the contract's `ParameterSmoother`, because
+    /// this is not an iterator: it never ends, it returns `f32` rather than `Option<f32>`, and a
+    /// caller that treats it as an iterator would silently get the resting value for ever.
+    ///
     /// * `remaining == 0` — the ramp is at rest: returns `current` unchanged.
     /// * `remaining == 1` — the final sample: assigns `target` exactly (the D11 snap).
     /// * otherwise — `current += step`, `remaining -= 1`.
     ///
     /// A three-sample ramp from `0.0` to `1.0` therefore produces `1/3`, `1/3 + 1/3`, `1.0` — not
     /// `1/3`, `1/2`, `1.0`, which is what re-deriving the step from the remaining distance gives.
-    pub fn next(&mut self) -> f32 {
+    pub fn next_value(&mut self) -> f32 {
         match self.remaining {
             0 => self.current,
             1 => {
@@ -110,7 +114,7 @@ impl LinearRamp {
 
     /// Describes the next `frames` samples as a [`RampSegment`] and advances the state past them.
     ///
-    /// The returned segment reproduces [`LinearRamp::next`] exactly, sample for sample:
+    /// The returned segment reproduces [`LinearRamp::next_value`] exactly, sample for sample:
     ///
     /// * `start` is the value of the first sample of the block — `current + step`, or `target`
     ///   when this block contains the final sample, or `current` when the ramp is at rest.
@@ -121,7 +125,7 @@ impl LinearRamp {
     ///   run.
     /// * `target` is the target, applied from `ramp_frames` onward.
     ///
-    /// The state is then advanced by `min(frames, remaining)` calls of [`LinearRamp::next`] —
+    /// The state is then advanced by `min(frames, remaining)` calls of [`LinearRamp::next_value`] —
     /// iterated additions, matching the kernel's iterated additions — so splitting a block
     /// anywhere leaves both the applied gains and the resulting state bit-identical (gate P1).
     #[must_use]
@@ -132,13 +136,13 @@ impl LinearRamp {
             _ => self.current + self.step,
         };
         let ramp_frames = core::cmp::min(self.remaining.saturating_sub(1) as usize, frames);
-        // Captured before the advance: `next` zeroes `step` when it snaps, and the segment must
+        // Captured before the advance: `next_value` zeroes `step` when it snaps, and the segment must
         // carry the increment that was in force during this block.
         let step = if ramp_frames == 0 { 0.0 } else { self.step };
         let target = self.target;
         let advance = core::cmp::min(frames, self.remaining as usize);
         for _ in 0..advance {
-            let _ = self.next();
+            let _ = self.next_value();
         }
         RampSegment {
             start: L::splat(start),
