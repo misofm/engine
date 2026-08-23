@@ -105,7 +105,6 @@ pub(crate) fn exp2f(mut x: f32) -> f32 {
         }
         if ui >= 0x80000000 {
             /* x < -126 */
-            if ui >= 0xc3160000 || (ui & 0x0000ffff != 0) {}
             if ui >= 0xc3160000 {
                 /* x <= -150 */
                 return 0.0;

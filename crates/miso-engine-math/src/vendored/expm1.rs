@@ -83,7 +83,6 @@ pub(crate) fn expm1(mut x: f64) -> f64 {
         c = (hi - x) - lo;
     } else if hx < 0x3c900000 {
         /* |x| < 2**-54, return x */
-        if hx < 0x00100000 {}
         return x;
     } else {
         c = 0.0;
