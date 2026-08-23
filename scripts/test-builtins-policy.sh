@@ -15,7 +15,7 @@ make_fixture() {
         "$fixture/crates/miso-engine-rack"
     printf '[workspace]\nmembers = []\n' >"$fixture/Cargo.toml"
     printf '[package]\nname = "miso-engine-builtins"\n[lib]\nname = "miso_engine_builtins"\n[dependencies]\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-lane.workspace = true\nmiso-engine-math.workspace = true\n' >"$fixture/crates/miso-engine-builtins/Cargo.toml"
-    printf '[package]\nname = "miso-engine-builtins-compiler"\n[lib]\nname = "miso_engine_builtins_compiler"\n[dependencies]\nmiso-engine-builtins.workspace = true\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-graph.workspace = true\nmiso-engine-rack.workspace = true\nmiso-engine-session.workspace = true\nsha2.workspace = true\n' >"$fixture/crates/miso-engine-builtins-compiler/Cargo.toml"
+    printf '[package]\nname = "miso-engine-builtins-compiler"\n[lib]\nname = "miso_engine_builtins_compiler"\n[dependencies]\nmiso-engine-builtins.workspace = true\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-graph.workspace = true\nmiso-engine-rack.workspace = true\nmiso-engine-rack-compiler.workspace = true\nmiso-engine-session.workspace = true\nsha2.workspace = true\n' >"$fixture/crates/miso-engine-builtins-compiler/Cargo.toml"
     printf '[package]\nname = "miso-engine-core"\n' >"$fixture/crates/miso-engine-core/Cargo.toml"
     printf '[package]\nname = "miso-engine-effect-contract"\n' >"$fixture/crates/miso-engine-effect-contract/Cargo.toml"
     printf '[package]\nname = "miso-engine-session"\n' >"$fixture/crates/miso-engine-session/Cargo.toml"
@@ -33,4 +33,14 @@ if MISO_ENGINE_BUILTINS_SKIP_METADATA=1 bash "$root/scripts/check-builtins-polic
     printf 'builtins policy mutation escaped\n' >&2
     exit 1
 fi
+# The compiler's dependency list is a pinned boundary: dropping the planner edge must fail.
+missing_planner="$temp/missing-planner"
+make_fixture "$missing_planner"
+sed -i '/^miso-engine-rack-compiler\.workspace/d' \
+    "$missing_planner/crates/miso-engine-builtins-compiler/Cargo.toml"
+if MISO_ENGINE_BUILTINS_SKIP_METADATA=1 bash "$root/scripts/check-builtins-policy.sh" "$missing_planner" >/dev/null 2>&1; then
+    printf 'builtins policy mutation escaped: compiler dependency boundary\n' >&2
+    exit 1
+fi
+
 printf 'builtins policy mutations: ok\n'

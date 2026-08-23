@@ -64,37 +64,58 @@ pub enum RackLocationV1 {
     Simd2 = 2,
 }
 
+/// What a cohort planner needs of one slot's key.
+///
+/// The planner treats a key as an opaque cohort token: two lanes share a slot exactly when their
+/// keys are equal. The one thing it must ask is whether a key can bank at all.
+pub trait BankSlotKey: Clone + Eq + Ord {
+    /// `true` when a slot carrying this key can never join a homogeneous bank.
+    ///
+    /// The default is `false`: a fixed graph stage (the post-input builtins) always banks.
+    fn blocks_banking(&self) -> bool {
+        false
+    }
+}
+
+impl BankSlotKey for EffectProgramKeyV1 {
+    /// A connected sidechain reads a second graph buffer that a homogeneous bank has no port for
+    /// (#96 F9), so such a program renders per node.
+    fn blocks_banking(&self) -> bool {
+        matches!(
+            self.ports.sidechain,
+            PreparedSidechainPort::Connected { .. }
+        )
+    }
+}
+
 /// The ordered per-track program of one SIMD rack.
 ///
 /// There is no rate, quantum or routing field: every [`EffectProgramKeyV1`] slot already carries
 /// `sample_rate`, `quantum` and `ports.sidechain`, so a second copy could only disagree (#96 F5.4).
+///
+/// `K` is the slot key, defaulting to [`EffectProgramKeyV1`] — the SIMD racks' key. A fixed graph
+/// stage with a key of its own (the post-input builtin bank, #86) is planned by the same planner
+/// without either side having to fabricate the other's key type.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RackProgramV1 {
+pub struct RackProgramV1<K = EffectProgramKeyV1> {
     pub rack: RackLocationV1,
-    pub slots: Box<[EffectProgramKeyV1]>,
+    pub slots: Box<[K]>,
 }
 
-impl RackProgramV1 {
+impl<K: BankSlotKey> RackProgramV1<K> {
     #[must_use]
-    pub fn new(rack: RackLocationV1, slots: Vec<EffectProgramKeyV1>) -> Self {
+    pub fn new(rack: RackLocationV1, slots: Vec<K>) -> Self {
         Self {
             rack,
             slots: slots.into_boxed_slice(),
         }
     }
-    /// `true` iff the program is non-empty and no slot declares a connected sidechain.
+    /// `true` iff the program is non-empty and no slot blocks banking.
     ///
-    /// An empty program needs no bank at all, and a connected sidechain reads a second graph
-    /// buffer that a homogeneous bank has no port for (#96 F5.1/F9).
+    /// An empty program needs no bank at all (#96 F5.1).
     #[must_use]
     pub fn is_bankable(&self) -> bool {
-        !self.slots.is_empty()
-            && !self.slots.iter().any(|slot| {
-                matches!(
-                    slot.ports.sidechain,
-                    PreparedSidechainPort::Connected { .. }
-                )
-            })
+        !self.slots.is_empty() && !self.slots.iter().any(BankSlotKey::blocks_banking)
     }
     /// Greedy leftmost subsequence match of `self.slots` inside `leader.slots`.
     ///

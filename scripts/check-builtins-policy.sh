@@ -12,7 +12,7 @@ expected_builtins=$'miso-engine-core\nmiso-engine-effect-contract\nmiso-engine-l
 [[ "$(dependencies crates/miso-engine-builtins/Cargo.toml)" == "$expected_builtins" ]] || {
     printf 'builtins policy failure: builtins dependency boundary changed\n' >&2; exit 1;
 }
-expected_compiler=$'miso-engine-builtins\nmiso-engine-core\nmiso-engine-effect-contract\nmiso-engine-graph\nmiso-engine-rack\nmiso-engine-session\nsha2'
+expected_compiler=$'miso-engine-builtins\nmiso-engine-core\nmiso-engine-effect-contract\nmiso-engine-graph\nmiso-engine-rack\nmiso-engine-rack-compiler\nmiso-engine-session\nsha2'
 [[ "$(dependencies crates/miso-engine-builtins-compiler/Cargo.toml)" == "$expected_compiler" ]] || {
     printf 'builtins policy failure: builtins compiler dependency boundary changed\n' >&2; exit 1;
 }

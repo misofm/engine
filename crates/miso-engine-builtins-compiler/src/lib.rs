@@ -30,7 +30,8 @@ use miso_engine_graph::{
     GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
     StableGraphId, TrackStage,
 };
-use miso_engine_rack::{AoSoaScratch, KernelDispatch};
+use miso_engine_rack::{AoSoaScratch, BankSlotKey, KernelDispatch, RackLocationV1, RackProgramV1};
+use miso_engine_rack_compiler::{CohortCandidate, CohortLevel, plan_bank_groups};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,11 +140,28 @@ impl PreparedBuiltinInputBankV1 {
     }
 }
 
+/// The cohort key of the fixed post-input builtin stage.
+///
+/// It carries no fields on purpose: the stage is not selectable, its backend and width are fixed
+/// for the whole artifact, and its rate and quantum come from the session envelope. Every
+/// post-input node is therefore co-bankable with every other one at its dependency level, which
+/// is exactly the cohort the planner forms. If a per-track variant is ever added (a quality, a
+/// second section order), it becomes a field here and the planner splits the cohorts for free.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct BuiltinStageKeyV1;
+
+impl BankSlotKey for BuiltinStageKeyV1 {}
+
 /// Groups every post-input builtin node of a dependency level into `ceil(n / W)` banks.
 ///
 /// The last bank of a level is short: it holds `1..=W` members and the bank pads the remaining
 /// lanes with identity lanes.  Every post-input node on a vector host is therefore a bank member,
 /// and scalar post-input bindings survive only when the backend has no bank width at all.
+///
+/// The grouping itself is **not implemented here**: it delegates to
+/// [`miso_engine_rack_compiler::plan_bank_groups`], the workspace's single cohort planner (#96 F1).
+/// Padding, level partitioning and the trailing-`None` lane order are that planner's rules, so
+/// this function only turns each planned group back into the member list the graph attaches.
 fn planned_builtin_bank_members(
     inputs: &[(Box<str>, InputBuiltins)],
     dispatch: KernelDispatch,
@@ -162,24 +180,32 @@ fn planned_builtin_bank_members(
                 .map(move |node| (node, level.level))
         })
         .collect();
-    let mut by_level = BTreeMap::<u64, Vec<GraphNodeId>>::new();
+    let mut by_level = BTreeMap::<u64, Vec<CohortCandidate<GraphNodeId, BuiltinStageKeyV1>>>::new();
     for (track, _) in inputs {
         let node = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse(track).expect("prepared stable ID"),
             stage: TrackStage::PostInputBuiltins,
         };
         if let Some(level) = level_by_node.get(&node).copied() {
-            by_level.entry(level).or_default().push(node);
+            by_level.entry(level).or_default().push(CohortCandidate {
+                id: node,
+                program: RackProgramV1::new(RackLocationV1::Simd1, vec![BuiltinStageKeyV1]),
+            });
         }
     }
-    let mut groups = Vec::new();
-    for members in by_level.values_mut() {
-        members.sort();
-        for group in members.chunks(width.lanes() as usize) {
-            groups.push(group.to_vec().into_boxed_slice());
-        }
-    }
-    groups
+    let levels_in: Vec<_> = by_level
+        .into_iter()
+        .map(|(level, candidates)| CohortLevel { level, candidates })
+        .collect();
+    let plan = plan_bank_groups(&levels_in, width)
+        .expect("one post-input builtin node per track, so ids are unique");
+    // Every post-input node is bankable, so the planner's scalar list is empty; if a future stage
+    // key ever blocks banking, those tracks simply keep their scalar bindings.
+    debug_assert!(plan.scalar.is_empty());
+    plan.groups
+        .into_iter()
+        .map(|group| group.members.into_vec().into_iter().flatten().collect())
+        .collect()
 }
 
 /// Builds one padded bank from `inputs.len()` tracks in member order.

@@ -23,30 +23,30 @@
 
 use core::cmp::Ordering;
 use miso_engine_effect_contract::{BankWidth, EffectProgramKeyV1};
-use miso_engine_rack::{RackLocationV1, RackProgramV1};
+use miso_engine_rack::{BankSlotKey, RackLocationV1, RackProgramV1};
 
 /// One track's ordered rack program, addressed by a caller-chosen stable id.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortCandidate<Id> {
+pub struct CohortCandidate<Id, K = EffectProgramKeyV1> {
     pub id: Id,
-    pub program: RackProgramV1,
+    pub program: RackProgramV1<K>,
 }
 
 /// Candidates already partitioned by dependency level by the caller: a bank never crosses a level,
 /// because its members must all be ready in the same wave (#96 F12).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortLevel<Id> {
+pub struct CohortLevel<Id, K = EffectProgramKeyV1> {
     pub level: u64,
-    pub candidates: Vec<CohortCandidate<Id>>,
+    pub candidates: Vec<CohortCandidate<Id, K>>,
 }
 
 /// One planned bank: a cohort leader's program plus the lanes that run it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankGroup<Id> {
+pub struct BankGroup<Id, K = EffectProgramKeyV1> {
     pub level: u64,
     pub rack: RackLocationV1,
     /// The cohort leader's ordered program: a chain of `program.len()` slots.
-    pub program: Box<[EffectProgramKeyV1]>,
+    pub program: Box<[K]>,
     /// `len == width.lanes()`. `None` is a padding lane; padding lanes are always the highest
     /// lane indices.
     pub members: Box<[Option<Id>]>,
@@ -57,7 +57,7 @@ pub struct BankGroup<Id> {
     pub active_slots: Box<[Box<[bool]>]>,
 }
 
-impl<Id> BankGroup<Id> {
+impl<Id, K: BankSlotKey> BankGroup<Id, K> {
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.active_mask.iter().all(|lane| *lane)
@@ -76,7 +76,7 @@ impl<Id> BankGroup<Id> {
     }
     /// The leader program as a [`RackProgramV1`], for callers that re-derive masks.
     #[must_use]
-    pub fn program_v1(&self) -> RackProgramV1 {
+    pub fn program_v1(&self) -> RackProgramV1<K> {
         RackProgramV1 {
             rack: self.rack,
             slots: self.program.clone(),
@@ -86,8 +86,8 @@ impl<Id> BankGroup<Id> {
 
 /// The planner's whole output: banked groups plus the candidates that never bank.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankPlan<Id> {
-    pub groups: Vec<BankGroup<Id>>,
+pub struct BankPlan<Id, K = EffectProgramKeyV1> {
+    pub groups: Vec<BankGroup<Id, K>>,
     /// Candidates that never bank (empty program, or a connected sidechain), in `id` order.
     pub scalar: Vec<Id>,
 }
@@ -108,8 +108,8 @@ impl<Id> WorkingMember<Id> {
     }
 }
 
-struct WorkingGroup<Id> {
-    program: RackProgramV1,
+struct WorkingGroup<Id, K> {
+    program: RackProgramV1<K>,
     members: Vec<WorkingMember<Id>>,
 }
 
@@ -138,10 +138,10 @@ fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>]) {
 ///
 /// # Errors
 /// [`RackCompileError::DuplicateId`] if the same id appears twice, including across levels.
-pub fn plan_bank_groups<Id: Ord + Clone>(
-    members_by_level: &[CohortLevel<Id>],
+pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
+    members_by_level: &[CohortLevel<Id, K>],
     width: BankWidth,
-) -> Result<BankPlan<Id>, RackCompileError> {
+) -> Result<BankPlan<Id, K>, RackCompileError> {
     let lanes = width.lanes() as usize;
     let mut all_ids: Vec<&Id> = members_by_level
         .iter()
@@ -151,7 +151,7 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
     if all_ids.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(RackCompileError::DuplicateId);
     }
-    let mut by_level: std::collections::BTreeMap<u64, Vec<&CohortCandidate<Id>>> =
+    let mut by_level: std::collections::BTreeMap<u64, Vec<&CohortCandidate<Id, K>>> =
         std::collections::BTreeMap::new();
     for level in members_by_level {
         by_level
@@ -168,7 +168,7 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
             // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
             // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`
             // is the gate on that claim.
-            let mut pool: Vec<&CohortCandidate<Id>> = candidates
+            let mut pool: Vec<&CohortCandidate<Id, K>> = candidates
                 .iter()
                 .copied()
                 .filter(|candidate| candidate.program.rack == rack)
@@ -182,7 +182,7 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
                 }
             });
 
-            let mut rack_groups: Vec<WorkingGroup<Id>> = Vec::new();
+            let mut rack_groups: Vec<WorkingGroup<Id, K>> = Vec::new();
             while !pool.is_empty() {
                 let leader = pool
                     .iter()
@@ -234,12 +234,12 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
     Ok(plan)
 }
 
-fn materialize<Id>(
+fn materialize<Id, K>(
     level: u64,
     rack: RackLocationV1,
-    group: WorkingGroup<Id>,
+    group: WorkingGroup<Id, K>,
     lanes: usize,
-) -> BankGroup<Id> {
+) -> BankGroup<Id, K> {
     let slots = group.program.slots.len();
     let mut members: Vec<Option<Id>> = Vec::with_capacity(lanes);
     let mut active_slots: Vec<Box<[bool]>> = Vec::with_capacity(lanes);
@@ -262,7 +262,10 @@ fn materialize<Id>(
     }
 }
 
-fn plan_invariants_hold<Id: Ord + Clone>(plan: &BankPlan<Id>, lanes: usize) -> bool {
+fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
+    plan: &BankPlan<Id, K>,
+    lanes: usize,
+) -> bool {
     let mut seen: Vec<Id> = plan.scalar.clone();
     for group in &plan.groups {
         if group.members.len() != lanes
@@ -300,7 +303,7 @@ fn plan_invariants_hold<Id: Ord + Clone>(plan: &BankPlan<Id>, lanes: usize) -> b
 
 /// Total order over program keys, exposed so callers can reproduce cohort order in tests.
 #[must_use]
-pub fn compare_programs(a: &RackProgramV1, b: &RackProgramV1) -> Ordering {
+pub fn compare_programs<K: BankSlotKey>(a: &RackProgramV1<K>, b: &RackProgramV1<K>) -> Ordering {
     a.rack.cmp(&b.rack).then_with(|| a.slots.cmp(&b.slots))
 }
 
