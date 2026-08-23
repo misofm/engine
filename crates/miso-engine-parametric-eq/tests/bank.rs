@@ -481,3 +481,67 @@ fn bank_lane_and_track_changes_do_not_leak() {
         }
     }
 }
+
+/// Descriptive only (AGENTS.md: benchmarks are descriptive during feature development).
+///
+/// One warmup round and two measured rounds of the production shape: a `WIDTH`-wide bank, a
+/// 128-frame block, four sections, both channels, no ramp in flight, nothing hashed or checked
+/// inside the timed interval. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "descriptive measurement"]
+fn descriptive_bank_throughput() {
+    use std::time::Instant;
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values_by_track: Vec<_> = (0..lanes).map(configured_values).collect();
+    let requests: Vec<_> = values_by_track
+        .iter()
+        .map(|values| request(values, false))
+        .collect();
+    let mut bank = ParametricEqFactory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend,
+            width,
+            requests: &requests,
+        })
+        .expect("request")
+        .expect("native width binds");
+    let frames = 128_usize;
+    let blocks = 20_000_u64;
+    let mut left: Vec<f32> = (0..frames * lanes)
+        .map(|index| ((index as f32) * 0.011).sin() * 0.25)
+        .collect();
+    let mut right = left.clone();
+    let offsets = vec![0_u32; lanes + 1];
+    let mut round = |count: u64| {
+        let start = Instant::now();
+        for block in 0..count {
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    frames as u32,
+                    width,
+                    block * frames as u64,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("block"),
+            );
+        }
+        start.elapsed().as_nanos() as f64 / (count as f64 * frames as f64)
+    };
+    round(blocks / 4);
+    let first = round(blocks);
+    let second = round(blocks);
+    println!(
+        "issue-087 bank throughput width={lanes} frames={frames} \
+         ns_per_frame_round1={first:.3} ns_per_frame_round2={second:.3} \
+         ns_per_frame_per_track_round2={:.4}",
+        second / lanes as f64
+    );
+}
