@@ -7,13 +7,12 @@ diagnostic/event producer while retaining production-origin C events, and replac
 high-level plan/model/source resource pins with a genuinely primitive independent derivation and
 effective mutations.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One implementation pass plus one bounded HOLD correction is the full
-budget; a second HOLD stops. Benchmark, timing, workload, playback and listening counters start at
-zero and must remain zero.
+**COMPLETE / READY TO CLOSE AFTER UPSTREAM AND CI SYNCHRONIZATION.** Sol High implemented the
+bounded product correction and Sol XHigh returned strict PASS after the sole authorized HOLD.
+Benchmark, timing, workload, playback and listening counters remained zero.
 
-Remote Issue 121 is unallocated. Root must create and synchronize it under this exact title after
-the docs checkpoint is upstream. This record makes no GitHub mutation.
+Root must synchronize this final evidence and close remote Issue 121 only after the docs checkpoint
+is upstream and required CI is green. This record makes no GitHub mutation.
 
 ## Dependencies and routing by exact title
 
@@ -122,3 +121,46 @@ allowed-path/static/diff/artifact scans; and zero prohibited counters. Sol High 
 immutable focused-green checkpoint. Sol XHigh returns strict PASS or the sole bounded HOLD; the
 correction verdict must PASS or STOP. No benchmark, timing, workload, playback, listening,
 browser/device execution or Issue-116 runner invocation is authorized.
+
+## Completion evidence
+
+Sol XHigh's pass-1 review returned the sole bounded **HOLD**. The first checkpoint removed the new
+public protocol producer, but CAPI created an owned `"capi.render.activity"` string for each
+observation while charging only the inline retained slots. The external oracle also retained the
+opaque `11 * 128` compiled-index pin, `64 * 64` control-queue pin and copied canonical-writer
+projection formula instead of primitive owners.
+
+Sol High froze the sole correction at technical commit
+`a9a975d8f679707701cc60ad102c817eb54c3082`, tree
+`16728c5ea434dde1a75bdd4500568db8c283a2ca`. Sol XHigh's terminal read-only review returned strict
+**PASS**. The exact implementation fence and SHA-256 identities are:
+
+| Path | SHA-256 |
+| --- | --- |
+| `crates/miso-engine-capi/src/runtime.rs` | `79ccb21cffa18e731e40dc8b8457f0dc58851c7e8c401dd6292510d5de71ae50` |
+| `crates/miso-engine-capi/tests/resource_lifecycle.rs` | `c4ac50a3bb397f5714f2ea1cba83c273554b30c301da648bafaa973aaa2b95d7` |
+| `crates/miso-engine-protocol/src/controller.rs` | `7a4fa3549c611ef9f1c88ec0b0db0cb84ae8231bed22da7e16204664d275346a` |
+| `crates/miso-engine-protocol/src/lib.rs` | `bea15fa82401faa72af6f617bd6ed7d59ceab97e90a987a0bac1f1fd49888f1f` |
+
+The correction eagerly constructs and charges the fixed CAPI diagnostic slots and code payloads,
+retains exact reliable FIFO/query/one-short/retry behavior without render or diagnostic-dequeue
+allocation/free, and removes the Issue-120 public/hidden protocol producer without a replacement
+mutable seam. The independent oracle derives compiled index nodes, control-queue items and the
+canonical writer from typed primitive layouts and fixture counts; every named owner has effective
+omission and one-byte/count/shape mutations reaching the aggregate or maximum production
+comparison. The accepted Issue-120 exported-C command/event vectors, exact statuses/replay,
+production event origins, production/test layout identity, lifecycle ownership and ordered 6x6
+fault/reclaim/credit evidence remain green and unchanged.
+
+Reported green gates comprise the locked focused CAPI and protocol suites, external
+production-layout/resource-lifecycle evidence, literal 11-command and six-event C vectors, C11 and
+C++17 exact 14-symbol smoke, warning-denied Clippy and rustdoc, format, Wasm exclusion, realtime,
+resource, no-copy, layout and effective-mutation policies, shell syntax, and exact
+allowed-path/static/diff/artifact scans. Prohibited counters were exactly zero: no benchmark,
+timing, workload, playback, listening, browser/device or Issue-116 runner invocation.
+
+Issue 121 is therefore complete locally and ready to close once this evidence commit is upstream,
+required CI is green and the GitHub issue body/state is synchronized. Its PASS unblocks **Optional
+binary WebSocket sidecar** (Issue 025); together with accepted Issue 116 it also unblocks **Qualify
+native C ABI and reference runner target matrix** (Issue 114), subject to that same upstream/CI
+synchronization.
