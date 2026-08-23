@@ -7,7 +7,8 @@
 use core::{alloc::Layout, cell::Cell, marker::PhantomData, num::NonZeroUsize};
 use std::{
     io::{Read, Seek},
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle, Thread},
+    time::Duration,
 };
 
 use miso_engine_core::{
@@ -457,6 +458,13 @@ enum WorkerCommand {
     AuditHold,
 }
 
+const CONTROL_POLL_WAIT: Duration = Duration::from_micros(100);
+const AUDIT_WORKER_WAIT: Duration = Duration::from_millis(1);
+const EVENT_PUBLICATION_WAIT: Duration = Duration::from_millis(1);
+const EVENT_PUBLICATION_ATTEMPTS: usize = 1_000;
+const MIN_RENDER_WAIT_NANOS: u128 = 1_000_000;
+const MAX_RENDER_WAIT_NANOS: u128 = 20_000_000;
+
 /// Deterministic off-render hold/release gate for native-worker qualification only.
 ///
 /// The worker acknowledges that it is held before the caller enters render, and acknowledges its
@@ -467,6 +475,7 @@ pub struct NativeWorkerAuditGate {
     held: Consumer<()>,
     release: Producer<()>,
     resumed: Consumer<()>,
+    worker: Thread,
     released: bool,
     _not_sync: PhantomData<Cell<()>>,
 }
@@ -489,7 +498,7 @@ impl NativeWorkerAuditGate {
         loop {
             match self.held.try_pop() {
                 Ok(()) => return Ok(()),
-                Err(QueueEmpty { .. }) => thread::yield_now(),
+                Err(QueueEmpty { .. }) => thread::sleep(CONTROL_POLL_WAIT),
             }
         }
     }
@@ -503,6 +512,7 @@ impl NativeWorkerAuditGate {
         self.release
             .try_push(())
             .map_err(|_| NativeSourceWorkerControlError::Backpressure)?;
+        self.worker.unpark();
         self.released = true;
         loop {
             match self.resumed.try_pop() {
@@ -510,7 +520,7 @@ impl NativeWorkerAuditGate {
                     self.released = false;
                     return Ok(());
                 }
-                Err(QueueEmpty { .. }) => thread::yield_now(),
+                Err(QueueEmpty { .. }) => thread::sleep(CONTROL_POLL_WAIT),
             }
         }
     }
@@ -518,14 +528,15 @@ impl NativeWorkerAuditGate {
 
 #[cfg(feature = "test-support")]
 impl WorkerAuditGate {
-    fn hold(&mut self) {
+    fn hold(&mut self, stop: &mut Consumer<()>) -> bool {
         self.held
             .try_push(())
             .expect("audit controller consumes bounded hold acknowledgement");
         loop {
             match self.release.try_pop() {
-                Ok(()) => break,
-                Err(QueueEmpty { .. }) => thread::yield_now(),
+                Ok(()) => return true,
+                Err(QueueEmpty { .. }) if stop.try_pop().is_ok() => return false,
+                Err(QueueEmpty { .. }) => thread::park_timeout(AUDIT_WORKER_WAIT),
             }
         }
     }
@@ -560,6 +571,7 @@ pub struct NativeSourceController {
     terminal_observed: bool,
     next_requested_generation: SourceGeneration,
     region: NativeWaveRegion,
+    worker: Thread,
     _not_sync: PhantomData<Cell<()>>,
 }
 
@@ -634,7 +646,7 @@ impl NativeSourceController {
                 Err(QueueEmpty { .. }) if self.terminal_observed => {
                     return Err(NativeSourceWorkerControlError::Stopped);
                 }
-                Err(QueueEmpty { .. }) => thread::yield_now(),
+                Err(QueueEmpty { .. }) => thread::sleep(CONTROL_POLL_WAIT),
             }
         }
     }
@@ -644,7 +656,10 @@ impl NativeSourceController {
             return Err(NativeSourceWorkerControlError::Stopped);
         }
         match self.commands.try_push(command) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.worker.unpark();
+                Ok(())
+            }
             Err(QueueFull { .. }) => Err(NativeSourceWorkerControlError::Backpressure),
         }
     }
@@ -688,6 +703,9 @@ impl NativeSourceWorker {
             self.stop
                 .try_push(())
                 .map_err(|_| NativeSourceWorkerControlError::Stopped)?;
+            if let Some(join) = self.join.as_ref() {
+                join.thread().unpark();
+            }
             self.stopped = true;
         }
         let Some(join) = self.join.take() else {
@@ -759,6 +777,7 @@ pub fn prepare_native_source_with_audit_gate<S: NativeSourceResolver>(
             resumed: resumed_sender,
         }),
     )?;
+    let audit_worker = controller.worker.clone();
     Ok((
         PreparedNativeSource {
             controller,
@@ -770,6 +789,7 @@ pub fn prepare_native_source_with_audit_gate<S: NativeSourceResolver>(
             held: held_receiver,
             release: release_sender,
             resumed: resumed_receiver,
+            worker: audit_worker,
             released: false,
             _not_sync: PhantomData,
         },
@@ -856,6 +876,11 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
     let (stop_sender, stop_receiver) =
         bounded_spsc(NonZeroUsize::new(1).expect("one stop"), QueueGeneration(13))
             .map_err(|_| NativeSourcePrepareError::ResourceLimit)?;
+    let render_wait = worker_render_wait(
+        ring_report.transfer_block_count,
+        request.ring_config.quantum_frames.0,
+        metadata.sample_rate_hz,
+    );
     let join = thread::Builder::new()
         .name("miso-engine-source".to_owned())
         .spawn(move || {
@@ -868,9 +893,11 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
                 initial_generation,
                 stop_receiver,
                 audit_gate,
+                render_wait,
             )
         })
         .map_err(|_| NativeSourcePrepareError::WorkerStart)?;
+    let worker_thread = join.thread().clone();
     Ok((
         NativeSourceController {
             commands: command_sender,
@@ -879,6 +906,7 @@ fn prepare_native_source_parts_with_audit_gate<S: NativeSourceResolver>(
             terminal_observed: false,
             next_requested_generation: initial_generation,
             region: request.region,
+            worker: worker_thread,
             _not_sync: PhantomData,
         },
         NativeSourceWorker {
@@ -1173,6 +1201,32 @@ fn validate_seek_frame(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Idle {
+    Progress,
+    WaitingForRender,
+    WaitingForCommand,
+}
+
+fn worker_render_wait(
+    transfer_block_count: u64,
+    quantum_frames: u32,
+    sample_rate_hz: SampleRateHz,
+) -> Duration {
+    let ring_frames = u128::from(transfer_block_count) * u128::from(quantum_frames);
+    let half_playback_nanos = ring_frames * 1_000_000_000 / u128::from(sample_rate_hz.0) / 2;
+    let bounded_nanos = half_playback_nanos.clamp(MIN_RENDER_WAIT_NANOS, MAX_RENDER_WAIT_NANOS);
+    Duration::from_nanos(u64::try_from(bounded_nanos).expect("bounded render wait fits u64"))
+}
+
+fn wait_for_worker(idle: Idle, render_wait: Duration) {
+    match idle {
+        Idle::Progress => {}
+        Idle::WaitingForRender => thread::park_timeout(render_wait),
+        Idle::WaitingForCommand => thread::park(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_worker<R: Read + Seek>(
     mut commands: Consumer<WorkerCommand>,
@@ -1183,6 +1237,7 @@ fn run_worker<R: Read + Seek>(
     mut generation: SourceGeneration,
     mut stop: Consumer<()>,
     #[allow(unused_mut, unused_variables)] mut audit_gate: Option<WorkerAuditGate>,
+    render_wait: Duration,
 ) -> NativeSourceWorkerExit {
     let mut pending: Option<PendingBlock> = None;
     let mut pending_seek: Option<PendingSeek> = None;
@@ -1198,11 +1253,13 @@ fn run_worker<R: Read + Seek>(
         if stop.try_pop().is_ok() {
             break NativeSourceWorkerExit::Stopped;
         }
+        let mut idle = Idle::WaitingForCommand;
         let mut latest_seek = None;
         for _ in 0..command_capacity {
             let Ok(command) = commands.try_pop() else {
                 break;
             };
+            idle = Idle::Progress;
             match command {
                 WorkerCommand::Seek {
                     generation: requested,
@@ -1251,7 +1308,10 @@ fn run_worker<R: Read + Seek>(
                     pending_seek = None;
                 }
                 Err(SourceSeekError::Backpressure { .. }) => {
-                    thread::yield_now();
+                    if idle != Idle::Progress {
+                        idle = Idle::WaitingForRender;
+                    }
+                    wait_for_worker(idle, render_wait);
                     continue;
                 }
                 Err(error) => break NativeSourceWorkerExit::SeekFailed(error),
@@ -1279,7 +1339,9 @@ fn run_worker<R: Read + Seek>(
                         let Some(gate) = audit_gate.as_mut() else {
                             break NativeSourceWorkerExit::Stopped;
                         };
-                        gate.hold();
+                        if !gate.hold(&mut stop) {
+                            break NativeSourceWorkerExit::Stopped;
+                        }
                         audit_hold_after_submit = false;
                         audit_resume_after_submit = true;
                     }
@@ -1297,14 +1359,17 @@ fn run_worker<R: Read + Seek>(
                 }
                 Err(HostChunkError::Full { .. }) => {
                     pending = Some(block);
-                    thread::yield_now();
+                    if idle != Idle::Progress {
+                        idle = Idle::WaitingForRender;
+                    }
+                    wait_for_worker(idle, render_wait);
                     continue;
                 }
                 Err(error) => break NativeSourceWorkerExit::SubmitFailed(error),
             }
         }
         if end_submitted {
-            thread::yield_now();
+            wait_for_worker(idle, render_wait);
             continue;
         }
         let start_frame = decoder.next_source_frame();
@@ -1337,15 +1402,19 @@ fn publish_worker_event(
     event: NativeSourceWorkerEvent,
 ) {
     let mut pending = event;
-    loop {
+    for _ in 0..EVENT_PUBLICATION_ATTEMPTS {
         match events.try_push(pending) {
             Ok(()) => return,
             Err(QueueFull { value, .. }) => {
                 pending = value;
-                thread::yield_now();
+                thread::park_timeout(EVENT_PUBLICATION_WAIT);
             }
         }
     }
+    debug_assert!(
+        false,
+        "worker event queue remained full after bounded publication attempts"
+    );
 }
 
 #[cfg(test)]
@@ -1355,6 +1424,37 @@ mod tests {
 
     use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
     use miso_engine_session::{CompileCaps, StableId, compile_session, parse_session_toml};
+
+    #[test]
+    fn native_worker_idle_paths_do_not_use_active_spin_primitives() {
+        let source = include_str!("native_source.rs");
+        let yield_primitive = ["yield", "_now"].concat();
+        let spin_primitive = ["spin", "_loop"].concat();
+        assert!(
+            !source.contains(&yield_primitive),
+            "native worker/control paths must park or sleep instead of yielding"
+        );
+        assert!(
+            !source.contains(&spin_primitive),
+            "native worker/control paths must park or sleep instead of spinning"
+        );
+    }
+
+    #[test]
+    fn render_wait_is_half_the_prepared_ring_and_bounded() {
+        assert_eq!(
+            worker_render_wait(8, 128, SampleRateHz(48_000)),
+            Duration::from_nanos(10_666_666)
+        );
+        assert_eq!(
+            worker_render_wait(1, 1, SampleRateHz(96_000)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            worker_render_wait(64, 128, SampleRateHz(44_100)),
+            Duration::from_millis(20)
+        );
+    }
 
     struct Resolver {
         asset: Option<NativeResolvedAsset<Cursor<Vec<u8>>>>,
@@ -2094,6 +2194,7 @@ mod tests {
                 start_frame: SourceFrame(0),
                 length_frames: 16,
             },
+            worker: thread::current(),
             _not_sync: PhantomData,
         };
         bounded_controller.try_wake().expect("fill command queue");
