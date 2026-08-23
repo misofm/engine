@@ -263,3 +263,160 @@ Primary decisions: `[ITU-BS1770-5]` supplies only the measurement estimator and 
 `[VAIDYANATHAN-MULTIRATE]` support delay/FIR state and polyphase interpretation; immutable reported
 latency follows `[VST3-LATENCY]`. `[EBU-R128]` is qualification context, not a limiter gain-law
 source or a certification claim.
+
+---
+
+## Amended by #90 (wave 2), 2026-08-23
+
+This block supersedes the "Gain law and exact sample order" section above and the parts of
+"Automation, sanitation, reset, recovery and state" that describe layout 1. Everything not named
+here is unchanged: the Annex-2 table and its byte values, the declared latency `T = N + F`, the
+parameter table, the ports, `LinkModeSet::new(3)`, `scratch_fixed_bytes = 24`, `TailSamples::Infinite`,
+the `dBTP-est` unit string, and the fixed 1.0 dB internal estimator guard. Issue 050's "frozen
+scalar input" and its immutable gain law are superseded by the law below.
+
+### Why
+
+The layout-1 gain law dropped to the required gain in a single sample and held it for `L + F`
+samples. A step multiplied into programme material is a full-bandwidth discontinuity — the textbook
+source of limiter distortion — and the step creates new inter-sample overshoot that the 4x detector
+never sees, which is part of what the 1 dB guard was paying for (#90 F2, F7). The law also evaluated
+`powf` and `exp` per sample per lane through the platform libm, which is the crate's native↔wasm
+determinism break and about 28 % of its cost (#90 F1).
+
+### Detector sample-term alignment
+
+```text
+P[n] = max(|h[6]|, |v[0]|, |v[1]|, |v[2]|, |v[3]|)
+```
+
+`|h[6]|`, not `|x[n]|`. `h[6]` is the input sample the four phases are centred on; comparing the
+phases against a sample six frames in the future was the sole reason the old law needed the `+F`
+hold. The four `v[p]` are bit-unchanged: same table, same increasing-tap order, same `+0.0`
+accumulator, same separately rounded multiply then add.
+
+### Gain law
+
+With `L = floor(lookahead_ms * Fs / 1000 + 0.5)` clamped to `0..=N`, `R = N + 1`, `W_MIN = 32` and
+
+```text
+Wb = clamp(L + 1, W_MIN, R)                      // box-ramp window, in samples
+GRID = 16384                                     // 2^14
+limit = 10^((Cdb - 1.0) / 20)                    // unchanged 1.0 dB internal guard
+c     = 1 - exp(-1 / (0.001 * tau * Fs))         // one-pole release rate
+```
+
+then, per sample:
+
+```text
+r[n]   = if P[n] > limit { limit / P[n] } else { 1 }
+m[n]   = min(r[n-N ..= n-N+Wb-1])                // sliding minimum over the window
+m_q[n] = floor(m[n] * GRID) / GRID
+s[n]   = (m_q[n] + m_q[n-1] + ... + m_q[n-Wb+1]) / Wb
+d[n]   = max(1 - s[n], fma(c, (1 - s[n]) - d[n-1], d[n-1]))
+g[n]   = 1 - d[n]
+y[n]   = x[n-T] * g[n]                           // T = N + F, unchanged
+```
+
+There is no hold counter and no instantaneous attack. `g[n] <= r[n-N]` holds **by construction**:
+every box term `m_q[n-j]`, `j < Wb`, is a minimum over a window that contains `n-N`, so their
+average is at most `r[n-N]`, and `d >= 1 - s` forces `g <= s`. The reduction domain is what makes
+the release terminate at exactly `+0.0` after the D7 flush, and therefore `g` exactly `1.0` and
+`z * 1.0` exactly `z`, signed zero included.
+
+`W_MIN = 32` is a floor, not a preference: a ramp shorter than the twelve-tap detector span
+re-creates inter-sample overshoot the detector has already measured. Thirty-two samples is 0.33 ms
+at 96 kHz and 0.73 ms at 44.1 kHz. A lookahead of 0 ms therefore means "fastest ramp", never "step".
+Measured cost of removing it: the worst true-peak margin over the #90 E4 matrix moves from
+−0.961 dB to −0.398 dB.
+
+Every `m_q` is a multiple of `2^-14` in `[0, 1]`, so a running sum of at most `R <= 961` of them is
+an integer multiple of `2^-14` below `2^24`: every partial sum is exact in `f32`, the sliding sum
+cannot drift, needs no resynchronisation, and is partition invariant. `S / Wb` is exactly `1.0` when
+nothing is limiting, which is why the box average is a division and not a reciprocal multiply.
+
+### Coefficient smoothing (supersedes "advance ceiling then release ramps; derive limit/release")
+
+`SmoothingRule::Linear / 64` now ramps the **linear-domain** coefficients `limit` and `c`, not the
+dB and millisecond parameters. Both are designed once per accepted automation Point, on the control
+plane, in `f64`, through `miso-engine-math` — `limit = db_to_gain(Cdb - 1)`, `c = 1 - exp(...)` —
+and rounded once to `f32`. The per-sample increment is precomputed at event time (decision D11), so
+no transcendental and no division exists on the render path. Endpoints are exact and a new Point
+restarts from the current value, exactly as before. `powf`/`exp` "once per active lane/sample with
+bounded standard `f32` math" is withdrawn: this crate calls no platform transcendental at all.
+
+### Sanitation, recovery and the boundary check (supersedes the per-value rules)
+
+Decision D7. There is no per-value `is_finite`/`is_subnormal` check, no `sanitize`, no per-lane
+`recover`, and no recovery counter. The only flush is `miso_engine_lane::flush` on the single
+recursive word `d`. Output finiteness is checked **once per block per bank** by
+`miso-engine-effect-runtime`: a block containing a NaN or a magnitude at or above `1e30` is zeroed
+on both channels, the whole instance is reset to its defaults, and a block counter is incremented.
+Input sanitisation is the input stage's job, not the effect's. `ProcessReport.sanitized_main_samples`
+and `recovered_left/right_samples` are never incremented by this effect. `process_bank` no longer
+has a structural guard that returns the caller's audio untouched and undelayed; width, quantum and
+sidechain are `debug_assert!`s over compiler invariants.
+
+### State layout 2
+
+`state_layout_version` is **2**. The common section is the two-word version/word-count header that
+`miso-engine-effect-runtime` stamps into every payload, so `common_bytes` is 8 and no longer 0. Each
+channel of each track is `27 + B + 2R = 3N + 35` little-endian 32-bit words:
+
+```text
+word 0        bank main-delay cursor u32          word 1   bank gain-ring cursor u32
+word 2        lookahead_ms f32                    word 3   reduction d f32, in [0,1]
+word 4        minimum-filter phase u32, < Wb      word 5   minimum-filter prefix f32, in [0,1]
+word 6        box sum S f32, a multiple of 2^-14 in [0, Wb]
+words 7..10   limit ramp:   current f32, target f32, step f32, remaining u32 (<= 64)
+words 11..14  release ramp: current f32, target f32, step f32, remaining u32 (<= 64)
+words 15..26  detector history h[0..12], newest first
+next B        main-delay ring f32, physical order (B = N + F)
+next R        required-gain ring f32 in [0,1] (raw values and van Herk suffix minima)
+final R       box ring f32, in [0,1] and on the 2^-14 grid
+```
+
+| Fs | N | latency T (unchanged) | lane bytes | payload bytes (8 + 2 x lane) |
+|---:|---:|---:|---:|---:|
+| 44100 | 441 | 447 | 5432 | 10872 |
+| 48000 | 480 | 486 | 5900 | 11808 |
+| 88200 | 882 | 888 | 10724 | 21456 |
+| 96000 | 960 | 966 | 11660 | 23328 |
+
+Restore accepts layout 2 only and validates, before committing anything: exact section lengths, the
+header, cursors in range, finite non-negative in-domain `lookahead_ms` (negative zero rejected),
+`d` and `prefix` in `[0,1]`, `phase < Wb`, `S` in `[0, Wb]` and on the grid **and equal to the sum
+of the `Wb` most recent box-ring words recomputed from the payload**, both ramps' `current` and
+`target` inside the per-rate coefficient range with `remaining <= 64`, and every history and ring
+word finite. Signed zero is legal in the history and main rings.
+
+The payload's cursor is the frame its rings are written in. A bank shares one cursor pair across its
+`W` tracks — layout 1's per-lane cursors were redundant, since every lane and both channels have
+always advanced in lockstep (#90 F3/F6) — so restore rotates the rings from the payload's frame into
+the receiver's while copying them: logical age `a` of the payload lands at logical age `a` of the
+receiver. The rotation is the identity whenever the two frames agree, which is the case for a scalar
+instance restored from a scalar snapshot and for every track of a bank restored from that bank.
+Scalar and bank track payloads stay byte-compatible.
+
+`FullToDefaults` clears the history and main ring to `+0.0`, the required-gain and box rings to
+`1.0`, `S` to `Wb`, `prefix` to `1.0`, `phase`, `d` and both cursors to zero, and snaps both ramps to
+the prepared defaults' coefficients. `DiscontinuityKeepParameters` does the same to the runtime words
+and snaps both ramps to their current targets, keeping the lookahead.
+
+### Bank and kernel shape (supersedes "Do not add a limiter core kernel")
+
+One generic `limiter_block<L: Lane>` owns the frame loop at `WIDTH` 1, 4 and 8; a scalar instance is
+that body at `L = f32` over a `W = 1` AoSoA block, so no separate scalar path exists. Per channel the
+bank owns one AoSoA arena (`history` 12 x W tap-major, the three rings `slots x W`) and one cursor
+pair, allocated at preparation. `PreparedGateGainKernelV1`, `KernelBackendV1` dispatch and
+`miso-engine-core` are no longer used by this crate. There is no `unsafe`, no `target_feature`, no
+intrinsic and no vector-library name anywhere in it: the ISA is pinned at compile time and attested
+at boot (decision D4).
+
+### Evidence
+
+`crates/miso-engine-true-peak-limiter/tests/MUTATIONS.md` lists sixteen red mutations and the four
+that survived their first target, with what was done about each. The ceiling property is gated over
+4 rates x 2 links x 3 ceilings x 4 lookaheads x 2 releases x 6 corpora against an independent `f64`
+4x estimator with no tolerance; the worst margin is −0.961 dB. Descriptive throughput on Zen 5 at
+`x86-64-v3`: 5.05 ns per channel lane-sample at W8, against the audit replica's 25.1 ns.

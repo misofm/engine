@@ -128,7 +128,7 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
 }
 
 fn automation(block: usize) -> [PreparedAutomationSpan; 1] {
-    let value = if block % 2 == 0 { -3.0 } else { -9.0 };
+    let value = if block.is_multiple_of(2) { -3.0 } else { -9.0 };
     [PreparedAutomationSpan {
         kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,

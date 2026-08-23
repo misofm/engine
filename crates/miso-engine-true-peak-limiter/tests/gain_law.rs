@@ -36,7 +36,7 @@ fn values_with(ceiling: f32, release: f32, lookahead: f32) -> [InitialParameterV
     let mut values: [InitialParameterValue; 6] =
         core::array::from_fn(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
-            channel: if index % 2 == 0 {
+            channel: if index.is_multiple_of(2) {
                 ParameterChannel::Left
             } else {
                 ParameterChannel::Right
@@ -113,7 +113,7 @@ fn output_true_peak_never_exceeds_the_ceiling() {
             for ceiling in [-1.0_f32, -6.0, -12.0] {
                 for lookahead in [0.0_f32, 1.0, 5.0, 10.0] {
                     for release in [10.0_f32, 2000.0] {
-                        for corpus in 0..5 {
+                        for corpus in 0..6 {
                             let (mut left, mut right) = corpus_signal(corpus, frames, rate);
                             let values = values_with(ceiling, release, lookahead);
                             let mut preparation = request_at_rate(&values, rate);
@@ -175,6 +175,18 @@ fn corpus_signal(index: usize, frames: usize, rate: u32) -> (Vec<f32>, Vec<f32>)
                 let phase = step * frame as f64;
                 left[frame] = (phase.sin() * 1.4125) as f32;
                 right[frame] = ((phase + 0.37).sin() * 1.4125) as f32;
+            }
+        }
+        4 => {
+            // A gated near-Nyquist burst at +6 dB: the ramp has to arrive at the requirement
+            // exactly when the burst does, over and over, at the shortest window.
+            let step = core::f64::consts::TAU * 0.49;
+            for frame in 0..frames {
+                if (frame / 300).is_multiple_of(2) {
+                    let phase = step * frame as f64;
+                    left[frame] = (phase.sin() * 2.0) as f32;
+                    right[frame] = ((phase + 0.9).sin() * 2.0) as f32;
+                }
             }
         }
         _ => {

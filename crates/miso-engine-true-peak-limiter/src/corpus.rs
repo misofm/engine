@@ -1,6 +1,6 @@
 //! The cross-target determinism corpus for the limiter kernel (master plan gate G5).
 //!
-//! Each case runs [`limiter_block`](crate::limiter_block) over [`LANES`] independent stereo tracks
+//! Each case runs the crate's `limiter_block` kernel over [`LANES`] independent stereo tracks
 //! for [`FRAMES`] frames and yields one `u32` result word per output sample, **lane major**: left
 //! channel of lane 0, then lane 1, and so on, then the right channel the same way. At width `W`
 //! the corpus is processed in `LANES / W` groups of an AoSoA block and read back lane major before

@@ -91,7 +91,7 @@ fn bench_w8_ns_per_lane_sample() {
     let source = noise(FRAMES * 8, 0x5150_0090);
     let offsets = [0_u32; 9];
 
-    let mut round = |bank: &mut Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>| {
+    let round = |bank: &mut Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>| {
         let mut left = source.clone();
         let mut right = source.clone();
         let start = Instant::now();

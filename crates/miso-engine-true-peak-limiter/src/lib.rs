@@ -1,7 +1,7 @@
 //! Fixed-four-phase true-peak safety limiter.
 //!
 //! The audible path stays at the host sample rate; the frozen BS.1770-5 Annex-2 FIR is
-//! detector-only. One generic block kernel, [`limiter_block`], owns the frame loop for every
+//! detector-only. One generic block kernel, `limiter_block`, owns the frame loop for every
 //! width: a scalar instance is the same body at `L = f32`, a W4/W8 bank is the same body at
 //! `Simd4`/`Simd8` over an AoSoA arena. Nothing in this crate is per-sample scalar any more, and
 //! nothing here names an intrinsic, a vector library or `unsafe`.
@@ -1506,7 +1506,7 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 /// A prepared scalar limiter instance: the block kernel at `L = f32`, `WIDTH = 1`.
 ///
 /// There is no separate scalar code path any more (#90 F9). A planar block is a `W = 1` AoSoA
-/// block, so `process` runs the same [`limiter_block`] body a W8 bank runs, and lane identity is a
+/// block, so `process` runs the same `limiter_block` body a W8 bank runs, and lane identity is a
 /// property of the code rather than of a fixture.
 pub struct PreparedTruePeakLimiter {
     core: LimiterCore<f32>,
@@ -2109,45 +2109,109 @@ mod tests {
     ///
     /// The release is a one-pole on the reduction `d`; the D7 flush is what turns its asymptotic
     /// decay into an exact `+0.0`, and an exact `+0.0` is what makes `g` exactly `1.0` and
-    /// `z * 1.0` exactly `z`, signed zero included. Without the flush the identity would be
-    /// approached and never reached. At a 10 ms release the decay crosses `FLUSH_EPS` after about
-    /// 22 000 samples, which is why the silence is that long.
+    /// `z * 1.0` exactly `z`, signed zero included. Without the flush the decay would pass under
+    /// `f32`'s normal range and stay there for ever. At a 10 ms release it crosses `FLUSH_EPS`
+    /// after about 22 000 samples, which is why the silence is that long.
+    ///
+    /// The sweep includes a 2 ms lookahead deliberately: that is `Wb = 97`, and 97 is one of the
+    /// few window lengths for which `97 * (1 / 97)` is not exactly `1.0` in `f32`. The box average
+    /// is a division precisely so that an unlimited block is the exact identity at every window.
     #[test]
     fn silence_restores_exact_identity_including_signed_zero() {
-        let values = values_with(-6.0, 10.0, 5.0);
-        let mut effect = TruePeakLimiterFactory
-            .prepare(request(&values))
-            .expect("prepare");
-        let mut noise = Noise(0x9001);
-        let mut left = vec![0.0_f32; 32_768];
-        let mut right = vec![0.0_f32; 32_768];
-        for index in 0..1024 {
-            left[index] = noise.next() * 4.0;
-            right[index] = noise.next() * 4.0;
-        }
-        render(effect.as_mut(), &mut left, &mut right, 128);
+        for lookahead in [0.0_f32, 2.0, 5.0, 10.0] {
+            let values = values_with(-6.0, 10.0, lookahead);
+            let mut effect = TruePeakLimiterFactory
+                .prepare(request(&values))
+                .expect("prepare");
+            let mut noise = Noise(0x9001);
+            let mut left = vec![0.0_f32; 32_768];
+            let mut right = vec![0.0_f32; 32_768];
+            for index in 0..1024 {
+                left[index] = noise.next() * 4.0;
+                right[index] = noise.next() * 4.0;
+            }
+            render(effect.as_mut(), &mut left, &mut right, 128);
 
-        let mut left = vec![0.0_f32; 1024];
-        let mut right = vec![0.0_f32; 1024];
-        left[100] = -0.0;
-        left[200] = 0.25;
-        right[100] = 0.25;
-        let expected_left = left.clone();
-        let expected_right = right.clone();
-        render(effect.as_mut(), &mut left, &mut right, 128);
-        let latency = 486;
-        for index in latency..1024 {
+            // The recursive word itself, not just its effect on the output.
+            let payload = snapshot(effect.as_ref());
             assert_eq!(
-                left[index].to_bits(),
-                expected_left[index - latency].to_bits(),
-                "left identity at {index}"
+                read_f32(&payload.1, words::REDUCTION).to_bits(),
+                0.0_f32.to_bits(),
+                "lookahead {lookahead}: the reduction never reached +0.0"
             );
             assert_eq!(
-                right[index].to_bits(),
-                expected_right[index - latency].to_bits(),
-                "right identity at {index}"
+                read_f32(&payload.2, words::REDUCTION).to_bits(),
+                0.0_f32.to_bits()
             );
+
+            let mut left = vec![0.0_f32; 1024];
+            let mut right = vec![0.0_f32; 1024];
+            left[100] = -0.0;
+            left[200] = 0.25;
+            right[100] = 0.25;
+            let expected_left = left.clone();
+            let expected_right = right.clone();
+            render(effect.as_mut(), &mut left, &mut right, 128);
+            let latency = 486;
+            for index in latency..1024 {
+                assert_eq!(
+                    left[index].to_bits(),
+                    expected_left[index - latency].to_bits(),
+                    "lookahead {lookahead}: left identity at {index}"
+                );
+                assert_eq!(
+                    right[index].to_bits(),
+                    expected_right[index - latency].to_bits(),
+                    "lookahead {lookahead}: right identity at {index}"
+                );
+            }
         }
+    }
+
+    /// E13: the lane-wide coefficient ramp is `LinearRamp::next_value`, snap included.
+    ///
+    /// `RampLanes::advance` is a second implementation of the runtime's D11 law, in the vector
+    /// domain, so it needs its own gate: `remaining = max(remaining - 1, 0)` then
+    /// `current = select(remaining > 0, current + step, target)`. The scalar ramp is the oracle and
+    /// the comparison is `to_bits`, at every width and across the snap.
+    #[test]
+    fn the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit() {
+        fn check<L: Lane>() {
+            let mut scalar = [LinearRamp::fixed(0.0); MAXIMUM_WIDTH];
+            let starts = [0.0_f32, -1.0, 0.25, 100.0, -0.5, 3.0, 0.0, 7.0];
+            let targets = [1.0_f32, 2.0, 0.25, -100.0, 0.5, -3.0, 1.0e-4, 0.0];
+            for (lane, ramp) in scalar.iter_mut().enumerate().take(L::WIDTH) {
+                *ramp = LinearRamp::fixed(starts[lane]);
+                ramp.set_target(targets[lane], RAMP_UPDATES);
+            }
+            let mut lanes = RampLanes::<L>::gather(&scalar[..L::WIDTH]);
+            let mut expected = scalar;
+            let mut produced = [0.0_f32; MAXIMUM_WIDTH];
+            for update in 0..RAMP_UPDATES + 4 {
+                lanes.advance().store(&mut produced);
+                for lane in 0..L::WIDTH {
+                    assert_eq!(
+                        produced[lane].to_bits(),
+                        expected[lane].next_value().to_bits(),
+                        "width {} lane {lane} update {update}",
+                        L::WIDTH
+                    );
+                }
+            }
+            // The scattered state is the scalar state, so a block boundary is not observable.
+            let mut scattered = scalar;
+            lanes.scatter(&mut scattered[..L::WIDTH]);
+            for lane in 0..L::WIDTH {
+                assert_eq!(
+                    scattered[lane].current.to_bits(),
+                    expected[lane].current.to_bits()
+                );
+                assert_eq!(scattered[lane].remaining, expected[lane].remaining);
+            }
+        }
+        check::<f32>();
+        check::<Simd4>();
+        check::<Simd8>();
     }
 
     /// E8: one body, three widths; PCM, per-track payload bytes and reports agree by `to_bits`.
