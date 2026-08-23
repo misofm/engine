@@ -146,6 +146,38 @@ pub fn finish_block<L: Lane>(
     false
 }
 
+/// Applies the master plan section 4.4 policy to **one channel** of one block.
+///
+/// Returns `0` when the block is clean. Otherwise the block is zeroed, `reset` is called, and the
+/// bitmask of the lanes that were out of bounds is returned so that the caller can attribute the
+/// failure to a track — which is what an effect with one report per lane needs and what a single
+/// `bool` cannot carry.
+///
+/// # Why this exists next to [`finish_block`]
+///
+/// [`finish_block`] checks and zeroes the two channels **together**, because a
+/// [`HomogeneousBank`] slot shares one coefficient set and one reset between them: accepting one
+/// and rejecting the other would leave the pair inconsistent.
+///
+/// A stereo effect whose channels carry *separate* state — separate rings, separate cursors,
+/// separate recurrences, which is every dynamics processor running `LinkMode::DualMono` — has the
+/// opposite requirement. Its left channel is exactly correct when its right diverged, and zeroing
+/// it would destroy evidence rather than protect anything. Under a linked detector the two fail
+/// together anyway, because the level that diverged reaches both, so the coupled case is not lost.
+///
+/// The check itself is identical in both: [`check_block`] once per channel, one `mask_any` for the
+/// whole block, no horizontal reduction inside the loop.
+#[inline]
+pub fn finish_channel<L: Lane>(io: &mut [f32], reset: impl FnOnce()) -> u32 {
+    if check_block::<L>(io) {
+        return 0;
+    }
+    let mask = nonfinite_lane_mask::<L>(io);
+    io.fill(0.0);
+    reset();
+    mask
+}
+
 /// One slot type of a homogeneous bank: a kernel plus the shapes it carries.
 ///
 /// Implemented once per effect, generic over [`Lane`]. Everything the driver needs to allocate,

@@ -179,6 +179,13 @@ test the_curve_matches_the_paper ... FAILED
 T 0 R 1.5 W 1: upper edge 0.5 vs line 0.3333333333333333
 ```
 
+### Added by issue #88 (`bank::finish_channel`, verifier decision W2-D3)
+
+| # | mutation | file | test binary | result |
+|---|---|---|---|---|
+| 19 | `finish_channel` returns `0` after a rejected block instead of the failing lane mask | `src/bank.rs` | `bank` | RED |
+| 20 | `finish_channel` resets the channel but does not zero the rejected block | `src/bank.rs` | `bank` | RED |
+
 ## Equivalent mutations (recorded, deliberately not gated)
 
 | # | mutation | why it survives |

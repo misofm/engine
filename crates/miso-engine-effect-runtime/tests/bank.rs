@@ -2,7 +2,7 @@
 
 use miso_engine_effect_runtime::bank::{
     BLOCK_LIMIT, BankKernel, HomogeneousBank, NonFiniteReport, check_block, finish_block,
-    nonfinite_lane_mask,
+    finish_channel, nonfinite_lane_mask,
 };
 use miso_engine_lane::{Lane, Simd4, Simd8};
 
@@ -251,4 +251,45 @@ fn reset_clears_state_and_keeps_coefficients() {
         assert_eq!(a.to_bits(), b.to_bits(), "sample {index} after reset");
     }
     assert_eq!(bank.coefficients_mut(0).c.to_bits(), 0.5f32.to_bits());
+}
+
+/// `finish_channel` applies the section 4.4 policy to one channel and names the failing lanes.
+///
+/// Red mutation: return `0` after a failing block instead of the lane mask — RED, the caller can
+/// no longer attribute a rejected block to a track. Recorded in `tests/MUTATIONS.md`.
+#[test]
+fn finish_channel_is_per_channel_and_reports_its_lanes() {
+    type L = miso_engine_lane::Simd4;
+
+    // A clean block is left exactly alone and no reset runs.
+    let mut clean = vec![0.25f32; 4 * 16];
+    let mut reset_ran = false;
+    let mask = finish_channel::<L>(&mut clean, || reset_ran = true);
+    assert_eq!(mask, 0);
+    assert!(!reset_ran);
+    assert!(clean.iter().all(|v| v.to_bits() == 0.25f32.to_bits()));
+
+    // A NaN in lane 2 and an out-of-bounds magnitude in lane 0 name exactly those two lanes.
+    let mut failing = vec![0.25f32; 4 * 16];
+    failing[3 * 4 + 2] = f32::NAN;
+    failing[7 * 4] = 1.0e30;
+    let mut reset_ran = false;
+    let mask = finish_channel::<L>(&mut failing, || reset_ran = true);
+    assert_eq!(mask, 0b0101);
+    assert!(reset_ran, "a rejected block resets the channel");
+    assert!(failing.iter().all(|v| v.to_bits() == 0));
+
+    // The other channel of the same effect is untouched: this is the whole point of the per-channel
+    // form. Nothing links the two calls.
+    let mut other = vec![-0.5f32; 4 * 16];
+    let mask = finish_channel::<L>(&mut other, || panic!("the clean channel must not reset"));
+    assert_eq!(mask, 0);
+    assert!(other.iter().all(|v| v.to_bits() == (-0.5f32).to_bits()));
+
+    // The threshold is the same one `finish_block` uses.
+    let mut edge = vec![0.0f32; 4 * 4];
+    edge[1] = f32::from_bits(1.0e30f32.to_bits() - 1);
+    assert_eq!(finish_channel::<L>(&mut edge, || {}), 0);
+    edge[1] = 1.0e30;
+    assert_eq!(finish_channel::<L>(&mut edge, || {}), 0b0010);
 }
