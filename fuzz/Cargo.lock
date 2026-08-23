@@ -124,6 +124,7 @@ name = "miso-engine-effect-contract"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-math",
 ]
 
 [[package]]
@@ -135,6 +136,10 @@ dependencies = [
  "miso-engine-session",
  "sha2",
 ]
+
+[[package]]
+name = "miso-engine-math"
+version = "0.1.0"
 
 [[package]]
 name = "miso-engine-protocol"
