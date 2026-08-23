@@ -6,8 +6,8 @@
 
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
-    schema::{capabilities_request, descriptor, enum_choice},
-    session_wire::{Message, Rule},
+    schema::{self, descriptor, enum_choice},
+    session_wire::Message,
 };
 
 const WIRE_U8: u8 = 1;
@@ -815,7 +815,7 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<(), DecodeError> {
-        top_level_message(self, payload, count)?.schema_spec(&capabilities_request::SPEC)
+        top_level_message(self, payload, count)?.schema_spec(&schema::capabilities_request::SPEC)
     }
 
     /// Exact caller-output length for a snapshot request.
@@ -849,7 +849,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionSnapshotRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2)])?;
+        message.schema_spec(&schema::snapshot_request::SPEC)?;
         let result = SessionSnapshotRequest {
             offset: read_u64(message.one(1, WIRE_U64)?)?,
             maximum_bytes: read_u32(message.one(2, WIRE_U32)?)?,
@@ -910,7 +910,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionSnapshot<'a>, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+        message.schema_spec(&schema::snapshot::SPEC)?;
         let result = SessionSnapshot {
             total_bytes: read_u64(message.one(1, WIRE_U64)?)?,
             offset: read_u64(message.one(2, WIRE_U64)?)?,
@@ -958,7 +958,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<TransactionApplied, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1)])?;
+        message.schema_spec(&schema::transaction_applied::SPEC)?;
         Ok(TransactionApplied {
             applied_operations: read_u32(message.one(1, WIRE_U32)?)?,
         })
@@ -994,7 +994,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<SessionCommitted, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+        message.schema_spec(&schema::session_committed::SPEC)?;
         Ok(SessionCommitted {
             event_sequence: read_u64(message.one(1, WIRE_U64)?)?,
             origin_request_id: crate::RequestId::new(read_u64(message.one(2, WIRE_U64)?)?)
@@ -1028,7 +1028,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ParameterMetadataRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2)])?;
+        message.schema_spec(&schema::metadata_request::SPEC)?;
         let value = ParameterMetadataRequest {
             after_handle: read_u32(message.one(1, WIRE_U32)?)?,
             limit: read_u16(message.one(2, WIRE_U16)?)?,
@@ -1103,7 +1103,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ParameterStateRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1)])?;
+        message.schema_spec(&schema::state_request::SPEC)?;
         let bytes = message.one(1, WIRE_PACKED_U32)?;
         if !bytes.len().is_multiple_of(4) {
             return Err(DecodeError::InvalidValueLength);
@@ -1232,7 +1232,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<AutomationEnqueued, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+        message.schema_spec(&schema::automation_enqueued::SPEC)?;
         let result = AutomationEnqueued {
             accepted_records: read_u16(message.one(1, WIRE_U16)?)?,
             occupancy: read_u64(message.one(2, WIRE_U64)?)?,
@@ -1446,14 +1446,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<AutomationCanceled, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[
-            Rule::one(1),
-            Rule::one(2),
-            Rule::one(3),
-            Rule::one(4),
-            Rule::one(5),
-            Rule::optional(6),
-        ])?;
+        message.schema_spec(&schema::automation_canceled::SPEC)?;
         let value = AutomationCanceled {
             event_sequence: read_u64(message.one(1, WIRE_U64)?)?,
             origin_request_id: crate::RequestId::new(read_u64(message.one(2, WIRE_U64)?)?)
@@ -1534,7 +1527,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DecodedMeterBatch<'a>, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+        message.schema_spec(&schema::meter_batch::SPEC)?;
         let result = DecodedMeterBatch {
             observed_sample: crate::SampleTime(read_u64(message.one(1, WIRE_U64)?)?),
             count: read_u16(message.one(2, WIRE_U16)?)?,
@@ -1628,7 +1621,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticEvent, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1)])?;
+        message.schema_spec(&schema::diagnostic_event::SPEC)?;
         let diagnostic = decode_diagnostic(
             self,
             nested_message(self, message.one(1, WIRE_MESSAGE)?, 1)?,
@@ -1696,14 +1689,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<TelemetryConfiguration, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[
-            Rule::one(1),
-            Rule::one(2),
-            Rule::one(3),
-            Rule::one(4),
-            Rule::one(5),
-            Rule::one(6),
-        ])?;
+        message.schema_spec(&schema::telemetry_configuration::SPEC)?;
         let result = TelemetryConfiguration {
             meter_handles: decode_nonzero_u32s(message.one(1, WIRE_PACKED_U32)?, true)?,
             meter_period_blocks: read_u32(message.one(2, WIRE_U32)?)?,
@@ -1756,7 +1742,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<CountersRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::optional(2)])?;
+        message.schema_spec(&schema::counters_request::SPEC)?;
         let all = read_bool(message.one(1, 8)?)?;
         let ids = message
             .optional_one(2, WIRE_PACKED_U32)?
@@ -1835,11 +1821,11 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<CounterSnapshot, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::repeated(2)])?;
+        message.schema_spec(&schema::counter_snapshot::SPEC)?;
         let mut values = Vec::with_capacity(message.values(2, WIRE_MESSAGE)?.count());
         for raw in message.values(2, WIRE_MESSAGE)? {
             let counter = nested_message(self, raw, 1)?;
-            counter.schema(&[Rule::one(1), Rule::one(2)])?;
+            counter.schema_spec(&schema::counter_value::SPEC)?;
             values.push(CounterValue {
                 id: parse_counter_id(read_u32(counter.one(1, WIRE_U32)?)?)?,
                 value: read_u64(counter.one(2, WIRE_U64)?)?,
@@ -1879,7 +1865,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticsRequest, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3)])?;
+        message.schema_spec(&schema::diagnostics_request::SPEC)?;
         let value = DiagnosticsRequest {
             after_sequence: read_u64(message.one(1, WIRE_U64)?)?,
             limit: read_u16(message.one(2, WIRE_U16)?)?,
@@ -1950,7 +1936,7 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<DiagnosticsPage, DecodeError> {
         let message = top_level_message(self, payload, count)?;
-        message.schema(&[Rule::one(1), Rule::one(2), Rule::repeated(3)])?;
+        message.schema_spec(&schema::diagnostics_page::SPEC)?;
         let diagnostics = message
             .values(3, WIRE_MESSAGE)?
             .map(|raw| decode_diagnostic(self, nested_message(self, raw, 1)?))
@@ -2857,7 +2843,7 @@ fn decode_metadata_page(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterMetadataPage, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::repeated(3)])?;
+    message.schema_spec(&schema::metadata_page::SPEC)?;
     let descriptors = message
         .values(3, WIRE_MESSAGE)?
         .map(|v| decode_descriptor(codec, nested_message(codec, v, 1)?))
@@ -3104,7 +3090,7 @@ fn decode_state_page(
     _codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterStatePage, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2), Rule::one(3), Rule::one(4)])?;
+    message.schema_spec(&schema::state_page::SPEC)?;
     let count = read_u16(message.one(2, WIRE_U16)?)? as usize;
     if count > 256 || read_u16(message.one(3, WIRE_U16)?)? != 16 {
         return Err(DecodeError::InvalidTlv);
@@ -3283,35 +3269,7 @@ fn decode_capabilities<'a>(
     codec: &ProtocolCodec,
     message: Message<'a>,
 ) -> Result<DecodedCapabilities<'a>, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-        Rule::one(6),
-        Rule::one(7),
-        Rule::one(8),
-        Rule::one(9),
-        Rule::one(10),
-        Rule::one(11),
-        Rule::one(12),
-        Rule::one(13),
-        Rule::one(14),
-        Rule::one(15),
-        Rule::one(16),
-        Rule::one(17),
-        Rule::one(18),
-        Rule::one(19),
-        Rule::one(20),
-        Rule::one(21),
-        Rule::one(22),
-        Rule::one(23),
-        Rule::one(24),
-        Rule::one(25),
-        Rule::one(26),
-        Rule::one(27),
-    ])?;
+    message.schema_spec(&schema::capabilities::SPEC)?;
     let value = DecodedCapabilities {
         minimum_version: crate::ProtocolVersion {
             major: read_u16(message.one(1, WIRE_U16)?)?,
@@ -3751,7 +3709,7 @@ fn decode_non_ok(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<NonOkResponse, DecodeError> {
-    message.schema(&[Rule::repeated(1), Rule::one(2), Rule::optional(3)])?;
+    message.schema_spec(&schema::non_ok::SPEC)?;
     let diagnostics = message
         .values(1, WIRE_MESSAGE)?
         .map(|value| decode_diagnostic(codec, nested_message(codec, value, 1)?))
@@ -3772,15 +3730,7 @@ fn decode_diagnostic(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<Diagnostic, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::repeated(3),
-        Rule::optional(4),
-        Rule::optional(5),
-        Rule::optional(6),
-        Rule::optional(7),
-    ])?;
+    message.schema_spec(&schema::diagnostic::SPEC)?;
     let code = read_string(codec, message.one(1, WIRE_UTF8)?)?.to_owned();
     if !valid_dotted_code(&code) {
         return Err(DecodeError::InvalidTlv);
@@ -3821,12 +3771,7 @@ fn decode_path_segment(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<PathSegment, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::optional(2),
-        Rule::optional(3),
-        Rule::optional(4),
-    ])?;
+    message.schema_spec(&schema::path_segment::SPEC)?;
     let tag = read_u8(message.one(1, WIRE_U8)?)?;
     let field = message.optional_one(2, WIRE_UTF8)?;
     let index = message.optional_one(3, WIRE_U64)?;
@@ -3853,16 +3798,7 @@ fn decode_backpressure(
     _codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<Backpressure, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::optional(5),
-        Rule::optional(6),
-        Rule::optional(7),
-        Rule::optional(8),
-    ])?;
+    message.schema_spec(&schema::backpressure::SPEC)?;
     let queue_kind = BackpressureQueueKind::decode(read_u8(message.one(1, WIRE_U8)?)?)?;
     let value = Backpressure {
         queue_kind,

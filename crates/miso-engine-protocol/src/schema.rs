@@ -1,8 +1,8 @@
-//! Declarative message-field registry migrated one production message at a time.
+//! Declarative message-field registry for shared typed protocol payloads.
 //!
-//! `CapabilitiesGet` command validation and `ParameterDescriptor` encode/decode are the first
-//! migrated slice. Remaining message families continue to use their existing typed codecs until
-//! their writer and reader move together; this module is never a second encoder or decoder.
+//! Session-edit payloads and transport payloads retain their specialized readers until their
+//! respective migrations. This registry is metadata consumed by the existing bounded reader; it
+//! is never a second encoder or decoder.
 
 /// Frozen BTLV wire type.
 #[repr(u8)]
@@ -174,6 +174,301 @@ pub(crate) mod descriptor {
     };
 }
 
+pub(crate) mod snapshot_request {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SessionSnapshotRequest",
+        fields: &[FieldSpec::req(1, Wire::U64), FieldSpec::req(2, Wire::U32)],
+    };
+}
+
+pub(crate) mod snapshot {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SessionSnapshot",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U64),
+            FieldSpec::req(3, Wire::Bytes),
+            FieldSpec::req(4, Wire::Bool),
+        ],
+    };
+}
+
+pub(crate) mod transaction_applied {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TransactionApplied",
+        fields: &[FieldSpec::req(1, Wire::U32)],
+    };
+}
+
+pub(crate) mod session_committed {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SessionCommitted",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U64),
+            FieldSpec::req(3, Wire::U64),
+            FieldSpec::req(4, Wire::U32),
+        ],
+    };
+}
+
+pub(crate) mod metadata_request {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ParameterMetadataRequest",
+        fields: &[FieldSpec::req(1, Wire::U32), FieldSpec::req(2, Wire::U16)],
+    };
+}
+
+pub(crate) mod metadata_page {
+    use super::{descriptor, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ParameterMetadataPage",
+        fields: &[
+            FieldSpec::req(1, Wire::U32),
+            FieldSpec::req(2, Wire::Bool),
+            FieldSpec::msg(3, true, true, &descriptor::SPEC),
+        ],
+    };
+}
+
+pub(crate) mod state_request {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ParameterStateRequest",
+        fields: &[FieldSpec::req(1, Wire::PackedU32)],
+    };
+}
+
+pub(crate) mod state_page {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ParameterStatePage",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U16),
+            FieldSpec::req(3, Wire::U16),
+            FieldSpec::req(4, Wire::Bytes),
+        ],
+    };
+}
+
+pub(crate) mod automation_enqueued {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "AutomationEnqueued",
+        fields: &[
+            FieldSpec::req(1, Wire::U16),
+            FieldSpec::req(2, Wire::U64),
+            FieldSpec::req(3, Wire::U64),
+            FieldSpec::req(4, Wire::U64),
+        ],
+    };
+}
+
+pub(crate) mod automation_canceled {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "AutomationCanceled",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U64),
+            FieldSpec::req(3, Wire::U16),
+            FieldSpec::req(4, Wire::U8),
+            FieldSpec::req(5, Wire::U64),
+            FieldSpec::opt(6, Wire::U64),
+        ],
+    };
+}
+
+pub(crate) mod meter_batch {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "MeterBatch",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U16),
+            FieldSpec::req(3, Wire::U16),
+            FieldSpec::req(4, Wire::Bytes),
+        ],
+    };
+}
+
+pub(crate) mod telemetry_configuration {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "TelemetryConfiguration",
+        fields: &[
+            FieldSpec::req(1, Wire::PackedU32),
+            FieldSpec::req(2, Wire::U32),
+            FieldSpec::req(3, Wire::PackedU32),
+            FieldSpec::req(4, Wire::U32),
+            FieldSpec::req(5, Wire::Bool),
+            FieldSpec::req(6, Wire::U8),
+        ],
+    };
+}
+
+pub(crate) mod counters_request {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "CountersRequest",
+        fields: &[
+            FieldSpec::req(1, Wire::Bool),
+            FieldSpec::opt(2, Wire::PackedU32),
+        ],
+    };
+}
+
+pub(crate) mod counter_value {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "CounterValue",
+        fields: &[FieldSpec::req(1, Wire::U32), FieldSpec::req(2, Wire::U64)],
+    };
+}
+
+pub(crate) mod counter_snapshot {
+    use super::{counter_value, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "CounterSnapshot",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::msg(2, true, true, &counter_value::SPEC),
+        ],
+    };
+}
+
+pub(crate) mod diagnostics_request {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "DiagnosticsRequest",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::U16),
+            FieldSpec::req(3, Wire::U8),
+        ],
+    };
+}
+
+pub(crate) mod path_segment {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "PathSegment",
+        fields: &[
+            FieldSpec::req(1, Wire::U8),
+            FieldSpec::opt(2, Wire::Utf8),
+            FieldSpec::opt(3, Wire::U64),
+            FieldSpec::opt(4, Wire::Utf8),
+        ],
+    };
+}
+
+pub(crate) mod diagnostic {
+    use super::{path_segment, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "Diagnostic",
+        fields: &[
+            FieldSpec::req(1, Wire::Utf8),
+            FieldSpec::req(2, Wire::U8),
+            FieldSpec::msg(3, true, true, &path_segment::SPEC),
+            FieldSpec::opt(4, Wire::Utf8),
+            FieldSpec::opt(5, Wire::U32),
+            FieldSpec::opt(6, Wire::U64),
+            FieldSpec::opt(7, Wire::U64),
+        ],
+    };
+}
+
+pub(crate) mod backpressure {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "Backpressure",
+        fields: &[
+            FieldSpec::req(1, Wire::U8),
+            FieldSpec::req(2, Wire::U64),
+            FieldSpec::req(3, Wire::U64),
+            FieldSpec::req(4, Wire::U16),
+            FieldSpec::opt(5, Wire::U64),
+            FieldSpec::opt(6, Wire::U64),
+            FieldSpec::opt(7, Wire::U64),
+            FieldSpec::opt(8, Wire::U64),
+        ],
+    };
+}
+
+pub(crate) mod non_ok {
+    use super::{backpressure, diagnostic, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "NonOkResponse",
+        fields: &[
+            FieldSpec::msg(1, true, true, &diagnostic::SPEC),
+            FieldSpec::req(2, Wire::U32),
+            FieldSpec::msg(3, false, false, &backpressure::SPEC),
+        ],
+    };
+}
+
+pub(crate) mod diagnostics_page {
+    use super::{diagnostic, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "DiagnosticsPage",
+        fields: &[
+            FieldSpec::req(1, Wire::U64),
+            FieldSpec::req(2, Wire::Bool),
+            FieldSpec::msg(3, true, true, &diagnostic::SPEC),
+        ],
+    };
+}
+
+pub(crate) mod diagnostic_event {
+    use super::{diagnostic, *};
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "DiagnosticEvent",
+        fields: &[FieldSpec::msg(1, true, false, &diagnostic::SPEC)],
+    };
+}
+
+pub(crate) mod capabilities {
+    use super::*;
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "Capabilities",
+        fields: &[
+            FieldSpec::req(1, Wire::U16),
+            FieldSpec::req(2, Wire::U16),
+            FieldSpec::req(3, Wire::U16),
+            FieldSpec::req(4, Wire::U16),
+            FieldSpec::req(5, Wire::U64),
+            FieldSpec::req(6, Wire::U32),
+            FieldSpec::req(7, Wire::U64),
+            FieldSpec::req(8, Wire::U8),
+            FieldSpec::req(9, Wire::U16),
+            FieldSpec::req(10, Wire::U64),
+            FieldSpec::req(11, Wire::U64),
+            FieldSpec::req(12, Wire::U64),
+            FieldSpec::req(13, Wire::U64),
+            FieldSpec::req(14, Wire::U64),
+            FieldSpec::req(15, Wire::U64),
+            FieldSpec::req(16, Wire::U64),
+            FieldSpec::req(17, Wire::U64),
+            FieldSpec::req(18, Wire::U64),
+            FieldSpec::req(19, Wire::U64),
+            FieldSpec::req(20, Wire::U64),
+            FieldSpec::req(21, Wire::U16),
+            FieldSpec::req(22, Wire::U16),
+            FieldSpec::req(23, Wire::U16),
+            FieldSpec::req(24, Wire::U32),
+            FieldSpec::req(25, Wire::PackedU16),
+            FieldSpec::req(26, Wire::PackedU16),
+            FieldSpec::req(27, Wire::U64),
+        ],
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +479,29 @@ mod tests {
             &capabilities_request::SPEC,
             &enum_choice::SPEC,
             &descriptor::SPEC,
+            &snapshot_request::SPEC,
+            &snapshot::SPEC,
+            &transaction_applied::SPEC,
+            &session_committed::SPEC,
+            &metadata_request::SPEC,
+            &metadata_page::SPEC,
+            &state_request::SPEC,
+            &state_page::SPEC,
+            &automation_enqueued::SPEC,
+            &automation_canceled::SPEC,
+            &meter_batch::SPEC,
+            &telemetry_configuration::SPEC,
+            &counters_request::SPEC,
+            &counter_value::SPEC,
+            &counter_snapshot::SPEC,
+            &diagnostics_request::SPEC,
+            &path_segment::SPEC,
+            &diagnostic::SPEC,
+            &backpressure::SPEC,
+            &non_ok::SPEC,
+            &diagnostics_page::SPEC,
+            &diagnostic_event::SPEC,
+            &capabilities::SPEC,
         ];
         for spec in specs {
             assert!(!spec.name.is_empty());
