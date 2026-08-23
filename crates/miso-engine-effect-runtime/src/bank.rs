@@ -97,6 +97,7 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
 ///
 /// Panics in debug builds if `io` is not a whole number of `L::WIDTH` frames, or if `L::WIDTH`
 /// exceeds 32 (no such width exists: the three backends are 1, 4 and 8).
+#[inline]
 #[must_use]
 pub fn nonfinite_lane_mask<L: Lane>(io: &[f32]) -> u32 {
     debug_assert_eq!(io.len() % L::WIDTH, 0);
@@ -127,6 +128,7 @@ pub fn nonfinite_lane_mask<L: Lane>(io: &[f32]) -> u32 {
 ///
 /// Left and right are checked and zeroed together: a bank's two channels share their coefficients
 /// and their reset, so accepting one while rejecting the other would leave the pair inconsistent.
+#[inline]
 pub fn finish_block<L: Lane>(
     left: &mut [f32],
     right: &mut [f32],
@@ -239,6 +241,7 @@ impl<L: Lane, K: BankKernel<L>> HomogeneousBank<L, K> {
     /// # Panics
     ///
     /// Panics in debug builds if either block is not `frames * L::WIDTH` long.
+    #[inline]
     pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
         debug_assert_eq!(left.len(), frames * L::WIDTH);
         debug_assert_eq!(right.len(), frames * L::WIDTH);

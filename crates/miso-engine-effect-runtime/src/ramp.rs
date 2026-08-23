@@ -128,6 +128,7 @@ impl LinearRamp {
     /// The state is then advanced by `min(frames, remaining)` calls of [`LinearRamp::next_value`] —
     /// iterated additions, matching the kernel's iterated additions — so splitting a block
     /// anywhere leaves both the applied gains and the resulting state bit-identical (gate P1).
+    #[inline(always)]
     #[must_use]
     pub fn advance_block<L: Lane>(&mut self, frames: usize) -> RampSegment<L> {
         let start = match self.remaining {
