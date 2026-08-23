@@ -404,37 +404,46 @@ fn a_version_one_payload_is_rejected() {
     );
 }
 
-/// A payload whose header is a different layout is rejected on its own evidence.
+/// A payload of the wrong length is rejected before a word is read.
+///
+/// Exactly, in both directions: a payload longer than the layout is as wrong as a short one,
+/// because the surplus is either another layout's data or uninitialised memory.
 #[test]
-fn a_payload_with_a_stale_header_is_rejected() {
+fn a_payload_of_the_wrong_length_is_rejected() {
     let values = values();
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    let (mut common, left, right) = snapshot(effect.as_ref());
-    common[0] = 1;
-    assert_eq!(
-        effect.restore_state_payload(
-            2,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
-                .expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.version"
-        })
-    );
-    let (mut common, left, right) = snapshot(effect.as_ref());
-    common[4] = 0xff;
-    assert_eq!(
-        effect.restore_state_payload(
-            2,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
-                .expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.length"
-        })
-    );
+    let (common, left, right) = snapshot(effect.as_ref());
+    for (common_len, left_len, right_len) in [
+        (4_usize, LANE_BYTES, LANE_BYTES),
+        (0, LANE_BYTES - 4, LANE_BYTES),
+        (0, LANE_BYTES, LANE_BYTES + 4),
+    ] {
+        let mut common_bytes = vec![0_u8; common_len];
+        common_bytes[..common.len().min(common_len)]
+            .copy_from_slice(&common[..common.len().min(common_len)]);
+        let mut left_bytes = vec![0_u8; left_len];
+        let take = left.len().min(left_len);
+        left_bytes[..take].copy_from_slice(&left[..take]);
+        let mut right_bytes = vec![0_u8; right_len];
+        let take = right.len().min(right_len);
+        right_bytes[..take].copy_from_slice(&right[..take]);
+        assert_eq!(
+            effect.restore_state_payload(
+                2,
+                StatePayloadInput {
+                    common: &common_bytes,
+                    left: &left_bytes,
+                    right: &right_bytes,
+                }
+            ),
+            Err(StatePayloadError {
+                code: "effect.state.length"
+            }),
+            "sections {common_len}/{left_len}/{right_len}"
+        );
+    }
 }
 
 /// A payload whose words are out of domain or inconsistent with its parameters is rejected whole.

@@ -25,9 +25,12 @@
 //!
 //! # State layout
 //!
-//! Version 2. Per lane, per band, 19 little-endian 32-bit words (76 words, 304 bytes per lane);
-//! the common section carries only the runtime codec's two-word header. A version-1 payload is
-//! rejected with `effect.state.version`; there is no silent migration.
+//! Version 2. Per lane, per band, 19 little-endian 32-bit words (76 words, 304 bytes per lane) and
+//! an empty common section — the two channels share no state. The words are read and written with
+//! `miso_engine_effect_runtime::state_payload`'s codec; its two-word header is deliberately *not*
+//! adopted here (wave-2 decision W2-D2: the header moves `common_bytes` and therefore the
+//! descriptor identity, which is a coordinated change #95 owns). A version-1 payload is rejected
+//! with `effect.state.version`; there is no silent migration.
 
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
@@ -60,14 +63,11 @@ const STATE_WORDS_PER_BAND: usize = 19;
 const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT_V1 * STATE_WORDS_PER_BAND;
 /// Bytes in each channel section.
 const STATE_BYTES_PER_LANE: usize = STATE_LANE_WORDS * payload::WORD_BYTES;
-/// Bytes in the common section: the codec's two-word header and nothing else.
-const STATE_COMMON_BYTES: usize = payload::HEADER_WORDS as usize * payload::WORD_BYTES;
-/// The payload shape this crate hands the shared codec.
-const STATE_LAYOUT: payload::StateLayout = payload::StateLayout {
-    version: STATE_LAYOUT_VERSION,
-    common_words: 0,
-    lane_words: STATE_LANE_WORDS as u32,
-};
+/// Bytes in the common section. The two channels share no state, and wave-2 decision W2-D2 keeps
+/// the runtime codec's two-word header out of this crate: adopting it would move `common_bytes`
+/// and with it the descriptor identity, which is a coordinated change #95 owns. The shared
+/// little-endian word codec is used; only its header is not.
+const STATE_COMMON_BYTES: usize = 0;
 
 /// Samples an automation point takes to reach its target (`SmoothingRule::Linear`, D11).
 const RAMP_SAMPLES: u32 = 64;
@@ -1287,50 +1287,37 @@ impl NativeEffectFactory for ParametricEqFactory {
     }
 }
 
-/// Validates and decodes a payload section into one lane's state words.
-fn read_lane_words(
-    common: &[u8],
-    lane: &[u8],
-) -> Result<[u32; STATE_LANE_WORDS], StatePayloadError> {
-    let mut words = [0_u32; STATE_LANE_WORDS];
-    let mut discard = [0_u32; STATE_LANE_WORDS];
-    payload::restore(
-        &STATE_LAYOUT,
-        &payload::StatePayloadInput {
-            common,
-            left: lane,
-            right: lane,
-        },
-        &mut payload::StateWordsMut {
-            common: &mut [],
-            left: &mut words,
-            right: &mut discard,
-        },
-    )
-    .map_err(|error| StatePayloadError { code: error.code })?;
-    Ok(words)
+/// Checks the three sections against the layout, exactly — a payload longer than its layout is as
+/// wrong as one that is shorter, because the surplus is another layout's data.
+fn validate_sections(common: usize, left: usize, right: usize) -> Result<(), StatePayloadError> {
+    if common != STATE_COMMON_BYTES || left != STATE_BYTES_PER_LANE || right != STATE_BYTES_PER_LANE
+    {
+        return Err(StatePayloadError {
+            code: payload::STATE_LENGTH_CODE,
+        });
+    }
+    Ok(())
 }
 
-/// Writes the header and one lane pair into a payload.
+/// Decodes one lane section into its state words.
+fn read_lane_words(lane: &[u8]) -> [u32; STATE_LANE_WORDS] {
+    core::array::from_fn(|word| payload::read_u32(lane, word))
+}
+
+/// Writes one lane pair into a validated payload.
 fn write_payload(
     output: StatePayloadOutput<'_>,
     left: &[u32; STATE_LANE_WORDS],
     right: &[u32; STATE_LANE_WORDS],
 ) -> Result<(), StatePayloadError> {
-    payload::snapshot(
-        &STATE_LAYOUT,
-        &payload::StateWords {
-            common: &[],
-            left,
-            right,
-        },
-        &mut payload::StatePayloadOutput {
-            common: output.common,
-            left: output.left,
-            right: output.right,
-        },
-    )
-    .map_err(|error| StatePayloadError { code: error.code })
+    validate_sections(output.common.len(), output.left.len(), output.right.len())?;
+    for (word, value) in left.iter().enumerate() {
+        payload::write_u32(output.left, word, *value);
+    }
+    for (word, value) in right.iter().enumerate() {
+        payload::write_u32(output.right, word, *value);
+    }
+    Ok(())
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
@@ -1359,8 +1346,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 code: payload::STATE_VERSION_CODE,
             });
         }
-        let left = read_lane_words(input.common, input.left)?;
-        let right = read_lane_words(input.common, input.right)?;
+        validate_sections(input.common.len(), input.left.len(), input.right.len())?;
+        let left = read_lane_words(input.left);
+        let right = read_lane_words(input.right);
         let sample_rate = self.sample_rate();
         let mut candidate_left = Channel::<L, W>::new(
             core::array::from_fn(|index| self.left.targets[index]),
