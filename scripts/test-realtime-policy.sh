@@ -12,6 +12,7 @@ create_fixture() {
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
         "$root/crates/miso-engine-core/src/arch" \
         "$root/crates/miso-engine-capi/src" \
+        "$root/crates/miso-engine-capi/tests" \
         "$root/crates/miso-engine-effect-compiler/tests" \
         "$root/crates/miso-engine-effect-package/src" \
         "$root/crates/miso-engine-effect-package/tests" \
@@ -48,6 +49,11 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
         >"$root/crates/miso-engine-capi/src/ffi.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe impl GlobalAlloc for LifecycleAllocator {}' \
+        'struct LifecycleAllocator;' \
+        >"$root/crates/miso-engine-capi/tests/resource_lifecycle.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn descriptor_capi_boundary() {}' \
@@ -130,6 +136,8 @@ expect_failure unsafe-outside-capi-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-capi/src/lib.rs"'
 expect_failure unsafe-in-second-capi-ffi-path \
     'mkdir -p "$root/crates/miso-engine-capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-capi/src/ffi/other.rs"'
+expect_failure unsafe-outside-capi-lifecycle-audit \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-capi/tests/other.rs"'
 expect_failure unsafe-outside-effect-package-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-effect-package/src/lib.rs"'
 expect_failure unsafe-in-second-effect-package-ffi-path \

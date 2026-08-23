@@ -70,7 +70,8 @@ pub const AUTOMATION_RECORD_BYTES: usize = 32;
 pub use conformance::{ConformanceDecoder, ConformanceFrame, complete_schema_corpus};
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
-    ControllerRequest, ControllerResponse, EventEgressError, MockProvider, MockProviderConfig,
+    ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
+    ControllerRetainedCapacity, EventEgressError, MockProvider, MockProviderConfig,
     ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
     PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
     ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,

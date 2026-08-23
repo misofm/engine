@@ -905,34 +905,13 @@ pub(crate) fn test_enqueue_reliable(
 }
 
 #[cfg(test)]
-pub(crate) fn test_enqueue_diagnostic(
+pub(crate) fn test_install_parameter(
     session: *mut Session,
-    revision: miso_engine_protocol::SessionRevision,
-    event: miso_engine_protocol::DiagnosticEvent,
-) -> Result<(), ()> {
-    // SAFETY: Test callers retain the exclusively owned live session for this injection.
-    unsafe { &mut (*session).state }.test_enqueue_diagnostic(revision, event)
-}
-
-#[cfg(test)]
-pub(crate) fn test_stage_meter(
-    session: *mut Session,
-    revision: miso_engine_protocol::SessionRevision,
-    observed_sample: miso_engine_protocol::SampleTime,
-    records: &[miso_engine_protocol::MeterRecord],
-) -> Result<(), ()> {
-    // SAFETY: Test callers retain the exclusively owned live session for this injection.
-    unsafe { &mut (*session).state }.test_stage_meter(revision, observed_sample, records)
-}
-
-#[cfg(test)]
-pub(crate) fn test_stage_counter(
-    session: *mut Session,
-    revision: miso_engine_protocol::SessionRevision,
-    snapshot: &miso_engine_protocol::CounterSnapshot,
-) -> Result<(), ()> {
-    // SAFETY: Test callers retain the exclusively owned live session for this injection.
-    unsafe { &mut (*session).state }.test_stage_counter(revision, snapshot)
+    descriptor: miso_engine_protocol::ParameterDescriptor,
+    state: miso_engine_protocol::ParameterStateRecord,
+) {
+    // SAFETY: Test callers retain the exclusively owned live session for typed provider setup.
+    unsafe { &mut (*session).state }.test_install_parameter(descriptor, state);
 }
 
 #[cfg(test)]
@@ -947,6 +926,27 @@ pub(crate) fn test_telemetry_counters(
 pub(crate) fn test_set_capi_retained_limit(session: *mut Session, bytes: u64) {
     // SAFETY: Test callers retain the exclusively owned live session for this fault injection.
     unsafe { &mut (*session).state }.test_set_capi_retained_limit(bytes);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_structural_faults(
+    session: *mut Session,
+    faults: [Option<crate::runtime::TestStructuralFaultPhase>; 2],
+) {
+    // SAFETY: Test callers retain the exclusively owned live session for deterministic faults.
+    unsafe { &mut (*session).state }.test_set_structural_faults(faults);
+}
+
+#[cfg(test)]
+pub(crate) fn test_owner_counters(session: *mut Session) -> crate::runtime::TestOwnerCounters {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).state }.test_owner_counters()
+}
+
+#[cfg(test)]
+pub(crate) fn test_retained_capacities(session: *mut Session) -> [usize; 7] {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).state }.test_retained_capacities()
 }
 
 #[cfg(test)]

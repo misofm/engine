@@ -62,6 +62,40 @@ pub struct ProtocolControllerConfig {
     pub provider_features: ProviderFeatures,
 }
 
+/// Eager retained collection capacities for controller/provider configuration state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerRetainedCapacity {
+    /// Meter handles retained independently by the controller and provider.
+    pub meter_handles: usize,
+    /// Counter identifiers retained independently by the controller and provider.
+    pub counter_ids: usize,
+}
+
+/// Eager controller/provider allocation could not be completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerResourceAllocationError;
+
+fn retained_telemetry_configuration(
+    capacity: ControllerRetainedCapacity,
+) -> Result<TelemetryConfiguration, ControllerResourceAllocationError> {
+    let mut meter_handles = Vec::new();
+    meter_handles
+        .try_reserve_exact(capacity.meter_handles)
+        .map_err(|_| ControllerResourceAllocationError)?;
+    let mut counter_ids = Vec::new();
+    counter_ids
+        .try_reserve_exact(capacity.counter_ids)
+        .map_err(|_| ControllerResourceAllocationError)?;
+    Ok(TelemetryConfiguration {
+        meter_handles,
+        meter_period_blocks: 0,
+        counter_ids,
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
+    })
+}
+
 /// Typed provider and event enablement; no raw capability bytes are accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(missing_docs)] // Frozen one-to-one capability feature switches.
@@ -128,15 +162,20 @@ pub enum ReplayDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReplayEntry {
     request_id: RequestId,
-    request: Vec<u8>,
-    response: ControllerResponse,
+    request_offset: usize,
+    request_bytes: usize,
+    response_offset: usize,
+    response_bytes: usize,
+    response_status: StatusCode,
+    response_revision: SessionRevision,
+    framed: bool,
 }
 
 /// Bounded exact-byte replay cache. It intentionally covers one endpoint lifetime only.
-#[derive(Clone)]
 pub struct ReplayCache {
     config: ReplayCacheConfig,
     entries: VecDeque<ReplayEntry>,
+    storage: Box<[u8]>,
     retained_bytes: usize,
     highest_new_id: Option<RequestId>,
 }
@@ -163,12 +202,72 @@ impl ReplayCache {
     /// Prepare a bounded replay cache off the render plane.
     #[must_use]
     pub fn new(config: ReplayCacheConfig) -> Self {
-        Self {
+        Self::try_new(config)
+            .expect("valid replay configuration allocates its eager retained arena")
+    }
+
+    /// Fallibly allocate the complete replay metadata and byte arena before endpoint publication.
+    pub fn try_new(config: ReplayCacheConfig) -> Result<Self, ReplayCacheError> {
+        Self::resource_report_for_config(config)?;
+        let mut entries = VecDeque::new();
+        entries
+            .try_reserve_exact(config.entries.get())
+            .map_err(|_| ReplayCacheError::ResourceAllocation)?;
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(config.bytes.get())
+            .map_err(|_| ReplayCacheError::ResourceAllocation)?;
+        storage.resize(config.bytes.get(), 0);
+        Ok(Self {
             config,
-            entries: VecDeque::with_capacity(config.entries.get()),
+            entries,
+            storage: storage.into_boxed_slice(),
             retained_bytes: 0,
             highest_new_id: None,
+        })
+    }
+
+    fn try_clone_eager(&self) -> Result<Self, ReplayCacheError> {
+        let mut cloned = Self::try_new(self.config)?;
+        cloned.entries.extend(self.entries.iter().cloned());
+        cloned.storage.copy_from_slice(&self.storage);
+        cloned.retained_bytes = self.retained_bytes;
+        cloned.highest_new_id = self.highest_new_id;
+        Ok(cloned)
+    }
+
+    fn cached_response(&self, entry: &ReplayEntry) -> ControllerResponse {
+        let response = self.storage
+            [entry.response_offset..entry.response_offset + entry.response_bytes]
+            .to_vec();
+        ControllerResponse {
+            request_id: entry.request_id,
+            status: entry.response_status,
+            revision: entry.response_revision,
+            bytes: if entry.framed {
+                Vec::new()
+            } else {
+                response.clone()
+            },
+            frame_bytes: entry.framed.then_some(response),
         }
+    }
+
+    fn compact(&mut self) {
+        let mut cursor = 0;
+        for entry in &mut self.entries {
+            let request_end = entry.request_offset + entry.request_bytes;
+            self.storage
+                .copy_within(entry.request_offset..request_end, cursor);
+            entry.request_offset = cursor;
+            cursor += entry.request_bytes;
+            let response_end = entry.response_offset + entry.response_bytes;
+            self.storage
+                .copy_within(entry.response_offset..response_end, cursor);
+            entry.response_offset = cursor;
+            cursor += entry.response_bytes;
+        }
+        debug_assert_eq!(cursor, self.retained_bytes);
     }
 
     /// Inspect/capacity-reserve a request before execution. An `Execute` result makes enough
@@ -183,8 +282,10 @@ impl ReplayCache {
             .iter()
             .find(|entry| entry.request_id == request_id)
         {
-            return if entry.request == request {
-                ReplayDecision::Cached(entry.response.clone())
+            return if self.storage[entry.request_offset..entry.request_offset + entry.request_bytes]
+                == *request
+            {
+                ReplayDecision::Cached(self.cached_response(entry))
             } else {
                 ReplayDecision::RequestIdReuse
             };
@@ -247,11 +348,26 @@ impl ReplayCache {
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
+        self.compact();
+        let request_offset = self.retained_bytes;
+        let response_offset = request_offset + request.len();
+        let response_bytes = response
+            .frame_bytes
+            .as_deref()
+            .unwrap_or(response.bytes.as_slice());
+        self.storage[request_offset..response_offset].copy_from_slice(request);
+        self.storage[response_offset..response_offset + response_bytes.len()]
+            .copy_from_slice(response_bytes);
         self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
         self.entries.push_back(ReplayEntry {
             request_id,
-            request: request.to_vec(),
-            response,
+            request_offset,
+            request_bytes: request.len(),
+            response_offset,
+            response_bytes: response_bytes.len(),
+            response_status: response.status,
+            response_revision: response.revision,
+            framed: response.frame_bytes.is_some(),
         });
         Ok(())
     }
@@ -279,13 +395,17 @@ impl ReplayCache {
     pub const fn config(&self) -> ReplayCacheConfig {
         self.config
     }
+
+    /// Inspect eager metadata and byte-arena capacities without exposing replay contents.
+    #[must_use]
+    pub fn retained_storage_capacities(&self) -> (usize, usize) {
+        (self.entries.capacity(), self.storage.len())
+    }
 }
 
 impl ReplayEntry {
     fn byte_len(&self) -> usize {
-        self.request
-            .len()
-            .saturating_add(self.response.replay_byte_len())
+        self.request_bytes.saturating_add(self.response_bytes)
     }
 }
 
@@ -299,6 +419,15 @@ pub enum ReplayCacheError {
     ReservationMissing,
     /// A configured retained payload layout or checked sum is not representable.
     ResourceOverflow,
+    /// Eager replay metadata or byte-arena allocation failed before publication.
+    ResourceAllocation,
+}
+
+impl Clone for ReplayCache {
+    fn clone(&self) -> Self {
+        self.try_clone_eager()
+            .expect("cloning an accepted replay cache eagerly allocates its declared capacity")
+    }
 }
 
 impl fmt::Display for ReplayCacheError {
@@ -434,6 +563,46 @@ impl Default for MockProvider {
 }
 
 impl MockProvider {
+    /// Construct an empty provider with eager retained mutable collection capacities.
+    pub fn try_with_retained_capacity(
+        capacity: ControllerRetainedCapacity,
+    ) -> Result<Self, ControllerResourceAllocationError> {
+        let mut provider = Self {
+            telemetry_configuration: retained_telemetry_configuration(capacity)?,
+            ..Self::default()
+        };
+        provider
+            .counter_snapshot
+            .values
+            .try_reserve_exact(capacity.counter_ids)
+            .map_err(|_| ControllerResourceAllocationError)?;
+        Ok(provider)
+    }
+
+    /// Inspect eager mutable retained capacities without exposing provider state mutation.
+    #[must_use]
+    pub fn retained_capacities(&self) -> (ControllerRetainedCapacity, usize) {
+        (
+            ControllerRetainedCapacity {
+                meter_handles: self.telemetry_configuration.meter_handles.capacity(),
+                counter_ids: self.telemetry_configuration.counter_ids.capacity(),
+            },
+            self.counter_snapshot.values.capacity(),
+        )
+    }
+
+    /// Install one bounded typed automation parameter for cross-transport conformance fixtures.
+    fn install_conformance_parameter(
+        &mut self,
+        descriptor: crate::ParameterDescriptor,
+        state: crate::ParameterStateRecord,
+    ) {
+        self.parameter_metadata.clear();
+        self.parameter_metadata.push(descriptor);
+        self.parameter_state.records.clear();
+        self.parameter_state.records.push(state);
+    }
+
     /// Construct deterministic typed fixtures only after every configured collection is bounded.
     pub fn new(config: MockProviderConfig) -> Result<Self, ParameterProviderError> {
         let validation_codec = ProtocolCodec::default();
@@ -692,8 +861,20 @@ impl ControlProvider for MockProvider {
         &mut self,
         configuration: TelemetryConfiguration,
     ) -> TelemetryConfiguration {
-        self.telemetry_configuration = configuration;
-        self.telemetry_configuration.clone()
+        self.telemetry_configuration.meter_handles.clear();
+        self.telemetry_configuration
+            .meter_handles
+            .extend_from_slice(&configuration.meter_handles);
+        self.telemetry_configuration.counter_ids.clear();
+        self.telemetry_configuration
+            .counter_ids
+            .extend_from_slice(&configuration.counter_ids);
+        self.telemetry_configuration.meter_period_blocks = configuration.meter_period_blocks;
+        self.telemetry_configuration.counter_period_blocks = configuration.counter_period_blocks;
+        self.telemetry_configuration.diagnostics_enabled = configuration.diagnostics_enabled;
+        self.telemetry_configuration.minimum_diagnostic_severity =
+            configuration.minimum_diagnostic_severity;
+        configuration
     }
 }
 
@@ -1013,6 +1194,49 @@ pub struct ProtocolController<P: ControlProvider> {
 }
 
 impl<P: ControlProvider> ProtocolController<P> {
+    /// Construct an endpoint after eagerly allocating every mutable retained controller vector.
+    pub fn try_with_config_and_retained_capacity(
+        session: SessionStore,
+        queues: ProtocolQueues,
+        provider: P,
+        replay: ReplayCache,
+        codec: ProtocolCodec,
+        config: ProtocolControllerConfig,
+        capacity: ControllerRetainedCapacity,
+    ) -> Result<Self, ControllerResourceAllocationError> {
+        let diagnostic_slots = queues.config().reliable_event_slots.get();
+        let mut diagnostics = Vec::new();
+        diagnostics
+            .try_reserve_exact(diagnostic_slots)
+            .map_err(|_| ControllerResourceAllocationError)?;
+        diagnostics.resize_with(diagnostic_slots, || None);
+        Ok(Self {
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            next_reliable_event_sequence: 1,
+            telemetry_configuration: retained_telemetry_configuration(capacity)?,
+            diagnostic_event_slots: diagnostics.into_boxed_slice(),
+            pending_reliable_event: None,
+            pending_meter_record: None,
+            pending_counter_record: None,
+            pending_telemetry_event: PendingTelemetryEvent::None,
+            structural_generation: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Inspect eager controller telemetry capacities without exposing mutable configuration.
+    #[must_use]
+    pub fn retained_configuration_capacity(&self) -> ControllerRetainedCapacity {
+        ControllerRetainedCapacity {
+            meter_handles: self.telemetry_configuration.meter_handles.capacity(),
+            counter_ids: self.telemetry_configuration.counter_ids.capacity(),
+        }
+    }
+
     /// Bind a precompiled session, already prepared protocol queues, provider, and bounded replay
     /// cache into one control endpoint. This does not create a render plan.
     #[must_use]
@@ -1054,30 +1278,19 @@ impl<P: ControlProvider> ProtocolController<P> {
         codec: ProtocolCodec,
         config: ProtocolControllerConfig,
     ) -> Self {
-        let diagnostic_slots = queues.config().reliable_event_slots.get();
-        Self {
+        Self::try_with_config_and_retained_capacity(
             session,
             queues,
             provider,
             replay,
             codec,
             config,
-            next_reliable_event_sequence: 1,
-            telemetry_configuration: TelemetryConfiguration {
-                meter_handles: Vec::new(),
-                meter_period_blocks: 0,
-                counter_ids: Vec::new(),
-                counter_period_blocks: 0,
-                diagnostics_enabled: false,
-                minimum_diagnostic_severity: crate::DiagnosticSeverity::Info,
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
             },
-            diagnostic_event_slots: vec![None; diagnostic_slots].into_boxed_slice(),
-            pending_reliable_event: None,
-            pending_meter_record: None,
-            pending_counter_record: None,
-            pending_telemetry_event: PendingTelemetryEvent::None,
-            structural_generation: Arc::new(AtomicU64::new(0)),
-        }
+        )
+        .expect("zero-capacity controller construction does not allocate telemetry vectors")
     }
 
     /// Process one logical request with exact-byte replay and no renderer call.
@@ -1274,7 +1487,10 @@ impl<P: ControlProvider> ProtocolController<P> {
             });
         }
 
-        let mut prospective_replay = self.replay.clone();
+        let mut prospective_replay = self
+            .replay
+            .try_clone_eager()
+            .map_err(|_| CommandFrameProcessError::Internal)?;
         if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
             return self.process_immediate_command(input, scratch, output_capacity);
         }
@@ -2505,7 +2721,22 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Ok(bytes) => {
                         // The codec has just validated the complete normalized six-field value.
                         // Only then may it enable/mock-configure endpoint event egress.
-                        self.telemetry_configuration = configured;
+                        self.telemetry_configuration.meter_handles.clear();
+                        self.telemetry_configuration
+                            .meter_handles
+                            .extend_from_slice(&configured.meter_handles);
+                        self.telemetry_configuration.counter_ids.clear();
+                        self.telemetry_configuration
+                            .counter_ids
+                            .extend_from_slice(&configured.counter_ids);
+                        self.telemetry_configuration.meter_period_blocks =
+                            configured.meter_period_blocks;
+                        self.telemetry_configuration.counter_period_blocks =
+                            configured.counter_period_blocks;
+                        self.telemetry_configuration.diagnostics_enabled =
+                            configured.diagnostics_enabled;
+                        self.telemetry_configuration.minimum_diagnostic_severity =
+                            configured.minimum_diagnostic_severity;
                         self.response(request.request_id, StatusCode::Ok, bytes)
                     }
                     Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
@@ -3177,6 +3408,19 @@ impl<P: ControlProvider> ProtocolController<P> {
             self.provider.record_canceled_automation(canceled);
         }
         Ok(canceled)
+    }
+}
+
+impl ProtocolController<MockProvider> {
+    /// Install one bounded typed parameter for external transport conformance evidence.
+    #[doc(hidden)]
+    pub fn install_conformance_parameter(
+        &mut self,
+        descriptor: crate::ParameterDescriptor,
+        state: crate::ParameterStateRecord,
+    ) {
+        self.provider
+            .install_conformance_parameter(descriptor, state);
     }
 }
 
