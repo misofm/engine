@@ -8,8 +8,8 @@
 //!
 //! # The law
 //!
-//! Two instantaneous-peak one-pole followers (0.5 ms / 20 ms and 10 ms / 100 ms) track the linked
-//! detector magnitude. Their ratio is the *contrast*
+//! Two switched attack/release one-pole followers — fast at 0.5 ms / 20 ms and slow at
+//! 10 ms / 100 ms — track the linked detector magnitude. Their ratio is the *contrast*
 //! `c = DB_PER_OCTAVE * log2(max(fast, FLOOR) / max(slow, FLOOR))` in dB, clamped to ±24 dB; the
 //! shape is `A * max(c, 0) + S * max(-c, 0)` clamped to ±18 dB; the gain is
 //! `exp2(OCTAVES_PER_DB * shape)` — which is `10^(shape / 20)` — and the output is the dry/wet mix
