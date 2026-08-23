@@ -6,12 +6,14 @@ Make the compiler's canonical sequential graph schedule exactly the concatenatio
 sorted dependency levels so a retained homogeneous bank never gathers another member's input
 before that input has been produced in the current block.
 
-**COMPLETE / SOL XHIGH PASS.** The user directed execution of standing audit controller Issue 125
+**BOUNDED HOLD / SOLE CORRECTION AUTHORIZED.** The user directed execution of standing audit
+controller Issue 125
 after the terminal verdict recorded below. AGENTS.md requires a failed shape to be rescoped and
 rebriefed before work restarts, while Issue 125 requires Issue 123 to finish in place rather than
-creating an attempt issue. Sol XHigh approved this synchronized narrower restart and returned
-strict PASS on its first fresh Sol High implementation attempt on 2026-08-23; no correction was
-consumed.
+creating an attempt issue. Sol XHigh approved this synchronized narrower restart. Its first fresh
+implementation verdict was invalidated by main CI run `32631304629`, which found two pre-existing
+hand-built plans with empty dependency levels. Sol XHigh issued the fresh workflow's sole bounded
+HOLD and authorized only the test/audit metadata correction recorded below.
 
 The old 100,000-render audit remains consumed: invocation count `1`, retry count `0`. It is not an
 acceptance gate, may not be rerun, and neither its `0xf8ee_8fef_8f42_3df4` candidate nor the stopped
@@ -219,13 +221,19 @@ or worker-lifetime change, allocation-arena redesign, telemetry cleanup or test-
 
 - `crates/miso-engine-graph-compiler/src/lib.rs` and its focused existing tests;
 - `crates/miso-engine-graph/src/lib.rs` and its focused existing tests;
+- only `source_bind_fixture()` in `crates/miso-engine-builtins-compiler/src/lib.rs`, to replace its
+  empty levels with the three sorted singleton levels already implied by its input-to-builtin-to-
+  output test graph;
+- only `prepared_graph()` in `tools/miso-engine-graph-audit/src/main.rs`, to replace its empty
+  levels with the two sorted singleton levels already claimed by its resource estimate;
 - this issue spec and its tracked brief; and
 - minimal Issue-123 routing in `.github/ISSUE_SPECS/README.md`,
   `docs/IMPLEMENTATION_PLAN.md` and the Issue-026 dependency list.
 
-Any edit to graph fixtures/generator, `crates/miso-engine-native-scheduler/**`, Cargo manifests or
-lockfile, accepted qualification/benchmark artifacts, core, builtins/effect production code,
-another runtime crate or another issue's evidence is STOP and requires a new or amended issue.
+Any other edit to builtins-compiler or graph-audit, or any edit to graph fixtures/generator,
+`crates/miso-engine-native-scheduler/**`, Cargo manifests or lockfile, accepted qualification/
+benchmark artifacts, core, builtins/effect production code, another runtime crate or another
+issue's evidence is STOP and requires a new or amended issue.
 
 ## Dependencies by exact title
 
@@ -447,3 +455,36 @@ historical 100,000-render audit was not invoked in the fresh workflow: total inv
 
 This PASS closes Issue-098 F1 only. Issue-098 F2–F13 and Issue-099 wave 3 remain open. GitHub Issue
 123 closes after this evidence is upstream on `main` and the resulting CI run is green.
+
+## Main-CI invalidation and sole bounded correction
+
+Main CI run `32631304629`, host job `97174441665`, invalidated the focused PASS when
+`miso-engine-builtins-compiler::tests::source_set_bind_succeeds_with_private_builtin_and_external_ownership`
+failed with `graph.scheduler.layout`. Its test-only `source_bind_fixture()` describes the valid
+chain input level 0, builtin level 1, output level 2 but supplied `dependency_levels: Vec::new()`.
+The same static audit found the only other empty-level hand-built plan in
+`tools/miso-engine-graph-audit::prepared_graph()`: its input-to-output graph and resource estimate
+require singleton levels 0 and 1, and a three-block preflight fails before render with the same
+code.
+
+Sol XHigh issued the fresh workflow's sole bounded HOLD. The correction may only replace those two
+empty vectors with their sorted singleton levels. Every non-test builtins-compiler line and every
+other graph-audit behavior is frozen. Graph validation, compiler production, render code, public
+APIs, manifests, fixtures and scripts must not change.
+
+At `9960a26`, the named builtins test and three-block graph-audit preflight are the red baselines.
+Reverting either helper independently must restore its failure. Wrong, reversed, duplicate or
+omitted levels remain rejected by the existing graph corruption gates; validator weakening is
+terminal STOP.
+
+Required green evidence is the focused source-set test, all builtins-compiler library tests,
+graph-audit all-target tests, one three-block functional audit and
+`bash scripts/trace-graph-audit.sh 3`, graph/graph-compiler package tests, full workspace all-target
+tests, formatting, warning-denied Clippy/rustdoc, graph/realtime/workspace policies, diff check and
+an exact two-helper production fence. The three-block failed preflight and correction run are not
+the historical 100,000-render audit, a benchmark or timing run.
+
+Fresh counters are attempt 1, HOLD 1, sole correction authorized. No further correction follows
+it. Historical long-audit counters stay one invocation and zero retries; benchmark and timed-
+benchmark counts stay zero. A replacement green main CI must precede terminal Sol XHigh PASS and
+GitHub closure; any failure after this correction is terminal STOP.

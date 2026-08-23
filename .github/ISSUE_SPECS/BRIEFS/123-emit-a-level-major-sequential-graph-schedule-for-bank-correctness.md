@@ -2,11 +2,12 @@
 
 ## Decision
 
-**COMPLETE / SOL XHIGH PASS.** After the recorded terminal verdict, the user directed
+**BOUNDED HOLD / SOLE CORRECTION AUTHORIZED.** After the recorded terminal verdict, the user directed
 execution of standing controller Issue 125. AGENTS.md and Issue 125 authorize a narrower,
 synchronized in-place rescope rather than a disguised fourth retry or a new attempt issue. This
-fresh workflow passed its first Sol High implementation attempt at `494f4fe` under Sol XHigh
-adversarial review; no HOLD or correction was consumed.
+fresh workflow's first Sol High implementation attempt at `494f4fe` passed focused review but was
+invalidated by main CI `32631304629`. Sol XHigh issued the sole bounded HOLD for two exact
+test/audit metadata repairs; no production correction or later HOLD is authorized.
 
 The replacement gates are #98 wave-0 E1/E2 plus the Issue-037 100-layout transcript derived from
 independently prepared native execution on every layout. The previous 100,000-render audit remains
@@ -171,3 +172,16 @@ The stopped periodic extrapolation did not return, the historical long audit was
 red mutations failed and were reverted, the fixture exception remains exact, and integration with
 accepted Issue-94 commit `97e1a03` is clean. This fresh PASS supersedes only the earlier terminal
 verdict for the explicitly rescoped proof; the stopped checkpoint remains technical input only.
+
+## Sole bounded correction after main CI
+
+Main CI `32631304629` invalidated the focused PASS because test-only
+`miso-engine-builtins-compiler::source_bind_fixture()` supplied no levels for its valid
+input-to-builtin-to-output chain. The only other empty-level plan is the graph-audit tool's valid
+input-to-output graph, which also fails before rendering.
+
+The sole correction may add only three sorted singleton levels to that test helper and two sorted
+singleton levels to `tools/miso-engine-graph-audit::prepared_graph()`. Do not change production
+validation or any other line in those files. Reproduce both red failures, restore either empty list
+as independent red mutations, then run the exact focused/audit/workspace/policy gates in the issue
+spec and obtain green main CI. The next Sol XHigh verdict is terminal PASS or STOP.
