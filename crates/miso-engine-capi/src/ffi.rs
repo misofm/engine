@@ -83,12 +83,31 @@ unsafe fn write_bytes(out: *mut BytesOut, value: &[u8]) -> u32 {
     RESULT_OK
 }
 
-unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64) -> Result<&'a [u8], u32> {
-    if data.is_null() {
+/// Frozen upper bound on borrowed source-ID bytes: `StableId` is `[a-z][a-z0-9._-]{0,126}`
+/// (`miso-engine-session/src/id.rs`), so no valid ID exceeds 127 bytes.
+const MAX_SOURCE_ID_BYTES: u64 = 127;
+
+/// Frozen maximum extent of any single borrowed region, in bytes.
+///
+/// `core::slice::from_raw_parts` requires the total size to fit in `isize`; a larger caller-declared
+/// length is undefined behaviour before a single byte is read, so it is rejected here.
+const MAX_BORROWED_BYTES: u64 = isize::MAX as u64;
+
+/// Borrows caller bytes for the duration of one call.
+///
+/// Rejects a null pointer, a length above the call's own `limit`, and any length the platform
+/// cannot address as one slice, all before the region is turned into a slice.
+///
+/// # Safety
+///
+/// A nonnull `data` must be readable for `bytes` bytes for the duration of the call.
+unsafe fn borrowed_bytes<'a>(data: *const u8, bytes: u64, limit: u64) -> Result<&'a [u8], u32> {
+    if data.is_null() || bytes > limit || bytes > MAX_BORROWED_BYTES {
         return Err(RESULT_INVALID_ARGUMENT);
     }
     let bytes = usize::try_from(bytes).map_err(|_| RESULT_INVALID_ARGUMENT)?;
-    // SAFETY: The caller promises `data` is readable for the declared byte count for this call.
+    // SAFETY: `data` is nonnull, the caller promises it is readable for the declared byte count for
+    // this call, and the length was proved to be at most `isize::MAX` above.
     Ok(unsafe { core::slice::from_raw_parts(data, bytes) })
 }
 
@@ -316,7 +335,7 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
             };
         }
         // SAFETY: The caller promises the TOML region is readable for `toml_bytes`.
-        let toml = match unsafe { borrowed_bytes(toml, toml_bytes) } {
+        let toml = match unsafe { borrowed_bytes(toml, toml_bytes, limits.maximum_toml_bytes) } {
             Ok(value) => value,
             Err(code) => return code,
         };
@@ -406,25 +425,32 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
             || chunk.plane_count == 0
             || chunk.plane_count > 255
             || chunk.planes.is_null()
+            || !chunk.planes.is_aligned()
+            || u64::from(chunk.frames).saturating_mul(core::mem::size_of::<f32>() as u64)
+                > MAX_BORROWED_BYTES
         {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The caller promises the source-ID storage is readable for this call.
-        let source_id = match unsafe { borrowed_bytes(source_id, source_id_bytes) } {
-            Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
-            _ => return RESULT_INVALID_ARGUMENT,
-        };
+        let source_id =
+            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
+                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
+                _ => return RESULT_INVALID_ARGUMENT,
+            };
         let plane_count = chunk.plane_count as usize;
-        // SAFETY: The caller promises an array of `plane_count` readable plane pointers.
+        // SAFETY: `chunk.planes` was proved nonnull and pointer-aligned above, `plane_count` is at
+        // most 255 so the array is far inside `isize::MAX` bytes, and the caller promises that many
+        // readable plane pointers for this call.
         let plane_pointers = unsafe { core::slice::from_raw_parts(chunk.planes, plane_count) };
         let frames = chunk.frames as usize;
         let mut planes: [&[f32]; 255] = [&[]; 255];
         for (index, plane) in plane_pointers.iter().enumerate() {
-            if plane.is_null() {
+            if plane.is_null() || !plane.is_aligned() {
                 return RESULT_INVALID_ARGUMENT;
             }
-            // SAFETY: Each nonnull caller plane is readable for exactly `frames` samples and is
-            // borrowed only until the underlying source submission copies it.
+            // SAFETY: Each caller plane is nonnull, `f32`-aligned, and at most `isize::MAX` bytes
+            // long — all checked above — is readable for exactly `frames` samples, and is borrowed
+            // only until the underlying source submission copies it.
             planes[index] = unsafe { core::slice::from_raw_parts(*plane, frames) };
         }
         // SAFETY: `session` passed the live-kind check and this operation requires its exclusive
@@ -486,10 +512,11 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The caller promises the source-ID storage is readable for this call.
-        let source_id = match unsafe { borrowed_bytes(source_id, source_id_bytes) } {
-            Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
-            _ => return RESULT_INVALID_ARGUMENT,
-        };
+        let source_id =
+            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
+                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
+                _ => return RESULT_INVALID_ARGUMENT,
+            };
         // SAFETY: `session` passed the live-kind check and the ABI requires exclusive serial
         // source-control ownership for seek.
         let session = unsafe { &mut *session };
@@ -540,7 +567,8 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
             Err(code) => return code,
         };
         // SAFETY: The caller promises the complete request frame is readable for this call.
-        let request = match unsafe { borrowed_bytes(request, request_bytes) } {
+        // The control codec bounds the frame itself; only the platform slice cap applies here.
+        let request = match unsafe { borrowed_bytes(request, request_bytes, MAX_BORROWED_BYTES) } {
             Ok(value) if !value.is_empty() => value,
             _ => return RESULT_INVALID_ARGUMENT,
         };
@@ -702,6 +730,10 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         let state = unsafe { &mut *plan_state(plan) };
         // SAFETY: See above; the diagnostic slot is disjoint from `state`.
         let error = unsafe { &*plan_error_slot(plan) };
+        if !output.samples.is_aligned() {
+            error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
+            return RESULT_INVALID_ARGUMENT;
+        }
         let frames = state.quantum_frames();
         let required_samples =
             match u64::from(output.plane_stride_samples).checked_add(u64::from(output.frames)) {
@@ -733,11 +765,11 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
                 return RESULT_RENDER_REJECTED;
             }
         };
-        // SAFETY: Scalar validation proved the exact contiguous region required by two planes is
-        // within caller capacity and Rust's maximum slice extent. The caller promises this many
-        // writable aligned `f32` elements exclusively for the duration of the call.
         let samples_pointer = output.samples;
-        // SAFETY: The preceding validation proves the pointer is writable for this exact extent.
+        // SAFETY: `output.samples` was proved nonnull and `f32`-aligned above, and scalar
+        // validation proved the exact contiguous region required by two planes is within caller
+        // capacity and at most `isize::MAX` bytes. The caller promises this many writable `f32`
+        // elements exclusively for the duration of the call.
         let samples = unsafe { core::slice::from_raw_parts_mut(samples_pointer, required_samples) };
         let render_output = match miso_engine_core::realtime::PlanarBufferMut::try_new(
             samples,
@@ -1815,6 +1847,210 @@ mod tests {
             read_last_error(plan.cast()),
             plan_error::text(plan_error::CONTRACT_REJECTED),
             "a const-plan query must not clear the render diagnostic"
+        );
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// F3: every caller-declared length is bounded by the call's own limit and by `isize::MAX`
+    /// before the region becomes a slice. The pointer used here is dangling: if any check were
+    /// missing, `from_raw_parts` would hit its debug precondition and abort the test process.
+    #[test]
+    fn oversized_borrowed_lengths_are_rejected_before_any_read() {
+        let (engine, session, plan) = compiled_fixture();
+        let dangling = ptr::NonNull::<u8>::dangling().as_ptr().cast_const();
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let planes = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: planes.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut submitted = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        for source_id_bytes in [u64::MAX, MAX_SOURCE_ID_BYTES + 1, MAX_BORROWED_BYTES + 1] {
+            assert_eq!(
+                // SAFETY: The oversized declared length is rejected before `dangling` is read.
+                unsafe {
+                    miso_engine_v2_source_submit_planar_f32(
+                        session,
+                        dangling,
+                        source_id_bytes,
+                        &chunk,
+                        &mut submitted,
+                    )
+                },
+                RESULT_INVALID_ARGUMENT
+            );
+            assert_eq!(submitted.accepted_frames, 0);
+            assert_eq!(
+                seek(session, dangling, source_id_bytes, 1, 0),
+                RESULT_INVALID_ARGUMENT
+            );
+        }
+        let mut response = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        assert_eq!(
+            // SAFETY: The oversized declared frame length is rejected before `dangling` is read.
+            unsafe {
+                miso_engine_v2_submit_command(
+                    session,
+                    dangling,
+                    MAX_BORROWED_BYTES + 1,
+                    &mut response,
+                )
+            },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(response.required_bytes, 0);
+
+        let mut unbounded = limits();
+        unbounded.maximum_toml_bytes = u64::MAX;
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        let mut oversized_session = ptr::null_mut();
+        let mut oversized_plan = ptr::null_mut();
+        assert_eq!(
+            // SAFETY: The oversized declared TOML length is rejected before `dangling` is read.
+            unsafe {
+                miso_engine_v2_compile_session(
+                    engine,
+                    dangling,
+                    MAX_BORROWED_BYTES + 1,
+                    &unbounded,
+                    &mut diagnostics,
+                    &mut oversized_session,
+                    &mut oversized_plan,
+                )
+            },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert!(oversized_session.is_null());
+        assert!(oversized_plan.is_null());
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// F3: every float plane the ABI turns into a slice is null- and alignment-checked first. A
+    /// misaligned pointer reaching `from_raw_parts` would abort the test process on its debug
+    /// precondition instead of returning a typed code.
+    #[test]
+    fn misaligned_planes_and_output_are_rejected() {
+        let (engine, session, plan) = compiled_fixture();
+        let staging = vec![0.0_f32; 130];
+        let base = staging.as_ptr().cast::<u8>();
+        let misaligned_plane = base.wrapping_add(1).cast::<f32>();
+        assert!(!misaligned_plane.is_aligned());
+        let aligned_plane = staging.as_ptr();
+        let planes = [misaligned_plane, aligned_plane];
+        let mut chunk = SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: planes.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut submitted = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        assert_eq!(
+            // SAFETY: The misaligned plane is rejected before it becomes a slice.
+            unsafe {
+                miso_engine_v2_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &chunk,
+                    &mut submitted,
+                )
+            },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(submitted.accepted_frames, 0);
+
+        let pointer_store = [0_u64; 4];
+        let misaligned_planes = pointer_store
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_add(4)
+            .cast::<*const f32>();
+        assert!(!misaligned_planes.is_aligned());
+        chunk.planes = misaligned_planes;
+        assert_eq!(
+            // SAFETY: The misaligned plane array is rejected before it becomes a slice.
+            unsafe {
+                miso_engine_v2_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &chunk,
+                    &mut submitted,
+                )
+            },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(submitted.accepted_frames, 0);
+
+        let mut pcm = vec![f32::NAN; 258];
+        let mut output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr().cast::<u8>().wrapping_add(2).cast::<f32>(),
+            sample_capacity: 256,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert!(!output.samples.is_aligned());
+        assert_eq!(
+            // SAFETY: The misaligned output is rejected before it becomes a slice.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_INVALID_ARGUMENT
+        );
+        assert!(pcm.iter().all(|sample| sample.is_nan()));
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::OUTPUT_UNALIGNED)
+        );
+
+        output.samples = pcm.as_mut_ptr();
+        assert_eq!(
+            // SAFETY: The aligned output now satisfies the complete render contract.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            RESULT_OK
+        );
+        assert!(pcm[..256].iter().all(|sample| sample.is_finite()));
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::NONE)
         );
         destroy_fixture(engine, session, plan);
     }
