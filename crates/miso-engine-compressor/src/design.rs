@@ -70,8 +70,9 @@ pub(crate) const ALL_PARAMETERS: u8 = 0b0111_1111;
 
 /// The widest [`miso_engine_lane::Lane`]; the number of lane columns a coefficient word holds.
 ///
-/// Not a track ceiling: a bank is exactly one lane wide per track and the engine has no
-/// `MAX_TRACKS`.
+/// Not a track ceiling. A bank is exactly one lane wide per track, the engine imposes no ceiling on
+/// how many tracks a session has, and a cohort simply uses as many banks as it needs; this constant
+/// is the width of the widest SIMD register the build can use and nothing else.
 pub(crate) const MAX_WIDTH: usize = 8;
 
 /// Coefficient words, coefficient-major so that one `Lane::load` fills one lane vector.

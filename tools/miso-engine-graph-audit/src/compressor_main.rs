@@ -132,7 +132,7 @@ fn main() {
             let mut points = threshold_points;
             if ramping {
                 // Alternate the target so the ramp restarts rather than settling once.
-                let value = if (block / AUTOMATION_EVERY) % 2 == 0 {
+                let value = if (block / AUTOMATION_EVERY).is_multiple_of(2) {
                     -30.0
                 } else {
                     -12.0
