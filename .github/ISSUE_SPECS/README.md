@@ -94,12 +94,15 @@ strict-session compilation, separate control/render ownership, bounded host sour
 caller-owned planar output. Issue 101, **Close native-source seek backpressure without worker
 termination**, stopped after its second review HOLD with the bounded production correction retained
 only as technical input. Issue 112, **Close native-source seek submission qualification and seal
-backpressure fix**, owns the remaining test-only submission handshake and one fresh clean broad
-nonbenchmark seal. Issue 073, **Native PCM reference runner and C ABI qualification**, follows Issue
-022 only after Issue 112 closes; it alone owns native WAV/RF64 runner breadth, complete Issue-005
-provider/mutation integration and native platform qualification. Issues 101 and 112 change no
-public/resource shape and defer the source audit's F2–F12. Issue 023 consumes the host-fed product
-directly; Issues 025 and 026 wait for Issue 073. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
+backpressure fix**, completed the remaining test-only handshake and fresh clean broad nonbenchmark
+seal with Sol XHigh PASS. Issue 073, **Native WAV/RF64 reference runner over frozen C ABI V1**,
+follows accepted Issues 022 and 112 and owns only the native file runner and deterministic PCM
+fixtures. Issue 113, **Close C ABI control/event transport and transactional plan replacement**,
+follows accepted Issues 005, 003 and 022 and owns the complete control provider, event egress and
+replacement-plan product; it gates Issue 025 directly. Issue 114, **Qualify native C ABI and
+reference runner target matrix**, joins Issues 073 and 113 and alone owns native platform/runner
+qualification before Issue 026. Issues 101 and 112 change no public/resource shape and defer the
+source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
 stopped after two attempts at checkpoint `ba7ffc6`; that checkpoint is technical input only and is
 not an accepted dependency. Issue 075, **Close AudioWorklet lifecycle and backend identity**, stopped
 after its sole browser invocation rejected WebDriver Navigate To's valid null success before product
@@ -168,12 +171,13 @@ safe move/SPSC/block-stamped correction and gates Issues 022, 023 and 077. Issue
 native-source seek backpressure without worker termination**, consumed that accepted worker but
 stopped after its second HOLD; its `d8fd1762...` production bytes remain technical input without
 overall PASS. Issue 112, **Close native-source seek submission qualification and seal backpressure
-fix**, consumes that checkpoint, closes only the remaining test synchronization and fresh broad
-seal, and precedes Issue 073. Issue 041, **Issue-010 source streaming
+fix**, consumed that checkpoint, closed the remaining test synchronization and fresh broad seal,
+and has Sol XHigh PASS. It precedes tooling-only Issue 073, **Native WAV/RF64 reference runner over
+frozen C ABI V1**. Issue 041, **Issue-010 source streaming
 qualification tooling and adversarial evidence**, follows 043 and owns the expanded diagnostic
 corpus, frozen seek races, real worker-delay audit and duration-independent allocation-layout/RSS
 proof. Issue 041 is nonblocking for hosts/features and gates only release qualification Issue 026.
-Issues 040, 041, 043, 101 and 112 forbid benchmarks; the timed invocation count remains zero.
+Issues 040, 041, 043, 101, 112 and 073 forbid benchmarks; their timed invocation count remains zero.
 
 Issue 012 stopped without overall PASS when its first independent-oracle gate disproved the frozen
 five-`f32`-coefficient direct-form-I numerical contract. Issue 042 then selected an endpoint-
