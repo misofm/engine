@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_host_mobile"
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-target-smoke.workspace = true
 
 [features]

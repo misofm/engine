@@ -117,6 +117,38 @@ names a kernel, and costs build time and artifact size, never speed.
   unwinds and `#[should_panic]` still works. That was verified by inspecting the `rustc`
   command lines: a release binary is compiled with `-C panic=abort`, a release test harness is not.
 
+## Issue 083 boot attestation and the cross-target gate runtime
+
+**Boot attestation.** Master plan D4 removes runtime SIMD dispatch: the instruction set is chosen
+at compile time and there is no scalar fallback to fall back *to*. Every entry point that can start
+an engine therefore calls `miso_engine_lane::attest_host` once, on the control plane, before any
+render state exists, and refuses to start on an error:
+
+| entry point | on failure |
+|---|---|
+| `hosts/miso-engine-host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
+| `hosts/miso-engine-host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
+| `crates/miso-engine-capi` `miso_engine_v2_engine_create` | `MISO_ENGINE_V2_UNSUPPORTED` (7) |
+
+The C header previously said `MISO_ENGINE_V2_UNSUPPORTED` was reserved and never returned; it is
+now returned by that one entry point and the header says so. An embedder that receives it must not
+retry: the library and the CPU do not match. On every supported host the attestation succeeds and
+nothing about these calls changes. `hosts/miso-engine-host-web` is `wasm32`, where the pinned
+instruction set is a whole-artifact build flag rather than a CPU property, so the attestation is a
+compile-time no-operation there and no call is added.
+
+**The gate runtime.** `tools/miso-engine-wasm-gates` depends on `wasmtime = "=47.0.3"`
+(Apache-2.0 WITH LLVM-exception, `default-features = false`, features `runtime`, `cranelift`,
+`std`). It is dev/tooling: it links into no shipped artifact, and no engine crate, host or fixture
+may reach a WebAssembly runtime — AGENTS.md is explicit that a render callback never invokes one.
+The version is pinned exactly because a runtime upgrade may change which post-MVP proposals
+validate, and rejecting a module that uses one is part of what the gate does: the runner sets
+`wasm_relaxed_simd(false)`, so a build that emits a relaxed instruction fails validation instead of
+returning a digest. That distinction is load-bearing and was measured — wasmtime 47 lowers
+`f32x4.relaxed_madd` to a hardware `vfmadd` on an x86 host, so the relaxed instruction *agreed*
+with the exact software FMA there. Agreement on one runtime's lowering choice is not a property of
+the program, which is why D3 forbids the opcode rather than testing its result.
+
 ## Issue 004 control-plane parser dependencies
 
 `miso-engine-session` is not render-reachable. It depends one way on `miso-engine-core` only for

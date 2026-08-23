@@ -42,7 +42,11 @@ extern "C" {
  * miso_engine_v2_last_error on a plan returns a fixed diagnostic selected by the most recent render
  * call ("render.output.unaligned", "render.contract.rejected", ...) and is empty after a successful
  * render; on a session or engine it returns the most recent control-thread diagnostic.
- * MISO_ENGINE_V2_UNSUPPORTED is reserved and is never returned by this ABI.
+ * MISO_ENGINE_V2_UNSUPPORTED is returned by exactly one entry point: miso_engine_v2_engine_create
+ * refuses to create an engine on a CPU that cannot execute the instruction set this library was
+ * built for (issue 083, master plan D4 -- the engine dispatches nothing at runtime, so the check
+ * happens once at boot instead of inside a render callback). No other entry point returns it. An
+ * embedder that receives it must not retry; the library and the CPU do not match.
  */
 
 #define MISO_ENGINE_V2_ABI_VERSION UINT32_C(0x00010000)

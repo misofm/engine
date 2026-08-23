@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-target-smoke.workspace = true
 
 [[bin]]

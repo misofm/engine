@@ -7,7 +7,8 @@ use crate::{
     EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, HandleHeader, Plan,
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_WRONG_HANDLE, Session, SourceChunk, SubmitReport,
+    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session,
+    SourceChunk, SubmitReport,
 };
 use core::ffi::c_void;
 use core::ptr;
@@ -227,6 +228,12 @@ pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilitie
 
 /// Creates an engine factory handle without compiling runtime state.
 ///
+/// This is the C ABI's boot entry, so it is where the CPU is attested (master plan #83 D4). The
+/// engine is compiled for a pinned instruction set and dispatches nothing at runtime; a host whose
+/// CPU cannot execute it is told so, once, with [`RESULT_UNSUPPORTED`], rather than being allowed
+/// to reach an illegal instruction inside a render callback. On a CPU that satisfies the pin —
+/// every supported host — nothing about this call changes.
+///
 /// # Safety
 ///
 /// `config` and `out_engine` must satisfy their readable/writable ABI V1 pointer contracts.
@@ -254,6 +261,10 @@ pub unsafe extern "C" fn miso_engine_v2_engine_create(
         }
         if config.abi_version != ABI_VERSION {
             return RESULT_ABI_MISMATCH;
+        }
+        // D4 boot attestation: control-plane work, once per engine, never from render.
+        if miso_engine_lane::attest_host().is_err() {
+            return RESULT_UNSUPPORTED;
         }
 
         let engine = Box::new(Engine::new());
