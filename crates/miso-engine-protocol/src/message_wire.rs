@@ -7,8 +7,8 @@
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
     btlv::{
-        CountSink, Fields as Message, Sink, SliceSink, padding, read_f32, read_u8, read_u16,
-        read_u32, read_u64,
+        CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8, read_u16, read_u32,
+        read_u64,
     },
     schema::{self, descriptor, enum_choice},
 };
@@ -17,8 +17,6 @@ use crate::{
 const WIRE_U8: u8 = 1;
 #[cfg(test)]
 const WIRE_U32: u8 = 3;
-const WIRE_MESSAGE: u8 = 11;
-const TLV_PREFIX_BYTES: usize = 8;
 const NESTED_HEADER_BYTES: usize = 8;
 
 macro_rules! write_spec {
@@ -868,17 +866,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::snapshot_request::OFFSET,
-            &value.offset.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::snapshot_request::MAXIMUM_BYTES,
-            &value.maximum_bytes.to_le_bytes()
-        )?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_snapshot_request(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -902,27 +892,9 @@ impl ProtocolCodec {
 
     /// Exact caller-output length for a snapshot success payload.
     pub fn encoded_snapshot_len(&self, value: SessionSnapshot<'_>) -> Result<usize, EncodeError> {
-        if value.offset > value.total_bytes
-            || u64::try_from(value.canonical_toml_chunk.len())
-                .map_err(|_| EncodeError::LimitExceeded)?
-                > value.total_bytes.saturating_sub(value.offset)
-            || value.eof
-                != (value
-                    .offset
-                    .saturating_add(value.canonical_toml_chunk.len() as u64)
-                    == value.total_bytes)
-        {
-            return Err(EncodeError::LimitExceeded);
-        }
-        let len = tlv_len(8)?
-            .checked_add(tlv_len(8)?)
-            .and_then(|v| v.checked_add(tlv_len(value.canonical_toml_chunk.len()).ok()?))
-            .and_then(|v| v.checked_add(tlv_len(1).ok()?))
-            .ok_or(EncodeError::LimitExceeded)?;
-        if len > self.limits().max_frame_bytes {
-            return Err(EncodeError::LimitExceeded);
-        }
-        Ok(len)
+        let mut sink = CountSink::new(self.limits());
+        write_snapshot(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a typed canonical-TOML snapshot chunk.
@@ -935,23 +907,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::snapshot::TOTAL_BYTES,
-            &value.total_bytes.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::snapshot::OFFSET,
-            &value.offset.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::snapshot::CANONICAL_TOML_CHUNK,
-            value.canonical_toml_chunk
-        )?;
-        write_spec!(writer, schema::snapshot::EOF, &[u8::from(value.eof)])?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_snapshot(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -990,16 +948,15 @@ impl ProtocolCodec {
         value: TransactionApplied,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        const LEN: usize = 16;
-        if output.len() < LEN {
-            return Err(EncodeError::OutputTooSmall { required: LEN });
+        let mut sizing = CountSink::new(self.limits());
+        write_transaction_applied(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        write_spec!(
-            PayloadWriter::new(output, self.limits().max_tlv_count),
-            schema::transaction_applied::APPLIED_OPERATIONS,
-            &value.applied_operations.to_le_bytes()
-        )?;
-        Ok(LEN)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_transaction_applied(&mut writer, value)?;
+        Ok(required)
     }
 
     /// Strictly decode the one-field transaction success payload.
@@ -1024,32 +981,15 @@ impl ProtocolCodec {
         value: SessionCommitted,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        const LEN: usize = 64;
-        if output.len() < LEN {
-            return Err(EncodeError::OutputTooSmall { required: LEN });
+        let mut sizing = CountSink::new(self.limits());
+        write_session_committed(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::session_committed::EVENT_SEQUENCE,
-            &value.event_sequence.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::session_committed::ORIGIN_REQUEST_ID,
-            &value.origin_request_id.get().to_le_bytes(),
-        )?;
-        write_spec!(
-            writer,
-            schema::session_committed::PREVIOUS_REVISION,
-            &value.previous_revision.0.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::session_committed::APPLIED_OPERATIONS,
-            &value.applied_operations.to_le_bytes()
-        )?;
-        Ok(LEN)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_session_committed(&mut writer, value)?;
+        Ok(required)
     }
 
     /// Strictly decode a reliable session-committed event payload.
@@ -1087,24 +1027,15 @@ impl ProtocolCodec {
         value: ParameterMetadataRequest,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        if value.limit == 0 || value.limit > 256 {
-            return Err(EncodeError::LimitExceeded);
+        let mut sizing = CountSink::new(self.limits());
+        write_metadata_request(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        if output.len() < 32 {
-            return Err(EncodeError::OutputTooSmall { required: 32 });
-        }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::metadata_request::AFTER_HANDLE,
-            &value.after_handle.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::metadata_request::LIMIT,
-            &value.limit.to_le_bytes()
-        )?;
-        Ok(32)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_metadata_request(&mut writer, value)?;
+        Ok(required)
     }
     /// Strictly decode the exact two-field metadata cursor request.
     pub fn decode_parameter_metadata_request(
@@ -1160,14 +1091,9 @@ impl ProtocolCodec {
         &self,
         value: &ParameterStateRequest,
     ) -> Result<usize, EncodeError> {
-        check_handles(&value.handles).map_err(|_| EncodeError::LimitExceeded)?;
-        tlv_len(
-            value
-                .handles
-                .len()
-                .checked_mul(4)
-                .ok_or(EncodeError::LimitExceeded)?,
-        )
+        let mut sink = CountSink::new(self.limits());
+        write_state_request(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a bounded sorted unique nonzero state-handle request without allocation.
@@ -1180,8 +1106,8 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.packed_u32(schema::state_request::HANDLES, &value.handles)?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_state_request(&mut writer, value)?;
         Ok(required)
     }
     /// Strictly decode a bounded sorted unique nonzero state-handle request.
@@ -1241,17 +1167,9 @@ impl ProtocolCodec {
         &self,
         value: AutomationEnqueue<'_>,
     ) -> Result<usize, EncodeError> {
-        validate_automation_records(value.records).map_err(|_| EncodeError::LimitExceeded)?;
-        let bytes = value
-            .records
-            .len()
-            .checked_mul(crate::AUTOMATION_RECORD_BYTES)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let len = checked_add(checked_add(tlv_len(2)?, tlv_len(2)?)?, tlv_len(bytes)?)?;
-        if len > self.limits().max_frame_bytes || 3 > self.limits().max_tlv_count {
-            return Err(EncodeError::LimitExceeded);
-        }
-        Ok(len)
+        let mut sink = CountSink::new(self.limits());
+        write_automation_enqueue(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a fixed-record automation command directly into caller-owned output.
@@ -1264,20 +1182,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
-        write_spec!(
-            writer,
-            schema::automation_enqueue::COUNT,
-            &count.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_enqueue::RECORD_BYTES,
-            &(crate::AUTOMATION_RECORD_BYTES as u16).to_le_bytes(),
-        )?;
-        write_automation_record_bytes(&mut writer, value.records)?;
-        debug_assert_eq!(writer.position, required);
+        let mut writer = SliceSink::new(output, self.limits());
+        write_automation_enqueue(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1296,35 +1203,15 @@ impl ProtocolCodec {
         value: AutomationEnqueued,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        const LEN: usize = 64;
-        if value.accepted_records == 0 || value.capacity == 0 || value.occupancy > value.capacity {
-            return Err(EncodeError::LimitExceeded);
+        let mut sizing = CountSink::new(self.limits());
+        write_automation_enqueued(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        if output.len() < LEN {
-            return Err(EncodeError::OutputTooSmall { required: LEN });
-        }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::automation_enqueued::ACCEPTED_RECORDS,
-            &value.accepted_records.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_enqueued::OCCUPANCY,
-            &value.occupancy.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_enqueued::CAPACITY,
-            &value.capacity.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_enqueued::GENERATION,
-            &value.generation.to_le_bytes()
-        )?;
-        Ok(LEN)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_automation_enqueued(&mut writer, value)?;
+        Ok(required)
     }
 
     /// Strictly decode the exact four-field successful automation admission payload.
@@ -1387,15 +1274,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(writer, schema::transport_set::STATE, &[value.state as u8])?;
-        if let Some(position) = value.position {
-            write_spec!(
-                writer,
-                schema::transport_set::POSITION,
-                &position.0.to_le_bytes()
-            )?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_transport_set(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1425,27 +1306,15 @@ impl ProtocolCodec {
         value: TransportSnapshot,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        const LEN: usize = 48;
-        if output.len() < LEN {
-            return Err(EncodeError::OutputTooSmall { required: LEN });
+        let mut sizing = CountSink::new(self.limits());
+        write_transport_snapshot(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::transport_snapshot::STATE,
-            &[value.state as u8]
-        )?;
-        write_spec!(
-            writer,
-            schema::transport_snapshot::POSITION,
-            &value.position.0.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::transport_snapshot::EFFECTIVE_SAMPLE,
-            &value.effective_sample.0.to_le_bytes()
-        )?;
-        Ok(LEN)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_transport_snapshot(&mut writer, value)?;
+        Ok(required)
     }
 
     /// Strictly decode a typed three-field transport snapshot without allocation.
@@ -1491,34 +1360,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::transport_state_event::EVENT_SEQUENCE,
-            &value.event_sequence.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::transport_state_event::STATE,
-            &[value.state as u8]
-        )?;
-        write_spec!(
-            writer,
-            schema::transport_state_event::POSITION,
-            &value.position.0.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::transport_state_event::EFFECTIVE_SAMPLE,
-            &value.effective_sample.0.to_le_bytes()
-        )?;
-        if let Some(origin) = value.origin_request_id {
-            write_spec!(
-                writer,
-                schema::transport_state_event::ORIGIN_REQUEST_ID,
-                &origin.get().to_le_bytes()
-            )?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_transport_state_event(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1575,46 +1419,13 @@ impl ProtocolCodec {
         value: AutomationCanceled,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        if value.canceled_records == 0 {
-            return Err(EncodeError::LimitExceeded);
-        }
         let required = self.encoded_automation_canceled_len(value);
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::automation_canceled::EVENT_SEQUENCE,
-            &value.event_sequence.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_canceled::ORIGIN_REQUEST_ID,
-            &value.origin_request_id.get().to_le_bytes(),
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_canceled::CANCELED_RECORDS,
-            &value.canceled_records.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_canceled::REASON,
-            &[value.reason as u8]
-        )?;
-        write_spec!(
-            writer,
-            schema::automation_canceled::QUEUE_GENERATION,
-            &value.queue_generation.to_le_bytes()
-        )?;
-        if let Some(sample) = value.effective_sample {
-            write_spec!(
-                writer,
-                schema::automation_canceled::EFFECTIVE_SAMPLE,
-                &sample.0.to_le_bytes()
-            )?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_automation_canceled(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1664,13 +1475,9 @@ impl ProtocolCodec {
 
     /// Return the exact caller-buffer bytes required for one fixed-record meter batch.
     pub fn encoded_meter_batch_len(&self, value: MeterBatch<'_>) -> Result<usize, EncodeError> {
-        validate_meter_records(value.records)?;
-        let records = value
-            .records
-            .len()
-            .checked_mul(16)
-            .ok_or(EncodeError::LimitExceeded)?;
-        checked_add(48, tlv_len(records)?)
+        let mut sink = CountSink::new(self.limits());
+        write_meter_batch(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a canonical fixed-record lossy `METER_BATCH` payload without allocation.
@@ -1683,44 +1490,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
-        let record_bytes = value
-            .records
-            .len()
-            .checked_mul(16)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::meter_batch::OBSERVED_SAMPLE,
-            &value.observed_sample.0.to_le_bytes()
-        )?;
-        write_spec!(writer, schema::meter_batch::COUNT, &count.to_le_bytes())?;
-        write_spec!(
-            writer,
-            schema::meter_batch::RECORD_BYTES,
-            &16_u16.to_le_bytes()
-        )?;
-        let start = writer.position;
-        write_spec!(writer, schema::meter_batch::RECORDS, &[])?;
-        let end = start
-            .checked_add(tlv_len(record_bytes)?)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let bytes = writer
-            .output
-            .get_mut(start..end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        bytes[4..8].copy_from_slice(
-            &u32::try_from(record_bytes)
-                .map_err(|_| EncodeError::LimitExceeded)?
-                .to_le_bytes(),
-        );
-        for (index, record) in value.records.iter().enumerate() {
-            encode_meter_record(record, &mut bytes[8 + index * 16..8 + (index + 1) * 16]);
-        }
-        bytes[8 + record_bytes..].fill(0);
-        writer.position = end;
-        debug_assert_eq!(writer.position, required);
+        let mut writer = SliceSink::new(output, self.limits());
+        write_meter_batch(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1844,24 +1616,9 @@ impl ProtocolCodec {
         &self,
         value: &TelemetryConfiguration,
     ) -> Result<usize, EncodeError> {
-        validate_telemetry_configuration(value).map_err(|_| EncodeError::LimitExceeded)?;
-        let meters = value
-            .meter_handles
-            .len()
-            .checked_mul(4)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let counters = value
-            .counter_ids
-            .len()
-            .checked_mul(4)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let length = [meters, 4, counters, 4, 1, 1]
-            .into_iter()
-            .try_fold(0_usize, |sum, field| checked_add(sum, tlv_len(field)?))?;
-        if length > self.limits().max_frame_bytes || 6 > self.limits().max_tlv_count {
-            return Err(EncodeError::LimitExceeded);
-        }
-        Ok(length)
+        let mut sink = CountSink::new(self.limits());
+        write_telemetry_configuration(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a canonical telemetry configuration or success echo without allocation.
@@ -1874,36 +1631,8 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        writer.packed_u32(
-            schema::telemetry_configuration::METER_HANDLES,
-            &value.meter_handles,
-        )?;
-        write_spec!(
-            writer,
-            schema::telemetry_configuration::METER_PERIOD_BLOCKS,
-            &value.meter_period_blocks.to_le_bytes()
-        )?;
-        write_counter_ids(
-            &mut writer,
-            schema::telemetry_configuration::COUNTER_IDS,
-            &value.counter_ids,
-        )?;
-        write_spec!(
-            writer,
-            schema::telemetry_configuration::COUNTER_PERIOD_BLOCKS,
-            &value.counter_period_blocks.to_le_bytes(),
-        )?;
-        write_spec!(
-            writer,
-            schema::telemetry_configuration::DIAGNOSTICS_ENABLED,
-            &[u8::from(value.diagnostics_enabled)]
-        )?;
-        write_spec!(
-            writer,
-            schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY,
-            &[value.minimum_diagnostic_severity as u8]
-        )?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_telemetry_configuration(&mut writer, value)?;
         Ok(required)
     }
 
@@ -1950,12 +1679,9 @@ impl ProtocolCodec {
         &self,
         value: &CountersRequest,
     ) -> Result<usize, EncodeError> {
-        validate_counters_request(value).map_err(|_| EncodeError::LimitExceeded)?;
-        let mut result = tlv_len(1)?;
-        if !value.all {
-            result = checked_add(result, tlv_len(value.ids.len() * 4)?)?;
-        }
-        Ok(result)
+        let mut sink = CountSink::new(self.limits());
+        write_counters_request(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a typed counters selector without allocation.
@@ -1968,15 +1694,8 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::counters_request::ALL,
-            &[u8::from(value.all)]
-        )?;
-        if !value.all {
-            write_u32s(&mut writer, schema::counters_request::IDS, &value.ids)?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_counters_request(&mut writer, value)?;
         Ok(required)
     }
 
@@ -2014,12 +1733,9 @@ impl ProtocolCodec {
         &self,
         value: CounterSnapshotRef<'_>,
     ) -> Result<usize, EncodeError> {
-        validate_counter_snapshot_ref(value).map_err(|_| EncodeError::LimitExceeded)?;
-        let mut result = tlv_len(8)?;
-        for _ in value.values {
-            result = checked_add(result, tlv_len(NESTED_HEADER_BYTES + 32)?)?;
-        }
-        Ok(result)
+        let mut sink = CountSink::new(self.limits());
+        write_counter_snapshot(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a typed ascending nondestructive counter snapshot without allocation.
@@ -2047,26 +1763,8 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::counter_snapshot::OBSERVED_SAMPLE,
-            &value.observed_sample.0.to_le_bytes()
-        )?;
-        for counter in value.values {
-            writer.nested_start_spec(schema::counter_snapshot::VALUE, 32, 2)?;
-            write_spec!(
-                writer,
-                schema::counter_value::ID,
-                &(counter.id as u32).to_le_bytes()
-            )?;
-            write_spec!(
-                writer,
-                schema::counter_value::VALUE,
-                &counter.value.to_le_bytes()
-            )?;
-            writer.finish_nested(32)?;
-        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_counter_snapshot(&mut writer, value)?;
         Ok(required)
     }
 
@@ -2105,29 +1803,15 @@ impl ProtocolCodec {
         value: DiagnosticsRequest,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        if value.limit == 0 || value.limit > 256 {
-            return Err(EncodeError::LimitExceeded);
+        let mut sizing = CountSink::new(self.limits());
+        write_diagnostics_request(&mut sizing, value)?;
+        let required = checked_sink_len(self, &sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
         }
-        if output.len() < 48 {
-            return Err(EncodeError::OutputTooSmall { required: 48 });
-        }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::diagnostics_request::AFTER_SEQUENCE,
-            &value.after_sequence.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::diagnostics_request::LIMIT,
-            &value.limit.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::diagnostics_request::MINIMUM_SEVERITY,
-            &[value.minimum_severity as u8]
-        )?;
-        Ok(48)
+        let mut writer = SliceSink::new(output, self.limits());
+        write_diagnostics_request(&mut writer, value)?;
+        Ok(required)
     }
 
     /// Strictly decode a typed diagnostics cursor request.
@@ -2398,59 +2082,37 @@ fn validate_diagnostics_page(value: &DiagnosticsPage) -> Result<(), EncodeError>
 }
 
 fn write_counter_ids(
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     values: &[CounterId],
 ) -> Result<(), EncodeError> {
-    let len = values
+    let length = values
         .len()
         .checked_mul(4)
         .ok_or(EncodeError::LimitExceeded)?;
-    let start = writer.position;
-    write_spec!(writer, spec, &[])?;
-    let end = start
-        .checked_add(tlv_len(len)?)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let bytes = writer
-        .output
-        .get_mut(start..end)
-        .ok_or(EncodeError::LimitExceeded)?;
-    bytes[4..8].copy_from_slice(&(len as u32).to_le_bytes());
-    for (index, value) in values.iter().enumerate() {
-        let offset = TLV_PREFIX_BYTES + index * 4;
-        bytes[offset..offset + 4].copy_from_slice(&(*value as u32).to_le_bytes());
-    }
-    bytes[TLV_PREFIX_BYTES + len..].fill(0);
-    writer.position = end;
-    Ok(())
+    sink.stream_field_spec(spec, length, &mut |sink| {
+        for value in values {
+            sink.raw(&(*value as u32).to_le_bytes())?;
+        }
+        Ok(())
+    })
 }
 
 fn write_u32s(
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     values: &[u32],
 ) -> Result<(), EncodeError> {
-    let len = values
+    let length = values
         .len()
         .checked_mul(4)
         .ok_or(EncodeError::LimitExceeded)?;
-    let start = writer.position;
-    write_spec!(writer, spec, &[])?;
-    let end = start
-        .checked_add(tlv_len(len)?)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let bytes = writer
-        .output
-        .get_mut(start..end)
-        .ok_or(EncodeError::LimitExceeded)?;
-    bytes[4..8].copy_from_slice(&(len as u32).to_le_bytes());
-    for (index, value) in values.iter().enumerate() {
-        let offset = TLV_PREFIX_BYTES + index * 4;
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
-    bytes[TLV_PREFIX_BYTES + len..].fill(0);
-    writer.position = end;
-    Ok(())
+    sink.stream_field_spec(spec, length, &mut |sink| {
+        for value in values {
+            sink.raw(&value.to_le_bytes())?;
+        }
+        Ok(())
+    })
 }
 
 fn validate_automation_records(
@@ -2465,41 +2127,23 @@ fn validate_automation_records(
 }
 
 fn write_automation_record_bytes(
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     records: &[crate::AutomationRecord],
 ) -> Result<(), EncodeError> {
-    let len = records
+    let length = records
         .len()
         .checked_mul(crate::AUTOMATION_RECORD_BYTES)
         .ok_or(EncodeError::LimitExceeded)?;
-    let start = writer.position;
-    write_spec!(writer, schema::automation_enqueue::RECORDS, &[])?;
-    let end = start
-        .checked_add(tlv_len(len)?)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let bytes = writer
-        .output
-        .get_mut(start..end)
-        .ok_or(EncodeError::LimitExceeded)?;
-    bytes[4..8].copy_from_slice(
-        &u32::try_from(len)
-            .map_err(|_| EncodeError::LimitExceeded)?
-            .to_le_bytes(),
-    );
-    for (index, record) in records.iter().enumerate() {
-        let offset = TLV_PREFIX_BYTES + index * crate::AUTOMATION_RECORD_BYTES;
-        let destination: &mut [u8; crate::AUTOMATION_RECORD_BYTES] = bytes
-            .get_mut(offset..offset + crate::AUTOMATION_RECORD_BYTES)
-            .ok_or(EncodeError::LimitExceeded)?
-            .try_into()
-            .map_err(|_| EncodeError::LimitExceeded)?;
-        record
-            .encode_le(destination)
-            .map_err(|_| EncodeError::LimitExceeded)?;
-    }
-    bytes[TLV_PREFIX_BYTES + len..].fill(0);
-    writer.position = end;
-    Ok(())
+    sink.stream_field_spec(schema::automation_enqueue::RECORDS, length, &mut |sink| {
+        for record in records {
+            let mut bytes = [0_u8; crate::AUTOMATION_RECORD_BYTES];
+            record
+                .encode_le(&mut bytes)
+                .map_err(|_| EncodeError::LimitExceeded)?;
+            sink.raw(&bytes)?;
+        }
+        Ok(())
+    })
 }
 
 /// Automation uses the shared allocation-free reader while borrowing its fixed record array.
@@ -2565,132 +2209,430 @@ fn decode_automation_enqueue<'a>(
     Ok(result)
 }
 
-struct PayloadWriter<'a> {
-    output: &'a mut [u8],
-    position: usize,
+fn write_snapshot_request(
+    sink: &mut dyn Sink,
+    value: SessionSnapshotRequest,
+) -> Result<(), EncodeError> {
+    if value.maximum_bytes == 0 {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::snapshot_request::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::snapshot_request::OFFSET,
+        &value.offset.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::snapshot_request::MAXIMUM_BYTES,
+        &value.maximum_bytes.to_le_bytes()
+    )
 }
 
-impl<'a> PayloadWriter<'a> {
-    fn new(output: &'a mut [u8], _maximum_fields: u32) -> Self {
-        Self {
-            output,
-            position: 0,
+fn write_snapshot(sink: &mut dyn Sink, value: SessionSnapshot<'_>) -> Result<(), EncodeError> {
+    if value.offset > value.total_bytes
+        || u64::try_from(value.canonical_toml_chunk.len())
+            .map_err(|_| EncodeError::LimitExceeded)?
+            > value.total_bytes.saturating_sub(value.offset)
+        || value.eof
+            != (value
+                .offset
+                .saturating_add(value.canonical_toml_chunk.len() as u64)
+                == value.total_bytes)
+    {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::snapshot::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::snapshot::TOTAL_BYTES,
+        &value.total_bytes.to_le_bytes()
+    )?;
+    write_spec!(sink, schema::snapshot::OFFSET, &value.offset.to_le_bytes())?;
+    write_spec!(
+        sink,
+        schema::snapshot::CANONICAL_TOML_CHUNK,
+        value.canonical_toml_chunk
+    )?;
+    write_spec!(sink, schema::snapshot::EOF, &[u8::from(value.eof)])
+}
+
+fn write_transaction_applied(
+    sink: &mut dyn Sink,
+    value: TransactionApplied,
+) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::transaction_applied::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::transaction_applied::APPLIED_OPERATIONS,
+        &value.applied_operations.to_le_bytes()
+    )
+}
+
+fn write_session_committed(
+    sink: &mut dyn Sink,
+    value: SessionCommitted,
+) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::session_committed::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::session_committed::EVENT_SEQUENCE,
+        &value.event_sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::session_committed::ORIGIN_REQUEST_ID,
+        &value.origin_request_id.get().to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::session_committed::PREVIOUS_REVISION,
+        &value.previous_revision.0.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::session_committed::APPLIED_OPERATIONS,
+        &value.applied_operations.to_le_bytes()
+    )
+}
+
+fn write_metadata_request(
+    sink: &mut dyn Sink,
+    value: ParameterMetadataRequest,
+) -> Result<(), EncodeError> {
+    if value.limit == 0 || value.limit > 256 {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::metadata_request::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::metadata_request::AFTER_HANDLE,
+        &value.after_handle.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::metadata_request::LIMIT,
+        &value.limit.to_le_bytes()
+    )
+}
+
+fn write_state_request(
+    sink: &mut dyn Sink,
+    value: &ParameterStateRequest,
+) -> Result<(), EncodeError> {
+    check_handles(&value.handles).map_err(|_| EncodeError::LimitExceeded)?;
+    sink.check_field_count(schema::state_request::SPEC.field_count(&[])?)?;
+    write_u32s(sink, schema::state_request::HANDLES, &value.handles)
+}
+
+fn write_automation_enqueue(
+    sink: &mut dyn Sink,
+    value: AutomationEnqueue<'_>,
+) -> Result<(), EncodeError> {
+    validate_automation_records(value.records).map_err(|_| EncodeError::LimitExceeded)?;
+    sink.check_field_count(schema::automation_enqueue::SPEC.field_count(&[])?)?;
+    let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
+    write_spec!(
+        sink,
+        schema::automation_enqueue::COUNT,
+        &count.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_enqueue::RECORD_BYTES,
+        &(crate::AUTOMATION_RECORD_BYTES as u16).to_le_bytes()
+    )?;
+    write_automation_record_bytes(sink, value.records)
+}
+
+fn write_automation_enqueued(
+    sink: &mut dyn Sink,
+    value: AutomationEnqueued,
+) -> Result<(), EncodeError> {
+    if value.accepted_records == 0 || value.capacity == 0 || value.occupancy > value.capacity {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::automation_enqueued::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::automation_enqueued::ACCEPTED_RECORDS,
+        &value.accepted_records.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_enqueued::OCCUPANCY,
+        &value.occupancy.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_enqueued::CAPACITY,
+        &value.capacity.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_enqueued::GENERATION,
+        &value.generation.to_le_bytes()
+    )
+}
+
+fn write_transport_set(sink: &mut dyn Sink, value: TransportSetRequest) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::transport_set::SPEC.field_count(&[(
+        schema::transport_set::POSITION,
+        usize::from(value.position.is_some()),
+    )])?)?;
+    write_spec!(sink, schema::transport_set::STATE, &[value.state as u8])?;
+    if let Some(position) = value.position {
+        write_spec!(
+            sink,
+            schema::transport_set::POSITION,
+            &position.0.to_le_bytes()
+        )?;
+    }
+    Ok(())
+}
+
+fn write_transport_snapshot(
+    sink: &mut dyn Sink,
+    value: TransportSnapshot,
+) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::transport_snapshot::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::transport_snapshot::STATE,
+        &[value.state as u8]
+    )?;
+    write_spec!(
+        sink,
+        schema::transport_snapshot::POSITION,
+        &value.position.0.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::transport_snapshot::EFFECTIVE_SAMPLE,
+        &value.effective_sample.0.to_le_bytes()
+    )
+}
+
+fn write_transport_state_event(
+    sink: &mut dyn Sink,
+    value: TransportStateEvent,
+) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::transport_state_event::SPEC.field_count(&[(
+        schema::transport_state_event::ORIGIN_REQUEST_ID,
+        usize::from(value.origin_request_id.is_some()),
+    )])?)?;
+    write_spec!(
+        sink,
+        schema::transport_state_event::EVENT_SEQUENCE,
+        &value.event_sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::transport_state_event::STATE,
+        &[value.state as u8]
+    )?;
+    write_spec!(
+        sink,
+        schema::transport_state_event::POSITION,
+        &value.position.0.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::transport_state_event::EFFECTIVE_SAMPLE,
+        &value.effective_sample.0.to_le_bytes()
+    )?;
+    if let Some(origin) = value.origin_request_id {
+        write_spec!(
+            sink,
+            schema::transport_state_event::ORIGIN_REQUEST_ID,
+            &origin.get().to_le_bytes()
+        )?;
+    }
+    Ok(())
+}
+
+fn write_automation_canceled(
+    sink: &mut dyn Sink,
+    value: AutomationCanceled,
+) -> Result<(), EncodeError> {
+    if value.canceled_records == 0 {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::automation_canceled::SPEC.field_count(&[(
+        schema::automation_canceled::EFFECTIVE_SAMPLE,
+        usize::from(value.effective_sample.is_some()),
+    )])?)?;
+    write_spec!(
+        sink,
+        schema::automation_canceled::EVENT_SEQUENCE,
+        &value.event_sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_canceled::ORIGIN_REQUEST_ID,
+        &value.origin_request_id.get().to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_canceled::CANCELED_RECORDS,
+        &value.canceled_records.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_canceled::REASON,
+        &[value.reason as u8]
+    )?;
+    write_spec!(
+        sink,
+        schema::automation_canceled::QUEUE_GENERATION,
+        &value.queue_generation.to_le_bytes()
+    )?;
+    if let Some(sample) = value.effective_sample {
+        write_spec!(
+            sink,
+            schema::automation_canceled::EFFECTIVE_SAMPLE,
+            &sample.0.to_le_bytes()
+        )?;
+    }
+    Ok(())
+}
+
+fn write_meter_batch(sink: &mut dyn Sink, value: MeterBatch<'_>) -> Result<(), EncodeError> {
+    validate_meter_records(value.records)?;
+    sink.check_field_count(schema::meter_batch::SPEC.field_count(&[])?)?;
+    let count = u16::try_from(value.records.len()).map_err(|_| EncodeError::LimitExceeded)?;
+    let length = value
+        .records
+        .len()
+        .checked_mul(16)
+        .ok_or(EncodeError::LimitExceeded)?;
+    write_spec!(
+        sink,
+        schema::meter_batch::OBSERVED_SAMPLE,
+        &value.observed_sample.0.to_le_bytes()
+    )?;
+    write_spec!(sink, schema::meter_batch::COUNT, &count.to_le_bytes())?;
+    write_spec!(
+        sink,
+        schema::meter_batch::RECORD_BYTES,
+        &16_u16.to_le_bytes()
+    )?;
+    sink.stream_field_spec(schema::meter_batch::RECORDS, length, &mut |sink| {
+        for record in value.records {
+            let mut bytes = [0_u8; 16];
+            encode_meter_record(record, &mut bytes);
+            sink.raw(&bytes)?;
         }
-    }
-
-    fn field(
-        &mut self,
-        id: u16,
-        wire: u8,
-        mandatory: bool,
-        value: &[u8],
-    ) -> Result<(), EncodeError> {
-        let end = self
-            .position
-            .checked_add(tlv_len(value.len())?)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let bytes = self
-            .output
-            .get_mut(self.position..end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        bytes[..2].copy_from_slice(&id.to_le_bytes());
-        bytes[2] = wire;
-        bytes[3] = u8::from(mandatory);
-        bytes[4..8].copy_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| EncodeError::LimitExceeded)?
-                .to_le_bytes(),
-        );
-        bytes[TLV_PREFIX_BYTES..TLV_PREFIX_BYTES + value.len()].copy_from_slice(value);
-        bytes[TLV_PREFIX_BYTES + value.len()..].fill(0);
-        self.position = end;
         Ok(())
-    }
+    })
+}
 
-    fn field_spec(&mut self, spec: schema::FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
-        self.field(spec.id, spec.wire.raw(), spec.mandatory, value)
-    }
+fn write_telemetry_configuration(
+    sink: &mut dyn Sink,
+    value: &TelemetryConfiguration,
+) -> Result<(), EncodeError> {
+    validate_telemetry_configuration(value).map_err(|_| EncodeError::LimitExceeded)?;
+    sink.check_field_count(schema::telemetry_configuration::SPEC.field_count(&[])?)?;
+    write_u32s(
+        sink,
+        schema::telemetry_configuration::METER_HANDLES,
+        &value.meter_handles,
+    )?;
+    write_spec!(
+        sink,
+        schema::telemetry_configuration::METER_PERIOD_BLOCKS,
+        &value.meter_period_blocks.to_le_bytes()
+    )?;
+    write_counter_ids(
+        sink,
+        schema::telemetry_configuration::COUNTER_IDS,
+        &value.counter_ids,
+    )?;
+    write_spec!(
+        sink,
+        schema::telemetry_configuration::COUNTER_PERIOD_BLOCKS,
+        &value.counter_period_blocks.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::telemetry_configuration::DIAGNOSTICS_ENABLED,
+        &[u8::from(value.diagnostics_enabled)]
+    )?;
+    write_spec!(
+        sink,
+        schema::telemetry_configuration::MINIMUM_DIAGNOSTIC_SEVERITY,
+        &[value.minimum_diagnostic_severity as u8]
+    )
+}
 
-    fn packed_u32(&mut self, spec: schema::FieldSpec, values: &[u32]) -> Result<(), EncodeError> {
-        let value_len = values
-            .len()
-            .checked_mul(4)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let start = self.position;
-        write_spec!(self, spec, &[])?;
-        let end = start
-            .checked_add(tlv_len(value_len)?)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let bytes = self
-            .output
-            .get_mut(start..end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        bytes[4..8].copy_from_slice(
-            &u32::try_from(value_len)
-                .map_err(|_| EncodeError::LimitExceeded)?
-                .to_le_bytes(),
-        );
-        for (index, value) in values.iter().enumerate() {
-            bytes[TLV_PREFIX_BYTES + index * 4..TLV_PREFIX_BYTES + index * 4 + 4]
-                .copy_from_slice(&value.to_le_bytes());
-        }
-        bytes[TLV_PREFIX_BYTES + value_len..].fill(0);
-        self.position = end;
-        Ok(())
+fn write_counters_request(sink: &mut dyn Sink, value: &CountersRequest) -> Result<(), EncodeError> {
+    validate_counters_request(value).map_err(|_| EncodeError::LimitExceeded)?;
+    sink.check_field_count(
+        schema::counters_request::SPEC
+            .field_count(&[(schema::counters_request::IDS, usize::from(!value.all))])?,
+    )?;
+    write_spec!(sink, schema::counters_request::ALL, &[u8::from(value.all)])?;
+    if !value.all {
+        write_u32s(sink, schema::counters_request::IDS, &value.ids)?;
     }
+    Ok(())
+}
 
-    fn nested_start(
-        &mut self,
-        id: u16,
-        mandatory: bool,
-        body_len: usize,
-        field_count: u32,
-    ) -> Result<(), EncodeError> {
-        let value_len = NESTED_HEADER_BYTES
-            .checked_add(body_len)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let start = self.position;
-        self.field(id, WIRE_MESSAGE, mandatory, &[])?;
-        let end = start
-            .checked_add(tlv_len(value_len)?)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let bytes = self
-            .output
-            .get_mut(start..end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        bytes[4..8].copy_from_slice(
-            &u32::try_from(value_len)
-                .map_err(|_| EncodeError::LimitExceeded)?
-                .to_le_bytes(),
-        );
-        bytes[8..12].copy_from_slice(&field_count.to_le_bytes());
-        bytes[12..16].fill(0);
-        self.position = start + TLV_PREFIX_BYTES + NESTED_HEADER_BYTES;
-        Ok(())
+fn write_counter_snapshot(
+    sink: &mut dyn Sink,
+    value: CounterSnapshotRef<'_>,
+) -> Result<(), EncodeError> {
+    validate_counter_snapshot_ref(value).map_err(|_| EncodeError::LimitExceeded)?;
+    sink.check_field_count(
+        schema::counter_snapshot::SPEC
+            .field_count(&[(schema::counter_snapshot::VALUE, value.values.len())])?,
+    )?;
+    write_spec!(
+        sink,
+        schema::counter_snapshot::OBSERVED_SAMPLE,
+        &value.observed_sample.0.to_le_bytes()
+    )?;
+    for counter in value.values {
+        sink.nested_spec(schema::counter_snapshot::VALUE, &mut |sink| {
+            sink.message_header(schema::counter_value::SPEC.field_count(&[])?)?;
+            write_spec!(
+                sink,
+                schema::counter_value::ID,
+                &(counter.id as u32).to_le_bytes()
+            )?;
+            write_spec!(
+                sink,
+                schema::counter_value::VALUE,
+                &counter.value.to_le_bytes()
+            )
+        })?;
     }
+    Ok(())
+}
 
-    fn nested_start_spec(
-        &mut self,
-        spec: schema::FieldSpec,
-        body_len: usize,
-        field_count: u32,
-    ) -> Result<(), EncodeError> {
-        self.nested_start(spec.id, spec.mandatory, body_len, field_count)
+fn write_diagnostics_request(
+    sink: &mut dyn Sink,
+    value: DiagnosticsRequest,
+) -> Result<(), EncodeError> {
+    if value.limit == 0 || value.limit > 256 {
+        return Err(EncodeError::LimitExceeded);
     }
-
-    fn finish_nested(&mut self, body_len: usize) -> Result<(), EncodeError> {
-        let padding = padding(NESTED_HEADER_BYTES + body_len);
-        let end = self
-            .position
-            .checked_add(padding)
-            .ok_or(EncodeError::LimitExceeded)?;
-        self.output
-            .get_mut(self.position..end)
-            .ok_or(EncodeError::LimitExceeded)?
-            .fill(0);
-        self.position = end;
-        Ok(())
-    }
+    sink.check_field_count(schema::diagnostics_request::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::diagnostics_request::AFTER_SEQUENCE,
+        &value.after_sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::diagnostics_request::LIMIT,
+        &value.limit.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::diagnostics_request::MINIMUM_SEVERITY,
+        &[value.minimum_severity as u8]
+    )
 }
 
 fn write_non_ok(
@@ -3993,23 +3935,12 @@ fn valid_stable_id(value: &str) -> bool {
         })
 }
 
-fn checked_add(left: usize, right: usize) -> Result<usize, EncodeError> {
-    left.checked_add(right).ok_or(EncodeError::LimitExceeded)
-}
-
 fn checked_sink_len(codec: &ProtocolCodec, sink: &dyn Sink) -> Result<usize, EncodeError> {
     let written = sink.written();
     if written > codec.limits().max_frame_bytes {
         return Err(EncodeError::LimitExceeded);
     }
     Ok(written)
-}
-
-fn tlv_len(value_len: usize) -> Result<usize, EncodeError> {
-    checked_add(
-        TLV_PREFIX_BYTES,
-        checked_add(value_len, padding(value_len))?,
-    )
 }
 
 #[cfg(test)]
