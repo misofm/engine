@@ -167,6 +167,12 @@ pub fn finish_block<L: Lane>(
 ///
 /// The check itself is identical in both: [`check_block`] once per channel, one `mask_any` for the
 /// whole block, no horizontal reduction inside the loop.
+///
+/// Two shipped crates already open-code exactly this — `miso-engine-parametric-eq` and
+/// `miso-engine-gate-expander` both write `if check_block(block) { … }` followed by
+/// `nonfinite_lane_mask(block)` per channel — which is the divergence this module exists to stop.
+/// They are not rewritten here: each is another issue's file. `miso-engine-compressor` is the
+/// first caller.
 #[inline]
 pub fn finish_channel<L: Lane>(io: &mut [f32], reset: impl FnOnce()) -> u32 {
     if check_block::<L>(io) {

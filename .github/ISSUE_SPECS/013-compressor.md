@@ -346,6 +346,17 @@ descriptor or the corpus; the duplication it was aimed at — a separate scalar 
 implementation of `reset`, `render`, `snapshot` and `restore` — **is** gone: both contract traits
 are thin wrappers over one `Instance<L>`.
 
+### Correction to the record (rebase onto #90, 2026-08-23)
+
+`effect_runtime::bank::finish_channel` was added on the verifier's W2-D3 decision with the note
+that #89 and #94 would be its next consumers. On the rebase onto the finished wave 2 that turned out
+not to be so: #94 (multiband), #91 (soft clip), #92 (transient shaper) and #90 (limiter) all use the
+channel-coupled `finish_block`, and #87 (parametric EQ) and #89 (gate expander) **open-code** the
+per-channel form — `if check_block(block) { … }` then `nonfinite_lane_mask(block)` — which is the
+divergence the module exists to stop. The function is therefore justified by two existing copies
+rather than by two expected callers, and the compressor is its first caller. Those two crates are
+not rewritten here: each is another issue's file.
+
 ### Deferred
 
 - `scratch_fixed_bytes: 64` is declared and unused (finding F10). It is part of
