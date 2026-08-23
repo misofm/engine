@@ -1620,15 +1620,16 @@ impl GraphExecutor {
         let runtime_builtin_banks = builtin_banks
             .into_iter()
             .map(|bank| {
-                let members = bank
+                let members: Box<[usize]> = bank
                     .members
                     .iter()
                     .map(|member| node_indices[member])
                     .collect();
+                let active = trailing_active_mask(members.len(), bank.scratch.width());
                 runtime_bank(
                     members,
                     bank.scratch,
-                    bank.active_mask,
+                    active,
                     Box::new(BuiltinStage(bank.processor)),
                 )
             })
@@ -2586,6 +2587,18 @@ impl NativeGraphUnit {
     }
 }
 
+/// A padded group's active mask **is** its membership: the planner emits `Some` members before
+/// every `None`, so lane `i` is active exactly while `i < members`. The mask is therefore derived
+/// here and stored nowhere (#86 F9's graph half).
+fn trailing_active_mask(
+    members: usize,
+    width: miso_engine_effect_contract::BankWidth,
+) -> Box<[bool]> {
+    (0..width.lanes() as usize)
+        .map(|lane| lane < members)
+        .collect()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn native_bank_chain(
     scratch: AoSoaScratch,
@@ -2800,11 +2813,13 @@ impl NativeGraphExecutor {
                                     )
                                 })
                                 .collect();
+                            let active =
+                                trailing_active_mask(unit.members.len(), bank.scratch.width());
                             NativeGraphUnit::Bank {
                                 members,
                                 chain: native_bank_chain(
                                     bank.scratch,
-                                    bank.active_mask,
+                                    active,
                                     Box::new(BuiltinStage(bank.processor)),
                                 ),
                             }
@@ -3433,7 +3448,7 @@ mod tests {
                     backend: KernelBackendV1::Aarch64Neon,
                     members: members.into_boxed_slice(),
                     processor: Box::<CountingIdentityBuiltin>::default(),
-                    scratch: miso_engine_rack::AoSoaScratch::new_main_only(BankWidth::Four, 1)
+                    scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1)
                         .expect("W4 scratch"),
                 }],
                 GraphBuiltinBankResourceEstimate {

@@ -914,7 +914,7 @@ impl PreparedBuiltinsSession {
                     process_calls: 0,
                     frames_processed: 0,
                 },
-                scratch: AoSoaScratch::new_main_only(width, self.seal.quantum)
+                scratch: AoSoaScratch::new(width, self.seal.quantum)
                     .expect("prepared nonzero graph quantum"),
             });
         }
