@@ -7,12 +7,7 @@
 
 #![allow(missing_docs)]
 
-use core::{
-    alloc::Layout,
-    cmp,
-    mem::{align_of, size_of},
-    num::NonZeroUsize,
-};
+use core::{alloc::Layout, cmp, mem::size_of, num::NonZeroUsize};
 use std::fmt;
 
 use miso_engine_core::{
@@ -259,7 +254,6 @@ pub struct SourceSetRetainedResourceReport {
     pub claims: SourceRetainedAllocation,
     pub driver: SourceRetainedAllocation,
     pub retirement_workers: SourceRetainedAllocation,
-    pub source_planes: SourceRetainedAllocation,
     pub owned_stable_id_payloads: SourceRetainedAllocation,
 }
 
@@ -271,7 +265,6 @@ impl SourceSetRetainedResourceReport {
             self.claims.bytes,
             self.driver.bytes,
             self.retirement_workers.bytes,
-            self.source_planes.bytes,
             self.owned_stable_id_payloads.bytes,
         ]
         .into_iter()
@@ -285,7 +278,6 @@ impl SourceSetRetainedResourceReport {
             self.claims.largest_allocation_bytes,
             self.driver.largest_allocation_bytes,
             self.retirement_workers.largest_allocation_bytes,
-            self.source_planes.largest_allocation_bytes,
             self.owned_stable_id_payloads.largest_allocation_bytes,
         ]
         .into_iter()
@@ -1445,8 +1437,6 @@ pub enum SourceGraphSourceSetError {
 
 struct GraphSourceEntry {
     consumer: PcmSourceConsumer,
-    channel_count: u32,
-    planes: Box<[f32]>,
 }
 
 struct SourceGraphSourceSetDriver {
@@ -1456,6 +1446,7 @@ struct SourceGraphSourceSetDriver {
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
+    copied_claims: usize,
 }
 
 fn allocation_class<T>(
@@ -1477,7 +1468,6 @@ fn allocation_class<T>(
 fn source_set_retained_resources(
     sources: &[SourceGraphSource],
     mappings: &[SourceGraphTrackMapping],
-    quantum: usize,
 ) -> Result<SourceSetRetainedResourceReport, SourceGraphSourceSetError> {
     let source_entries = allocation_class::<GraphSourceEntry>(sources.len())?;
     let mappings_report = allocation_class::<SourceGraphTrackMapping>(mappings.len())?;
@@ -1497,27 +1487,6 @@ fn source_set_retained_resources(
         largest_allocation_bytes: 0,
         alignment_bytes: 1,
     };
-    let mut planes = SourceRetainedAllocation {
-        item_count: 0,
-        bytes: 0,
-        largest_allocation_bytes: 0,
-        alignment_bytes: u64::try_from(align_of::<f32>()).expect("alignment fits u64"),
-    };
-    for source in sources {
-        let samples = usize::try_from(source.consumer.channel_count())
-            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
-            .checked_mul(quantum)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        let class = allocation_class::<f32>(samples)?;
-        planes.item_count = planes.item_count.saturating_add(1);
-        planes.bytes = planes
-            .bytes
-            .checked_add(class.bytes)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        planes.largest_allocation_bytes = planes
-            .largest_allocation_bytes
-            .max(class.largest_allocation_bytes);
-    }
     let mut ids = SourceRetainedAllocation {
         item_count: 0,
         bytes: 0,
@@ -1547,7 +1516,6 @@ fn source_set_retained_resources(
         claims,
         driver,
         retirement_workers,
-        source_planes: planes,
         owned_stable_id_payloads: ids,
     })
 }
@@ -1566,10 +1534,13 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
         }
         for source in &mut self.sources {
-            source
-                .consumer
-                .read_block_contiguous(&mut source.planes)
-                .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+            source.consumer.begin_block();
+        }
+        self.copied_claims = 0;
+        if self.mappings.is_empty() {
+            for source in &mut self.sources {
+                source.consumer.end_block();
+            }
         }
         Ok(())
     }
@@ -1580,36 +1551,35 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         left: &mut [f32],
         right: &mut [f32],
     ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        let mapping = self
+        let (source_index, left_channel, right_channel) = self
             .mappings
             .get(claim_index)
+            .map(|mapping| {
+                (
+                    mapping.source_index,
+                    mapping.left_channel,
+                    mapping.right_channel,
+                )
+            })
             .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
         let source = self
             .sources
-            .get(mapping.source_index)
+            .get(source_index)
             .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let quantum = usize::try_from(self.quantum_frames)
+        source
+            .consumer
+            .copy_channel(left_channel, left)
             .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        if left.len() != quantum || right.len() != quantum {
-            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
+        source
+            .consumer
+            .copy_channel(right_channel, right)
+            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
+        self.copied_claims = self.copied_claims.saturating_add(1);
+        if self.copied_claims == self.mappings.len() {
+            for source in &mut self.sources {
+                source.consumer.end_block();
+            }
         }
-        let left_channel = usize::try_from(mapping.left_channel)
-            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let right_channel = usize::try_from(mapping.right_channel)
-            .map_err(|_| miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        if left_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
-            || right_channel >= usize::try_from(source.channel_count).expect("u32 fits usize")
-        {
-            return Err(miso_engine_core::realtime::RenderError::InvalidEnvelope);
-        }
-        let left_offset = left_channel
-            .checked_mul(quantum)
-            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        let right_offset = right_channel
-            .checked_mul(quantum)
-            .ok_or(miso_engine_core::realtime::RenderError::InvalidEnvelope)?;
-        left.copy_from_slice(&source.planes[left_offset..left_offset + quantum]);
-        right.copy_from_slice(&source.planes[right_offset..right_offset + quantum]);
         Ok(())
     }
 
@@ -1637,9 +1607,9 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
 ///
-/// The wrapper owns exactly one consumer and preallocated contiguous source planes per source.
-/// The graph calls `begin_block` once, then copies each declared mapping without allowing native
-/// workers to observe a consumer or ring.
+/// The wrapper owns exactly one consumer per source. The graph calls `begin_block` once, then each
+/// mapping copies directly from the retained played block before the final claim recycles all
+/// blocks, without allowing native workers to observe a consumer or ring.
 pub fn prepare_graph_source_set(
     envelope: miso_engine_core::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
@@ -1648,11 +1618,9 @@ pub fn prepare_graph_source_set(
     if sources.is_empty() {
         return Err(SourceGraphSourceSetError::EmptySources);
     }
-    let quantum = usize::try_from(envelope.quantum.0)
-        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
     // Until extraction below, SourceGraphSource field order guarantees every early-return path
     // stops/joins its worker before dropping the paired consumer.
-    let retained = source_set_retained_resources(&sources, &mappings, quantum)?;
+    let retained = source_set_retained_resources(&sources, &mappings)?;
     let mut pcm_payload = 0_u64;
     let mut overhead = 0_u64;
     let mut largest = 0_u64;
@@ -1663,11 +1631,6 @@ pub fn prepare_graph_source_set(
             .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?,
     );
     for source in sources {
-        let channel_count = source.consumer.channel_count();
-        let samples = usize::try_from(channel_count)
-            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?
-            .checked_mul(quantum)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
         pcm_payload = pcm_payload
             .checked_add(source.resources.pcm_payload_already_charged_bytes)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
@@ -1684,8 +1647,6 @@ pub fn prepare_graph_source_set(
         }
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
-            channel_count,
-            planes: vec![0.0; samples].into_boxed_slice(),
         });
     }
     overhead = overhead
@@ -1700,8 +1661,8 @@ pub fn prepare_graph_source_set(
         let source = entries
             .get(mapping.source_index)
             .ok_or(SourceGraphSourceSetError::SourceIndex)?;
-        if mapping.left_channel >= source.channel_count
-            || mapping.right_channel >= source.channel_count
+        if mapping.left_channel >= source.consumer.channel_count()
+            || mapping.right_channel >= source.consumer.channel_count()
         {
             return Err(SourceGraphSourceSetError::ChannelIndex);
         }
@@ -1730,6 +1691,7 @@ pub fn prepare_graph_source_set(
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
+            copied_claims: 0,
         }),
     ))
 }
@@ -2010,6 +1972,129 @@ mod tests {
         consumer.end_block();
         assert!(consumer.played.is_none());
         assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
+    }
+
+    fn test_mapping(index: u32) -> SourceGraphTrackMapping {
+        SourceGraphTrackMapping {
+            node: GraphNodeId::TrackStage {
+                track_id: miso_engine_graph::StableGraphId::parse(&format!("track{index}"))
+                    .expect("track ID"),
+                stage: miso_engine_graph::TrackStage::Input,
+            },
+            source_index: 0,
+            left_channel: 0,
+            right_channel: 0,
+        }
+    }
+
+    fn test_driver(
+        consumer: PcmSourceConsumer,
+        mappings: Vec<SourceGraphTrackMapping>,
+    ) -> SourceGraphSourceSetDriver {
+        SourceGraphSourceSetDriver {
+            #[cfg(not(target_arch = "wasm32"))]
+            _retirement_workers: Vec::new().into_boxed_slice(),
+            sources: vec![GraphSourceEntry { consumer }].into_boxed_slice(),
+            mappings: mappings.into_boxed_slice(),
+            quantum_frames: 4,
+            copied_claims: 0,
+        }
+    }
+
+    #[test]
+    fn graph_driver_last_claim_recycles_in_call_and_incomplete_paths_recycle_next_begin() {
+        let samples = [1.0, 2.0, 3.0, 4.0];
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
+        driver.begin_block(0, 4).expect("complete begin");
+        let mut left = [0.0; 4];
+        let mut right = [0.0; 4];
+        driver
+            .copy_track_input(0, &mut left, &mut right)
+            .expect("last claim");
+        assert_eq!(left, samples);
+        assert_eq!(right, samples);
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("last claim recycled within copy call");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0), test_mapping(1)]);
+        driver.begin_block(0, 4).expect("incomplete begin");
+        driver
+            .copy_track_input(0, &mut left, &mut right)
+            .expect("first of two claims");
+        assert!(matches!(
+            host.submit(chunk(1, 4, &[&samples], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
+        driver
+            .begin_block(4, 4)
+            .expect("next begin recycles missing claim block");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("missing claim recycled on next begin");
+
+        let (producer, consumer, _) = PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
+        driver.begin_block(0, 4).expect("error begin");
+        assert_eq!(
+            driver.copy_track_input(0, &mut left[..3], &mut right),
+            Err(miso_engine_core::realtime::RenderError::InvalidEnvelope)
+        );
+        driver
+            .begin_block(4, 4)
+            .expect("next begin recycles error block");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("errored claim recycled on next begin");
+    }
+
+    #[test]
+    fn graph_driver_zero_claims_recycles_in_begin_and_retains_no_plane_class() {
+        let samples = [1.0, 2.0, 3.0, 4.0];
+        let (producer, consumer, resources) =
+            PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&samples], 4, false))
+            .expect("first block");
+        let source = SourceGraphSource::new(consumer, resources, 0, 0);
+        let retained = source_set_retained_resources(core::slice::from_ref(&source), &[])
+            .expect("retained report");
+        let expected_overhead = retained
+            .source_entries
+            .bytes
+            .checked_add(retained.mappings.bytes)
+            .and_then(|total| total.checked_add(retained.claims.bytes))
+            .and_then(|total| total.checked_add(retained.driver.bytes))
+            .and_then(|total| total.checked_add(retained.retirement_workers.bytes))
+            .and_then(|total| total.checked_add(retained.owned_stable_id_payloads.bytes))
+            .expect("retained overhead");
+        assert_eq!(retained.overhead_bytes(), Some(expected_overhead));
+
+        let SourceGraphSource { consumer, .. } = source;
+        let mut driver = test_driver(consumer, Vec::new());
+        driver.begin_block(0, 4).expect("zero-claim begin");
+        host.submit(chunk(1, 4, &[&samples], 4, false))
+            .expect("zero claims recycle in begin");
+
+        let source_text = include_str!("lib.rs");
+        assert!(!source_text.contains(&["source", "_planes"].concat()));
+        let entry_start = source_text
+            .find("struct GraphSourceEntry")
+            .expect("graph source entry");
+        let entry_end = source_text[entry_start..]
+            .find("struct SourceGraphSourceSetDriver")
+            .map(|offset| entry_start + offset)
+            .expect("driver declaration");
+        assert!(!source_text[entry_start..entry_end].contains("planes"));
     }
 
     #[test]

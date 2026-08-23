@@ -3079,15 +3079,13 @@ mod tests {
         first_controller.wait_for_event().expect("first ready");
         second_controller.wait_for_event().expect("second ready");
         let sources = vec![first_source, second_source];
-        let retained = crate::source_set_retained_resources(&sources, &[], 4)
+        let retained = crate::source_set_retained_resources(&sources, &[])
             .expect("exact set retained resources");
         assert_eq!(retained.retirement_workers.item_count, 2);
         assert_eq!(
             retained.retirement_workers.bytes,
             u64::try_from(size_of::<NativeSourceWorker>() * 2).expect("worker box bytes")
         );
-        assert_eq!(retained.source_planes.item_count, 2);
-        assert!(retained.source_planes.bytes > 0);
 
         let source_set = prepare_graph_source_set(
             RenderEnvelope {
