@@ -6,7 +6,10 @@
 
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
-    btlv::{Fields as Message, padding, read_f32, read_u8, read_u16, read_u32, read_u64},
+    btlv::{
+        CountSink, Fields as Message, Sink, SliceSink, padding, read_f32, read_u8, read_u16,
+        read_u32, read_u64,
+    },
     schema::{self, descriptor, enum_choice},
 };
 
@@ -21,7 +24,7 @@ const NESTED_HEADER_BYTES: usize = 8;
 macro_rules! write_spec {
     ($writer:expr, $spec:expr, $bytes:expr $(,)?) => {{
         let spec = $spec;
-        $writer.field(spec.id, spec.wire.raw(), spec.mandatory, $bytes)
+        $writer.field_spec(spec, $bytes)
     }};
 }
 
@@ -806,7 +809,9 @@ impl ProtocolCodec {
 
     /// Exact payload length for the 27-field successful capabilities response.
     pub fn encoded_capabilities_len(&self, value: &Capabilities<'_>) -> Result<usize, EncodeError> {
-        capabilities_len(self, value)
+        let mut sink = CountSink::new(self.limits());
+        write_capabilities(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
 
     /// Encode a successful capabilities payload directly into caller-owned output.
@@ -819,8 +824,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
+        let mut writer = SliceSink::new(output, self.limits());
         write_capabilities(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
 
@@ -1122,7 +1128,9 @@ impl ProtocolCodec {
         &self,
         value: &ParameterMetadataPage,
     ) -> Result<usize, EncodeError> {
-        metadata_page_len(self, value)
+        let mut sink = CountSink::new(self.limits());
+        write_metadata_page(self, &mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
     /// Encode a canonical typed metadata page without allocation.
     pub fn encode_parameter_metadata_page(
@@ -1134,8 +1142,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
+        let mut writer = SliceSink::new(output, self.limits());
         write_metadata_page(self, &mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
     /// Strictly decode a typed metadata page into bounded typed descriptors.
@@ -1199,7 +1208,9 @@ impl ProtocolCodec {
         &self,
         value: &ParameterStatePage,
     ) -> Result<usize, EncodeError> {
-        state_page_len(self, value)
+        let mut sink = CountSink::new(self.limits());
+        write_state_page(&mut sink, value)?;
+        checked_sink_len(self, &sink)
     }
     /// Encode a validated fixed-16-byte-record state page without allocation.
     pub fn encode_parameter_state_page(
@@ -1211,23 +1222,9 @@ impl ProtocolCodec {
         if output.len() < required {
             return Err(EncodeError::OutputTooSmall { required });
         }
-        let mut writer = PayloadWriter::new(output, self.limits().max_tlv_count);
-        write_spec!(
-            writer,
-            schema::state_page::OBSERVED_SAMPLE,
-            &value.observed_sample.to_le_bytes()
-        )?;
-        write_spec!(
-            writer,
-            schema::state_page::COUNT,
-            &(value.records.len() as u16).to_le_bytes(),
-        )?;
-        write_spec!(
-            writer,
-            schema::state_page::RECORD_BYTES,
-            &16_u16.to_le_bytes()
-        )?;
-        write_state_record_bytes(&mut writer, &value.records)?;
+        let mut writer = SliceSink::new(output, self.limits());
+        write_state_page(&mut writer, value)?;
+        debug_assert_eq!(writer.written(), required);
         Ok(required)
     }
     /// Strictly decode fixed 16-byte state records.
@@ -2658,32 +2655,8 @@ impl<'a> PayloadWriter<'a> {
         Ok(())
     }
 
-    fn packed_u16(&mut self, spec: schema::FieldSpec, values: &[u16]) -> Result<(), EncodeError> {
-        let value_len = values
-            .len()
-            .checked_mul(2)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let start = self.position;
-        write_spec!(self, spec, &[])?;
-        let end = start
-            .checked_add(tlv_len(value_len)?)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let bytes = self
-            .output
-            .get_mut(start..end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        bytes[4..8].copy_from_slice(
-            &u32::try_from(value_len)
-                .map_err(|_| EncodeError::LimitExceeded)?
-                .to_le_bytes(),
-        );
-        for (index, value) in values.iter().enumerate() {
-            let offset = TLV_PREFIX_BYTES + index * 2;
-            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-        }
-        bytes[TLV_PREFIX_BYTES + value_len..].fill(0);
-        self.position = end;
-        Ok(())
+    fn field_spec(&mut self, spec: schema::FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
+        self.field(spec.id, spec.wire.raw(), spec.mandatory, value)
     }
 
     fn packed_u32(&mut self, spec: schema::FieldSpec, values: &[u32]) -> Result<(), EncodeError> {
@@ -2797,58 +2770,11 @@ fn check_handles(handles: &[u32]) -> Result<(), DecodeError> {
     }
     Ok(())
 }
-fn enum_choice_len(codec: &ProtocolCodec, choice: &EnumChoice) -> Result<usize, EncodeError> {
-    if !choice.value.is_finite() {
-        return Err(EncodeError::LimitExceeded);
-    }
-    check_string(codec, &choice.label)?;
-    checked_add(
-        NESTED_HEADER_BYTES,
-        checked_add(tlv_len(4)?, tlv_len(choice.label.len())?)?,
-    )
-}
-fn descriptor_len(
+fn write_metadata_page(
     codec: &ProtocolCodec,
-    value: &ParameterDescriptor,
-) -> Result<usize, EncodeError> {
-    validate_descriptor(codec, value)?;
-    let mut len = tlv_len(4)?;
-    for fixed in [
-        value.track_id.len(),
-        1,
-        value.effect_id.len(),
-        4,
-        1,
-        1,
-        1,
-        1,
-    ] {
-        len = checked_add(len, tlv_len(fixed)?)?;
-    }
-    if value.minimum.is_some() {
-        len = checked_add(len, tlv_len(4)?)?;
-    }
-    if value.maximum.is_some() {
-        len = checked_add(len, tlv_len(4)?)?;
-    }
-    for fixed in [4, 1, 1, 4, 4] {
-        len = checked_add(len, tlv_len(fixed)?)?;
-    }
-    if let Some(v) = &value.display_name {
-        len = checked_add(len, tlv_len(v.len())?)?;
-    }
-    if let Some(v) = &value.display_unit {
-        len = checked_add(len, tlv_len(v.len())?)?;
-    }
-    for choice in &value.enum_choices {
-        len = checked_add(len, tlv_len(enum_choice_len(codec, choice)?)?)?;
-    }
-    checked_add(NESTED_HEADER_BYTES, len)
-}
-fn metadata_page_len(
-    codec: &ProtocolCodec,
+    sink: &mut dyn Sink,
     value: &ParameterMetadataPage,
-) -> Result<usize, EncodeError> {
+) -> Result<(), EncodeError> {
     if value.descriptors.len() > 256
         || value
             .descriptors
@@ -2862,94 +2788,102 @@ fn metadata_page_len(
     {
         return Err(EncodeError::LimitExceeded);
     }
-    let mut len = checked_add(tlv_len(4)?, tlv_len(1)?)?;
-    for descriptor in &value.descriptors {
-        len = checked_add(len, tlv_len(descriptor_len(codec, descriptor)?)?)?;
-    }
-    if len > codec.limits().max_frame_bytes
-        || (2 + value.descriptors.len() as u32) > codec.limits().max_tlv_count
-    {
-        return Err(EncodeError::LimitExceeded);
-    }
-    Ok(len)
-}
-fn write_metadata_page(
-    codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
-    value: &ParameterMetadataPage,
-) -> Result<(), EncodeError> {
+    let count = schema::metadata_page::SPEC
+        .field_count(&[(schema::metadata_page::DESCRIPTOR, value.descriptors.len())])?;
+    sink.check_field_count(count)?;
     write_spec!(
-        writer,
+        sink,
         schema::metadata_page::LAST_HANDLE,
         &value.last_handle.to_le_bytes()
     )?;
-    write_spec!(writer, schema::metadata_page::EOF, &[u8::from(value.eof)])?;
+    write_spec!(sink, schema::metadata_page::EOF, &[u8::from(value.eof)])?;
     for descriptor in &value.descriptors {
-        write_descriptor(codec, writer, schema::metadata_page::DESCRIPTOR, descriptor)?;
+        write_descriptor(codec, sink, schema::metadata_page::DESCRIPTOR, descriptor)?;
     }
     Ok(())
 }
 fn write_descriptor(
     codec: &ProtocolCodec,
-    writer: &mut PayloadWriter<'_>,
+    sink: &mut dyn Sink,
     spec: schema::FieldSpec,
     value: &ParameterDescriptor,
 ) -> Result<(), EncodeError> {
-    let total = descriptor_len(codec, value)?;
-    let body = total - NESTED_HEADER_BYTES;
-    let fields = 14
-        + u32::from(value.minimum.is_some())
-        + u32::from(value.maximum.is_some())
-        + u32::from(value.display_name.is_some())
-        + u32::from(value.display_unit.is_some())
-        + value.enum_choices.len() as u32;
-    writer.nested_start_spec(spec, body, fields)?;
-    write_spec!(writer, descriptor::HANDLE, &value.handle.to_le_bytes())?;
-    write_spec!(writer, descriptor::TRACK_ID, value.track_id.as_bytes())?;
-    write_spec!(writer, descriptor::RACK, &[value.rack as u8])?;
-    write_spec!(writer, descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
-    write_spec!(
-        writer,
-        descriptor::PARAMETER_ID,
-        &value.parameter_id.to_le_bytes()
-    )?;
-    write_spec!(writer, descriptor::CHANNEL, &[value.channel as u8])?;
-    write_spec!(writer, descriptor::VALUE_KIND, &[value.value_kind as u8])?;
-    write_spec!(writer, descriptor::UNIT, &[value.unit as u8])?;
-    write_spec!(writer, descriptor::DOMAIN, &[value.domain as u8])?;
-    if let Some(v) = value.minimum {
-        write_spec!(writer, descriptor::MINIMUM, &v.to_le_bytes())?;
+    validate_descriptor(codec, value)?;
+    let fields = descriptor::SPEC.field_count(&[
+        (descriptor::MINIMUM, usize::from(value.minimum.is_some())),
+        (descriptor::MAXIMUM, usize::from(value.maximum.is_some())),
+        (
+            descriptor::DISPLAY_NAME,
+            usize::from(value.display_name.is_some()),
+        ),
+        (
+            descriptor::DISPLAY_UNIT,
+            usize::from(value.display_unit.is_some()),
+        ),
+        (descriptor::ENUM_CHOICE, value.enum_choices.len()),
+    ])?;
+    sink.nested_spec(spec, &mut |sink| {
+        sink.message_header(fields)?;
+        write_spec!(sink, descriptor::HANDLE, &value.handle.to_le_bytes())?;
+        write_spec!(sink, descriptor::TRACK_ID, value.track_id.as_bytes())?;
+        write_spec!(sink, descriptor::RACK, &[value.rack as u8])?;
+        write_spec!(sink, descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
+        write_spec!(
+            sink,
+            descriptor::PARAMETER_ID,
+            &value.parameter_id.to_le_bytes()
+        )?;
+        write_spec!(sink, descriptor::CHANNEL, &[value.channel as u8])?;
+        write_spec!(sink, descriptor::VALUE_KIND, &[value.value_kind as u8])?;
+        write_spec!(sink, descriptor::UNIT, &[value.unit as u8])?;
+        write_spec!(sink, descriptor::DOMAIN, &[value.domain as u8])?;
+        if let Some(v) = value.minimum {
+            write_spec!(sink, descriptor::MINIMUM, &v.to_le_bytes())?;
+        }
+        if let Some(v) = value.maximum {
+            write_spec!(sink, descriptor::MAXIMUM, &v.to_le_bytes())?;
+        }
+        write_spec!(sink, descriptor::DEFAULT, &value.default.to_le_bytes())?;
+        write_spec!(sink, descriptor::MAPPING, &[value.mapping as u8])?;
+        write_spec!(
+            sink,
+            descriptor::AUTOMATION_RATE,
+            &[value.automation_rate as u8]
+        )?;
+        write_spec!(
+            sink,
+            descriptor::SMOOTHING_SAMPLES,
+            &value.smoothing_samples.to_le_bytes()
+        )?;
+        write_spec!(sink, descriptor::FLAGS, &value.flags.to_le_bytes())?;
+        if let Some(v) = &value.display_name {
+            write_spec!(sink, descriptor::DISPLAY_NAME, v.as_bytes())?;
+        }
+        if let Some(v) = &value.display_unit {
+            write_spec!(sink, descriptor::DISPLAY_UNIT, v.as_bytes())?;
+        }
+        for choice in &value.enum_choices {
+            write_enum_choice(codec, sink, choice)?;
+        }
+        Ok(())
+    })
+}
+
+fn write_enum_choice(
+    codec: &ProtocolCodec,
+    sink: &mut dyn Sink,
+    choice: &EnumChoice,
+) -> Result<(), EncodeError> {
+    if !choice.value.is_finite() {
+        return Err(EncodeError::LimitExceeded);
     }
-    if let Some(v) = value.maximum {
-        write_spec!(writer, descriptor::MAXIMUM, &v.to_le_bytes())?;
-    }
-    write_spec!(writer, descriptor::DEFAULT, &value.default.to_le_bytes())?;
-    write_spec!(writer, descriptor::MAPPING, &[value.mapping as u8])?;
-    write_spec!(
-        writer,
-        descriptor::AUTOMATION_RATE,
-        &[value.automation_rate as u8]
-    )?;
-    write_spec!(
-        writer,
-        descriptor::SMOOTHING_SAMPLES,
-        &value.smoothing_samples.to_le_bytes()
-    )?;
-    write_spec!(writer, descriptor::FLAGS, &value.flags.to_le_bytes())?;
-    if let Some(v) = &value.display_name {
-        write_spec!(writer, descriptor::DISPLAY_NAME, v.as_bytes())?;
-    }
-    if let Some(v) = &value.display_unit {
-        write_spec!(writer, descriptor::DISPLAY_UNIT, v.as_bytes())?;
-    }
-    for choice in &value.enum_choices {
-        let total = enum_choice_len(codec, choice)?;
-        writer.nested_start_spec(descriptor::ENUM_CHOICE, total - NESTED_HEADER_BYTES, 2)?;
-        write_spec!(writer, enum_choice::VALUE, &choice.value.to_le_bytes())?;
-        write_spec!(writer, enum_choice::LABEL, choice.label.as_bytes())?;
-        writer.finish_nested(total - NESTED_HEADER_BYTES)?;
-    }
-    writer.finish_nested(body)
+    check_string(codec, &choice.label)?;
+    let fields = enum_choice::SPEC.field_count(&[])?;
+    sink.nested_spec(descriptor::ENUM_CHOICE, &mut |sink| {
+        sink.message_header(fields)?;
+        write_spec!(sink, enum_choice::VALUE, &choice.value.to_le_bytes())?;
+        write_spec!(sink, enum_choice::LABEL, choice.label.as_bytes())
+    })
 }
 fn decode_metadata_page(
     codec: &ProtocolCodec,
@@ -3142,7 +3076,7 @@ fn parse_rate(v: u8) -> Result<ParameterAutomationRate, DecodeError> {
         _ => Err(DecodeError::InvalidTlv),
     }
 }
-fn state_page_len(codec: &ProtocolCodec, value: &ParameterStatePage) -> Result<usize, EncodeError> {
+fn write_state_page(sink: &mut dyn Sink, value: &ParameterStatePage) -> Result<(), EncodeError> {
     if value.records.len() > 256 {
         return Err(EncodeError::LimitExceeded);
     }
@@ -3154,43 +3088,33 @@ fn state_page_len(codec: &ProtocolCodec, value: &ParameterStatePage) -> Result<u
         .len()
         .checked_mul(16)
         .ok_or(EncodeError::LimitExceeded)?;
-    let len = checked_add(
-        checked_add(tlv_len(8)?, tlv_len(2)?)?,
-        checked_add(tlv_len(2)?, tlv_len(bytes)?)?,
+    sink.check_field_count(schema::state_page::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::state_page::OBSERVED_SAMPLE,
+        &value.observed_sample.to_le_bytes()
     )?;
-    if len > codec.limits().max_frame_bytes {
-        return Err(EncodeError::LimitExceeded);
-    }
-    Ok(len)
-}
-fn write_state_record_bytes(
-    writer: &mut PayloadWriter<'_>,
-    records: &[ParameterStateRecord],
-) -> Result<(), EncodeError> {
-    let len = records
-        .len()
-        .checked_mul(16)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let start = writer.position;
-    write_spec!(writer, schema::state_page::RECORDS, &[])?;
-    let end = start
-        .checked_add(tlv_len(len)?)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let bytes = writer
-        .output
-        .get_mut(start..end)
-        .ok_or(EncodeError::LimitExceeded)?;
-    bytes[4..8].copy_from_slice(&(len as u32).to_le_bytes());
-    for (i, r) in records.iter().enumerate() {
-        let o = 8 + i * 16;
-        bytes[o..o + 4].copy_from_slice(&r.handle.to_le_bytes());
-        bytes[o + 4..o + 8].copy_from_slice(&r.flags.to_le_bytes());
-        bytes[o + 8..o + 12].copy_from_slice(&r.value.to_le_bytes());
-        bytes[o + 12..o + 16].fill(0);
-    }
-    bytes[8 + len..].fill(0);
-    writer.position = end;
-    Ok(())
+    write_spec!(
+        sink,
+        schema::state_page::COUNT,
+        &u16::try_from(value.records.len())
+            .map_err(|_| EncodeError::LimitExceeded)?
+            .to_le_bytes(),
+    )?;
+    write_spec!(
+        sink,
+        schema::state_page::RECORD_BYTES,
+        &16_u16.to_le_bytes()
+    )?;
+    sink.stream_field_spec(schema::state_page::RECORDS, bytes, &mut |sink| {
+        for record in &value.records {
+            sink.raw(&record.handle.to_le_bytes())?;
+            sink.raw(&record.flags.to_le_bytes())?;
+            sink.raw(&record.value.to_le_bytes())?;
+            sink.raw(&0_u32.to_le_bytes())?;
+        }
+        Ok(())
+    })
 }
 fn decode_state_page(
     _codec: &ProtocolCodec,
@@ -3237,103 +3161,51 @@ fn validate_state_record(value: &ParameterStateRecord) -> Result<(), DecodeError
     Ok(())
 }
 
-fn capabilities_len(codec: &ProtocolCodec, value: &Capabilities<'_>) -> Result<usize, EncodeError> {
+fn write_capabilities(sink: &mut dyn Sink, value: &Capabilities<'_>) -> Result<(), EncodeError> {
     check_capabilities(value)?;
-    let command_bytes = value
-        .supported_commands
-        .len()
-        .checked_mul(2)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let event_bytes = value
-        .supported_events
-        .len()
-        .checked_mul(2)
-        .ok_or(EncodeError::LimitExceeded)?;
-    let lengths = [
-        2_usize,
-        2,
-        2,
-        2,
-        8,
-        4,
-        8,
-        1,
-        2,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        8,
-        2,
-        2,
-        2,
-        4,
-        command_bytes,
-        event_bytes,
-        8,
-    ];
-    let mut result = 0_usize;
-    for length in lengths {
-        result = checked_add(result, tlv_len(length)?)?;
-    }
-    if result > codec.limits().max_frame_bytes || 27 > codec.limits().max_tlv_count {
-        return Err(EncodeError::LimitExceeded);
-    }
-    Ok(result)
-}
-
-fn write_capabilities(
-    writer: &mut PayloadWriter<'_>,
-    value: &Capabilities<'_>,
-) -> Result<(), EncodeError> {
+    sink.check_field_count(schema::capabilities::SPEC.field_count(&[])?)?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MINIMUM_VERSION_MAJOR,
         &value.minimum_version.major.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MINIMUM_VERSION_MINOR,
         &value.minimum_version.minor.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_VERSION_MAJOR,
         &value.maximum_version.major.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_VERSION_MINOR,
         &value.maximum_version.minor.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_FRAME_BYTES,
         &value.maximum_frame_bytes.to_le_bytes()
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_TLVS,
         &value.maximum_tlvs.to_le_bytes()
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_STRING_BYTES,
         &value.maximum_string_bytes.to_le_bytes()
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_NESTING,
         &[value.maximum_nesting]
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_AUTOMATION_RECORDS,
         &value.maximum_automation_records.to_le_bytes(),
     )?;
@@ -3374,42 +3246,61 @@ fn write_capabilities(
             value.admission_quantum_frames,
         ),
     ] {
-        write_spec!(writer, spec, &field.to_le_bytes())?;
+        write_spec!(sink, spec, &field.to_le_bytes())?;
     }
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_PARAMETER_PAGE_ITEMS,
         &value.maximum_parameter_page_items.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_DIAGNOSTIC_PAGE_ITEMS,
         &value.maximum_diagnostic_page_items.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_TELEMETRY_HANDLES,
         &value.maximum_telemetry_handles.to_le_bytes(),
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::MAXIMUM_TRANSACTION_EDITS,
         &value.maximum_transaction_edits.to_le_bytes(),
     )?;
-    writer.packed_u16(
+    write_packed_u16(
+        sink,
         schema::capabilities::SUPPORTED_COMMANDS,
         value.supported_commands,
     )?;
-    writer.packed_u16(
+    write_packed_u16(
+        sink,
         schema::capabilities::SUPPORTED_EVENTS,
         value.supported_events,
     )?;
     write_spec!(
-        writer,
+        sink,
         schema::capabilities::FLAGS,
         &value.flags.0.to_le_bytes()
     )?;
     Ok(())
+}
+
+fn write_packed_u16(
+    sink: &mut dyn Sink,
+    spec: schema::FieldSpec,
+    values: &[u16],
+) -> Result<(), EncodeError> {
+    let value_len = values
+        .len()
+        .checked_mul(2)
+        .ok_or(EncodeError::LimitExceeded)?;
+    sink.stream_field_spec(spec, value_len, &mut |sink| {
+        for value in values {
+            sink.raw(&value.to_le_bytes())?;
+        }
+        Ok(())
+    })
 }
 
 fn decode_capabilities<'a>(
@@ -4158,6 +4049,14 @@ fn valid_stable_id(value: &str) -> bool {
 
 fn checked_add(left: usize, right: usize) -> Result<usize, EncodeError> {
     left.checked_add(right).ok_or(EncodeError::LimitExceeded)
+}
+
+fn checked_sink_len(codec: &ProtocolCodec, sink: &dyn Sink) -> Result<usize, EncodeError> {
+    let written = sink.written();
+    if written > codec.limits().max_frame_bytes {
+        return Err(EncodeError::LimitExceeded);
+    }
+    Ok(written)
 }
 
 fn tlv_len(value_len: usize) -> Result<usize, EncodeError> {

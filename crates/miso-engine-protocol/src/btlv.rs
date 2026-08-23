@@ -1,6 +1,9 @@
 //! Shared bounded-TLV reader, validation, and output sinks.
 
-use crate::{DecodeError, EncodeError, ProtocolLimits, schema::MessageSpec};
+use crate::{
+    DecodeError, EncodeError, ProtocolLimits,
+    schema::{FieldSpec, MessageSpec, Wire},
+};
 
 #[cfg(test)]
 pub(crate) const WIRE_U8: u8 = 1;
@@ -475,10 +478,15 @@ pub(crate) trait Sink {
     fn written(&self) -> usize;
     fn raw(&mut self, bytes: &[u8]) -> Result<(), EncodeError>;
 
-    fn message_header(&mut self, count: u32) -> Result<(), EncodeError> {
+    fn check_field_count(&self, count: u32) -> Result<(), EncodeError> {
         if count > self.limits().max_tlv_count {
             return Err(EncodeError::LimitExceeded);
         }
+        Ok(())
+    }
+
+    fn message_header(&mut self, count: u32) -> Result<(), EncodeError> {
+        self.check_field_count(count)?;
         self.raw(&count.to_le_bytes())?;
         self.raw(&0_u32.to_le_bytes())
     }
@@ -495,9 +503,40 @@ pub(crate) trait Sink {
         self.raw(&[0_u8; 7][..padding(value.len())])
     }
 
+    fn field_spec(&mut self, spec: FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
+        self.stream_field_spec(spec, value.len(), &mut |sink| sink.raw(value))
+    }
+
+    fn stream_field_spec(
+        &mut self,
+        spec: FieldSpec,
+        value_len: usize,
+        body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
+    ) -> Result<(), EncodeError>;
+
     fn nested(
         &mut self,
         id: u16,
+        body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
+    ) -> Result<(), EncodeError> {
+        self.nested_field(id, true, body)
+    }
+
+    fn nested_spec(
+        &mut self,
+        spec: FieldSpec,
+        body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
+    ) -> Result<(), EncodeError> {
+        if spec.wire != Wire::Message || spec.nested.is_none() {
+            return Err(EncodeError::LimitExceeded);
+        }
+        self.nested_field(spec.id, spec.mandatory, body)
+    }
+
+    fn nested_field(
+        &mut self,
+        id: u16,
+        mandatory: bool,
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError>;
 }
@@ -535,9 +574,26 @@ impl Sink for CountSink {
         Ok(())
     }
 
-    fn nested(
+    fn stream_field_spec(
+        &mut self,
+        _spec: FieldSpec,
+        value_len: usize,
+        body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
+    ) -> Result<(), EncodeError> {
+        self.raw(&[0_u8; TLV_PREFIX_BYTES])?;
+        let value_start = self.length;
+        body(self)?;
+        if self.length - value_start != value_len {
+            return Err(EncodeError::LimitExceeded);
+        }
+        u32::try_from(value_len).map_err(|_| EncodeError::LimitExceeded)?;
+        self.raw(&[0_u8; 7][..padding(value_len)])
+    }
+
+    fn nested_field(
         &mut self,
         _id: u16,
+        _mandatory: bool,
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError> {
         self.raw(&[0_u8; TLV_PREFIX_BYTES])?;
@@ -590,16 +646,38 @@ impl Sink for SliceSink<'_> {
         Ok(())
     }
 
-    fn nested(
+    fn stream_field_spec(
+        &mut self,
+        spec: FieldSpec,
+        value_len: usize,
+        body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
+    ) -> Result<(), EncodeError> {
+        let length = u32::try_from(value_len).map_err(|_| EncodeError::LimitExceeded)?;
+        let mut prefix = [0_u8; TLV_PREFIX_BYTES];
+        prefix[..2].copy_from_slice(&spec.id.to_le_bytes());
+        prefix[2] = spec.wire.raw();
+        prefix[3] = u8::from(spec.mandatory);
+        prefix[4..].copy_from_slice(&length.to_le_bytes());
+        self.raw(&prefix)?;
+        let value_start = self.length;
+        body(self)?;
+        if self.length - value_start != value_len {
+            return Err(EncodeError::LimitExceeded);
+        }
+        self.raw(&[0_u8; 7][..padding(value_len)])
+    }
+
+    fn nested_field(
         &mut self,
         id: u16,
+        mandatory: bool,
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError> {
         let field_start = self.length;
         let mut prefix = [0_u8; TLV_PREFIX_BYTES];
         prefix[..2].copy_from_slice(&id.to_le_bytes());
         prefix[2] = WIRE_MESSAGE;
-        prefix[3] = 1;
+        prefix[3] = u8::from(mandatory);
         self.raw(&prefix)?;
         let body_start = self.length;
         body(self)?;
@@ -648,5 +726,65 @@ mod tests {
             24
         );
         assert!(output[28..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn schema_fields_stream_optional_and_nested_values_once_per_sink() {
+        let limits = ProtocolLimits::default();
+        let required = FieldSpec::req(1, Wire::U32);
+        let packed = FieldSpec::opt(2, Wire::PackedU16);
+        let nested = FieldSpec::msg(3, false, false, &crate::schema::enum_choice::SPEC);
+
+        let mut sizing_stream_calls = 0;
+        let mut sizing_nested_calls = 0;
+        let mut sizing = CountSink::new(limits);
+        sizing
+            .field_spec(required, &9_u32.to_le_bytes())
+            .expect("required field");
+        sizing
+            .stream_field_spec(packed, 4, &mut |sink| {
+                sizing_stream_calls += 1;
+                sink.raw(&7_u16.to_le_bytes())?;
+                sink.raw(&8_u16.to_le_bytes())
+            })
+            .expect("packed field");
+        sizing
+            .nested_spec(nested, &mut |sink| {
+                sizing_nested_calls += 1;
+                sink.message_header(0)
+            })
+            .expect("nested field");
+        assert_eq!((sizing_stream_calls, sizing_nested_calls), (1, 1));
+
+        let mut output = vec![0xa5; sizing.written()];
+        let mut writing_stream_calls = 0;
+        let mut writing_nested_calls = 0;
+        let mut writer = SliceSink::new(&mut output, limits);
+        writer
+            .field_spec(required, &9_u32.to_le_bytes())
+            .expect("required field");
+        writer
+            .stream_field_spec(packed, 4, &mut |sink| {
+                writing_stream_calls += 1;
+                sink.raw(&7_u16.to_le_bytes())?;
+                sink.raw(&8_u16.to_le_bytes())
+            })
+            .expect("packed field");
+        writer
+            .nested_spec(nested, &mut |sink| {
+                writing_nested_calls += 1;
+                sink.message_header(0)
+            })
+            .expect("nested field");
+        assert_eq!((writing_stream_calls, writing_nested_calls), (1, 1));
+        assert_eq!(writer.written(), sizing.written());
+        assert_eq!(output[3], 1, "required schema flag");
+        assert_eq!(output[19], 0, "optional packed schema flag");
+        assert_eq!(output[35], 0, "optional nested schema flag");
+        assert_eq!(&output[24..28], &[7, 0, 8, 0]);
+        assert_eq!(
+            u32::from_le_bytes(output[36..40].try_into().expect("nested length")),
+            8
+        );
     }
 }
