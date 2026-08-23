@@ -27,6 +27,8 @@
 //! generic — the dB curve a compressor rides, the followers that ride it — so they too are
 //! digested at every width.
 
+use miso_engine_delay::corpus as delay_corpus;
+use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
 use miso_engine_lane::Lane;
 use miso_engine_lane::kernels::{
@@ -36,7 +38,6 @@ use miso_engine_lane::kernels::{
 };
 use miso_engine_math::corpus as math_corpus;
 use miso_engine_math::{exp2_lane, log2_lane};
-use miso_engine_transient_shaper::corpus as transient_shaper_corpus;
 use sha2::{Digest, Sha256};
 
 /// Independent single-lane signals in every lane case; a multiple of the widest backend.
@@ -71,9 +72,19 @@ pub const RUNTIME_CASE_COUNT: usize = runtime_corpus::CASE_COUNT;
 /// are lane generic, and their pins live in that crate.
 pub const TRANSIENT_SHAPER_CASE_COUNT: usize = transient_shaper_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_delay::corpus`] (issue #93's G5 row, replayed under wasm).
+///
+/// The delay is a `W = 1` effect -- a gathered two-second ring has no `W4`/`W8` kernel -- so like
+/// the math cases these are run once rather than at every width. What they carry across the target
+/// boundary is the six `Lane::fma` sites of its kernel, which on wasm are the software FMA.
+pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
-pub const CASE_COUNT: usize =
-    LANE_CASE_COUNT + MATH_CASE_COUNT + RUNTIME_CASE_COUNT + TRANSIENT_SHAPER_CASE_COUNT;
+pub const CASE_COUNT: usize = LANE_CASE_COUNT
+    + MATH_CASE_COUNT
+    + RUNTIME_CASE_COUNT
+    + TRANSIENT_SHAPER_CASE_COUNT
+    + DELAY_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -261,6 +272,8 @@ enum Case {
     Runtime(usize),
     /// One case of the `miso-engine-transient-shaper` cross-target corpus.
     TransientShaper(usize),
+    /// One case of the `miso-engine-delay` G5 corpus.
+    Delay(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -289,21 +302,26 @@ fn case_of(index: usize) -> Case {
     if index < RUNTIME_CASE_COUNT {
         return Case::Runtime(index);
     }
-    Case::TransientShaper(index - RUNTIME_CASE_COUNT)
+    let index = index - RUNTIME_CASE_COUNT;
+    if index < TRANSIENT_SHAPER_CASE_COUNT {
+        return Case::TransientShaper(index);
+    }
+    Case::Delay(index - TRANSIENT_SHAPER_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
 /// widths and is compared at each of them.
 ///
-/// Only the math cases are excluded: they are scalar `f64`/`f32` functions with no lane
-/// instantiation, so they are run once and their digest cannot depend on a width.
+/// The math and delay cases are excluded: the math functions are scalar `f64`/`f32` with no lane
+/// instantiation, and the delay is a `W = 1` effect, so both are run once and their digests cannot
+/// depend on a width.
 ///
 /// # Panics
 ///
 /// Panics if `index >= CASE_COUNT`.
 #[must_use]
 pub fn is_width_dependent(index: usize) -> bool {
-    !matches!(case_of(index), Case::Math(_))
+    !matches!(case_of(index), Case::Math(_) | Case::Delay(_))
 }
 
 /// `true` when the case is one of this crate's own kernel or element-wise cases, whose per-lane
@@ -333,6 +351,7 @@ pub fn case_name(index: usize) -> String {
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
+        Case::Delay(case) => format!("delay/{}", delay_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -368,6 +387,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
+        Case::Delay(case) => delay_corpus::G5_DIGESTS[case],
     }
 }
 
@@ -390,6 +410,7 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             _ => digest_runtime::<miso_engine_lane::Simd8>(case),
         },
         Case::TransientShaper(case) => digest_transient_shaper(case, width),
+        Case::Delay(case) => digest_delay(case),
     }
 }
 
@@ -447,7 +468,7 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             1 => elementwise_values::<miso_engine_lane::Simd4>(operation, fused),
             _ => elementwise_values::<miso_engine_lane::Simd8>(operation, fused),
         },
-        Case::Math(_) | Case::Runtime(_) | Case::TransientShaper(_) => {
+        Case::Math(_) | Case::Runtime(_) | Case::TransientShaper(_) | Case::Delay(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -793,6 +814,18 @@ fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
     let mut out = vec![0_u32; transient_shaper_corpus::WORDS];
     transient_shaper_corpus::run_case(case, transient_shaper_corpus::WIDTHS[width], &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Digests one `miso-engine-delay` G5 case, exactly as that crate's `tests/determinism.rs` does
+/// natively.
+fn digest_delay(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; delay_corpus::POINTS];
+    delay_corpus::run_case(case, &mut out);
     let mut hasher = Sha256::new();
     for word in &out {
         hasher.update(word.to_le_bytes());

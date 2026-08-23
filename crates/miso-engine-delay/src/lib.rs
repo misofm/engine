@@ -50,7 +50,7 @@ use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use miso_engine_lane::{Lane, flush};
 
-// pub mod corpus;
+pub mod corpus;
 
 const PER_LANE_PARAMETER_COUNT: usize = 4;
 const ORDINARY_RAMP_COUNT: usize = 3;
@@ -434,7 +434,12 @@ impl DelayLane {
     ///
     /// The one place the reset fields are listed. `FullToDefaults` passes the prepared defaults;
     /// `DiscontinuityKeepParameters` passes the pending tap and the ramps snapped to their targets.
-    fn reset_to(&mut self, delay: u32, delay_target_ms: f32, ramps: [LinearRamp; ORDINARY_RAMP_COUNT]) {
+    fn reset_to(
+        &mut self,
+        delay: u32,
+        delay_target_ms: f32,
+        ramps: [LinearRamp; ORDINARY_RAMP_COUNT],
+    ) {
         self.damping_state = 0.0;
         self.delay_target_ms = delay_target_ms;
         self.active_delay = delay;
@@ -632,7 +637,8 @@ fn validate_inputs(
     let initial = EffectPrepareError {
         code: "effect.parameter.initial",
     };
-    let left = LaneDefaults::new(&left, metadata.sample_rate, resources.max_delay).ok_or(initial)?;
+    let left =
+        LaneDefaults::new(&left, metadata.sample_rate, resources.max_delay).ok_or(initial)?;
     let right =
         LaneDefaults::new(&right, metadata.sample_rate, resources.max_delay).ok_or(initial)?;
     Ok((metadata, resources, left, right, cross))
@@ -825,8 +831,11 @@ impl PreparedDelay {
         debug_assert!((1..=CHUNK_FRAMES).contains(&frames));
         debug_assert!(cursor + frames <= ring_words);
 
-        self.left
-            .fill_windows(cursor, &mut windows.left_old[..frames], &mut windows.left_new[..frames]);
+        self.left.fill_windows(
+            cursor,
+            &mut windows.left_old[..frames],
+            &mut windows.left_new[..frames],
+        );
         self.right.fill_windows(
             cursor,
             &mut windows.right_old[..frames],
@@ -1013,20 +1022,30 @@ fn delay_chunk(
     debug_assert_eq!(write_right.len(), frames);
     debug_assert_eq!(left.old.len(), frames);
     debug_assert_eq!(right.old.len(), frames);
+    // Re-sliced to the chunk length so the bounds of all six streams are one fact the compiler
+    // already has; the indexing below then carries no check.
+    let io_left = &mut io_left[..frames];
+    let io_right = &mut io_right[..frames];
+    let write_left = &mut write_left[..frames];
+    let write_right = &mut write_right[..frames];
+
+    // Three specialisations of the body below, each *provably* the same computation rather than a
+    // different one: a ramp whose first value is exactly `0.0` or `1.0` and whose step is exactly
+    // zero holds that value for every sample of the chunk, so the corresponding per-sample mask is
+    // constant and the `select` collapses to the arm it always chooses. They are read once, so
+    // the loop is unswitched rather than branched per sample.
+    let matrix_through = cross.position.0 == 0.0 && cross.position.1 == 0.0;
+    let matrix_swap = cross.position.0 == 1.0 && cross.position.1 == 0.0;
+    let damping_off = left.damping.0 == 0.0
+        && left.damping.1 == 0.0
+        && right.damping.0 == 0.0
+        && right.damping.1 == 0.0;
 
     let last = frames - 1;
-    let (mut gain_left, mut feedback_left, mut mix_left, mut alpha_left) = (
-        left.damping.0,
-        left.feedback.0,
-        left.mix.0,
-        left.alpha,
-    );
-    let (mut gain_right, mut feedback_right, mut mix_right, mut alpha_right) = (
-        right.damping.0,
-        right.feedback.0,
-        right.mix.0,
-        right.alpha,
-    );
+    let (mut gain_left, mut feedback_left, mut mix_left, mut alpha_left) =
+        (left.damping.0, left.feedback.0, left.mix.0, left.alpha);
+    let (mut gain_right, mut feedback_right, mut mix_right, mut alpha_right) =
+        (right.damping.0, right.feedback.0, right.mix.0, right.alpha);
     let mut position = cross.position.0;
     let (mut state_l, mut state_r) = (*state_left, *state_right);
     let bypass = lane_mask(cross.bypass);
@@ -1034,26 +1053,44 @@ fn delay_chunk(
     for frame in 0..frames {
         let tap_left = tap_sample(&left, frame, last, &mut alpha_left, STEP_ALPHA);
         let tap_right = tap_sample(&right, frame, last, &mut alpha_right, STEP_ALPHA);
-        let damped_left = damp_sample(tap_left, gain_left, &mut state_l);
-        let damped_right = damp_sample(tap_right, gain_right, &mut state_r);
+        let (damped_left, damped_right) = if damping_off {
+            // Exactly `damp_sample`'s identity arm: the state takes the flushed tap, the output the
+            // tap itself.
+            state_l = flush(tap_left);
+            state_r = flush(tap_right);
+            (tap_left, tap_right)
+        } else {
+            (
+                damp_sample(tap_left, gain_left, &mut state_l),
+                damp_sample(tap_right, gain_right, &mut state_r),
+            )
+        };
         let sent_left = feedback_left * damped_left;
         let sent_right = feedback_right * damped_right;
 
-        let opposite = 1.0 - position;
-        let through = lane_eq(position, 0.0);
-        let swapped = lane_eq(position, 1.0);
-        let mixed_left = opposite.fma(sent_left, position * sent_right);
-        let mixed_right = position.fma(sent_left, opposite * sent_right);
-        let fed_left = lane_select(
-            through,
-            sent_left,
-            lane_select(swapped, sent_right, mixed_left),
-        );
-        let fed_right = lane_select(
-            through,
-            sent_right,
-            lane_select(swapped, sent_left, mixed_right),
-        );
+        let (fed_left, fed_right) = if matrix_through {
+            (sent_left, sent_right)
+        } else if matrix_swap {
+            (sent_right, sent_left)
+        } else {
+            let opposite = 1.0 - position;
+            let through = lane_eq(position, 0.0);
+            let swapped = lane_eq(position, 1.0);
+            let mixed_left = opposite.fma(sent_left, position * sent_right);
+            let mixed_right = position.fma(sent_left, opposite * sent_right);
+            (
+                lane_select(
+                    through,
+                    sent_left,
+                    lane_select(swapped, sent_right, mixed_left),
+                ),
+                lane_select(
+                    through,
+                    sent_right,
+                    lane_select(swapped, sent_left, mixed_right),
+                ),
+            )
+        };
 
         let dry_left = io_left[frame];
         let dry_right = io_right[frame];
@@ -1115,11 +1152,7 @@ fn damp_sample(tap: f32, gain: f32, state: &mut f32) -> f32 {
 fn mix_sample(dry: f32, wet: f32, mix: f32, bypass: Mask) -> f32 {
     let blended = mix.fma(wet - dry, dry);
     let wet_or_blend = lane_select(lane_eq(mix, 1.0), wet, blended);
-    lane_select(
-        lane_mask_or(lane_eq(mix, 0.0), bypass),
-        dry,
-        wet_or_blend,
-    )
+    lane_select(lane_mask_or(lane_eq(mix, 0.0), bypass), dry, wet_or_blend)
 }
 
 impl PreparedNativeEffect for PreparedDelay {
@@ -1241,8 +1274,18 @@ impl PreparedNativeEffect for PreparedDelay {
         // (issue #93 finding F9).
         let left = read_lane_header(input.left, self.resources, sample_rate)?;
         let right = read_lane_header(input.right, self.resources, sample_rate)?;
-        validate_ring(input.left, cursor, left.valid_history, self.resources.ring_words)?;
-        validate_ring(input.right, cursor, right.valid_history, self.resources.ring_words)?;
+        validate_ring(
+            input.left,
+            cursor,
+            left.valid_history,
+            self.resources.ring_words,
+        )?;
+        validate_ring(
+            input.right,
+            cursor,
+            right.valid_history,
+            self.resources.ring_words,
+        )?;
 
         self.cursor = cursor;
         self.cross = cross;
@@ -1430,11 +1473,7 @@ fn read_lane_header(
     // The damping triple holds the mapped coefficient, so its domain is the coefficient's, not the
     // control's; the other two hold their descriptor values.
     let damping_domain = ParameterSpec::continuous(0.0, damping_coefficient_max(sample_rate), 0.0);
-    let specs = [
-        &PARAMETER_SPECS[1],
-        &damping_domain,
-        &PARAMETER_SPECS[3],
-    ];
+    let specs = [&PARAMETER_SPECS[1], &damping_domain, &PARAMETER_SPECS[3]];
     let mut ramps = [LinearRamp::fixed(0.0); ORDINARY_RAMP_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
         *ramp = read_ramp(bytes, 7 + index * 3, specs[index])?;
@@ -1837,7 +1876,10 @@ mod tests {
             miso_engine_math::atan(big_g) * f64::from(sample_rate) / core::f64::consts::PI
         }
 
-        assert_eq!(damping_coefficient(0.0, 48_000).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(
+            damping_coefficient(0.0, 48_000).to_bits(),
+            0.0_f32.to_bits()
+        );
         for sample_rate in [44_100_u32, 48_000, 88_200, 96_000] {
             let cutoff = cutoff_of(damping_coefficient(0.25, sample_rate), sample_rate);
             assert!(
@@ -1845,7 +1887,10 @@ mod tests {
                 "{sample_rate} Hz default cutoff {cutoff}"
             );
             let low = cutoff_of(damping_coefficient(0.995, sample_rate), sample_rate);
-            assert!((low - 38.29).abs() < 0.1, "{sample_rate} Hz low cutoff {low}");
+            assert!(
+                (low - 38.29).abs() < 0.1,
+                "{sample_rate} Hz low cutoff {low}"
+            );
             // Everything below the clamp point shares one cutoff.
             let clamped = cutoff_of(damping_coefficient(0.01, sample_rate), sample_rate);
             assert!(
@@ -2038,11 +2083,10 @@ mod tests {
     /// `lcm(7, 512)`, and a multiple of 1, 64 and 128: every partition starts a block here.
     const PARTITION_EVENT: usize = 3_584;
 
-    fn render_partition(
-        frames: usize,
-        block_frames: usize,
-        chunk_cap: usize,
-    ) -> (Vec<u32>, Vec<u32>, (Vec<u8>, Vec<u8>, Vec<u8>)) {
+    /// One partition run: the left output bits, the right output bits and the final snapshot.
+    type PartitionRun = (Vec<u32>, Vec<u32>, (Vec<u8>, Vec<u8>, Vec<u8>));
+
+    fn render_partition(frames: usize, block_frames: usize, chunk_cap: usize) -> PartitionRun {
         let values = initial_values();
         let mut effect =
             prepare_delay(request_with_quantum(&values, 48_000, 512)).expect("prepare at q512");
@@ -2096,5 +2140,361 @@ mod tests {
         assert_eq!(per_sample.0, reference.0, "left at chunk cap 1");
         assert_eq!(per_sample.1, reference.1, "right at chunk cap 1");
         assert_eq!(per_sample.2, reference.2, "state at chunk cap 1");
+    }
+
+    /// Parameters for the recovery tests: a 1 ms tap, wet output, real feedback.
+    fn recovery_values(cross: f32) -> [InitialParameterValue; 9] {
+        let mut values = initial_values();
+        values[0].value = 1.0;
+        values[1].value = 1.0;
+        values[2].value = 0.5;
+        values[3].value = 0.5;
+        values[6].value = 1.0;
+        values[7].value = 1.0;
+        values[8].value = cross;
+        values
+    }
+
+    /// E7 — D7: finiteness is a once-per-block, once-per-lane decision, and at cross 0 the two
+    /// lanes are independent.
+    #[test]
+    fn nonfinite_state_recovers_per_block_lane_locally_at_p_zero() {
+        let values = recovery_values(0.0);
+        let mut injected = prepare(&values);
+        let mut clean = prepare(&values);
+        let (warm_left, warm_right) = partition_signal(128);
+        for effect in [&mut injected, &mut clean] {
+            let mut left = warm_left.clone();
+            let mut right = warm_right.clone();
+            let report = effect.process(
+                EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("warm"),
+            );
+            assert_eq!(report, ProcessReport::default());
+        }
+
+        // The cell the next sample's 1 ms tap reads, which is inside the valid history.
+        let ring_words = injected.left.ring.len();
+        let poisoned = injected.cursor + ring_words - 48;
+        injected.left.ring[poisoned % ring_words] = f32::INFINITY;
+
+        let (next_left, next_right) = partition_signal(64);
+        let mut injected_left = next_left.clone();
+        let mut injected_right = next_right.clone();
+        let report = injected.process(
+            EffectProcessBlock::new(&mut injected_left, &mut injected_right, None, 128, &[], 128)
+                .expect("faulted block"),
+        );
+        let mut clean_left = next_left;
+        let mut clean_right = next_right;
+        clean.process(
+            EffectProcessBlock::new(&mut clean_left, &mut clean_right, None, 128, &[], 128)
+                .expect("clean block"),
+        );
+
+        assert_eq!(report.recovered_left_samples, 1);
+        assert_eq!(report.recovered_right_samples, 0);
+        assert_eq!(report.sanitized_main_samples, 0);
+        assert!(injected_left.iter().all(|sample| sample.to_bits() == 0));
+        assert_eq!(injected.left.valid_history, 0);
+        assert_eq!(injected.left.damping_state.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(
+            injected_right
+                .iter()
+                .map(|s| s.to_bits())
+                .collect::<Vec<_>>(),
+            clean_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(injected.right.valid_history, clean.right.valid_history);
+
+        // With the matrix engaged the fault crosses to the other lane inside the same block, and
+        // both lanes recover.
+        let crossed_values = recovery_values(0.5);
+        let mut crossed = prepare(&crossed_values);
+        let (warm_left, warm_right) = partition_signal(128);
+        let mut left = warm_left;
+        let mut right = warm_right;
+        crossed.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("warm"),
+        );
+        let ring_words = crossed.left.ring.len();
+        let poisoned = (crossed.cursor + ring_words - 48) % ring_words;
+        crossed.left.ring[poisoned] = f32::INFINITY;
+        let mut left = vec![0.25_f32; 64];
+        let mut right = vec![-0.125_f32; 64];
+        let report = crossed.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 128, &[], 128).expect("crossed"),
+        );
+        assert_eq!(report.recovered_left_samples, 1);
+        assert_eq!(report.recovered_right_samples, 1);
+        assert!(
+            left.iter()
+                .chain(&right)
+                .all(|sample| sample.to_bits() == 0)
+        );
+
+        // A non-finite *input* is not sanitised here -- the input stage upstream owns that -- so it
+        // is caught by the same block check and counted as a recovery.
+        let mut from_input = prepare(&values);
+        let mut left = [f32::NAN, f32::from_bits(1)];
+        let mut right = [0.25_f32; 2];
+        let report = from_input.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("nan input"),
+        );
+        assert_eq!(report.sanitized_main_samples, 0);
+        assert_eq!(report.recovered_left_samples, 1);
+        assert_eq!(report.recovered_right_samples, 0);
+        assert_eq!(left.map(f32::to_bits), [0, 0]);
+    }
+
+    /// E8 — a rejected restore changes nothing, and both resets are word exact.
+    #[test]
+    fn invalid_restore_is_atomic_and_both_resets_are_word_exact() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let spans = [
+            point(0, ParameterChannel::Left, 0, 2.0),
+            point(1, ParameterChannel::Left, 0, -0.5),
+            point(4, ParameterChannel::Both, 0, 1.0),
+        ];
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.125_f32; 8];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128)
+                .expect("dirty block"),
+        );
+        let before = snapshot(&effect);
+        for (section, word, value) in [(2_usize, 0_usize, f32::NAN), (1, 0, f32::INFINITY)] {
+            let mut invalid = before.clone();
+            let bytes = match section {
+                1 => &mut invalid.1,
+                _ => &mut invalid.2,
+            };
+            write_f32(bytes, word, value);
+            assert!(
+                effect
+                    .restore_state_payload(
+                        1,
+                        StatePayloadInput::new(
+                            &invalid.0,
+                            &invalid.1,
+                            &invalid.2,
+                            effect.metadata().state_sizes,
+                        )
+                        .expect("invalid payload shape"),
+                    )
+                    .is_err()
+            );
+            assert_eq!(snapshot(&effect), before);
+        }
+        // A stale ring word outside the valid history is rejected after the header, and still
+        // leaves nothing written.
+        let mut stale = before.clone();
+        write_f32(&mut stale.1, LANE_HEADER_WORDS + 4_000, 0.5);
+        assert!(
+            effect
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(
+                        &stale.0,
+                        &stale.1,
+                        &stale.2,
+                        effect.metadata().state_sizes,
+                    )
+                    .expect("stale payload shape"),
+                )
+                .is_err()
+        );
+        assert_eq!(snapshot(&effect), before);
+        assert!(
+            effect
+                .restore_state_payload(
+                    2,
+                    StatePayloadInput::new(
+                        &before.0,
+                        &before.1,
+                        &before.2,
+                        effect.metadata().state_sizes,
+                    )
+                    .expect("payload shape"),
+                )
+                .is_err()
+        );
+
+        // A restored effect continues bit for bit.
+        let mut restored = prepare(&values);
+        restored
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(
+                    &before.0,
+                    &before.1,
+                    &before.2,
+                    restored.metadata().state_sizes,
+                )
+                .expect("state input"),
+            )
+            .expect("restore");
+        let mut next_left = [0.1_f32; 16];
+        let mut next_right = [-0.2_f32; 16];
+        let mut restored_left = next_left;
+        let mut restored_right = next_right;
+        effect.process(
+            EffectProcessBlock::new(&mut next_left, &mut next_right, None, 8, &[], 128)
+                .expect("continuation"),
+        );
+        restored.process(
+            EffectProcessBlock::new(&mut restored_left, &mut restored_right, None, 8, &[], 128)
+                .expect("restored continuation"),
+        );
+        assert_eq!(next_left.map(f32::to_bits), restored_left.map(f32::to_bits));
+        assert_eq!(
+            next_right.map(f32::to_bits),
+            restored_right.map(f32::to_bits)
+        );
+
+        effect.reset(ResetKind::DiscontinuityKeepParameters);
+        let mut retained_values = values;
+        retained_values[0].value = 2.0;
+        retained_values[2].value = -0.5;
+        retained_values[8].value = 1.0;
+        let retained = prepare(&retained_values);
+        assert_eq!(snapshot(&effect), snapshot(&retained));
+
+        effect.reset(ResetKind::FullToDefaults);
+        let fresh = prepare(&values);
+        assert_eq!(snapshot(&effect), snapshot(&fresh));
+        assert_eq!(effect.cursor, 0);
+        assert_eq!(effect.left.valid_history, 0);
+    }
+
+    /// E9 — the dry identities keep the input's bits, including its sign of zero, while the ring
+    /// word the same sample writes is canonical `+0.0` under D7.
+    #[test]
+    fn dry_identities_warm_histories_with_canonical_zero_state() {
+        let mut mix_values = initial_values();
+        mix_values[6].value = 0.0;
+        mix_values[7].value = 0.0;
+        let mut mix_zero = prepare(&mix_values);
+        let mut left = [-0.0_f32];
+        let mut right = [0.0_f32];
+        mix_zero.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                .expect("mix-zero block"),
+        );
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(mix_zero.left.valid_history, 1);
+        // Re-pinned: the ring write is a recursive word, so it is flushed and `-0.0` becomes
+        // `+0.0` (D7, issue #93 finding F10 -- the old pin was the software flush disagreeing with
+        // hardware FTZ).
+        assert_eq!(mix_zero.left.ring[0].to_bits(), 0.0_f32.to_bits());
+
+        let values = initial_values();
+        let mut bypass_request = request(&values, 48_000);
+        bypass_request.bypass = true;
+        let mut bypass = prepare_delay(bypass_request).expect("bypass prepare");
+        let mut left = [-0.0_f32];
+        let mut right = [0.0_f32];
+        bypass.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
+                .expect("bypass block"),
+        );
+        assert_eq!(left[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(bypass.left.valid_history, 1);
+        assert_eq!(bypass.left.ring[0].to_bits(), 0.0_f32.to_bits());
+
+        // Damping off is the exact tap, and the damping state follows it.
+        let mut wet_values = initial_values();
+        wet_values[0].value = 1.0;
+        wet_values[1].value = 1.0;
+        wet_values[4].value = 0.0;
+        wet_values[5].value = 0.0;
+        wet_values[6].value = 1.0;
+        wet_values[7].value = 1.0;
+        let mut wet = prepare(&wet_values);
+        let mut left = vec![0.0_f32; 64];
+        let mut right = vec![0.0_f32; 64];
+        left[0] = 0.125;
+        wet.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("wet block"),
+        );
+        assert_eq!(wet.left.ramps[1].current.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(left[48].to_bits(), 0.125_f32.to_bits());
+    }
+
+    /// E10 — the delay never binds a bank, and every member is validated before the fallback.
+    #[test]
+    fn bank_fallback_validates_every_member() {
+        let factory = DelayFactory;
+        let bank_values = [initial_values(); 4];
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|index| request(&bank_values[index], 48_000));
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: KernelBackendV1::Aarch64Neon,
+                    width: BankWidth::Four,
+                    requests: &requests,
+                })
+                .expect("legal scalar fallback")
+                .is_none()
+        );
+
+        let mut malformed_values = bank_values;
+        malformed_values[3][0].value = f32::NAN;
+        let malformed_requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|index| request(&malformed_values[index], 48_000));
+        let malformed = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Aarch64Neon,
+            width: BankWidth::Four,
+            requests: &malformed_requests,
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed member must precede fallback"),
+        };
+        assert_eq!(malformed.code, "effect.parameter.initial");
+        let mut below_cap = requests;
+        below_cap[3].limits.maximum_total_state_bytes -= 1;
+        let under_cap = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: KernelBackendV1::Aarch64Neon,
+            width: BankWidth::Four,
+            requests: &below_cap,
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("under-cap member must precede fallback"),
+        };
+        assert_eq!(under_cap.code, "effect.resource.limit");
+    }
+
+    /// Automation that is out of shape is counted, never applied, and never panics.
+    #[test]
+    fn malformed_automation_is_counted_and_never_applied() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let spans = [
+            // Out of order: parameter 3 before parameter 1.
+            point(3, ParameterChannel::Left, 0, 0.5),
+            point(1, ParameterChannel::Left, 0, 0.5),
+            // Wrong channel for a per-lane parameter.
+            point(1, ParameterChannel::Both, 0, 0.5),
+            // Unknown parameter.
+            point(9, ParameterChannel::Left, 0, 0.5),
+            // Outside the domain.
+            point(4, ParameterChannel::Both, 0, 2.0),
+            // Not a point.
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Linear,
+                channel: ParameterChannel::Both,
+                parameter_index: 4,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 0.5,
+                end_value: 0.5,
+            },
+        ];
+        let report = process_zeros(&mut effect, 4, 0, &spans);
+        assert_eq!(report.invalid_spans, 5);
+        assert_eq!(effect.left.ramps[2].target.to_bits(), 0.5_f32.to_bits());
+        assert_eq!(effect.left.ramps[0].current.to_bits(), 0.35_f32.to_bits());
+        assert_eq!(effect.cross.target.to_bits(), 0.0_f32.to_bits());
     }
 }

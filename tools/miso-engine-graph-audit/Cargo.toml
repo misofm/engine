@@ -13,8 +13,13 @@ path = "src/main.rs"
 name = "miso_engine_graph_audit_parametric_eq"
 path = "src/parametric_eq_main.rs"
 
+[[bin]]
+name = "miso_engine_graph_audit_delay"
+path = "src/delay_main.rs"
+
 [dependencies]
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-delay.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-parametric-eq.workspace = true

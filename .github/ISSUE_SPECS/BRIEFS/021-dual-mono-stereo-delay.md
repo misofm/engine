@@ -271,3 +271,88 @@ rebriefing. Do not tune or weaken gates. Record exact commands, candidate, evide
 for explicit channel delay only. The measurable adoption reason is exact full-band integer-tap
 amplitude, at-most-half-sample mapped-time error, bounded two-second memory and explicit transition
 behavior; no unsupported fractional-response claim is made.
+
+## #93 amendment (master plan #83, D3/D6/D7/D10/D11)
+
+Issue #93 re-lands this effect on the `miso-engine-lane` / `miso-engine-math` /
+`miso-engine-effect-runtime` foundation. The frozen tables above — descriptor, resource totals,
+latency, tail, state layout and its version, integer tap mapping, transition timing, automation
+validation and the `Ok(None)` bank fallback — are unchanged. What follows amends the numerics and
+the recovery granularity.
+
+1. **Damping is a topology-preserving one-pole with a rate-invariant mapping (class B).** The
+   control keeps its `[0, 0.995]` linear domain, its identifier 3, its default `0.25` and its
+   64-sample smoothing. It is no longer the raw coefficient of `v = (1-c)*y + c*z`. At prepare, at
+   every automation point and at restore it is mapped, at control rate, through
+   `miso_engine_math::{log, tan}`:
+
+   ```text
+   fc(c) = min(19_845 Hz, -ln(c) * 48_000 / (2*pi))     c > 0
+   G     = tan(pi * fc / Fs)
+   g     = G / (1 + G)                                   g(0) = 0 exactly
+   ```
+
+   and the recurrence, in the frozen operation order, is
+
+   ```text
+   d = y - z;  h = g*d;  v = fma(g, d, z);  z = flush(v + h)   g != 0
+   v = y;      z = flush(y)                                     g == 0 (per-sample select)
+   ```
+
+   The reason is that `c` alone fixes a pole per *sample*, so the tone of the feedback tail moved
+   with the sample rate (issue #93 finding F5). Evaluating the old pole's cutoff once at the 48 kHz
+   reference rate and re-designing `g` for the running rate holds that cutoff in hertz at every
+   rate, and leaves the 48 kHz sound exactly where it was. Reference values: `c = 0.25` is
+   10_590.6 Hz, `c = 0.995` is 38.3 Hz, every `c <= 0.0745` clamps at 19_845 Hz (`0.45 * 44_100`,
+   which keeps `tan` finite at the lowest launch rate). The mapping is strictly decreasing in `c`.
+   The damping ramp triple in the state layout holds **`g`**, not `c`; its restore domain is
+   therefore `[0, g_max(Fs)]`, with `g_max` about `0.863` at 44.1 kHz, `0.781` at 48 kHz, `0.461`
+   at 88.2 kHz and `0.432` at 96 kHz. The word positions and the layout version do not change.
+   *Open, for the owner:* exposing damping in hertz would be the honest control, but that is a
+   descriptor change and therefore a contract change; it is not taken here.
+
+2. **FMA is now permitted, and only through `Lane::fma` (D3).** The sentence "No FMA is permitted
+   in the frozen scalar graph" is superseded. There are six fused sites per stereo frame: the
+   crossfade blend `fma(alpha, new - old, old)`, the damping output `fma(g, d, z)`, the two matrix
+   products `fma(q, gL, p*gR)` / `fma(p, gL, q*gR)`, and the wet mix `fma(mix, y - x, x)`. Every
+   one replaces a separately rounded pair, so each carries one rounding instead of two. Nothing
+   else fuses: Rust never contracts `a*b + c`, and `mul_add` may not appear in the crate.
+
+3. **Denormals and non-finite values (D7).** `flush(x) = andnot(|x| < 1e-20, x)` is applied to
+   exactly two recursive words per lane per sample — the damping state and the ring write — and
+   nowhere else. Every per-value `is_finite`/`is_subnormal` classification is deleted. `-0.0` is
+   never stored in a ring or a damping state; the dry, wet and bypass identities still deliver the
+   selected input's or tap's bits, sign of zero included, because those are selects and not
+   arithmetic. Finiteness is checked **once per block per lane**, over the lane's output, the ring
+   cells the block wrote and the lane's damping state. A failing lane has its output zeroed, its
+   damping state cleared and its history logically invalidated, and increments its recovery
+   counter once for the *block*; parameters, tap transition and the shared cursor continue. With
+   `p > 0` a non-finite value in one lane reaches the other inside the same block and both lanes
+   recover; at `p = 0` the lanes stay independent, because the matrix identities are bitwise
+   selects. Input sanitisation is no longer performed here — the input stage sanitises once per
+   track per block — so `sanitized_main_samples` is always zero from this effect and a non-finite
+   input is counted as a recovery instead. The `recovered_*_samples` counters therefore count
+   blocks; issue #95 renames them.
+
+4. **Ramps (D11).** All seven ramps are `effect_runtime::ramp::LinearRamp`: one division when the
+   target changes, iterated additions per sample, and an exact assignment of the target on the
+   final (64th) update. The per-sample division is gone. Restore re-derives the step from the
+   stored `(current, target, remaining)` triple and requires `remaining == 0` to come with
+   `current == target`, which every snapshot this effect writes satisfies.
+
+5. **Chunked evaluation, and why the bits do not move.** A block is rendered in chunks of at most
+   128 frames whose length is the minimum of: the frames left in the block; `R - cursor`; each
+   lane's `active_delay`, and its `transition_delay` while a crossfade runs; `transition_remaining`
+   while a crossfade runs; `D - valid_history` for each tap `D` that is not yet valid; and
+   `remaining - 1` for each running ramp (`1` when `remaining == 1`, so the D11 snap is its own
+   frame). Every per-sample decision is therefore constant inside a chunk, and the tap windows can
+   be copied out with two contiguous slice copies before the chunk writes anything: sample `k`
+   reads cell `(cursor + k - D) mod R` and sample `j < k` wrote `cursor + j`, so an overlap would
+   need `j = k - D < 0`. The rendered bits and the resulting state are consequently identical for
+   any partition of a stream into blocks — proven over `{1, 7, 64, 128, 512}` and against a
+   one-frame chunk cap — with the single, deliberate exception of the block-granular recovery in
+   point 3, which is what "once per block" means.
+
+6. **Still open.** The crossfade law (linear, 128 updates, sample 128 selecting the new tap) is
+   unchanged; whether a raised-cosine law or a length that scales with the tap distance would be
+   better is issue #93 finding F6 and stays open.

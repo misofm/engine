@@ -165,7 +165,11 @@ impl ReferenceDelayPair {
         let left_tap = self.left.read_transition(self.cursor);
         let right_tap = self.right.read_transition(self.cursor);
         let left_filtered = damp(left_tap, self.left_damping_g, &mut self.left.damping_state);
-        let right_filtered = damp(right_tap, self.right_damping_g, &mut self.right.damping_state);
+        let right_filtered = damp(
+            right_tap,
+            self.right_damping_g,
+            &mut self.right.damping_state,
+        );
         let left_gain = self.parameters.left_feedback * left_filtered;
         let right_gain = self.parameters.right_feedback * right_filtered;
         let (left_feedback, right_feedback) =
@@ -261,8 +265,8 @@ fn damping_coefficient(c: f64, sample_rate_hz: f64) -> f64 {
     if c == 0.0 {
         return 0.0;
     }
-    let cutoff =
-        (-c.ln() * DAMPING_REFERENCE_RATE_HZ / (2.0 * core::f64::consts::PI)).min(DAMPING_MAX_CUTOFF_HZ);
+    let cutoff = (-c.ln() * DAMPING_REFERENCE_RATE_HZ / (2.0 * core::f64::consts::PI))
+        .min(DAMPING_MAX_CUTOFF_HZ);
     let big_g = (core::f64::consts::PI * cutoff / sample_rate_hz).tan();
     big_g / (1.0 + big_g)
 }
