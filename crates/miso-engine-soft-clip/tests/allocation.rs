@@ -111,6 +111,7 @@ fn the_scalar_render_path_never_allocates() {
             first_sample += 128;
         }
         effect.reset(ResetKind::DiscontinuityKeepParameters);
+        effect.reset(ResetKind::FullToDefaults);
         effect
             .snapshot_state_payload(
                 miso_engine_effect_contract::StatePayloadOutput::new(

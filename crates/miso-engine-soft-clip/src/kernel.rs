@@ -3,7 +3,7 @@
 //! This is the whole of the frozen graph of `.github/ISSUE_SPECS/BRIEFS/019` — two-times
 //! oversampling through a 63-tap Blackman half-band, a cubic shaper clamped to `±2/3`, a dry path
 //! delayed 31 samples and a dry/wet mix — written once, generic over
-//! [`Lane`](miso_engine_lane::Lane) (D10). The scalar tail is the same function at `L = f32`,
+//! [`Lane`] (D10). The scalar tail is the same function at `L = f32`,
 //! because a planar slice is already a `WIDTH = 1` AoSoA block.
 //!
 //! # What changed against the five hand-written copies, and what did not

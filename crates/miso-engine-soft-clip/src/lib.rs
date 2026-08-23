@@ -262,6 +262,13 @@ fn converted_value_valid(index: usize, value: f32) -> bool {
     converted_domain(index).is_some_and(|(low, high)| value >= low && value <= high)
 }
 
+/// Converts the six validated initial values into the two per-channel coefficient sets.
+///
+/// The `-0.0` rule is **not** re-implemented here. `expected_prepared_metadata` has already run
+/// the contract's `validate_initial_values`, which rejects a negative zero, and every caller of
+/// this function goes through it first; the effect-runtime's rule is the lenient one (normalise,
+/// do not reject) and #95 owns reconciling the two. One law, one home: whichever way that lands,
+/// this crate follows it without an edit.
 fn initial_defaults(
     values: &[InitialParameterValue],
 ) -> Result<([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]), EffectPrepareError> {
@@ -283,7 +290,6 @@ fn initial_defaults(
         if value.parameter_index != parameter as u32
             || value.channel != channel
             || !parameter_value_valid(parameter, value.value)
-            || is_negative_zero(value.value)
         {
             return Err(invalid);
         }
@@ -353,8 +359,18 @@ impl<L: Lane> Channel<L> {
     }
 
     /// Clears every history and returns every ramp to `defaults`, at rest.
+    ///
+    /// In place, never by rebuilding: a reset can reach this from a seek or a transport stop, and
+    /// the render thread has no allocator.
     fn reset_full(&mut self, defaults: &[[f32; PARAMETER_COUNT]]) {
-        *self = Self::new(defaults);
+        debug_assert_eq!(defaults.len(), L::WIDTH);
+        self.history.clear();
+        for (lane, (values, ramps)) in defaults.iter().zip(self.ramps.iter_mut()).enumerate() {
+            for (parameter, value) in values.iter().copied().enumerate() {
+                ramps[parameter] = LinearRamp::fixed(value);
+                set_lane(self.state.field_mut(parameter), lane, value);
+            }
+        }
     }
 
     /// Clears every history and snaps every ramp to its target, keeping parameters.
