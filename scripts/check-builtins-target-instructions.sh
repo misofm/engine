@@ -168,7 +168,27 @@ done
 printf 'issue068 object leg=native-avx2-fma object_sha256=%s symbol_sha256=%s result=PASS\n' \
     "$(hash_file "$fma_object")" "$(hash_file "$scratch/fma.symbol")"
 
-build_closure native-scalar '' '-avx2,-fma'
+# Issue-083 D4 removed the scalar x86 build: `miso-engine-lane` `compile_error!`s on x86 without
+# `avx2`+`fma`, the engine attests the CPU at boot, and there is no silent fallback. From wave 2 the
+# effect crates reach the lane crate, and `miso-engine-graph-compiler` reaches the effect crates
+# through `miso-engine-effect-compiler`, so the `-avx2,-fma` leg can no longer compile the whole
+# closure -- the configuration it probes is one the workspace has deliberately abolished.
+#
+# The leg is kept for the part of the closure the decision does not touch: `miso-engine-core`, the
+# builtins and `miso-engine-graph` still contain the portable scalar TPT paths issue 068 asked about,
+# and they still compile with x86 SIMD turned off. The four cross-target legs below are unchanged and
+# still cover the whole closure, `graph-compiler` included. Retiring or re-scoping this leg outright
+# belongs to the #104 evidence triage, together with the rest of the issue-068 seal.
+native_scalar_closure=(
+    -p miso-engine-core
+    -p miso-engine-builtins
+    -p miso-engine-builtins-compiler
+    -p miso-engine-graph
+)
+RUSTFLAGS='-C target-feature=-avx2,-fma' CARGO_TARGET_DIR="$scratch/native-scalar" \
+    cargo check --locked --release "${native_scalar_closure[@]}"
+printf 'issue068 build leg=%s target=%s features=%s result=PASS compile-or-object-only\n' \
+    native-scalar native '-avx2,-fma (closure without graph-compiler: D4, see comment)'
 build_closure aarch64-android aarch64-linux-android '+neon'
 build_closure aarch64-ios aarch64-apple-ios '+neon'
 build_closure wasm-scalar wasm32-unknown-unknown '-simd128'

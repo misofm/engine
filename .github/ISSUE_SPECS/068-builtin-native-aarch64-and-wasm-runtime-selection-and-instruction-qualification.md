@@ -222,3 +222,24 @@ selection, build and named-instruction contract and unblocks its exact downstrea
 `sol_complete_candidate_script_invocations=1`; `cumulative_candidate_script_invocations=4`;
 `workload_invocations=0`;
 `timed_benchmark_invocations=0`; `benchmark_invocations=0`.
+
+## Amendment (audit #92, 2026-08-23) — the `native-scalar` closure leg
+
+`scripts/check-builtins-target-instructions.sh` compiled the whole five-crate closure with
+`-C target-feature=-avx2,-fma` as its `native-scalar` leg. Master plan #83 **D4** removed the scalar
+`x86` build: `miso-engine-lane` `compile_error!`s on `x86` without `avx2`+`fma`, every host attests
+the CPU once at boot, and there is no silent fallback. From wave 2 the effect crates depend on
+`miso-engine-lane`, and `miso-engine-graph-compiler` reaches them through
+`miso-engine-effect-compiler`, so that leg stopped compiling the moment the first effect crate was
+re-landed — the configuration it probes is one the workspace has deliberately abolished.
+
+The leg is kept, scoped to the part of the closure D4 does not touch: `miso-engine-core`,
+`miso-engine-builtins`, `miso-engine-builtins-compiler` and `miso-engine-graph`, which still carry
+the portable scalar TPT paths this issue asked about and still compile with `x86` SIMD off. The four
+cross-target legs (`aarch64-linux-android`, `aarch64-apple-ios`, `wasm32` +/-`simd128`) are unchanged
+and still cover the whole closure including `graph-compiler`, as are every object and symbol hash.
+Nothing else in the script moved.
+
+This collision is not specific to #92: it will meet #85, #87, #88, #89, #90, #91, #93 and #94
+identically. Retiring or re-scoping the leg outright — with the rest of the issue-068 seal — belongs
+to the **#104** evidence triage recorded on #125.
