@@ -1074,12 +1074,10 @@ pub struct ControllerResponse {
     pub status: StatusCode,
     /// Observed or newly committed authoritative revision.
     pub revision: SessionRevision,
-    /// Canonical response bytes remain private replay storage; callers use `encode_payload`.
-    bytes: Vec<u8>,
-    /// Complete canonical response bytes retained internally for exact replay.
-    /// Keeping this internal preserves payload-only caller compatibility without exposing a raw
-    /// provider response path.
-    frame_bytes: Option<Vec<u8>>,
+    /// One complete canonical response frame retained for exact replay and payload projection.
+    frame: Vec<u8>,
+    /// Validated payload extent within `frame`; no second payload allocation is retained.
+    payload: Range<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -1117,20 +1115,49 @@ struct Outcome {
 }
 
 impl ControllerResponse {
+    fn from_complete_frame(
+        request_id: RequestId,
+        status: StatusCode,
+        revision: SessionRevision,
+        frame: Vec<u8>,
+    ) -> Self {
+        let payload = if frame.len() >= crate::OUTER_HEADER_BYTES {
+            crate::OUTER_HEADER_BYTES..frame.len()
+        } else {
+            0..0
+        };
+        Self {
+            request_id,
+            status,
+            revision,
+            frame,
+            payload,
+        }
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.frame[self.payload.clone()]
+    }
+
+    fn complete_frame(&self) -> &[u8] {
+        &self.frame
+    }
+
     /// Return the exact caller-buffer byte count for the canonical typed response payload.
     #[must_use]
     pub const fn payload_len(&self) -> usize {
-        self.bytes.len()
+        self.payload.end - self.payload.start
     }
 
     /// Copy the already canonical typed response into caller-owned output without exposing a raw
     /// provider payload API.
     pub fn encode_payload(&self, output: &mut [u8]) -> Result<usize, crate::EncodeError> {
-        let required = self.bytes.len();
+        let payload = self.payload();
+        let required = payload.len();
         if output.len() < required {
             return Err(crate::EncodeError::OutputTooSmall { required });
         }
-        output[..required].copy_from_slice(&self.bytes);
+        output[..required].copy_from_slice(payload);
         Ok(required)
     }
 }
@@ -1218,8 +1245,7 @@ impl PreparedStructuralCommand {
     pub fn response_len(&self) -> usize {
         self.response
             .as_ref()
-            .and_then(|response| response.frame_bytes.as_ref())
-            .map_or(0, Vec::len)
+            .map_or(0, |response| response.frame.len())
     }
 }
 
@@ -1503,17 +1529,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         let outcome = self.execute(&request);
         let response = self.compatibility_response(message_id, request.request_id, outcome);
-        let Some(frame) = response.frame_bytes.as_deref() else {
-            return self.compatibility_response(
-                message_id,
-                request.request_id,
-                self.non_ok(StatusCode::Internal, None),
-            );
-        };
-        match self
-            .replay
-            .complete(request.request_id, request.canonical_bytes, frame)
-        {
+        match self.replay.complete(
+            request.request_id,
+            request.canonical_bytes,
+            response.complete_frame(),
+        ) {
             Ok(()) => response,
             Err(_) => self.compatibility_response(
                 message_id,
@@ -1767,13 +1787,12 @@ impl<P: ControlProvider> ProtocolController<P> {
                 },
             ));
         }
-        let response = ControllerResponse {
-            request_id: header.request_id,
-            status: StatusCode::Ok,
+        let response = ControllerResponse::from_complete_frame(
+            header.request_id,
+            StatusCode::Ok,
             revision,
-            bytes: Vec::new(),
-            frame_bytes: Some(frame),
-        };
+            frame,
+        );
         let mut prospective_replay = self
             .replay
             .try_clone_eager()
@@ -1782,14 +1801,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             return Ok(None);
         }
         prospective_replay
-            .complete(
-                header.request_id,
-                input,
-                response
-                    .frame_bytes
-                    .as_deref()
-                    .ok_or(CommandFrameProcessError::Internal)?,
-            )
+            .complete(header.request_id, input, response.complete_frame())
             .map_err(|_| CommandFrameProcessError::Internal)?;
         let event_reservations = match self.queues.reserve_reliable_events(required_events) {
             Ok(reservations) => reservations,
@@ -1893,9 +1905,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .response
             .take()
             .expect("affine token owns committed response");
-        let bytes = response
-            .frame_bytes
-            .expect("prepared structural response is a complete frame");
+        let bytes = response.frame;
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;
@@ -2219,17 +2229,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     (status, revision, frame)
                 }
             };
-        let bytes = frame
-            .get(crate::OUTER_HEADER_BYTES..)
-            .unwrap_or_default()
-            .to_vec();
-        ControllerResponse {
-            request_id,
-            status,
-            revision,
-            bytes,
-            frame_bytes: Some(frame),
-        }
+        ControllerResponse::from_complete_frame(request_id, status, revision, frame)
     }
 
     fn compatibility_cached_response(
@@ -2239,28 +2239,26 @@ impl<P: ControlProvider> ProtocolController<P> {
         hit: ReplayHit,
     ) -> ControllerResponse {
         let frame = self.replay.cached(hit);
-        let mut field_ids = vec![0_u16; frame.len() / crate::TLV_PREFIX_BYTES];
-        let decoded = self
-            .codec
-            .decode(frame, &mut DecodeScratch::new(&mut field_ids));
-        let Ok(crate::DecodedFrame {
-            header: crate::FrameHeader::Response(header),
-            payload,
-        }) = decoded
-        else {
+        let Ok(decoded) = self.codec.decode_header(frame) else {
             return self.compatibility_response(
                 message_id,
                 request_id,
                 self.non_ok(StatusCode::Internal, None),
             );
         };
-        ControllerResponse {
-            request_id: header.request_id,
-            status: header.status,
-            revision: header.revision,
-            bytes: payload.to_vec(),
-            frame_bytes: Some(frame.to_vec()),
-        }
+        let Some(header) = decoded.header.response() else {
+            return self.compatibility_response(
+                message_id,
+                request_id,
+                self.non_ok(StatusCode::Internal, None),
+            );
+        };
+        ControllerResponse::from_complete_frame(
+            header.request_id,
+            header.status,
+            header.revision,
+            frame.to_vec(),
+        )
     }
     /// Borrow authoritative control-plane session state.
     #[must_use]
@@ -4734,6 +4732,45 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_response_uses_one_frame_backing_and_cached_header_only_decode() {
+        fn assert_shared_payload_backing(response: &ControllerResponse) {
+            assert_eq!(
+                response.payload().as_ptr(),
+                response.frame.as_ptr().wrapping_add(response.payload.start),
+                "payload must be a range into the sole complete-frame backing"
+            );
+            assert_eq!(
+                response.frame.len(),
+                crate::OUTER_HEADER_BYTES + response.payload_len()
+            );
+        }
+
+        let mut controller = controller(2, 1);
+        let first = controller.process(capability(1, b"single-frame-backing"));
+        assert_shared_payload_backing(&first);
+        let mut payload = vec![0xa5; first.payload_len()];
+        assert_eq!(first.encode_payload(&mut payload), Ok(first.payload_len()));
+        assert_eq!(payload, first.payload());
+
+        crate::btlv::reset_reader_passes();
+        let cached = controller.process(capability(1, b"single-frame-backing"));
+        assert_eq!(
+            crate::btlv::reader_passes(),
+            0,
+            "cached metadata reconstruction must not invoke the recursive TLV Reader"
+        );
+        assert_eq!(
+            cached, first,
+            "cache hit preserves exact metadata and bytes"
+        );
+        assert_shared_payload_backing(&cached);
+
+        let cloned = cached.clone();
+        assert_eq!(cloned, cached, "Clone/Eq preserve complete frame and range");
+        assert_shared_payload_backing(&cloned);
+    }
+
+    #[test]
     fn mutations_require_exact_revision_and_roll_back_on_validation() {
         let mut controller = controller(4, 1);
         let any = ControllerRequest {
@@ -4805,7 +4842,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::ValidationFailed);
         let codec = ProtocolCodec::default();
         let decoded = codec
-            .decode_non_ok_payload(&response.bytes, 2)
+            .decode_non_ok_payload(response.payload(), 2)
             .expect("canonical validation error");
         assert_eq!(decoded.omitted_diagnostics, 1);
         assert_eq!(decoded.diagnostics.len(), 1);
@@ -4836,7 +4873,11 @@ mod tests {
         codec
             .encode_non_ok_payload(&decoded, &mut encoded)
             .expect("round-trip encode");
-        assert_eq!(encoded, response.bytes, "non-OK payload remains canonical");
+        assert_eq!(
+            encoded,
+            response.payload(),
+            "non-OK payload remains canonical"
+        );
     }
 
     #[test]
@@ -4855,7 +4896,7 @@ mod tests {
         let response = controller.process(request);
         assert_eq!(response.status, StatusCode::ValidationFailed);
         let decoded = ProtocolCodec::default()
-            .decode_non_ok_payload(&response.bytes, 2)
+            .decode_non_ok_payload(response.payload(), 2)
             .expect("typed edit error");
         assert_eq!(decoded.omitted_diagnostics, 0);
         assert_eq!(decoded.diagnostics.len(), 1);
@@ -4997,7 +5038,7 @@ mod tests {
             );
             assert_eq!(response.status, case.status, "{} status", case.name);
             let decoded = codec
-                .decode_non_ok_payload(&response.bytes, case.top_level_tlvs)
+                .decode_non_ok_payload(response.payload(), case.top_level_tlvs)
                 .unwrap_or_else(|error| panic!("{} common non-OK payload: {error:?}", case.name));
             assert_eq!(
                 decoded.omitted_diagnostics, 0,
@@ -5019,7 +5060,12 @@ mod tests {
             codec
                 .encode_non_ok_payload(&decoded, &mut canonical)
                 .expect("canonical non-OK encode");
-            assert_eq!(canonical, response.bytes, "{} canonical bytes", case.name);
+            assert_eq!(
+                canonical,
+                response.payload(),
+                "{} canonical bytes",
+                case.name
+            );
         }
     }
 
@@ -5126,7 +5172,7 @@ mod tests {
             assert_eq!(response.status, StatusCode::ValidationFailed);
             assert_eq!(response.revision, before_revision);
             let decoded = ProtocolCodec::default()
-                .decode_non_ok_payload(&response.bytes, 2)
+                .decode_non_ok_payload(response.payload(), 2)
                 .expect("typed launch-rate diagnostic");
             assert_eq!(decoded.omitted_diagnostics, 0);
             assert_eq!(decoded.diagnostics.len(), 1);
@@ -5390,7 +5436,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(
             ProtocolCodec::default()
-                .decode_automation_enqueued(&response.bytes, 4)
+                .decode_automation_enqueued(response.payload(), 4)
                 .expect("success payload"),
             AutomationEnqueued {
                 accepted_records: 1,
@@ -5406,7 +5452,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::Backpressure);
         assert_eq!(
             ProtocolCodec::default()
-                .decode_non_ok_payload(&response.bytes, 2)
+                .decode_non_ok_payload(response.payload(), 2)
                 .expect("typed backpressure")
                 .backpressure
                 .expect("backpressure"),
@@ -5507,7 +5553,7 @@ mod tests {
         assert_eq!(get_response.status, StatusCode::Ok);
         assert_eq!(
             codec
-                .decode_transport_snapshot(&get_response.bytes, 3)
+                .decode_transport_snapshot(get_response.payload(), 3)
                 .expect("get snapshot"),
             TransportSnapshot {
                 state: TransportState::Stopped,
@@ -5521,7 +5567,7 @@ mod tests {
         assert_eq!(set_response.status, StatusCode::Ok);
         assert_eq!(
             codec
-                .decode_transport_snapshot(&set_response.bytes, 3)
+                .decode_transport_snapshot(set_response.payload(), 3)
                 .expect("set snapshot"),
             TransportSnapshot {
                 state: TransportState::Playing,
@@ -5586,7 +5632,7 @@ mod tests {
             )
             .expect("retain position");
         assert_eq!(
-            codec.decode_transport_snapshot(&retained.bytes, 3),
+            codec.decode_transport_snapshot(retained.payload(), 3),
             Ok(TransportSnapshot {
                 state: TransportState::Stopped,
                 position: SampleTime(9),
@@ -5730,7 +5776,7 @@ mod tests {
             .expect("configure");
         assert_eq!(first.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_telemetry_configuration(&first.bytes, 6),
+            codec.decode_telemetry_configuration(first.payload(), 6),
             Ok(configuration.clone())
         );
         assert_eq!(controller.provider().telemetry_configuration, configuration);
@@ -5746,7 +5792,7 @@ mod tests {
                 &mut DecodeScratch::new(&mut [0_u16; 6]),
             )
             .expect("idempotent configure");
-        assert_eq!(second.bytes, first.bytes);
+        assert_eq!(second.payload(), first.payload());
 
         let request = CountersRequest {
             all: false,
@@ -5780,10 +5826,10 @@ mod tests {
                 &mut DecodeScratch::new(&mut [0_u16; 2]),
             )
             .expect("nonreset read");
-        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(first.payload(), second.payload());
         assert_eq!(
             codec
-                .decode_counter_snapshot(&first.bytes, 3)
+                .decode_counter_snapshot(first.payload(), 3)
                 .expect("snapshot")
                 .values
                 .len(),
@@ -5854,7 +5900,7 @@ mod tests {
             .expect("first page");
         assert_eq!(first.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_diagnostics_page(&first.bytes, 3),
+            codec.decode_diagnostics_page(first.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 3,
                 eof: false,
@@ -5869,7 +5915,8 @@ mod tests {
             .expect("nondestructive first page");
         assert_eq!(repeat.status, StatusCode::Ok);
         assert_eq!(
-            repeat.bytes, first.bytes,
+            repeat.payload(),
+            first.payload(),
             "reads must not drain retained history"
         );
 
@@ -5887,7 +5934,7 @@ mod tests {
             )
             .expect("final page");
         assert_eq!(
-            codec.decode_diagnostics_page(&final_page.bytes, 3),
+            codec.decode_diagnostics_page(final_page.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -5909,7 +5956,7 @@ mod tests {
             .expect("severity filtered page");
         assert_eq!(filtered.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_diagnostics_page(&filtered.bytes, 3),
+            codec.decode_diagnostics_page(filtered.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -5933,7 +5980,7 @@ mod tests {
         assert_eq!(expired.status, StatusCode::ReplayExpired);
         assert_eq!(
             codec
-                .decode_non_ok_payload(&expired.bytes, 2)
+                .decode_non_ok_payload(expired.payload(), 2)
                 .expect("typed expiration diagnostic")
                 .diagnostics,
             vec![Diagnostic {
@@ -5961,7 +6008,7 @@ mod tests {
             )
             .expect("empty page");
         assert_eq!(
-            codec.decode_diagnostics_page(&empty.bytes, 2),
+            codec.decode_diagnostics_page(empty.payload(), 2),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -6035,7 +6082,7 @@ mod tests {
             endpoint.set_provider_features(features);
             let response = endpoint.process(capability(1, b"features"));
             let decoded = codec
-                .decode_capabilities(&response.bytes, 27)
+                .decode_capabilities(response.payload(), 27)
                 .expect("capabilities");
             if required_command != 0 {
                 assert!(
@@ -6059,7 +6106,7 @@ mod tests {
         endpoint.set_provider_features(ProviderFeatures::NONE);
         let caps = endpoint.process(capability(1, b"none"));
         let decoded = codec
-            .decode_capabilities(&caps.bytes, 27)
+            .decode_capabilities(caps.payload(), 27)
             .expect("none caps");
         assert_eq!(decoded.flags.0 & !((1 << 7) - 1), 0);
         assert_eq!(
@@ -6093,7 +6140,7 @@ mod tests {
         endpoint.config.maximum_transaction_edits = 0;
         let caps = endpoint.process(capability(1, b"zero-edit-limit"));
         let decoded = codec
-            .decode_capabilities(&caps.bytes, 27)
+            .decode_capabilities(caps.payload(), 27)
             .expect("zero-edit capabilities");
         assert_eq!(decoded.maximum_transaction_edits, 0);
         assert!(
@@ -6205,7 +6252,7 @@ mod tests {
             .expect("first page");
         assert_eq!(first_response.status, StatusCode::Ok);
         let first_page = codec
-            .decode_snapshot(&first_response.bytes, 4)
+            .decode_snapshot(first_response.payload(), 4)
             .expect("page");
         assert_eq!(first_page.offset, 0);
         assert!(!first_page.eof);
@@ -6221,7 +6268,7 @@ mod tests {
             .process_b1b_btlv(&final_page, &mut DecodeScratch::new(&mut [0_u16; 2]))
             .expect("final page");
         let final_snapshot = codec
-            .decode_snapshot(&final_response.bytes, 4)
+            .decode_snapshot(final_response.payload(), 4)
             .expect("final payload");
         assert!(final_snapshot.eof);
         assert!(final_snapshot.canonical_toml_chunk.is_empty());
