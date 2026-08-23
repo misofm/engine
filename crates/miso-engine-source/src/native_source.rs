@@ -395,7 +395,7 @@ impl NativeSourcePrepareError {
     }
 }
 
-/// Worker lifecycle event delivered only through a bounded non-render channel.
+/// Per-source job lifecycle event delivered only through a bounded non-render channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeSourceWorkerEvent {
     /// First PCM chunk or zero-frame end marker has been submitted to the prepared ring.
