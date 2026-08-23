@@ -1195,7 +1195,11 @@ name = "miso-engine-true-peak-limiter"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
+ "miso-engine-effect-runtime",
+ "miso-engine-lane",
+ "miso-engine-math",
 ]
 
 [[package]]

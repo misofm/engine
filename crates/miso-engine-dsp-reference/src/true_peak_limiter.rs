@@ -455,9 +455,14 @@ pub fn reference_annex2_phases(history_newest_first: &[f64; HISTORY]) -> [f64; 4
 
 /// The Annex-2 4x true-peak estimate of a whole signal: `max` over `n` of `P[n]`.
 ///
-/// The signal is flushed with `11` trailing zeros so the last samples are measured with the same
-/// twelve-tap window as every other sample. This is the measurement the ceiling gate applies to
-/// *production output*, computed by an implementation that shares nothing with it.
+/// This is the measurement the #90 ceiling gate applies to *production output*, computed by an
+/// implementation that shares nothing with it.
+///
+/// The record is measured, never extended. Sample magnitudes are taken at every index; the four
+/// interpolated phases are taken only where the whole twelve-tap window lies inside the record.
+/// Padding a record with zeros at either end measures a step discontinuity the signal does not
+/// contain, and a twelve-tap interpolator across such a step reads about a decibel above the
+/// signal's real peak — which would make a ceiling gate fail on an artefact of its own framing.
 ///
 /// # Errors
 ///
@@ -468,15 +473,17 @@ pub fn reference_true_peak_estimate(samples: &[f64]) -> Result<f64, ReferenceTru
     }
     let mut history = [0.0_f64; HISTORY];
     let mut peak = 0.0_f64;
-    for index in 0..samples.len() + HISTORY - 1 {
-        let sample = samples.get(index).copied().unwrap_or(0.0);
+    for (index, sample) in samples.iter().enumerate() {
         for tap in (1..HISTORY).rev() {
             history[tap] = history[tap - 1];
         }
-        history[0] = sample;
+        history[0] = *sample;
         let magnitude = sample.abs();
         if magnitude > peak {
             peak = magnitude;
+        }
+        if index + 1 < HISTORY {
+            continue;
         }
         for phase in reference_annex2_phases(&history) {
             let magnitude = phase.abs();
