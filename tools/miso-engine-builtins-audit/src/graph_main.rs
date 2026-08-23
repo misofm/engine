@@ -34,7 +34,7 @@ use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effe
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
     GraphBindingBlock, GraphEdgeId, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
-    GraphRuntimeProcessor, TrackStage,
+    GraphRuntimeProcessor, PreparedGraphPlan, TrackStage,
 };
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler};
 use miso_engine_session::{
@@ -626,7 +626,7 @@ fn prepare_graph_plan(
         },
     })
     .unwrap_or_else(|_| panic!("graph compile"));
-    assert_graph_fixture_pdc(artifact.report());
+    assert_graph_fixture_pdc(artifact.graph());
     assert_eq!(artifact.external_binding_nodes().count(), 2);
     let envelope = artifact.envelope();
     let nodes = artifact
@@ -660,9 +660,9 @@ fn prepare_graph_plan(
     (bound.plan, bound.meter_consumers)
 }
 
-fn assert_graph_fixture_pdc(report: &GraphCompileReport) {
+fn assert_graph_fixture_pdc(graph: &PreparedGraphPlan) {
     let timing = |id: &str| {
-        report
+        graph
             .route_timings
             .iter()
             .find(|row| row.route_id.as_str() == id)
@@ -686,7 +686,7 @@ fn assert_graph_fixture_pdc(report: &GraphCompileReport) {
         ),
         (0, 9, 9)
     );
-    let delays: Vec<_> = report
+    let delays: Vec<_> = graph
         .inserted_delays
         .iter()
         .filter(|row| {

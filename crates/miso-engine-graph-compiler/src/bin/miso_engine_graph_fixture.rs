@@ -10,8 +10,10 @@ use std::{
 };
 
 use miso_engine_effect_compiler::EffectPreparedSession;
-use miso_engine_graph::{GraphCompileCaps, balanced_pairwise_sum};
-use miso_engine_graph_compiler::{GraphCompileReport, GraphCompileRequest, GraphCompiler};
+use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan, balanced_pairwise_sum};
+use miso_engine_graph_compiler::{
+    GraphCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphArtifact,
+};
 use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 use sha2::{Digest, Sha256};
 
@@ -29,7 +31,9 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     let root = default_root();
     match arguments.as_slice() {
         [] => {
-            println!("{}", fingerprint(&compile_fixture()));
+            let artifact = compile_fixture();
+            let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
+            println!("{}", fingerprint(&artifact.graph, &evidence));
             Ok(())
         }
         [mode] if mode == "--check" => verify(&root, &generated()),
@@ -64,7 +68,7 @@ fn default_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/graph")
 }
 
-fn compile_fixture() -> GraphCompileReport {
+fn compile_fixture() -> PreparedGraphArtifact {
     let mut model = parse_session_toml(SESSION).unwrap_or_else(|diagnostics| {
         panic!("session parse diagnostics: {diagnostics:?}");
     });
@@ -106,13 +110,16 @@ fn compile_fixture() -> GraphCompileReport {
         },
     })
     .unwrap_or_else(|failure| panic!("graph compile diagnostics: {:?}", failure.diagnostics))
-    .report
 }
 
 fn generated() -> Vec<(String, Vec<u8>)> {
-    let report = compile_fixture();
-    let fingerprint = format!("{}\n", fingerprint(&report)).into_bytes();
-    let colored_buffers = report
+    let artifact = compile_fixture();
+    let graph = &artifact.graph;
+    let report = &artifact.report;
+    // #99 F5: evidence is produced here, off the compile path, exactly once.
+    let evidence = GraphCompiler::evidence(graph, report);
+    let fingerprint = format!("{}\n", fingerprint(graph, &evidence)).into_bytes();
+    let colored_buffers = graph
         .buffer_assignments
         .iter()
         .map(|assignment| assignment.buffer_index)
@@ -146,9 +153,9 @@ fn generated() -> Vec<(String, Vec<u8>)> {
     let mut files = vec![
         (
             "v1/direct-route.canonical.txt".to_owned(),
-            report.canonical_debug_bytes,
+            evidence.canonical_bytes,
         ),
-        ("v1/direct-route.dot".to_owned(), report.dot.into_bytes()),
+        ("v1/direct-route.dot".to_owned(), evidence.dot.into_bytes()),
         (
             "v1/invalid-scc-diagnostics.json".to_owned(),
             concat!(
@@ -260,7 +267,7 @@ fn summation_report() -> String {
     )
 }
 
-fn fingerprint(report: &GraphCompileReport) -> String {
+fn fingerprint(graph: &PreparedGraphPlan, evidence: &GraphEvidence) -> String {
     format!(
         concat!(
             "{{\"schema\":1,\"fixture\":\"direct-route\",",
@@ -269,16 +276,16 @@ fn fingerprint(report: &GraphCompileReport) -> String {
             "\"nodes\":{},\"edges\":{},\"schedule_items\":{},",
             "\"levels\":{},\"route_timings\":{},\"buffer_assignments\":{}}}"
         ),
-        report.canonical_debug_bytes.len(),
-        report.sha256,
-        report.dot.len(),
-        sha256_hex(report.dot.as_bytes()),
-        report.nodes.len(),
-        report.edges.len(),
-        report.sequential_schedule.len(),
-        report.dependency_levels.len(),
-        report.route_timings.len(),
-        report.buffer_assignments.len(),
+        evidence.canonical_bytes.len(),
+        evidence.sha256,
+        evidence.dot.len(),
+        sha256_hex(evidence.dot.as_bytes()),
+        graph.spec.nodes.len(),
+        graph.spec.edges.len(),
+        graph.sequential_schedule.len(),
+        graph.dependency_levels.len(),
+        graph.route_timings.len(),
+        graph.buffer_assignments.len(),
     )
 }
 

@@ -99,5 +99,5 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     assert_eq!(artifact.report.estimate.edges, 393_224);
     assert_eq!(artifact.report.estimate.routes, 1);
     assert_eq!(artifact.report.estimate.effects, 0);
-    assert_eq!(artifact.report.sequential_schedule.len(), 458_761);
+    assert_eq!(artifact.graph.sequential_schedule.len(), 458_761);
 }
