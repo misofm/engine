@@ -265,11 +265,31 @@ pub fn gain_block<L: Lane>(io: &mut [f32], frames: usize, g: L) {
 pub fn gain_mix_block<L: Lane>(io: &mut [f32], frames: usize, g: L, mix: L) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     for frame in io.chunks_exact_mut(L::WIDTH) {
-        let x = L::load(frame);
-        let w = x.mul(g);
-        let d = w.sub(x);
-        mix.fma(d, x).store(frame);
+        gain_mix_step(L::load(frame), g, mix).store(frame);
     }
+}
+
+/// One frame of [`gain_mix_block`]: `y = dry + mix * (wet - dry)` with `wet = x * g`.
+///
+/// The body of [`gain_mix_block`], factored out so that an effect whose gain is recomputed per
+/// frame — a dynamics processor, where `g` comes out of a detector rather than out of a prepared
+/// coefficient — composes the *same* law rather than writing a second copy of it. The block kernel
+/// is a loop over this function, so the two are bit-identical by construction.
+///
+/// Frozen operation order:
+/// 1. `w = x * g`
+/// 2. `d = w - x`
+/// 3. `y = fma(mix, d, x)` — one rounding
+///
+/// `mix = 0` returns `x` bit-for-bit for a finite `d` (`fma(0, d, x) = x`). It does **not**
+/// preserve the sign of a zero `x` when `d` is non-zero, which is why an effect with a signed-zero
+/// identity contract selects the dry value with a mask instead of relying on `mix`.
+#[inline(always)]
+#[must_use]
+pub fn gain_mix_step<L: Lane>(x: L, g: L, mix: L) -> L {
+    let w = x.mul(g);
+    let d = w.sub(x);
+    mix.fma(d, x)
 }
 
 /// A linear gain ramp over one block (D11), one segment per lane.
