@@ -6,15 +6,52 @@ Make the compiler's canonical sequential graph schedule exactly the concatenatio
 sorted dependency levels so a retained homogeneous bank never gathers another member's input
 before that input has been produced in the current block.
 
-**TERMINAL STOP / NO OVERALL PASS.** Sol High completed pass 1 and the sole bounded correction;
-Sol XHigh issued the one permitted HOLD and then returned terminal STOP. The product checkpoint is
-preserved as technical input only. The consumed 100,000-render audit may not be retried, and no
-further Issue-123 implementation pass is authorized. Benchmark and timing invocation counts remain
-zero.
+**RESCOPED RESTART / READY.** The user directed execution of standing audit controller Issue 125
+after the terminal verdict recorded below. AGENTS.md requires a failed shape to be rescoped and
+rebriefed before work restarts, while Issue 125 requires Issue 123 to finish in place rather than
+creating an attempt issue. Sol XHigh therefore approved this synchronized, narrower restart on
+2026-08-23. The fresh workflow has at most one Sol High implementation pass and one bounded
+correction after a Sol XHigh HOLD.
 
-Remote Issue 123 was read-only confirmed unallocated on 2026-08-23. Root owns GitHub creation,
-body synchronization and state changes after this docs checkpoint is committed and upstream. This
-record authorizes no GitHub mutation.
+The old 100,000-render audit remains consumed: invocation count `1`, retry count `0`. It is not an
+acceptance gate, may not be rerun, and neither its `0xf8ee_8fef_8f42_3df4` candidate nor the stopped
+4,096-block periodic-output model is authority. Benchmark and timed-benchmark counts remain zero.
+The stopped checkpoint `34d0e825d8d470ce499f423276a1e28c3e19f991` is technical input only and
+must not be resurrected wholesale.
+
+## Authoritative 2026-08-23 rescope
+
+This section supersedes the earlier attempt shape and acceptance/evidence requirements wherever
+they conflict. It applies the newer Issue-123 audit-link comment and Issue-125 Step-0 instruction
+to the #98 plan's wave-0 E1/E2 gates and #99's native-oracle transcript procedure:
+
+1. Emit `sequential_schedule` as the exact concatenation of the accepted, sorted dependency
+   levels and recompute deterministic buffer coloring from that schedule. Preserve every accepted
+   Issue-122 level byte.
+2. Keep one private scalar/native bind-time invariant that rejects an ID-ordered or otherwise
+   bank-predecessor-invalid schedule transactionally, after existing binding/source/observer
+   validation and before executor/scheduler construction.
+3. E1 is a hand-built four-track identity builtin bank with distinct constant inputs. Exact lane
+   observers and analytic sums must hold from block zero across three blocks for sequential and
+   native `SingleThread`; the ID-ordered shape must reject with returned ownership reusable. The
+   effective red mutation removes the bank-input invariant so that the invalid shape binds and
+   exposes the auditor's `1/11/21` failure.
+4. E2 compiles the production selected-width builtin bank, renders three blocks through separately
+   prepared sequential and native `SingleThread` plans, and requires bit-identical PCM with a
+   nonzero block zero. Reverting compiler emission to Kahn/ID order must expose zero or stale later
+   lanes.
+5. The existing Issue-037 100-layout test must prepare an independent native plan for every layout.
+   Sequential PCM and qualification counters must equal that native oracle before the transcript
+   is folded. Re-pin `0xc85b_2209_8007_7824` only from those native-equal results and record the
+   old/new literal, 100/100 equality, selected host dispatch and #98 F1 reason.
+6. Preserve the exact pinned graph-fixture exception, allowed-path fence, canonical identity,
+   coloring/liveness proof, transactional corruption/retry coverage, focused package tests,
+   warning-denied Clippy/rustdoc, formatting, graph/realtime policies and CI.
+
+The #98 plan originally assigned the Issue-037 transcript re-pin to #99. Issue 125 and the newer
+Issue-123 audit-link comment specifically assign it to this closure, which is the authority for
+this rescope. Issue 123 may close only after Sol XHigh PASS, an upstream evidence commit, and green
+CI. Passing closes #98 F1 only; #98 and #99 wave-3 work remains open.
 
 ## Accepted authorities and technical input
 

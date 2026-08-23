@@ -43,7 +43,9 @@ parallel-submix regression and exact native single-thread/dependency-wave proof.
 before later members' inputs exist. Issue 123, **Emit a level-major sequential graph schedule for
 bank correctness**, owns only the exact flattened-level schedule, matching buffer recoloring,
 transactional scalar/native bind guards and bank-audio/hash proof. It follows accepted Issues 006,
-039 and 122, defers Issue-098 F2–F13, uses Sol High/Sol XHigh with one pass plus one HOLD, and gates
+039 and 122, defers Issue-098 F2–F13, and was rebriefed under Issue 125 after its earlier stopped
+100,000-render evidence shape. Its fresh Sol High/Sol XHigh workflow uses #98 E1/E2 plus a
+native-derived 100-layout Issue-037 transcript, preserves the consumed long-audit counter, and gates
 Issue 026 without benchmark or timing.
 
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its

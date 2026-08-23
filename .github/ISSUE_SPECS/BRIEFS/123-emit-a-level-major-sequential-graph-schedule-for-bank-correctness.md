@@ -2,11 +2,23 @@
 
 ## Decision
 
-**TERMINAL STOP / NO OVERALL PASS.** Sol High completed pass 1 and the sole bounded correction.
-Sol XHigh issued the one permitted HOLD, then returned terminal STOP because the corrected
-100,000-block evidence still extrapolates from output repetition without proving hidden-state
-recurrence. The product checkpoint is technical input only; no retry, second correction, benchmark
-or timing run is authorized.
+**READY / SOL XHIGH REBRIEF PASS.** After the recorded terminal verdict, the user directed
+execution of standing controller Issue 125. AGENTS.md and Issue 125 authorize a narrower,
+synchronized in-place rescope rather than a disguised fourth retry or a new attempt issue. This
+fresh workflow permits one Sol High implementation pass and, only after a Sol XHigh HOLD, one
+bounded correction.
+
+The replacement gates are #98 wave-0 E1/E2 plus the Issue-037 100-layout transcript derived from
+independently prepared native execution on every layout. The previous 100,000-render audit remains
+consumed (`invocations=1`, `retries=0`) and is removed from acceptance. Do not rerun it, use its
+candidate hash as authority, or restore the stopped periodic-output extrapolation. Benchmark and
+timed-benchmark counts remain zero.
+
+Implement only the exact flattened-level schedule and matching recoloring, the shared
+transactional bank-input bind invariant, the analytic four-track sequential/native regression,
+the compiler-selected-width three-block sequential/native bit-parity regression, and the native-
+oracle Issue-037 transcript re-pin. Preserve the pinned fixture exception and frozen product
+boundaries. The stopped `34d0e825` checkpoint is reference material only, not a cherry-pick target.
 
 Accepted authorities are Issue 006 product checkpoint/rescope
 `40f0a2f3f5057e725e80715da18afb0e5f4d6bb3` /
