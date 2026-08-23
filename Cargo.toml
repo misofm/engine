@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/miso-engine-core",
+    "crates/miso-engine-math",
     "crates/miso-engine-lane",
     "crates/miso-engine-session",
     "crates/miso-engine-source",
@@ -62,6 +63,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 miso-engine-core = { path = "crates/miso-engine-core", version = "0.1.0" }
+miso-engine-math = { path = "crates/miso-engine-math", version = "0.1.0" }
 miso-engine-lane = { path = "crates/miso-engine-lane", version = "0.1.0" }
 miso-engine-target-smoke = { path = "crates/miso-engine-target-smoke", version = "0.1.0" }
 miso-engine-dsp-reference = { path = "crates/miso-engine-dsp-reference", version = "0.1.0" }
