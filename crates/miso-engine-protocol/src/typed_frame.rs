@@ -17,6 +17,26 @@ use crate::{
     TransportStateEvent,
 };
 
+#[cfg(test)]
+std::thread_local! {
+    static FRAME_COUNT_PASSES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static FRAME_SLICE_PASSES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_frame_writer_passes() {
+    FRAME_COUNT_PASSES.with(|passes| passes.set(0));
+    FRAME_SLICE_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn frame_writer_passes() -> (usize, usize) {
+    (
+        FRAME_COUNT_PASSES.with(core::cell::Cell::get),
+        FRAME_SLICE_PASSES.with(core::cell::Cell::get),
+    )
+}
+
 /// One schema-closed command payload ready for full-frame encoding.
 #[allow(missing_docs)] // Variant names exactly mirror the frozen command registry.
 pub enum CommandPayload<'a> {
@@ -260,9 +280,25 @@ impl ProtocolCodec {
         frame: &TypedSuccessResponseFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let measure = measure_payload(self, |sink| {
+        let measure = self.measure_success_response_frame(frame)?;
+        self.encode_success_response_frame_measured_into(frame, measure, output)
+    }
+
+    pub(crate) fn measure_success_response_frame(
+        &self,
+        frame: &TypedSuccessResponseFrame<'_>,
+    ) -> Result<MessageMeasure, EncodeError> {
+        measure_payload(self, |sink| {
             write_success_payload(self, &frame.payload, sink)
-        })?;
+        })
+    }
+
+    pub(crate) fn encode_success_response_frame_measured_into(
+        &self,
+        frame: &TypedSuccessResponseFrame<'_>,
+        measure: MessageMeasure,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
         encode_complete_frame(
             self,
             FrameKind::Response,
@@ -553,6 +589,8 @@ fn measure_payload(
     codec: &ProtocolCodec,
     write: impl FnOnce(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<MessageMeasure, EncodeError> {
+    #[cfg(test)]
+    FRAME_COUNT_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
     let mut sizing = CountSink::new(codec.limits());
     write(&mut sizing)?;
     let measure = sizing.measure_message()?;
@@ -587,6 +625,8 @@ fn encode_complete_frame(
     if output.len() < required {
         return Err(EncodeError::OutputTooSmall { required });
     }
+    #[cfg(test)]
+    FRAME_SLICE_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
     codec.write_outer_header(
         output,
         kind,

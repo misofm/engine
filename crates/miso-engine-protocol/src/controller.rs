@@ -15,6 +15,7 @@ std::thread_local! {
     static PREPARED_IMMEDIATE_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static PROSPECTIVE_REPLAY_CLONES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static RESPONSE_STAGING_VECS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 use crate::{
@@ -1228,7 +1229,19 @@ struct StructuralCommandPlan {
     cancellation_batches: usize,
     required_events: usize,
     applied_operations: u32,
-    response_len: usize,
+    response_measure: crate::btlv::MessageMeasure,
+}
+
+// Keeping the structural plan inline avoids introducing a heap allocation into the direct
+// one-call transaction path merely to reduce this short-lived dispatch value's stack size.
+#[allow(clippy::large_enum_variant)]
+enum StructuralCommandDisposition {
+    Legacy,
+    Immediate {
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+    },
+    Structural(StructuralCommandPlan),
 }
 
 /// Opaque affine structural preparation bound to one exact controller identity and generation.
@@ -1674,9 +1687,17 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        match self.process_structural_command_into(input, scratch, output, header)? {
-            Some(written) => Ok(written),
-            None => self.process_command_frame_into_legacy(input, scratch, output),
+        match self.plan_structural_command(input, scratch, output.len(), header)? {
+            StructuralCommandDisposition::Legacy => {
+                self.process_command_frame_into_legacy(input, scratch, output)
+            }
+            StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome,
+            } => self.process_planned_immediate_into(input, header, replay_plan, outcome, output),
+            StructuralCommandDisposition::Structural(plan) => {
+                self.process_structural_plan_into(input, output, header, plan)
+            }
         }
     }
 
@@ -1695,37 +1716,50 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        match self.prepare_structural_command(input, scratch, output_capacity, header)? {
-            Some(prepared) => Ok(PreparedCommandFrame::Structural(Box::new(prepared))),
-            None => self.process_immediate_command(input, scratch, output_capacity),
+        match self.plan_structural_command(input, scratch, output_capacity, header)? {
+            StructuralCommandDisposition::Legacy => {
+                self.process_immediate_command(input, scratch, output_capacity)
+            }
+            StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome,
+            } => {
+                self.prepare_planned_immediate(input, header, replay_plan, outcome, output_capacity)
+            }
+            StructuralCommandDisposition::Structural(plan) => Ok(PreparedCommandFrame::Structural(
+                Box::new(self.prepare_structural_plan(input, header, plan)?),
+            )),
         }
     }
 
-    fn prepare_structural_command(
+    fn prepare_structural_plan(
         &mut self,
         input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
-        output_capacity: usize,
         header: CommandHeader,
-    ) -> Result<Option<PreparedStructuralCommand>, CommandFrameProcessError> {
-        let Some(plan) = self.plan_structural_command(input, scratch, output_capacity, header)?
-        else {
-            return Ok(None);
-        };
+        plan: StructuralCommandPlan,
+    ) -> Result<PreparedStructuralCommand, CommandFrameProcessError> {
         let revision = plan.prospective_session.revision();
-        let frame = self
-            .encode_outcome_frame(
-                header.message_id,
-                header.request_id,
-                self.ok_at_revision(
-                    revision,
-                    Body::TransactionApplied(TransactionApplied {
-                        applied_operations: plan.applied_operations,
-                    }),
-                ),
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations: plan.applied_operations,
+            }),
+        };
+        #[cfg(test)]
+        RESPONSE_STAGING_VECS.with(|allocations| {
+            allocations.set(allocations.get().saturating_add(1));
+        });
+        let mut frame = vec![0_u8; self.replay.config.max_response_bytes];
+        let written = self
+            .codec
+            .encode_success_response_frame_measured_into(
+                &response_frame,
+                plan.response_measure,
+                &mut frame,
             )
             .map_err(CommandFrameProcessError::Encode)?;
-        debug_assert_eq!(frame.len(), plan.response_len);
+        frame.truncate(written);
         let response = ControllerResponse::from_complete_frame(
             header.request_id,
             StatusCode::Ok,
@@ -1737,14 +1771,14 @@ impl<P: ControlProvider> ProtocolController<P> {
             .try_clone_eager()
             .map_err(|_| CommandFrameProcessError::Internal)?;
         if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
-            return Ok(None);
+            return Err(CommandFrameProcessError::Internal);
         }
         prospective_replay
             .complete(header.request_id, input, response.complete_frame())
             .map_err(|_| CommandFrameProcessError::Internal)?;
         let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
             Ok(reservations) => reservations,
-            Err(_) => return Ok(None),
+            Err(_) => return Err(CommandFrameProcessError::Internal),
         };
 
         let current = self.structural_generation.load(Ordering::Acquire);
@@ -1755,7 +1789,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.structural_generation
             .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
-        Ok(Some(PreparedStructuralCommand {
+        Ok(PreparedStructuralCommand {
             owner: Arc::clone(&self.structural_generation),
             generation,
             request_id: plan.request_id,
@@ -1768,7 +1802,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             cancellation_batches: plan.cancellation_batches,
             applied_operations: plan.applied_operations,
             armed: true,
-        }))
+        })
     }
 
     fn plan_structural_command(
@@ -1777,9 +1811,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
-    ) -> Result<Option<StructuralCommandPlan>, CommandFrameProcessError> {
+    ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
         if header.message_id != MessageId::SessionTransactionApply {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Legacy);
         }
         let is_new_request = self.replay.is_new_request(header.request_id);
         if is_new_request && output_capacity < self.replay.config().max_response_bytes {
@@ -1788,7 +1822,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             });
         }
         if !is_new_request || self.replay.reservation.is_some() {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Legacy);
         }
         if !self.config.provider_features.session_events
             || self.config.maximum_transaction_edits == 0
@@ -1798,22 +1832,41 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ExpectedRevision::Exact(revision) if revision != self.session.revision()
             )
         {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Legacy);
         }
         let replay_plan = match self.replay.plan_preflight(header.request_id, input) {
             Ok(plan) => plan,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(StructuralCommandDisposition::Legacy),
         };
 
+        #[cfg(test)]
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let decoded = match self.codec.decode_typed_command(input, scratch) {
             Ok(decoded) => decoded,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(error.status(), None),
+                });
+            }
         };
         let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
         };
-        if edits.is_empty() || edits.len() > self.config.maximum_transaction_edits as usize {
-            return Ok(None);
+        if edits.is_empty() {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::InvalidField, None),
+            });
+        }
+        if edits.len() > self.config.maximum_transaction_edits as usize {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::LimitExceeded, None),
+            });
         }
         let cancellation_batches =
             usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
@@ -1825,42 +1878,67 @@ impl<P: ControlProvider> ProtocolController<P> {
                 .capacity
                 .saturating_sub(usize::try_from(event_report.occupancy).unwrap_or(usize::MAX))
         {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.queue_backpressure_outcome(event_report),
+            });
         }
         let event_sequence = self.next_reliable_event_sequence;
         if event_sequence
             .checked_add(u64::try_from(required_events).unwrap_or(u64::MAX))
             .is_none()
         {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
         }
         let applied_operations = match u32::try_from(edits.len()) {
             Ok(value) => value,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::LimitExceeded, None),
+                });
+            }
         };
         let prospective_session = match self
             .session
             .prepare_transaction(header.expected_revision, &edits)
         {
             Ok(value) => value,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.transaction_error_outcome(&error),
+                });
+            }
         };
         let revision = prospective_session.revision();
-        let response_len = match self.encode_outcome_into(
-            header.message_id,
-            header.request_id,
-            self.ok_at_revision(
-                revision,
-                Body::TransactionApplied(TransactionApplied { applied_operations }),
-            ),
-            &mut [],
-        ) {
-            Ok(written) => written,
-            Err(EncodeError::OutputTooSmall { required }) => required,
-            Err(_) => return Ok(None),
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations,
+            }),
         };
+        let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
+            Ok(measure) => measure,
+            Err(_) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::Internal, None),
+                });
+            }
+        };
+        let response_len = crate::OUTER_HEADER_BYTES
+            .checked_add(response_measure.length)
+            .ok_or(CommandFrameProcessError::Internal)?;
         if response_len > self.replay.config().max_response_bytes {
-            return Ok(None);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
         }
         if response_len > output_capacity {
             return Err(CommandFrameProcessError::Encode(
@@ -1869,44 +1947,44 @@ impl<P: ControlProvider> ProtocolController<P> {
                 },
             ));
         }
-        Ok(Some(StructuralCommandPlan {
-            request_id: header.request_id,
-            previous_revision: self.session.revision(),
-            prospective_session,
-            replay_plan,
-            event_sequence,
-            cancellation_batches,
-            required_events,
-            applied_operations,
-            response_len,
-        }))
+        Ok(StructuralCommandDisposition::Structural(
+            StructuralCommandPlan {
+                request_id: header.request_id,
+                previous_revision: self.session.revision(),
+                prospective_session,
+                replay_plan,
+                event_sequence,
+                cancellation_batches,
+                required_events,
+                applied_operations,
+                response_measure,
+            },
+        ))
     }
 
-    fn process_structural_command_into(
+    fn process_structural_plan_into(
         &mut self,
         input: &[u8],
-        scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
         header: CommandHeader,
-    ) -> Result<Option<usize>, CommandFrameProcessError> {
-        let Some(plan) = self.plan_structural_command(input, scratch, output.len(), header)? else {
-            return Ok(None);
-        };
+        plan: StructuralCommandPlan,
+    ) -> Result<usize, CommandFrameProcessError> {
         let revision = plan.prospective_session.revision();
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations: plan.applied_operations,
+            }),
+        };
         let written = self
-            .encode_outcome_into(
-                header.message_id,
-                header.request_id,
-                self.ok_at_revision(
-                    revision,
-                    Body::TransactionApplied(TransactionApplied {
-                        applied_operations: plan.applied_operations,
-                    }),
-                ),
+            .codec
+            .encode_success_response_frame_measured_into(
+                &response_frame,
+                plan.response_measure,
                 output,
             )
             .map_err(CommandFrameProcessError::Encode)?;
-        debug_assert_eq!(written, plan.response_len);
 
         // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
         // above. Exclusive `&mut self` ownership makes these exact reservations invariant from
@@ -1941,7 +2019,46 @@ impl<P: ControlProvider> ProtocolController<P> {
             Some(effective_sample),
         )
         .expect("planned cancellation events retain their exact reservations");
-        Ok(Some(written))
+        Ok(written)
+    }
+
+    fn process_planned_immediate_into(
+        &mut self,
+        input: &[u8],
+        header: CommandHeader,
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let (written, _, _) = self
+            .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
+            .map_err(CommandFrameProcessError::Encode)?;
+        self.replay
+            .apply_preflight_plan(header.request_id, input, replay_plan);
+        self.replay
+            .complete(header.request_id, input, &output[..written])
+            .expect("planned immediate replay reservation accepts measured response");
+        Ok(written)
+    }
+
+    fn prepare_planned_immediate(
+        &mut self,
+        input: &[u8],
+        header: CommandHeader,
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+        output_capacity: usize,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        #[cfg(test)]
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+        let capacity = output_capacity.min(self.replay.config().max_response_bytes);
+        let mut bytes = vec![0_u8; capacity];
+        let written =
+            self.process_planned_immediate_into(input, header, replay_plan, outcome, &mut bytes)?;
+        bytes.truncate(written);
+        Ok(PreparedCommandFrame::Immediate(
+            PreparedImmediateCommandFrame { bytes },
+        ))
     }
 
     fn process_immediate_command(
@@ -2067,6 +2184,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReplayDecision::Execute => {}
         }
 
+        #[cfg(test)]
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let outcome = match self.codec.decode_typed_command(input, scratch) {
             Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
             Err(error) => self.non_ok(error.status(), None),
@@ -4411,8 +4530,12 @@ mod tests {
             crate::CommandPayload::SessionTransactionApply(&first_edits),
         );
         let mut endpoint = controller(1, 2);
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+        crate::typed_frame::reset_frame_writer_passes();
         let committed = process_full_command(&mut endpoint, &first);
         assert_eq!(status(&committed), StatusCode::Ok);
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
+        assert_eq!(crate::typed_frame::frame_writer_passes(), (1, 1));
         PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
         RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
         let committed_snapshot = endpoint.session().canonical_snapshot().to_owned();
@@ -4508,10 +4631,12 @@ mod tests {
         );
         let mut invalid_endpoint = controller(4, 2);
         let invalid_snapshot = invalid_endpoint.session().canonical_snapshot().to_owned();
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
         assert_eq!(
             status(&process_full_command(&mut invalid_endpoint, &invalid)),
             StatusCode::ValidationFailed
         );
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
         assert_eq!(
             invalid_endpoint.session().canonical_snapshot(),
             invalid_snapshot
@@ -4603,6 +4728,47 @@ mod tests {
         PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
         RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
 
+        let before_malformed_transaction = endpoint.session().canonical_snapshot().to_owned();
+        let mut malformed_transaction = input.clone();
+        malformed_transaction[crate::OUTER_HEADER_BYTES + 2] = 1;
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+        let transaction_response = process_full_command(&mut endpoint, &malformed_transaction);
+        TYPED_COMMAND_DECODES.with(|decodes| {
+            assert_eq!(
+                decodes.get(),
+                1,
+                "a malformed transaction carries its typed-decode error into the direct outcome path"
+            );
+        });
+        let mut transaction_response_fields = [0_u16; 32];
+        match ProtocolCodec::default()
+            .decode_typed_response(
+                &transaction_response,
+                &mut DecodeScratch::new(&mut transaction_response_fields),
+            )
+            .expect("correlatable malformed transaction response")
+        {
+            crate::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                assert_eq!(header.request_id, id(1));
+                assert_eq!(header.message_id, MessageId::SessionTransactionApply);
+                assert_eq!(header.status, StatusCode::MalformedFrame);
+            }
+            crate::DecodedTypedResponseFrame::Success { .. } => {
+                panic!("malformed transaction payload succeeded")
+            }
+        }
+        assert_eq!(
+            endpoint.session().canonical_snapshot(),
+            before_malformed_transaction
+        );
+        assert_eq!(
+            endpoint
+                .queues()
+                .report(crate::QueueKind::ReliableEvent)
+                .occupancy,
+            0
+        );
+
         let mut malformed = full_command(
             2,
             ExpectedRevision::Any,
@@ -4611,7 +4777,9 @@ mod tests {
         malformed[20..24].copy_from_slice(&8_u32.to_le_bytes());
         malformed[40..44].copy_from_slice(&1_u32.to_le_bytes());
         malformed.extend_from_slice(&[1, 0, 1, 0, 1, 0, 0, 0]);
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
         let response = process_full_command(&mut endpoint, &malformed);
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
         let mut response_fields = [0_u16; 32];
         match ProtocolCodec::default()
             .decode_typed_response(&response, &mut DecodeScratch::new(&mut response_fields))
