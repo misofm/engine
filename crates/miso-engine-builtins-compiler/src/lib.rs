@@ -2250,7 +2250,20 @@ mod tests {
                 ],
             },
             sequential_schedule: vec![input.clone(), builtin.clone(), output.clone()],
-            dependency_levels: Vec::new(),
+            dependency_levels: vec![
+                DependencyLevel {
+                    level: 0,
+                    nodes: vec![input.clone()],
+                },
+                DependencyLevel {
+                    level: 1,
+                    nodes: vec![builtin.clone()],
+                },
+                DependencyLevel {
+                    level: 2,
+                    nodes: vec![output.clone()],
+                },
+            ],
             route_timings: Vec::new(),
             inserted_delays: Vec::new(),
             buffer_assignments: Vec::new(),

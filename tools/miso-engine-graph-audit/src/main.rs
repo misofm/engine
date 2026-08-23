@@ -300,7 +300,16 @@ fn prepared_graph(
             edges: vec![edge],
         },
         sequential_schedule: vec![input.clone(), output.clone()],
-        dependency_levels: Vec::new(),
+        dependency_levels: vec![
+            miso_engine_graph::DependencyLevel {
+                level: 0,
+                nodes: vec![input.clone()],
+            },
+            miso_engine_graph::DependencyLevel {
+                level: 1,
+                nodes: vec![output.clone()],
+            },
+        ],
         route_timings: Vec::new(),
         inserted_delays: Vec::new(),
         buffer_assignments: Vec::new(),
