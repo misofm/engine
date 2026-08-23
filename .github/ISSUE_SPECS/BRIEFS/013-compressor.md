@@ -383,3 +383,43 @@ contract, variable reported latency, connected-sidechain banking, f64 production
 oracle logic, noncanonical automation, shared lane/track state, runtime allocation/detection,
 unaccounted delay/default storage, relaxed SIMD, an FMA contraction, a tolerance/domain change,
 benchmark before authorization, any benchmark retry, or an attempt beyond the two-attempt budget.
+
+## Amendment (2026-08-23) — issue #88 re-land on the wave-1 foundation
+
+Appended, not rewritten. The clauses below are **superseded** by master plan #83; everything this
+brief says that is not listed here still stands, and in particular the parameter table, the port
+list, latency `N = Fs/50`, the `L`/`D` derivation and ring semantics, the link laws, the four
+identities, the state payload layout and `state_layout_version = 1` are unchanged.
+
+### Superseded implementation clauses
+
+| brief clause | superseded by | what it says now |
+|---|---|---|
+| The `X = clamp(20*log10(u0), -160, 24)` and `A = 10^((G+makeup)*0.05)` conversions (the sample-graph block around line 136 and line 165) | **D6** | `X = log2_lane(u0) * 20*log10(2)` and `A = exp2_lane((G+makeup) * log2(10)/20)`, through `miso-engine-math`. The platform libm may not be called from a render path: `f32::log10`, `f32::powf` and `f32::exp` are whatever the target links, which is audit finding F1 and the reason the cross-target claim needed a tolerance. |
+| `aa = exp(...)`, `ar = exp(...)` evaluated **per sample** (lines 159-160) | **D6**, and audit finding F1 | The two ballistic coefficients are designed on the control plane, in `f64`, through `miso_engine_math::exp`, and are recomputed only while a `Linear 64` ramp on `attack` or `release` is in flight — at most 64 samples after an event. `1 - exp(-1/(tau*fs))` evaluated in `f64` and rounded **once** also fixes a real accuracy defect: at the release maximum, 5,000 ms at 96 kHz, computing it in `f32` leaves about seven significant bits of the coefficient. |
+| `p0 = a*G_previous; p1 = (1-a)*C; G = p0+p1` — two roundings (lines 161-163) | **D3** | `G = fma(c, C - G_previous, G_previous)` — one rounding, with `c = 1 - a` the *rate* coefficient. `envelope::rms_follow` composed with one `Lane::select` for the strict `C < G` branch. The direction convention is unchanged: equality takes release. |
+| "The bank walks tracks in ascending lane order for sanitation, linking, ring access, scalar `log10/exp/powf`, gain-computer and smoother work" (lines 233-240) | **D10** | There is no per-lane scalar walk. One `Lane`-generic block body is instantiated at `f32`, `Simd4` and `Simd8`; the scalar instance *is* the `L = f32` instantiation. The only remaining per-lane loop inside a frame is the detector gather, which is per lane because `lookahead` is a per-lane parameter and deliberately not part of the program key. The rings are one row-major allocation per channel rather than two per lane. |
+| "sanitation/recovery" and the per-value `is_finite`/subnormal checks | **D7** | There is no per-value sanitiser, no `recover` and no recovery frame. `miso_engine_lane::flush` is applied to `G`, the one recursive word, and the finished block is inspected once per channel by `effect_runtime::bank::finish_channel`. `ProcessReport::sanitized_main_samples` and `sanitized_sidechain_samples` are therefore always `0`, and `recovered_left_samples`/`recovered_right_samples` now count **rejected blocks**, not samples. |
+| "Cross-target results use `abs(error) <= 1e-6 + 2e-5*abs(reference)`" (lines 269-270) | **D5** | Deleted, not loosened. Cross-target and cross-backend results are `to_bits()` identity. `miso_engine_compressor::corpus` is the frozen four-case corpus and `tools/miso-engine-wasm-gates` replays it under wasmtime, with and without `simd128`, against the same pins the native test uses. |
+| The ramp law "`current += (target - current) / remaining`" | **D11** | One division at the event, iterated additions, an exact assignment of the target on the final sample: `effect_runtime::ramp::LinearRamp`. |
+| "the gain/mix step remains one packed W4/W8 call per channel/sample" | **D10** | `PreparedCompressorGainMixKernelV1` is gone; the step is `miso_engine_lane::kernels::gain_mix_step` inside the one kernel body, at the width the build was compiled for. |
+
+### Behaviour a caller can observe
+
+- Output samples are no longer flushed. Only `G` is (D7). A tiny wet sample now passes through
+  instead of becoming `+0.0`.
+- A NaN or a magnitude at or above `1e30` in the output is caught at the **end of the block** it
+  appears in, not at the sample. The block is zeroed, that channel's rings, cursor and `G` are
+  cleared, and one counter is incremented. The two channels are independent: a divergent right
+  channel leaves the left channel bit-identical to a clean render.
+- A NaN reaching only the *detector* — a connected sidechain carrying one — is clamped to the level
+  floor and produces no gain reduction, rather than poisoning `G`. Two clamps do this and either
+  alone would: the D8 `max` against `1e-8` and `log2_lane`'s own argument clamp.
+- Bypass, `mix == 0` and `mix == 1` keep the detector and `G` running, as before. This is
+  intentional and is what makes un-bypassing click-free; it answers open question 5 of the audit.
+- The bank's per-block guard now rejects `frames == 0`, a slice whose length does not match
+  `frames * lanes`, an automation-offset array of the wrong length and offsets that are descending
+  or run past the span slice — **before** it indexes them.
+- A bank binds only at the width the build was compiled for. D4 revision 4 removed runtime SIMD
+  dispatch, so a request for any other width is an unavailable backend and takes the `Ok(None)`
+  scalar fallback, exactly as an unavailable backend did before.

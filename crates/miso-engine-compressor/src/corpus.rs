@@ -164,7 +164,10 @@ const fn link_of(case: usize) -> LinkMode {
 pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
     assert!(case < CASE_COUNT, "corpus case index out of range");
     assert_eq!(out.len(), POINTS, "corpus output length");
-    assert_eq!(LANES % L::WIDTH, 0, "width must divide the lane count");
+    assert!(
+        LANES.is_multiple_of(L::WIDTH),
+        "width must divide the lane count"
+    );
     let width = L::WIDTH;
     let link = link_of(case);
 

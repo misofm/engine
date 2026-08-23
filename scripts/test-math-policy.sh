@@ -71,7 +71,7 @@ expect_failure sin-in-a-host \
 expect_failure new-file-next-to-an-allowlisted-one \
     'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-effect-contract/src/other.rs"'
 expect_failure allowlisted-file-gains-a-call \
-    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-compressor/src/lib.rs"'
+    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-effect-contract/src/lib.rs"'
 expect_failure allowlist-entry-gone-stale \
     'printf "%s\n" "pub fn migrated(x: f64) -> f64 { miso_engine_math::exp(x) }" >"$root/crates/miso-engine-graph-compiler/src/lib.rs"'
 expect_failure allowlisted-file-deleted \

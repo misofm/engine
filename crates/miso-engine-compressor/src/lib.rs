@@ -421,25 +421,6 @@ fn detector_source<'a>(
     }
 }
 
-/// Runs the §4.4 boundary check on both channels and attributes failures to lane reports.
-fn finish_block<L: Lane>(
-    left_io: &mut [f32],
-    right_io: &mut [f32],
-    left: &mut Channel<L>,
-    right: &mut Channel<L>,
-    mut record: impl FnMut(usize, bool, bool),
-) {
-    let left_mask = kernel::finish_channel::<L>(left_io, left);
-    let right_mask = kernel::finish_channel::<L>(right_io, right);
-    if left_mask | right_mask == 0 {
-        return;
-    }
-    for lane in 0..L::WIDTH {
-        let bit = 1 << lane;
-        record(lane, left_mask & bit != 0, right_mask & bit != 0);
-    }
-}
-
 /// The track index a bank call names, or the track diagnostic.
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| StatePayloadError {
@@ -453,19 +434,134 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
     Ok(track)
 }
 
+/// Everything a prepared compressor is, at one lane width.
+///
+/// The scalar instance and the bank are the same object at `L = f32` and `L = Simd4 | Simd8`, and
+/// they share every method below. Only the two contract traits differ — one addresses lane 0 and
+/// reports into a `ProcessReport`, the other addresses a track and reports into an array of them —
+/// so the traits are thin wrappers and there is exactly one body per operation. A second copy of
+/// `restore` is precisely the divergence the audit found in six other crates.
+struct Instance<L: Lane> {
+    metadata: PreparedEffectMetadata,
+    left: Channel<L>,
+    right: Channel<L>,
+}
+
+impl<L: Lane> Instance<L> {
+    /// Allocates both channels from per-lane preparation values.
+    fn new(
+        metadata: PreparedEffectMetadata,
+        left_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
+        right_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
+        length: usize,
+    ) -> Self {
+        Self {
+            metadata,
+            left: Channel::new(left_defaults, length, metadata.sample_rate),
+            right: Channel::new(right_defaults, length, metadata.sample_rate),
+        }
+    }
+
+    fn reset(&mut self, kind: ResetKind) {
+        let rate = self.metadata.sample_rate;
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.left.full_reset(rate);
+                self.right.full_reset(rate);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                self.left.discontinuity_reset(rate);
+                self.right.discontinuity_reset(rate);
+            }
+        }
+    }
+
+    /// Renders one block and applies the section 4.4 boundary policy to each channel.
+    ///
+    /// `record(lane, left_failed, right_failed)` is called once per lane, and only when a block
+    /// was rejected, so the caller maps the failure onto whichever report shape it owns.
+    fn render(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        detector: Detector<'_>,
+        frames: usize,
+        mut record: impl FnMut(usize, bool, bool),
+    ) {
+        kernel::process_block::<L>(
+            left,
+            right,
+            detector,
+            frames,
+            self.metadata.link_mode,
+            self.metadata.bypass,
+            self.metadata.sample_rate,
+            (&mut self.left, &mut self.right),
+        );
+        let left_mask = kernel::finish_channel::<L>(left, &mut self.left);
+        let right_mask = kernel::finish_channel::<L>(right, &mut self.right);
+        if left_mask | right_mask == 0 {
+            return;
+        }
+        for lane in 0..L::WIDTH {
+            let bit = 1 << lane;
+            record(lane, left_mask & bit != 0, right_mask & bit != 0);
+        }
+    }
+
+    /// Writes one lane's payload.
+    fn snapshot(
+        &self,
+        mut output: StatePayloadOutput<'_>,
+        lane: usize,
+    ) -> Result<(), StatePayloadError> {
+        state::validate_lengths(
+            output.common.len(),
+            output.left.len(),
+            output.right.len(),
+            self.metadata.state_sizes,
+        )?;
+        state::snapshot_lane(&mut output, &self.left, &self.right, lane);
+        Ok(())
+    }
+
+    /// Restores one lane's payload, transactionally across both channels.
+    fn restore(
+        &mut self,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+        lane: usize,
+    ) -> Result<(), StatePayloadError> {
+        if state_layout_version != COMPRESSOR_DESCRIPTOR_V1.state_layout_version {
+            return Err(StatePayloadError {
+                code: "effect.state.version",
+            });
+        }
+        state::validate_lengths(
+            input.common.len(),
+            input.left.len(),
+            input.right.len(),
+            self.metadata.state_sizes,
+        )?;
+        let length = self.left.ring_length as usize;
+        state::validate_channel(input.left, length)?;
+        state::validate_channel(input.right, length)?;
+        let rate = self.metadata.sample_rate;
+        state::commit_channel(input.left, &mut self.left, lane, rate);
+        state::commit_channel(input.right, &mut self.right, lane, rate);
+        Ok(())
+    }
+}
+
 /// A prepared, allocation-free scalar compressor instance: the `L = f32` instantiation.
 pub struct PreparedCompressor {
-    metadata: PreparedEffectMetadata,
-    left: Channel<f32>,
-    right: Channel<f32>,
+    instance: Instance<f32>,
 }
 
 /// A prepared homogeneous bank: `L::WIDTH` tracks as one vector, same kernel body.
 struct PreparedCompressorBank<L: Lane> {
     metadata: PreparedBankMetadata,
-    effect_metadata: PreparedEffectMetadata,
-    left: Channel<L>,
-    right: Channel<L>,
+    instance: Instance<L>,
 }
 
 impl NativeEffectFactory for CompressorFactory {
@@ -481,9 +577,12 @@ impl NativeEffectFactory for CompressorFactory {
         let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
         let length = ring_length(metadata)?;
         Ok(Box::new(PreparedCompressor {
-            metadata,
-            left: Channel::new(&[left_defaults; MAX_WIDTH], length, metadata.sample_rate),
-            right: Channel::new(&[right_defaults; MAX_WIDTH], length, metadata.sample_rate),
+            instance: Instance::new(
+                metadata,
+                &[left_defaults; MAX_WIDTH],
+                &[right_defaults; MAX_WIDTH],
+                length,
+            ),
         }))
     }
 
@@ -542,15 +641,11 @@ impl NativeEffectFactory for CompressorFactory {
         Ok(Some(match Backend::current() {
             Backend::Simd4 => Box::new(PreparedCompressorBank::<Simd4> {
                 metadata: bank_metadata,
-                effect_metadata: metadata,
-                left: Channel::new(&left_defaults, length, metadata.sample_rate),
-                right: Channel::new(&right_defaults, length, metadata.sample_rate),
+                instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
             }) as Box<dyn PreparedNativeEffectBank>,
             Backend::Simd8 => Box::new(PreparedCompressorBank::<Simd8> {
                 metadata: bank_metadata,
-                effect_metadata: metadata,
-                left: Channel::new(&left_defaults, length, metadata.sample_rate),
-                right: Channel::new(&right_defaults, length, metadata.sample_rate),
+                instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
             }) as Box<dyn PreparedNativeEffectBank>,
             Backend::Scalar => return Ok(None),
         }))
@@ -559,50 +654,31 @@ impl NativeEffectFactory for CompressorFactory {
 
 impl PreparedNativeEffect for PreparedCompressor {
     fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
+        self.instance.metadata
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        let rate = self.metadata.sample_rate;
-        match kind {
-            ResetKind::FullToDefaults => {
-                self.left.full_reset(rate);
-                self.right.full_reset(rate);
-            }
-            ResetKind::DiscontinuityKeepParameters => {
-                self.left.discontinuity_reset(rate);
-                self.right.discontinuity_reset(rate);
-            }
-        }
+        self.instance.reset(kind);
     }
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
+        let metadata = self.instance.metadata;
         apply_automation(
             block.automation,
-            self.metadata,
+            metadata,
             block.first_sample,
             0,
-            &mut self.left,
-            &mut self.right,
+            &mut self.instance.left,
+            &mut self.instance.right,
             &mut report,
         );
         let frames = block.left.len();
-        kernel::process_block::<f32>(
+        self.instance.render(
             block.left,
             block.right,
-            detector_source(self.metadata, block.sidechain),
+            detector_source(metadata, block.sidechain),
             frames,
-            self.metadata.link_mode,
-            self.metadata.bypass,
-            self.metadata.sample_rate,
-            (&mut self.left, &mut self.right),
-        );
-        finish_block::<f32>(
-            block.left,
-            block.right,
-            &mut self.left,
-            &mut self.right,
             |_, left_failed, right_failed| {
                 if left_failed {
                     report.recovered_left_samples = report.recovered_left_samples.saturating_add(1);
@@ -618,16 +694,9 @@ impl PreparedNativeEffect for PreparedCompressor {
 
     fn snapshot_state_payload(
         &self,
-        mut output: StatePayloadOutput<'_>,
+        output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        state::validate_lengths(
-            output.common.len(),
-            output.left.len(),
-            output.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        state::snapshot_lane(&mut output, &self.left, &self.right, 0);
-        Ok(())
+        self.instance.snapshot(output, 0)
     }
 
     fn restore_state_payload(
@@ -635,24 +704,7 @@ impl PreparedNativeEffect for PreparedCompressor {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        if state_layout_version != COMPRESSOR_DESCRIPTOR_V1.state_layout_version {
-            return Err(StatePayloadError {
-                code: "effect.state.version",
-            });
-        }
-        state::validate_lengths(
-            input.common.len(),
-            input.left.len(),
-            input.right.len(),
-            self.metadata.state_sizes,
-        )?;
-        let length = self.left.ring_length as usize;
-        state::validate_channel(input.left, length)?;
-        state::validate_channel(input.right, length)?;
-        let rate = self.metadata.sample_rate;
-        state::commit_channel(input.left, &mut self.left, 0, rate);
-        state::commit_channel(input.right, &mut self.right, 0, rate);
-        Ok(())
+        self.instance.restore(state_layout_version, input, 0)
     }
 }
 
@@ -662,17 +714,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        let rate = self.effect_metadata.sample_rate;
-        match kind {
-            ResetKind::FullToDefaults => {
-                self.left.full_reset(rate);
-                self.right.full_reset(rate);
-            }
-            ResetKind::DiscontinuityKeepParameters => {
-                self.left.discontinuity_reset(rate);
-                self.right.discontinuity_reset(rate);
-            }
-        }
+        self.instance.reset(kind);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
@@ -685,7 +727,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         if block.width != self.metadata.width
             || lanes != self.metadata.width.lanes() as usize
             || frames == 0
-            || block.frames > self.effect_metadata.quantum
+            || block.frames > self.instance.metadata.quantum
             || block.sidechain.is_some()
             || block.left.len() != frames * lanes
             || block.right.len() != frames * lanes
@@ -694,34 +736,25 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         {
             return report;
         }
+        let metadata = self.instance.metadata;
         for track in 0..lanes {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             apply_automation(
                 &block.automation[start..end],
-                self.effect_metadata,
+                metadata,
                 block.first_sample,
                 track,
-                &mut self.left,
-                &mut self.right,
+                &mut self.instance.left,
+                &mut self.instance.right,
                 &mut report.reports[track],
             );
         }
-        kernel::process_block::<L>(
+        self.instance.render(
             block.left,
             block.right,
             Detector::Main,
             frames,
-            self.effect_metadata.link_mode,
-            self.effect_metadata.bypass,
-            self.effect_metadata.sample_rate,
-            (&mut self.left, &mut self.right),
-        );
-        finish_block::<L>(
-            block.left,
-            block.right,
-            &mut self.left,
-            &mut self.right,
             |lane, left_failed, right_failed| {
                 if left_failed {
                     report.reports[lane].recovered_left_samples = report.reports[lane]
@@ -741,17 +774,10 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
-        mut output: StatePayloadOutput<'_>,
+        output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH)?;
-        state::validate_lengths(
-            output.common.len(),
-            output.left.len(),
-            output.right.len(),
-            self.effect_metadata.state_sizes,
-        )?;
-        state::snapshot_lane(&mut output, &self.left, &self.right, track);
-        Ok(())
+        self.instance.snapshot(output, track)
     }
 
     fn restore_track_state_payload(
@@ -761,24 +787,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH)?;
-        if state_layout_version != COMPRESSOR_DESCRIPTOR_V1.state_layout_version {
-            return Err(StatePayloadError {
-                code: "effect.state.version",
-            });
-        }
-        state::validate_lengths(
-            input.common.len(),
-            input.left.len(),
-            input.right.len(),
-            self.effect_metadata.state_sizes,
-        )?;
-        let length = self.left.ring_length as usize;
-        state::validate_channel(input.left, length)?;
-        state::validate_channel(input.right, length)?;
-        let rate = self.effect_metadata.sample_rate;
-        state::commit_channel(input.left, &mut self.left, track, rate);
-        state::commit_channel(input.right, &mut self.right, track, rate);
-        Ok(())
+        self.instance.restore(state_layout_version, input, track)
     }
 }
 

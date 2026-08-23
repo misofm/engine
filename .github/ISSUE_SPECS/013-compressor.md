@@ -249,3 +249,119 @@ owned by Issue 046, **Launch compressor qualification, realtime audit, and bench
 successor alone owns the expanded corpus/oracle, 10,000 and million-sample matrices, cohort/
 determinism expansion, 100,000-render audit, target/instruction proof, benchmark and audition/
 listening handoff; these do not reopen Issue 013. `timed_benchmark_invocations = 0`.
+
+## Audit #88 re-land (2026-08-23) — decision record and evidence
+
+The crate was re-landed on the wave-1 foundation (`miso-engine-lane`, `miso-engine-math`,
+`miso-engine-effect-runtime`) per the #88 plan and master plan #83 §6 and D3-D11. Branch
+`audit-088-compressor`. The product contract this issue closed is unchanged; see the amendment
+appended to `BRIEFS/013-compressor.md` for the implementation clauses that are superseded.
+
+### Changes by bit-safety class (master plan §1.8)
+
+| change | class | evidence |
+|---|---|---|
+| One `Lane`-generic block kernel instantiated at `f32`, `Simd4`, `Simd8`; the scalar path *is* `L = f32` | **A** — identity is structural | `tests/lane_identity.rs`: a bound bank against `W` scalar instances, output bits and per-track payload bytes; the corpus word for word at all three widths |
+| Four integer modulos with a runtime divisor replaced by compare-select wraps | **A** | `tests/partition.rs`; `rg -n '%' crates/miso-engine-compressor/src` finds none |
+| Gain computer moved to `effect-runtime::dynamics::gain_delta_db` (GMR 2012 eq. 4, branchless) | **B** | `tests/static_curve.rs`, worst **4.578e-6 dB** over a 3x4x3x737 grid against an `f64` transcription of the paper |
+| `20*log10` / `10^(x/20)` replaced by `dynamics::level_db` / `dynamics::gain_from_db` on the lane `log2`/`exp2` of `miso-engine-math` | **B** | the same grid; end to end by `tests/oracle.rs` below |
+| Ballistic coefficients designed in `f64` at event rate through `miso_engine_math::exp`, instead of `f32` `expf` per sample | **B**, strictly more accurate | at release 5,000 ms / 96 kHz the `f32` form keeps about 7 bits of `c`; the `f64` form keeps 24 |
+| The one-pole becomes the one-rounding `fma(c, C - G, G)` (`envelope::rms_follow` + one `Lane::select`) instead of the two-rounding `a*G + (1-a)*C` | **B** | `tests/oracle.rs` |
+| Ramps: per-sample division to the D11 precomputed step (`effect-runtime::ramp::LinearRamp`) | **B** | `tests/ramps.rs` pins the step, the iterated additions and the exact snap on update 64 |
+| Per-value `sanitize`/`flushed`/`recover` deleted; one `flush` on `G`, one boundary check per channel per block | behavioural | `tests/nonfinite.rs`; see the brief amendment |
+| Output samples no longer flushed | **B**, <= 1 subnormal | D7; `tests/oracle.rs` covers it end to end |
+| `PreparedCompressorGainMixKernelV1` replaced by `lane::kernels::gain_mix_step` | **A** — no bit moves | same operation order; every eval and all four `C1_DIGESTS` were unchanged by the swap |
+| Payload codec moved to `effect-runtime::state_payload`; domain predicate to `effect-runtime::params` | **A** | `tests/payload.rs`, `tests/contract.rs` |
+
+### Derived bound for the class-B swap, and what was measured
+
+Gate M1 puts `log2_lane` and `exp2_lane` within 2 ulp. At the domain edge `|X| <= 160` dB the level
+is about 26.6 octaves, so 2 ulp of the `log2` result is about `7.6e-6` octaves, `4.6e-5` dB after
+the `6.0206` scale; the curve then applies at most four `f32` operations to a quantity bounded by
+184 dB, at most `2.2e-5` dB. Total `6.8e-5` dB on the static curve. Through the ballistic, a
+per-sample difference `d` accumulates to at most `d/c`; through `exp2_lane` a dB error `e` becomes a
+relative gain error of `0.1151 e`.
+
+**Measured, end to end, against the independent `f64` `ReferencePeakCompressor`** (its own rings,
+its own curve, its own two-rounding one-pole, the platform libm in `f64`):
+
+| configuration | worst absolute deviation | gate |
+|---|---|---|
+| `T -24, R 8, W 0, att 1 ms, rel 20 ms, mix 1, lookahead 0` | **4.694e-7** | 2e-5 |
+| `T -30, R 4, W 12, att 5 ms, rel 100 ms, makeup +3, mix 0.7, lookahead 5 ms` | **1.192e-7** | 2e-5 |
+
+The gate is the pre-audit tolerance, unchanged. The old bits were target-specific libm results
+(finding F1); the new bits are IEEE-only and identical across `Scalar`/`Simd4`/`Simd8` and across
+`x86_64`/`aarch64`/`wasm32`.
+
+### Re-pin table
+
+| fixture | oracle | result |
+|---|---|---|
+| descriptor rows, latency, `maximum_state`, `scratch_fixed_bytes: 64`, program key | contract | **not re-pinned** |
+| state payload layout, `state_layout_version = 1` | contract | **not re-pinned** |
+| `L`/`D` derivation, ring semantics | contract | **not re-pinned** |
+| link laws, the four identities | contract | **not re-pinned** |
+| `graph-compiler::launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change` | existing | **not re-pinned**, green untouched |
+| `miso_engine_compressor::corpus::C1_DIGESTS` (four cases) | **new**; pinned from the `L = f32` instantiation on `x86_64` (§8.3: pinning from the scalar oracle is allowed when the property pinned is identity) | newly pinned; all three widths produced these digests before the pin was written |
+| the pre-audit `2e-5` **cross-target tolerance** of `BRIEFS/013:269-270` | — | **deleted**, not loosened (D5). Replaced by `to_bits` identity under `tools/miso-engine-wasm-gates` |
+
+Each old bit that moved traces to a finding: F1 (libm on the render path) for the conversions and
+the coefficients, F5 (output flush) for the tiny-sample change, F6 (the knee's in-loop division) for
+the curve, and D11 for the ramp.
+
+### Descriptive timing (AGENTS.md: measured once, never tuned toward)
+
+Host: AMD Ryzen 7 9700X (Zen 5), 16 threads, `schedutil`, shared machine and therefore noisy.
+`cargo run --release -p miso-engine-compressor --example lane_sample_timing`, 4,096 blocks of 128
+frames, one 512-block untimed warmup, two measured rounds, minimum reported.
+
+| | before (`ae02d2a`) | after | change |
+|---|---|---|---|
+| scalar | 19.396 ns/lane-sample | **21.051** | 1.09x slower |
+| bank W8 | 20.707 ns/lane-sample | **5.404** | **3.83x faster** |
+| bank / scalar | 0.94x | **3.90x** | the bank is finally worth binding |
+
+A second observation taken under `perf stat` on the same host in the same session read 16.371 and
+5.058 (ratio 3.24x); the machine is shared and the spread is the machine, not the code. Neither
+number was tuned toward and the example was not re-run to select one.
+
+The plan's expectation was scalar `<= 8` ns; it is not met, and the §10 fallback applies: report the
+numbers and the hot spots, do not restructure the kernel in this job. `perf record` attributes 64 %
+of the bank's time to `Instance::render` with the largest single leaf being `Lane::select`
+(`bitselect`) inside `exp2_lane`/`log2_lane`. That is the shape of the trade: the dB conversions are
+now portable polynomials rather than platform libm calls, which costs a scalar lane roughly what the
+libm call cost and is amortised eight ways in the bank. The scalar path is the oracle and the
+cohort tail; the vector path is what a session renders.
+
+### Production line count
+
+The plan's target was `<= 600` production lines; the crate is **1,453** code lines
+(non-comment, non-blank) across five modules, of which 158 are the cross-target corpus module that
+the wasm gate needs to live in the crate. The pre-audit single file was 1,150 code lines with
+essentially no documentation. Breakdown: frozen descriptor tables and their `const fn` helpers 216,
+the kernel 357, the payload codec 144, the coefficient design 102, and the factory plus the two
+contract trait implementations 216. The target was not reachable without deleting the frozen
+descriptor or the corpus; the duplication it was aimed at — a separate scalar and bank
+implementation of `reset`, `render`, `snapshot` and `restore` — **is** gone: both contract traits
+are thin wrappers over one `Instance<L>`.
+
+### Deferred
+
+- `scratch_fixed_bytes: 64` is declared and unused (finding F10). It is part of
+  `EffectProgramKeyV1.scratch_bytes`, so changing it is a program-key change: **#95**.
+- 83c's two-word versioned payload header is **not** adopted here. This crate's `common_bytes` is
+  `0` in every quality row and the payload layout is a contract fixture #88 must not move; the word
+  codec and the exact-length validation are adopted, the header and the `state_layout_version` bump
+  it implies belong to **#95**.
+- The `f32` ballistic stall: at the release maximum (5,000 ms, 96 kHz) `G` stops moving **0.2289 dB**
+  short of its target, after 2,180,096 samples of a settled input. `tests/stall.rs` measures and
+  prints it. This is inherent to an `f32` recursive word (master plan D2 leaves an `f64` `Lane64`
+  family open) and BRIEFS/013's 0.005 dB envelope gate at the release maximum needs that decision:
+  **issue 046**. #92's `envelope::ar_one_pole_step` argues for the two-product form on exactly these
+  grounds and is a candidate answer; adopting it for the compressor is a change to a decision #88's
+  plan makes (the one-rounding `fma`), so it is reported rather than taken here.
+- The expanded corpus, the 10,000-seeded-configuration and million-sample matrices, the
+  100,000-render **production-graph** audit, target/instruction evidence, the authorised benchmark
+  and listening: **issue 046**, unchanged. This job's 100,000-block audit
+  (`miso_engine_graph_audit_compressor`) is the effect-level one, not the graph-level one.

@@ -125,3 +125,42 @@ hashes; cohort/graph/PCM/state/report identities; exact realtime counters; targe
 instruction reports; preflight `workload_launches=0`; benchmark authorization and, only afterward,
 raw/accepted hashes and six-record count; audition/preregistration hashes; attempt count; explicit
 `timed_benchmark_invocations`; and Terra/final Sol PASS/FAIL verdicts.
+
+## Amendment (2026-08-23) — issue #88 re-land
+
+Appended, not rewritten.
+
+**Gate 6's cross-target tolerance becomes bit identity.** `BRIEFS/013:269-270` conceded
+`abs(error) <= 1e-6 + 2e-5*abs(reference)` between targets because `G` is recursive and the old
+implementation reached the platform libm for `log10`, `powf` and `exp`. Master plan #83 D5 and D6
+removed the cause: every render-path transcendental is now `miso-engine-math`, built from `Lane`
+operations only. The tolerance is deleted, and this gate is `to_bits()` identity, executed by
+`bash scripts/run-wasm-gates.sh` — native, `wasm32` without `simd128`, and `wasm32` with it, all
+against `miso_engine_compressor::corpus::C1_DIGESTS`. As of #88 that leg reads 96 cases, 224
+comparisons, 0 mismatches. AArch64 remains compile evidence unless a runtime is available.
+
+**What #88 already discharged, so this issue need not repeat it:** cross-backend bit identity of
+the bank against `W` scalar instances including per-track payload bytes; partition invariance over
+{1, 7, 64, 128, 512} for both the scalar instance and the bank; the effect-level 100,000-block
+allocation audit (`cargo run --release -p miso-engine-graph-audit --bin
+miso_engine_graph_audit_compressor`, all counters zero, with a block-rate automation Point every
+1,000 blocks so the ramping body is covered); and one descriptive timing pair.
+
+**What #88 hands this issue, new:**
+
+1. **The `f32` ballistic stall.** At the release maximum, 5,000 ms at 96 kHz, the gain-reduction
+   word stops moving **0.2289 dB** short of its target: the increment `c * (C - G)` falls below half
+   an ulp of `G` while `|C - G|` is still of that order. Measured and printed by
+   `crates/miso-engine-compressor/tests/stall.rs`. This crate's 0.005 dB envelope gate at the
+   release maximum cannot be met by an `f32` recursive word at any operation order, so this issue
+   owns the decision: an `f64` `Lane64` family (master plan D2), the two-product form that
+   `miso-engine-effect-runtime`'s `ar_one_pole_step` documents (which trades this stall for a
+   different one), or a revised gate.
+2. **The timing numbers to beat.** Scalar 21.051 ns/lane-sample and bank W8 5.404 ns/lane-sample on
+   an AMD Ryzen 7 9700X, from `cargo run --release -p miso-engine-compressor --example
+   lane_sample_timing` (before the re-land: 19.396 and 20.707). The scalar path did not improve;
+   `perf` attributes the bank's time overwhelmingly to the `Lane::select` inside
+   `exp2_lane`/`log2_lane`, which is the deterministic dB conversion. If this issue's benchmark is
+   authorised, that is the hot spot to report against.
+3. **The production-graph audit** remains this issue's, unchanged: #88's audit prepares effects
+   directly, not through a compiled graph.
