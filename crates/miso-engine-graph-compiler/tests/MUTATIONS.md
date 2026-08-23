@@ -69,3 +69,49 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1.
 * Red: two tests. `chain_of_seven_stages_...` — `left: 3 / right: 2`; and
   `taps_are_not_readers_...` — `an alias chain with one real reader must fold into its producer's
   buffer`.
+
+### M-08 — free a buffer one op too early
+* Mutation: in the colouring sweep, `for buffer in expire[op_index].drain(..)` instead of
+  `expire[op_index - 1]`.
+* Command: `cargo test -p miso-engine-graph -- program::`
+* Red: `delayed_edge_gets_staging_buffer_and_blocks_in_place` — the PDC staging buffer collides
+  with a buffer whose last read is the current op.
+
+### M-09 — return dedicated buffers to the free list  *(green on first attempt; gate strengthened)*
+* Mutation: drop the `if !lifetimes[buffer].dedicated` guard, so a bank-eligible node's buffer
+  re-enters the arena when its last *reader* has run.
+* Command: `cargo test -p miso-engine-graph -- program::`
+* **First attempt: GREEN.** The symbolic interpreter evaluates one op at a time, and a bank is
+  not one op: nothing in a per-op dataflow comparison can see that a bank keeps every member's
+  output live from the first gather to the last scatter. Recorded rather than accepted.
+* First strengthening attempt was itself **wrong** and failed on unmutated code: asserting that a
+  dedicated buffer is never shared with any other op forbids *inheriting* storage a dead buffer
+  used earlier, which is legal and is what keeps the arena small. The invariant lowering actually
+  owes is forward-only: once a bank-eligible node has written its buffer, no later op may write
+  it or stage PDC into it. That is what the property test now asserts.
+* Red, after: `graph 0: op 9 writes buffer BufferRef(5), held by a bank-eligible node since op 7`.
+
+### M-10 — allow in-place onto a bank member's buffer
+* Mutation: `reads_of[owner] == 1` without `&& !lifetimes[buffer].dedicated`.
+* Command: `cargo test -p miso-engine-graph -- program::`
+* Red: two tests — `chain_of_seven_stages_...` and `taps_are_not_readers_...`.
+
+---
+
+## F1 — the wave-0 level-order property (gated here, not assumed)
+
+`#122`/`#123` landed the fix; the property test the plan specified for it did not land with it, so
+it lands here. `direct-route` cannot see this bug: it is a chain with one node per level.
+
+### M-11 — emit levels in Kahn pop order
+* Mutation: in `topo`, replace the per-level `nodes.sort()` with a no-op.
+* Command: `cargo test -p miso-engine-graph-compiler --lib random_dags`
+* Red: `random_dags_have_strictly_ascending_levels_and_level_major_schedule` —
+  `graph 0: level 1 is not strictly ascending` (which is exactly what
+  `NativeGraphBlueprint::prepare` rejects with `graph.scheduler.layout`).
+
+### M-12 — level = max(predecessor) instead of max(predecessor) + 1
+* Mutation: `.map_or(0, |value| value)` in `topo`'s level computation.
+* Command: `cargo test -p miso-engine-graph-compiler --lib random_dags`
+* Red: `graph 0: level of Submix { submix_id: StableGraphId("n03") }` — the in-test longest-path
+  recomputation disagrees.
