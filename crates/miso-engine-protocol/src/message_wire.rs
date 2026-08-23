@@ -13,8 +13,6 @@ use crate::{
     schema::{self, descriptor, enum_choice},
 };
 
-pub use miso_engine_session::{ParameterChannel, ParameterUnit, RackName as ParameterRack};
-
 #[cfg(test)]
 const WIRE_U8: u8 = 1;
 #[cfg(test)]
@@ -196,6 +194,36 @@ pub enum ParameterDomain {
 pub enum ParameterValueKind {
     F32 = 1,
 }
+/// Fixed B2a rack registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+#[allow(missing_docs)]
+pub enum ParameterRack {
+    Simd1 = 1,
+    Dynamic = 2,
+    Simd2 = 3,
+}
+/// Fixed B2a parameter channel registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+#[allow(missing_docs)]
+pub enum ParameterChannel {
+    Left = 1,
+    Right = 2,
+    Both = 3,
+}
+/// Fixed B2a unit registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+#[allow(missing_docs)]
+pub enum ParameterUnit {
+    Db = 1,
+    Hz = 2,
+    Milliseconds = 3,
+    Samples = 4,
+    Linear = 5,
+    Ratio = 6,
+}
 /// Fixed B2a mapping registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -214,6 +242,102 @@ pub enum ParameterAutomationRate {
     Sample = 1,
     Block = 2,
     None = 3,
+}
+
+impl ParameterRack {
+    pub(crate) const fn from_session(value: miso_engine_session::RackName) -> Self {
+        match value {
+            miso_engine_session::RackName::Simd1 => Self::Simd1,
+            miso_engine_session::RackName::Dynamic => Self::Dynamic,
+            miso_engine_session::RackName::Simd2 => Self::Simd2,
+        }
+    }
+
+    pub(crate) const fn into_session(self) -> miso_engine_session::RackName {
+        match self {
+            Self::Simd1 => miso_engine_session::RackName::Simd1,
+            Self::Dynamic => miso_engine_session::RackName::Dynamic,
+            Self::Simd2 => miso_engine_session::RackName::Simd2,
+        }
+    }
+}
+
+impl From<miso_engine_session::RackName> for ParameterRack {
+    fn from(value: miso_engine_session::RackName) -> Self {
+        Self::from_session(value)
+    }
+}
+
+impl From<ParameterRack> for miso_engine_session::RackName {
+    fn from(value: ParameterRack) -> Self {
+        value.into_session()
+    }
+}
+
+impl ParameterChannel {
+    pub(crate) const fn from_session(value: miso_engine_session::ParameterChannel) -> Self {
+        match value {
+            miso_engine_session::ParameterChannel::Left => Self::Left,
+            miso_engine_session::ParameterChannel::Right => Self::Right,
+            miso_engine_session::ParameterChannel::Both => Self::Both,
+        }
+    }
+
+    pub(crate) const fn into_session(self) -> miso_engine_session::ParameterChannel {
+        match self {
+            Self::Left => miso_engine_session::ParameterChannel::Left,
+            Self::Right => miso_engine_session::ParameterChannel::Right,
+            Self::Both => miso_engine_session::ParameterChannel::Both,
+        }
+    }
+}
+
+impl From<miso_engine_session::ParameterChannel> for ParameterChannel {
+    fn from(value: miso_engine_session::ParameterChannel) -> Self {
+        Self::from_session(value)
+    }
+}
+
+impl From<ParameterChannel> for miso_engine_session::ParameterChannel {
+    fn from(value: ParameterChannel) -> Self {
+        value.into_session()
+    }
+}
+
+impl ParameterUnit {
+    pub(crate) const fn from_session(value: miso_engine_session::ParameterUnit) -> Self {
+        match value {
+            miso_engine_session::ParameterUnit::Db => Self::Db,
+            miso_engine_session::ParameterUnit::Hz => Self::Hz,
+            miso_engine_session::ParameterUnit::Milliseconds => Self::Milliseconds,
+            miso_engine_session::ParameterUnit::Samples => Self::Samples,
+            miso_engine_session::ParameterUnit::Linear => Self::Linear,
+            miso_engine_session::ParameterUnit::Ratio => Self::Ratio,
+        }
+    }
+
+    pub(crate) const fn into_session(self) -> miso_engine_session::ParameterUnit {
+        match self {
+            Self::Db => miso_engine_session::ParameterUnit::Db,
+            Self::Hz => miso_engine_session::ParameterUnit::Hz,
+            Self::Milliseconds => miso_engine_session::ParameterUnit::Milliseconds,
+            Self::Samples => miso_engine_session::ParameterUnit::Samples,
+            Self::Linear => miso_engine_session::ParameterUnit::Linear,
+            Self::Ratio => miso_engine_session::ParameterUnit::Ratio,
+        }
+    }
+}
+
+impl From<miso_engine_session::ParameterUnit> for ParameterUnit {
+    fn from(value: miso_engine_session::ParameterUnit) -> Self {
+        Self::from_session(value)
+    }
+}
+
+impl From<ParameterUnit> for miso_engine_session::ParameterUnit {
+    fn from(value: ParameterUnit) -> Self {
+        value.into_session()
+    }
 }
 
 /// One declared enumeration choice in a typed descriptor.

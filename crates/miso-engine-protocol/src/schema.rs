@@ -3,21 +3,23 @@
 //! Every typed payload family consumes this metadata through the shared bounded reader. The
 //! registry is never a second encoder or decoder.
 
-use miso_engine_session::{ParameterChannel, ParameterUnit, RackName};
+use crate::message_wire::{ParameterChannel, ParameterRack, ParameterUnit};
 
-pub(crate) const fn parameter_rack_wire(value: RackName) -> u8 {
+pub(crate) const fn parameter_rack_wire(value: ParameterRack) -> u8 {
     match value {
-        RackName::Simd1 => 1,
-        RackName::Dynamic => 2,
-        RackName::Simd2 => 3,
+        ParameterRack::Simd1 => 1,
+        ParameterRack::Dynamic => 2,
+        ParameterRack::Simd2 => 3,
     }
 }
 
-pub(crate) const fn parameter_rack_from_wire(value: u8) -> Result<RackName, crate::DecodeError> {
+pub(crate) const fn parameter_rack_from_wire(
+    value: u8,
+) -> Result<ParameterRack, crate::DecodeError> {
     match value {
-        1 => Ok(RackName::Simd1),
-        2 => Ok(RackName::Dynamic),
-        3 => Ok(RackName::Simd2),
+        1 => Ok(ParameterRack::Simd1),
+        2 => Ok(ParameterRack::Dynamic),
+        3 => Ok(ParameterRack::Simd2),
         _ => Err(crate::DecodeError::InvalidTlv),
     }
 }
@@ -63,6 +65,47 @@ pub(crate) const fn parameter_unit_from_wire(
         5 => Ok(ParameterUnit::Linear),
         6 => Ok(ParameterUnit::Ratio),
         _ => Err(crate::DecodeError::InvalidTlv),
+    }
+}
+
+pub(crate) const fn session_parameter_rack_wire(value: miso_engine_session::RackName) -> u8 {
+    parameter_rack_wire(ParameterRack::from_session(value))
+}
+
+pub(crate) const fn session_parameter_rack_from_wire(
+    value: u8,
+) -> Result<miso_engine_session::RackName, crate::DecodeError> {
+    match parameter_rack_from_wire(value) {
+        Ok(value) => Ok(value.into_session()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) const fn session_parameter_channel_wire(
+    value: miso_engine_session::ParameterChannel,
+) -> u8 {
+    parameter_channel_wire(ParameterChannel::from_session(value))
+}
+
+pub(crate) const fn session_parameter_channel_from_wire(
+    value: u8,
+) -> Result<miso_engine_session::ParameterChannel, crate::DecodeError> {
+    match parameter_channel_from_wire(value) {
+        Ok(value) => Ok(value.into_session()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) const fn session_parameter_unit_wire(value: miso_engine_session::ParameterUnit) -> u8 {
+    parameter_unit_wire(ParameterUnit::from_session(value))
+}
+
+pub(crate) const fn session_parameter_unit_from_wire(
+    value: u8,
+) -> Result<miso_engine_session::ParameterUnit, crate::DecodeError> {
+    match parameter_unit_from_wire(value) {
+        Ok(value) => Ok(value.into_session()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1571,20 +1614,30 @@ mod tests {
     #[test]
     fn parameter_enum_wire_mappings_are_exhaustive_and_roundtrip() {
         for (value, wire) in [
-            (RackName::Simd1, 1),
-            (RackName::Dynamic, 2),
-            (RackName::Simd2, 3),
+            (ParameterRack::Simd1, 1),
+            (ParameterRack::Dynamic, 2),
+            (ParameterRack::Simd2, 3),
         ] {
+            assert_eq!(value as u64, u64::from(wire));
             assert_eq!(parameter_rack_wire(value), wire);
             assert_eq!(parameter_rack_from_wire(wire), Ok(value));
+            let session = miso_engine_session::RackName::from(value);
+            assert_eq!(ParameterRack::from(session), value);
+            assert_eq!(session_parameter_rack_wire(session), wire);
+            assert_eq!(session_parameter_rack_from_wire(wire), Ok(session));
         }
         for (value, wire) in [
             (ParameterChannel::Left, 1),
             (ParameterChannel::Right, 2),
             (ParameterChannel::Both, 3),
         ] {
+            assert_eq!(value as u64, u64::from(wire));
             assert_eq!(parameter_channel_wire(value), wire);
             assert_eq!(parameter_channel_from_wire(wire), Ok(value));
+            let session = miso_engine_session::ParameterChannel::from(value);
+            assert_eq!(ParameterChannel::from(session), value);
+            assert_eq!(session_parameter_channel_wire(session), wire);
+            assert_eq!(session_parameter_channel_from_wire(wire), Ok(session));
         }
         for (value, wire) in [
             (ParameterUnit::Db, 1),
@@ -1594,8 +1647,13 @@ mod tests {
             (ParameterUnit::Linear, 5),
             (ParameterUnit::Ratio, 6),
         ] {
+            assert_eq!(value as u64, u64::from(wire));
             assert_eq!(parameter_unit_wire(value), wire);
             assert_eq!(parameter_unit_from_wire(wire), Ok(value));
+            let session = miso_engine_session::ParameterUnit::from(value);
+            assert_eq!(ParameterUnit::from(session), value);
+            assert_eq!(session_parameter_unit_wire(session), wire);
+            assert_eq!(session_parameter_unit_from_wire(wire), Ok(session));
         }
         assert_eq!(
             parameter_rack_from_wire(0),

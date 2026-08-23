@@ -602,7 +602,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             rack,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
+            tx_u8(
+                sink,
+                fields[1],
+                schema::session_parameter_rack_wire(*rack_name),
+            )?;
             tx_message(sink, fields[2], |v| tx_rack(v, rack))
         }
         SessionEditV1::PutTrackEffect {
@@ -612,7 +616,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
+            tx_u8(
+                sink,
+                fields[1],
+                schema::session_parameter_rack_wire(*rack_name),
+            )?;
             tx_u32(sink, fields[2], *final_position)?;
             tx_message(sink, fields[3], |v| tx_effect(v, effect))
         }
@@ -622,7 +630,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_id,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
+            tx_u8(
+                sink,
+                fields[1],
+                schema::session_parameter_rack_wire(*rack_name),
+            )?;
             tx_id(sink, fields[2], effect_id)
         }
         SessionEditV1::SetTrackEffectOrder {
@@ -631,7 +643,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_ids,
         } => {
             tx_id(sink, fields[0], track_id)?;
-            tx_u8(sink, fields[1], schema::parameter_rack_wire(*rack_name))?;
+            tx_u8(
+                sink,
+                fields[1],
+                schema::session_parameter_rack_wire(*rack_name),
+            )?;
             for effect_id in effect_ids {
                 tx_id(sink, fields[2], effect_id)?;
             }
@@ -705,7 +721,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
         } => {
             tx_effect_edit_prefix(sink, fields, track_id, *rack_name, effect_id)?;
             tx_u32(sink, fields[3], *parameter_id)?;
-            tx_u8(sink, fields[4], schema::parameter_channel_wire(*channel))
+            tx_u8(
+                sink,
+                fields[4],
+                schema::session_parameter_channel_wire(*channel),
+            )
         }
         SessionEditV1::SetTrackFader { track_id, fader } => {
             tx_id(sink, fields[0], track_id)?;
@@ -782,7 +802,11 @@ fn tx_effect_edit_prefix(
     effect_id: &StableId,
 ) -> Result<(), EncodeError> {
     tx_id(sink, fields[0], track_id)?;
-    tx_u8(sink, fields[1], schema::parameter_rack_wire(rack_name))?;
+    tx_u8(
+        sink,
+        fields[1],
+        schema::session_parameter_rack_wire(rack_name),
+    )?;
     tx_id(sink, fields[2], effect_id)
 }
 fn tx_effect_edit_scalar(
@@ -1022,12 +1046,12 @@ fn tx_param(sink: &mut dyn Sink, value: &EffectParam) -> Result<(), EncodeError>
     tx_u8(
         sink,
         schema::session::param::CHANNEL,
-        schema::parameter_channel_wire(value.channel),
+        schema::session_parameter_channel_wire(value.channel),
     )?;
     tx_u8(
         sink,
         schema::session::param::UNIT,
-        schema::parameter_unit_wire(value.unit),
+        schema::session_parameter_unit_wire(value.unit),
     )?;
     tx_f32(sink, schema::session::param::VALUE, value.value)
 }
@@ -1185,7 +1209,7 @@ fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result
     tx_u8(
         sink,
         schema::session::automation_target::RACK,
-        schema::parameter_rack_wire(value.rack),
+        schema::session_parameter_rack_wire(value.rack),
     )?;
     tx_id(
         sink,
@@ -1200,7 +1224,7 @@ fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result
     tx_u8(
         sink,
         schema::session::automation_target::CHANNEL,
-        schema::parameter_channel_wire(value.channel),
+        schema::session_parameter_channel_wire(value.channel),
     )
 }
 fn tx_automation_segment(
@@ -1239,7 +1263,7 @@ fn tx_automation_segment(
     tx_u8(
         sink,
         schema::session::automation_segment::UNIT,
-        schema::parameter_unit_wire(value.unit),
+        schema::session_parameter_unit_wire(value.unit),
     )
 }
 fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeError> {
@@ -1334,14 +1358,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }),
         crate::SessionEditOpcode::SetTrackRack => Ok(SessionEditV1::SetTrackRack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+            rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
             rack: parse_rack_message(payload.nested_value(one_spec!(payload, fields[2])?)?)?,
         }),
         crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEditV1::PutTrackEffect {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+            rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
             final_position: read_u32_exact(one_spec!(payload, fields[2])?)?,
@@ -1357,7 +1381,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetTrackEffectOrder => Ok(SessionEditV1::SetTrackEffectOrder {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+            rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
             effect_ids: values_spec!(payload, fields[2])?
@@ -1420,12 +1444,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEditV1::RemoveEffectParam {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
-            rack_name: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+            rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
             effect_id: stable_id(one_spec!(payload, fields[2])?)?,
             parameter_id: read_u32_exact(one_spec!(payload, fields[3])?)?,
-            channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
+            channel: schema::session_parameter_channel_from_wire(read_u8_exact(one_spec!(
                 payload, fields[4]
             )?)?)?,
         }),
@@ -1736,11 +1760,11 @@ fn parse_param(message: Message<'_>) -> Result<EffectParam, DecodeError> {
     let message = message.schema_spec(&schema::session::param::SPEC)?;
     Ok(EffectParam {
         parameter_id: read_u32_exact(one_spec!(message, schema::session::param::PARAMETER_ID)?)?,
-        channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
+        channel: schema::session_parameter_channel_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::param::CHANNEL
         )?)?)?,
-        unit: schema::parameter_unit_from_wire(read_u8_exact(one_spec!(
+        unit: schema::session_parameter_unit_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::param::UNIT
         )?)?)?,
@@ -1858,7 +1882,7 @@ fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, Dec
             message,
             schema::session::automation_target::ENTITY_ID
         )?)?,
-        rack: schema::parameter_rack_from_wire(read_u8_exact(one_spec!(
+        rack: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_target::RACK
         )?)?)?,
@@ -1870,7 +1894,7 @@ fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, Dec
             message,
             schema::session::automation_target::PARAMETER_ID
         )?)?,
-        channel: schema::parameter_channel_from_wire(read_u8_exact(one_spec!(
+        channel: schema::session_parameter_channel_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_target::CHANNEL
         )?)?)?,
@@ -1899,7 +1923,7 @@ fn parse_automation_segment(message: Message<'_>) -> Result<AutomationSegment, D
             message,
             schema::session::automation_segment::END_VALUE
         )?)?,
-        unit: schema::parameter_unit_from_wire(read_u8_exact(one_spec!(
+        unit: schema::session_parameter_unit_from_wire(read_u8_exact(one_spec!(
             message,
             schema::session::automation_segment::UNIT
         )?)?)?,
@@ -1923,7 +1947,7 @@ fn parse_track_effect_ref(
 ) -> Result<(StableId, RackName, StableId), DecodeError> {
     Ok((
         stable_id(one_spec!(message, fields[0])?)?,
-        schema::parameter_rack_from_wire(read_u8_exact(one_spec!(message, fields[1])?)?)?,
+        schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(message, fields[1])?)?)?,
         stable_id(one_spec!(message, fields[2])?)?,
     ))
 }
