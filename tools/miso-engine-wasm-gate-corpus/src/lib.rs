@@ -334,10 +334,12 @@ pub fn width_name(width: usize) -> &'static str {
     }
 }
 
-/// The pinned digest of a case, or `None` for a math case, whose pin lives in `miso-engine-math`.
+/// The pinned digest of a case.
 ///
-/// Keeping the math pins where gate M3 wrote them is the point: this crate replays that gate on a
-/// second target rather than pinning a second copy that could drift away from it.
+/// This crate's own cases are pinned in [`LANE_DIGESTS`]; the delegated cases return the pins gates
+/// M3 and D1 wrote in `miso-engine-math` and `miso-engine-effect-runtime`. Keeping them there is
+/// the point: this crate replays those gates on a second target, and a second copy of their pins
+/// could drift away from the gates it is meant to replay.
 ///
 /// # Panics
 ///

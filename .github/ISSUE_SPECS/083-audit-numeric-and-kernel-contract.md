@@ -102,12 +102,36 @@ nothing.
 **D12 profiles.** `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `debug = 1`, with
 `[profile.bench]` inheriting release. Verified from the `rustc` command lines that a release
 *binary* is built with `-C panic=abort` while a release *test harness* is not, so the release
-gates, the Loom race model and `#[should_panic]` still unwind. What `panic = "abort"` changes is
+gates, the Loom race model and `#[should_panic]` still unwind. Hazard H6's rack benchmark is an
+exactly-once qualification that refuses to overwrite its committed artifact, so it cannot be
+re-run; that artifact records `render_panic_unwinds = 0`, so its `catch_unwind` never fired, and
+the benchmark is not in CI -- `panic = "abort"` removes a diagnostic there that has never had
+anything to diagnose. What `panic = "abort"` changes is
 documented for embedders in `docs/REALTIME_DEPENDENCY_POLICY.md` ("Panic behaviour by profile"):
 a release `libmiso_engine_capi` no longer converts a panic into `RESULT_INTERNAL`, and the
 AudioWorklet artifacts trap instead. One consequence shaped the design: a lib target that emits a
 `cdylib` is compiled with the profile's `panic = "abort"` and an unwinding test harness then cannot
 link it, which is why the corpus is a separate `rlib` from the guest `cdylib`.
+
+**What D12 cost, measured.** Fat LTO makes rustc write LLVM bitcode into the `.o` files three
+qualification scripts disassemble, so `check-builtins-target-instructions.sh` (068),
+`check-parametric-eq-targets.sh` (042) and `check-rack-instructions.sh` (008) failed with
+"file format not recognized". Each now exports `CARGO_PROFILE_RELEASE_LTO=false` for its own
+single-crate `--emit=obj` probe, which is the setting they were written against; they never link,
+and LTO has no part in instruction selection within one crate. The profile decision was not
+weakened -- cross-crate inlining of the lane kernels is exactly what finding F8 asked for.
+
+`debug = 1` grew the browser artifacts sevenfold, and that was worth fixing rather than filing:
+
+| scalar AudioWorklet artifact | bytes |
+|---|---|
+| `main`, before D12 | 2,153,061 |
+| D12 as written | 16,661,225 |
+| D12, debug information stripped | 1,940,472 |
+
+Fat LTO alone makes the module about ten percent *smaller* than it was; the whole of the growth was
+DWARF. `scripts/build-web-audioworklet.sh` now strips it -- in the delivery script, not in
+`[profile.release]` (hazard H7), so native artifacts keep their line tables.
 
 **Boot attestation (D4).** `miso_engine_lane::attest_host` is called at
 `hosts/miso-engine-host-native::main` (diagnostic and `ExitCode::FAILURE`),
@@ -116,6 +140,15 @@ link it, which is why the corpus is a separate `rlib` from the guest `cdylib`.
 `UNSUPPORTED` was reserved and never returned; it now documents the one entry point that returns
 it. `host-web` is `wasm32`, where the instruction set is a build flag rather than a CPU property,
 so the attestation is a compile-time no-operation and no call is added.
+
+Three policy scripts are red on `main` and were red before this branch; they are named here so a
+verifier does not attribute them to 83d. `check-capi-qualification-v1.sh` reports "accepted
+authority drifted" for seven pinned files, six of which already drifted on `main` (#103's wave-0
+capi work); this branch adds a seventh, `crates/miso-engine-capi/Cargo.toml`, by giving capi its
+`miso-engine-lane` dependency. The pin is a record of what was qualified, so it is not refreshed
+here: re-pinning it would claim a qualification nobody ran. `check-builtins-fixtures.sh` reports an
+unsorted manifest and `check-web-audioworklet.sh` an unexpected `miso_engine_effect_descriptor_v1_inspect`
+export, both unchanged from `main`.
 
 Deferred with an owner: the `--lane-kernels` flag of `tools/miso-engine-realtime-audit` (eval A1)
 is not delivered; the existing realtime allocation and syscall trace still runs unchanged, so the
