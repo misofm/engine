@@ -7,10 +7,11 @@ the current-plus-prospective double-live replacement state, correct any bounded 
 defects exposed by that accounting or the required matrix, and prove the complete cross-component
 command/event/replay/source-provider/PCM-boundary contract.
 
-**STATELESS SOL XHIGH BRIEF / READY FOR SOL HIGH PASS 1 AFTER REMOTE SYNC.** Sol High implements;
-Sol XHigh briefs and verifies. One implementation pass plus one bounded HOLD correction is the full
-budget; a second HOLD stops. Benchmark, timing, real-workload, playback and listening counters start
-at zero and must remain zero.
+**TERMINAL STOP AFTER SECOND SOL XHIGH HOLD.** The final technical checkpoint is
+`f9ad53896c21d03135e1ccf77c9a5dbe76a532ac` (tree
+`2a2adaa57cfd69eb2e2f76457337e1a13b1a7ddb`). It improves the evidence and implementation but has
+no overall PASS. The bounded review budget is exhausted; remaining work moves statelessly to Issue
+119. Benchmark, timing, real-workload, playback and listening counters remained zero.
 
 Read-only remote inspection on 2026-08-23 found Issue 118 unallocated. Root must create and
 synchronize it under this exact title after the docs checkpoint is upstream. This record makes no
@@ -30,9 +31,31 @@ is technical input only. Preserve its accepted checkpoint-1 commit
 `e1115750fba8a54e16ec2a0e333b40ce4f187f1c`, but inherit no overall PASS or resource/evidence
 claim.
 
-Accepted Issue 118 gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and
-118 jointly gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then
+Accepted **Preallocate C ABI controller resources and independently seal replacement semantics**
+(Issue 119) gates **Optional binary WebSocket sidecar** (Issue 025). Accepted Issues 116 and 119
+jointly gate **Qualify native C ABI and reference runner target matrix** (Issue 114), which then
 gates **End-to-end release, performance, and listening qualification** (Issue 026).
+
+## Terminal review decision
+
+Checkpoint `f9ad53896c21d03135e1ccf77c9a5dbe76a532ac` separated aggregate retained totals from
+maximum-single-allocation rows, pinned the source-reset policy, added source-changing nonzero PCM,
+and materially expanded command, event query/one-short/retry and lossy-counter evidence. The second
+review nevertheless could not return PASS:
+
+- the claimed independent resource oracle still invoked production projection helpers before
+  duplicating their formula, so it was not an external/manual oracle;
+- controller and provider telemetry vectors began empty and grew lazily even though the projection
+  charged hypothetical maximum retained arrays, defeating exact eager resource ownership;
+- the patch redefined Issue-022's graph/session/plan report row by adding compiled-model bytes,
+  instead of retaining that ABI meaning and admitting double-live compiled models under a separate
+  owner; and
+- the residual matrix did not prove retirement render/reclaim/credit retry, complete construction/
+  disposal/allocation/drop counters or every ordered failure phase. Several event rows still used
+  behind-C injection rather than production-origin command/provider vectors.
+
+These are technical findings only. Issue 118 is not accepted and grants no downstream capability;
+Issue 119 consumes the checkpoint and closes only this bounded remainder.
 
 ## Frozen accepted technical seams
 
@@ -126,4 +149,3 @@ PASS or the sole bounded HOLD. After a HOLD, one exact correction and one final 
 PASS or STOP. Overall PASS requires exact double-live limit/one-below proof and the complete matrix
 above on one immutable candidate. No benchmark, timing, real workload, playback, listening,
 browser/device execution or Issue-116 runner invocation is authorized.
-

@@ -2,15 +2,16 @@
 
 ## Decision
 
-**WAITING FOR ISSUES 116 AND 118.** After both pass, qualify their frozen bytes; do not repair them
+**WAITING FOR ISSUES 116 AND 119.** After both pass, qualify their frozen bytes; do not repair them
 inside this issue. Sol High implements and Sol XHigh verifies with one pass plus one bounded HOLD
 correction. A second HOLD stops. Timed and benchmark counts remain zero.
 
 Direct dependencies are **Seal portable native PCM runner under an explicit output-directory
-ownership contract** (116) and **Close C ABI replacement resource accounting and cross-component
-evidence** (118). Stopped Issue 115 is technical input only through accepted 116; stopped Issues 113
-and 117 are technical input only through accepted 118. PASS gates **End-to-end release, performance,
-and listening qualification** (026). Issue 025 needs accepted 118, not this matrix.
+ownership contract** (116) and **Preallocate C ABI controller resources and independently seal
+replacement semantics** (119). Stopped Issue 115 is technical input only through accepted 116;
+stopped Issues 113, 117 and 118 are technical input only through accepted 119. PASS gates
+**End-to-end release, performance, and listening qualification** (026). Issue 025 needs accepted
+119, not this matrix.
 
 ## Matrix
 
