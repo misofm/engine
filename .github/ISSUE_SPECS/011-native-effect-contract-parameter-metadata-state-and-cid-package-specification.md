@@ -266,3 +266,53 @@ the bank workloads measure the homogeneous no-op trait/interface path rather tha
 Android/iOS/Wasm results are compilation claims, not device-run claims; and all external
 descriptor bytes and the successor-owned package/CID/persistence/migration semantics remain outside
 issue-011 scope and were not used as issue-011 evidence.
+
+## Decision record amendment: audit #95 (2026-08-23)
+
+The #83 audit of `miso-engine-effect-contract` re-froze five V1 semantics that this issue had
+frozen wrong. Each entry is a change to what the contract *says*, executed as a removal because
+wave 2 had already stopped implementing the old text. No canonical descriptor byte, effect CID,
+PDC sample count, state-payload layout or pinned PCM hash moved; `cargo test --workspace` is green
+with `git diff --exit-code -- fixtures` empty.
+
+1. **Per-value NaN/subnormal classification is withdrawn** (finding F1, master plan D7). "Nonfinite
+   and subnormal input, sidechain, internal, and output values become `+0.0`" with saturating
+   per-sample counters cost four to six scalar classify-and-branch sequences per frame per effect,
+   prevented the frame loop from vectorising, and both production callers discarded the counters.
+   Replaced by three mechanisms, each where its hazard is: `flush` on recursive state words inside
+   the kernel, one vector output-bounds compare per block per bank, and input sanitisation once per
+   track per block at the track input stage. `sanitize_sample` is deleted. **An effect classifies no
+   individual sample.**
+2. **Divide-per-sample smoothing is withdrawn** (finding F2, master plan D11). `SmoothingRule::Linear`
+   now means "precompute `step = (target - current) / N` once at the event, then `current += step`,
+   then assign the exact target on update `N`". `smoothing_samples` from the descriptor is binding.
+   `miso_engine_effect_runtime::ramp::LinearRamp` is the one render-path implementation and
+   `ParameterSmoother` is proven bit-identical to it.
+3. **Bank binding has one semantic** (wave-2 divergence). `Err` is reserved for a request that
+   violates the contract — a self-contradicting shape, or a member that would fail `prepare`;
+   `Ok(None)` covers every legal "not bankable here", including a heterogeneous cohort, which was
+   the case the crates disagreed about. `PrepareEffectBankRequest::validate_shape` is the Err half.
+4. **The payload-header rule is frozen**: a version or length word inside the payload outranks the
+   caller's `state_layout_version` argument. Uniform *adoption* is not taken here — a header moves
+   `maximum_state.common_bytes` and therefore descriptor identity (decision W2-D2) — but no effect
+   may adopt one and still let the argument win.
+5. **`scratch_fixed_bytes` is defined as an admission ceiling**, not a measurement (closing #88 F10
+   and #92 F9). A declared 64 against an actual 0 is conservative, not wrong; tightening it is an
+   effect-identity change owned by the effect's issue and #97, never a contract cleanup. The
+   accounting itself is now computed once, in `ValidatedPrepare`.
+
+Also: the orphaned root header `include/miso_engine_effect_contract_v1.h` is deleted. It had no
+Rust mirror and contradicted the implemented ABI (32-byte ports and 48-byte quality rows against
+the real 24 and 64); `crates/miso-engine-effect-package/include/miso_engine_effect_descriptor_v1.h`
+is the only C ABI for descriptors and the contract crate's types are deliberately not `repr(C)`.
+The contract's last four platform-libm calls moved to `miso-engine-math` (D6) and its
+`check-math-policy.sh` allowlist row is deleted.
+
+**Not taken, with the design handed over.** `bypass` stays in `EffectProgramKeyV1` (finding F4).
+Removing it is correct and the target design is written out on the type — identity coefficients so
+the wet path still runs, a per-lane bitwise `select` (never `fma(0, wet, dry)`, which loses
+`-0.0`), the dry path delayed by exactly the declared `latency` so PDC is unchanged by
+construction. What blocks it is that every effect's bank reads one `metadata.bypass` for the whole
+bank and builds an all-or-nothing mask from it, so removing the field from the key without making
+the kernels per-lane would apply lane 0's bypass to all eight. That is a DSP change inside nine
+effect crates plus the rack bank driver — the seam #96 owns.

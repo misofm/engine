@@ -190,6 +190,32 @@ impl StatePayloadSizes {
             None => None,
         }
     }
+
+    /// The one exact-length check for a three-section payload.
+    ///
+    /// The audit found this comparison written out four times in this crate alone and once more
+    /// per effect crate, with four different diagnostic strings. It is one function now, and
+    /// `effect.state.length` is its one code.
+    ///
+    /// # Errors
+    ///
+    /// `effect.state.length` if any section length differs from the prepared size.
+    pub const fn check(
+        self,
+        common: usize,
+        left: usize,
+        right: usize,
+    ) -> Result<(), StatePayloadError> {
+        if common != self.common_bytes as usize
+            || left != self.left_bytes as usize
+            || right != self.right_bytes as usize
+        {
+            return Err(StatePayloadError {
+                code: "effect.state.length",
+            });
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnumChoiceV1 {
@@ -705,6 +731,39 @@ pub struct PreparedEffectMetadata {
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
 }
+/// The semantic cohort identity: two prepared effects may share one bank iff these fields agree.
+///
+/// # `bypass` is still here, and why (issue #95 finding F4)
+///
+/// It should not be. `bypass` is a per-instance *configuration*, not a program: a bypassed track
+/// and an identical enabled track run the same kernel with the same coefficients, and keeping the
+/// flag in the key means they can never share a bank — toggling bypass on one track of an
+/// eight-track cohort splits it and forces a structural rebuild. The target design, which is
+/// exact and preserves every current guarantee:
+///
+/// * **Identity coefficients.** The wet path still runs for a bypassed lane. Its state stays
+///   continuous, so un-bypassing does not click, and the cohort does not split.
+/// * **A per-lane bitwise select, never an arithmetic identity.** `out = select(bypass_mask,
+///   dry_delayed, wet)` with `bypass_mask = [u32::from(b).wrapping_neg(); W]` built once at bind.
+///   `fma(0, wet, dry)` is **not** equivalent: `-0.0 + 0.0` is `+0.0`, which would break
+///   `executed_w8_bypass_preserves_lane_local_signed_zero_at_fixed_latency`.
+/// * **Latency preserved exactly.** `dry_delayed` is the lane's input delayed by exactly
+///   `PreparedEffectMetadata.latency` — the same integer the enabled path reports — so a bypassed
+///   lane's impulse lands on the same sample as an enabled lane's.
+/// * **PDC exact by construction.** `graph-compiler` derives route timings solely from
+///   `PreparedEffectMetadata.latency`, and `bypass` stays in `PrepareEffectRequest` and
+///   `PreparedEffectMetadata` (it is also byte 108 of the persisted state envelope, a contract
+///   fixture). Removing it from the *key* therefore changes no timing at all: the existing
+///   `bypass leaves route_timings unchanged` test stays green untouched.
+///
+/// What blocks it is not the contract. Every effect's bank today reads one `metadata.bypass` for
+/// the whole bank and builds an all-or-nothing `L::Mask` from it — `parametric-eq` does not even
+/// run the wet path when bypassed — so removing the field from the key would silently apply lane
+/// 0's bypass to all eight lanes. Making it per lane is a DSP change inside all nine effect
+/// crates plus the rack's bank driver, which is the seam #96 owns and which this contract
+/// cleanup may not touch. It is handed over with the design above rather than half-taken: a
+/// key that no longer separates bypassed lanes, on kernels that cannot separate them, is a
+/// correctness bug, not a cleanup.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectProgramKeyV1 {
     pub effect_id: EffectId,
@@ -1116,20 +1175,12 @@ impl<'a> StatePayloadOutput<'a> {
         right: &'a mut [u8],
         s: StatePayloadSizes,
     ) -> Result<Self, StatePayloadError> {
-        if common.len() != s.common_bytes as usize
-            || left.len() != s.left_bytes as usize
-            || right.len() != s.right_bytes as usize
-        {
-            Err(StatePayloadError {
-                code: "effect.state.length",
-            })
-        } else {
-            Ok(Self {
-                common,
-                left,
-                right,
-            })
-        }
+        s.check(common.len(), left.len(), right.len())?;
+        Ok(Self {
+            common,
+            left,
+            right,
+        })
     }
 }
 impl<'a> StatePayloadInput<'a> {
@@ -1139,20 +1190,12 @@ impl<'a> StatePayloadInput<'a> {
         right: &'a [u8],
         s: StatePayloadSizes,
     ) -> Result<Self, StatePayloadError> {
-        if common.len() != s.common_bytes as usize
-            || left.len() != s.left_bytes as usize
-            || right.len() != s.right_bytes as usize
-        {
-            Err(StatePayloadError {
-                code: "effect.state.length",
-            })
-        } else {
-            Ok(Self {
-                common,
-                left,
-                right,
-            })
-        }
+        s.check(common.len(), left.len(), right.len())?;
+        Ok(Self {
+            common,
+            left,
+            right,
+        })
     }
 }
 pub trait NativeEffectFactory: Send + Sync {
@@ -1219,6 +1262,44 @@ pub trait PreparedNativeEffect: Send {
         &self,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError>;
+
+    /// Restores a snapshot into this prepared instance.
+    ///
+    /// # The payload-header rule (issue #95; the uniform rule for every effect)
+    ///
+    /// `state_layout_version` is the caller's **claim** about the bytes it is handing over. It
+    /// arrives out of band — from the descriptor the caller believes wrote them — and it is only
+    /// trustworthy while the caller is the same build as the writer, which is exactly the
+    /// situation a persisted session is not in.
+    ///
+    /// The frozen rule, adopted from the design #87 landed in `parametric-eq`:
+    ///
+    /// > **A version or length word inside the payload outranks the caller's claim.** Where a
+    /// > payload carries a header, the restore compares the two and rejects on the payload's own
+    /// > evidence; it never lets the argument override the bytes. Where a payload carries no
+    /// > header, the argument is all there is, and the restore checks it against the descriptor's
+    /// > `state_layout_version` and the prepared `StatePayloadSizes` — the caller may not name a
+    /// > version this instance was not prepared for.
+    ///
+    /// The header itself is two little-endian words at the front of the common section — the
+    /// layout version and the effect's data word count — implemented once in
+    /// `miso_engine_effect_runtime::state_payload` (`HEADER_WORDS`, `read_header`, `snapshot`,
+    /// `restore`). It is what makes a payload self-describing, so a stale or truncated restore is
+    /// rejected by evidence rather than by trust.
+    ///
+    /// **Uniform adoption is not this issue's to take.** A header moves `maximum_state.common_bytes`
+    /// from 0 to 8, which is a canonical descriptor byte, an effect CID and a
+    /// `state_layout_version` bump (decision W2-D2). Crates that had to bump anyway adopted it
+    /// inside that bump — `parametric-eq`, `gate-expander`, `soft-clip`, `true-peak-limiter`; the
+    /// rest keep their current layout until a coordinated change carries the identity bump with
+    /// #97. What is frozen **now** is the rule above, so that no effect adopts a header and then
+    /// still lets the argument win, and no new effect ships without one.
+    ///
+    /// # Errors
+    ///
+    /// `effect.state.version` if the payload is not the layout this instance was prepared for,
+    /// `effect.state.length` if a section is not its prepared size, and the effect's own code if
+    /// a decoded value is outside its declared domain.
     fn restore_state_payload(
         &mut self,
         state_layout_version: u32,
@@ -1293,26 +1374,58 @@ impl NativeEffectRegistry {
         self.factories.is_empty()
     }
 }
+/// The exact `(parameter_index, channel)` sequence a prepare request must carry, in order.
+///
+/// `Shared` contributes one `Both` entry, `PerLane` contributes `Left` then `Right`. This is the
+/// only statement of that order: [`validate_initial_values`] checks against it and
+/// [`default_initial_values`] fills it with the descriptor's declared defaults, so a caller can
+/// build a conforming request from the descriptor alone. Before issue #95 the order existed only
+/// inside the validator as a freshly allocated `Vec`, which is why the conformance harness had to
+/// hard-code one parameter's L/R pair and could therefore only ever run against its own mock.
+pub fn initial_value_slots(
+    d: &'static EffectDescriptorV1,
+) -> impl Iterator<Item = (u32, ParameterChannel)> + 'static {
+    d.parameters
+        .iter()
+        .enumerate()
+        .flat_map(|(index, parameter)| {
+            let index = index as u32;
+            match parameter.channel_policy {
+                ParameterChannelPolicy::Shared => [Some((index, ParameterChannel::Both)), None],
+                ParameterChannelPolicy::PerLane => [
+                    Some((index, ParameterChannel::Left)),
+                    Some((index, ParameterChannel::Right)),
+                ],
+            }
+        })
+        .flatten()
+}
+
+/// A conforming `initial_values` slice built from the descriptor's declared defaults.
+///
+/// Every entry is `parameter_valid`-checked at descriptor validation, so the result always passes
+/// [`validate_initial_values`]. `-0.0` is normalised: the validator rejects it, and a descriptor
+/// that declares it is already invalid.
+pub fn default_initial_values(
+    d: &'static EffectDescriptorV1,
+) -> impl Iterator<Item = InitialParameterValue> + 'static {
+    initial_value_slots(d).map(|(parameter_index, channel)| InitialParameterValue {
+        parameter_index,
+        channel,
+        value: normalize_zero(d.parameters[parameter_index as usize].default_value),
+    })
+}
+
 pub fn validate_initial_values(
     d: &'static EffectDescriptorV1,
     v: &[InitialParameterValue],
 ) -> Result<(), EffectPrepareError> {
-    let mut expected = Vec::new();
-    for (i, p) in d.parameters.iter().enumerate() {
-        match p.channel_policy {
-            ParameterChannelPolicy::Shared => expected.push((i as u32, ParameterChannel::Both)),
-            ParameterChannelPolicy::PerLane => {
-                expected.push((i as u32, ParameterChannel::Left));
-                expected.push((i as u32, ParameterChannel::Right));
-            }
-        }
-    }
-    if expected.len() != v.len() {
+    if initial_value_slots(d).count() != v.len() {
         return Err(EffectPrepareError {
             code: "effect.parameter.initial",
         });
     }
-    for (x, e) in v.iter().zip(expected) {
+    for (x, e) in v.iter().zip(initial_value_slots(d)) {
         let p = d
             .parameters
             .get(x.parameter_index as usize)
@@ -1330,10 +1443,64 @@ pub fn validate_initial_values(
     }
     Ok(())
 }
+/// What a validated prepare request resolved to.
+///
+/// `scratch_bytes` is computed **once**, here. The audit found the same
+/// `scratch_fixed_bytes + scratch_bytes_per_frame * quantum` accounting written out twice in this
+/// file — in `validate_prepare_request` to compare against the caller's limit, and again in
+/// `expected_prepared_metadata` to fill the metadata — so a change to one silently disagreed with
+/// the other. One value, computed once, used for both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidatedPrepare {
+    /// The quality row the request resolved to.
+    pub quality: QualityDescriptorV1,
+    /// Scratch this preparation is entitled to: `scratch_fixed_bytes + per_frame * quantum`.
+    pub scratch_bytes: u64,
+}
+
+/// `scratch_fixed_bytes + scratch_bytes_per_frame * quantum`, checked.
+///
+/// # What `scratch_fixed_bytes` means (issue #95, closing #88 F10 and #92 F9)
+///
+/// Wave 2 reported the field as "declared and unused": the compressor declares 64 and the
+/// transient shaper 24, and neither touches a scratch byte. Both deferred a re-accounting here.
+/// The re-accounting is a **definition**, not a number change, because the number is part of the
+/// canonical descriptor bytes and therefore of the effect's CID (issue 082) — moving it would
+/// break contract fixtures that master plan §8 rule 2 forbids this job to touch.
+///
+/// The definition: `scratch_fixed_bytes` is the **admission ceiling** an effect reserves, not a
+/// measurement of what it uses. A host admits a preparation by proving it can supply this much
+/// scratch; an effect that uses less is conforming, an effect that uses more is not. Under that
+/// definition a declared 64 with an actual 0 is correct — conservative, not wrong — and the two
+/// deferred items close with no descriptor byte moved and no CID re-pinned.
+///
+/// Tightening a declared ceiling toward its measured use remains legal, but it is a descriptor
+/// identity change: it belongs to the owning effect's issue, coordinated with #97 (package/CID),
+/// never to a contract cleanup.
+///
+/// # Errors
+///
+/// `effect.resource.limit` on overflow.
+const fn scratch_for(
+    quality: QualityDescriptorV1,
+    quantum: u32,
+) -> Result<u64, EffectPrepareError> {
+    let limit = EffectPrepareError {
+        code: "effect.resource.limit",
+    };
+    let Some(per_block) = quality.scratch_bytes_per_frame.checked_mul(quantum as u64) else {
+        return Err(limit);
+    };
+    match quality.scratch_fixed_bytes.checked_add(per_block) {
+        Some(total) => Ok(total),
+        None => Err(limit),
+    }
+}
+
 pub fn validate_prepare_request(
     d: &'static EffectDescriptorV1,
     r: PrepareEffectRequest<'_>,
-) -> Result<QualityDescriptorV1, EffectPrepareError> {
+) -> Result<ValidatedPrepare, EffectPrepareError> {
     validate_descriptor_v1(d).map_err(|_| EffectPrepareError {
         code: "effect.descriptor.invalid",
     })?;
@@ -1363,18 +1530,7 @@ pub fn validate_prepare_request(
     let state = q.maximum_state.total().ok_or(EffectPrepareError {
         code: "effect.resource.limit",
     })?;
-    let scratch = q
-        .scratch_fixed_bytes
-        .checked_add(
-            q.scratch_bytes_per_frame
-                .checked_mul(r.quantum as u64)
-                .ok_or(EffectPrepareError {
-                    code: "effect.resource.limit",
-                })?,
-        )
-        .ok_or(EffectPrepareError {
-            code: "effect.resource.limit",
-        })?;
+    let scratch = scratch_for(q, r.quantum)?;
     if state > r.limits.maximum_total_state_bytes
         || scratch > r.limits.maximum_scratch_bytes
         || usize::try_from(state).is_err()
@@ -1418,7 +1574,10 @@ pub fn validate_prepare_request(
             }
         }
     }
-    Ok(q)
+    Ok(ValidatedPrepare {
+        quality: q,
+        scratch_bytes: scratch,
+    })
 }
 
 /// Derive the sole conforming immutable metadata value for a validated prepare request.
@@ -1426,20 +1585,10 @@ pub fn expected_prepared_metadata(
     descriptor: &'static EffectDescriptorV1,
     request: PrepareEffectRequest<'_>,
 ) -> Result<PreparedEffectMetadata, EffectPrepareError> {
-    let quality = validate_prepare_request(descriptor, request)?;
-    let scratch_bytes = quality
-        .scratch_fixed_bytes
-        .checked_add(
-            quality
-                .scratch_bytes_per_frame
-                .checked_mul(request.quantum as u64)
-                .ok_or(EffectPrepareError {
-                    code: "effect.resource.limit",
-                })?,
-        )
-        .ok_or(EffectPrepareError {
-            code: "effect.resource.limit",
-        })?;
+    let ValidatedPrepare {
+        quality,
+        scratch_bytes,
+    } = validate_prepare_request(descriptor, request)?;
     Ok(PreparedEffectMetadata {
         descriptor,
         sample_rate: request.sample_rate,

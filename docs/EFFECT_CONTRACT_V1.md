@@ -5,6 +5,14 @@ artifact bytes, CID identity, persisted state envelopes, and migration belong to
 **Canonical effect interchange, state migration, and CID package identity**. They are neither
 runtime identities nor issue-011 gates.
 
+The contract crate's Rust types are deliberately **not** `repr(C)` and it publishes no C header.
+The only C ABI for descriptors is
+`crates/miso-engine-effect-package/include/miso_engine_effect_descriptor_v1.h` (80/24/64/16-byte
+records, asserted in `effect-package`). A second, orphaned header once sat at
+`include/miso_engine_effect_contract_v1.h` describing 32-byte ports and 48-byte quality rows that
+nothing implemented; issue #95 deleted it and `scripts/check-effect-runtime-policy.sh` keeps it
+gone.
+
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
 latency, tail, state-section sizes, scratch bytes, and automation capacity. The compiler caches
@@ -72,7 +80,27 @@ change the last valid target.
 
 State is three exact caller buffers: common, left, and right. Snapshot is deterministic and
 all-or-none. Restore accepts only the current nonzero `state_layout_version` and exact prepared
-sizes; the compiler restores only into an unpublished temporary. Per-lane audio, delay, filter,
+sizes; the compiler restores only into an unpublished temporary.
+
+**A version or length word inside the payload outranks the caller's claim.** The
+`state_layout_version` argument of `restore_state_payload` arrives out of band, from the
+descriptor the caller *believes* wrote the bytes, and is trustworthy only while caller and writer
+are the same build — which a persisted session is not. Where a payload carries a header, the
+restore compares the two and rejects on the payload's own evidence; the argument never overrides
+the bytes. Where a payload carries none, the argument is checked against the descriptor's
+`state_layout_version` and the prepared sizes. The header is two little-endian words at the front
+of the common section — layout version, then the effect's data word count — implemented once in
+`miso_engine_effect_runtime::state_payload`. Adopting it moves `maximum_state.common_bytes` from 0
+to 8, which is a canonical descriptor byte and an effect CID, so adoption travels with a
+`state_layout_version` bump (decision W2-D2): the crates that had to bump anyway carry a header
+today, the rest adopt one in a coordinated identity change. The **rule** above is frozen now for
+all of them.
+
+`scratch_fixed_bytes` is an **admission ceiling an effect reserves, not a measurement of what it
+uses**. A host admits a preparation by proving it can supply
+`scratch_fixed_bytes + scratch_bytes_per_frame x quantum`; an effect that uses less is conforming.
+A declared ceiling may be tightened toward measured use, but that moves canonical descriptor bytes
+and is an effect-identity change, never a contract cleanup. Per-lane audio, delay, filter,
 envelope, smoother, and dual-mono detector state stays in the corresponding lane section. Only
 shared configuration and an explicitly linked detector may be common. Full reset restores
 prepared defaults; discontinuity reset keeps targets but clears histories and active spans.
@@ -115,7 +143,17 @@ D7 output-block bounds under poisoned input and sidechain, deterministic state r
 isolation. Separate faulty mocks exercise
 allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, changing
 latency/tail/resources, bypass latency, malformed automation, NaN propagation, partial or
-nondeterministic snapshot, and rejected restore. Deterministic tests execute at least 10,000
+nondeterministic snapshot, and rejected restore.
+
+The harness is built from the descriptor, not from the reference mock: the prepare request uses
+`default_initial_values`, the ports come from the descriptor's own sidechain declaration (or
+`PreparedSidechainPort::None`), the impulse probe renders as many blocks as the declared latency
+needs, and lane isolation is compared against a silence-rendered control instance in dual-mono
+only — a linked detector is exactly what `Maximum` and `Average` declare. Launch effects run it:
+`miso-engine-compressor` (882 samples of lookahead, linked detector, a ring index that advances on
+silence) and `miso-engine-parametric-eq` (zero latency, header-carrying payload) each have a
+`tests/conformance.rs` asserting `report.launch_gates.failures.is_empty()`. A contract whose only
+conforming implementation is its own mock is not evidence. Deterministic tests execute at least 10,000
 descriptor, span, and session mutations. The release audit performs 1,000,000 128-frame calls
 under allocation/deallocation hooks and native syscall tracing.
 

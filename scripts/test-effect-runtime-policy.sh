@@ -126,6 +126,59 @@ expect_contract_dependency_failure contract-gains-lane
 sed -i '/^miso-engine-math[.]workspace = true$/d' "$contract_manifest"
 expect_contract_dependency_failure contract-loses-math
 
+# Issue #95 F6: the orphan root header must not come back, and the contract must stay non-`repr(C)`.
+mkdir -p "$temp/include"
+printf '#define MISO_ENGINE_EFFECT_CONTRACT_V1_H\n' >"$temp/include/miso_engine_effect_contract_v1.h"
+if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+    printf 'orphan contract header mutation escaped\n' >&2
+    exit 1
+fi
+rm -rf "$temp/include"
+
+printf '\n#[repr(C)]\npub struct LeakedAbiRecord {\n    pub a: u32,\n}\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
+if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+    printf 'contract repr(C) mutation escaped\n' >&2
+    exit 1
+fi
+cp "$root/crates/miso-engine-effect-contract/src/lib.rs" "$temp/crates/miso-engine-effect-contract/src/lib.rs"
+
+# Issue #95 eval E4: the duplicated-helper manifest is a ratchet in both directions.
+helper_mutation() {
+    local name="$1"
+    local file="$2"
+    local body="$3"
+    printf '\n%s\n' "$body" >>"$temp/$file"
+    if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+        printf 'duplicated-helper mutation escaped: %s\n' "$name" >&2
+        exit 1
+    fi
+    cp "$root/$file" "$temp/$file"
+}
+
+helper_mutation normalize_zero-copy-in-an-effect \
+    crates/miso-engine-delay/src/lib.rs \
+    'fn normalize_zero(v: f32) -> f32 { v }'
+helper_mutation sanitize-comes-back \
+    crates/miso-engine-delay/src/lib.rs \
+    'fn sanitize(v: f32, c: &mut u64) -> f32 { *c += 1; v }'
+helper_mutation private-ramp-struct-comes-back \
+    crates/miso-engine-compressor/src/lib.rs \
+    'struct Ramp { current: f32, target: f32, remaining: u32 }'
+helper_mutation second-linear-ramp \
+    crates/miso-engine-effect-runtime/src/ramp.rs \
+    'pub struct LinearRamp2 { pub current: f32 }
+pub struct LinearRamp { pub current: f32 }'
+
+# Down is a failure too: a row that reaches its target must be updated, not silently satisfied.
+sed -i 's/^fn advance_ramps(\&mut self, sample_rate: u32) {/fn advance_ramps_renamed(\&mut self, sample_rate: u32) {/' \
+    "$temp/crates/miso-engine-compressor/src/kernel.rs" 2>/dev/null || true
+sed -i 's/fn advance_ramps(/fn advance_ramps_renamed(/' "$temp/crates/miso-engine-compressor/src/kernel.rs"
+if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
+    printf 'duplicated-helper manifest accepted a stale row (count went down)\n' >&2
+    exit 1
+fi
+cp "$root/crates/miso-engine-compressor/src/kernel.rs" "$temp/crates/miso-engine-compressor/src/kernel.rs"
+
 printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime identity mutation escaped\n' >&2

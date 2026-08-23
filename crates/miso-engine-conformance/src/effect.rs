@@ -12,15 +12,15 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankProcessReport, EffectDescriptorV1, EffectId, EffectPrepareError,
-    EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples, LinkMode,
-    LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
-    ProcessReport, QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata, valid_runtime_span, validate_descriptor_v1,
+    EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedPortsV1, PreparedSidechainPort, ProcessReport, QualityDescriptorV1, ResetKind,
+    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
+    validate_descriptor_v1,
 };
 
 const MOCK_ID: EffectId = match EffectId::new("conformance.delay") {
@@ -696,30 +696,16 @@ pub fn run_effect_conformance(
                 continue;
             }
             for bypass in [false, true] {
-                let initial = [
-                    InitialParameterValue {
-                        parameter_index: 0,
-                        channel: ParameterChannel::Left,
-                        value: 1.0,
-                    },
-                    InitialParameterValue {
-                        parameter_index: 0,
-                        channel: ParameterChannel::Right,
-                        value: 1.0,
-                    },
-                ];
+                // Issue #95: built from the descriptor, not hard-coded to the mock's single
+                // parameter. This is what lets the harness run against a real effect (eval E6).
+                let initial: Vec<_> = default_initial_values(descriptor).collect();
                 let request = PrepareEffectRequest {
                     sample_rate: quality.sample_rate,
                     quantum: config.quantum,
                     quality: quality.quality,
                     bypass,
                     link_mode,
-                    ports: PreparedPortsV1 {
-                        sidechain: PreparedSidechainPort::Unconnected {
-                            id: SIDECHAIN_IN,
-                            required: false,
-                        },
-                    },
+                    ports: unconnected_ports(descriptor),
                     initial_values: &initial,
                     limits: PrepareEffectLimits {
                         maximum_total_state_bytes: 1 << 20,
@@ -745,36 +731,105 @@ pub fn run_effect_conformance(
                 if effect.metadata().program_key() != expected.program_key() {
                     tier.failures.push("metadata.exact");
                 }
-                let initial_right = snapshot_payload(effect.as_ref(), expected)
-                    .map(|(_, _, right)| right)
-                    .unwrap_or_default();
                 let frames = config.quantum as usize;
                 let mut left = vec![0.0; frames];
                 let mut right = vec![0.0; frames];
-                left[0] = 1.0;
-                let block =
-                    EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], config.quantum)
-                        .expect("valid block");
-                let process = catch_unwind(AssertUnwindSafe(|| {
-                    audit::in_render_scope(|| effect.process(block))
-                }));
-                tier.process_calls += 1;
-                if process.is_err() {
+
+                // Issue #95: render as many blocks as the declared latency needs, not one.
+                // The audited probe rendered a single `quantum`-frame block and asserted the
+                // impulse landed inside it, which is only true for an effect whose latency is
+                // shorter than one quantum — the reference mock's three samples. The compressor
+                // declares 882 (20 ms of lookahead at 44.1 kHz), so the probe could never have
+                // passed for a real effect. Latency is a *sample count*, so the gate is the
+                // absolute index of the first non-zero output over the whole render.
+                let blocks_for_latency = expected.latency.0 as usize / frames + 1;
+                let mut impulse_position = None;
+                let mut within_bounds = true;
+                let mut panicked = false;
+                for block_index in 0..blocks_for_latency {
+                    left.fill(0.0);
+                    right.fill(0.0);
+                    if block_index == 0 {
+                        left[0] = 1.0;
+                    }
+                    let first_sample = (block_index * frames) as u64;
+                    let block = EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        None,
+                        first_sample,
+                        &[],
+                        config.quantum,
+                    )
+                    .expect("valid block");
+                    let process = catch_unwind(AssertUnwindSafe(|| {
+                        audit::in_render_scope(|| effect.process(block))
+                    }));
+                    tier.process_calls += 1;
+                    if process.is_err() {
+                        panicked = true;
+                        break;
+                    }
+                    within_bounds &=
+                        block_is_within_bounds(&left) && block_is_within_bounds(&right);
+                    if impulse_position.is_none()
+                        && let Some(offset) = left.iter().position(|v| *v != 0.0)
+                    {
+                        impulse_position = Some(block_index * frames + offset);
+                    }
+                }
+                if panicked {
                     tier.failures.push("process.realtime_or_panic");
                     continue;
                 }
-                if !block_is_within_bounds(&left) || !block_is_within_bounds(&right) {
+                if !within_bounds {
                     tier.failures.push("process.block_bounds");
                 }
-                if left.iter().position(|v| *v != 0.0) != usize::try_from(expected.latency.0).ok() {
+                if impulse_position != usize::try_from(expected.latency.0).ok() {
                     tier.failures.push("latency.impulse");
                 }
                 if effect.metadata().program_key() != expected.program_key() {
                     tier.failures.push("metadata.changed");
                 }
+                // Lane isolation, against a **control render** rather than against the initial
+                // state (issue #95). The audited probe compared the right section after the
+                // impulse with the right section before it, which conflates two different
+                // things: "the left input leaked into the right lane" and "time passed". A
+                // lookahead ring's write index, a smoother's countdown and a hold timer all
+                // advance in both lanes on every block regardless of input, so the audited
+                // probe failed every real effect that has any of them. The control instance is
+                // prepared identically and rendered for the same number of blocks with silence,
+                // so anything that differs is attributable to the impulse alone.
+                //
+                // It is a requirement *in dual-mono only*: `LinkMode::Maximum` and
+                // `LinkMode::Average` declare a linked detector, which the contract explicitly
+                // permits to be shared, so a left-only impulse legitimately reaches the right
+                // lane there.
+                let silent_right = if link_mode == LinkMode::DualMono {
+                    factory.prepare(request).ok().and_then(|mut control| {
+                        for block_index in 0..blocks_for_latency {
+                            let mut control_left = vec![0.0; frames];
+                            let mut control_right = vec![0.0; frames];
+                            let block = EffectProcessBlock::new(
+                                &mut control_left,
+                                &mut control_right,
+                                None,
+                                (block_index * frames) as u64,
+                                &[],
+                                config.quantum,
+                            )
+                            .expect("valid block");
+                            let _ = audit::in_render_scope(|| control.process(block));
+                        }
+                        snapshot_payload(control.as_ref(), expected).map(|(_, _, right)| right)
+                    })
+                } else {
+                    None
+                };
                 if let Some((_, _, right_after)) =
                     snapshot_checks(effect.as_mut(), expected, &mut tier.failures)
-                    && initial_right != right_after
+                    && let Some(silent_right) = silent_right
+                    && silent_right != right_after
                 {
                     tier.failures.push("state.lane_isolation");
                 }
@@ -889,6 +944,27 @@ fn impulse_sequence(
         && effect.metadata().program_key() == expected.program_key()
 }
 
+/// The descriptor's own sidechain port, unconnected — or `None` when it declares no sidechain.
+///
+/// Issue #95: the harness used to name the reference mock's `sidechain-in` port unconditionally,
+/// so `validate_prepare_request` rejected every effect that declares no sidechain at all (the
+/// parametric EQ) or names its port differently. `PreparedSidechainPort::None` and
+/// `Unconnected { id, required }` are not interchangeable — the contract checks each against the
+/// descriptor — so the request has to be built from the descriptor.
+fn unconnected_ports(descriptor: &'static EffectDescriptorV1) -> PreparedPortsV1 {
+    let sidechain = descriptor
+        .ports
+        .iter()
+        .find(|port| port.role == PortRole::SidechainInput)
+        .map_or(PreparedSidechainPort::None, |port| {
+            PreparedSidechainPort::Unconnected {
+                id: port.id,
+                required: port.required,
+            }
+        });
+    PreparedPortsV1 { sidechain }
+}
+
 /// The mock's own per-value canonical-finite predicate.
 ///
 /// Issue #95 deleted `miso_engine_effect_contract::sanitize_sample`: decision D7 says no
@@ -906,16 +982,25 @@ fn canonical_finite(value: f32) -> bool {
 /// block-granular property the bank driver checks with one vector compare; the harness asserts it
 /// on the values the effect actually produced.
 fn block_is_within_bounds(values: &[f32]) -> bool {
-    values
-        .iter()
-        .all(|value| *value == *value && value.abs() < 1.0e30)
+    // `!(|x| < 1e30)` is exactly "NaN or out of range": an ordered compare against NaN is false,
+    // so the NaN case needs no separate term. This is the scalar spelling of the one vector
+    // compare `miso_engine_effect_runtime::bank::check_block` performs per block.
+    values.iter().all(|value| value.abs() < 1.0e30)
 }
 
+/// A poisoned input block must leave the *processing* path bounded and unpoisoned (D7).
+///
+/// Forced to the enabled configuration (issue #95). A bypassed effect is contractually required
+/// to emit the dry input delayed by its declared latency — poison in, poison out is the correct
+/// answer there, not a fault — and under D7 an effect never sanitises its input at all: input
+/// sanitisation happens once per track per block at the track input stage, and what this probe
+/// gates is that the effect's own output stays within `x == x && |x| < 1e30`.
 fn sanitization_probe(
     factory: &dyn NativeEffectFactory,
-    request: PrepareEffectRequest<'_>,
+    mut request: PrepareEffectRequest<'_>,
     process_calls: &mut u64,
 ) -> bool {
+    request.bypass = false;
     let Ok(mut effect) = factory.prepare(request) else {
         return false;
     };
@@ -939,15 +1024,29 @@ fn sanitization_probe(
     block_is_within_bounds(&left) && block_is_within_bounds(&right)
 }
 
+/// The same D7 property with the poison arriving on a **connected sidechain**.
+///
+/// Skipped for an effect that declares no sidechain input, and it names that effect's own port
+/// rather than the reference mock's (issue #95). Enabled configuration only, for the reason given
+/// on [`sanitization_probe`].
 fn sidechain_probe(
     factory: &dyn NativeEffectFactory,
     mut request: PrepareEffectRequest<'_>,
     process_calls: &mut u64,
 ) -> bool {
+    let Some(port) = factory
+        .descriptor()
+        .ports
+        .iter()
+        .find(|port| port.role == PortRole::SidechainInput)
+    else {
+        return true;
+    };
+    request.bypass = false;
     request.ports = PreparedPortsV1 {
         sidechain: PreparedSidechainPort::Connected {
-            id: SIDECHAIN_IN,
-            required: false,
+            id: port.id,
+            required: port.required,
         },
     };
     let Ok(mut effect) = factory.prepare(request) else {
