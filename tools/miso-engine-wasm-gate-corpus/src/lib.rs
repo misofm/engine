@@ -22,12 +22,12 @@
 //!
 //! The rest of the corpus is not redefined here. Cases past [`LANE_CASE_COUNT`] delegate to
 //! [`miso_engine_math::corpus`] (gate M3), [`miso_engine_effect_runtime::corpus`] (gate D1),
-//! [`miso_engine_soft_clip::corpus`] (issue #91) and [`miso_engine_parametric_eq::corpus`]
-//! (issue #87) and are compared against those crates' own pins, so the wasm run replays exactly
-//! what those gates pinned natively rather than a transcription of them. All of them but the math
-//! and delay cases are lane generic — the dB curve a compressor rides, the followers that ride it,
-//! a whole soft-clip block, a whole four-section EQ cascade — so they too are digested at every
-//! width.
+//! [`miso_engine_soft_clip::corpus`] (issue #91), [`miso_engine_parametric_eq::corpus`]
+//! (issue #87) and [`miso_engine_gate_expander::corpus`] (issue #89) and are compared against those
+//! crates' own pins, so the wasm run replays exactly what those gates pinned natively rather than a
+//! transcription of them. All of them but the math and delay cases are lane generic — the dB curve
+//! a compressor rides, the followers that ride it, a whole soft-clip block, a whole four-section EQ
+//! cascade, a whole gate graph — so they too are digested at every width.
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
@@ -35,6 +35,7 @@
 
 use miso_engine_delay::corpus as delay_corpus;
 use miso_engine_effect_runtime::corpus as runtime_corpus;
+use miso_engine_gate_expander::corpus as gate_expander_corpus;
 use miso_engine_lane::Lane;
 use miso_engine_lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
@@ -113,6 +114,16 @@ pub const SOFT_CLIP_CASE_COUNT: usize = soft_clip_corpus::CASE_COUNT;
 /// bits on every target.
 pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 
+/// Cases delegated to [`miso_engine_gate_expander::corpus`] (issue #89), replayed under wasm.
+///
+/// A whole prepared gate graph per case, over 1 024 frames of eight independent lanes: the
+/// per-lane lookahead gather out of a power-of-two ring, `log2_lane` into the branchless
+/// hysteretic transition, the downward-expansion curve, the single-rounding `fma` one-pole with
+/// its D7 `flush`, `exp2_lane` and the identity select. One case per link mode, one of gated
+/// bursts that drives both one-pole rates and the hold, one of subnormal input, and one with a
+/// D11 word ramp in flight across a block boundary.
+pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -121,7 +132,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + DELAY_CASE_COUNT
     + MULTIBAND_CASE_COUNT
     + SOFT_CLIP_CASE_COUNT
-    + PARAMETRIC_EQ_CASE_COUNT;
+    + PARAMETRIC_EQ_CASE_COUNT
+    + GATE_EXPANDER_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 12] = [
@@ -317,6 +329,8 @@ enum Case {
     SoftClip(usize),
     /// One case of the `miso-engine-parametric-eq` E9 corpus.
     ParametricEq(usize),
+    /// One case of the `miso-engine-gate-expander` corpus.
+    GateExpander(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -361,7 +375,11 @@ fn case_of(index: usize) -> Case {
     if index < SOFT_CLIP_CASE_COUNT {
         return Case::SoftClip(index);
     }
-    Case::ParametricEq(index - SOFT_CLIP_CASE_COUNT)
+    let index = index - SOFT_CLIP_CASE_COUNT;
+    if index < PARAMETRIC_EQ_CASE_COUNT {
+        return Case::ParametricEq(index);
+    }
+    Case::GateExpander(index - PARAMETRIC_EQ_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -416,6 +434,10 @@ pub fn case_name(index: usize) -> String {
             "effect/parametric_eq/{}",
             parametric_eq_corpus::CASE_NAMES[case]
         ),
+        Case::GateExpander(case) => format!(
+            "effect/gate_expander/{}",
+            gate_expander_corpus::CASE_NAMES[case]
+        ),
     }
 }
 
@@ -455,6 +477,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Multiband(case) => multiband_corpus::DIGESTS[case],
         Case::SoftClip(case) => soft_clip_corpus::SOFT_CLIP_DIGESTS[case],
         Case::ParametricEq(case) => parametric_eq_corpus::E9_DIGESTS[case],
+        Case::GateExpander(case) => gate_expander_corpus::GATE_DIGESTS[case],
     }
 }
 
@@ -492,6 +515,11 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             0 => digest_parametric_eq::<f32>(case),
             1 => digest_parametric_eq::<miso_engine_lane::Simd4>(case),
             _ => digest_parametric_eq::<miso_engine_lane::Simd8>(case),
+        },
+        Case::GateExpander(case) => match width {
+            0 => digest_gate_expander::<f32>(case),
+            1 => digest_gate_expander::<miso_engine_lane::Simd4>(case),
+            _ => digest_gate_expander::<miso_engine_lane::Simd8>(case),
         },
     }
 }
@@ -556,7 +584,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::Delay(_)
         | Case::Multiband(_)
         | Case::SoftClip(_)
-        | Case::ParametricEq(_) => {
+        | Case::ParametricEq(_)
+        | Case::GateExpander(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -945,6 +974,18 @@ fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
 }
 
 /// Digests one `miso-engine-parametric-eq` E9 case, exactly as that crate's `tests/determinism.rs`
+/// Digests one `miso-engine-gate-expander` case at width `L::WIDTH`, exactly as that crate's
+/// `tests/determinism.rs` does natively.
+fn digest_gate_expander<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; gate_expander_corpus::POINTS];
+    gate_expander_corpus::run_case::<L>(case, &mut out);
+    let mut hasher = Sha256::new();
+    for word in &out {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
 /// does natively.
 fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; parametric_eq_corpus::POINTS];

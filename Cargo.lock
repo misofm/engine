@@ -1200,6 +1200,7 @@ version = "0.1.0"
 dependencies = [
  "miso-engine-delay",
  "miso-engine-effect-runtime",
+ "miso-engine-gate-expander",
  "miso-engine-lane",
  "miso-engine-math",
  "miso-engine-multiband-compressor",
@@ -1222,6 +1223,7 @@ name = "miso-engine-wasm-gates"
 version = "0.1.0"
 dependencies = [
  "miso-engine-effect-runtime",
+ "miso-engine-gate-expander",
  "miso-engine-lane",
  "miso-engine-math",
  "miso-engine-parametric-eq",

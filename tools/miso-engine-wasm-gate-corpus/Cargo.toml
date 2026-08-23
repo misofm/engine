@@ -15,6 +15,7 @@ name = "miso_engine_wasm_gate_corpus"
 [dependencies]
 miso-engine-delay.workspace = true
 miso-engine-effect-runtime.workspace = true
+miso-engine-gate-expander.workspace = true
 miso-engine-lane.workspace = true
 miso-engine-math = { workspace = true, features = ["lane"] }
 # The wave-2 effect crates whose corpora this gate replays; their pins live in those crates,

@@ -207,11 +207,6 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         "the parametric-EQ block must cover every case that crate pins"
     );
     let parametric_eq_base = soft_clip_base + corpus::SOFT_CLIP_CASE_COUNT;
-    assert_eq!(
-        parametric_eq_base + corpus::PARAMETRIC_EQ_CASE_COUNT,
-        corpus::CASE_COUNT,
-        "parametric-eq must be the last family in the pin order"
-    );
     for case in 0..corpus::PARAMETRIC_EQ_CASE_COUNT {
         assert_eq!(
             corpus::expected_digest(parametric_eq_base + case),
@@ -225,6 +220,32 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert!(
             corpus::case_name(parametric_eq_base + case).starts_with("effect/parametric_eq/"),
             "parametric-eq cases keep their owning crate's names"
+        );
+    }
+    assert_eq!(
+        corpus::GATE_EXPANDER_CASE_COUNT,
+        miso_engine_gate_expander::corpus::CASE_COUNT,
+        "the gate/expander block must cover every case that crate pins"
+    );
+    let gate_expander_base = parametric_eq_base + corpus::PARAMETRIC_EQ_CASE_COUNT;
+    assert_eq!(
+        gate_expander_base + corpus::GATE_EXPANDER_CASE_COUNT,
+        corpus::CASE_COUNT,
+        "gate-expander must be the last family in the pin order"
+    );
+    for case in 0..corpus::GATE_EXPANDER_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(gate_expander_base + case),
+            miso_engine_gate_expander::corpus::GATE_DIGESTS[case],
+            "gate-expander case {case} must be pinned by miso-engine-gate-expander, not by this crate"
+        );
+        assert!(
+            corpus::is_width_dependent(gate_expander_base + case),
+            "a gate/expander case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(gate_expander_base + case).starts_with("effect/gate_expander/"),
+            "gate-expander cases keep their owning crate's names"
         );
     }
 }
