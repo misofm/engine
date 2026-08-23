@@ -105,6 +105,51 @@ pub(crate) struct MessageSpec {
     pub(crate) fields: &'static [FieldSpec],
 }
 
+impl MessageSpec {
+    /// Derive the emitted top-level field count from this schema and the occurrences of its
+    /// optional or repeated fields. Required singular fields contribute exactly one.
+    pub(crate) fn field_count(
+        &'static self,
+        variable: &[(FieldSpec, usize)],
+    ) -> Result<u32, crate::EncodeError> {
+        for (candidate, _) in variable {
+            let Some(field) = self.fields.iter().find(|field| field.id == candidate.id) else {
+                return Err(crate::EncodeError::LimitExceeded);
+            };
+            if (!field.repeated && field.mandatory)
+                || candidate.wire != field.wire
+                || candidate.mandatory != field.mandatory
+                || candidate.repeated != field.repeated
+                || variable
+                    .iter()
+                    .filter(|(other, _)| other.id == candidate.id)
+                    .count()
+                    != 1
+            {
+                return Err(crate::EncodeError::LimitExceeded);
+            }
+        }
+        let mut total = 0_usize;
+        for field in self.fields {
+            let occurrences = if field.repeated || !field.mandatory {
+                variable
+                    .iter()
+                    .find(|(candidate, _)| candidate.id == field.id)
+                    .map_or(0, |(_, count)| *count)
+            } else {
+                1
+            };
+            if !field.repeated && occurrences > 1 {
+                return Err(crate::EncodeError::LimitExceeded);
+            }
+            total = total
+                .checked_add(occurrences)
+                .ok_or(crate::EncodeError::LimitExceeded)?;
+        }
+        u32::try_from(total).map_err(|_| crate::EncodeError::LimitExceeded)
+    }
+}
+
 pub(crate) mod capabilities_request {
     use super::MessageSpec;
 
@@ -1247,5 +1292,32 @@ mod tests {
         assert!(wires.into_iter().enumerate().all(|(index, wire)| {
             wire.raw() == u8::try_from(index + 1).expect("wire registry fits u8")
         }));
+    }
+
+    #[test]
+    fn top_level_counts_derive_required_optional_and_repeated_occurrences() {
+        assert_eq!(
+            capabilities::SPEC.field_count(&[]),
+            u32::try_from(capabilities::SPEC.fields.len())
+                .map_err(|_| crate::EncodeError::LimitExceeded)
+        );
+        assert_eq!(transport_set::SPEC.field_count(&[]), Ok(1));
+        assert_eq!(
+            transport_set::SPEC.field_count(&[(transport_set::POSITION, 1)]),
+            Ok(2)
+        );
+        assert_eq!(
+            counter_snapshot::SPEC.field_count(&[(counter_snapshot::VALUE, 3)]),
+            Ok(4)
+        );
+        assert_eq!(
+            transport_set::SPEC.field_count(&[(transport_set::STATE, 1)]),
+            Err(crate::EncodeError::LimitExceeded)
+        );
+        assert_eq!(
+            transport_set::SPEC
+                .field_count(&[(transport_set::POSITION, 1), (transport_set::POSITION, 1),]),
+            Err(crate::EncodeError::LimitExceeded)
+        );
     }
 }

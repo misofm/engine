@@ -238,7 +238,9 @@ impl ProtocolCodec {
                 output,
             );
         }
-        let (payload_len, tlv_count) = command_shape(self, &frame.payload)?;
+        let payload_len =
+            encoded_payload_len(|output| encode_command_payload(self, &frame.payload, output))?;
+        let tlv_count = command_field_count(&frame.payload)?;
         encode_complete_frame(
             self,
             FrameKind::Command,
@@ -260,7 +262,9 @@ impl ProtocolCodec {
         frame: &TypedSuccessResponseFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let (payload_len, tlv_count) = success_shape(self, &frame.payload)?;
+        let payload_len =
+            encoded_payload_len(|output| encode_success_payload(self, &frame.payload, output))?;
+        let tlv_count = success_field_count(&frame.payload)?;
         encode_complete_frame(
             self,
             FrameKind::Response,
@@ -288,8 +292,18 @@ impl ProtocolCodec {
         {
             return Err(EncodeError::MessageKindMismatch);
         }
-        let payload_len = self.encoded_non_ok_payload_len(frame.payload)?;
-        let tlv_count = non_ok_tlv_count(frame.payload)?;
+        let payload_len =
+            encoded_payload_len(|output| self.encode_non_ok_payload(frame.payload, output))?;
+        let tlv_count = crate::schema::non_ok::SPEC.field_count(&[
+            (
+                crate::schema::non_ok::DIAGNOSTIC,
+                frame.payload.diagnostics.len(),
+            ),
+            (
+                crate::schema::non_ok::BACKPRESSURE,
+                usize::from(frame.payload.backpressure.is_some()),
+            ),
+        ])?;
         encode_complete_frame(
             self,
             FrameKind::Response,
@@ -311,7 +325,9 @@ impl ProtocolCodec {
         frame: &TypedEventFrame<'_>,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
-        let (payload_len, tlv_count) = event_shape(self, &frame.payload)?;
+        let payload_len =
+            encoded_payload_len(|output| encode_event_payload(self, &frame.payload, output))?;
+        let tlv_count = event_field_count(&frame.payload)?;
         encode_complete_frame(
             self,
             FrameKind::Event,
@@ -519,126 +535,113 @@ const fn command_flags(revision: crate::ExpectedRevision) -> u8 {
     }
 }
 
-fn command_shape(
-    codec: &ProtocolCodec,
-    payload: &CommandPayload<'_>,
-) -> Result<(usize, u32), EncodeError> {
+fn encoded_payload_len(
+    encode: impl FnOnce(&mut [u8]) -> Result<usize, EncodeError>,
+) -> Result<usize, EncodeError> {
+    match encode(&mut []) {
+        Ok(length) => Ok(length),
+        Err(EncodeError::OutputTooSmall { required }) => Ok(required),
+        Err(error) => Err(error),
+    }
+}
+
+fn command_field_count(payload: &CommandPayload<'_>) -> Result<u32, EncodeError> {
     match payload {
-        CommandPayload::CapabilitiesGet | CommandPayload::TransportGet => Ok((0, 0)),
-        CommandPayload::SessionSnapshotGet(value) => {
-            Ok((codec.encoded_snapshot_request_len(*value), 2))
+        CommandPayload::CapabilitiesGet => {
+            crate::schema::capabilities_request::SPEC.field_count(&[])
         }
-        CommandPayload::SessionTransactionApply(_) => unreachable!("handled before payload sizing"),
-        CommandPayload::ParameterMetadataGet(value) => {
-            if value.limit == 0 || value.limit > 256 {
-                return Err(EncodeError::LimitExceeded);
-            }
-            Ok((32, 2))
+        CommandPayload::SessionSnapshotGet(_) => {
+            crate::schema::snapshot_request::SPEC.field_count(&[])
         }
-        CommandPayload::ParameterStateGet(value) => {
-            Ok((codec.encoded_parameter_state_request_len(value)?, 1))
+        CommandPayload::SessionTransactionApply(_) => {
+            unreachable!("handled as a complete transaction frame")
         }
-        CommandPayload::AutomationEnqueue(value) => {
-            Ok((codec.encoded_automation_enqueue_len(*value)?, 3))
+        CommandPayload::ParameterMetadataGet(_) => {
+            crate::schema::metadata_request::SPEC.field_count(&[])
         }
-        CommandPayload::TransportSet(value) => Ok((
-            codec.encoded_transport_set_request_len(*value),
-            if value.position.is_some() { 2 } else { 1 },
-        )),
-        CommandPayload::TelemetryConfigure(value) => {
-            Ok((codec.encoded_telemetry_configuration_len(value)?, 6))
+        CommandPayload::ParameterStateGet(_) => crate::schema::state_request::SPEC.field_count(&[]),
+        CommandPayload::AutomationEnqueue(_) => {
+            crate::schema::automation_enqueue::SPEC.field_count(&[])
         }
-        CommandPayload::CountersGet(value) => Ok((
-            codec.encoded_counters_request_len(value)?,
-            if value.all { 1 } else { 2 },
-        )),
-        CommandPayload::DiagnosticsGet(value) => {
-            if value.limit == 0 || value.limit > 256 {
-                return Err(EncodeError::LimitExceeded);
-            }
-            Ok((48, 3))
+        CommandPayload::TransportGet => crate::schema::transport_get::SPEC.field_count(&[]),
+        CommandPayload::TransportSet(value) => crate::schema::transport_set::SPEC.field_count(&[(
+            crate::schema::transport_set::POSITION,
+            usize::from(value.position.is_some()),
+        )]),
+        CommandPayload::TelemetryConfigure(_) => {
+            crate::schema::telemetry_configuration::SPEC.field_count(&[])
+        }
+        CommandPayload::CountersGet(value) => {
+            crate::schema::counters_request::SPEC.field_count(&[(
+                crate::schema::counters_request::IDS,
+                usize::from(!value.all),
+            )])
+        }
+        CommandPayload::DiagnosticsGet(_) => {
+            crate::schema::diagnostics_request::SPEC.field_count(&[])
         }
     }
 }
 
-fn success_shape(
-    codec: &ProtocolCodec,
-    payload: &SuccessResponsePayload<'_>,
-) -> Result<(usize, u32), EncodeError> {
+fn success_field_count(payload: &SuccessResponsePayload<'_>) -> Result<u32, EncodeError> {
     match payload {
-        SuccessResponsePayload::Capabilities(value) => {
-            Ok((codec.encoded_capabilities_len(value)?, 27))
+        SuccessResponsePayload::Capabilities(_) => {
+            crate::schema::capabilities::SPEC.field_count(&[])
         }
-        SuccessResponsePayload::SessionSnapshot(value) => {
-            Ok((codec.encoded_snapshot_len(*value)?, 4))
+        SuccessResponsePayload::SessionSnapshot(_) => {
+            crate::schema::snapshot::SPEC.field_count(&[])
         }
-        SuccessResponsePayload::SessionTransactionApplied(_) => Ok((16, 1)),
-        SuccessResponsePayload::ParameterMetadata(value) => Ok((
-            codec.encoded_parameter_metadata_page_len(value)?,
-            2 + u32::try_from(value.descriptors.len()).map_err(|_| EncodeError::LimitExceeded)?,
-        )),
-        SuccessResponsePayload::ParameterState(value) => {
-            Ok((codec.encoded_parameter_state_page_len(value)?, 4))
+        SuccessResponsePayload::SessionTransactionApplied(_) => {
+            crate::schema::transaction_applied::SPEC.field_count(&[])
         }
-        SuccessResponsePayload::AutomationEnqueued(_) => Ok((64, 4)),
+        SuccessResponsePayload::ParameterMetadata(value) => crate::schema::metadata_page::SPEC
+            .field_count(&[(
+                crate::schema::metadata_page::DESCRIPTOR,
+                value.descriptors.len(),
+            )]),
+        SuccessResponsePayload::ParameterState(_) => {
+            crate::schema::state_page::SPEC.field_count(&[])
+        }
+        SuccessResponsePayload::AutomationEnqueued(_) => {
+            crate::schema::automation_enqueued::SPEC.field_count(&[])
+        }
         SuccessResponsePayload::TransportGetSnapshot(_)
-        | SuccessResponsePayload::TransportSetSnapshot(_) => Ok((48, 3)),
-        SuccessResponsePayload::TelemetryConfiguration(value) => {
-            Ok((codec.encoded_telemetry_configuration_len(value)?, 6))
+        | SuccessResponsePayload::TransportSetSnapshot(_) => {
+            crate::schema::transport_snapshot::SPEC.field_count(&[])
         }
-        SuccessResponsePayload::CounterSnapshot(value) => Ok((
-            codec.encoded_counter_snapshot_len(value)?,
-            1 + u32::try_from(value.values.len()).map_err(|_| EncodeError::LimitExceeded)?,
-        )),
-        SuccessResponsePayload::DiagnosticsPage(value) => Ok((
-            codec.encoded_diagnostics_page_len(value)?,
-            2 + u32::try_from(value.diagnostics.len()).map_err(|_| EncodeError::LimitExceeded)?,
-        )),
+        SuccessResponsePayload::TelemetryConfiguration(_) => {
+            crate::schema::telemetry_configuration::SPEC.field_count(&[])
+        }
+        SuccessResponsePayload::CounterSnapshot(value) => crate::schema::counter_snapshot::SPEC
+            .field_count(&[(crate::schema::counter_snapshot::VALUE, value.values.len())]),
+        SuccessResponsePayload::DiagnosticsPage(value) => crate::schema::diagnostics_page::SPEC
+            .field_count(&[(
+                crate::schema::diagnostics_page::DIAGNOSTIC,
+                value.diagnostics.len(),
+            )]),
     }
 }
 
-fn event_shape(
-    codec: &ProtocolCodec,
-    payload: &EventPayload<'_>,
-) -> Result<(usize, u32), EncodeError> {
+fn event_field_count(payload: &EventPayload<'_>) -> Result<u32, EncodeError> {
     match payload {
-        EventPayload::SessionCommitted(_) => Ok((64, 4)),
-        EventPayload::AutomationCanceled(value) => {
-            if value.canceled_records == 0 {
-                return Err(EncodeError::LimitExceeded);
-            }
-            Ok((
-                codec.encoded_automation_canceled_len(*value),
-                if value.effective_sample.is_some() {
-                    6
-                } else {
-                    5
-                },
-            ))
+        EventPayload::SessionCommitted(_) => {
+            crate::schema::session_committed::SPEC.field_count(&[])
         }
-        EventPayload::TransportState(value) => Ok((
-            codec.encoded_transport_state_event_len(*value),
-            if value.origin_request_id.is_some() {
-                5
-            } else {
-                4
-            },
-        )),
-        EventPayload::MeterBatch(value) => Ok((codec.encoded_meter_batch_len(*value)?, 4)),
-        EventPayload::CounterSnapshot(value) => Ok((
-            codec.encoded_counter_snapshot_ref_len(*value)?,
-            1 + u32::try_from(value.values.len()).map_err(|_| EncodeError::LimitExceeded)?,
-        )),
-        EventPayload::Diagnostic(value) => Ok((codec.encoded_diagnostic_ref_len(value)?, 1)),
+        EventPayload::AutomationCanceled(value) => crate::schema::automation_canceled::SPEC
+            .field_count(&[(
+                crate::schema::automation_canceled::EFFECTIVE_SAMPLE,
+                usize::from(value.effective_sample.is_some()),
+            )]),
+        EventPayload::TransportState(value) => crate::schema::transport_state_event::SPEC
+            .field_count(&[(
+                crate::schema::transport_state_event::ORIGIN_REQUEST_ID,
+                usize::from(value.origin_request_id.is_some()),
+            )]),
+        EventPayload::MeterBatch(_) => crate::schema::meter_batch::SPEC.field_count(&[]),
+        EventPayload::CounterSnapshot(value) => crate::schema::counter_snapshot::SPEC
+            .field_count(&[(crate::schema::counter_snapshot::VALUE, value.values.len())]),
+        EventPayload::Diagnostic(_) => crate::schema::diagnostic_event::SPEC.field_count(&[]),
     }
-}
-
-fn non_ok_tlv_count(value: &NonOkResponse) -> Result<u32, EncodeError> {
-    u32::try_from(value.diagnostics.len())
-        .map_err(|_| EncodeError::LimitExceeded)?
-        .checked_add(1)
-        .and_then(|count| count.checked_add(u32::from(value.backpressure.is_some())))
-        .ok_or(EncodeError::LimitExceeded)
 }
 
 #[allow(clippy::too_many_arguments)] // The frozen outer-header fields are deliberately explicit.
