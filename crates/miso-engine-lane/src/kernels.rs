@@ -125,7 +125,9 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 /// 9. `y = fma(m2, v2, fma(m1, v1, m0 * v0))`
 /// 10. `store(frame, y)`
 ///
-/// `-c1` is computed once per block as a sign-bit flip, which is exact.
+/// `-c1` is computed once per block as a sign-bit flip, which is exact. Steps 2 to 9 are
+/// [`svf_step`], which is the only copy of them: this kernel, [`svf_block_ramped`] and the fused
+/// chain kernels of [`builtins`] all call it, so the numeric contract has one home.
 #[inline(always)]
 pub fn svf_block<L: Lane>(io: &mut [f32], frames: usize, c: &SvfCoef<L>, s: &mut SvfState<L>) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
