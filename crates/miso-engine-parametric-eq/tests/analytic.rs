@@ -502,3 +502,34 @@ fn the_pcm_fixture_rows_are_oracle_bounded() {
     }
     eprintln!("issue-087 pcm-fixture rows worst_error_db={worst:.6e}");
 }
+
+/// The stability predicate separates contractive from expansive word triples.
+///
+/// `word_spectral_norm` is the guard `design_svf_v1` applies and the quantity the ramp gate above
+/// measures, so it has to be discriminating in its own right. Spectral *radius* is not enough: this
+/// triple has both eigenvalues on the unit circle and an operator norm of 1.4, because the state
+/// matrix is strongly non-normal — which is exactly the failure mode a per-sample coefficient
+/// update can excite and a direct-form realization cannot survive.
+#[test]
+fn the_spectral_norm_predicate_separates_contractive_from_expansive_words() {
+    let tolerance = 1.0 + 1.0 / 4_194_304.0;
+    let expansive = EqSvfWordsV1 {
+        c1: 0.1,
+        a2: 0.3,
+        a3: 0.9,
+        m0: 1.0,
+        m1: 0.0,
+        m2: 0.0,
+    };
+    let norm = miso_engine_parametric_eq::word_spectral_norm(expansive);
+    assert!(norm > tolerance, "expansive triple scored {norm}");
+    assert!(
+        (norm - 1.4).abs() < 1.0e-8,
+        "expansive triple scored {norm}"
+    );
+    assert_eq!(
+        miso_engine_parametric_eq::word_spectral_norm(EqSvfWordsV1::IDENTITY),
+        1.0,
+        "the identity section is an isometry"
+    );
+}
