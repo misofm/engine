@@ -31,6 +31,20 @@ closure=(
     -p miso-engine-graph
     -p miso-engine-graph-compiler
 )
+# The pre-v3 x86 leg (`-avx2,-fma`) cannot include `miso-engine-graph-compiler` any more. It reaches
+# `miso-engine-effect-compiler`, which registers the native effects, and from wave 2 onward an effect
+# crate depends on `miso-engine-lane` -- which `compile_error!`s on x86 without AVX2+FMA on purpose
+# (master plan #83 D4: the engine is built for x86-64-v3, attested once at boot, with no runtime
+# dispatch and no silent scalar fallback). A pre-v3 x86 build of the effect closure is therefore not
+# a thing that exists, and asking for one is asking for the fallback D4 abolished. What this leg is
+# actually about -- that `miso-engine-core`'s scalar kernels compile and select scalar instructions
+# without AVX2 -- is unchanged, and the object probes below still run on exactly that build.
+scalar_closure=(
+    -p miso-engine-core
+    -p miso-engine-builtins
+    -p miso-engine-builtins-compiler
+    -p miso-engine-graph
+)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-issue068.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 
@@ -94,8 +108,10 @@ build_closure() {
     features=$3
     local -a target_args=()
     [[ -z "$target" ]] || target_args=(--target "$target")
+    local -a packages=("${closure[@]}")
+    [[ "$features" != *-avx2* ]] || packages=("${scalar_closure[@]}")
     RUSTFLAGS="-C target-feature=$features" CARGO_TARGET_DIR="$scratch/$name" \
-        cargo check --locked --release "${closure[@]}" "${target_args[@]}"
+        cargo check --locked --release "${packages[@]}" "${target_args[@]}"
     printf 'issue068 build leg=%s target=%s features=%s result=PASS compile-or-object-only\n' \
         "$name" "${target:-native}" "$features"
 }
