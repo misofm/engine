@@ -15,6 +15,33 @@ The old 13-symbol inventory is superseded by the current 14-symbol ABI, includin
 
 Issue 103 remains open after this checkpoint for F1 and the later wave-4 CAPI/web facade work.
 
+### Briefing/preflight correction
+
+The first Sol High turn stopped before implementation after the originally named pre-fix Miri
+command ran zero tests (`0 passed; 18 filtered out`): E1 had not yet been scaffolded. It exercised
+no code and is invalid evidence, not an implementation attempt. Sol XHigh approved one bounded
+brief correction without weakening Miri:
+
+- `implementation_attempts_started=0` and `failed_implementation_attempts=0` at correction time;
+- `invalid_zero_test_miri_invocations=1`;
+- `tests_executed_by_invalid_invocation=0`;
+- `valid_miri_evidence_invocations=0`.
+
+Before production changes, add only the E1 qualification scaffold in `ffi.rs` while retaining the
+whole-Plan/`RefCell` defect. Freeze its exact name as
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render`. A non-Miri `--list` preflight must
+find that exact name once. Only then is one replacement valid pre-fix run authorized; it must say
+`running 1 test` and fail for the expected whole-Plan alias/data-race defect. An unrelated failure
+or pass is STOP. After that red, implementation attempt 1 may begin and exactly one identical
+corrected run must execute one test and pass.
+
+Final successful counters are `miri_named_invocations_total=3`,
+`invalid_zero_test_miri_invocations=1`, `valid_pre_fix_red_invocations=1`,
+`valid_corrected_green_invocations=1`, `valid_miri_evidence_invocations=2`,
+`miri_retries_of_valid_workload=0`, `implementation_attempts_started=1`, and
+`failed_implementation_attempts=0`. No alternate filter, substitute toolchain or extra retry is
+authorized.
+
 ## Accepted authority and frozen behavior
 
 Preserve the accepted Issue-113 through Issue-121 implementation, including:
@@ -159,11 +186,21 @@ the compile-fail example unexpectedly compile.
 
 ## Required commands
 
-Run one pre-fix and one corrected pinned-Miri invocation for E1; no other Miri retry or tuning:
+After adding only the E1 scaffold with the production defect intact, preflight its exact name:
+
+```sh
+cargo +nightly-2026-08-20 test --locked -p miso-engine-capi --lib -- --list
+```
+
+The output must contain exactly one
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render: test` line. Then run one valid
+pre-fix and one corrected pinned-Miri invocation with the identical exact filter; no other valid-
+workload retry or tuning:
 
 ```sh
 rustup +nightly-2026-08-20 component add miri
-cargo +nightly-2026-08-20 miri test --locked -p miso-engine-capi --lib plan_queries_are_pure
+cargo +nightly-2026-08-20 miri test --locked -p miso-engine-capi --lib -- \
+  ffi::tests::plan_queries_are_pure_and_concurrent_with_render --exact --nocapture
 ```
 
 Then run:
@@ -194,7 +231,8 @@ record the exact failure and stop before implementation; do not substitute an un
 
 ## Evidence and completion
 
-Record the base/candidate/tree and exact changed paths; old and new Plan ownership; active-report
+Record the base/candidate/tree and exact changed paths; the invalid zero-test invocation and final
+Miri counters; old and new Plan ownership; active-report
 transition before/after a committed replacement; all 14 header ownership rows; diagnostic table;
 every cap/alignment site and exact rejection; E1–E6 results; pre-fix and corrected Miri results;
 each red mutation; independent resource-owner totals; format/Clippy/test/doc/policy results; frozen
