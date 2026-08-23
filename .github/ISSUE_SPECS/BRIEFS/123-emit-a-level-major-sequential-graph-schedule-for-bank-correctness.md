@@ -2,11 +2,11 @@
 
 ## Decision
 
-**READY / SOL XHIGH REBRIEF PASS.** After the recorded terminal verdict, the user directed
+**COMPLETE / SOL XHIGH PASS.** After the recorded terminal verdict, the user directed
 execution of standing controller Issue 125. AGENTS.md and Issue 125 authorize a narrower,
 synchronized in-place rescope rather than a disguised fourth retry or a new attempt issue. This
-fresh workflow permits one Sol High implementation pass and, only after a Sol XHigh HOLD, one
-bounded correction.
+fresh workflow passed its first Sol High implementation attempt at `494f4fe` under Sol XHigh
+adversarial review; no HOLD or correction was consumed.
 
 The replacement gates are #98 wave-0 E1/E2 plus the Issue-037 100-layout transcript derived from
 independently prepared native execution on every layout. The previous 100,000-render audit remains
@@ -158,3 +158,16 @@ Final counters are
 
 Verdict: **terminal STOP, no overall PASS, no retry.** The technical checkpoint is preserved as
 input only and does not unblock Issue 026.
+
+## Fresh-rescope verdict
+
+Sol High candidate `494f4fe91ed1b9d5acf25426dc05543d386a7d61` (tree
+`ddb902be388453e55561b7f25d002d9ee1028004`) received strict Sol XHigh PASS on attempt 1. It closes
+the replacement gates with exact three-block analytic W4 output, production-selected W8-plus-tail
+sequential/native parity and independently prepared native PCM/counter equality on 100/100
+Issue-037 layouts before re-pinning `0xc85b220980077824` to `0x4965aa764307e393`.
+
+The stopped periodic extrapolation did not return, the historical long audit was not rerun, all
+red mutations failed and were reverted, the fixture exception remains exact, and integration with
+accepted Issue-94 commit `97e1a03` is clean. This fresh PASS supersedes only the earlier terminal
+verdict for the explicitly rescoped proof; the stopped checkpoint remains technical input only.

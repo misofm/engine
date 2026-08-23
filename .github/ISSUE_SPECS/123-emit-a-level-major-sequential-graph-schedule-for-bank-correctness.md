@@ -6,12 +6,12 @@ Make the compiler's canonical sequential graph schedule exactly the concatenatio
 sorted dependency levels so a retained homogeneous bank never gathers another member's input
 before that input has been produced in the current block.
 
-**RESCOPED RESTART / READY.** The user directed execution of standing audit controller Issue 125
+**COMPLETE / SOL XHIGH PASS.** The user directed execution of standing audit controller Issue 125
 after the terminal verdict recorded below. AGENTS.md requires a failed shape to be rescoped and
 rebriefed before work restarts, while Issue 125 requires Issue 123 to finish in place rather than
-creating an attempt issue. Sol XHigh therefore approved this synchronized, narrower restart on
-2026-08-23. The fresh workflow has at most one Sol High implementation pass and one bounded
-correction after a Sol XHigh HOLD.
+creating an attempt issue. Sol XHigh approved this synchronized narrower restart and returned
+strict PASS on its first fresh Sol High implementation attempt on 2026-08-23; no correction was
+consumed.
 
 The old 100,000-render audit remains consumed: invocation count `1`, retry count `0`. It is not an
 acceptance gate, may not be rerun, and neither its `0xf8ee_8fef_8f42_3df4` candidate nor the stopped
@@ -378,3 +378,72 @@ Issue 123 has **no overall PASS**. Commit
 `34d0e825d8d470ce499f423276a1e28c3e19f991` is technical input only and does not unblock Issue 026
 or authorize a retry, another correction, a second 100,000-render audit, timing, benchmark or
 performance claim.
+
+## Rescoped implementation and final Sol XHigh evidence — 2026-08-23
+
+The authoritative rescope above restarted the workflow with a different proof shape. Sol High
+implemented it at `494f4fe91ed1b9d5acf25426dc05543d386a7d61` (tree
+`ddb902be388453e55561b7f25d002d9ee1028004`) and Sol XHigh returned strict PASS on attempt 1.
+The stopped checkpoint remains historical technical input only; no stopped long-corpus inference
+was reused.
+
+The exact implementation paths and SHA-256 identities are:
+
+- `crates/miso-engine-graph/src/lib.rs`:
+  `8b3672c4ddbd733b66e1c7d47c3d11b0ff5c13ff3a093679239aa0e1c0c4aa89`;
+- `crates/miso-engine-graph-compiler/src/lib.rs`:
+  `0aeba99e09b841986108d6cb3fbec096946dc129d5aeeea60c79098b8e72be78`.
+
+Their exact binary diff SHA-256 is
+`86f4283f539127837bc569da0396080826e06f0669ea4a5372ff9ba7a83d6230`.
+No fixture, manifest, Cargo file, native scheduler, render loop or unrelated crate changed.
+
+The compiler now emits the sequential schedule by flattening the accepted sorted levels and
+recolors from that exact schedule. The reverse-route tail changed from Kahn order
+`submix:a -> route:z -> submix:z -> route:a` to level-major order
+`submix:a -> submix:z -> route:a -> route:z`; accepted Issue-122 level bytes did not change. Its
+canonical SHA-256 changed from
+`3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce` to
+`464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5` for the authorized schedule
+identity change. Independent interval reconstruction, identity aliasing, fan-out liveness and
+simultaneous bank-color distinction all passed.
+
+One private structural validator is shared by scalar/native and source/no-source binding after
+binding/source/observer validation and before executor or scheduler construction. It rejects
+schedule, node, level, edge and bank corruption with `graph.scheduler.layout`, returns all
+ownership transactionally and permits a corrected retry.
+
+E1 produced exact analytic PCM `10/-15`, `20/-30`, `30/-45` across three blocks through scalar,
+banked sequential and native `SingleThread` plans. It observed every lane in stable order 12 times
+per plan, retained zero node latency and no inserted PDC, reported scalar counters `[0,0]` and
+banked/native counters `[3,3]`, and selected `Sequential(SingleThread)` natively. Removing the guard
+exposed the auditor's exact stale left transcript `[1,11,21]`.
+
+E2 used the production-selected X86Avx2Fma W8 bank plus four-track scalar tail. Separately prepared
+sequential/native plans produced bit-identical nonzero PCM for all three blocks with matching
+counters and distinct simultaneous bank colors.
+
+The Issue-037 test independently prepared and rendered native `SingleThread` execution for every
+one of the 100 layouts. Sequential PCM and counters matched the native values before each fold.
+Only then was the transcript re-pinned from `0xc85b220980077824` to
+`0x4965aa764307e393`. Restoring the stale literal failed with those exact values; flipping one
+native-oracle bit failed the pre-fold equality.
+
+Other executed and reverted red mutations restored ready-pop/Kahn emission, reversed the coloring
+input, processed only the first bank member and triggered at the last member. They respectively
+failed schedule equality, independent assignment reconstruction, observer audio and block-zero
+lane audio. No mutation remains.
+
+PASS commands covered locked graph and graph-compiler checks/tests (15 graph tests, 26 compiler
+tests, binaries, doctests and the 65,537-track scale test), all-target/all-feature warning-denied
+Clippy, all-feature warning-denied rustdoc, formatting, graph/realtime/workspace policies and the
+realtime mutation suite. Integration with disjoint accepted Issue-94 checkpoint `97e1a03` passed
+the focused multiband graph-compiler gate.
+
+The graph fixture command still exits 1 with sole output `graph fixture manifest mismatch`; all
+seven pinned fixture paths/hashes and the accepted checked/generated exception remain exact. The
+historical 100,000-render audit was not invoked in the fresh workflow: total invocation count stays
+`1`, retry count `0`; benchmark and timed-benchmark counts stay zero.
+
+This PASS closes Issue-098 F1 only. Issue-098 F2–F13 and Issue-099 wave 3 remain open. GitHub Issue
+123 closes after this evidence is upstream on `main` and the resulting CI run is green.
