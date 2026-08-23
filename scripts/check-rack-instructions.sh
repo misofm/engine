@@ -5,6 +5,16 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
+# Issue-083 D12 added `[profile.release] lto = "fat"` to the workspace. Under fat LTO, rustc emits
+# LLVM bitcode into the `.o` files this script disassembles, and `objdump` reports "file format not
+# recognized". Turn link-time optimisation off for these single-crate probes only.
+#
+# This does not weaken the check. The probe compiles `-p miso-engine-core --lib` on its own and
+# disassembles one function to see which instructions the target selected; it never links, and LTO
+# is a link-time transform across crates that plays no part in that selection. `lto = false` is the
+# setting these gates were written against, before the workspace had a release profile at all.
+export CARGO_PROFILE_RELEASE_LTO=false
+
 fail() {
     printf 'rack instruction failure: %s\n' "$1" >&2
     exit 1
