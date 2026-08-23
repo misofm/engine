@@ -57,13 +57,20 @@ outputs are never retained.
 ## Atomic publication and diagnostics
 
 Both the final path and exact sibling `OUTPUT.issue073.partial` must be absent. The runner creates
-the partial with create-new semantics, streams and hashes bytes, flushes and synchronizes it, then
-retains its descriptor to verify exact `frames * 8` length, digest, and file identity. On Linux,
-`linkat(AT_EMPTY_PATH)` publishes that exact retained inode only if the final name is still absent;
-other native hosts require the partial path to retain the same device/inode through their
-same-directory no-replace hard-link. Removal is identity-checked and leaves a single final name.
-Failures remove only an owned partial and leave the requested final absent.
-Existing regular files, symlinks, and hardlinks are never followed, truncated, or replaced.
+the partial with create-new semantics, streams and hashes bytes, flushes and synchronizes it, and
+retains the create-new handle through exact `frames * 8` length, digest, and identity checks.
+Publication is explicit per supported host family and never falls back to a checked pathname:
+
+- Linux and Android use `linkat(AT_EMPTY_PATH)` on the retained descriptor;
+- Apple Unix uses no-replace `linkat` through the retained `/dev/fd/N` descriptor name; and
+- Windows uses no-replace `SetFileInformationByHandle(FileLinkInfo)` on the retained handle.
+
+Unix compares device/inode identity and Windows compares volume serial/file index identity from
+opened handles. Each primitive publishes the exact retained file only while the final name is
+absent. Removal is identity-checked and leaves a single final name. Existing regular files,
+symlinks, and hardlinks are never followed, truncated, or replaced. A native platform without one
+of these proved adapters returns `preflight/platform.unsupported` before output creation or engine
+invocation.
 
 Stderr failures have the stable tab-separated form:
 

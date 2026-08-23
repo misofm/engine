@@ -6,7 +6,10 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -16,8 +19,12 @@ use std::{
     path::{Component, Path, PathBuf},
     ptr,
 };
-#[cfg(target_os = "linux")]
-use std::{ffi::CString, os::fd::AsRawFd, os::unix::ffi::OsStrExt};
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+use std::{
+    ffi::CString,
+    os::fd::AsRawFd,
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+};
 
 use miso_engine_capi as capi;
 use miso_engine_session::{SessionTomlV1, parse_session_toml};
@@ -231,6 +238,12 @@ fn run_with(
     validate_scalar_contract(arguments, &model)?;
     let ring_frames = u32::try_from(model.limits.pcm_ring_frames)
         .map_err(|_| RunnerError::new(FailurePhase::Preflight, "ring.overflow"))?;
+    if !platform_supported() {
+        return Err(RunnerError::new(
+            FailurePhase::Preflight,
+            "platform.unsupported",
+        ));
+    }
     preflight_output(&arguments.output)?;
     let mut sources = resolve_sources(&model, &arguments.source_root)?;
     engine.compile(
@@ -258,6 +271,15 @@ fn run_with(
         sink.write_block(&rendered)?;
     }
     sink.finish()
+}
+
+const fn platform_supported() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    ))
 }
 
 fn read_bounded_session(path: &Path) -> Result<Vec<u8>, RunnerError> {
@@ -573,9 +595,17 @@ enum RealOutputFault {
     #[cfg(test)]
     ShortWrite,
     #[cfg(test)]
+    Flush,
+    #[cfg(test)]
     Sync,
     #[cfg(test)]
+    Digest,
+    #[cfg(test)]
     Publish,
+    #[cfg(test)]
+    PartialUnlink,
+    #[cfg(test)]
+    FinalVerify,
 }
 
 #[derive(Default)]
@@ -590,11 +620,61 @@ struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        Self {
+    #[cfg(unix)]
+    fn from_file(file: &File) -> Option<Self> {
+        let metadata = file.metadata().ok()?;
+        Some(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn from_file(file: &File) -> Option<Self> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct FileTime {
+            low: u32,
+            high: u32,
         }
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct ByHandleFileInformation {
+            attributes: u32,
+            creation: FileTime,
+            access: FileTime,
+            write: FileTime,
+            volume_serial: u32,
+            size_high: u32,
+            size_low: u32,
+            link_count: u32,
+            index_high: u32,
+            index_low: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileInformationByHandle(
+                file: *mut c_void,
+                information: *mut ByHandleFileInformation,
+            ) -> i32;
+        }
+        let mut information = ByHandleFileInformation::default();
+        // SAFETY: The retained std File supplies a live Windows handle and `information` is exact
+        // writable fixed storage for this call.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) } == 0 {
+            return None;
+        }
+        Some(Self {
+            device: u64::from(information.volume_serial),
+            inode: (u64::from(information.index_high) << 32) | u64::from(information.index_low),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn from_file(_file: &File) -> Option<Self> {
+        None
     }
 }
 
@@ -611,11 +691,60 @@ struct RealOutputSink {
 }
 
 impl RealOutputSink {
-    fn path_is_owned(&self, path: &Path) -> bool {
-        fs::symlink_metadata(path)
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn open_without_follow(path: &Path) -> Option<File> {
+        const O_NOFOLLOW: i32 = 0x2_0000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
             .ok()
-            .filter(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
-            .is_some_and(|metadata| FileIdentity::from_metadata(&metadata) == self.identity)
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn open_without_follow(path: &Path) -> Option<File> {
+        const O_NOFOLLOW: i32 = 0x100;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .ok()
+    }
+
+    #[cfg(windows)]
+    fn open_without_follow(path: &Path) -> Option<File> {
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x20_0000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    fn open_without_follow(_path: &Path) -> Option<File> {
+        None
+    }
+
+    fn path_is_owned(&self, path: &Path) -> bool {
+        let Some(metadata) = fs::symlink_metadata(path).ok() else {
+            return false;
+        };
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return false;
+        }
+        let Some(file) = Self::open_without_follow(path) else {
+            return false;
+        };
+        file.metadata()
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_file())
+            && FileIdentity::from_file(&file) == Some(self.identity)
     }
 
     fn remove_owned_partial(&self) {
@@ -624,7 +753,13 @@ impl RealOutputSink {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    fn remove_owned_final(&self) {
+        if self.path_is_owned(&self.final_path) {
+            let _ = fs::remove_file(&self.final_path);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn publish_owned_inode(&self, file: &File) -> Result<(), RunnerError> {
         const AT_FDCWD: i32 = -100;
         const AT_EMPTY_PATH: i32 = 0x1000;
@@ -660,13 +795,191 @@ impl RealOutputSink {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn publish_owned_inode(&self, _file: &File) -> Result<(), RunnerError> {
-        if !self.path_is_owned(&self.partial_path) {
-            return Err(RunnerError::new(FailurePhase::Output, "partial.replaced"));
+    #[cfg(target_vendor = "apple")]
+    fn publish_owned_inode(&self, file: &File) -> Result<(), RunnerError> {
+        const AT_FDCWD: i32 = -2;
+        const AT_SYMLINK_FOLLOW: i32 = 0x40;
+        unsafe extern "C" {
+            fn linkat(
+                old_directory: i32,
+                old_path: *const std::ffi::c_char,
+                new_directory: i32,
+                new_path: *const std::ffi::c_char,
+                flags: i32,
+            ) -> i32;
         }
-        fs::hard_link(&self.partial_path, &self.final_path)
-            .map_err(|_| RunnerError::new(FailurePhase::Publish, "final.exists_or_publish"))
+        let held_path = CString::new(format!("/dev/fd/{}", file.as_raw_fd()))
+            .map_err(|_| RunnerError::new(FailurePhase::Publish, "partial.handle"))?;
+        let final_path = CString::new(self.final_path.as_os_str().as_bytes())
+            .map_err(|_| RunnerError::new(FailurePhase::Publish, "final.path"))?;
+        // SAFETY: `/dev/fd/N` is the Darwin descriptor namespace for the retained file and
+        // `AT_SYMLINK_FOLLOW` makes `linkat` link that exact held file. The final link is created
+        // atomically and the kernel rejects every existing final-name kind.
+        let result = unsafe {
+            linkat(
+                AT_FDCWD,
+                held_path.as_ptr(),
+                AT_FDCWD,
+                final_path.as_ptr(),
+                AT_SYMLINK_FOLLOW,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(RunnerError::new(
+                FailurePhase::Publish,
+                "final.exists_or_publish",
+            ))
+        }
+    }
+
+    #[cfg(windows)]
+    fn publish_owned_inode(&self, file: &File) -> Result<(), RunnerError> {
+        use std::{ffi::c_void, mem::size_of, ptr::null_mut};
+
+        #[repr(C)]
+        struct FileLinkInfo {
+            replace_if_exists: u8,
+            root_directory: *mut c_void,
+            file_name_length: u32,
+            file_name: [u16; 1],
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetFileInformationByHandle(
+                file: *mut c_void,
+                information_class: u32,
+                information: *const c_void,
+                bytes: u32,
+            ) -> i32;
+        }
+        const FILE_LINK_INFO_CLASS: u32 = 11;
+        let final_name: Vec<u16> = self.final_path.as_os_str().encode_wide().collect();
+        let name_bytes = final_name
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| RunnerError::new(FailurePhase::Publish, "final.path"))?;
+        let total = size_of::<FileLinkInfo>()
+            .checked_add(final_name.len().saturating_sub(1) * size_of::<u16>())
+            .ok_or_else(|| RunnerError::new(FailurePhase::Publish, "final.path"))?;
+        let mut storage = vec![0_u64; total.div_ceil(size_of::<u64>())];
+        let info = storage.as_mut_ptr().cast::<FileLinkInfo>();
+        // SAFETY: `storage` is aligned and large enough for the fixed header plus exact UTF-16
+        // name. The handle is the retained create-new file; ReplaceIfExists is false, so Windows
+        // creates a hard link to that exact handle and rejects every existing final name.
+        let result = unsafe {
+            (*info).replace_if_exists = 0;
+            (*info).root_directory = null_mut();
+            (*info).file_name_length = name_bytes;
+            std::ptr::copy_nonoverlapping(
+                final_name.as_ptr(),
+                (*info).file_name.as_mut_ptr(),
+                final_name.len(),
+            );
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FILE_LINK_INFO_CLASS,
+                info.cast(),
+                u32::try_from(total)
+                    .map_err(|_| RunnerError::new(FailurePhase::Publish, "final.path"))?,
+            )
+        };
+        if result != 0 {
+            Ok(())
+        } else {
+            Err(RunnerError::new(
+                FailurePhase::Publish,
+                "final.exists_or_publish",
+            ))
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    fn publish_owned_inode(&self, _file: &File) -> Result<(), RunnerError> {
+        Err(RunnerError::new(
+            FailurePhase::Preflight,
+            "platform.unsupported",
+        ))
+    }
+}
+
+trait PublicationAdapter {
+    fn partial_is_owned(&mut self) -> bool;
+    fn publish_held(&mut self) -> Result<(), RunnerError>;
+    fn final_is_owned(&mut self) -> bool;
+    fn remove_owned_partial(&mut self) -> Result<(), RunnerError>;
+    fn remove_owned_final(&mut self);
+}
+
+fn complete_publication(adapter: &mut impl PublicationAdapter) -> Result<(), RunnerError> {
+    if !adapter.partial_is_owned() {
+        return Err(RunnerError::new(FailurePhase::Output, "partial.replaced"));
+    }
+    adapter.publish_held()?;
+    if !adapter.partial_is_owned() || !adapter.final_is_owned() {
+        adapter.remove_owned_final();
+        return Err(RunnerError::new(FailurePhase::Publish, "path.replaced"));
+    }
+    if let Err(error) = adapter.remove_owned_partial() {
+        adapter.remove_owned_final();
+        return Err(error);
+    }
+    if !adapter.final_is_owned() {
+        adapter.remove_owned_final();
+        return Err(RunnerError::new(FailurePhase::Publish, "final.shape"));
+    }
+    Ok(())
+}
+
+struct OsPublication<'a> {
+    sink: &'a RealOutputSink,
+    file: &'a File,
+    final_checks: u8,
+}
+
+impl PublicationAdapter for OsPublication<'_> {
+    fn partial_is_owned(&mut self) -> bool {
+        self.sink.path_is_owned(&self.sink.partial_path)
+    }
+
+    fn publish_held(&mut self) -> Result<(), RunnerError> {
+        #[cfg(test)]
+        if matches!(self.sink.fault, RealOutputFault::Publish) {
+            return Err(RunnerError::new(FailurePhase::Publish, "injected.publish"));
+        }
+        self.sink.publish_owned_inode(self.file)
+    }
+
+    fn final_is_owned(&mut self) -> bool {
+        self.final_checks = self.final_checks.saturating_add(1);
+        #[cfg(test)]
+        if matches!(self.sink.fault, RealOutputFault::FinalVerify) && self.final_checks == 2 {
+            return false;
+        }
+        self.sink.path_is_owned(&self.sink.final_path)
+    }
+
+    fn remove_owned_partial(&mut self) -> Result<(), RunnerError> {
+        #[cfg(test)]
+        if matches!(self.sink.fault, RealOutputFault::PartialUnlink) {
+            return Err(RunnerError::new(FailurePhase::Publish, "partial.remove"));
+        }
+        if !self.sink.path_is_owned(&self.sink.partial_path) {
+            return Err(RunnerError::new(FailurePhase::Publish, "path.replaced"));
+        }
+        fs::remove_file(&self.sink.partial_path)
+            .map_err(|_| RunnerError::new(FailurePhase::Publish, "partial.remove"))
+    }
+
+    fn remove_owned_final(&mut self) {
+        self.sink.remove_owned_final();
     }
 }
 
@@ -691,11 +1004,8 @@ impl OutputBoundary for RealOutput {
             .create_new(true)
             .open(&partial_path)
             .map_err(|_| RunnerError::new(FailurePhase::Output, "partial.create"))?;
-        let identity = FileIdentity::from_metadata(
-            &file
-                .metadata()
-                .map_err(|_| RunnerError::new(FailurePhase::Output, "partial.inspect"))?,
-        );
+        let identity = FileIdentity::from_file(&file)
+            .ok_or_else(|| RunnerError::new(FailurePhase::Preflight, "platform.identity"))?;
         Ok(Box::new(RealOutputSink {
             final_path: final_path.to_path_buf(),
             partial_path,
@@ -749,6 +1059,10 @@ impl OutputSink for RealOutputSink {
             .file
             .take()
             .ok_or_else(|| RunnerError::new(FailurePhase::Output, "partial.closed"))?;
+        #[cfg(test)]
+        if matches!(self.fault, RealOutputFault::Flush) {
+            return Err(RunnerError::new(FailurePhase::Output, "partial.flush"));
+        }
         file.flush()
             .map_err(|_| RunnerError::new(FailurePhase::Output, "partial.flush"))?;
         #[cfg(test)]
@@ -777,30 +1091,18 @@ impl OutputSink for RealOutputSink {
             }
             verifier.update(&buffer[..count]);
         }
+        #[cfg(test)]
+        if matches!(self.fault, RealOutputFault::Digest) {
+            return Err(RunnerError::new(FailurePhase::Output, "partial.digest"));
+        }
         if <[u8; 32]>::from(verifier.finalize()) != expected_digest {
             return Err(RunnerError::new(FailurePhase::Output, "partial.digest"));
         }
-        #[cfg(test)]
-        if matches!(self.fault, RealOutputFault::Publish) {
-            return Err(RunnerError::new(FailurePhase::Publish, "injected.publish"));
-        }
-        self.publish_owned_inode(&file)?;
-        if !self.path_is_owned(&self.partial_path) || !self.path_is_owned(&self.final_path) {
-            if self.path_is_owned(&self.final_path) {
-                let _ = fs::remove_file(&self.final_path);
-            }
-            return Err(RunnerError::new(FailurePhase::Publish, "path.replaced"));
-        }
-        if fs::remove_file(&self.partial_path).is_err() {
-            if self.path_is_owned(&self.final_path) {
-                let _ = fs::remove_file(&self.final_path);
-            }
-            return Err(RunnerError::new(FailurePhase::Publish, "partial.remove"));
-        }
-        if !self.path_is_owned(&self.final_path) {
-            return Err(RunnerError::new(FailurePhase::Publish, "final.shape"));
-        }
-        Ok(())
+        complete_publication(&mut OsPublication {
+            sink: &self,
+            file: &file,
+            final_checks: 0,
+        })
     }
 }
 
@@ -1553,7 +1855,25 @@ mod tests {
             fs::read(&final_path).expect("output"),
             [0, 0, 0, 0, 0, 0, 0, 128]
         );
+        assert_eq!(
+            fs::symlink_metadata(&final_path)
+                .expect("accepted metadata")
+                .nlink(),
+            1
+        );
         assert!(!partial_path(&final_path).expect("partial").exists());
+        let error = match RealOutput::default().begin(&final_path, 8) {
+            Ok(_) => panic!("second publication must not overwrite"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            (error.phase, error.code),
+            (FailurePhase::Preflight, "output.exists")
+        );
+        assert_eq!(
+            fs::read(&final_path).expect("preserved output"),
+            [0, 0, 0, 0, 0, 0, 0, 128]
+        );
         fs::remove_dir_all(temp).expect("remove temp");
     }
 
@@ -1727,16 +2047,40 @@ mod tests {
                 "partial.short_write",
             ),
             (
+                "flush",
+                RealOutputFault::Flush,
+                FailurePhase::Output,
+                "partial.flush",
+            ),
+            (
                 "sync",
                 RealOutputFault::Sync,
                 FailurePhase::Output,
                 "partial.sync",
             ),
             (
+                "digest",
+                RealOutputFault::Digest,
+                FailurePhase::Output,
+                "partial.digest",
+            ),
+            (
                 "publish",
                 RealOutputFault::Publish,
                 FailurePhase::Publish,
                 "injected.publish",
+            ),
+            (
+                "partial-unlink",
+                RealOutputFault::PartialUnlink,
+                FailurePhase::Publish,
+                "partial.remove",
+            ),
+            (
+                "final-verify",
+                RealOutputFault::FinalVerify,
+                FailurePhase::Publish,
+                "final.shape",
             ),
         ] {
             let temp = temp_dir(label);
@@ -1750,6 +2094,225 @@ mod tests {
             assert!(!partial_path(&output_path).expect("partial").exists());
             fs::remove_dir_all(temp).expect("remove temp");
         }
+
+        let temp = temp_dir("length");
+        let final_path = temp.join("out");
+        let mut sink = RealOutput::default()
+            .begin(&final_path, 12)
+            .expect("length begin");
+        sink.write_block(&[0.0, -0.0]).expect("length write");
+        let error = sink.finish().expect_err("length mismatch");
+        assert_eq!(
+            (error.phase, error.code),
+            (FailurePhase::Output, "partial.length")
+        );
+        assert!(!final_path.exists());
+        assert!(!partial_path(&final_path).expect("partial").exists());
+        fs::remove_dir_all(temp).expect("remove temp");
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FakeEntry {
+        Owned,
+        WrongPublished,
+        Sentinel(&'static str),
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FakeMutation {
+        None,
+        ReplacePartialBeforeInitial(&'static str),
+        ReplacePartialBeforePublish(&'static str),
+        ReplacePartialBeforeSecondCheck(&'static str),
+        ReplacePartialBeforeUnlink(&'static str),
+        FinalCollision(&'static str),
+        WrongIdentityPublication,
+        PublishFailure,
+        PartialUnlinkFailure,
+        FinalVerificationFailure,
+    }
+
+    struct FakePublication {
+        partial: Option<FakeEntry>,
+        final_entry: Option<FakeEntry>,
+        mutation: FakeMutation,
+        partial_checks: u8,
+        final_checks: u8,
+        publish_calls: u8,
+        unlink_calls: u8,
+    }
+
+    impl FakePublication {
+        fn new(mutation: FakeMutation) -> Self {
+            Self {
+                partial: Some(FakeEntry::Owned),
+                final_entry: None,
+                mutation,
+                partial_checks: 0,
+                final_checks: 0,
+                publish_calls: 0,
+                unlink_calls: 0,
+            }
+        }
+
+        fn replace_partial(&mut self, shape: &'static str) {
+            self.partial = Some(FakeEntry::Sentinel(shape));
+        }
+
+        fn drop_owned_partial(&mut self) {
+            if self.partial == Some(FakeEntry::Owned) {
+                self.partial = None;
+            }
+        }
+    }
+
+    impl PublicationAdapter for FakePublication {
+        fn partial_is_owned(&mut self) -> bool {
+            self.partial_checks += 1;
+            match (self.mutation, self.partial_checks) {
+                (FakeMutation::ReplacePartialBeforeInitial(shape), 1)
+                | (FakeMutation::ReplacePartialBeforeSecondCheck(shape), 2) => {
+                    self.replace_partial(shape);
+                }
+                _ => {}
+            }
+            self.partial == Some(FakeEntry::Owned)
+        }
+
+        fn publish_held(&mut self) -> Result<(), RunnerError> {
+            self.publish_calls += 1;
+            match self.mutation {
+                FakeMutation::ReplacePartialBeforePublish(shape) => self.replace_partial(shape),
+                FakeMutation::FinalCollision(shape) => {
+                    self.final_entry = Some(FakeEntry::Sentinel(shape));
+                }
+                FakeMutation::PublishFailure => {
+                    return Err(RunnerError::new(
+                        FailurePhase::Publish,
+                        "final.exists_or_publish",
+                    ));
+                }
+                _ => {}
+            }
+            if self.final_entry.is_some() {
+                return Err(RunnerError::new(
+                    FailurePhase::Publish,
+                    "final.exists_or_publish",
+                ));
+            }
+            self.final_entry = Some(if self.mutation == FakeMutation::WrongIdentityPublication {
+                FakeEntry::WrongPublished
+            } else {
+                FakeEntry::Owned
+            });
+            Ok(())
+        }
+
+        fn final_is_owned(&mut self) -> bool {
+            self.final_checks += 1;
+            if self.mutation == FakeMutation::FinalVerificationFailure && self.final_checks == 2 {
+                return false;
+            }
+            self.final_entry == Some(FakeEntry::Owned)
+        }
+
+        fn remove_owned_partial(&mut self) -> Result<(), RunnerError> {
+            self.unlink_calls += 1;
+            if let FakeMutation::ReplacePartialBeforeUnlink(shape) = self.mutation {
+                self.replace_partial(shape);
+            }
+            if self.mutation == FakeMutation::PartialUnlinkFailure {
+                return Err(RunnerError::new(FailurePhase::Publish, "partial.remove"));
+            }
+            if self.partial != Some(FakeEntry::Owned) {
+                return Err(RunnerError::new(FailurePhase::Publish, "path.replaced"));
+            }
+            self.partial = None;
+            Ok(())
+        }
+
+        fn remove_owned_final(&mut self) {
+            if matches!(
+                self.final_entry,
+                Some(FakeEntry::Owned | FakeEntry::WrongPublished)
+            ) {
+                self.final_entry = None;
+            }
+        }
+    }
+
+    #[test]
+    fn portable_publication_state_machine_freezes_every_race_and_failure() {
+        for shape in ["regular", "symlink", "hardlink", "rename"] {
+            for (mutation, phase, code) in [
+                (
+                    FakeMutation::ReplacePartialBeforeInitial(shape),
+                    FailurePhase::Output,
+                    "partial.replaced",
+                ),
+                (
+                    FakeMutation::ReplacePartialBeforePublish(shape),
+                    FailurePhase::Publish,
+                    "path.replaced",
+                ),
+                (
+                    FakeMutation::ReplacePartialBeforeSecondCheck(shape),
+                    FailurePhase::Publish,
+                    "path.replaced",
+                ),
+                (
+                    FakeMutation::ReplacePartialBeforeUnlink(shape),
+                    FailurePhase::Publish,
+                    "path.replaced",
+                ),
+            ] {
+                let mut adapter = FakePublication::new(mutation);
+                let error = complete_publication(&mut adapter).expect_err("partial replacement");
+                adapter.drop_owned_partial();
+                assert_eq!((error.phase, error.code), (phase, code));
+                assert_eq!(adapter.partial, Some(FakeEntry::Sentinel(shape)));
+                assert_eq!(adapter.final_entry, None);
+            }
+
+            let mut adapter = FakePublication::new(FakeMutation::FinalCollision(shape));
+            let error = complete_publication(&mut adapter).expect_err("final collision");
+            adapter.drop_owned_partial();
+            assert_eq!(
+                (error.phase, error.code),
+                (FailurePhase::Publish, "final.exists_or_publish")
+            );
+            assert_eq!(adapter.final_entry, Some(FakeEntry::Sentinel(shape)));
+            assert_eq!(adapter.publish_calls, 1);
+        }
+
+        for (mutation, code) in [
+            (FakeMutation::WrongIdentityPublication, "path.replaced"),
+            (FakeMutation::PublishFailure, "final.exists_or_publish"),
+            (FakeMutation::PartialUnlinkFailure, "partial.remove"),
+            (FakeMutation::FinalVerificationFailure, "final.shape"),
+        ] {
+            let mut adapter = FakePublication::new(mutation);
+            let error = complete_publication(&mut adapter).expect_err("publication failure");
+            adapter.drop_owned_partial();
+            assert_eq!((error.phase, error.code), (FailurePhase::Publish, code));
+            assert_eq!(adapter.partial, None);
+            assert_eq!(adapter.final_entry, None);
+        }
+
+        let mut accepted = FakePublication::new(FakeMutation::None);
+        complete_publication(&mut accepted).expect("first publication");
+        assert_eq!(accepted.partial, None);
+        assert_eq!(accepted.final_entry, Some(FakeEntry::Owned));
+        assert_eq!((accepted.publish_calls, accepted.unlink_calls), (1, 1));
+        let mut second = FakePublication::new(FakeMutation::None);
+        second.final_entry = accepted.final_entry;
+        let error = complete_publication(&mut second).expect_err("second publication");
+        second.drop_owned_partial();
+        assert_eq!(
+            (error.phase, error.code),
+            (FailurePhase::Publish, "final.exists_or_publish")
+        );
+        assert_eq!(second.final_entry, Some(FakeEntry::Owned));
     }
 
     #[test]
