@@ -5218,7 +5218,7 @@ mod tests {
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
-            "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff",
+            "0db5f432ff338537f3368e6d4922f907792c946a11037a31d6f56e09c26d96e8",
             "accepted joined-corpus manifest identity"
         );
 

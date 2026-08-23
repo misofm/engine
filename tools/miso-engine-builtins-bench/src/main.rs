@@ -1865,7 +1865,7 @@ mod tests {
         assert!(record.contains(
             "\"input_fixture_id\":\"fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml\""
         ));
-        assert!(record.contains("\"input_fixture_sha256\":\"4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9\""));
+        assert!(record.contains("\"input_fixture_sha256\":\"178b35953960ded3166157b3d781d2aeac0d033789925d77aec6f57bab084d7d\""));
         assert!(record.contains("\"render_errors\":0"));
         assert!(record.contains("\"render_feature_detection\":0"));
         assert!(record.contains("\"render_panic_unwind\":0"));
@@ -1965,9 +1965,12 @@ mod tests {
 
         let fixture = input_fixture(Workload::IdentityChain, 48_000);
         let pcm = fixture.pcm();
+        // The identity chain's two disabled sections are the arithmetic identity, and their
+        // trailing `+ 0.0` normalises a negative zero (#85, class B): the fixture's `-0.0` inputs
+        // therefore arrive here as `+0.0`, uniformly at every width and on every target.
         assert_eq!(pcm.left[0].to_bits(), 0.0_f32.to_bits());
-        assert_eq!(pcm.left[1].to_bits(), (-0.0_f32).to_bits());
-        assert_eq!(pcm.right[0].to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(pcm.left[1].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(pcm.right[0].to_bits(), 0.0_f32.to_bits());
         assert_eq!(pcm.right[1].to_bits(), 0.0_f32.to_bits());
         let (parameters, _) = render_parameters_from_fixture(&fixture, Workload::IdentityChain);
         assert_eq!(parameters.matrix, Matrix2x2::IDENTITY);
@@ -2036,7 +2039,7 @@ mod tests {
         }
         assert_eq!(
             manifest_input_sha256("fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"),
-            "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
+            "95904e939716b6dd8de19c5cc92050ba13ef7e4b9d41a212b135c559d0b032a0"
         );
     }
 

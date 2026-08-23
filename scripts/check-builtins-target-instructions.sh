@@ -69,9 +69,9 @@ candidate_before=$(seal_candidate)
 source_manifest >"$scratch/source-before.tsv"
 source_before=$(hash_file "$scratch/source-before.tsv")
 lock_before=$(hash_file Cargo.lock)
-require_hash fixtures/builtins/v1/MANIFEST.tsv bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff
-require_hash fixtures/builtins/v1/pcm/graph-taps.f32le 508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19
-require_hash fixtures/builtins/v1/meters/graph-taps.jsonl 958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f
+require_hash fixtures/builtins/v1/MANIFEST.tsv 0db5f432ff338537f3368e6d4922f907792c946a11037a31d6f56e09c26d96e8
+require_hash fixtures/builtins/v1/pcm/graph-taps.f32le e6294eba78adcb3b09ae20dbf7ca7b322f81c8d39455b45ab5034e25e8493049
+require_hash fixtures/builtins/v1/meters/graph-taps.jsonl 03cc39799a40728bceff741a51bfb132b164d5fa96c823a85a8bc6c38050297f
 printf 'issue068 candidate=%s source_manifest=%s cargo_lock=%s scratch=%s\n' \
     "$candidate_before" "$source_before" "$lock_before" "$(basename "$scratch")"
 printf 'issue068 tool rustc=%s\n' "$(rustc --version)"
@@ -84,7 +84,7 @@ CARGO_TARGET_DIR="$scratch/runtime-selection-tests" cargo test --locked -p miso-
 CARGO_TARGET_DIR="$scratch/preparation-tests" cargo test --locked -p miso-engine-core \
     arch::tests::preparation_is_the_only_safe_architecture_gate -- --exact --test-threads=1
 CARGO_TARGET_DIR="$scratch/four-rate-tests" cargo test --locked -p miso-engine-builtins \
-    tests::issue068_launch_rates_match_scalar_for_nonfused_and_fma_tpt_banks \
+    --test stage bank_is_bit_identical_to_scalar_stage_at_every_width \
     -- --exact --test-threads=1 --nocapture
 
 build_closure() {
@@ -174,21 +174,26 @@ printf 'issue068 object leg=native-avx2-fma object_sha256=%s symbol_sha256=%s re
 # through `miso-engine-effect-compiler`, so the `-avx2,-fma` leg can no longer compile the whole
 # closure -- the configuration it probes is one the workspace has deliberately abolished.
 #
-# The leg is kept for the part of the closure the decision does not touch: `miso-engine-core`, the
-# builtins and `miso-engine-graph` still contain the portable scalar TPT paths issue 068 asked about,
-# and they still compile with x86 SIMD turned off. The four cross-target legs below are unchanged and
-# still cover the whole closure, `graph-compiler` included. Retiring or re-scoping this leg outright
-# belongs to the #104 evidence triage, together with the rest of the issue-068 seal.
+# Issue #85 narrows the leg again, by the same rule (verifier decision W2-D1: scope each
+# native-scalar leg to the crates that do not reach lane). `miso-engine-builtins` now depends on
+# `miso-engine-lane` for its block kernels and `miso-engine-math` for its coefficient design, and
+# `miso-engine-builtins-compiler` depends on builtins, so both leave this leg. What remains is
+# `miso-engine-core`, which still holds the portable scalar TPT paths issue 068 asked about, and
+# `miso-engine-graph`, which reaches only core, the effect contract and the rack. The guard is not
+# weakened to keep the leg green, and scalar semantics stay proven three ways: the `WIDTH = 1`
+# `Lane` instantiation runs in every builtins test on the pinned build, `scripts/run-wasm-gates.sh`
+# executes a genuinely SIMD-less `wasm32` target, and the scalar oracle is the identity baseline of
+# every lane gate. The four cross-target legs below are unchanged and still cover the whole closure,
+# `graph-compiler` and builtins included. Retiring this leg outright belongs to the #104 evidence
+# triage, together with the rest of the issue-068 seal.
 native_scalar_closure=(
     -p miso-engine-core
-    -p miso-engine-builtins
-    -p miso-engine-builtins-compiler
     -p miso-engine-graph
 )
 RUSTFLAGS='-C target-feature=-avx2,-fma' CARGO_TARGET_DIR="$scratch/native-scalar" \
     cargo check --locked --release "${native_scalar_closure[@]}"
 printf 'issue068 build leg=%s target=%s features=%s result=PASS compile-or-object-only\n' \
-    native-scalar native '-avx2,-fma (closure without graph-compiler: D4, see comment)'
+    native-scalar native '-avx2,-fma (core and graph only: D4 and W2-D1, see comment)'
 build_closure aarch64-android aarch64-linux-android '+neon'
 build_closure aarch64-ios aarch64-apple-ios '+neon'
 build_closure wasm-scalar wasm32-unknown-unknown '-simd128'
@@ -260,7 +265,7 @@ lock_after=$(hash_file Cargo.lock)
 [[ "$candidate_after" == "$candidate_before" ]] || fail 'candidate commit changed during qualification'
 [[ "$source_after" == "$source_before" ]] || fail 'source manifest changed during qualification'
 [[ "$lock_after" == "$lock_before" ]] || fail 'Cargo.lock changed during qualification'
-require_hash fixtures/builtins/v1/MANIFEST.tsv bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff
-require_hash fixtures/builtins/v1/pcm/graph-taps.f32le 508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19
-require_hash fixtures/builtins/v1/meters/graph-taps.jsonl 958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f
+require_hash fixtures/builtins/v1/MANIFEST.tsv 0db5f432ff338537f3368e6d4922f907792c946a11037a31d6f56e09c26d96e8
+require_hash fixtures/builtins/v1/pcm/graph-taps.f32le e6294eba78adcb3b09ae20dbf7ca7b322f81c8d39455b45ab5034e25e8493049
+require_hash fixtures/builtins/v1/meters/graph-taps.jsonl 03cc39799a40728bceff741a51bfb132b164d5fa96c823a85a8bc6c38050297f
 printf 'issue068 target/instruction qualification: PASS (cross-target compile-or-object-only)\n'

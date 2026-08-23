@@ -5,7 +5,14 @@ workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
 cd "$workspace_dir"
 packages=(-p miso-engine-builtins -p miso-engine-builtins-compiler)
 
-RUSTFLAGS='-C target-feature=-avx2,-fma' cargo check --locked --release "${packages[@]}"
+# Master plan #83 D4 (verifier decision W2-D1): these crates reach `miso-engine-lane`, which
+# refuses to compile on x86 without AVX2+FMA -- that guard is the point, not a regression, and it
+# is never weakened to keep a script green. The native leg therefore builds the pinned
+# `x86-64-v3` target instead of the retired scalar one. Scalar semantics stay proven three ways:
+# the `WIDTH = 1` `Lane` instantiation runs in every test on this build, `scripts/run-wasm-gates.sh`
+# executes a genuinely SIMD-less `wasm32` target, and the scalar oracle is the identity baseline of
+# every lane gate.
+RUSTFLAGS='-C target-feature=+avx2,+fma' cargo check --locked --release "${packages[@]}"
 for target in aarch64-linux-android aarch64-apple-ios; do
   CARGO_TARGET_DIR="target/issue7/targets/$target" \
     cargo check --locked --release --target "$target" "${packages[@]}"
