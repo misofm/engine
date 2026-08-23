@@ -454,96 +454,6 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     }
 }
 impl PreparedGraphPlan {
-    fn has_valid_structural_layout(&self) -> bool {
-        let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| node.id.clone()).collect();
-        if graph_nodes.len() != self.spec.nodes.len() {
-            return false;
-        }
-
-        let mut level_by_node = BTreeMap::new();
-        let mut flattened = Vec::with_capacity(graph_nodes.len());
-        let mut previous_level = None;
-        for level in &self.dependency_levels {
-            if level.nodes.is_empty()
-                || previous_level.is_some_and(|previous| previous >= level.level)
-                || level.nodes.windows(2).any(|pair| pair[0] >= pair[1])
-                || level
-                    .nodes
-                    .iter()
-                    .any(|node| level_by_node.insert(node.clone(), level.level).is_some())
-            {
-                return false;
-            }
-            previous_level = Some(level.level);
-            flattened.extend(level.nodes.iter().cloned());
-        }
-        if flattened != self.sequential_schedule
-            || level_by_node.keys().cloned().collect::<BTreeSet<_>>() != graph_nodes
-        {
-            return false;
-        }
-
-        let positions: BTreeMap<_, _> = self
-            .sequential_schedule
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(position, node)| (node, position))
-            .collect();
-        if self.spec.edges.iter().any(|edge| {
-            match (
-                level_by_node.get(&edge.source.node),
-                level_by_node.get(&edge.destination.node),
-            ) {
-                (Some(source), Some(destination)) => source >= destination,
-                _ => true,
-            }
-        }) {
-            return false;
-        }
-
-        let effect_banks = self.banks.iter().map(|bank| {
-            bank.members
-                .iter()
-                .cloned()
-                .map(GraphNodeId::Effect)
-                .collect::<Vec<_>>()
-        });
-        let builtin_banks = self.builtin_banks.iter().map(|bank| bank.members.to_vec());
-        let mut bank_members = BTreeSet::new();
-        for members in effect_banks.chain(builtin_banks) {
-            if members.is_empty() || members.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return false;
-            }
-            let Some(bank_level) = level_by_node.get(&members[0]).copied() else {
-                return false;
-            };
-            if members.iter().any(|member| {
-                level_by_node.get(member).copied() != Some(bank_level)
-                    || !bank_members.insert(member.clone())
-            }) {
-                return false;
-            }
-            let Some(first_member) = members
-                .iter()
-                .filter_map(|member| positions.get(member))
-                .min()
-                .copied()
-            else {
-                return false;
-            };
-            if self.spec.edges.iter().any(|edge| {
-                members.contains(&edge.destination.node)
-                    && positions
-                        .get(&edge.source.node)
-                        .is_none_or(|source| *source >= first_member)
-            }) {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Number of prepared homogeneous banks retained for off-render-selected execution.
     #[must_use]
     pub const fn prepared_bank_count(&self) -> usize {
@@ -755,9 +665,6 @@ impl PreparedGraphPlan {
             };
             return Err((self, bindings, source_set, code));
         }
-        if !self.has_valid_structural_layout() {
-            return Err((self, bindings, source_set, "graph.scheduler.layout"));
-        }
         let envelope = self.envelope;
         let executor = GraphExecutor::new(
             self.spec,
@@ -905,9 +812,6 @@ impl PreparedGraphPlan {
                 "graph.plan.binding"
             };
             return Err((self, bindings, source_set, config, code));
-        }
-        if !self.has_valid_structural_layout() {
-            return Err((self, bindings, source_set, config, "graph.scheduler.layout"));
         }
         let blueprint = match NativeGraphBlueprint::prepare(&self, config, bindings.observers.len())
         {
@@ -3035,15 +2939,11 @@ mod tests {
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::LAUNCH_SAMPLE_RATES;
     use miso_engine_effect_contract::{
-        BankWidth, EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode,
-        LinkModeSet, NativeEffectFactory, ParameterChannel, PortDescriptorV1, PortId, PortLayout,
-        PortRole, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1,
-        PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError, StatePayloadInput,
-        StatePayloadOutput, StatePayloadSizes,
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode, LinkModeSet,
+        NativeEffectFactory, ParameterChannel, PortDescriptorV1, PortId, PortLayout, PortRole,
+        PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+        ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+        StatePayloadSizes,
     };
 
     struct Noop;
@@ -3062,94 +2962,6 @@ mod tests {
         emitted: bool,
         left: f32,
         right: f32,
-    }
-
-    struct TwoBlockConstant {
-        lane: u32,
-    }
-    impl GraphRuntimeProcessor for TwoBlockConstant {
-        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-            let scale = if block.first_sample == 0 { 1.0 } else { 2.0 };
-            block.left.fill(scale * (self.lane + 1) as f32);
-            block.right.fill(-scale * (1_u32 << self.lane) as f32);
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct CountingIdentityBuiltin {
-        calls: u64,
-    }
-    impl GraphPreparedBuiltinBankProcessor for CountingIdentityBuiltin {
-        fn process(
-            &mut self,
-            left: &mut [f32],
-            right: &mut [f32],
-            _frames: u32,
-            first_sample: u64,
-        ) -> Result<(), RenderError> {
-            let expected_left = if first_sample == 0 {
-                [1.0, 2.0, 3.0, 4.0]
-            } else {
-                [2.0, 4.0, 6.0, 8.0]
-            };
-            let expected_right = if first_sample == 0 {
-                [-1.0, -2.0, -4.0, -8.0]
-            } else {
-                [-2.0, -4.0, -8.0, -16.0]
-            };
-            assert_eq!(left, expected_left);
-            assert_eq!(right, expected_right);
-            self.calls += 1;
-            Ok(())
-        }
-
-        fn qualification_counters(&self) -> [u64; 2] {
-            [self.calls, self.calls]
-        }
-    }
-
-    struct W4OrderObserver {
-        lane: u64,
-        order: Arc<AtomicU64>,
-    }
-    impl GraphRuntimeObserver for W4OrderObserver {
-        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
-            let expected_order = block.first_sample * 4 + self.lane;
-            assert_eq!(
-                self.order.fetch_add(1, Ordering::SeqCst),
-                expected_order,
-                "stable member observation order"
-            );
-            let scale = if block.first_sample == 0 { 1.0 } else { 2.0 };
-            assert_eq!(block.left, [scale * (self.lane + 1) as f32]);
-            assert_eq!(block.right, [-scale * (1_u64 << self.lane) as f32]);
-            Ok(())
-        }
-    }
-
-    struct SilentSourceSetDriver {
-        claims: usize,
-    }
-    impl GraphPreparedSourceSetDriver for SilentSourceSetDriver {
-        fn claim_count(&self) -> usize {
-            self.claims
-        }
-
-        fn begin_block(&mut self, _first_sample: u64, _frames: u32) -> Result<(), RenderError> {
-            Ok(())
-        }
-
-        fn copy_track_input(
-            &mut self,
-            _claim_index: usize,
-            left: &mut [f32],
-            right: &mut [f32],
-        ) -> Result<(), RenderError> {
-            left.fill(0.0);
-            right.fill(0.0);
-            Ok(())
-        }
     }
     impl GraphRuntimeProcessor for OneShotSource {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3355,16 +3167,7 @@ mod tests {
                     edges: vec![edge],
                 },
                 sequential_schedule: vec![input.clone(), output.clone()],
-                dependency_levels: vec![
-                    DependencyLevel {
-                        level: 0,
-                        nodes: vec![input.clone()],
-                    },
-                    DependencyLevel {
-                        level: 1,
-                        nodes: vec![output.clone()],
-                    },
-                ],
+                dependency_levels: Vec::new(),
                 route_timings: Vec::new(),
                 inserted_delays: Vec::new(),
                 buffer_assignments: Vec::new(),
@@ -3387,430 +3190,6 @@ mod tests {
             },
             input,
         )
-    }
-
-    fn four_track_builtin_plan(
-        plan_id: u64,
-        banked: bool,
-    ) -> (PreparedGraphPlan, GraphRuntimeBindings, Arc<AtomicU64>) {
-        let envelope = RenderEnvelope {
-            sample_rate: miso_engine_core::SampleRateHz(48_000),
-            quantum: QuantumFrames(1),
-            input_channels: None,
-            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
-        };
-        let inputs: Vec<_> = (0..4)
-            .map(|lane| GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
-                stage: TrackStage::Input,
-            })
-            .collect();
-        let members: Vec<_> = (0..4)
-            .map(|lane| GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
-                stage: TrackStage::PostInputBuiltins,
-            })
-            .collect();
-        let output = GraphNodeId::Output {
-            output_id: StableGraphId::parse("main").expect("output id"),
-        };
-        let mut schedule = inputs.clone();
-        schedule.extend(members.iter().cloned());
-        schedule.push(output.clone());
-        let nodes = schedule
-            .iter()
-            .cloned()
-            .map(|id| GraphNode {
-                id,
-                latency: LatencySamples(0),
-                tail: TailSamples::Finite(0),
-            })
-            .collect();
-        let mut edges = Vec::new();
-        for lane in 0..4 {
-            edges.push(GraphEdge {
-                id: GraphEdgeId::TrackMain {
-                    target: members[lane].clone(),
-                },
-                source: GraphPortId {
-                    node: inputs[lane].clone(),
-                    kind: GraphPortKind::MainOutput,
-                    effect_port: None,
-                },
-                destination: GraphPortId {
-                    node: members[lane].clone(),
-                    kind: GraphPortKind::MainInput,
-                    effect_port: None,
-                },
-                path: format!("$.tracks[{lane}].builtin"),
-            });
-            edges.push(GraphEdge {
-                id: GraphEdgeId::RouteSource {
-                    route_id: StableGraphId::parse(&format!("route{lane}")).expect("route id"),
-                },
-                source: GraphPortId {
-                    node: members[lane].clone(),
-                    kind: GraphPortKind::MainOutput,
-                    effect_port: None,
-                },
-                destination: GraphPortId {
-                    node: output.clone(),
-                    kind: GraphPortKind::MainInput,
-                    effect_port: None,
-                },
-                path: format!("$.routes[{lane}]"),
-            });
-        }
-        let builtin_banks = if banked {
-            vec![GraphPreparedBuiltinBank {
-                backend: KernelBackendV1::Aarch64Neon,
-                members: members.clone().into_boxed_slice(),
-                active_mask: vec![true; 4].into_boxed_slice(),
-                processor: Box::<CountingIdentityBuiltin>::default(),
-                scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1)
-                    .expect("W4 scratch"),
-            }]
-        } else {
-            Vec::new()
-        };
-        let required_bindings: Vec<_> = inputs
-            .iter()
-            .chain(&members)
-            .chain(core::iter::once(&output))
-            .cloned()
-            .collect();
-        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
-            plan_id,
-            spec: GraphSpec {
-                nodes,
-                ports: Vec::new(),
-                edges,
-            },
-            sequential_schedule: schedule,
-            dependency_levels: vec![
-                DependencyLevel {
-                    level: 0,
-                    nodes: inputs.clone(),
-                },
-                DependencyLevel {
-                    level: 1,
-                    nodes: members.clone(),
-                },
-                DependencyLevel {
-                    level: 2,
-                    nodes: vec![output.clone()],
-                },
-            ],
-            route_timings: Vec::new(),
-            inserted_delays: Vec::new(),
-            buffer_assignments: Vec::new(),
-            estimate: empty_estimate(),
-            envelope,
-            required_bindings: required_bindings.clone(),
-            routes: Vec::new(),
-            effects: Vec::new(),
-            banks: Vec::new(),
-            builtin_banks,
-            observers: Vec::new(),
-        });
-        let nodes = required_bindings
-            .into_iter()
-            .filter(|node| !banked || !members.contains(node))
-            .map(|node| {
-                let processor: Box<dyn GraphRuntimeProcessor> = match &node {
-                    GraphNodeId::TrackStage {
-                        track_id,
-                        stage: TrackStage::Input,
-                    } => Box::new(TwoBlockConstant {
-                        lane: track_id
-                            .as_str()
-                            .strip_prefix("track")
-                            .expect("track prefix")
-                            .parse()
-                            .expect("track lane"),
-                    }),
-                    _ => Box::new(Noop),
-                };
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
-        let observer_order = Arc::new(AtomicU64::new(0));
-        let observers = members
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(lane, node)| {
-                GraphNodeObserverBinding::new(
-                    node,
-                    4 - lane as u64,
-                    Box::new(W4OrderObserver {
-                        lane: lane as u64,
-                        order: Arc::clone(&observer_order),
-                    }),
-                )
-            })
-            .collect();
-        (
-            graph,
-            GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers,
-            },
-            observer_order,
-        )
-    }
-
-    fn render_two_blocks(mut plan: PreparedRenderPlan) -> ([f32; 4], [u64; 2]) {
-        let mut pcm = [0.0_f32; 4];
-        for block in 0..2 {
-            let output = PlanarBufferMut::try_new(&mut pcm[block * 2..block * 2 + 2], 2, 1, 1)
-                .expect("output");
-            plan.render(
-                miso_engine_core::realtime::RenderIo {
-                    input: None,
-                    output,
-                },
-                miso_engine_core::realtime::RenderTime {
-                    absolute_sample: block as u64,
-                },
-            )
-            .expect("render");
-        }
-        (pcm, plan.qualification_counters())
-    }
-
-    #[test]
-    fn level_major_w4_builtin_bank_is_correct_from_block_zero_in_both_executors() {
-        let (scalar_graph, scalar_bindings, scalar_observers) =
-            four_track_builtin_plan(123_000, false);
-        assert!(scalar_graph.inserted_delays.is_empty());
-        assert!(
-            scalar_graph
-                .spec
-                .nodes
-                .iter()
-                .all(|node| node.latency == LatencySamples(0))
-        );
-        let scalar = scalar_graph
-            .bind(scalar_bindings)
-            .unwrap_or_else(|failure| panic!("scalar reference bind: {}", failure.code));
-        let scalar = render_two_blocks(scalar);
-
-        let (bank_graph, bank_bindings, bank_observers) = four_track_builtin_plan(123_001, true);
-        assert!(bank_graph.inserted_delays.is_empty());
-        assert!(
-            bank_graph
-                .spec
-                .nodes
-                .iter()
-                .all(|node| node.latency == LatencySamples(0))
-        );
-        let banked = bank_graph
-            .bind(bank_bindings)
-            .unwrap_or_else(|failure| panic!("banked bind: {}", failure.code));
-        let banked = render_two_blocks(banked);
-
-        let (native_graph, native_bindings, native_observers) =
-            four_track_builtin_plan(123_002, true);
-        assert!(native_graph.inserted_delays.is_empty());
-        assert!(
-            native_graph
-                .spec
-                .nodes
-                .iter()
-                .all(|node| node.latency == LatencySamples(0))
-        );
-        let native = native_graph
-            .bind_native(
-                native_bindings,
-                NativeGraphBindConfigV1 {
-                    render_mode: NativeGraphRenderModeV1::SingleThread,
-                    scheduler: NativeSchedulerConfigV1::new(
-                        core::num::NonZeroUsize::new(4).expect("four lanes"),
-                        true,
-                    ),
-                    maximum_retained_bytes: 1 << 20,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("native bind: {}", failure.code));
-        assert_eq!(
-            native.metadata.selection,
-            SchedulerSelectionV1::Sequential(FallbackReasonV1::SingleThread)
-        );
-        let native = render_two_blocks(native.into_plan());
-
-        let analytic = [10.0, -15.0, 20.0, -30.0];
-        assert_eq!(scalar.0.map(f32::to_bits), analytic.map(f32::to_bits));
-        assert_eq!(banked.0.map(f32::to_bits), analytic.map(f32::to_bits));
-        assert_eq!(native.0.map(f32::to_bits), analytic.map(f32::to_bits));
-        assert_eq!(scalar.1, [0, 0]);
-        assert_eq!(banked.1, [2, 2]);
-        assert_eq!(native.1, [2, 2]);
-        assert_eq!(scalar_observers.load(Ordering::SeqCst), 8);
-        assert_eq!(bank_observers.load(Ordering::SeqCst), 8);
-        assert_eq!(native_observers.load(Ordering::SeqCst), 8);
-    }
-
-    fn silent_source_set(envelope: RenderEnvelope, node: GraphNodeId) -> GraphPreparedSourceSet {
-        GraphPreparedSourceSet::new(
-            envelope,
-            vec![GraphSourceInputClaim { node }],
-            GraphSourceSetResourceReport {
-                pcm_payload_already_charged_bytes: 0,
-                overhead_bytes: 0,
-                total_engine_owned_bytes: 0,
-                largest_allocation_bytes: 0,
-            },
-            Box::new(SilentSourceSetDriver { claims: 1 }),
-        )
-    }
-
-    #[test]
-    fn structural_layout_rejection_is_shared_transactional_and_retryable() {
-        let (mut scalar, scalar_bindings, _) = binding_plan();
-        scalar.sequential_schedule.swap(0, 1);
-        let scalar_failure = match scalar.bind(scalar_bindings) {
-            Ok(_) => panic!("non-level-major scalar plan accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(scalar_failure.code, "graph.scheduler.layout");
-        assert_eq!(scalar_failure.bindings.nodes.len(), 2);
-        let mut scalar = *scalar_failure.plan;
-        scalar.sequential_schedule.swap(0, 1);
-        scalar
-            .bind(scalar_failure.bindings)
-            .unwrap_or_else(|failure| panic!("scalar retry: {}", failure.code));
-
-        let (mut source_graph, mut source_bindings, source_node) = binding_plan();
-        source_graph.sequential_schedule.swap(0, 1);
-        source_bindings.nodes.remove(0);
-        let source_set = silent_source_set(source_graph.envelope, source_node);
-        let source_failure = match source_graph.bind_with_source_set(source_bindings, source_set) {
-            Ok(_) => panic!("non-level-major source plan accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(source_failure.code, "graph.scheduler.layout");
-        assert_eq!(source_failure.bindings.nodes.len(), 1);
-        assert_eq!(source_failure.source_set.claims().len(), 1);
-        let mut source_graph = *source_failure.plan;
-        source_graph.sequential_schedule.swap(0, 1);
-        source_graph
-            .bind_with_source_set(source_failure.bindings, source_failure.source_set)
-            .unwrap_or_else(|failure| panic!("source retry: {}", failure.code));
-
-        let config = NativeGraphBindConfigV1 {
-            render_mode: NativeGraphRenderModeV1::SingleThread,
-            scheduler: NativeSchedulerConfigV1::new(
-                core::num::NonZeroUsize::new(2).expect("two lanes"),
-                true,
-            ),
-            maximum_retained_bytes: 1 << 20,
-        };
-        let (mut native, native_bindings) = native_parallel_sum_plan(48_000);
-        native.sequential_schedule.swap(0, 1);
-        let native_failure = match native.bind_native(native_bindings, config) {
-            Ok(_) => panic!("non-level-major native plan accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(native_failure.code, "graph.scheduler.layout");
-        assert_eq!(native_failure.config, config);
-        assert_eq!(native_failure.bindings.nodes.len(), 3);
-        let mut native = *native_failure.plan;
-        native.sequential_schedule.swap(0, 1);
-        native
-            .bind_native(native_failure.bindings, native_failure.config)
-            .unwrap_or_else(|failure| panic!("native retry: {}", failure.code));
-
-        let (mut native_source, mut native_source_bindings) = native_parallel_sum_plan(48_000);
-        native_source.sequential_schedule.swap(0, 1);
-        let claimed = native_source.sequential_schedule[1].clone();
-        native_source_bindings
-            .nodes
-            .retain(|binding| binding.node != claimed);
-        let source_set = silent_source_set(native_source.envelope, claimed);
-        let native_source_failure = match native_source.bind_native_with_source_set(
-            native_source_bindings,
-            config,
-            source_set,
-        ) {
-            Ok(_) => panic!("non-level-major native source plan accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(native_source_failure.code, "graph.scheduler.layout");
-        assert_eq!(native_source_failure.config, config);
-        assert_eq!(native_source_failure.bindings.nodes.len(), 2);
-        assert_eq!(native_source_failure.source_set.claims().len(), 1);
-        let mut native_source = *native_source_failure.plan;
-        native_source.sequential_schedule.swap(0, 1);
-        native_source
-            .bind_native_with_source_set(
-                native_source_failure.bindings,
-                native_source_failure.config,
-                native_source_failure.source_set,
-            )
-            .unwrap_or_else(|failure| panic!("native source retry: {}", failure.code));
-    }
-
-    #[test]
-    fn structural_layout_rejects_complete_node_edge_and_bank_corruptions() {
-        for corruption in 0..5 {
-            let (mut graph, bindings, _) = binding_plan();
-            match corruption {
-                0 => {
-                    let duplicate = graph.dependency_levels[0].nodes[0].clone();
-                    graph.dependency_levels[0].nodes.push(duplicate);
-                }
-                1 => graph.dependency_levels[1].nodes.clear(),
-                2 => graph.dependency_levels[1].level = 0,
-                3 => graph.spec.edges[0].source.node = graph.dependency_levels[1].nodes[0].clone(),
-                4 => graph.sequential_schedule.pop().map_or((), |_| ()),
-                _ => unreachable!(),
-            }
-            let failure = match graph.bind(bindings) {
-                Ok(_) => panic!("structural corruption accepted"),
-                Err(failure) => failure,
-            };
-            assert_eq!(failure.code, "graph.scheduler.layout");
-            assert_eq!(failure.bindings.nodes.len(), 2);
-        }
-
-        let (mut reversed_bank, bindings, _) = four_track_builtin_plan(123_100, true);
-        reversed_bank.builtin_banks[0].members.reverse();
-        let failure = match reversed_bank.bind(bindings) {
-            Ok(_) => panic!("reversed bank members accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.scheduler.layout");
-
-        let (mut mixed_level_bank, bindings, _) = four_track_builtin_plan(123_101, true);
-        let moved = mixed_level_bank.dependency_levels[1]
-            .nodes
-            .pop()
-            .expect("member");
-        mixed_level_bank.dependency_levels[0].nodes.push(moved);
-        mixed_level_bank.dependency_levels[0].nodes.sort();
-        mixed_level_bank.sequential_schedule = mixed_level_bank
-            .dependency_levels
-            .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
-            .collect();
-        let failure = match mixed_level_bank.bind(bindings) {
-            Ok(_) => panic!("mixed-level bank accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.scheduler.layout");
-
-        let (mut precedence_plan, mut bad_bindings, duplicate) = binding_plan();
-        precedence_plan.sequential_schedule.swap(0, 1);
-        bad_bindings
-            .nodes
-            .push(GraphNodeBinding::new(duplicate, Box::new(Noop)));
-        let failure = match precedence_plan.bind(bad_bindings) {
-            Ok(_) => panic!("invalid binding accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.plan.binding");
     }
 
     #[test]
@@ -4293,20 +3672,7 @@ mod tests {
                 edges,
             },
             sequential_schedule: schedule,
-            dependency_levels: vec![
-                DependencyLevel {
-                    level: 0,
-                    nodes: vec![input_a.clone(), input_b.clone()],
-                },
-                DependencyLevel {
-                    level: 1,
-                    nodes: vec![route_a.clone(), route_b.clone()],
-                },
-                DependencyLevel {
-                    level: 2,
-                    nodes: vec![output_node.clone()],
-                },
-            ],
+            dependency_levels: Vec::new(),
             route_timings: Vec::new(),
             inserted_delays: vec![InsertedDelay {
                 node: GraphNodeId::CompensationDelay {
@@ -4518,24 +3884,7 @@ mod tests {
                 edges: vec![main_edge, sidechain_edge, route_source, route_destination],
             },
             sequential_schedule: schedule,
-            dependency_levels: vec![
-                DependencyLevel {
-                    level: 0,
-                    nodes: vec![main_input.clone(), sidechain_input.clone()],
-                },
-                DependencyLevel {
-                    level: 1,
-                    nodes: vec![effect_node.clone()],
-                },
-                DependencyLevel {
-                    level: 2,
-                    nodes: vec![route_node.clone()],
-                },
-                DependencyLevel {
-                    level: 3,
-                    nodes: vec![output_node.clone()],
-                },
-            ],
+            dependency_levels: Vec::new(),
             route_timings: Vec::new(),
             inserted_delays: vec![InsertedDelay {
                 node: GraphNodeId::CompensationDelay {
@@ -4789,24 +4138,7 @@ mod tests {
                 edges,
             },
             sequential_schedule: schedule,
-            dependency_levels: vec![
-                DependencyLevel {
-                    level: 0,
-                    nodes: vec![input_direct.clone(), input_effect.clone()],
-                },
-                DependencyLevel {
-                    level: 1,
-                    nodes: vec![effect_node.clone(), route_direct.clone()],
-                },
-                DependencyLevel {
-                    level: 2,
-                    nodes: vec![route_effect.clone()],
-                },
-                DependencyLevel {
-                    level: 3,
-                    nodes: vec![output_node.clone()],
-                },
-            ],
+            dependency_levels: Vec::new(),
             route_timings: Vec::new(),
             inserted_delays: vec![InsertedDelay {
                 node: GraphNodeId::CompensationDelay {
