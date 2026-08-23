@@ -25,8 +25,11 @@
 
 /// Safe replacement for libm's `i!` indexing macro.
 ///
-/// Upstream uses `get_unchecked` in release builds. Bounds-checked indexing produces the same
-/// values, keeps the crate free of `unsafe`, and is what the workspace lint policy requires.
+/// Upstream uses `get_unchecked` in release builds and `get(..).unwrap()` in debug ones.
+/// Bounds-checked indexing produces the same values, keeps the crate free of `unsafe`, and is what
+/// the workspace lint policy requires. It is also no worse for the render path than upstream's
+/// debug form: every index here is provably in range, so the check is a branch that never fires,
+/// not a new panic path.
 macro_rules! i {
     ($array:expr, $index:expr) => {
         $array[$index]

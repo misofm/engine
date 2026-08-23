@@ -255,6 +255,28 @@ fn sqrt_is_correctly_rounded() {
         assert_eq!(m::sqrt(x), n as f64, "sqrt of the perfect square {x}");
     }
 
+    // Subnormals get their own pass: they are 1 in 2048 of the random draw above, and they are
+    // the only inputs that take the normalising shift in the decomposition.
+    for shift in 0..52 {
+        for delta in [0u64, 1, 2] {
+            let bits = (1u64 << shift) + delta;
+            let x = f64::from_bits(bits);
+            assert_eq!(
+                m::sqrt(x).to_bits(),
+                x.sqrt().to_bits(),
+                "sqrt(subnormal {bits:#018x})"
+            );
+        }
+    }
+    for n in 1..200_000u64 {
+        let x = f64::from_bits(n.wrapping_mul(0x0000_0001_1234_5677) & 0x000f_ffff_ffff_ffff);
+        assert_eq!(
+            m::sqrt(x).to_bits(),
+            x.sqrt().to_bits(),
+            "sqrt(subnormal {x:e})"
+        );
+    }
+
     for &x in &[
         0.0,
         -0.0,
