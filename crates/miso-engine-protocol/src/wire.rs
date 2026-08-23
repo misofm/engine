@@ -2,7 +2,10 @@
 
 use core::{fmt, num::NonZeroU64};
 
-use crate::{OUTER_HEADER_BYTES, PROTOCOL_MAJOR_V1, PROTOCOL_MINOR_V1, TLV_PREFIX_BYTES};
+use crate::{
+    OUTER_HEADER_BYTES, PROTOCOL_MAJOR_V1, PROTOCOL_MINOR_V1,
+    btlv::{read_u16_at as read_u16, read_u32_at as read_u32, read_u64_at as read_u64},
+};
 
 const MAGIC: [u8; 8] = *b"MISOCTL\0";
 const FLAG_REVISION_ANY: u8 = 1;
@@ -136,7 +139,8 @@ impl MessageId {
         self as u16
     }
 
-    fn parse(value: u16) -> Result<Self, DecodeError> {
+    /// Parse one frozen numeric message ID, rejecting unassigned and media-reserved values.
+    pub const fn from_raw(value: u16) -> Result<Self, DecodeError> {
         let message = match value {
             0x0001 => Self::CapabilitiesGet,
             0x0002 => Self::SessionSnapshotGet,
@@ -444,6 +448,16 @@ impl<'a> DecodeScratch<'a> {
         self.used += 1;
         Ok(())
     }
+
+    pub(crate) fn prepare(&mut self, count: u32) -> Result<(), DecodeError> {
+        self.reset();
+        let count = usize::try_from(count).map_err(|_| DecodeError::LimitExceeded)?;
+        if count > self.field_ids.len() {
+            return Err(DecodeError::ScratchTooSmall);
+        }
+        self.used = count;
+        Ok(())
+    }
 }
 
 /// A zero-copy validated frame borrowed only from the decode input.
@@ -575,6 +589,31 @@ impl ProtocolCodec {
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedFrame<'a>, DecodeError> {
         scratch.reset();
+        let decoded = self.decode_header(input)?;
+        let tlv_count = match decoded.header {
+            FrameHeader::Command(header) => header.tlv_count,
+            FrameHeader::Response(header) => header.tlv_count,
+            FrameHeader::Event(header) => header.tlv_count,
+        };
+        let limits = match decoded.header {
+            FrameHeader::Command(header)
+                if header.message_id == MessageId::SessionTransactionApply =>
+            {
+                crate::session_wire::transaction_envelope_limits(self.limits)
+            }
+            _ => self.limits,
+        };
+        crate::btlv::validate_message(decoded.payload, tlv_count, 0, limits, None, |field_id| {
+            scratch.push(field_id)
+        })?;
+        Ok(decoded)
+    }
+
+    /// Parse and validate the fixed outer header without walking its BTLV payload.
+    pub(crate) fn decode_header<'a>(
+        &self,
+        input: &'a [u8],
+    ) -> Result<DecodedFrame<'a>, DecodeError> {
         if input.len() > self.limits.max_frame_bytes {
             return Err(DecodeError::LimitExceeded);
         }
@@ -599,7 +638,7 @@ impl ProtocolCodec {
         if flags & !KNOWN_FLAG_BITS != 0 {
             return Err(DecodeError::InvalidFlags);
         }
-        let message_id = MessageId::parse(read_u16(header_bytes, 16)?)?;
+        let message_id = MessageId::from_raw(read_u16(header_bytes, 16)?)?;
         if !message_id.permits_kind(kind) {
             return Err(DecodeError::MessageKindMismatch);
         }
@@ -624,26 +663,6 @@ impl ProtocolCodec {
             return Err(DecodeError::NonzeroReserved);
         }
         let payload = &input[OUTER_HEADER_BYTES..];
-        let count = parse_tlvs(payload, tlv_count, 0, self.limits, scratch, true)?;
-        if count != tlv_count {
-            return Err(DecodeError::InvalidTlv);
-        }
-        if message_id == MessageId::CapabilitiesGet && kind == FrameKind::Command {
-            let mut cursor = 0_usize;
-            for _ in 0..tlv_count {
-                let prefix = payload
-                    .get(cursor..cursor + TLV_PREFIX_BYTES)
-                    .ok_or(DecodeError::Truncated)?;
-                if prefix[3] & 1 != 0 {
-                    return Err(DecodeError::UnknownRequiredField);
-                }
-                let length = usize::try_from(read_u32(prefix, 4)?)
-                    .map_err(|_| DecodeError::LimitExceeded)?;
-                cursor = cursor
-                    .checked_add(TLV_PREFIX_BYTES + length + padding(length))
-                    .ok_or(DecodeError::LimitExceeded)?;
-            }
-        }
         let header = match kind {
             FrameKind::Command => {
                 let request_id =
@@ -704,78 +723,13 @@ impl ProtocolCodec {
     ///
     /// This deliberately stops before TLV validation.  The controller uses it to return a
     /// canonical non-OK response for a malformed *payload* only after the complete command
-    /// header has established a real request ID.  It is crate-visible rather than a second
-    /// public wire surface: callers must use [`Self::decode`] or the schema-closed typed decoder.
-    pub(crate) fn decode_correlatable_command_header(
-        &self,
-        input: &[u8],
-    ) -> Result<CommandHeader, DecodeError> {
-        if input.len() > self.limits.max_frame_bytes {
-            return Err(DecodeError::LimitExceeded);
-        }
-        let header = input
-            .get(..OUTER_HEADER_BYTES)
-            .ok_or(DecodeError::Truncated)?;
-        if header[..8] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        let version = ProtocolVersion {
-            major: read_u16(header, 8)?,
-            minor: read_u16(header, 10)?,
-        };
-        if version.major != PROTOCOL_MAJOR_V1 {
-            return Err(DecodeError::UnsupportedVersion);
-        }
-        if read_u16(header, 12)? != OUTER_HEADER_BYTES as u16 {
-            return Err(DecodeError::BadHeaderLength);
-        }
-        if FrameKind::parse(header[14])? != FrameKind::Command {
-            return Err(DecodeError::MessageKindMismatch);
-        }
-        let flags = header[15];
-        if flags & !KNOWN_FLAG_BITS != 0 {
-            return Err(DecodeError::InvalidFlags);
-        }
-        let message_id = MessageId::parse(read_u16(header, 16)?)?;
-        if !message_id.permits_kind(FrameKind::Command) {
-            return Err(DecodeError::MessageKindMismatch);
-        }
-        if StatusCode::parse(read_u16(header, 18)?)? != StatusCode::Ok {
-            return Err(DecodeError::InvalidStatus);
-        }
-        let payload_len = read_u32(header, 20)?;
-        let declared_len = OUTER_HEADER_BYTES
-            .checked_add(usize::try_from(payload_len).map_err(|_| DecodeError::LimitExceeded)?)
-            .ok_or(DecodeError::LimitExceeded)?;
-        if declared_len != input.len() {
-            return Err(DecodeError::BadPayloadLength);
-        }
-        let request_id =
-            RequestId::new(read_u64(header, 24)?).ok_or(DecodeError::InvalidRequestId)?;
-        let wire_revision = read_u64(header, 32)?;
-        let tlv_count = read_u32(header, 40)?;
-        if tlv_count > self.limits.max_tlv_count {
-            return Err(DecodeError::LimitExceeded);
-        }
-        if read_u32(header, 44)? != 0 {
-            return Err(DecodeError::NonzeroReserved);
-        }
-        let expected_revision = if flags & FLAG_REVISION_ANY != 0 {
-            if wire_revision != 0 {
-                return Err(DecodeError::InvalidRevisionEncoding);
-            }
-            ExpectedRevision::Any
-        } else {
-            ExpectedRevision::Exact(SessionRevision(wire_revision))
-        };
-        Ok(CommandHeader {
-            version,
-            message_id,
-            request_id,
-            expected_revision,
-            payload_len,
-            tlv_count,
-        })
+    /// header has established a real request ID. Controllers and hosts can use this header-only
+    /// operation to correlate a request before validating its payload.
+    pub fn decode_command_header(&self, input: &[u8]) -> Result<CommandHeader, DecodeError> {
+        self.decode_header(input)?
+            .header
+            .command()
+            .ok_or(DecodeError::MessageKindMismatch)
     }
 
     /// Encode a canonical empty-payload frame into caller output without partial writes.
@@ -889,145 +843,6 @@ fn header_for_frame(
     }
 }
 
-fn parse_tlvs(
-    bytes: &[u8],
-    declared_count: u32,
-    depth: u8,
-    limits: ProtocolLimits,
-    scratch: &mut DecodeScratch<'_>,
-    top_level: bool,
-) -> Result<u32, DecodeError> {
-    let mut cursor = 0usize;
-    let mut previous_id = 0u16;
-    for index in 0..declared_count {
-        let prefix_end = cursor
-            .checked_add(TLV_PREFIX_BYTES)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let prefix = bytes
-            .get(cursor..prefix_end)
-            .ok_or(DecodeError::Truncated)?;
-        let field_id = read_u16(prefix, 0)?;
-        if field_id == 0 || (index != 0 && field_id < previous_id) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        previous_id = field_id;
-        let wire_type = prefix[2];
-        let flags = prefix[3];
-        if !(1..=15).contains(&wire_type) || flags & !1 != 0 {
-            return Err(DecodeError::InvalidTlv);
-        }
-        let value_len =
-            usize::try_from(read_u32(prefix, 4)?).map_err(|_| DecodeError::LimitExceeded)?;
-        let value_start = prefix_end;
-        let value_end = value_start
-            .checked_add(value_len)
-            .ok_or(DecodeError::LimitExceeded)?;
-        let value = bytes
-            .get(value_start..value_end)
-            .ok_or(DecodeError::Truncated)?;
-        validate_value(wire_type, value, depth, limits, scratch)?;
-        let padded_end = value_end
-            .checked_add(padding(value_len))
-            .ok_or(DecodeError::LimitExceeded)?;
-        let padding_bytes = bytes
-            .get(value_end..padded_end)
-            .ok_or(DecodeError::Truncated)?;
-        if padding_bytes.iter().any(|byte| *byte != 0) {
-            return Err(DecodeError::InvalidTlv);
-        }
-        if top_level {
-            scratch.push(field_id)?;
-        }
-        cursor = padded_end;
-    }
-    if cursor != bytes.len() {
-        return Err(DecodeError::InvalidTlv);
-    }
-    Ok(declared_count)
-}
-
-fn validate_value(
-    wire_type: u8,
-    value: &[u8],
-    depth: u8,
-    limits: ProtocolLimits,
-    scratch: &mut DecodeScratch<'_>,
-) -> Result<(), DecodeError> {
-    let exact = match wire_type {
-        1 | 8 => Some(1),
-        2 => Some(2),
-        3 | 6 => Some(4),
-        4 | 5 | 7 => Some(8),
-        _ => None,
-    };
-    if let Some(exact) = exact {
-        if value.len() != exact {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        if wire_type == 8 && !matches!(value[0], 0 | 1) {
-            return Err(DecodeError::InvalidValueLength);
-        }
-    }
-    match wire_type {
-        9 => {
-            if value.len() > limits.max_string_bytes {
-                return Err(DecodeError::LimitExceeded);
-            }
-            if core::str::from_utf8(value).is_err() {
-                return Err(DecodeError::InvalidUtf8);
-            }
-        }
-        11 => {
-            if depth >= limits.max_nesting {
-                return Err(DecodeError::LimitExceeded);
-            }
-            let nested_header = value.get(..8).ok_or(DecodeError::Truncated)?;
-            let count = read_u32(nested_header, 0)?;
-            if count > limits.max_tlv_count {
-                return Err(DecodeError::LimitExceeded);
-            }
-            if read_u32(nested_header, 4)? != 0 {
-                return Err(DecodeError::NonzeroReserved);
-            }
-            parse_tlvs(&value[8..], count, depth + 1, limits, scratch, false)?;
-        }
-        12 if !value.len().is_multiple_of(2) => return Err(DecodeError::InvalidValueLength),
-        13 | 15 if !value.len().is_multiple_of(4) => {
-            return Err(DecodeError::InvalidValueLength);
-        }
-        14 if !value.len().is_multiple_of(8) => return Err(DecodeError::InvalidValueLength),
-        _ => {}
-    }
-    Ok(())
-}
-
-const fn padding(length: usize) -> usize {
-    (8 - (length & 7)) & 7
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 2)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u16::from_le_bytes([value[0], value[1]]))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 4)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, DecodeError> {
-    let value = bytes
-        .get(offset..offset + 8)
-        .ok_or(DecodeError::Truncated)?;
-    Ok(u64::from_le_bytes([
-        value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
-    ]))
-}
-
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -1094,6 +909,43 @@ mod tests {
         let mut encoded = [0xff; OUTER_HEADER_BYTES];
         assert_eq!(codec.encode(&frame, &mut encoded), Ok(OUTER_HEADER_BYTES));
         assert_eq!(encoded, EMPTY_CAPABILITIES_ANY);
+    }
+
+    #[test]
+    fn public_command_header_peek_stops_before_payload_validation() {
+        assert_eq!(
+            MessageId::from_raw(MessageId::TransportGet.raw()),
+            Ok(MessageId::TransportGet)
+        );
+        assert_eq!(MessageId::from_raw(0x6000), Err(DecodeError::PcmForbidden));
+        assert_eq!(
+            MessageId::from_raw(0x7000),
+            Err(DecodeError::UnsupportedMessage)
+        );
+
+        let codec = ProtocolCodec::default();
+        let mut frame = EMPTY_CAPABILITIES_ANY.to_vec();
+        frame[20..24].copy_from_slice(&16_u32.to_le_bytes());
+        frame[40..44].copy_from_slice(&1_u32.to_le_bytes());
+        frame.extend_from_slice(&[1, 0, 1, 1, 1, 0, 0, 0]);
+        frame.extend_from_slice(&[0; 8]);
+        let header = codec
+            .decode_command_header(&frame)
+            .expect("complete command header remains correlatable");
+        assert_eq!(header.request_id, RequestId::new(1).expect("nonzero"));
+        assert_eq!(header.message_id, MessageId::CapabilitiesGet);
+        assert_eq!(header.payload_len, 16);
+        assert_eq!(header.tlv_count, 1);
+        assert!(
+            codec
+                .decode(&frame, &mut DecodeScratch::new(&mut [0_u16; 1]))
+                .is_ok(),
+            "generic decode validates structure without selecting a message schema"
+        );
+        assert!(matches!(
+            codec.decode_typed_command(&frame, &mut DecodeScratch::new(&mut [0_u16; 1])),
+            Err(DecodeError::UnknownRequiredField)
+        ));
     }
 
     #[test]
@@ -1214,9 +1066,10 @@ mod tests {
         frame[40] = 1;
         frame.extend_from_slice(&[1, 0, 1, 1, 1, 0, 0, 0]);
         frame.extend_from_slice(&[0; 8]);
-        assert_eq!(
-            codec.decode(&frame, &mut DecodeScratch::new(&mut slots)),
-            Err(DecodeError::UnknownRequiredField)
+        assert!(
+            codec
+                .decode(&frame, &mut DecodeScratch::new(&mut slots))
+                .is_ok()
         );
         frame[57] = 1;
         assert_eq!(

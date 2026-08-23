@@ -395,11 +395,7 @@ fn push_command(
     out.push(ConformanceFrame {
         name,
         bytes,
-        decoder: if matches!(frame.payload, CommandPayload::SessionTransactionApply(_)) {
-            ConformanceDecoder::Transaction
-        } else {
-            ConformanceDecoder::Command
-        },
+        decoder: ConformanceDecoder::Command,
     });
 }
 fn push_success(

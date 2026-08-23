@@ -22,11 +22,10 @@ fn one_million_deterministic_mutations_cover_complete_schema_closed_dispatch() {
         46,
         "11 commands (including all-opcode transaction) + 11 success + 18 non-OK + 6 events"
     );
-    assert!(
-        seeds
-            .iter()
-            .any(|seed| seed.decoder == ConformanceDecoder::Transaction)
-    );
+    assert!(seeds.iter().any(|seed| {
+        seed.name == "command.session_transaction_apply"
+            && seed.decoder == ConformanceDecoder::Command
+    }));
     let mut state = 0x4d49_534f_4354_4c05_u64;
     let mut frame = vec![0_u8; MAX_FRAME_BYTES + 32];
     for index in 0..MUTATION_RUNS {

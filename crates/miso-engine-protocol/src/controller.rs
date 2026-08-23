@@ -4,12 +4,19 @@
 //! will construct the same commands after the bounded wire decoder has finished; no decoder calls
 //! a renderer, and this module has no plan-publication capability.
 
-use core::{alloc::Layout, fmt, num::NonZeroUsize};
-use std::collections::VecDeque;
+use core::{alloc::Layout, fmt, num::NonZeroUsize, ops::Range};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+#[cfg(test)]
+std::thread_local! {
+    static PREPARED_IMMEDIATE_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static PROSPECTIVE_REPLAY_CLONES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static RESPONSE_STAGING_VECS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
@@ -148,7 +155,7 @@ pub enum ReplayDecision {
     /// The request is new and has reserved enough configured replay capacity to execute.
     Execute,
     /// An exact same-ID/same-byte request returns this cached response with no execution.
-    Cached(ControllerResponse),
+    Cached(ReplayHit),
     /// Same request ID had different canonical bytes.
     RequestIdReuse,
     /// Request ID was retired, evicted, or was not strictly increasing as a new request.
@@ -158,26 +165,52 @@ pub enum ReplayDecision {
     Backpressure,
 }
 
-/// One cached exact request/response byte pair.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ReplayEntry {
+/// Opaque stable identity of one exact cached response.
+///
+/// A hit remains valid while its request entry survives in its originating cache, including
+/// across arena compaction. Cross-cache and evicted hits are rejected by [`ReplayCache::cached`]
+/// and [`ReplayCache::try_cached`] without indexing stale arena offsets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplayHit {
+    cache_id: u64,
     request_id: RequestId,
+}
+
+/// One cached exact request/response byte pair.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ReplayEntry {
+    request_id: u64,
     request_offset: usize,
     request_bytes: usize,
     response_offset: usize,
     response_bytes: usize,
-    response_status: StatusCode,
-    response_revision: SessionRevision,
-    framed: bool,
+    // Preserve the established per-slot resource authority even though response metadata now
+    // comes from the canonical cached frame rather than duplicate typed fields.
+    _resource_layout_reservation: [u8; 16],
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReplayReservation {
+    request_id: RequestId,
+    request_offset: usize,
+    request_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ReplayPreflightPlan {
+    evicted: usize,
+    removed_bytes: usize,
+}
+
+static NEXT_REPLAY_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded exact-byte replay cache. It intentionally covers one endpoint lifetime only.
 pub struct ReplayCache {
+    cache_id: u64,
     config: ReplayCacheConfig,
-    entries: VecDeque<ReplayEntry>,
+    entries: Box<[ReplayEntry]>,
     storage: Box<[u8]>,
-    retained_bytes: usize,
-    highest_new_id: Option<RequestId>,
+    reservation: Option<ReplayReservation>,
 }
 
 impl ReplayCache {
@@ -209,65 +242,143 @@ impl ReplayCache {
     /// Fallibly allocate the complete replay metadata and byte arena before endpoint publication.
     pub fn try_new(config: ReplayCacheConfig) -> Result<Self, ReplayCacheError> {
         Self::resource_report_for_config(config)?;
-        let mut entries = VecDeque::new();
+        let cache_id = NEXT_REPLAY_CACHE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| ReplayCacheError::ResourceOverflow)?;
+        let mut entries = Vec::new();
         entries
             .try_reserve_exact(config.entries.get())
             .map_err(|_| ReplayCacheError::ResourceAllocation)?;
+        entries.resize(config.entries.get(), ReplayEntry::default());
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(config.bytes.get())
             .map_err(|_| ReplayCacheError::ResourceAllocation)?;
         storage.resize(config.bytes.get(), 0);
         Ok(Self {
+            cache_id,
             config,
-            entries,
+            entries: entries.into_boxed_slice(),
             storage: storage.into_boxed_slice(),
-            retained_bytes: 0,
-            highest_new_id: None,
+            reservation: None,
         })
     }
 
     fn try_clone_eager(&self) -> Result<Self, ReplayCacheError> {
+        #[cfg(test)]
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(clones.get().saturating_add(1)));
         let mut cloned = Self::try_new(self.config)?;
-        cloned.entries.extend(self.entries.iter().cloned());
+        cloned.entries.copy_from_slice(&self.entries);
         cloned.storage.copy_from_slice(&self.storage);
-        cloned.retained_bytes = self.retained_bytes;
-        cloned.highest_new_id = self.highest_new_id;
+        cloned.reservation = self.reservation;
         Ok(cloned)
     }
 
-    fn cached_response(&self, entry: &ReplayEntry) -> ControllerResponse {
-        let response = self.storage
-            [entry.response_offset..entry.response_offset + entry.response_bytes]
-            .to_vec();
-        ControllerResponse {
-            request_id: entry.request_id,
-            status: entry.response_status,
-            revision: entry.response_revision,
-            bytes: if entry.framed {
-                Vec::new()
-            } else {
-                response.clone()
-            },
-            frame_bytes: entry.framed.then_some(response),
+    fn completed_len(&self) -> usize {
+        self.entries.partition_point(|entry| entry.request_id != 0)
+    }
+
+    fn completed_retained_bytes(&self) -> usize {
+        self.entries[..self.completed_len()]
+            .last()
+            .map_or(0, |entry| {
+                entry.response_offset.saturating_add(entry.response_bytes)
+            })
+    }
+
+    fn highest_new_id(&self) -> Option<RequestId> {
+        self.reservation
+            .map(|reservation| reservation.request_id)
+            .or_else(|| {
+                self.entries[..self.completed_len()]
+                    .last()
+                    .and_then(|entry| RequestId::new(entry.request_id))
+            })
+    }
+
+    fn entry_index(&self, request_id: RequestId) -> Result<usize, usize> {
+        let request_id = request_id.get();
+        let entries = &self.entries[..self.completed_len()];
+        let index = entries.partition_point(|entry| entry.request_id < request_id);
+        if index < entries.len() && entries[index].request_id == request_id {
+            Ok(index)
+        } else {
+            Err(index)
         }
     }
 
-    fn compact(&mut self) {
-        let mut cursor = 0;
-        for entry in &mut self.entries {
-            let request_end = entry.request_offset + entry.request_bytes;
-            self.storage
-                .copy_within(entry.request_offset..request_end, cursor);
-            entry.request_offset = cursor;
-            cursor += entry.request_bytes;
-            let response_end = entry.response_offset + entry.response_bytes;
-            self.storage
-                .copy_within(entry.response_offset..response_end, cursor);
-            entry.response_offset = cursor;
-            cursor += entry.response_bytes;
+    fn evict_prefix(&mut self, count: usize, removed_bytes: usize) {
+        if count == 0 {
+            return;
         }
-        debug_assert_eq!(cursor, self.retained_bytes);
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
+        self.storage.copy_within(removed_bytes..retained_bytes, 0);
+        self.entries.copy_within(count..len, 0);
+        let remaining = len - count;
+        for entry in &mut self.entries[..remaining] {
+            entry.request_offset -= removed_bytes;
+            entry.response_offset -= removed_bytes;
+        }
+        self.entries[remaining..len].fill(ReplayEntry::default());
+    }
+
+    fn plan_preflight(
+        &self,
+        request_id: RequestId,
+        request: &[u8],
+    ) -> Result<ReplayPreflightPlan, ReplayDecision> {
+        if let Ok(index) = self.entry_index(request_id) {
+            let entry = self.entries[index];
+            return Err(
+                if self.storage[entry.request_offset..entry.request_offset + entry.request_bytes]
+                    == *request
+                {
+                    ReplayDecision::Cached(ReplayHit {
+                        cache_id: self.cache_id,
+                        request_id,
+                    })
+                } else {
+                    ReplayDecision::RequestIdReuse
+                },
+            );
+        }
+        if self.reservation.is_some() {
+            return Err(ReplayDecision::Backpressure);
+        }
+        if self
+            .highest_new_id()
+            .is_some_and(|highest| request_id <= highest)
+        {
+            return Err(ReplayDecision::ReplayExpired);
+        }
+        let reservation = request
+            .len()
+            .checked_add(self.config.max_response_bytes)
+            .ok_or(ReplayDecision::Backpressure)?;
+        if reservation > self.config.bytes.get() {
+            return Err(ReplayDecision::Backpressure);
+        }
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
+        let mut evicted = 0;
+        let mut removed_bytes = 0;
+        while len.saturating_sub(evicted) >= self.entries.len()
+            || retained_bytes
+                .saturating_sub(removed_bytes)
+                .saturating_add(reservation)
+                > self.storage.len()
+        {
+            let Some(entry) = self.entries.get(evicted).filter(|_| evicted < len) else {
+                return Err(ReplayDecision::Backpressure);
+            };
+            removed_bytes = removed_bytes.saturating_add(entry.byte_len());
+            evicted += 1;
+        }
+        Ok(ReplayPreflightPlan {
+            evicted,
+            removed_bytes,
+        })
     }
 
     /// Inspect/capacity-reserve a request before execution. An `Execute` result makes enough
@@ -276,118 +387,128 @@ impl ReplayCache {
     /// A `Backpressure` result is deliberately **unaccepted**: it neither advances the strictly
     /// increasing new-request frontier nor creates a replay entry. This is the endpoint's one
     /// replay-preflight policy, so the same ID remains reusable if capacity later permits it.
+    /// While an accepted request is pending completion, other new preflights return
+    /// `Backpressure` without replacing its exact-byte reservation.
     pub fn preflight(&mut self, request_id: RequestId, request: &[u8]) -> ReplayDecision {
-        if let Some(entry) = self
-            .entries
-            .iter()
-            .find(|entry| entry.request_id == request_id)
-        {
-            return if self.storage[entry.request_offset..entry.request_offset + entry.request_bytes]
-                == *request
-            {
-                ReplayDecision::Cached(self.cached_response(entry))
-            } else {
-                ReplayDecision::RequestIdReuse
-            };
-        }
-        if self
-            .highest_new_id
-            .is_some_and(|highest| request_id <= highest)
-        {
-            return ReplayDecision::ReplayExpired;
-        }
-        let reservation = match request.len().checked_add(self.config.max_response_bytes) {
-            Some(value) => value,
-            None => return ReplayDecision::Backpressure,
+        let plan = match self.plan_preflight(request_id, request) {
+            Ok(plan) => plan,
+            Err(decision) => return decision,
         };
-        if reservation > self.config.bytes.get() {
-            return ReplayDecision::Backpressure;
-        }
-        while self.entries.len() >= self.config.entries.get()
-            || self.retained_bytes.saturating_add(reservation) > self.config.bytes.get()
-        {
-            let Some(entry) = self.entries.pop_front() else {
-                return ReplayDecision::Backpressure;
-            };
-            self.retained_bytes = self.retained_bytes.saturating_sub(entry.byte_len());
-        }
-        self.highest_new_id = Some(request_id);
+        self.apply_preflight_plan(request_id, request, plan);
         ReplayDecision::Execute
+    }
+
+    fn apply_preflight_plan(
+        &mut self,
+        request_id: RequestId,
+        request: &[u8],
+        plan: ReplayPreflightPlan,
+    ) {
+        self.evict_prefix(plan.evicted, plan.removed_bytes);
+        let request_offset = self.completed_retained_bytes();
+        self.storage[request_offset..request_offset + request.len()].copy_from_slice(request);
+        self.reservation = Some(ReplayReservation {
+            request_id,
+            request_offset,
+            request_bytes: request.len(),
+        });
     }
 
     /// Whether this ID would reach new-request admission rather than an already-known replay
     /// result. This is intentionally read-only so caller-output reservation can happen before
     /// preflight advances the endpoint's new-request frontier.
     fn is_new_request(&self, request_id: RequestId) -> bool {
-        !self
-            .entries
-            .iter()
-            .any(|entry| entry.request_id == request_id)
+        self.entry_index(request_id).is_err()
             && self
-                .highest_new_id
+                .highest_new_id()
                 .is_none_or(|highest| request_id > highest)
     }
 
     /// Cache the exact bytes from a request that previously received [`ReplayDecision::Execute`].
-    /// The response must fit the fixed reservation made by [`Self::preflight`].
+    /// The response must fit the fixed reservation made by [`Self::preflight`]. An ID, length, or
+    /// byte mismatch leaves the original reservation intact so its exact completion can retry.
     pub fn complete(
         &mut self,
         request_id: RequestId,
         request: &[u8],
-        response: ControllerResponse,
+        response: &[u8],
     ) -> Result<(), ReplayCacheError> {
-        if response.replay_byte_len() > self.config.max_response_bytes {
+        if response.len() > self.config.max_response_bytes {
             return Err(ReplayCacheError::ResponseTooLarge);
         }
         let byte_len = request
             .len()
-            .checked_add(response.replay_byte_len())
+            .checked_add(response.len())
             .ok_or(ReplayCacheError::ResponseTooLarge)?;
-        if self.entries.len() >= self.config.entries.get()
-            || self.retained_bytes.saturating_add(byte_len) > self.config.bytes.get()
+        let Some(reservation) = self.reservation else {
+            return Err(ReplayCacheError::ReservationMissing);
+        };
+        if reservation.request_id != request_id
+            || reservation.request_bytes != request.len()
+            || self
+                .storage
+                .get(reservation.request_offset..reservation.request_offset + request.len())
+                != Some(request)
         {
             return Err(ReplayCacheError::ReservationMissing);
         }
-        self.compact();
-        let request_offset = self.retained_bytes;
+        let len = self.completed_len();
+        let retained_bytes = self.completed_retained_bytes();
+        if len >= self.entries.len() || retained_bytes.saturating_add(byte_len) > self.storage.len()
+        {
+            return Err(ReplayCacheError::ReservationMissing);
+        }
+        self.reservation = None;
+        let request_offset = reservation.request_offset;
         let response_offset = request_offset + request.len();
-        let response_bytes = response
-            .frame_bytes
-            .as_deref()
-            .unwrap_or(response.bytes.as_slice());
-        self.storage[request_offset..response_offset].copy_from_slice(request);
-        self.storage[response_offset..response_offset + response_bytes.len()]
-            .copy_from_slice(response_bytes);
-        self.retained_bytes = self.retained_bytes.saturating_add(byte_len);
-        self.entries.push_back(ReplayEntry {
-            request_id,
+        self.storage[response_offset..response_offset + response.len()].copy_from_slice(response);
+        self.entries[len] = ReplayEntry {
+            request_id: request_id.get(),
             request_offset,
             request_bytes: request.len(),
             response_offset,
-            response_bytes: response_bytes.len(),
-            response_status: response.status,
-            response_revision: response.revision,
-            framed: response.frame_bytes.is_some(),
-        });
+            response_bytes: response.len(),
+            _resource_layout_reservation: [0; 16],
+        };
         Ok(())
+    }
+
+    /// Borrow the exact cached response bytes represented by a hit from [`Self::preflight`].
+    ///
+    /// Returns an empty slice for a stale or foreign hit. Use [`Self::try_cached`] when an empty
+    /// cached response must be distinguished from invalid handle use.
+    #[must_use]
+    pub fn cached(&self, hit: ReplayHit) -> &[u8] {
+        self.try_cached(hit).unwrap_or_default()
+    }
+
+    /// Fallibly borrow a cached response, rejecting evicted and cross-cache hits.
+    #[must_use]
+    pub fn try_cached(&self, hit: ReplayHit) -> Option<&[u8]> {
+        if hit.cache_id != self.cache_id {
+            return None;
+        }
+        let entry = self.entries.get(self.entry_index(hit.request_id).ok()?)?;
+        self.storage
+            .get(entry.response_offset..entry.response_offset.checked_add(entry.response_bytes)?)
     }
 
     /// Number of complete exact-byte entries currently retained.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.completed_len()
     }
 
     /// Whether no replay entries are retained.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.completed_len() == 0
     }
 
     /// Current retained exact-byte count.
     #[must_use]
-    pub const fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+    pub fn retained_bytes(&self) -> usize {
+        self.completed_retained_bytes()
     }
 
     /// Return the immutable effective replay capacity configuration.
@@ -399,7 +520,7 @@ impl ReplayCache {
     /// Inspect eager metadata and byte-arena capacities without exposing replay contents.
     #[must_use]
     pub fn retained_storage_capacities(&self) -> (usize, usize) {
-        (self.entries.capacity(), self.storage.len())
+        (self.entries.len(), self.storage.len())
     }
 }
 
@@ -940,6 +1061,22 @@ impl ControlCommand<'_> {
                 | Self::TelemetryConfigure { .. }
         )
     }
+
+    const fn message_id(&self) -> MessageId {
+        match self {
+            Self::CapabilitiesGet => MessageId::CapabilitiesGet,
+            Self::SessionSnapshotGet { .. } => MessageId::SessionSnapshotGet,
+            Self::SessionTransactionApply { .. } => MessageId::SessionTransactionApply,
+            Self::ParameterMetadataGet { .. } => MessageId::ParameterMetadataGet,
+            Self::ParameterStateGet { .. } => MessageId::ParameterStateGet,
+            Self::AutomationEnqueue { .. } => MessageId::AutomationEnqueue,
+            Self::TransportGet => MessageId::TransportGet,
+            Self::TransportSet { .. } => MessageId::TransportSet,
+            Self::TelemetryConfigure { .. } => MessageId::TelemetryConfigure,
+            Self::CountersGet { .. } => MessageId::CountersGet,
+            Self::DiagnosticsGet { .. } => MessageId::DiagnosticsGet,
+        }
+    }
 }
 
 /// One internally decoded request. `canonical_bytes` are retained exactly for replay comparison.
@@ -963,35 +1100,86 @@ pub struct ControllerResponse {
     pub status: StatusCode,
     /// Observed or newly committed authoritative revision.
     pub revision: SessionRevision,
-    /// Canonical response bytes remain private replay storage; callers use `encode_payload`.
-    bytes: Vec<u8>,
-    /// Complete canonical response bytes for the schema-closed full-frame ingress path.
-    ///
-    /// Older payload-only controller callers intentionally leave this absent.  Keeping this
-    /// internal preserves their compatibility without introducing a public raw-frame escape.
-    frame_bytes: Option<Vec<u8>>,
+    /// One complete canonical response frame retained for exact replay and payload projection.
+    /// This is the response's sole byte backing allocation.
+    pub frame: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct CapabilitySet {
+    commands: [u16; 11],
+    command_len: u8,
+    events: [u16; 6],
+    event_len: u8,
+    flags: CapabilityFlags,
+}
+
+enum Body {
+    Capabilities(CapabilitySet),
+    Snapshot {
+        total: u64,
+        offset: u64,
+        range: Range<usize>,
+        eof: bool,
+    },
+    TransactionApplied(TransactionApplied),
+    ParameterMetadata(ParameterMetadataPage),
+    ParameterState(ParameterStatePage),
+    AutomationEnqueued(AutomationEnqueued),
+    Transport(TransportSnapshot),
+    Telemetry(TelemetryConfiguration),
+    Counters(CounterSnapshot),
+    Diagnostics(DiagnosticsPage),
+    NonOk(NonOkResponse),
+}
+
+struct Outcome {
+    status: StatusCode,
+    revision: SessionRevision,
+    body: Body,
 }
 
 impl ControllerResponse {
+    fn from_complete_frame(
+        request_id: RequestId,
+        status: StatusCode,
+        revision: SessionRevision,
+        frame: Vec<u8>,
+    ) -> Self {
+        Self {
+            request_id,
+            status,
+            revision,
+            frame,
+        }
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.frame
+            .get(crate::OUTER_HEADER_BYTES..)
+            .unwrap_or_default()
+    }
+
+    fn complete_frame(&self) -> &[u8] {
+        &self.frame
+    }
+
     /// Return the exact caller-buffer byte count for the canonical typed response payload.
     #[must_use]
     pub const fn payload_len(&self) -> usize {
-        self.bytes.len()
+        self.frame.len().saturating_sub(crate::OUTER_HEADER_BYTES)
     }
 
     /// Copy the already canonical typed response into caller-owned output without exposing a raw
     /// provider payload API.
     pub fn encode_payload(&self, output: &mut [u8]) -> Result<usize, crate::EncodeError> {
-        let required = self.bytes.len();
+        let payload = self.payload();
+        let required = payload.len();
         if output.len() < required {
             return Err(crate::EncodeError::OutputTooSmall { required });
         }
-        output[..required].copy_from_slice(&self.bytes);
+        output[..required].copy_from_slice(payload);
         Ok(required)
-    }
-
-    fn replay_byte_len(&self) -> usize {
-        self.frame_bytes.as_ref().map_or(self.bytes.len(), Vec::len)
     }
 }
 
@@ -1047,6 +1235,30 @@ impl PreparedImmediateCommandFrame {
     }
 }
 
+struct StructuralCommandPlan {
+    request_id: RequestId,
+    previous_revision: SessionRevision,
+    prospective_session: PreparedSessionTransaction,
+    replay_plan: ReplayPreflightPlan,
+    event_sequence: u64,
+    cancellation_batches: usize,
+    required_events: usize,
+    applied_operations: u32,
+    response_measure: crate::btlv::MessageMeasure,
+}
+
+// Keeping the structural plan inline avoids introducing a heap allocation into the direct
+// one-call transaction path merely to reduce this short-lived dispatch value's stack size.
+#[allow(clippy::large_enum_variant)]
+enum StructuralCommandDisposition {
+    Legacy,
+    Immediate {
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+    },
+    Structural(StructuralCommandPlan),
+}
+
 /// Opaque affine structural preparation bound to one exact controller identity and generation.
 /// It is deliberately neither `Clone` nor publicly constructible.
 pub struct PreparedStructuralCommand {
@@ -1062,6 +1274,10 @@ pub struct PreparedStructuralCommand {
     cancellation_batches: usize,
     applied_operations: u32,
     armed: bool,
+    // The CAPI resource contract counts this public opaque token's established retained layout.
+    // ReplayCache itself is compact in the live controller; keep the prepared-token authority
+    // stable until that external resource contract can be revised in its own issue.
+    _resource_layout_reservation: [u8; 24],
 }
 
 impl PreparedStructuralCommand {
@@ -1078,8 +1294,7 @@ impl PreparedStructuralCommand {
     pub fn response_len(&self) -> usize {
         self.response
             .as_ref()
-            .and_then(|response| response.frame_bytes.as_ref())
-            .map_or(0, Vec::len)
+            .map_or(0, |response| response.frame.len())
     }
 }
 
@@ -1323,36 +1538,57 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
+        let message_id = request.command.message_id();
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
-            return self.response(request.request_id, StatusCode::Backpressure, Vec::new());
+            return self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.non_ok(StatusCode::Backpressure, None),
+            );
         }
         match self
             .replay
             .preflight(request.request_id, request.canonical_bytes)
         {
-            ReplayDecision::Cached(response) => return response,
+            ReplayDecision::Cached(hit) => {
+                return self.compatibility_cached_response(message_id, request.request_id, hit);
+            }
             ReplayDecision::RequestIdReuse => {
-                return self.response(request.request_id, StatusCode::RequestIdReuse, Vec::new());
+                return self.compatibility_response(
+                    message_id,
+                    request.request_id,
+                    self.non_ok(StatusCode::RequestIdReuse, None),
+                );
             }
             ReplayDecision::ReplayExpired => {
-                return self.response(request.request_id, StatusCode::ReplayExpired, Vec::new());
+                return self.compatibility_response(
+                    message_id,
+                    request.request_id,
+                    self.non_ok(StatusCode::ReplayExpired, None),
+                );
             }
             ReplayDecision::Backpressure => {
-                return self.replay_backpressure_response(
+                return self.compatibility_response(
+                    message_id,
                     request.request_id,
-                    request.canonical_bytes.len(),
+                    self.replay_backpressure_outcome(request.canonical_bytes.len()),
                 );
             }
             ReplayDecision::Execute => {}
         }
-        let response = self.execute(&request);
+        let outcome = self.execute(&request);
+        let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
             request.request_id,
             request.canonical_bytes,
-            response.clone(),
+            response.complete_frame(),
         ) {
             Ok(()) => response,
-            Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
+            Err(_) => self.compatibility_response(
+                message_id,
+                request.request_id,
+                self.non_ok(StatusCode::Internal, None),
+            ),
         }
     }
 
@@ -1391,39 +1627,35 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
-        let frame = codec.decode(input, scratch)?;
-        let header = frame
-            .header
-            .command()
-            .ok_or(DecodeError::MessageKindMismatch)?;
-        let command = match header.message_id {
-            MessageId::CapabilitiesGet => {
-                if header.expected_revision != ExpectedRevision::Any {
-                    return Err(DecodeError::InvalidTlv);
+        let decoded = codec.decode_typed_command_limited(
+            input,
+            scratch,
+            self.config.maximum_transaction_edits,
+        )?;
+        let header = decoded.header;
+        let command = match decoded.payload {
+            DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
+            DecodedCommandPayload::SessionSnapshotGet(request) => {
+                ControlCommand::SessionSnapshotGet {
+                    offset: request.offset,
+                    max_bytes: request.maximum_bytes,
                 }
-                codec.decode_capabilities_request(frame.payload, header.tlv_count)?;
-                ControlCommand::CapabilitiesGet
             }
-            MessageId::SessionSnapshotGet => ControlCommand::SessionSnapshotGet {
-                offset: codec
-                    .decode_snapshot_request(frame.payload, header.tlv_count)?
-                    .offset,
-                max_bytes: codec
-                    .decode_snapshot_request(frame.payload, header.tlv_count)?
-                    .maximum_bytes,
-            },
-            MessageId::SessionTransactionApply => {
-                return self.process_session_transaction_btlv(&codec, input, scratch);
+            DecodedCommandPayload::SessionTransactionApply(edits) => {
+                return Ok(self.process(ControllerRequest {
+                    request_id: header.request_id,
+                    expected_revision: header.expected_revision,
+                    canonical_bytes: input,
+                    command: ControlCommand::SessionTransactionApply { edits: &edits },
+                }));
             }
-            MessageId::ParameterMetadataGet => ControlCommand::ParameterMetadataGet {
-                request: codec
-                    .decode_parameter_metadata_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::ParameterStateGet => ControlCommand::ParameterStateGet {
-                request: codec.decode_parameter_state_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::AutomationEnqueue => {
-                let decoded = codec.decode_automation_enqueue(frame.payload, header.tlv_count)?;
+            DecodedCommandPayload::ParameterMetadataGet(request) => {
+                ControlCommand::ParameterMetadataGet { request }
+            }
+            DecodedCommandPayload::ParameterStateGet(request) => {
+                ControlCommand::ParameterStateGet { request }
+            }
+            DecodedCommandPayload::AutomationEnqueue(decoded) => {
                 let revision = match header.expected_revision {
                     ExpectedRevision::Exact(revision) => revision,
                     ExpectedRevision::Any => SessionRevision(0),
@@ -1432,24 +1664,17 @@ impl<P: ControlProvider> ProtocolController<P> {
                     batch: decoded.into_batch(revision, header.request_id)?,
                 }
             }
-            MessageId::TransportGet => {
-                codec.decode_transport_get_request(frame.payload, header.tlv_count)?;
-                ControlCommand::TransportGet
+            DecodedCommandPayload::TransportGet => ControlCommand::TransportGet,
+            DecodedCommandPayload::TransportSet(request) => {
+                ControlCommand::TransportSet { request }
             }
-            MessageId::TransportSet => ControlCommand::TransportSet {
-                request: codec.decode_transport_set_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::TelemetryConfigure => ControlCommand::TelemetryConfigure {
-                configuration: codec
-                    .decode_telemetry_configuration(frame.payload, header.tlv_count)?,
-            },
-            MessageId::CountersGet => ControlCommand::CountersGet {
-                request: codec.decode_counters_request(frame.payload, header.tlv_count)?,
-            },
-            MessageId::DiagnosticsGet => ControlCommand::DiagnosticsGet {
-                request: codec.decode_diagnostics_request(frame.payload, header.tlv_count)?,
-            },
-            _ => return Err(DecodeError::UnsupportedMessage),
+            DecodedCommandPayload::TelemetryConfigure(configuration) => {
+                ControlCommand::TelemetryConfigure { configuration }
+            }
+            DecodedCommandPayload::CountersGet(request) => ControlCommand::CountersGet { request },
+            DecodedCommandPayload::DiagnosticsGet(request) => {
+                ControlCommand::DiagnosticsGet { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -1474,17 +1699,23 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        match self.prepare_command_frame(input, scratch, output.len())? {
-            PreparedCommandFrame::Immediate(response) => response
-                .write_into(output)
-                .map_err(CommandFrameProcessError::Encode),
-            PreparedCommandFrame::Structural(prepared) => {
-                let committed = self
-                    .commit_prepared_structural(*prepared)
-                    .map_err(|_| CommandFrameProcessError::Internal)?;
-                committed
-                    .write_into(output)
-                    .map_err(CommandFrameProcessError::Encode)
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        match self.plan_structural_command(input, scratch, output.len(), header)? {
+            StructuralCommandDisposition::Legacy => {
+                self.process_command_frame_into_legacy(input, scratch, output)
+            }
+            StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome,
+            } => self.process_planned_immediate_into(input, header, replay_plan, outcome, output),
+            StructuralCommandDisposition::Structural(plan) => {
+                self.process_structural_plan_into(input, output, header, plan)
             }
         }
     }
@@ -1502,44 +1733,160 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         let header = self
             .codec
-            .decode_correlatable_command_header(input)
+            .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
-        if header.message_id != MessageId::SessionTransactionApply {
-            return self.process_immediate_command(input, scratch, output_capacity);
+        match self.plan_structural_command(input, scratch, output_capacity, header)? {
+            StructuralCommandDisposition::Legacy => {
+                self.process_immediate_command(input, scratch, output_capacity)
+            }
+            StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome,
+            } => {
+                self.prepare_planned_immediate(input, header, replay_plan, outcome, output_capacity)
+            }
+            StructuralCommandDisposition::Structural(plan) => Ok(PreparedCommandFrame::Structural(
+                Box::new(self.prepare_structural_plan(input, header, plan)?),
+            )),
         }
-        if self.replay.is_new_request(header.request_id)
-            && output_capacity < self.replay.config().max_response_bytes
-        {
-            return Err(CommandFrameProcessError::OutputReservationTooSmall {
-                required: self.replay.config().max_response_bytes,
-            });
-        }
+    }
 
+    fn prepare_structural_plan(
+        &mut self,
+        input: &[u8],
+        header: CommandHeader,
+        plan: StructuralCommandPlan,
+    ) -> Result<PreparedStructuralCommand, CommandFrameProcessError> {
+        let revision = plan.prospective_session.revision();
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations: plan.applied_operations,
+            }),
+        };
+        #[cfg(test)]
+        RESPONSE_STAGING_VECS.with(|allocations| {
+            allocations.set(allocations.get().saturating_add(1));
+        });
+        let mut frame = vec![0_u8; self.replay.config.max_response_bytes];
+        let written = self
+            .codec
+            .encode_success_response_frame_measured_into(
+                &response_frame,
+                plan.response_measure,
+                &mut frame,
+            )
+            .map_err(CommandFrameProcessError::Encode)?;
+        frame.truncate(written);
+        let response = ControllerResponse::from_complete_frame(
+            header.request_id,
+            StatusCode::Ok,
+            revision,
+            frame,
+        );
         let mut prospective_replay = self
             .replay
             .try_clone_eager()
             .map_err(|_| CommandFrameProcessError::Internal)?;
         if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
-            return self.process_immediate_command(input, scratch, output_capacity);
+            return Err(CommandFrameProcessError::Internal);
         }
-        let decoded = match self.codec.decode_typed_command(input, scratch) {
-            Ok(decoded) => decoded,
-            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        prospective_replay
+            .complete(header.request_id, input, response.complete_frame())
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        let event_reservations = match self.queues.reserve_reliable_events(plan.required_events) {
+            Ok(reservations) => reservations,
+            Err(_) => return Err(CommandFrameProcessError::Internal),
         };
-        let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
-            return self.process_immediate_command(input, scratch, output_capacity);
-        };
+
+        let current = self.structural_generation.load(Ordering::Acquire);
+        let generation = current
+            .checked_add(1)
+            .filter(|generation| generation & 1 == 1)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        self.structural_generation
+            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        Ok(PreparedStructuralCommand {
+            owner: Arc::clone(&self.structural_generation),
+            generation,
+            request_id: plan.request_id,
+            previous_revision: plan.previous_revision,
+            prospective_session: Some(plan.prospective_session),
+            prospective_replay: Some(prospective_replay),
+            response: Some(response),
+            event_reservations: Some(event_reservations),
+            event_sequence: plan.event_sequence,
+            cancellation_batches: plan.cancellation_batches,
+            applied_operations: plan.applied_operations,
+            armed: true,
+            _resource_layout_reservation: [0; 24],
+        })
+    }
+
+    fn plan_structural_command(
+        &self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        header: CommandHeader,
+    ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
+        if header.message_id != MessageId::SessionTransactionApply {
+            return Ok(StructuralCommandDisposition::Legacy);
+        }
+        let is_new_request = self.replay.is_new_request(header.request_id);
+        if is_new_request && output_capacity < self.replay.config().max_response_bytes {
+            return Err(CommandFrameProcessError::OutputReservationTooSmall {
+                required: self.replay.config().max_response_bytes,
+            });
+        }
+        if !is_new_request || self.replay.reservation.is_some() {
+            return Ok(StructuralCommandDisposition::Legacy);
+        }
         if !self.config.provider_features.session_events
             || self.config.maximum_transaction_edits == 0
-            || edits.is_empty()
-            || edits.len() > self.config.maximum_transaction_edits as usize
             || !matches!(header.expected_revision, ExpectedRevision::Exact(_))
             || matches!(
                 header.expected_revision,
                 ExpectedRevision::Exact(revision) if revision != self.session.revision()
             )
         {
-            return self.process_immediate_command(input, scratch, output_capacity);
+            return Ok(StructuralCommandDisposition::Legacy);
+        }
+        let replay_plan = match self.replay.plan_preflight(header.request_id, input) {
+            Ok(plan) => plan,
+            Err(_) => return Ok(StructuralCommandDisposition::Legacy),
+        };
+
+        #[cfg(test)]
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
+        let decoded = match self.codec.decode_typed_command(input, scratch) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(error.status(), None),
+                });
+            }
+        };
+        let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
+        };
+        if edits.is_empty() {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::InvalidField, None),
+            });
+        }
+        if edits.len() > self.config.maximum_transaction_edits as usize {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::LimitExceeded, None),
+            });
         }
         let cancellation_batches =
             usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
@@ -1551,81 +1898,187 @@ impl<P: ControlProvider> ProtocolController<P> {
                 .capacity
                 .saturating_sub(usize::try_from(event_report.occupancy).unwrap_or(usize::MAX))
         {
-            return self.process_immediate_command(input, scratch, output_capacity);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.queue_backpressure_outcome(event_report),
+            });
         }
         let event_sequence = self.next_reliable_event_sequence;
         if event_sequence
             .checked_add(u64::try_from(required_events).unwrap_or(u64::MAX))
             .is_none()
         {
-            return self.process_immediate_command(input, scratch, output_capacity);
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
         }
         let applied_operations = match u32::try_from(edits.len()) {
             Ok(value) => value,
-            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+            Err(_) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::LimitExceeded, None),
+                });
+            }
         };
         let prospective_session = match self
             .session
             .prepare_transaction(header.expected_revision, &edits)
         {
             Ok(value) => value,
-            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+            Err(error) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.transaction_error_outcome(&error),
+                });
+            }
         };
-        let bytes = match self
-            .encode_transaction_applied_payload(TransactionApplied { applied_operations })
-        {
-            Ok(bytes) => bytes,
-            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        let revision = prospective_session.revision();
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations,
+            }),
         };
-        let mut response = self.response_at_revision(
-            header.request_id,
-            StatusCode::Ok,
-            prospective_session.revision(),
-            bytes,
-        );
-        let frame = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
-        if frame.len() > output_capacity {
+        let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
+            Ok(measure) => measure,
+            Err(_) => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::Internal, None),
+                });
+            }
+        };
+        let response_len = crate::OUTER_HEADER_BYTES
+            .checked_add(response_measure.length)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        if response_len > self.replay.config().max_response_bytes {
+            return Ok(StructuralCommandDisposition::Immediate {
+                replay_plan,
+                outcome: self.non_ok(StatusCode::Internal, None),
+            });
+        }
+        if response_len > output_capacity {
             return Err(CommandFrameProcessError::Encode(
                 EncodeError::OutputTooSmall {
-                    required: frame.len(),
+                    required: response_len,
                 },
             ));
         }
-        response.frame_bytes = Some(frame);
-        prospective_replay
-            .complete(header.request_id, input, response.clone())
-            .map_err(|_| CommandFrameProcessError::Internal)?;
-        let event_reservations = match self.queues.reserve_reliable_events(required_events) {
-            Ok(reservations) => reservations,
-            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
-        };
-
-        let current = self.structural_generation.load(Ordering::Acquire);
-        let generation = current
-            .checked_add(1)
-            .filter(|generation| generation & 1 == 1)
-            .ok_or(CommandFrameProcessError::Internal)?;
-        self.structural_generation
-            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
-        Ok(PreparedCommandFrame::Structural(Box::new(
-            PreparedStructuralCommand {
-                owner: Arc::clone(&self.structural_generation),
-                generation,
+        Ok(StructuralCommandDisposition::Structural(
+            StructuralCommandPlan {
                 request_id: header.request_id,
                 previous_revision: self.session.revision(),
-                prospective_session: Some(prospective_session),
-                prospective_replay: Some(prospective_replay),
-                response: Some(response),
-                event_reservations: Some(event_reservations),
+                prospective_session,
+                replay_plan,
                 event_sequence,
                 cancellation_batches,
+                required_events,
                 applied_operations,
-                armed: true,
+                response_measure,
             },
-        )))
+        ))
+    }
+
+    fn process_structural_plan_into(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        header: CommandHeader,
+        plan: StructuralCommandPlan,
+    ) -> Result<usize, CommandFrameProcessError> {
+        let revision = plan.prospective_session.revision();
+        let response_frame = TypedSuccessResponseFrame {
+            request_id: header.request_id,
+            revision,
+            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                applied_operations: plan.applied_operations,
+            }),
+        };
+        let written = self
+            .codec
+            .encode_success_response_frame_measured_into(
+                &response_frame,
+                plan.response_measure,
+                output,
+            )
+            .map_err(CommandFrameProcessError::Encode)?;
+
+        // Every fallible semantic, output, replay-capacity, and event-capacity decision completed
+        // above. Exclusive `&mut self` ownership makes these exact reservations invariant from
+        // this point through the session/event/replay commit.
+        let mut event_reservations = self
+            .queues
+            .reserve_reliable_events(plan.required_events)
+            .expect("read-only structural plan reserved exact reliable-event capacity");
+        let effective_sample = self.provider.current_sample();
+        self.replay
+            .apply_preflight_plan(plan.request_id, input, plan.replay_plan);
+        self.replay
+            .complete(plan.request_id, input, &output[..written])
+            .expect("planned replay reservation accepts the measured direct response");
+
+        let commit = self.session.commit_prepared(plan.prospective_session);
+        debug_assert_eq!(commit.applied_operations, plan.applied_operations as usize);
+        self.queues.commit_reserved_reliable_event(
+            &mut event_reservations,
+            ReliableSlot::session_committed(
+                commit.revision,
+                plan.event_sequence,
+                plan.request_id,
+                plan.previous_revision,
+                plan.applied_operations,
+            ),
+        );
+        self.next_reliable_event_sequence = plan.event_sequence.saturating_add(1);
+        self.cancel_queued_automation_reserved(
+            &mut event_reservations,
+            AutomationCancellationReason::RevisionChanged,
+            Some(effective_sample),
+        )
+        .expect("planned cancellation events retain their exact reservations");
+        Ok(written)
+    }
+
+    fn process_planned_immediate_into(
+        &mut self,
+        input: &[u8],
+        header: CommandHeader,
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let (written, _, _) = self
+            .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
+            .map_err(CommandFrameProcessError::Encode)?;
+        self.replay
+            .apply_preflight_plan(header.request_id, input, replay_plan);
+        self.replay
+            .complete(header.request_id, input, &output[..written])
+            .expect("planned immediate replay reservation accepts measured response");
+        Ok(written)
+    }
+
+    fn prepare_planned_immediate(
+        &mut self,
+        input: &[u8],
+        header: CommandHeader,
+        replay_plan: ReplayPreflightPlan,
+        outcome: Outcome,
+        output_capacity: usize,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        #[cfg(test)]
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+        let capacity = output_capacity.min(self.replay.config().max_response_bytes);
+        let mut bytes = vec![0_u8; capacity];
+        let written =
+            self.process_planned_immediate_into(input, header, replay_plan, outcome, &mut bytes)?;
+        bytes.truncate(written);
+        Ok(PreparedCommandFrame::Immediate(
+            PreparedImmediateCommandFrame { bytes },
+        ))
     }
 
     fn process_immediate_command(
@@ -1634,6 +2087,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        #[cfg(test)]
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
         let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
@@ -1699,9 +2154,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             .response
             .take()
             .expect("affine token owns committed response");
-        let bytes = response
-            .frame_bytes
-            .expect("prepared structural response is a complete frame");
+        let bytes = response.frame;
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;
@@ -1716,7 +2169,7 @@ impl<P: ControlProvider> ProtocolController<P> {
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
-            .decode_correlatable_command_header(input)
+            .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
 
         // A new command must prove that its caller owns enough room for the endpoint's whole
@@ -1731,12 +2184,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
         }
         match self.replay.preflight(header.request_id, input) {
-            ReplayDecision::Cached(response) => {
-                let bytes = response
-                    .frame_bytes
-                    .as_deref()
-                    .ok_or(CommandFrameProcessError::Internal)?;
-                return copy_complete_frame(bytes, output)
+            ReplayDecision::Cached(hit) => {
+                return copy_complete_frame(self.replay.cached(hit), output)
                     .map_err(CommandFrameProcessError::Encode);
             }
             ReplayDecision::RequestIdReuse => {
@@ -1755,26 +2204,19 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReplayDecision::Execute => {}
         }
 
-        let mut response = match self.codec.decode_typed_command(input, scratch) {
+        #[cfg(test)]
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
+        let outcome = match self.codec.decode_typed_command(input, scratch) {
             Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
-            Err(error) => self.response(header.request_id, error.status(), Vec::new()),
+            Err(error) => self.non_ok(error.status(), None),
         };
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
+        let (written, _, _) = self
+            .encode_outcome_or_internal_into(header.message_id, header.request_id, outcome, output)
             .map_err(CommandFrameProcessError::Encode)?;
-        response.frame_bytes = Some(bytes);
-        let result = copy_complete_frame(
-            response
-                .frame_bytes
-                .as_deref()
-                .expect("just assigned complete response"),
-            output,
-        )
-        .map_err(CommandFrameProcessError::Encode);
         self.replay
-            .complete(header.request_id, input, response)
+            .complete(header.request_id, input, &output[..written])
             .map_err(|_| CommandFrameProcessError::Internal)?;
-        result
+        Ok(written)
     }
 
     fn write_uncached_status_frame(
@@ -1783,11 +2225,14 @@ impl<P: ControlProvider> ProtocolController<P> {
         status: StatusCode,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        let response = self.response(header.request_id, status, Vec::new());
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
-        copy_complete_frame(&bytes, output).map_err(CommandFrameProcessError::Encode)
+        self.encode_outcome_or_internal_into(
+            header.message_id,
+            header.request_id,
+            self.non_ok(status, None),
+            output,
+        )
+        .map(|(written, _, _)| written)
+        .map_err(CommandFrameProcessError::Encode)
     }
 
     fn write_uncached_replay_backpressure_frame(
@@ -1796,18 +2241,21 @@ impl<P: ControlProvider> ProtocolController<P> {
         request_bytes: usize,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
-        let response = self.replay_backpressure_response(header.request_id, request_bytes);
-        let bytes = self
-            .encode_controller_response_frame(header.message_id, &response)
-            .map_err(CommandFrameProcessError::Encode)?;
-        copy_complete_frame(&bytes, output).map_err(CommandFrameProcessError::Encode)
+        self.encode_outcome_or_internal_into(
+            header.message_id,
+            header.request_id,
+            self.replay_backpressure_outcome(request_bytes),
+            output,
+        )
+        .map(|(written, _, _)| written)
+        .map_err(CommandFrameProcessError::Encode)
     }
 
     fn execute_decoded_command(
         &mut self,
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
-    ) -> ControllerResponse {
+    ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
             DecodedCommandPayload::SessionSnapshotGet(request) => {
@@ -1832,12 +2280,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             DecodedCommandPayload::AutomationEnqueue(value) => {
                 let ExpectedRevision::Exact(revision) = header.expected_revision else {
-                    return self.response(header.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 };
                 let batch = match value.into_batch(revision, header.request_id) {
                     Ok(batch) => batch,
                     Err(error) => {
-                        return self.response(header.request_id, error.status(), Vec::new());
+                        return self.non_ok(error.status(), None);
                     }
                 };
                 ControlCommand::AutomationEnqueue { batch }
@@ -1862,182 +2310,211 @@ impl<P: ControlProvider> ProtocolController<P> {
         })
     }
 
-    fn encode_controller_response_frame(
+    fn encode_outcome_into(
         &self,
         message_id: MessageId,
-        response: &ControllerResponse,
-    ) -> Result<Vec<u8>, EncodeError> {
-        let tlv_count = canonical_tlv_count(&response.bytes)?;
-        let required = if response.status == StatusCode::Ok {
-            self.encoded_success_response_frame_len(message_id, response, tlv_count)?
-        } else {
-            let payload = self
-                .codec
-                .decode_non_ok_payload(&response.bytes, tlv_count)
-                .map_err(|_| EncodeError::LimitExceeded)?;
-            encoded_non_ok_response_frame_len(&self.codec, &payload)?
-        };
-        let mut output = vec![0_u8; required];
-        if response.status == StatusCode::Ok {
-            self.encode_success_response_frame(message_id, response, tlv_count, &mut output)?;
-        } else {
-            let payload = self
-                .codec
-                .decode_non_ok_payload(&response.bytes, tlv_count)
-                .map_err(|_| EncodeError::LimitExceeded)?;
-            self.codec.encode_non_ok_response_frame_into(
-                &TypedNonOkResponseFrame {
-                    request_id: response.request_id,
-                    revision: response.revision,
-                    message_id,
-                    status: response.status,
-                    payload: &payload,
-                },
-                &mut output,
-            )?;
-        }
-        Ok(output)
-    }
-
-    fn encoded_success_response_frame_len(
-        &self,
-        message_id: MessageId,
-        response: &ControllerResponse,
-        tlv_count: u32,
-    ) -> Result<usize, EncodeError> {
-        let mut empty = [];
-        match self.encode_success_response_frame(message_id, response, tlv_count, &mut empty) {
-            Err(EncodeError::OutputTooSmall { required }) => Ok(required),
-            Err(error) => Err(error),
-            Ok(_) => Err(EncodeError::LimitExceeded),
-        }
-    }
-
-    fn encode_success_response_frame(
-        &self,
-        message_id: MessageId,
-        response: &ControllerResponse,
-        tlv_count: u32,
+        request_id: RequestId,
+        outcome: Outcome,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
+        let Outcome {
+            status,
+            revision,
+            body,
+        } = outcome;
+        if status != StatusCode::Ok {
+            let Body::NonOk(payload) = body else {
+                return Err(EncodeError::MessageKindMismatch);
+            };
+            return self.codec.encode_non_ok_response_frame_into(
+                &TypedNonOkResponseFrame {
+                    request_id,
+                    revision,
+                    message_id,
+                    status,
+                    payload: &payload,
+                },
+                output,
+            );
+        }
         macro_rules! encode_success {
             ($payload:expr) => {
                 self.codec.encode_success_response_frame_into(
                     &TypedSuccessResponseFrame {
-                        request_id: response.request_id,
-                        revision: response.revision,
+                        request_id,
+                        revision,
                         payload: $payload,
                     },
                     output,
                 )
             };
         }
-        match message_id {
-            // The response body was just constructed from the current controller limits and
-            // features. Reconstructing that typed value keeps full-frame encoding on the closed
-            // typed API rather than exposing an opaque response-byte route.
-            MessageId::CapabilitiesGet => {
-                let queue = self.queues.config();
-                let replay = self.replay.config();
-                let (commands, events, flags) = self.capability_registry();
-                encode_success!(SuccessResponsePayload::Capabilities(Capabilities {
-                    minimum_version: crate::ProtocolVersion::V1,
-                    maximum_version: crate::ProtocolVersion::V1,
-                    maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
-                    maximum_tlvs: self.codec.limits().max_tlv_count,
-                    maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
-                    maximum_nesting: self.codec.limits().max_nesting,
-                    maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
-                    control_command_slots: queue.control_command_slots.get() as u64,
-                    control_command_bytes: queue.control_command_bytes.get() as u64,
-                    automation_batch_slots: queue.automation_batch_slots.get() as u64,
-                    reliable_response_slots: queue.reliable_response_slots.get() as u64,
-                    reliable_event_slots: queue.reliable_event_slots.get() as u64,
-                    telemetry_slots: queue.telemetry_slots.get() as u64,
-                    replay_entries: replay.entries.get() as u64,
-                    replay_bytes: replay.bytes.get() as u64,
-                    maximum_cached_response_bytes: replay.max_response_bytes as u64,
-                    per_block_automation_density: queue.per_block_automation_density.get() as u64,
-                    admission_quantum_frames: queue.quantum_frames.get() as u64,
-                    maximum_parameter_page_items: 256,
-                    maximum_diagnostic_page_items: 256,
-                    maximum_telemetry_handles: 256,
-                    maximum_transaction_edits: self.effective_maximum_transaction_edits(),
-                    supported_commands: &commands,
-                    supported_events: &events,
-                    flags,
+        match (message_id, body) {
+            (MessageId::CapabilitiesGet, Body::Capabilities(set)) => {
+                encode_success!(SuccessResponsePayload::Capabilities(
+                    self.capabilities(&set)
+                ))
+            }
+            (
+                MessageId::SessionSnapshotGet,
+                Body::Snapshot {
+                    total,
+                    offset,
+                    range,
+                    eof,
+                },
+            ) => {
+                let bytes = self.session.canonical_snapshot().as_bytes();
+                let chunk = bytes.get(range).ok_or(EncodeError::LimitExceeded)?;
+                encode_success!(SuccessResponsePayload::SessionSnapshot(SessionSnapshot {
+                    total_bytes: total,
+                    offset,
+                    canonical_toml_chunk: chunk,
+                    eof,
                 }))
             }
-            MessageId::SessionSnapshotGet => {
-                encode_success!(SuccessResponsePayload::SessionSnapshot(
-                    self.codec
-                        .decode_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::SessionTransactionApply, Body::TransactionApplied(value)) => {
+                encode_success!(SuccessResponsePayload::SessionTransactionApplied(value))
             }
-            MessageId::SessionTransactionApply => {
-                encode_success!(SuccessResponsePayload::SessionTransactionApplied(
-                    self.codec
-                        .decode_transaction_applied(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::ParameterMetadataGet, Body::ParameterMetadata(value)) => {
+                encode_success!(SuccessResponsePayload::ParameterMetadata(value))
             }
-            MessageId::ParameterMetadataGet => {
-                encode_success!(SuccessResponsePayload::ParameterMetadata(
-                    self.codec
-                        .decode_parameter_metadata_page(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::ParameterStateGet, Body::ParameterState(value)) => {
+                encode_success!(SuccessResponsePayload::ParameterState(value))
             }
-            MessageId::ParameterStateGet => {
-                encode_success!(SuccessResponsePayload::ParameterState(
-                    self.codec
-                        .decode_parameter_state_page(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::AutomationEnqueue, Body::AutomationEnqueued(value)) => {
+                encode_success!(SuccessResponsePayload::AutomationEnqueued(value))
             }
-            MessageId::AutomationEnqueue => {
-                encode_success!(SuccessResponsePayload::AutomationEnqueued(
-                    self.codec
-                        .decode_automation_enqueued(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TransportGet, Body::Transport(value)) => {
+                encode_success!(SuccessResponsePayload::TransportGetSnapshot(value))
             }
-            MessageId::TransportGet => {
-                encode_success!(SuccessResponsePayload::TransportGetSnapshot(
-                    self.codec
-                        .decode_transport_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TransportSet, Body::Transport(value)) => {
+                encode_success!(SuccessResponsePayload::TransportSetSnapshot(value))
             }
-            MessageId::TransportSet => {
-                encode_success!(SuccessResponsePayload::TransportSetSnapshot(
-                    self.codec
-                        .decode_transport_snapshot(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::TelemetryConfigure, Body::Telemetry(value)) => {
+                encode_success!(SuccessResponsePayload::TelemetryConfiguration(value))
             }
-            MessageId::TelemetryConfigure => {
-                encode_success!(SuccessResponsePayload::TelemetryConfiguration(
-                    self.codec
-                        .decode_telemetry_configuration(&response.bytes, tlv_count)
-                        .map_err(|_| EncodeError::LimitExceeded)?,
-                ))
+            (MessageId::CountersGet, Body::Counters(value)) => {
+                encode_success!(SuccessResponsePayload::CounterSnapshot(value))
             }
-            MessageId::CountersGet => encode_success!(SuccessResponsePayload::CounterSnapshot(
-                self.codec
-                    .decode_counter_snapshot(&response.bytes, tlv_count)
-                    .map_err(|_| EncodeError::LimitExceeded)?,
-            )),
-            MessageId::DiagnosticsGet => encode_success!(SuccessResponsePayload::DiagnosticsPage(
-                self.codec
-                    .decode_diagnostics_page(&response.bytes, tlv_count)
-                    .map_err(|_| EncodeError::LimitExceeded)?,
-            )),
+            (MessageId::DiagnosticsGet, Body::Diagnostics(value)) => {
+                encode_success!(SuccessResponsePayload::DiagnosticsPage(value))
+            }
             _ => Err(EncodeError::MessageKindMismatch),
         }
     }
 
+    fn encode_outcome_frame(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+    ) -> Result<Vec<u8>, EncodeError> {
+        #[cfg(test)]
+        RESPONSE_STAGING_VECS.with(|allocations| {
+            allocations.set(allocations.get().saturating_add(1));
+        });
+        let mut output = vec![0_u8; self.replay.config.max_response_bytes];
+        let written = self.encode_outcome_into(message_id, request_id, outcome, &mut output)?;
+        output.truncate(written);
+        Ok(output)
+    }
+
+    fn encode_outcome_or_internal_into(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+        output: &mut [u8],
+    ) -> Result<(usize, StatusCode, SessionRevision), EncodeError> {
+        let status = outcome.status;
+        let revision = outcome.revision;
+        match self.encode_outcome_into(message_id, request_id, outcome, output) {
+            Ok(written) => Ok((written, status, revision)),
+            Err(EncodeError::OutputTooSmall { required }) => {
+                Err(EncodeError::OutputTooSmall { required })
+            }
+            Err(_) => {
+                let fallback = self.encode_failure_outcome();
+                let status = fallback.status;
+                let revision = fallback.revision;
+                let written = self.encode_outcome_into(message_id, request_id, fallback, output)?;
+                Ok((written, status, revision))
+            }
+        }
+    }
+
+    fn encode_failure_outcome(&self) -> Outcome {
+        self.non_ok_value(
+            StatusCode::Internal,
+            NonOkResponse {
+                diagnostics: vec![Diagnostic {
+                    code: "protocol.encode".to_owned(),
+                    severity: crate::DiagnosticSeverity::Error,
+                    path: Vec::new(),
+                    detail: None,
+                    operation_index: None,
+                    sample_time: None,
+                    provider_sequence: None,
+                }],
+                omitted_diagnostics: 0,
+                backpressure: None,
+            },
+        )
+    }
+
+    fn compatibility_response(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        outcome: Outcome,
+    ) -> ControllerResponse {
+        let status = outcome.status;
+        let revision = outcome.revision;
+        let (status, revision, frame) =
+            match self.encode_outcome_frame(message_id, request_id, outcome) {
+                Ok(frame) => (status, revision, frame),
+                Err(_) => {
+                    let fallback = self.encode_failure_outcome();
+                    let status = fallback.status;
+                    let revision = fallback.revision;
+                    let frame = self
+                        .encode_outcome_frame(message_id, request_id, fallback)
+                        .unwrap_or_default();
+                    (status, revision, frame)
+                }
+            };
+        ControllerResponse::from_complete_frame(request_id, status, revision, frame)
+    }
+
+    fn compatibility_cached_response(
+        &self,
+        message_id: MessageId,
+        request_id: RequestId,
+        hit: ReplayHit,
+    ) -> ControllerResponse {
+        let frame = self.replay.cached(hit);
+        let Ok(decoded) = self.codec.decode_header(frame) else {
+            return self.compatibility_response(
+                message_id,
+                request_id,
+                self.non_ok(StatusCode::Internal, None),
+            );
+        };
+        let Some(header) = decoded.header.response() else {
+            return self.compatibility_response(
+                message_id,
+                request_id,
+                self.non_ok(StatusCode::Internal, None),
+            );
+        };
+        ControllerResponse::from_complete_frame(
+            header.request_id,
+            header.status,
+            header.revision,
+            frame.to_vec(),
+        )
+    }
     /// Borrow authoritative control-plane session state.
     #[must_use]
     pub const fn session(&self) -> &SessionStore {
@@ -2474,7 +2951,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
     }
 
-    fn execute(&mut self, request: &ControllerRequest<'_>) -> ControllerResponse {
+    fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
         let features = self.config.provider_features;
         let enabled = match request.command {
             ControlCommand::SessionTransactionApply { .. } => {
@@ -2489,64 +2966,49 @@ impl<P: ControlProvider> ProtocolController<P> {
             _ => true,
         };
         if !enabled {
-            return self.response(request.request_id, StatusCode::Unavailable, Vec::new());
+            return self.non_ok(StatusCode::Unavailable, None);
         }
         if request.command.requires_exact_revision()
             && !matches!(request.expected_revision, ExpectedRevision::Exact(_))
         {
-            return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+            return self.non_ok(StatusCode::InvalidField, None);
         }
         if let ExpectedRevision::Exact(expected) = request.expected_revision
             && expected != self.session.revision()
         {
-            return self.response(request.request_id, StatusCode::RevisionConflict, Vec::new());
+            return self.non_ok(StatusCode::RevisionConflict, None);
         }
         match &request.command {
-            ControlCommand::CapabilitiesGet => match self.encode_capabilities_payload() {
-                Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-            },
+            ControlCommand::CapabilitiesGet => {
+                self.ok(Body::Capabilities(self.capability_registry()))
+            }
             ControlCommand::SessionSnapshotGet { offset, max_bytes } => {
                 let snapshot = self.session.canonical_snapshot().as_bytes();
                 let offset = match usize::try_from(*offset) {
                     Ok(value) if value <= snapshot.len() => value,
                     _ => {
-                        return self.response(
-                            request.request_id,
-                            StatusCode::InvalidField,
-                            Vec::new(),
-                        );
+                        return self.non_ok(StatusCode::InvalidField, None);
                     }
                 };
                 if *max_bytes == 0 {
-                    return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 }
                 let end = offset
                     .saturating_add(*max_bytes as usize)
                     .min(snapshot.len());
-                let value = SessionSnapshot {
-                    total_bytes: snapshot.len() as u64,
+                self.ok(Body::Snapshot {
+                    total: snapshot.len() as u64,
                     offset: offset as u64,
-                    canonical_toml_chunk: &snapshot[offset..end],
+                    range: offset..end,
                     eof: end == snapshot.len(),
-                };
-                match self.encode_snapshot_payload(value) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                }
+                })
             }
             ControlCommand::SessionTransactionApply { edits } => {
                 if edits.is_empty() {
-                    return self.response(request.request_id, StatusCode::InvalidField, Vec::new());
+                    return self.non_ok(StatusCode::InvalidField, None);
                 }
                 if edits.len() > self.config.maximum_transaction_edits as usize {
-                    return self.response(
-                        request.request_id,
-                        StatusCode::LimitExceeded,
-                        Vec::new(),
-                    );
+                    return self.non_ok(StatusCode::LimitExceeded, None);
                 }
                 let event_sequence = self.next_reliable_event_sequence;
                 let cancellation_batches =
@@ -2557,13 +3019,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                         .unwrap_or(u64::MAX)
                         .saturating_add(1),
                 ) else {
-                    return self.response(request.request_id, StatusCode::Internal, Vec::new());
+                    return self.non_ok(StatusCode::Internal, None);
                 };
                 let mut cancellation_reservations =
                     match self.queues.reserve_reliable_events(cancellation_batches) {
                         Ok(reservations) => reservations,
                         Err(report) => {
-                            return self.queue_backpressure_response(request.request_id, report);
+                            return self.queue_backpressure_outcome(report);
                         }
                     };
                 let applied_operations = match u32::try_from(edits.len()) {
@@ -2571,11 +3033,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(_) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.response(
-                            request.request_id,
-                            StatusCode::LimitExceeded,
-                            Vec::new(),
-                        );
+                        return self.non_ok(StatusCode::LimitExceeded, None);
                     }
                 };
                 let previous_revision = self.session.revision();
@@ -2584,7 +3042,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(report) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.queue_backpressure_response(request.request_id, report);
+                        return self.queue_backpressure_outcome(report);
                     }
                 };
                 match self
@@ -2609,93 +3067,74 @@ impl<P: ControlProvider> ProtocolController<P> {
                             AutomationCancellationReason::RevisionChanged,
                             Some(effective_sample),
                         );
-                        match self.encode_transaction_applied_payload(TransactionApplied {
-                            applied_operations,
-                        }) {
-                            Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                            Err(_) => {
-                                self.response(request.request_id, StatusCode::Internal, Vec::new())
-                            }
-                        }
+                        self.ok_at_revision(
+                            commit.revision,
+                            Body::TransactionApplied(TransactionApplied { applied_operations }),
+                        )
                     }
                     Err(error) => {
                         self.queues.release_reliable_event(reservation);
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        self.transaction_error_response(request.request_id, &error)
+                        self.transaction_error_outcome(&error)
                     }
                 }
             }
             ControlCommand::ParameterMetadataGet {
                 request: parameter_request,
             } => match self.provider.parameter_metadata(*parameter_request) {
-                Ok(page) => match self.encode_parameter_metadata_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(page) => self.ok(Body::ParameterMetadata(page)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::ParameterStateGet {
                 request: parameter_request,
             } => match self.provider.parameter_state(parameter_request) {
-                Ok(page) => match self.encode_parameter_state_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => {
-                        self.response(request.request_id, StatusCode::LimitExceeded, Vec::new())
-                    }
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(page) => self.ok(Body::ParameterState(page)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::AutomationEnqueue { batch } => {
                 if batch.revision != self.session.revision() {
-                    return self.response(
-                        request.request_id,
-                        StatusCode::RevisionConflict,
-                        Vec::new(),
-                    );
+                    return self.non_ok(StatusCode::RevisionConflict, None);
                 }
                 if let Err(error) = self.validate_automation_domains(batch) {
-                    return self.response(request.request_id, error, Vec::new());
+                    return self.non_ok(error, None);
                 }
                 let current_sample = self.provider.current_sample();
                 match self.queues.try_enqueue_automation(current_sample, *batch) {
-                    Ok(()) => match self.encode_automation_enqueued_payload(batch.len) {
-                        Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                        Err(_) => {
-                            self.response(request.request_id, StatusCode::Internal, Vec::new())
-                        }
-                    },
-                    Err(AutomationEnqueueError::Full { report, .. }) => {
-                        match self.encode_automation_backpressure(
-                            report.capacity,
-                            report.occupancy,
-                            report.generation.0,
-                        ) {
-                            Ok(bytes) => {
-                                self.response(request.request_id, StatusCode::Backpressure, bytes)
-                            }
-                            Err(_) => {
-                                self.response(request.request_id, StatusCode::Internal, Vec::new())
-                            }
-                        }
+                    Ok(()) => {
+                        let report = self.queues.report(crate::QueueKind::Automation);
+                        self.ok(Body::AutomationEnqueued(AutomationEnqueued {
+                            accepted_records: batch.len,
+                            occupancy: report.occupancy,
+                            capacity: report.capacity as u64,
+                            generation: report.generation.0,
+                        }))
                     }
+                    Err(AutomationEnqueueError::Full { report, .. }) => self.non_ok_value(
+                        StatusCode::Backpressure,
+                        NonOkResponse {
+                            diagnostics: Vec::new(),
+                            omitted_diagnostics: 0,
+                            backpressure: Some(Backpressure {
+                                queue_kind: BackpressureQueueKind::Automation,
+                                capacity: report.capacity as u64,
+                                occupancy: report.occupancy,
+                                requested_items: 1,
+                                generation: Some(report.generation.0),
+                                retry_boundary: None,
+                                requested_bytes: None,
+                                available_bytes: None,
+                            }),
+                        },
+                    ),
                     Err(AutomationEnqueueError::Invalid { error, .. }) => {
-                        self.response(request.request_id, status_for_automation(error), Vec::new())
+                        self.non_ok(status_for_automation(error), None)
                     }
                 }
             }
             ControlCommand::TransportGet => {
                 let snapshot = self.provider.transport_get();
-                match self.encode_transport_snapshot_payload(snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TransportSet {
                 request: transport_request,
@@ -2712,13 +3151,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                         .unwrap_or(u64::MAX)
                         .saturating_add(1),
                 ) else {
-                    return self.response(request.request_id, StatusCode::Internal, Vec::new());
+                    return self.non_ok(StatusCode::Internal, None);
                 };
                 let mut cancellation_reservations =
                     match self.queues.reserve_reliable_events(cancellation_batches) {
                         Ok(reservations) => reservations,
                         Err(report) => {
-                            return self.queue_backpressure_response(request.request_id, report);
+                            return self.queue_backpressure_outcome(report);
                         }
                     };
                 let reservation = match self.queues.reserve_reliable_event() {
@@ -2726,7 +3165,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Err(report) => {
                         self.queues
                             .release_reliable_events(cancellation_reservations);
-                        return self.queue_backpressure_response(request.request_id, report);
+                        return self.queue_backpressure_outcome(report);
                     }
                 };
                 let snapshot = self.provider.transport_set(*transport_request);
@@ -2749,56 +3188,36 @@ impl<P: ControlProvider> ProtocolController<P> {
                         Some(snapshot.effective_sample),
                     );
                 }
-                match self.encode_transport_snapshot_payload(snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.ok(Body::Transport(snapshot))
             }
             ControlCommand::TelemetryConfigure { configuration } => {
                 let configured = self.provider.telemetry_configure(configuration.clone());
-                match self.encode_telemetry_configuration_payload(&configured) {
-                    Ok(bytes) => {
-                        // The codec has just validated the complete normalized six-field value.
-                        // Only then may it enable/mock-configure endpoint event egress.
-                        self.telemetry_configuration.meter_handles.clear();
-                        self.telemetry_configuration
-                            .meter_handles
-                            .extend_from_slice(&configured.meter_handles);
-                        self.telemetry_configuration.counter_ids.clear();
-                        self.telemetry_configuration
-                            .counter_ids
-                            .extend_from_slice(&configured.counter_ids);
-                        self.telemetry_configuration.meter_period_blocks =
-                            configured.meter_period_blocks;
-                        self.telemetry_configuration.counter_period_blocks =
-                            configured.counter_period_blocks;
-                        self.telemetry_configuration.diagnostics_enabled =
-                            configured.diagnostics_enabled;
-                        self.telemetry_configuration.minimum_diagnostic_severity =
-                            configured.minimum_diagnostic_severity;
-                        self.response(request.request_id, StatusCode::Ok, bytes)
-                    }
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                }
+                self.telemetry_configuration.meter_handles.clear();
+                self.telemetry_configuration
+                    .meter_handles
+                    .extend_from_slice(&configured.meter_handles);
+                self.telemetry_configuration.counter_ids.clear();
+                self.telemetry_configuration
+                    .counter_ids
+                    .extend_from_slice(&configured.counter_ids);
+                self.telemetry_configuration.meter_period_blocks = configured.meter_period_blocks;
+                self.telemetry_configuration.counter_period_blocks =
+                    configured.counter_period_blocks;
+                self.telemetry_configuration.diagnostics_enabled = configured.diagnostics_enabled;
+                self.telemetry_configuration.minimum_diagnostic_severity =
+                    configured.minimum_diagnostic_severity;
+                self.ok(Body::Telemetry(configured))
             }
             ControlCommand::CountersGet {
                 request: counters_request,
             } => match self.provider.counters(counters_request) {
-                Ok(snapshot) => match self.encode_counter_snapshot_payload(&snapshot) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                },
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Ok(snapshot) => self.ok(Body::Counters(snapshot)),
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::DiagnosticsGet {
                 request: diagnostics_request,
             } => match self.provider.diagnostics(*diagnostics_request) {
-                Ok(page) => match self.encode_diagnostics_page_payload(&page) {
-                    Ok(bytes) => self.response(request.request_id, StatusCode::Ok, bytes),
-                    Err(_) => self.response(request.request_id, StatusCode::Internal, Vec::new()),
-                },
+                Ok(page) => self.ok(Body::Diagnostics(page)),
                 Err(ParameterProviderError::ReplayExpired) => {
                     let expired = NonOkResponse {
                         diagnostics: vec![Diagnostic {
@@ -2813,40 +3232,28 @@ impl<P: ControlProvider> ProtocolController<P> {
                         omitted_diagnostics: 0,
                         backpressure: None,
                     };
-                    match self.encode_non_ok_payload(&expired) {
-                        Ok(bytes) => {
-                            self.response(request.request_id, StatusCode::ReplayExpired, bytes)
-                        }
-                        Err(_) => {
-                            self.response(request.request_id, StatusCode::Internal, Vec::new())
-                        }
-                    }
+                    self.non_ok_value(StatusCode::ReplayExpired, expired)
                 }
-                Err(error) => {
-                    self.response(request.request_id, status_for_parameter(error), Vec::new())
-                }
+                Err(error) => self.non_ok(status_for_parameter(error), None),
             },
         }
     }
 
-    fn response(
-        &self,
-        request_id: RequestId,
-        status: StatusCode,
-        bytes: Vec<u8>,
-    ) -> ControllerResponse {
-        self.response_at_revision(request_id, status, self.session.revision(), bytes)
+    fn ok(&self, body: Body) -> Outcome {
+        self.ok_at_revision(self.session.revision(), body)
     }
 
-    fn response_at_revision(
-        &self,
-        request_id: RequestId,
-        status: StatusCode,
-        revision: SessionRevision,
-        mut bytes: Vec<u8>,
-    ) -> ControllerResponse {
-        if status != StatusCode::Ok && bytes.is_empty() {
-            let backpressure = (status == StatusCode::Backpressure).then_some(Backpressure {
+    fn ok_at_revision(&self, revision: SessionRevision, body: Body) -> Outcome {
+        Outcome {
+            status: StatusCode::Ok,
+            revision,
+            body,
+        }
+    }
+
+    fn non_ok(&self, status: StatusCode, backpressure: Option<Backpressure>) -> Outcome {
+        let backpressure = if status == StatusCode::Backpressure && backpressure.is_none() {
+            Some(Backpressure {
                 queue_kind: BackpressureQueueKind::ReplayCache,
                 capacity: self.replay.config.entries.get() as u64,
                 occupancy: self.replay.entries.len() as u64,
@@ -2855,14 +3262,20 @@ impl<P: ControlProvider> ProtocolController<P> {
                 retry_boundary: None,
                 requested_bytes: None,
                 available_bytes: None,
-            });
-            let value = NonOkResponse {
+            })
+        } else {
+            backpressure
+        };
+        let code = if backpressure.is_some() {
+            "protocol.backpressure"
+        } else {
+            "protocol.failure"
+        };
+        self.non_ok_value(
+            status,
+            NonOkResponse {
                 diagnostics: vec![Diagnostic {
-                    code: if backpressure.is_some() {
-                        "protocol.backpressure".to_owned()
-                    } else {
-                        "protocol.failure".to_owned()
-                    },
+                    code: code.to_owned(),
                     severity: crate::DiagnosticSeverity::Error,
                     path: Vec::new(),
                     detail: None,
@@ -2872,23 +3285,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }],
                 omitted_diagnostics: 0,
                 backpressure,
-            };
-            bytes = self.encode_non_ok_payload(&value).unwrap_or_default();
-        }
-        ControllerResponse {
-            request_id,
+            },
+        )
+    }
+
+    fn non_ok_value(&self, status: StatusCode, payload: NonOkResponse) -> Outcome {
+        Outcome {
             status,
-            revision,
-            bytes,
-            frame_bytes: None,
+            revision: self.session.revision(),
+            body: Body::NonOk(payload),
         }
     }
 
-    fn queue_backpressure_response(
-        &self,
-        request_id: RequestId,
-        report: QueueReport,
-    ) -> ControllerResponse {
+    fn queue_backpressure_outcome(&self, report: QueueReport) -> Outcome {
         let queue_kind = match report.kind {
             crate::QueueKind::ControlCommand => BackpressureQueueKind::ControlCommand,
             crate::QueueKind::Automation => BackpressureQueueKind::Automation,
@@ -2896,18 +3305,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             crate::QueueKind::ReliableEvent => BackpressureQueueKind::ReliableEvent,
             crate::QueueKind::Telemetry => BackpressureQueueKind::Telemetry,
         };
-        let payload = NonOkResponse {
-            diagnostics: vec![Diagnostic {
-                code: "protocol.backpressure".to_owned(),
-                severity: crate::DiagnosticSeverity::Error,
-                path: Vec::new(),
-                detail: None,
-                operation_index: None,
-                sample_time: None,
-                provider_sequence: None,
-            }],
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
+        self.non_ok(
+            StatusCode::Backpressure,
+            Some(Backpressure {
                 queue_kind,
                 capacity: report.capacity as u64,
                 occupancy: report.occupancy,
@@ -2917,36 +3317,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 requested_bytes: None,
                 available_bytes: None,
             }),
-        };
-        match self.encode_non_ok_payload(&payload) {
-            Ok(bytes) => self.response(request_id, StatusCode::Backpressure, bytes),
-            Err(_) => self.response(request_id, StatusCode::Internal, Vec::new()),
-        }
+        )
     }
 
-    fn replay_backpressure_response(
-        &self,
-        request_id: RequestId,
-        request_bytes: usize,
-    ) -> ControllerResponse {
+    fn replay_backpressure_outcome(&self, request_bytes: usize) -> Outcome {
         let config = self.replay.config();
         let requested_bytes = request_bytes.saturating_add(config.max_response_bytes);
         let available_bytes = config
             .bytes
             .get()
             .saturating_sub(self.replay.retained_bytes());
-        let payload = NonOkResponse {
-            diagnostics: vec![Diagnostic {
-                code: "protocol.backpressure".to_owned(),
-                severity: crate::DiagnosticSeverity::Error,
-                path: Vec::new(),
-                detail: None,
-                operation_index: None,
-                sample_time: None,
-                provider_sequence: None,
-            }],
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
+        self.non_ok(
+            StatusCode::Backpressure,
+            Some(Backpressure {
                 queue_kind: BackpressureQueueKind::ReplayCache,
                 capacity: config.entries.get() as u64,
                 occupancy: self.replay.entries.len() as u64,
@@ -2956,123 +3339,54 @@ impl<P: ControlProvider> ProtocolController<P> {
                 requested_bytes: Some(u64::try_from(requested_bytes).unwrap_or(u64::MAX)),
                 available_bytes: Some(u64::try_from(available_bytes).unwrap_or(u64::MAX)),
             }),
-        };
-        match self.encode_non_ok_payload(&payload) {
-            Ok(bytes) => self.response(request_id, StatusCode::Backpressure, bytes),
-            Err(_) => self.response(request_id, StatusCode::Internal, Vec::new()),
-        }
+        )
     }
 
-    fn transaction_error_response(
-        &self,
-        request_id: RequestId,
-        error: &SessionStoreError,
-    ) -> ControllerResponse {
+    fn transaction_error_outcome(&self, error: &SessionStoreError) -> Outcome {
         let status = status_for_transaction(error);
         let diagnostics = transaction_error_diagnostics(error);
         if diagnostics.is_empty() {
-            return self.response(request_id, status, Vec::new());
+            return self.non_ok(status, None);
         }
-        match self.encode_bounded_non_ok_diagnostics(&diagnostics) {
-            Ok(bytes) => self.response(request_id, status, bytes),
-            Err(_) => {
-                // A validation rejection must not fall back to the generic `protocol.failure`
-                // identity. The empty common error payload remains canonical and explicitly
-                // reports that every original diagnostic was omitted by endpoint limits.
-                let value = NonOkResponse {
-                    diagnostics: Vec::new(),
-                    omitted_diagnostics: u32::try_from(diagnostics.len()).unwrap_or(u32::MAX),
-                    backpressure: None,
-                };
-                match self.encode_non_ok_payload(&value) {
-                    Ok(bytes) => self.response(request_id, status, bytes),
-                    Err(_) => ControllerResponse {
-                        request_id,
-                        status,
-                        revision: self.session.revision(),
-                        bytes: Vec::new(),
-                        frame_bytes: None,
-                    },
-                }
-            }
-        }
+        self.non_ok_value(status, self.bounded_non_ok_diagnostics(&diagnostics))
     }
-
-    fn encode_capabilities_payload(&self) -> Result<Vec<u8>, crate::EncodeError> {
-        let queue = self.queues.config();
-        let replay = self.replay.config();
-        let (commands, events, flags) = self.capability_registry();
-        let value = Capabilities {
-            minimum_version: crate::ProtocolVersion::V1,
-            maximum_version: crate::ProtocolVersion::V1,
-            maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
-            maximum_tlvs: self.codec.limits().max_tlv_count,
-            maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
-            maximum_nesting: self.codec.limits().max_nesting,
-            maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
-            control_command_slots: queue.control_command_slots.get() as u64,
-            control_command_bytes: queue.control_command_bytes.get() as u64,
-            automation_batch_slots: queue.automation_batch_slots.get() as u64,
-            reliable_response_slots: queue.reliable_response_slots.get() as u64,
-            reliable_event_slots: queue.reliable_event_slots.get() as u64,
-            telemetry_slots: queue.telemetry_slots.get() as u64,
-            replay_entries: replay.entries.get() as u64,
-            replay_bytes: replay.bytes.get() as u64,
-            maximum_cached_response_bytes: replay.max_response_bytes as u64,
-            per_block_automation_density: queue.per_block_automation_density.get() as u64,
-            admission_quantum_frames: queue.quantum_frames.get() as u64,
-            maximum_parameter_page_items: 256,
-            maximum_diagnostic_page_items: 256,
-            maximum_telemetry_handles: 256,
-            maximum_transaction_edits: self.effective_maximum_transaction_edits(),
-            supported_commands: &commands,
-            supported_events: &events,
-            flags,
-        };
-        let mut bytes = vec![0; self.codec.encoded_capabilities_len(&value)?];
-        self.codec.encode_capabilities(&value, &mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn capability_registry(&self) -> (Vec<u16>, Vec<u16>, CapabilityFlags) {
+    fn capability_registry(&self) -> CapabilitySet {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = vec![1_u16, 2, 6, 9];
-        if session_transactions {
-            commands.push(3);
+        let mut commands = [0_u16; 11];
+        let mut command_len = 0_usize;
+        for id in 1_u16..=11 {
+            let enabled = match id {
+                3 => session_transactions,
+                4 | 5 => features.parameters,
+                7 => features.transport,
+                8 => features.transport && features.transport_events,
+                10 => features.counters,
+                11 => features.diagnostics,
+                _ => true,
+            };
+            if enabled {
+                commands[command_len] = id;
+                command_len += 1;
+            }
         }
-        if features.parameters {
-            commands.extend([4, 5]);
-        }
-        if features.transport {
-            commands.push(7);
-        }
-        if features.transport && features.transport_events {
-            commands.push(8);
-        }
-        if features.counters {
-            commands.push(10);
-        }
-        if features.diagnostics {
-            commands.push(11);
-        }
-        commands.sort_unstable();
-        let mut events = Vec::new();
-        if session_transactions {
-            events.extend([0x8001_u16, 0x8002]);
-        }
-        if features.transport && features.transport_events {
-            events.push(0x8010);
-        }
-        if features.meters {
-            events.push(0x8020);
-        }
-        if features.counters {
-            events.push(0x8021);
-        }
-        if features.diagnostics {
-            events.push(0x8030);
+        let candidates = [0x8001_u16, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030];
+        let mut events = [0_u16; 6];
+        let mut event_len = 0_usize;
+        for id in candidates {
+            let enabled = match id {
+                0x8001 | 0x8002 => session_transactions,
+                0x8010 => features.transport && features.transport_events,
+                0x8020 => features.meters,
+                0x8021 => features.counters,
+                0x8030 => features.diagnostics,
+                _ => false,
+            };
+            if enabled {
+                events[event_len] = id;
+                event_len += 1;
+            }
         }
         let mut flags = (1 << 7) - 1;
         if !session_transactions {
@@ -3099,7 +3413,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         if features.transport && features.transport_events {
             flags |= 1 << 13;
         }
-        (commands, events, CapabilityFlags(flags))
+        CapabilitySet {
+            commands,
+            command_len: command_len as u8,
+            events,
+            event_len: event_len as u8,
+            flags: CapabilityFlags(flags),
+        }
     }
 
     fn effective_maximum_transaction_edits(&self) -> u32 {
@@ -3109,121 +3429,40 @@ impl<P: ControlProvider> ProtocolController<P> {
             0
         }
     }
-    fn encode_snapshot_payload(
-        &self,
-        value: SessionSnapshot<'_>,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_snapshot_len(value)?];
-        self.codec.encode_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_transaction_applied_payload(
-        &self,
-        value: TransactionApplied,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; 16];
-        self.codec.encode_transaction_applied(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_parameter_metadata_payload(
-        &self,
-        page: &ParameterMetadataPage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_parameter_metadata_page_len(page)?];
-        self.codec
-            .encode_parameter_metadata_page(page, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_parameter_state_payload(
-        &self,
-        page: &ParameterStatePage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_parameter_state_page_len(page)?];
-        self.codec.encode_parameter_state_page(page, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_automation_enqueued_payload(
-        &self,
-        accepted_records: u16,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let report = self.queues.report(crate::QueueKind::Automation);
-        let value = AutomationEnqueued {
-            accepted_records,
-            occupancy: report.occupancy,
-            capacity: report.capacity as u64,
-            generation: report.generation.0,
-        };
-        let mut bytes = vec![0; 64];
-        self.codec.encode_automation_enqueued(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_automation_backpressure(
-        &self,
-        capacity: usize,
-        occupancy: u64,
-        generation: u64,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let value = NonOkResponse {
-            diagnostics: Vec::new(),
-            omitted_diagnostics: 0,
-            backpressure: Some(Backpressure {
-                queue_kind: BackpressureQueueKind::Automation,
-                capacity: capacity as u64,
-                occupancy,
-                requested_items: 1,
-                generation: Some(generation),
-                retry_boundary: None,
-                requested_bytes: None,
-                available_bytes: None,
-            }),
-        };
-        let mut bytes = vec![0; self.codec.encoded_non_ok_payload_len(&value)?];
-        self.codec.encode_non_ok_payload(&value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_transport_snapshot_payload(
-        &self,
-        value: TransportSnapshot,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; 48];
-        self.codec.encode_transport_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_telemetry_configuration_payload(
-        &self,
-        value: &TelemetryConfiguration,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_telemetry_configuration_len(value)?];
-        self.codec
-            .encode_telemetry_configuration(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_counter_snapshot_payload(
-        &self,
-        value: &CounterSnapshot,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_counter_snapshot_len(value)?];
-        self.codec.encode_counter_snapshot(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_diagnostics_page_payload(
-        &self,
-        value: &DiagnosticsPage,
-    ) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_diagnostics_page_len(value)?];
-        self.codec.encode_diagnostics_page(value, &mut bytes)?;
-        Ok(bytes)
-    }
-    fn encode_non_ok_payload(&self, value: &NonOkResponse) -> Result<Vec<u8>, crate::EncodeError> {
-        let mut bytes = vec![0; self.codec.encoded_non_ok_payload_len(value)?];
-        self.codec.encode_non_ok_payload(value, &mut bytes)?;
-        Ok(bytes)
+
+    fn capabilities<'a>(&self, set: &'a CapabilitySet) -> Capabilities<'a> {
+        let queue = self.queues.config();
+        let replay = self.replay.config();
+        Capabilities {
+            minimum_version: crate::ProtocolVersion::V1,
+            maximum_version: crate::ProtocolVersion::V1,
+            maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
+            maximum_tlvs: self.codec.limits().max_tlv_count,
+            maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
+            maximum_nesting: self.codec.limits().max_nesting,
+            maximum_automation_records: crate::AUTOMATION_BATCH_RECORDS as u16,
+            control_command_slots: queue.control_command_slots.get() as u64,
+            control_command_bytes: queue.control_command_bytes.get() as u64,
+            automation_batch_slots: queue.automation_batch_slots.get() as u64,
+            reliable_response_slots: queue.reliable_response_slots.get() as u64,
+            reliable_event_slots: queue.reliable_event_slots.get() as u64,
+            telemetry_slots: queue.telemetry_slots.get() as u64,
+            replay_entries: replay.entries.get() as u64,
+            replay_bytes: replay.bytes.get() as u64,
+            maximum_cached_response_bytes: replay.max_response_bytes as u64,
+            per_block_automation_density: queue.per_block_automation_density.get() as u64,
+            admission_quantum_frames: queue.quantum_frames.get() as u64,
+            maximum_parameter_page_items: 256,
+            maximum_diagnostic_page_items: 256,
+            maximum_telemetry_handles: 256,
+            maximum_transaction_edits: self.effective_maximum_transaction_edits(),
+            supported_commands: &set.commands[..usize::from(set.command_len)],
+            supported_events: &set.events[..usize::from(set.event_len)],
+            flags: set.flags,
+        }
     }
 
-    fn encode_bounded_non_ok_diagnostics(
-        &self,
-        diagnostics: &[Diagnostic],
-    ) -> Result<Vec<u8>, crate::EncodeError> {
+    fn bounded_non_ok_diagnostics(&self, diagnostics: &[Diagnostic]) -> NonOkResponse {
         let maximum = usize::from(self.config.maximum_response_diagnostics);
         let mut retained = Vec::with_capacity(diagnostics.len().min(maximum));
         for diagnostic in diagnostics.iter().take(maximum) {
@@ -3234,24 +3473,24 @@ impl<P: ControlProvider> ProtocolController<P> {
                 omitted_diagnostics: 0,
                 backpressure: None,
             };
-            let encoded_len = match self.codec.encoded_non_ok_payload_len(&value) {
-                Ok(length) => length,
-                Err(_) => {
-                    break;
-                }
-            };
-            if encoded_len > self.replay.config.max_response_bytes {
+            let fits = self
+                .codec
+                .encoded_non_ok_payload_len(&value)
+                .is_ok_and(|length| {
+                    length.saturating_add(crate::OUTER_HEADER_BYTES)
+                        <= self.replay.config.max_response_bytes
+                });
+            if !fits {
                 break;
             }
             retained.push(diagnostic.clone());
         }
-        let value = NonOkResponse {
+        NonOkResponse {
             omitted_diagnostics: u32::try_from(diagnostics.len().saturating_sub(retained.len()))
                 .unwrap_or(u32::MAX),
             diagnostics: retained,
             backpressure: None,
-        };
-        self.encode_non_ok_payload(&value)
+        }
     }
 
     fn validate_automation_domains(
@@ -3459,51 +3698,6 @@ fn copy_complete_frame(input: &[u8], output: &mut [u8]) -> Result<usize, EncodeE
     Ok(required)
 }
 
-fn canonical_tlv_count(payload: &[u8]) -> Result<u32, EncodeError> {
-    let mut offset = 0_usize;
-    let mut count = 0_u32;
-    while offset != payload.len() {
-        let prefix_end = offset
-            .checked_add(crate::TLV_PREFIX_BYTES)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let prefix = payload
-            .get(offset..prefix_end)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let value_len = u32::from_le_bytes(
-            prefix[4..8]
-                .try_into()
-                .map_err(|_| EncodeError::LimitExceeded)?,
-        );
-        let value_len = usize::try_from(value_len).map_err(|_| EncodeError::LimitExceeded)?;
-        let field_end = prefix_end
-            .checked_add(value_len)
-            .ok_or(EncodeError::LimitExceeded)?;
-        let padded_end = field_end
-            .checked_add((8 - field_end % 8) % 8)
-            .ok_or(EncodeError::LimitExceeded)?;
-        if payload.get(offset..padded_end).is_none() {
-            return Err(EncodeError::LimitExceeded);
-        }
-        offset = padded_end;
-        count = count.checked_add(1).ok_or(EncodeError::LimitExceeded)?;
-    }
-    Ok(count)
-}
-
-fn encoded_non_ok_response_frame_len(
-    codec: &ProtocolCodec,
-    payload: &NonOkResponse,
-) -> Result<usize, EncodeError> {
-    let payload_len = codec.encoded_non_ok_payload_len(payload)?;
-    let required = crate::OUTER_HEADER_BYTES
-        .checked_add(payload_len)
-        .ok_or(EncodeError::LimitExceeded)?;
-    if required > codec.limits().max_frame_bytes {
-        return Err(EncodeError::LimitExceeded);
-    }
-    Ok(required)
-}
-
 fn status_for_transaction(error: &SessionStoreError) -> StatusCode {
     match error {
         SessionStoreError::ExactRevisionRequired | SessionStoreError::EmptyTransaction => {
@@ -3642,8 +3836,9 @@ mod tests {
             max_response_bytes: 256,
         };
         let report = ReplayCache::resource_report_for_config(config).expect("projection");
-        assert!(report.retained_payload_bytes > 1_024);
-        assert!(report.largest_allocation_bytes >= 1_024);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(report.retained_payload_bytes, 1_248);
+        assert_eq!(report.largest_allocation_bytes, 1_024);
         let overflow = ReplayCacheConfig {
             entries: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
             ..config
@@ -3652,6 +3847,176 @@ mod tests {
             ReplayCache::resource_report_for_config(overflow),
             Err(ReplayCacheError::ResourceOverflow)
         );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn replay_layout_stays_within_the_capi_resource_oracle() {
+        assert_eq!(core::mem::size_of::<ReplayEntry>(), 56);
+        assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
+        assert_eq!(
+            core::mem::size_of::<ProtocolController<MockProvider>>(),
+            5_992
+        );
+        assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
+    }
+
+    #[test]
+    fn replay_prefix_derives_length_retained_bytes_and_highest_pending_id() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(8).expect("eight bytes"),
+            max_response_bytes: 3,
+        });
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+        assert_eq!(cache.highest_new_id(), None);
+
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+        assert_eq!(cache.highest_new_id(), Some(id(1)));
+        cache.complete(id(1), b"aa", b"x").expect("first");
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
+        assert_eq!(cache.highest_new_id(), Some(id(1)));
+
+        assert_eq!(cache.preflight(id(2), b"c"), ReplayDecision::Execute);
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, 3));
+        assert_eq!(cache.highest_new_id(), Some(id(2)));
+        cache.complete(id(2), b"c", b"yy").expect("second");
+        let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"c") else {
+            panic!("second request must hit");
+        };
+        assert_eq!((cache.len(), cache.retained_bytes()), (2, 6));
+
+        assert_eq!(cache.preflight(id(3), b"d"), ReplayDecision::Execute);
+        assert_eq!(
+            (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
+            (1, 3, Some(id(3))),
+            "prefix eviction and pending bytes are derived without retained counters"
+        );
+        assert_eq!(cache.cached(second_hit), b"yy");
+        cache.complete(id(3), b"d", b"zzz").expect("third");
+        assert_eq!(
+            (cache.len(), cache.retained_bytes(), cache.highest_new_id()),
+            (2, 7, Some(id(3)))
+        );
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::ReplayExpired);
+    }
+
+    #[test]
+    fn fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(18).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(cache.retained_storage_capacities(), (2, 18));
+
+        assert_eq!(cache.preflight(id(1), b"one"), ReplayDecision::Execute);
+        cache.complete(id(1), b"one", b"1111").expect("first");
+        let ReplayDecision::Cached(first_hit) = cache.preflight(id(1), b"one") else {
+            panic!("first request must hit");
+        };
+        assert_eq!(cache.preflight(id(2), b"two"), ReplayDecision::Execute);
+        cache.complete(id(2), b"two", b"22").expect("second");
+
+        let ReplayDecision::Cached(second_hit) = cache.preflight(id(2), b"two") else {
+            panic!("second request must hit");
+        };
+        assert_eq!(cache.cached(second_hit), b"22");
+        assert_eq!(
+            cache.preflight(id(2), b"changed"),
+            ReplayDecision::RequestIdReuse
+        );
+
+        assert_eq!(cache.preflight(id(3), b"three"), ReplayDecision::Execute);
+        cache.complete(id(3), b"three", b"333").expect("third");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.try_cached(first_hit), None, "evicted hit is stale");
+        assert_eq!(cache.cached(first_hit), b"");
+        assert_eq!(
+            cache.cached(second_hit),
+            b"22",
+            "surviving hit resolves after compaction"
+        );
+        assert_eq!(
+            cache.preflight(id(1), b"one"),
+            ReplayDecision::ReplayExpired
+        );
+        let ReplayDecision::Cached(compacted_second_hit) = cache.preflight(id(2), b"two") else {
+            panic!("second request must survive prefix compaction");
+        };
+        assert_eq!(cache.cached(compacted_second_hit), b"22");
+        let ReplayDecision::Cached(third_hit) = cache.preflight(id(3), b"three") else {
+            panic!("third request must hit");
+        };
+        assert_eq!(cache.cached(third_hit), b"333");
+        assert_eq!(cache.retained_storage_capacities(), (2, 18));
+
+        let mut other = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(2).expect("two entries"),
+            bytes: NonZeroUsize::new(18).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(other.preflight(id(2), b"two"), ReplayDecision::Execute);
+        other
+            .complete(id(2), b"two", b"xx")
+            .expect("foreign same-ID entry");
+        assert_eq!(
+            other.try_cached(second_hit),
+            None,
+            "foreign hit is rejected"
+        );
+        assert_eq!(other.cached(second_hit), b"");
+    }
+
+    #[test]
+    fn replay_reservation_binds_exact_request_bytes() {
+        let mut cache = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(1).expect("one entry"),
+            bytes: NonZeroUsize::new(8).expect("arena bytes"),
+            max_response_bytes: 4,
+        });
+        assert_eq!(cache.preflight(id(1), b"aa"), ReplayDecision::Execute);
+        assert_eq!(
+            cache.preflight(id(2), b"cc"),
+            ReplayDecision::Backpressure,
+            "pending reservation cannot be overwritten"
+        );
+        assert_eq!(
+            cache.complete(id(1), b"bb", b"ok"),
+            Err(ReplayCacheError::ReservationMissing)
+        );
+        cache
+            .complete(id(1), b"aa", b"ok")
+            .expect("exact pending request remains retryable");
+        let ReplayDecision::Cached(hit) = cache.preflight(id(1), b"aa") else {
+            panic!("exact completed request hits");
+        };
+        assert_eq!(cache.cached(hit), b"ok");
+    }
+
+    #[test]
+    fn fixed_replay_arena_reports_response_and_reservation_bounds() {
+        let config = ReplayCacheConfig {
+            entries: NonZeroUsize::new(1).expect("one entry"),
+            bytes: NonZeroUsize::new(8).expect("arena bytes"),
+            max_response_bytes: 4,
+        };
+        let mut cache = ReplayCache::new(config);
+        assert_eq!(
+            cache.complete(id(1), b"x", b"12345"),
+            Err(ReplayCacheError::ResponseTooLarge)
+        );
+        assert_eq!(
+            cache.complete(id(1), b"123456789", b""),
+            Err(ReplayCacheError::ReservationMissing)
+        );
+        assert_eq!(
+            cache.preflight(id(1), b"12345"),
+            ReplayDecision::Backpressure
+        );
+        assert!(cache.is_empty());
+        assert_eq!(cache.retained_bytes(), 0);
     }
 
     fn controller(
@@ -3728,6 +4093,79 @@ mod tests {
                 max_response_bytes: 1024,
             }),
         )
+    }
+
+    #[test]
+    fn frozen_deep_transaction_reaches_public_b1b_process_path() {
+        let corpus = crate::complete_schema_corpus();
+        let transaction = corpus
+            .iter()
+            .find(|frame| frame.name == "command.session_transaction_apply")
+            .expect("frozen transaction frame");
+        controller(8, 1)
+            .process_b1b_btlv(
+                &transaction.bytes,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            )
+            .expect("public B1b process path accepts the frozen deep transaction");
+    }
+
+    #[test]
+    fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes() {
+        fn assert_single_typed_dispatch(frame_name: &str) {
+            let corpus = crate::complete_schema_corpus();
+            let frame = corpus
+                .iter()
+                .find(|frame| frame.name == frame_name)
+                .expect("frozen command frame");
+            let codec = ProtocolCodec::default();
+
+            crate::btlv::reset_reader_passes();
+            codec
+                .decode_typed_command(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("typed baseline decode");
+            let typed_reader_passes = crate::btlv::reader_passes();
+            assert!(typed_reader_passes > 0);
+
+            let mut controller = controller(8, 1);
+            crate::btlv::reset_reader_passes();
+            let first = controller
+                .process_b1b_btlv(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("single typed dispatch");
+            assert_eq!(
+                crate::btlv::reader_passes(),
+                typed_reader_passes,
+                "controller must add no generic structural walk for {frame_name}"
+            );
+
+            let replay = controller
+                .process_b1b_btlv(&frame.bytes, &mut DecodeScratch::new(&mut [0_u16; 1024]))
+                .expect("exact canonical replay");
+            assert_eq!(
+                replay, first,
+                "status and exact bytes replay for {frame_name}"
+            );
+        }
+
+        assert_single_typed_dispatch("command.transport_get");
+        assert_single_typed_dispatch("command.session_transaction_apply");
+
+        let corpus = crate::complete_schema_corpus();
+        let transaction = corpus
+            .iter()
+            .find(|frame| frame.name == "command.session_transaction_apply")
+            .expect("frozen transaction frame");
+        let mut limited = controller(8, 1);
+        limited.config.maximum_transaction_edits = 41;
+        assert_eq!(
+            limited.process_b1b_btlv(
+                &transaction.bytes,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            ),
+            Err(DecodeError::LimitExceeded)
+        );
+        assert_eq!(limited.session().revision(), SessionRevision(7));
+        assert!(limited.replay.is_empty());
     }
 
     fn egress_controller(
@@ -4101,6 +4539,234 @@ mod tests {
     }
 
     #[test]
+    fn public_immediate_frame_path_never_builds_a_prepared_vec() {
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
+        let mut endpoint = controller(8, 2);
+        let input = full_command(
+            1,
+            ExpectedRevision::Any,
+            crate::CommandPayload::CapabilitiesGet,
+        );
+        let first = process_full_command(&mut endpoint, &input);
+        assert_eq!(
+            process_full_command(&mut endpoint, &input),
+            first,
+            "replay bytes"
+        );
+
+        let changed = full_command(
+            1,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        );
+        let _reuse = process_full_command(&mut endpoint, &changed);
+
+        let mut malformed = full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::CapabilitiesGet,
+        );
+        malformed[20..24].copy_from_slice(&8_u32.to_le_bytes());
+        malformed[40..44].copy_from_slice(&1_u32.to_le_bytes());
+        malformed.extend_from_slice(&[1, 0, 1, 0, 1, 0, 0, 0]);
+        let _non_ok = process_full_command(&mut endpoint, &malformed);
+
+        PREPARED_IMMEDIATE_CALLS.with(|calls| {
+            assert_eq!(
+                calls.get(),
+                0,
+                "public immediate, replay, reuse, and correlatable-error paths write directly"
+            );
+        });
+    }
+
+    #[test]
+    fn one_call_transaction_success_and_fallbacks_avoid_owned_preparation() {
+        fn status(bytes: &[u8]) -> StatusCode {
+            match ProtocolCodec::default()
+                .decode_typed_response(bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .expect("typed response")
+            {
+                crate::DecodedTypedResponseFrame::Success { header, .. }
+                | crate::DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+            }
+        }
+
+        PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
+        let first_edits = [SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("direct-transaction").expect("ID"),
+        }];
+        let first = full_command(
+            1,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&first_edits),
+        );
+        let mut endpoint = controller(1, 2);
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+        crate::typed_frame::reset_frame_writer_passes();
+        let committed = process_full_command(&mut endpoint, &first);
+        assert_eq!(status(&committed), StatusCode::Ok);
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
+        assert_eq!(crate::typed_frame::frame_writer_passes(), (1, 1));
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
+        let committed_snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let committed_events = endpoint.queues().report(crate::QueueKind::ReliableEvent);
+
+        let replay = process_full_command(&mut endpoint, &first);
+        assert_eq!(replay, committed, "transaction replay bytes");
+        assert_eq!(endpoint.session().canonical_snapshot(), committed_snapshot);
+        assert_eq!(
+            endpoint.queues().report(crate::QueueKind::ReliableEvent),
+            committed_events
+        );
+        let event = endpoint
+            .queues_mut()
+            .try_dequeue_event()
+            .expect("one committed event");
+        assert_eq!(event.message_id, MessageId::SessionCommitted);
+        assert!(
+            endpoint.queues_mut().try_dequeue_event().is_err(),
+            "one-call commit and exact replay emit one event total"
+        );
+
+        let changed_edits = [SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("changed-reuse").expect("ID"),
+        }];
+        let changed = full_command(
+            1,
+            ExpectedRevision::Exact(SessionRevision(8)),
+            crate::CommandPayload::SessionTransactionApply(&changed_edits),
+        );
+        assert_eq!(
+            status(&process_full_command(&mut endpoint, &changed)),
+            StatusCode::RequestIdReuse
+        );
+        assert_eq!(endpoint.session().canonical_snapshot(), committed_snapshot);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| {
+            assert_eq!(
+                clones.get(),
+                0,
+                "cached and reuse IDs bypass prospective replay allocation"
+            );
+        });
+
+        let evict = full_command(
+            2,
+            ExpectedRevision::Any,
+            crate::CommandPayload::TransportGet,
+        );
+        assert_eq!(
+            status(&process_full_command(&mut endpoint, &evict)),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            status(&process_full_command(&mut endpoint, &first)),
+            StatusCode::ReplayExpired
+        );
+        assert_eq!(endpoint.session().canonical_snapshot(), committed_snapshot);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| {
+            assert_eq!(
+                clones.get(),
+                0,
+                "expired IDs bypass prospective replay allocation"
+            );
+        });
+
+        let conflict_edits = [SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("must-not-commit").expect("ID"),
+        }];
+        let conflict = full_command(
+            3,
+            ExpectedRevision::Exact(SessionRevision(6)),
+            crate::CommandPayload::SessionTransactionApply(&conflict_edits),
+        );
+        let mut conflicted = controller(4, 2);
+        let before_conflict = conflicted.session().canonical_snapshot().to_owned();
+        let clones_before_conflict = PROSPECTIVE_REPLAY_CLONES.with(core::cell::Cell::get);
+        let direct_conflict = process_full_command(&mut conflicted, &conflict);
+        assert_eq!(status(&direct_conflict), StatusCode::RevisionConflict);
+        assert_eq!(conflicted.session().canonical_snapshot(), before_conflict);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| {
+            assert_eq!(
+                clones.get(),
+                clones_before_conflict,
+                "header-known semantic fallback bypasses prospective replay allocation"
+            );
+        });
+
+        let invalid_edits = [SessionEditV1::SetSampleRateHz { sample_rate_hz: 0 }];
+        let invalid = full_command(
+            4,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&invalid_edits),
+        );
+        let mut invalid_endpoint = controller(4, 2);
+        let invalid_snapshot = invalid_endpoint.session().canonical_snapshot().to_owned();
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+        assert_eq!(
+            status(&process_full_command(&mut invalid_endpoint, &invalid)),
+            StatusCode::ValidationFailed
+        );
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
+        assert_eq!(
+            invalid_endpoint.session().canonical_snapshot(),
+            invalid_snapshot
+        );
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| {
+            assert_eq!(
+                clones.get(),
+                clones_before_conflict,
+                "session-prepare fallback bypasses prospective replay allocation"
+            );
+        });
+
+        let mut prepared_compat = controller(4, 2);
+        let prepared = prepared_compat
+            .prepare_command_frame(&conflict, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .expect("public owned fallback");
+        let PreparedCommandFrame::Immediate(prepared) = prepared else {
+            panic!("revision conflict must not produce a structural token");
+        };
+        let mut prepared_bytes = [0_u8; 2048];
+        let prepared_len = prepared
+            .write_into(&mut prepared_bytes)
+            .expect("prepared compatibility bytes");
+        assert_eq!(&prepared_bytes[..prepared_len], direct_conflict);
+
+        let mut pressured = controller(4, 2);
+        pressured.replay = ReplayCache::new(ReplayCacheConfig {
+            entries: NonZeroUsize::new(1).expect("entry"),
+            bytes: NonZeroUsize::new(64).expect("arena"),
+            max_response_bytes: 32,
+        });
+        let before_pressure = pressured.session().canonical_snapshot().to_owned();
+        assert_eq!(
+            status(&process_full_command(&mut pressured, &first)),
+            StatusCode::Backpressure
+        );
+        assert_eq!(pressured.session().canonical_snapshot(), before_pressure);
+        assert!(pressured.replay.is_empty());
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| {
+            assert_eq!(
+                clones.get(),
+                clones_before_conflict,
+                "replay-capacity backpressure bypasses prospective replay allocation"
+            );
+        });
+
+        PREPARED_IMMEDIATE_CALLS.with(|calls| {
+            assert_eq!(
+                calls.get(),
+                1,
+                "only the explicit public prepare fallback may build owned immediate bytes"
+            );
+        });
+    }
+
+    #[test]
     fn full_frame_ingress_preserves_output_ownership_and_correlates_payload_errors() {
         let transaction = [SessionEditV1::SetSessionId {
             session_id: miso_engine_session::StableId::parse("not-committed").expect("ID"),
@@ -4111,6 +4777,8 @@ mod tests {
             crate::CommandPayload::SessionTransactionApply(&transaction),
         );
         let mut endpoint = controller(8, 2);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
         let mut short = [0xa5_u8; 32];
         let mut fields = [0_u16; 16];
         assert_eq!(
@@ -4124,6 +4792,56 @@ mod tests {
         assert_eq!(short, [0xa5; 32]);
         assert_eq!(endpoint.session().revision(), SessionRevision(7));
         assert!(endpoint.replay().is_empty());
+        assert_eq!(
+            endpoint
+                .queues()
+                .report(crate::QueueKind::ReliableEvent)
+                .occupancy,
+            0
+        );
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 0));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 0));
+
+        let before_malformed_transaction = endpoint.session().canonical_snapshot().to_owned();
+        let mut malformed_transaction = input.clone();
+        malformed_transaction[crate::OUTER_HEADER_BYTES + 2] = 1;
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+        let transaction_response = process_full_command(&mut endpoint, &malformed_transaction);
+        TYPED_COMMAND_DECODES.with(|decodes| {
+            assert_eq!(
+                decodes.get(),
+                1,
+                "a malformed transaction carries its typed-decode error into the direct outcome path"
+            );
+        });
+        let mut transaction_response_fields = [0_u16; 32];
+        match ProtocolCodec::default()
+            .decode_typed_response(
+                &transaction_response,
+                &mut DecodeScratch::new(&mut transaction_response_fields),
+            )
+            .expect("correlatable malformed transaction response")
+        {
+            crate::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                assert_eq!(header.request_id, id(1));
+                assert_eq!(header.message_id, MessageId::SessionTransactionApply);
+                assert_eq!(header.status, StatusCode::MalformedFrame);
+            }
+            crate::DecodedTypedResponseFrame::Success { .. } => {
+                panic!("malformed transaction payload succeeded")
+            }
+        }
+        assert_eq!(
+            endpoint.session().canonical_snapshot(),
+            before_malformed_transaction
+        );
+        assert_eq!(
+            endpoint
+                .queues()
+                .report(crate::QueueKind::ReliableEvent)
+                .occupancy,
+            0
+        );
 
         let mut malformed = full_command(
             2,
@@ -4133,7 +4851,9 @@ mod tests {
         malformed[20..24].copy_from_slice(&8_u32.to_le_bytes());
         malformed[40..44].copy_from_slice(&1_u32.to_le_bytes());
         malformed.extend_from_slice(&[1, 0, 1, 0, 1, 0, 0, 0]);
+        TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
         let response = process_full_command(&mut endpoint, &malformed);
+        TYPED_COMMAND_DECODES.with(|decodes| assert_eq!(decodes.get(), 1));
         let mut response_fields = [0_u16; 32];
         match ProtocolCodec::default()
             .decode_typed_response(&response, &mut DecodeScratch::new(&mut response_fields))
@@ -4195,7 +4915,7 @@ mod tests {
         let mut accepted = controller(8, 2);
         let mut accepted_output = [0_u8; 2048];
         let accepted_len = accepted
-            .process_command_frame_into_legacy(
+            .process_command_frame_into(
                 &input,
                 &mut DecodeScratch::new(&mut [0_u16; 1024]),
                 &mut accepted_output,
@@ -4208,6 +4928,8 @@ mod tests {
         let before_event = endpoint
             .queues_mut()
             .report(crate::QueueKind::ReliableEvent);
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
+        RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
         let prepared = match endpoint
             .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
             .expect("prepare")
@@ -4215,6 +4937,8 @@ mod tests {
             PreparedCommandFrame::Structural(prepared) => *prepared,
             PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
         };
+        PROSPECTIVE_REPLAY_CLONES.with(|clones| assert_eq!(clones.get(), 1));
+        RESPONSE_STAGING_VECS.with(|allocations| assert_eq!(allocations.get(), 1));
         assert_eq!(endpoint.session().revision(), SessionRevision(7));
         assert_eq!(endpoint.session().canonical_snapshot(), before_snapshot);
         assert!(endpoint.replay().is_empty());
@@ -4392,6 +5116,58 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_response_uses_one_frame_backing_and_cached_header_only_decode() {
+        fn assert_shared_payload_backing(response: &ControllerResponse) {
+            assert_eq!(
+                response.payload().as_ptr(),
+                response
+                    .frame
+                    .as_ptr()
+                    .wrapping_add(crate::OUTER_HEADER_BYTES),
+                "payload must be a range into the sole complete-frame backing"
+            );
+            assert_eq!(
+                response.frame.len(),
+                crate::OUTER_HEADER_BYTES + response.payload_len()
+            );
+        }
+
+        let mut controller = controller(2, 1);
+        let first = controller.process(capability(1, b"single-frame-backing"));
+        assert_shared_payload_backing(&first);
+        let mut payload = vec![0xa5; first.payload_len()];
+        assert_eq!(first.encode_payload(&mut payload), Ok(first.payload_len()));
+        assert_eq!(payload, first.payload());
+
+        crate::btlv::reset_reader_passes();
+        let cached = controller.process(capability(1, b"single-frame-backing"));
+        assert_eq!(
+            crate::btlv::reader_passes(),
+            0,
+            "cached metadata reconstruction must not invoke the recursive TLV Reader"
+        );
+        assert_eq!(
+            cached, first,
+            "cache hit preserves exact metadata and bytes"
+        );
+        assert_shared_payload_backing(&cached);
+
+        let cloned = cached.clone();
+        assert_eq!(cloned, cached, "Clone/Eq preserve complete frame bytes");
+        assert_shared_payload_backing(&cloned);
+
+        let malformed = ControllerResponse::from_complete_frame(
+            id(99),
+            StatusCode::Internal,
+            SessionRevision(7),
+            vec![0xa5; crate::OUTER_HEADER_BYTES - 1],
+        );
+        assert_eq!(malformed.payload_len(), 0);
+        assert_eq!(malformed.payload(), &[]);
+        assert_eq!(malformed.encode_payload(&mut []), Ok(0));
+    }
+
+    #[test]
     fn mutations_require_exact_revision_and_roll_back_on_validation() {
         let mut controller = controller(4, 1);
         let any = ControllerRequest {
@@ -4463,7 +5239,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::ValidationFailed);
         let codec = ProtocolCodec::default();
         let decoded = codec
-            .decode_non_ok_payload(&response.bytes, 2)
+            .decode_non_ok_payload(response.payload(), 2)
             .expect("canonical validation error");
         assert_eq!(decoded.omitted_diagnostics, 1);
         assert_eq!(decoded.diagnostics.len(), 1);
@@ -4494,7 +5270,11 @@ mod tests {
         codec
             .encode_non_ok_payload(&decoded, &mut encoded)
             .expect("round-trip encode");
-        assert_eq!(encoded, response.bytes, "non-OK payload remains canonical");
+        assert_eq!(
+            encoded,
+            response.payload(),
+            "non-OK payload remains canonical"
+        );
     }
 
     #[test]
@@ -4513,7 +5293,7 @@ mod tests {
         let response = controller.process(request);
         assert_eq!(response.status, StatusCode::ValidationFailed);
         let decoded = ProtocolCodec::default()
-            .decode_non_ok_payload(&response.bytes, 2)
+            .decode_non_ok_payload(response.payload(), 2)
             .expect("typed edit error");
         assert_eq!(decoded.omitted_diagnostics, 0);
         assert_eq!(decoded.diagnostics.len(), 1);
@@ -4647,14 +5427,15 @@ mod tests {
                 assert_eq!(error.status(), case.status, "{} decoder mapping", case.name);
             }
             let controller = controller(4, 1);
-            let response = controller.response(
-                id(u64::try_from(index).expect("case index fits") + 1),
-                case.status,
-                Vec::new(),
+            let request_id = id(u64::try_from(index).expect("case index fits") + 1);
+            let response = controller.compatibility_response(
+                MessageId::CapabilitiesGet,
+                request_id,
+                controller.non_ok(case.status, None),
             );
             assert_eq!(response.status, case.status, "{} status", case.name);
             let decoded = codec
-                .decode_non_ok_payload(&response.bytes, case.top_level_tlvs)
+                .decode_non_ok_payload(response.payload(), case.top_level_tlvs)
                 .unwrap_or_else(|error| panic!("{} common non-OK payload: {error:?}", case.name));
             assert_eq!(
                 decoded.omitted_diagnostics, 0,
@@ -4676,7 +5457,12 @@ mod tests {
             codec
                 .encode_non_ok_payload(&decoded, &mut canonical)
                 .expect("canonical non-OK encode");
-            assert_eq!(canonical, response.bytes, "{} canonical bytes", case.name);
+            assert_eq!(
+                canonical,
+                response.payload(),
+                "{} canonical bytes",
+                case.name
+            );
         }
     }
 
@@ -4721,9 +5507,9 @@ mod tests {
         });
         assert_eq!(cache.preflight(id(1), b"x"), ReplayDecision::Backpressure);
         assert!(cache.is_empty());
-        assert_eq!(cache.highest_new_id, None);
+        assert_eq!(cache.highest_new_id(), None);
         assert_eq!(cache.preflight(id(1), b"x"), ReplayDecision::Backpressure);
-        assert_eq!(cache.highest_new_id, None);
+        assert_eq!(cache.highest_new_id(), None);
     }
 
     #[test]
@@ -4783,7 +5569,7 @@ mod tests {
             assert_eq!(response.status, StatusCode::ValidationFailed);
             assert_eq!(response.revision, before_revision);
             let decoded = ProtocolCodec::default()
-                .decode_non_ok_payload(&response.bytes, 2)
+                .decode_non_ok_payload(response.payload(), 2)
                 .expect("typed launch-rate diagnostic");
             assert_eq!(decoded.omitted_diagnostics, 0);
             assert_eq!(decoded.diagnostics.len(), 1);
@@ -5047,7 +5833,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(
             ProtocolCodec::default()
-                .decode_automation_enqueued(&response.bytes, 4)
+                .decode_automation_enqueued(response.payload(), 4)
                 .expect("success payload"),
             AutomationEnqueued {
                 accepted_records: 1,
@@ -5063,7 +5849,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::Backpressure);
         assert_eq!(
             ProtocolCodec::default()
-                .decode_non_ok_payload(&response.bytes, 2)
+                .decode_non_ok_payload(response.payload(), 2)
                 .expect("typed backpressure")
                 .backpressure
                 .expect("backpressure"),
@@ -5164,7 +5950,7 @@ mod tests {
         assert_eq!(get_response.status, StatusCode::Ok);
         assert_eq!(
             codec
-                .decode_transport_snapshot(&get_response.bytes, 3)
+                .decode_transport_snapshot(get_response.payload(), 3)
                 .expect("get snapshot"),
             TransportSnapshot {
                 state: TransportState::Stopped,
@@ -5178,7 +5964,7 @@ mod tests {
         assert_eq!(set_response.status, StatusCode::Ok);
         assert_eq!(
             codec
-                .decode_transport_snapshot(&set_response.bytes, 3)
+                .decode_transport_snapshot(set_response.payload(), 3)
                 .expect("set snapshot"),
             TransportSnapshot {
                 state: TransportState::Playing,
@@ -5243,7 +6029,7 @@ mod tests {
             )
             .expect("retain position");
         assert_eq!(
-            codec.decode_transport_snapshot(&retained.bytes, 3),
+            codec.decode_transport_snapshot(retained.payload(), 3),
             Ok(TransportSnapshot {
                 state: TransportState::Stopped,
                 position: SampleTime(9),
@@ -5387,7 +6173,7 @@ mod tests {
             .expect("configure");
         assert_eq!(first.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_telemetry_configuration(&first.bytes, 6),
+            codec.decode_telemetry_configuration(first.payload(), 6),
             Ok(configuration.clone())
         );
         assert_eq!(controller.provider().telemetry_configuration, configuration);
@@ -5403,7 +6189,7 @@ mod tests {
                 &mut DecodeScratch::new(&mut [0_u16; 6]),
             )
             .expect("idempotent configure");
-        assert_eq!(second.bytes, first.bytes);
+        assert_eq!(second.payload(), first.payload());
 
         let request = CountersRequest {
             all: false,
@@ -5437,10 +6223,10 @@ mod tests {
                 &mut DecodeScratch::new(&mut [0_u16; 2]),
             )
             .expect("nonreset read");
-        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(first.payload(), second.payload());
         assert_eq!(
             codec
-                .decode_counter_snapshot(&first.bytes, 3)
+                .decode_counter_snapshot(first.payload(), 3)
                 .expect("snapshot")
                 .values
                 .len(),
@@ -5511,7 +6297,7 @@ mod tests {
             .expect("first page");
         assert_eq!(first.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_diagnostics_page(&first.bytes, 3),
+            codec.decode_diagnostics_page(first.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 3,
                 eof: false,
@@ -5526,7 +6312,8 @@ mod tests {
             .expect("nondestructive first page");
         assert_eq!(repeat.status, StatusCode::Ok);
         assert_eq!(
-            repeat.bytes, first.bytes,
+            repeat.payload(),
+            first.payload(),
             "reads must not drain retained history"
         );
 
@@ -5544,7 +6331,7 @@ mod tests {
             )
             .expect("final page");
         assert_eq!(
-            codec.decode_diagnostics_page(&final_page.bytes, 3),
+            codec.decode_diagnostics_page(final_page.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -5566,7 +6353,7 @@ mod tests {
             .expect("severity filtered page");
         assert_eq!(filtered.status, StatusCode::Ok);
         assert_eq!(
-            codec.decode_diagnostics_page(&filtered.bytes, 3),
+            codec.decode_diagnostics_page(filtered.payload(), 3),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -5590,7 +6377,7 @@ mod tests {
         assert_eq!(expired.status, StatusCode::ReplayExpired);
         assert_eq!(
             codec
-                .decode_non_ok_payload(&expired.bytes, 2)
+                .decode_non_ok_payload(expired.payload(), 2)
                 .expect("typed expiration diagnostic")
                 .diagnostics,
             vec![Diagnostic {
@@ -5618,7 +6405,7 @@ mod tests {
             )
             .expect("empty page");
         assert_eq!(
-            codec.decode_diagnostics_page(&empty.bytes, 2),
+            codec.decode_diagnostics_page(empty.payload(), 2),
             Ok(DiagnosticsPage {
                 last_sequence: 4,
                 eof: true,
@@ -5692,7 +6479,7 @@ mod tests {
             endpoint.set_provider_features(features);
             let response = endpoint.process(capability(1, b"features"));
             let decoded = codec
-                .decode_capabilities(&response.bytes, 27)
+                .decode_capabilities(response.payload(), 27)
                 .expect("capabilities");
             if required_command != 0 {
                 assert!(
@@ -5716,7 +6503,7 @@ mod tests {
         endpoint.set_provider_features(ProviderFeatures::NONE);
         let caps = endpoint.process(capability(1, b"none"));
         let decoded = codec
-            .decode_capabilities(&caps.bytes, 27)
+            .decode_capabilities(caps.payload(), 27)
             .expect("none caps");
         assert_eq!(decoded.flags.0 & !((1 << 7) - 1), 0);
         assert_eq!(
@@ -5750,7 +6537,7 @@ mod tests {
         endpoint.config.maximum_transaction_edits = 0;
         let caps = endpoint.process(capability(1, b"zero-edit-limit"));
         let decoded = codec
-            .decode_capabilities(&caps.bytes, 27)
+            .decode_capabilities(caps.payload(), 27)
             .expect("zero-edit capabilities");
         assert_eq!(decoded.maximum_transaction_edits, 0);
         assert!(
@@ -5862,7 +6649,7 @@ mod tests {
             .expect("first page");
         assert_eq!(first_response.status, StatusCode::Ok);
         let first_page = codec
-            .decode_snapshot(&first_response.bytes, 4)
+            .decode_snapshot(first_response.payload(), 4)
             .expect("page");
         assert_eq!(first_page.offset, 0);
         assert!(!first_page.eof);
@@ -5878,7 +6665,7 @@ mod tests {
             .process_b1b_btlv(&final_page, &mut DecodeScratch::new(&mut [0_u16; 2]))
             .expect("final page");
         let final_snapshot = codec
-            .decode_snapshot(&final_response.bytes, 4)
+            .decode_snapshot(final_response.payload(), 4)
             .expect("final payload");
         assert!(final_snapshot.eof);
         assert!(final_snapshot.canonical_toml_chunk.is_empty());

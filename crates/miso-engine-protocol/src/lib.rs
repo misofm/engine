@@ -4,12 +4,13 @@
 //! adapter, or exported C ABI. Its caller-buffer codec is usable by future IPC, shared-memory,
 //! browser-message, and C ABI adapters without retaining any caller pointer.
 
+mod btlv;
 mod conformance;
 mod controller;
 mod message_wire;
 mod model;
 mod queue;
-#[allow(dead_code)] // Test-only allocating comparator remains beside the direct encoder.
+mod schema;
 mod session_wire;
 mod typed_frame;
 mod wire;
@@ -75,5 +76,5 @@ pub use controller::{
     ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
     PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
     ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
-    ReplayCacheResourceReport, ReplayDecision,
+    ReplayCacheResourceReport, ReplayDecision, ReplayHit,
 };
