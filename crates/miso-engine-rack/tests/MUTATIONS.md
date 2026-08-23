@@ -1,0 +1,82 @@
+# Red-mutation record for the #96 bank-chain and cohort-planner gates
+
+Master plan for issue #83, §1.6: *every gate is proven red*. A test that has never failed is not a
+gate. Every row below was applied to the working tree, the named test was run, the failure output
+was recorded, and the mutation was reverted in the same session. Nothing in this file is a claim
+about code that was not run.
+
+Host: `x86_64` (16 cores), workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`,
+debug profile. Sweep driver: one mutation applied at a time, `cargo test -p <pkg> <test> --
+--exact tests::<test>`, tree restored before the next row.
+
+Reproduce one row with:
+
+```
+# apply the "mutation" edit, then
+cargo test --locked -p miso-engine-rack -p miso-engine-rack-compiler -p miso-engine-graph-compiler
+# and revert
+```
+
+## `miso-engine-rack` — the bank chain
+
+| # | mutation | file | test | result | first failure line |
+|---|---|---|---|---|---|
+| M1 | `scatter_lane` reads the wrong lane: `*sample = chunk[lane]` becomes `chunk[lane ^ 1]` | `rack/src/lib.rs` | `gather_scatter_round_trip_is_bit_exact` | RED | ``assertion `left == right` failed: left lane=0 frame=0`` |
+| M2 | `gather_lane` chunks by frames instead of lanes: `chunks_exact_mut(lanes)` becomes `chunks_exact_mut(frames as usize)` | `rack/src/lib.rs` | `stage_sees_frame_major_layout` | RED | ``assertion `left == right` failed: lane=0 frame=1`` |
+| M3 | `BankChain::run` drops the identity-slot guard: `if slot.active_lanes.iter().any(..)` becomes `if true` | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` | RED | ``assertion `left == right` failed: both live slots ran once per block; the identity-everywhere slot never ran`` |
+| M3b | the transpose counter moves inside the slot loop (master plan §4.5: it is *per chain*, not per slot) | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` | RED | ``assertion `left == right` failed`` (2 live slots ⇒ 10 counted round-trips for 5 blocks) |
+| M4 | `BankChain::new` stops enforcing "a slot may only be active on an active lane" | `rack/src/lib.rs` | `chain_new_rejects_mask_shape_and_lane_implication` | RED | ``assertion `left == right` failed: a slot may not be active on a lane the chain never gathers`` |
+| M5 | `AoSoaScratch::new` re-adds a plane: `vec![0.0; length]` becomes `vec![0.0; length * 2]` for the left plane | `rack/src/lib.rs` | `scratch_allocates_exactly_two_planes` | RED | ``assertion `left == right` failed`` |
+| M6 | `gather_lane` drops the first frame of every block: `.zip(left)` becomes `.zip(&left[1..])` | `rack/src/lib.rs` | `chain_run_is_partition_invariant` | RED | ``assertion `left == right` failed: partition=1 lane=0 frame=0`` |
+| M7 | `run` scatters from inactive lanes too: `if self.active[lane]` becomes `if true` on the scatter loop | `rack/src/lib.rs` | `inactive_lanes_are_never_gathered_or_scattered` | RED | ``assertion `left == right` failed`` |
+
+## `miso-engine-rack-compiler` — the single cohort planner
+
+| # | mutation | file | test | result | first failure line |
+|---|---|---|---|---|---|
+| P1 | lane order within a group is reversed: `order_members`'s tie-break becomes `b.id.cmp(&a.id)` | `rack-compiler/src/lib.rs` | `single_slot_programs_reproduce_exact_equal_chunking` | RED | ``assertion `left == right` failed: case=0`` |
+| P2 | the `is_bankable` filter is dropped: `if candidate.program.is_bankable()` becomes `if true` | `rack-compiler/src/lib.rs` | `empty_programs_and_connected_sidechains_never_bank` | RED | ``assertion `left == right` failed`` |
+| P3 | `subsequence_mask` stops advancing the cursor, so one leader slot can satisfy two program slots | `rack/src/lib.rs` | `subsequence_uses_program_equality_not_occurrence` | RED | ``assertion `left == right` failed`` |
+| P4 | full-program tracks stop filling banks first: `b.active_count().cmp(&a.active_count())` becomes `a.active_count().cmp(&a.active_count())` | `rack-compiler/src/lib.rs` | `longest_program_leads_and_full_programs_fill_first` | RED | ``assertion `left == right` failed: full-program tracks fill the first bank even though their ids are larger`` |
+| P5 | cohort pooling stops being exhaustive: subsequence matching is replaced by program equality | `rack-compiler/src/lib.rs` | `pooling_is_exhaustive_so_no_member_is_stranded` | RED | `case=0: id 4 could have filled a free lane in group 0` |
+| P6 | `order_members` loses its id tie-break, so equal-`active_count` members keep pool order | `rack-compiler/src/lib.rs` | `output_is_input_order_invariant` | RED | ``assertion `left == right` failed`` |
+| P7 | duplicate ids are accepted: the `windows(2).any(..)` guard becomes `if false` | `rack-compiler/src/lib.rs` | `duplicate_ids_are_rejected_across_levels` | RED | `assertion failed: plan_invariants_hold(&plan, lanes)` |
+
+## `miso-engine-graph-compiler` — the bound plan and the §4.5 law
+
+| # | mutation | file | test | result | first failure line |
+|---|---|---|---|---|---|
+| G3 | padded groups are bound too: the `if !group.is_full()` guard in `bind_rack_banks` becomes `if false` | `graph-compiler/src/lib.rs` | `add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain` | RED | `full group` (the nine-track session panics binding a lane-short bank) |
+| G5 | the transpose counter stops counting: `saturating_add(1)` becomes `saturating_add(0)` | `rack/src/lib.rs` | `add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain` | RED | ``assertion `left == right` failed: one planar/AoSoA round-trip per chain per block`` |
+
+## Recorded equivalent mutants, with the arithmetic
+
+Neither of these is quietly dropped; both are stated so a later job can re-test them once the
+premise changes.
+
+* **A lane permutation applied to *both* sessions of the cohort-boundary test (G3).** Mutating
+  `scatter_lane` to `chunk[lane ^ 1]` permutes the eight-track bank identically in the eight-track
+  and nine-track sessions, so the *comparison* stays equal. The property "lane `i` of the block is
+  member `i`" is owned by M1 (bit-exact round trip) and P1 (lane order), not by G3, whose subject is
+  the cohort *boundary*. Under master-plan D5 (bank ≡ scalar to the bit) a pure membership change
+  is also unobservable in G3 by construction; that is what makes it a boundary test rather than a
+  membership test.
+* **Moving the transpose counter into the slot loop, observed at the graph level (G5).** Every chain
+  #96 builds has exactly one slot, so per-slot and per-chain counting agree there. M3b makes the
+  same mutation observable at the unit level with a three-slot chain, which is why the row above is
+  RED rather than recorded here. #99's multi-slot chains make it observable at the graph level too.
+
+## Dead code found by a surviving mutant, and removed rather than left untested
+
+Two pieces of the planner survived their mutations because nothing could reach them:
+
+* **The remainder-placement pass** (plan §6 step 4). Its mutation was green because the pass never
+  moves a member: within one cohort every group but the last is full, and a member of a later
+  cohort is by construction *not* a subsequence of an earlier cohort's leader — otherwise the
+  exhaustive pooling in step 2 would already have placed it there. The pass is deleted and replaced
+  by the proof in the crate doc plus `pooling_is_exhaustive_so_no_member_is_stranded` (P5), which
+  gates the argument on a seeded corpus.
+* **The pool canonicalising sort.** Its mutation was green because leader selection is a total
+  `max_by` over unique ids, `order_members` fixes every group's lane order, and `scalar` is sorted
+  on the way out. It is deleted; `output_is_input_order_invariant` (P6) is the gate on that claim,
+  and P6 is red under the mutation that actually reintroduces order dependence.

@@ -126,6 +126,12 @@ fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>]) {
 
 /// The single cohort planner.
 ///
+/// There is deliberately **no** remainder-placement pass. A member stranded in a partial group can
+/// never fit an earlier partial group: within one cohort every group but the last is full, and a
+/// member of a *later* cohort is by construction not a subsequence of an earlier cohort's leader --
+/// otherwise step 2's pooling, which is exhaustive, would already have placed it there.
+/// `pooling_is_exhaustive_so_no_member_is_stranded` gates that argument.
+///
 /// Deterministic: the output depends only on the multiset of `(level, id, program)` and on `width`,
 /// never on input order. Partial groups are padded rather than dropped (#96 F6); a program that is
 /// a subsequence of its cohort leader's joins that cohort with identity slots where it has no
@@ -159,12 +165,15 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
     let mut scalar = Vec::new();
     for (level, candidates) in by_level {
         for rack in [RackLocationV1::Simd1, RackLocationV1::Simd2] {
+            // No canonicalising sort here: leader selection is a total `max_by` over unique ids,
+            // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
+            // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`
+            // is the gate on that claim.
             let mut pool: Vec<&CohortCandidate<Id>> = candidates
                 .iter()
                 .copied()
                 .filter(|candidate| candidate.program.rack == rack)
                 .collect();
-            pool.sort_by(|a, b| a.id.cmp(&b.id));
             pool.retain(|candidate| {
                 if candidate.program.is_bankable() {
                     true
@@ -214,7 +223,6 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
                 pool = rest;
             }
 
-            place_remainders(&mut rack_groups, lanes);
             groups.extend(
                 rack_groups
                     .into_iter()
@@ -226,47 +234,6 @@ pub fn plan_bank_groups<Id: Ord + Clone>(
     let plan = BankPlan { groups, scalar };
     debug_assert!(plan_invariants_hold(&plan, lanes));
     Ok(plan)
-}
-
-/// F5.2 second half: a member stranded in a partial group joins an *earlier* partial group of the
-/// same `(level, rack)` whose leader program it is a subsequence of. Each member moves at most once
-/// and only backwards, so this terminates and is order-deterministic.
-fn place_remainders<Id: Ord + Clone>(groups: &mut Vec<WorkingGroup<Id>>, lanes: usize) {
-    let mut group = 0usize;
-    while group < groups.len() {
-        if groups[group].members.len() < lanes {
-            let mut index = 0usize;
-            while index < groups[group].members.len() {
-                let mut target = None;
-                for earlier in 0..group {
-                    if groups[earlier].members.len() >= lanes {
-                        continue;
-                    }
-                    if let Some(mask) = groups[group].members[index]
-                        .program
-                        .subsequence_mask(&groups[earlier].program)
-                    {
-                        target = Some((earlier, mask));
-                        break;
-                    }
-                }
-                match target {
-                    Some((earlier, mask)) => {
-                        let mut member = groups[group].members.remove(index);
-                        member.mask = mask;
-                        groups[earlier].members.push(member);
-                        order_members(&mut groups[earlier].members);
-                    }
-                    None => index += 1,
-                }
-            }
-            if groups[group].members.is_empty() {
-                groups.remove(group);
-                continue;
-            }
-        }
-        group += 1;
-    }
 }
 
 fn materialize<Id>(
@@ -618,28 +585,35 @@ mod tests {
         assert!(other_rack.subsequence_mask(&leader).is_none());
     }
 
-    /// P4: the longest program leads its cohort and full-program tracks fill banks first.
+    /// P4: the longest program leads its cohort and full-program tracks fill banks first. The
+    /// short programs deliberately carry the *smaller* ids, so a plan that sorted by id alone
+    /// would produce a different lane assignment.
     #[test]
     fn longest_program_leads_and_full_programs_fill_first() {
         let mut candidates = Vec::new();
-        for id in 0..5u32 {
-            candidates.push(candidate(id, &[0, 1, 2]));
-        }
-        for id in 5..9u32 {
+        for id in 0..4u32 {
             candidates.push(candidate(id, &[0, 2]));
+        }
+        for id in 4..9u32 {
+            candidates.push(candidate(id, &[0, 1, 2]));
         }
         let plan = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
         assert_eq!(plan.groups.len(), 3);
-        assert_eq!(plan.groups[0].program.len(), 3);
+        assert_eq!(
+            plan.groups[0].program.len(),
+            3,
+            "the longest program leads the cohort"
+        );
         assert_eq!(
             members(&plan.groups[0]),
-            vec![Some(0), Some(1), Some(2), Some(3)]
+            vec![Some(4), Some(5), Some(6), Some(7)],
+            "full-program tracks fill the first bank even though their ids are larger"
         );
         assert_eq!(
             members(&plan.groups[1]),
-            vec![Some(4), Some(5), Some(6), Some(7)]
+            vec![Some(8), Some(0), Some(1), Some(2)]
         );
-        assert_eq!(members(&plan.groups[2]), vec![Some(8), None, None, None]);
+        assert_eq!(members(&plan.groups[2]), vec![Some(3), None, None, None]);
         assert_eq!(
             plan.groups[1].active_slots[1].as_ref(),
             &[true, false, true],
@@ -653,45 +627,57 @@ mod tests {
         assert_eq!(plan.groups[2].active_count(), 1);
     }
 
-    /// P5: remainder placement only ever moves a member backwards, and only into a group whose
-    /// leader program it is a subsequence of.
+    /// P5: pooling is exhaustive, so no member is ever stranded behind an earlier free lane.
+    ///
+    /// This is what makes a remainder-placement pass unnecessary rather than merely unused: over a
+    /// seeded corpus, no partial group ever precedes a member of the same `(level, rack)` whose
+    /// program is a subsequence of that group's leader.
     #[test]
-    fn remainder_placement_moves_backwards_only_and_once() {
-        // Nothing to move: `[b]` is pooled by the `[a,b]` leader and lands in that cohort's own
-        // partial group; no earlier group has a free lane.
-        let mut candidates: Vec<CohortCandidate<u32>> =
-            (0..5u32).map(|id| candidate(id, &[0, 1])).collect();
-        candidates.push(candidate(5, &[1]));
-        let plan = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
-        assert_eq!(
-            members(&plan.groups[0]),
-            vec![Some(0), Some(1), Some(2), Some(3)]
-        );
-        assert_eq!(members(&plan.groups[1]), vec![Some(4), Some(5), None, None]);
-
-        // A `[b]`-only member of a later cohort's partial group moves back into the first cohort's
-        // free lane; a `[b,c]` member of the same partial group cannot and stays put.
-        let mut candidates: Vec<CohortCandidate<u32>> =
-            (0..3u32).map(|id| candidate(id, &[0, 1])).collect();
-        candidates.extend((3..8u32).map(|id| candidate(id, &[1, 2])));
-        candidates.push(candidate(8, &[1]));
-        let plan = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
-        assert_eq!(plan.groups.len(), 3);
-        assert_eq!(
-            members(&plan.groups[0]),
-            vec![Some(0), Some(1), Some(2), Some(8)],
-            "the one-slot member moved backwards into the free lane"
-        );
-        assert_eq!(
-            plan.groups[0].active_slots[3].as_ref(),
-            &[false, true],
-            "and runs only its own slot there"
-        );
-        assert_eq!(
-            members(&plan.groups[1]),
-            vec![Some(3), Some(4), Some(5), Some(6)]
-        );
-        assert_eq!(members(&plan.groups[2]), vec![Some(7), None, None, None]);
+    fn pooling_is_exhaustive_so_no_member_is_stranded() {
+        let mut state = 0x0517_2600_u64;
+        for case in 0..200u32 {
+            let width = if case.is_multiple_of(2) {
+                BankWidth::Four
+            } else {
+                BankWidth::Eight
+            };
+            let lanes = width.lanes() as usize;
+            let count = 1 + (splitmix(&mut state) % 30) as u32;
+            let mut candidates = Vec::new();
+            for id in 0..count {
+                let length = 1 + (splitmix(&mut state) % 3) as usize;
+                let slots: Vec<usize> = (0..length)
+                    .map(|_| (splitmix(&mut state) % 3) as usize)
+                    .collect();
+                candidates.push(CohortCandidate {
+                    id,
+                    program: RackProgramV1::new(
+                        RackLocationV1::Simd1,
+                        slots.into_iter().map(key).collect(),
+                    ),
+                });
+            }
+            let by_id: BTreeMap<u32, RackProgramV1> = candidates
+                .iter()
+                .map(|candidate| (candidate.id, candidate.program.clone()))
+                .collect();
+            let plan = plan_bank_groups(&one_level(candidates), width).expect("plan");
+            for (index, group) in plan.groups.iter().enumerate() {
+                if group.active_count() == lanes {
+                    continue;
+                }
+                for later in plan.groups.iter().skip(index + 1) {
+                    for member in later.members.iter().flatten() {
+                        assert!(
+                            by_id[member]
+                                .subsequence_mask(&group.program_v1())
+                                .is_none(),
+                            "case={case}: id {member} could have filled a free lane in group {index}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// P6: the plan depends only on the multiset of candidates, never on input order.

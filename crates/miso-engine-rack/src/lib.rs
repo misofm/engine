@@ -621,6 +621,7 @@ mod tests {
             vec![
                 slot(vec![true; 4], Box::new(Counting { slot: 0, calls: 0 })),
                 slot(vec![false; 4], Box::new(Counting { slot: 1, calls: 0 })),
+                slot(vec![true; 4], Box::new(Counting { slot: 0, calls: 0 })),
             ],
         )
         .expect("chain");
@@ -632,8 +633,8 @@ mod tests {
         }
         assert_eq!(
             chain.qualification_counters(),
-            [5, 0],
-            "the live slot ran once per block; the identity-everywhere slot never ran"
+            [10, 0],
+            "both live slots ran once per block; the identity-everywhere slot never ran"
         );
     }
 
