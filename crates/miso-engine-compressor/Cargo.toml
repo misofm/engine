@@ -9,14 +9,21 @@ publish.workspace = true
 name = "miso_engine_compressor"
 
 [dependencies]
-miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
+miso-engine-effect-runtime.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-math.workspace = true
 
 [dev-dependencies]
 # The independent f64 oracle is test-only and never reachable from production code.
 miso-engine-dsp-reference.workspace = true
 # Frozen SplitMix64 fixture generator for the timing example and the eval corpora.
 miso-engine-conformance.workspace = true
+# `KernelBackendV1` is named by the bank-request fixtures; the contract takes it but does not
+# re-export it. Production code in this crate no longer depends on `miso-engine-core` at all.
+miso-engine-core.workspace = true
+# Cross-target digest gate (E4). Never a production dependency.
+sha2.workspace = true
 
 [lints]
 workspace = true

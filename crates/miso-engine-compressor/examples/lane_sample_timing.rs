@@ -13,8 +13,8 @@ use miso_engine_conformance::SplitMix64;
 use miso_engine_core::{KernelBackendV1, TargetCapabilities, target_capabilities};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort, PortId,
+    LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
 };
 
 const FRAMES: usize = 128;
