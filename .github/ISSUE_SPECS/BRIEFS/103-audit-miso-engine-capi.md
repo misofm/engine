@@ -2,9 +2,9 @@
 
 ## Decision
 
-**READY / SOL XHIGH REBRIEF PASS.** Land F2 and F3 as one indivisible checkpoint against accepted
-Issues 113–121. The old plan's 13-symbol and frozen-initial-report assumptions are stale. Preserve
-all 14 symbols and the dynamic active resource report selected through the accepted epoch handoff.
+**TERMINAL PRE-IMPLEMENTATION STOP.** F2/F3 did not start. The old plan's 13-symbol and frozen-
+initial-report assumptions were rebriefed correctly, but the synchronized Miri qualification
+budget was exhausted by two scaffold/preflight failures before any production change.
 
 The first Miri command selected zero tests before E1 existed. It is recorded as one invalid
 zero-test invocation and consumed no implementation attempt. Add only the exact E1 scaffold first,
@@ -48,3 +48,15 @@ fixtures, protocol, core, graph or hosts. No benchmark or timing run.
 Stop on a pinned-Miri environment failure, lost active-report transition, whole-Plan reference,
 unexplained resource-owner delta, or any cap/alignment check that cannot precede slice creation.
 Do not weaken a gate or land a partial F2/F3 checkpoint.
+
+## Terminal verdict
+
+The first named Miri command selected zero tests. The one authorized replacement ran the exact E1
+test but stopped on pointer provenance erased by the scaffold's integer round-trip before reaching
+the intended whole-Plan alias/data-race red. Sol XHigh returned terminal pre-implementation STOP:
+two named Miri invocations, zero valid red/green evidence, zero retries of a valid workload, and
+zero implementation attempts. Production is unchanged and the flawed scaffold is not retained.
+
+Any future owner-approved rescope must first replace the integer round-trip with a provenance-
+preserving opaque test-only `SendPlanPtr` and must explicitly authorize new Miri evidence. This
+brief authorizes neither.

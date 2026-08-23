@@ -7,11 +7,11 @@ must be legal concurrently with the exclusive render owner, and every caller-own
 output region must be rejected before Rust constructs a slice when its length, extent, or alignment
 is invalid.
 
-**REBRIEFED / READY.** The original Issue-103 plan predates accepted Issues 113–121. Sol XHigh
-rebriefed this slice on 2026-08-23 against `main` at `97e1a03`, preserving the accepted two-phase
-replacement, active-epoch resource-report transition, lifecycle, event and ownership contracts.
-The old 13-symbol inventory is superseded by the current 14-symbol ABI, including
-`miso_engine_v2_dequeue_event`. F2 and F3 land together; a partial checkpoint is not accepted.
+**TERMINAL PRE-IMPLEMENTATION STOP.** The original Issue-103 plan predates accepted Issues 113–121.
+Sol XHigh rebriefed this slice on 2026-08-23 against `main` at `97e1a03`, preserving the accepted
+two-phase replacement, active-epoch resource-report transition, lifecycle, event and ownership
+contracts. Two Miri preflight/scaffold failures exhausted the synchronized pre-fix qualification
+budget before production changes began. F2/F3 did not start and have no implementation PASS.
 
 Issue 103 remains open after this checkpoint for F1 and the later wave-4 CAPI/web facade work.
 
@@ -255,3 +255,45 @@ keep it open. F1 facade de-duplication and later findings remain separate waves.
 
 F1 CAPI/web facade consolidation; new ABI symbols or result codes; protocol/core/graph/host changes;
 render algorithm changes; performance claims; benchmark, timing, target-matrix or fixture work.
+
+## Terminal pre-implementation evidence — 2026-08-23
+
+The first named pinned-Miri command selected zero tests (`0 passed; 18 filtered out`) because E1
+had not yet been scaffolded. It exercised no code and was invalid evidence. Sol XHigh authorized
+one bounded briefing correction: add only E1 while retaining the production defect, prove its
+exact name appears once, then run one replacement pre-fix invocation.
+
+The exact-name preflight found one
+`ffi::tests::plan_queries_are_pure_and_concurrent_with_render` test, and pinned Miri reported
+`running 1 test`. The scaffold had converted the live plan pointer through an integer and rebuilt
+it with `with_exposed_provenance`; Miri stopped in `plan_kind` while constructing a no-provenance
+`HandleHeader` reference. It never reached the intended whole-Plan alias/data-race defect. This is
+invalid E1 evidence but consumed the sole replacement pre-fix slot under the synchronized
+unrelated-failure STOP rule. No retry or alternate filter ran.
+
+Terminal counters are:
+
+- `miri_named_invocations_total=2`;
+- `invalid_zero_test_miri_invocations=1`;
+- `exact_named_miri_invocations=1`;
+- `unrelated_scaffold_failure_miri_invocations=1`;
+- `tests_executed_by_unrelated_invocation=1`;
+- `authorized_pre_fix_miri_slots_consumed=1`;
+- `valid_pre_fix_red_invocations=0`;
+- `valid_corrected_green_invocations=0`;
+- `valid_miri_evidence_invocations=0`;
+- `miri_retries_of_valid_workload=0`;
+- `implementation_attempts_started=0`;
+- `failed_implementation_attempts=0`;
+- `preimplementation_qualification_stops=2`;
+- `fresh_miri_invocations_authorized=0`.
+
+Production CAPI code, ABI/header, Issue-022 authority, fixtures and accepted Issue-113–121 behavior
+remain unchanged. The flawed E1 scaffold is not retained. No benchmark, timing, target-matrix or
+fixture command ran.
+
+A future owner-approved rescope must preserve raw-pointer provenance with a test-local opaque
+`SendPlanPtr` around the original `*mut Plan`, an audited test-only `unsafe impl Send`, a method
+that recovers the pointer inside `std::thread::scope`, and a join before destruction. It must use
+no `.addr()`, integer cast or `with_exposed_provenance`. This record does not authorize that edit,
+a fresh Miri run or production implementation. Issue 103 remains open and blocks Issue-125 Step 0.
