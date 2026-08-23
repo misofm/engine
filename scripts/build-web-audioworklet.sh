@@ -24,11 +24,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The browser artifacts are the one place the workspace's `debug = 1` (issue 083 D12) is pure cost.
+# It exists so a native profile or core dump names a kernel; a downloaded AudioWorklet module pays
+# for the DWARF on every page load and cannot use it in production. Measured on this repository:
+# scalar 2,153,061 bytes before D12, 16,661,225 with `debug = 1`, 1,940,863 with the debug
+# information stripped -- fat LTO alone makes the module *smaller* than it was, and the whole of
+# the growth is DWARF.
+#
+# Stripped here, in the delivery script, and deliberately not in `[profile.release]`: the native
+# artifacts keep their line tables. To build a debuggable browser module, override this with
+# `MISO_WEB_STRIP=none`.
+strip_flag="-C strip=${MISO_WEB_STRIP:-debuginfo}"
+
 (
   cd "$repo_root"
-  CARGO_TARGET_DIR="$scalar_target" RUSTFLAGS="-C target-feature=-simd128" \
+  CARGO_TARGET_DIR="$scalar_target" RUSTFLAGS="-C target-feature=-simd128 $strip_flag" \
     cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-host-web
-  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128" \
+  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag" \
     cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-host-web
 )
 
