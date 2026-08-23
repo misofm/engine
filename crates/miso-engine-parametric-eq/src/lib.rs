@@ -43,7 +43,7 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::params::{
-    ParameterSpec, is_negative_zero, parameter_value_valid as domain_valid,
+    ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
 use miso_engine_effect_runtime::state_payload as payload;
 use miso_engine_lane::kernels::{SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped};
@@ -936,7 +936,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 target: {
                     let mut target = configuration[section];
                     for index in 0..4 {
-                        target.set_numeric(index, read(15 + index));
+                        target.set_numeric(index, normalize_zero(read(15 + index)));
                     }
                     target
                 },
@@ -947,7 +947,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 || !band.step.into_iter().all(f32::is_finite)
                 || band.remaining > RAMP_SAMPLES
                 || !(0..4).all(|index| numeric_value_valid(index, numeric[index]))
-                || numeric.into_iter().any(is_negative_zero)
             {
                 return Err(invalid);
             }
@@ -1053,7 +1052,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 *invalid_spans = invalid_spans.saturating_add(1);
                 continue;
             }
-            pending[slot] = Some(span.start_value);
+            // Master plan §6 / 83c decision 3: `-0.0` is a way of writing zero, not an error. It is
+            // normalised here, on the way in, so no coefficient design and no payload ever sees it.
+            pending[slot] = Some(normalize_zero(span.start_value));
             prior_sort_key = Some(sort_key);
         }
         let sample_rate = self.sample_rate();

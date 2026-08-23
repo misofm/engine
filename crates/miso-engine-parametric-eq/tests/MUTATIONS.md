@@ -47,6 +47,7 @@ cargo test --locked -p miso-engine-parametric-eq --test <test binary>
 | 19 | the corpus reads a lane back from the mirrored AoSoA offset | `src/corpus.rs` | `determinism` | RED |
 | 20 | the bypass path renders instead of copying the dry block | `src/lib.rs` | `contract` | RED |
 | 21 | the corpus stops staggering its per-lane ramp ends | `src/corpus.rs` | `determinism` | RED |
+| 22 | a `-0.0` automation value is not normalised to `+0.0` on the way in | `src/lib.rs` | `contract` | RED |
 
 ## Recorded failures
 
@@ -146,3 +147,10 @@ with its stored parameters — a payload that would render something the session
 17 stamps the wrong version into the header, so a version-2 payload rejects itself. 20 renders the
 signal on the bypass path, and `bypass_copies_dry_bits_and_leaves_the_state_alone` fails because
 bypass must preserve the dry bits *and* the latency, not approximate them.
+
+### 22 — `-0.0` is not normalised
+
+`a_negative_zero_automation_value_is_accepted_as_zero` fails on the stored target: the payload
+carries `-0.0` and a later restore has to decide what to do with a value five of the eight effect
+crates used to reject outright. 83c decision 3 settled it — accepted as a way of writing zero,
+normalised on the way in — so nothing downstream of the validator ever sees a negative zero.

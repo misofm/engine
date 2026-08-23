@@ -630,3 +630,40 @@ fn prepare_refuses_an_unknown_family() {
             .is_err()
     );
 }
+
+/// `-0.0` is a way of writing zero, and is normalised on the way in (83c decision 3).
+///
+/// Five of the eight effect crates rejected it outright before wave 2. The lenient rule wins: a
+/// control message that writes zero the other way is not an error, while a `-0.0` reaching a
+/// coefficient design or a payload is a value nothing downstream expects.
+#[test]
+fn a_negative_zero_automation_value_is_accepted_as_zero() {
+    let mut values = bell_values();
+    set_initial(&mut values, 3, ParameterChannel::Left, 6.0);
+    let mut effect = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    let report = process_zeros(
+        effect.as_mut(),
+        0,
+        1,
+        &[point(3, ParameterChannel::Left, 0, -0.0)],
+    );
+    assert_eq!(report.invalid_spans, 0);
+    let (_, left, _) = snapshot(effect.as_ref());
+    assert_eq!(band_word(&left, 0, 16), 0.0_f32.to_bits(), "target is +0.0");
+    assert_eq!(band_word(&left, 0, 14), 64 - 1, "a ramp started");
+
+    // And a payload that carries `-0.0` restores as `+0.0` rather than being rejected.
+    let (common, mut stored, right) = snapshot(effect.as_ref());
+    stored[16 * 4..16 * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
+    effect
+        .restore_state_payload(
+            2,
+            StatePayloadInput::new(&common, &stored, &right, effect.metadata().state_sizes)
+                .expect("input"),
+        )
+        .expect("a negative zero parameter is a legal payload");
+    let (_, left, _) = snapshot(effect.as_ref());
+    assert_eq!(band_word(&left, 0, 16), 0.0_f32.to_bits());
+}
