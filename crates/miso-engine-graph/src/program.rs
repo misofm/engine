@@ -881,6 +881,294 @@ mod tests {
         );
     }
 
+    /// A symbolic value: what a buffer holds, as an expression over node outputs.
+    ///
+    /// `Sum` keeps its operand order, so a reduction whose inputs were reordered is a different
+    /// value, not an equal one.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum Expr {
+        Silence,
+        Node(NodeIndex, Box<Expr>),
+        Delayed(Box<Expr>, u64),
+        Sum(Vec<Expr>),
+    }
+
+    /// Evaluate the *semantic* graph the naive way: every node consumes the ordered, individually
+    /// delayed outputs of its incoming main edges. An identity stage boundary is transparent,
+    /// because that is exactly what the executor's `RuntimeNodeKind::Identity` does with a
+    /// single-input pairwise sum (`balanced_pairwise_sum` of one element returns it unchanged).
+    fn evaluate_spec(
+        spec: &GraphSpec,
+        schedule: &[GraphNodeId],
+        delays: &[InsertedDelay],
+    ) -> Vec<Expr> {
+        let mut value = vec![Expr::Silence; spec.nodes.len()];
+        for id in schedule {
+            let index = node_index(spec, id).expect("node") as usize;
+            let mut operands = Vec::new();
+            for edge in &spec.edges {
+                if &edge.destination.node != id || edge.destination.kind != GraphPortKind::MainInput
+                {
+                    continue;
+                }
+                let source = node_index(spec, &edge.source.node).expect("node") as usize;
+                let samples = delays
+                    .iter()
+                    .find(|delay| delay.edge_id == edge.id)
+                    .map(|delay| delay.samples.0)
+                    .filter(|samples| *samples != 0);
+                operands.push(match samples {
+                    Some(samples) => Expr::Delayed(Box::new(value[source].clone()), samples),
+                    None => value[source].clone(),
+                });
+            }
+            let combined = match operands.len() {
+                0 => Expr::Silence,
+                1 => operands.remove(0),
+                _ => Expr::Sum(operands),
+            };
+            // An identity stage boundary carries its input unchanged whether or not lowering
+            // elides it: elision removes the schedule item, never a transformation. Modelling it
+            // as transparent on both sides is what makes the delayed case (which keeps its op)
+            // comparable to the undelayed case (which becomes an alias).
+            value[index] = if is_alias_candidate(id) {
+                combined
+            } else {
+                Expr::Node(u32::try_from(index).expect("index"), Box::new(combined))
+            };
+        }
+        value
+    }
+
+    /// Interpret the *program* over an arena of symbolic buffers and compare, node by node.
+    ///
+    /// This is the check that colouring is sound: if an op were given storage another op still
+    /// needs, the later read returns the wrong expression and the comparison fails. It is also the
+    /// check that in-place folding and aliasing preserve dataflow.
+    fn assert_program_matches_spec(
+        spec: &GraphSpec,
+        schedule: &[GraphNodeId],
+        delays: &[InsertedDelay],
+        program: &ExecutionProgram,
+    ) {
+        let expected = evaluate_spec(spec, schedule, delays);
+        let mut arena = vec![Expr::Silence; program.buffers as usize];
+        let mut taps_by_op: std::collections::BTreeMap<OpIndex, Vec<&Tap>> =
+            std::collections::BTreeMap::new();
+        for tap in &program.taps {
+            taps_by_op.entry(tap.after_op).or_default().push(tap);
+        }
+        for (op_index, op) in program.ops.iter().enumerate() {
+            let mut operands = Vec::new();
+            for input in program.inputs_of(op) {
+                let value = arena[input.buffer.0 as usize].clone();
+                operands.push(match input.delay {
+                    Some(delay) => {
+                        Expr::Delayed(Box::new(value), program.delays[delay.line as usize].samples)
+                    }
+                    None => value,
+                });
+            }
+            let combined = match operands.len() {
+                0 => Expr::Silence,
+                1 => operands.remove(0),
+                _ => Expr::Sum(operands),
+            };
+            if op.in_place {
+                // The single input already lives in `output`; nothing is copied.
+                assert_eq!(
+                    op.output,
+                    program.inputs_of(op)[0].buffer,
+                    "an in-place op must write its own input buffer"
+                );
+            }
+            // Same rule as the reference side: an identity stage boundary that kept its op
+            // (because its input is delayed) still transforms nothing.
+            let id = &spec.nodes[op.node as usize].id;
+            arena[op.output.0 as usize] = if is_alias_candidate(id) {
+                combined
+            } else {
+                Expr::Node(op.node, Box::new(combined))
+            };
+            assert_eq!(
+                arena[op.output.0 as usize], expected[op.node as usize],
+                "op {op_index} produced the wrong value"
+            );
+            // Every alias attached here must already read the value its node has semantically.
+            for tap in taps_by_op.get(&(op_index as OpIndex)).into_iter().flatten() {
+                assert_eq!(
+                    arena[tap.buffer.0 as usize], expected[tap.node as usize],
+                    "alias for node {} observes the wrong value",
+                    tap.node
+                );
+            }
+        }
+        let output_node = spec
+            .nodes
+            .iter()
+            .position(|node| matches!(node.id, GraphNodeId::Output { .. }))
+            .expect("output");
+        assert_eq!(arena[program.output.0 as usize], expected[output_node]);
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// #99 F2, the load-bearing eval: over 300 seeded multi-track graphs with effects, fan-out,
+    /// fan-in and PDC, the lowered program computes exactly the value the semantic graph does,
+    /// and its arena is bounded by the graph's live width rather than its edge count.
+    ///
+    /// The comparison is symbolic, so it does not depend on either executor existing yet, and the
+    /// reference side never looks at the program: it walks `spec`/`schedule`/`delays` naively,
+    /// node by node, exactly as the pre-#99 render loop did.
+    #[test]
+    fn lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs() {
+        let mut state = 0x5deb_c0de_1234_9e37_u64;
+        for graph in 0..300_u32 {
+            let track_count = (xorshift(&mut state) % 4) as usize + 1;
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+            let mut route_index = 0usize;
+            for track in 0..track_count {
+                let name = format!("t{track:02}");
+                let routes: Vec<String> = (0..(xorshift(&mut state) % 2) + 1)
+                    .map(|_| {
+                        route_index += 1;
+                        format!("r{route_index:02}")
+                    })
+                    .collect();
+                let borrowed: Vec<&str> = routes.iter().map(String::as_str).collect();
+                let (track_nodes, track_edges) = plain_track(&name, &borrowed);
+                // Splice an effect into one rack, sometimes bank-eligible and sometimes not.
+                let rack = match xorshift(&mut state) % 3 {
+                    0 => None,
+                    1 => Some((RackId::Dynamic, TrackStage::PostDynamic)),
+                    _ => Some((RackId::Simd1, TrackStage::PostSimd1)),
+                };
+                let mut track_nodes = track_nodes;
+                let mut track_edges = track_edges;
+                if let Some((rack, stage)) = rack {
+                    let upstream = match stage {
+                        TrackStage::PostSimd1 => TrackStage::PostInputBuiltins,
+                        _ => TrackStage::PostSimd1,
+                    };
+                    let effect = GraphNodeId::Effect(crate::EffectNodeId {
+                        track_id: gid(&name),
+                        rack,
+                        effect_id: gid("fx"),
+                    });
+                    track_nodes.push(node(effect.clone()));
+                    track_edges.retain(|edge| {
+                        edge.id
+                            != GraphEdgeId::TrackMain {
+                                target: stage_node(&name, stage),
+                            }
+                    });
+                    track_edges.push(main_edge(
+                        GraphEdgeId::TrackMain {
+                            target: effect.clone(),
+                        },
+                        stage_node(&name, upstream),
+                        effect.clone(),
+                    ));
+                    track_edges.push(main_edge(
+                        GraphEdgeId::TrackMain {
+                            target: stage_node(&name, stage),
+                        },
+                        effect,
+                        stage_node(&name, stage),
+                    ));
+                }
+                nodes.extend(track_nodes.into_iter().filter(|candidate| {
+                    !matches!(candidate.id, GraphNodeId::Output { .. }) || track == 0
+                }));
+                edges.extend(track_edges);
+            }
+            let (spec, schedule, levels) = build(nodes, edges);
+            // PDC on a random subset of edges.
+            let mut delays: Vec<InsertedDelay> = Vec::new();
+            for edge in &spec.edges {
+                if !xorshift(&mut state).is_multiple_of(4) {
+                    continue;
+                }
+                delays.push(InsertedDelay {
+                    node: edge.destination.node.clone(),
+                    edge_id: edge.id.clone(),
+                    samples: LatencySamples(xorshift(&mut state) % 128 + 1),
+                });
+            }
+            let program = lower(&spec, &schedule, &levels, &delays)
+                .unwrap_or_else(|error| panic!("graph {graph}: {error:?}"));
+
+            assert_program_matches_spec(&spec, &schedule, &delays, &program);
+
+            // Structure: every node is either an op or an alias, never both and never neither.
+            assert_eq!(
+                program.ops.len() + program.taps.len(),
+                spec.nodes.len(),
+                "graph {graph}: nodes are neither op nor alias"
+            );
+            for (index, op) in program.node_op.iter().enumerate() {
+                let tapped = program.taps.iter().any(|tap| tap.node as usize == index);
+                assert_eq!(op.is_none(), tapped, "graph {graph}: node {index}");
+            }
+            // Ops stay level-major, and within a level in ascending node id.
+            assert!(
+                program
+                    .ops
+                    .windows(2)
+                    .all(|pair| (pair[0].level, pair[0].node) < (pair[1].level, pair[1].node)),
+                "graph {graph}: ops are not level-major"
+            );
+            // Once a bank-eligible node has written its buffer, nothing else may write it.
+            //
+            // A homogeneous bank gathers every member's output, runs, and scatters them back, so
+            // all member outputs are live from the first gather to the last scatter -- across
+            // every op scheduled between them. Colouring must therefore never hand that storage
+            // to a later op, and no later op may consume it in place. Inheriting storage a *dead*
+            // buffer used earlier is fine and is what keeps the arena small; the invariant is
+            // forward-only. The symbolic interpreter above cannot see this: it evaluates one op at
+            // a time, and a bank is not one op, so it is checked structurally here.
+            let mut open: std::collections::BTreeMap<BufferRef, usize> =
+                std::collections::BTreeMap::new();
+            for (at, op) in program.ops.iter().enumerate() {
+                if let Some(since) = open.get(&op.output) {
+                    panic!(
+                        "graph {graph}: op {at} writes buffer {:?}, held by a bank-eligible node \
+                         since op {since}",
+                        op.output
+                    );
+                }
+                for input in program.inputs_of(op) {
+                    if let Some(delay) = input.delay {
+                        assert!(
+                            !open.contains_key(&delay.staging),
+                            "graph {graph}: op {at} stages PDC into open bank storage"
+                        );
+                    }
+                }
+                if is_dedicated(&spec.nodes[op.node as usize].id) {
+                    open.insert(op.output, at);
+                }
+            }
+
+            // Arena bound: at most one buffer per op, and strictly fewer than the pre-#99 model,
+            // which allocated one contribution buffer per edge on top of a coloured output each.
+            assert!(
+                program.buffers as usize <= program.ops.len(),
+                "graph {graph}: arena is larger than the op count"
+            );
+            assert!(
+                (program.buffers as usize) < spec.edges.len() + spec.nodes.len(),
+                "graph {graph}: arena is no smaller than the per-edge model it replaces"
+            );
+        }
+    }
+
     /// The three rejections a caller maps to `graph.internal.invariant`.
     #[test]
     fn malformed_inputs_are_rejected_rather_than_lowered() {

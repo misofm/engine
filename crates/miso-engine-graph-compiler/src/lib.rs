@@ -2856,6 +2856,126 @@ mod tests {
         }
     }
 
+    /// Deterministic xorshift64: the same 500 graphs on every host, every run.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// #99 F1 (the property behind the wave-0 fix, gated here rather than assumed).
+    ///
+    /// `NativeGraphBlueprint::prepare` rejects any dependency level whose nodes are not strictly
+    /// ascending, and it runs for *both* native render modes -- so an unsorted level makes a valid
+    /// multi-submix session unbindable on the native launch path. The `direct-route` fixture
+    /// cannot see this: it is a chain with exactly one node per level. This test builds graphs
+    /// where node-ID order and topological order are deliberately unrelated, and checks the four
+    /// properties the executors actually rely on:
+    ///
+    /// 1. every level is strictly ascending by node id (the native layout contract);
+    /// 2. `level(n) == 1 + max level(predecessors)` -- the longest-path definition, recomputed in
+    ///    this test from the edge list alone, never from `topo`'s own bookkeeping;
+    /// 3. the sequential schedule is the concatenation of the levels, is a permutation of the
+    ///    nodes, and puts every edge's source before its destination;
+    /// 4. the result does not depend on edge order.
+    #[test]
+    fn random_dags_have_strictly_ascending_levels_and_level_major_schedule() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for graph in 0..500_u32 {
+            let count = (xorshift(&mut state) % 64) as usize + 1;
+            // A random topological rank per node, so a node's id says nothing about its depth.
+            let mut rank: Vec<usize> = (0..count).collect();
+            for index in (1..count).rev() {
+                let swap = (xorshift(&mut state) % (index as u64 + 1)) as usize;
+                rank.swap(index, swap);
+            }
+            let name = |index: usize| format!("n{index:02}");
+            let nodes: Vec<GraphNode> = (0..count)
+                .map(|index| graph_node(&name(index), 0, TailSamples::Finite(0)))
+                .collect();
+            let mut edges = Vec::new();
+            for source in 0..count {
+                let fanout = xorshift(&mut state) % 4;
+                for _ in 0..fanout {
+                    let destination = (xorshift(&mut state) % count as u64) as usize;
+                    if rank[source] >= rank[destination] {
+                        continue;
+                    }
+                    let id = format!("e{}-{}", name(source), name(destination));
+                    if edges.iter().any(|existing: &GraphEdge| {
+                        existing.id == GraphEdgeId::RouteDestination { route_id: gid(&id) }
+                    }) {
+                        continue;
+                    }
+                    edges.push(edge(&id, &name(source), &name(destination)));
+                }
+            }
+            let mut nodes = nodes;
+            nodes.sort_by(|a, b| a.id.cmp(&b.id));
+            edges.sort_by(|a, b| a.id.cmp(&b.id));
+
+            let levels = topo(&nodes, &edges).expect("acyclic by construction");
+            let schedule: Vec<GraphNodeId> = levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect();
+
+            // 1. strictly ascending within every level, and contiguous level numbering.
+            for (index, level) in levels.iter().enumerate() {
+                assert_eq!(level.level, index as u64, "graph {graph}: level numbering");
+                assert!(!level.nodes.is_empty(), "graph {graph}: empty level");
+                assert!(
+                    level.nodes.windows(2).all(|pair| pair[0] < pair[1]),
+                    "graph {graph}: level {index} is not strictly ascending"
+                );
+            }
+
+            // 2. longest-path levels, recomputed here from the edges alone.
+            let mut expected: BTreeMap<GraphNodeId, u64> =
+                nodes.iter().map(|node| (node.id.clone(), 0)).collect();
+            for _ in 0..count {
+                for edge in &edges {
+                    let source = expected[&edge.source.node];
+                    let destination = expected.get_mut(&edge.destination.node).expect("node");
+                    *destination = (*destination).max(source + 1);
+                }
+            }
+            for level in &levels {
+                for id in &level.nodes {
+                    assert_eq!(expected[id], level.level, "graph {graph}: level of {id:?}");
+                }
+            }
+
+            // 3. the schedule is the levels, is a permutation, and is topological.
+            let mut sorted = schedule.clone();
+            sorted.sort();
+            let mut all: Vec<GraphNodeId> = nodes.iter().map(|node| node.id.clone()).collect();
+            all.sort();
+            assert_eq!(sorted, all, "graph {graph}: schedule is not a permutation");
+            let position: BTreeMap<&GraphNodeId, usize> = schedule
+                .iter()
+                .enumerate()
+                .map(|(at, id)| (id, at))
+                .collect();
+            for edge in &edges {
+                assert!(
+                    position[&edge.source.node] < position[&edge.destination.node],
+                    "graph {graph}: edge runs backwards in the schedule"
+                );
+            }
+
+            // 4. edge order is not an input.
+            let mut reversed = edges.clone();
+            reversed.reverse();
+            assert_eq!(
+                topo(&nodes, &reversed).expect("acyclic"),
+                levels,
+                "graph {graph}: level assignment depends on edge order"
+            );
+        }
+    }
+
     fn caps(maximum_finite_tail_samples: u64) -> GraphCompileCaps {
         GraphCompileCaps {
             maximum_nodes: 100,
