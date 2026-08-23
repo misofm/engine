@@ -7,10 +7,11 @@ caller gives the invocation exclusive ownership of the output directory while th
 Within that boundary, complete portable held-handle/no-replace publication, prove the Linux,
 Windows and Apple compile seams, and run one fresh functional runner seal.
 
-**STATELESS SOL XHIGH BRIEF / READY.** Sol High implements; Sol XHigh briefs and adversarially
-verifies. One implementation pass plus one bounded HOLD correction is the complete budget; a second
-HOLD stops. Benchmark, timing, real workload, playback and listening counts start at and remain
-zero.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** Sol High implemented and sealed the bounded
+contract; Sol XHigh supplied the brief, one adversarial HOLD and final verification. The sole
+bounded correction closed the known-unowned cleanup evidence defect. The one fresh functional seal
+then passed without retry or edit. Benchmark, timing, real workload, playback and listening counts
+are all zero.
 
 Read-only inspection on 2026-08-23 found remote Issue 116 unallocated. Root must create and
 synchronize it under this exact title after the docs checkpoint is upstream. This record performs
@@ -137,3 +138,64 @@ contract; Linux/Windows/Apple compile rows pass; Sol XHigh verifies the sole fre
 and all prohibited counters remain zero. PASS unblocks Issue 114 together with accepted Issue 113.
 It does not rehabilitate Issue 115 or claim safety against concurrent same-privilege directory
 mutation.
+
+## Terminal implementation and review evidence
+
+The exact implementation checkpoint is commit
+`45f8f5af8bdd578b5ccb27fdb787f7a663c39818`, tree
+`7e0a7b7d48362c9b9eaa15b1cfce7180c935c5b5`. Its tracked delta is exactly the runner library,
+contract document, portability checker and portability mutation suite. The final authorities are:
+
+- runner library `a1395b95f9cab07ec516fd0da2583d7cb3e0083613ed86120cd51b93f4ed805a`;
+- contract document `ac80fc2112d3a060a0061eeb3e3db8f4c97aa1bfe475f38f98e49b830a09efc6`;
+- portability checker `596f99c66e2a5398bbcf534cfd850b8e5786f55ccbfef6376f7b9111d25a2f42`;
+  and
+- portability mutations `1e436ad55eabe45425a9bf0563065b05ca426d216dd680dc850a74b3c08cb3ad`.
+
+Frozen authorities remained byte-exact: runner manifest
+`bd5cd87f0c2bcd0ae5e7faf5532b1869b39e72f296dee81b2f135345e728a8e1`, runner CLI
+`89b2acb0f56c6e249bbbd7bcb965c7c0545fa3c6078772b5026362ec6b888dd0`, fixture manifest
+`8d251ad6b1eca8c95e24b8b4e2959e397d8ec954502307351f1c7fb3c01a9634`, installed C header
+`e7ba468361e0255cb465828c5dd317f1e5293213662c7bf9a5225cb2afaba4e7`, and `Cargo.lock`
+`c89b195f0d31ad21852d0a931023c70e1eb4a0caa534bfd6e1692c1e1178fd52`.
+
+Sol XHigh's focused HOLD found that the fake removed `WrongPublished` and that its policy mutation
+was a marker rather than executable cleanup broadening. The sole correction made fake cleanup
+remove only `Owned`, froze wrong identity as exact `publish/path.replaced` with the partial absent
+and known-unowned final preserved, pinned production final cleanup to the retained identity, and
+made the mutation change that live guard to `if true`. The checker rejects the real broadening.
+Sol XHigh returned strict focused PASS and authorized the one fresh seal.
+
+## Sole fresh full functional seal
+
+Sol High ran the ordered nonbenchmark seal once on the immutable commit/tree above, with no retry,
+edit or alternate invocation. Pre/post branch, HEAD, tree, index, tracked diff and worktree checks
+were identical and clean. The seal passed:
+
+- `cargo fmt --all -- --check`;
+- locked runner all-target tests: 18 library tests passed, zero binary tests, zero failed, ignored or
+  measured;
+- independent fixture generator `--check` and an exact manifest oracle with five output rows, each
+  8,192 bytes and one lowercase 64-hex digest;
+- C ABI header/symbol validation, locked runner all-target check, warning-denied all-target Clippy
+  and warning-denied all-feature no-dependency rustdoc;
+- Issue-116 portability and original runner checkers plus both mutation suites;
+- workspace and realtime policies plus their mutations, syntax for every tracked shell script, and
+  frozen-product/diff/conflict/artifact/final-identity scans; and
+- compile-only runner-library checks for `x86_64-unknown-linux-gnu`,
+  `x86_64-pc-windows-gnu` and `aarch64-apple-darwin`.
+
+The real C ABI fixture row verified these exact output digests:
+
+- `rf64-48000`: `43fa3c4ed46228d1ee13050b118f379f82a021e85f5dfff6f72593912e298ad0`;
+- `riff-44100`: `49663d8451e470a7a05511e68388ebff7b4d844db42d38e9632473f897a0b91d`;
+- `riff-48000`: `1e856978bbd412daebd2ac9dd81f554e4c3512244ce36b7437bb65cc5f43c99e`;
+- `riff-88200`: `bc8aa669d31090d7cc9a0abf740e6c63cf719db47cf5dc071fc724e19dfe6fff`;
+  and
+- `riff-96000`: `5645de29f441710a3a7b67f2e4a24e93086c9baa34426d8963e3f278ceb9d516`.
+
+Benchmark, timing, real-workload, playback and listening invocation counts are exactly zero. This
+is the required functional seal, not performance or listening evidence. Issue 116 is **COMPLETE**
+with **SOL XHIGH PASS** and **READY TO CLOSE**. It unblocks Issue 114 together with accepted Issue
+113. Upstream evidence synchronization and remote closure remain root work after this docs-only
+checkpoint; they are not claimed here.

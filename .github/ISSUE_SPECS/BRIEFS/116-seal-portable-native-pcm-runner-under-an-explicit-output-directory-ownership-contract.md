@@ -2,11 +2,12 @@
 
 ## Decision
 
-**READY.** Consume stopped Issue 115's held-handle publication checkpoint under one explicit and
-honest precondition: the caller exclusively owns the output directory for the complete invocation.
-Do not claim identity-conditional unlink safety against a concurrent same-privilege directory
-mutator. Sol High implements; Sol XHigh briefs/verifies. One pass plus one bounded HOLD correction;
-second HOLD stops. Benchmark/timing/real-workload/playback/listening counts remain zero.
+**COMPLETE / SOL XHIGH PASS / READY TO CLOSE.** Stopped Issue 115's held-handle checkpoint was
+completed under one explicit and honest precondition: the caller exclusively owns the output
+directory for the complete invocation. The result makes no identity-conditional unlink claim
+against a concurrent same-privilege directory mutator. Sol High implemented; Sol XHigh briefed,
+issued one bounded HOLD and verified its exact correction. The sole fresh functional seal passed
+without retry or edit. Benchmark/timing/real-workload/playback/listening counts are zero.
 
 Accepted dependencies are **Stable C ABI and host-fed planar PCM render** (022) and **Close native-
 source seek submission qualification and seal backpressure fix** (112). Stopped **Close portable
@@ -56,3 +57,27 @@ Clippy/rustdoc/fmt, policies/mutations/static scans and exact Linux/Windows/Appl
 rows. Sol High stops. Strict Sol XHigh focused PASS permits one clean checkpoint and one fresh full
 functional runner seal. First failure stops; no retry, benchmark, timing or real workload. Only the
 clean seal can yield overall PASS and unblock Issue 114.
+
+## Final verdict and immutable evidence
+
+Implementation commit/tree: `45f8f5af8bdd578b5ccb27fdb787f7a663c39818` /
+`7e0a7b7d48362c9b9eaa15b1cfce7180c935c5b5`. Final hashes are runner library
+`a1395b95f9cab07ec516fd0da2583d7cb3e0083613ed86120cd51b93f4ed805a`, contract
+`ac80fc2112d3a060a0061eeb3e3db8f4c97aa1bfe475f38f98e49b830a09efc6`, checker
+`596f99c66e2a5398bbcf534cfd850b8e5786f55ccbfef6376f7b9111d25a2f42`, and mutations
+`1e436ad55eabe45425a9bf0563065b05ca426d216dd680dc850a74b3c08cb3ad`.
+
+The focused HOLD corrected known-unowned fake cleanup and replaced a marker mutation with an actual
+production final-guard broadening that the checker rejects. Sol XHigh then returned strict focused
+PASS. The sole fresh full functional nonbenchmark seal ran once on the clean immutable candidate:
+18/18 library tests passed with zero binary/fail/ignored/measured; all five 8,192-byte fixture
+digests matched the frozen manifest; generator, C ABI, locked check, strict Clippy/rustdoc,
+portability/original policies and mutations, workspace/realtime policies and mutations, shell,
+static/frozen/clean scans, and exact Linux/Windows/Apple library compile rows all passed.
+
+Runner manifest `bd5cd87...a8e1`, CLI `89b2acb0...8dd0`, fixture manifest
+`8d251ad6...9634`, C header `e7ba4683...4e7`, and lock `c89b195f...fd52` remained frozen. All
+benchmark/timing/real-workload/playback/listening counters are zero. Issue 116 has overall **SOL
+XHIGH PASS**, is **COMPLETE / READY TO CLOSE**, and unblocks Issue 114 with accepted Issue 113. No
+further runner or seal invocation is authorized. Root retains upstream evidence synchronization and
+remote closure.
