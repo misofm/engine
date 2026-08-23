@@ -18,6 +18,13 @@ fail() {
 
 lane_source='^crates/miso-engine-lane/src/'
 lane_tests='^crates/miso-engine-lane/tests/'
+# `crates/miso-engine-dsp-reference` is the workspace's oracle/twin crate: it is a dev dependency
+# only, never links into an engine, host or artifact, and its whole job is to reproduce a frozen
+# operation order -- including its single roundings -- independently of the lane crate. It is
+# exempt here for the same structural reason `scripts/check-math-policy.sh` exempts it: matching
+# the platform is the point, not a leak of it. The exemption is the crate, not a wildcard: a
+# render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
+oracle_crate='^crates/miso-engine-dsp-reference/'
 lane_softfma='^crates/miso-engine-lane/src/softfma\.rs:'
 # Temporary exemptions. `crates/miso-engine-core/src/arch/` holds the hand-written per-target
 # kernels this crate replaces, and `crates/miso-engine-core/src/lib.rs` holds their runtime
@@ -29,7 +36,7 @@ legacy_detect='^crates/miso-engine-core/src/lib\.rs:'                           
 fusion_matches="$({
     rg -n 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' \
         crates hosts tools --glob '*.rs' || true
-} | rg -v "$lane_source|$lane_tests|$legacy_arch" || true)"
+} | rg -v "$lane_source|$lane_tests|$oracle_crate|$legacy_arch" || true)"
 [[ -z "$fusion_matches" ]] || {
     printf '%s\n' "$fusion_matches" >&2
     fail "fused multiply-add and the SIMD vocabulary belong to crates/miso-engine-lane (D3, D4)"

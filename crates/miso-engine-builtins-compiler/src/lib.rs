@@ -2535,11 +2535,13 @@ mod tests {
                 )),
                 3,
             ),
+            // D4: AVX2 without FMA has no bank width at all -- one arithmetic graph everywhere
+            // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
             (
                 KernelDispatch::select(TargetCapabilities::from_detected(
                     false, false, true, false,
                 )),
-                1,
+                0,
             ),
         ] {
             let groups = planned_builtin_bank_members(&inputs, dispatch, &levels);

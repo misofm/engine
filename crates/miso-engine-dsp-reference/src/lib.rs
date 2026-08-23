@@ -11,6 +11,7 @@ mod gate_expander;
 mod lr4;
 mod parametric_eq;
 mod processor;
+mod ramp;
 mod signals;
 mod soft_clip;
 mod spectrum;
@@ -37,6 +38,7 @@ pub use parametric_eq::{
     ReferenceParametricEqSection,
 };
 pub use processor::{IdentityProcessor, OfflineF64Processor, render_planar_f64};
+pub use ramp::ReferenceLinearRamp;
 pub use signals::{
     ReferenceSignalError, deterministic_bipolar_noise, deterministic_impulse, deterministic_sine,
 };
@@ -49,7 +51,7 @@ pub use svf::{
     ReferenceSvfStateSpace, shelf_slope_to_q,
 };
 pub use tpt::{
-    ReferenceRetainedTptF32, ReferenceTptOutput, ReferenceTptRetainedAction,
+    FLUSH_EPS, ReferenceRetainedTptF32, ReferenceTptOutput, ReferenceTptRetainedAction,
     ReferenceTptRetainedStep, ReferenceTptStateSpace,
 };
 pub use transient_shaper::{

@@ -43,7 +43,7 @@ pub fn all_lanes<L: Lane>() -> L::Mask {
 pub fn lanes_below<L: Lane>(count: usize) -> L::Mask {
     debug_assert!(count <= L::WIDTH);
     let mut flags = [0.0_f32; 64];
-    for flag in flags.iter_mut().take(count.min(L::WIDTH)) {
+    for flag in flags.iter_mut().take(count) {
         *flag = 1.0;
     }
     L::load(&flags[..L::WIDTH]).gt(L::zero())

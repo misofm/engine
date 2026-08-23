@@ -13,48 +13,58 @@ pub enum ReferenceTptOutput {
 
 /// The retained-state boundary action taken by the twin `f32` recurrence.
 ///
-/// Finite subnormal retained words are canonicalized to positive zero. Nonfinite retained words
-/// reset the complete two-word state and are the only action reported as recovery.
+/// Master plan #83 D7 replaced the per-sample classification with one mechanism: each recursive
+/// state word is flushed once per sample inside the kernel, and nothing else looks at it. There is
+/// no per-sample recovery any more -- non-finite output is caught once per block, by the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceTptRetainedAction {
-    /// Every retained state word was finite normal or zero.
+    /// Both retained words were at or above [`FLUSH_EPS`] in magnitude, or non-finite.
     FiniteNormal,
-    /// At least one finite subnormal retained word became positive zero.
-    SubnormalCanonicalization,
-    /// A nonfinite retained word reset the complete two-word state.
-    InvalidRecovery,
+    /// At least one retained word was below [`FLUSH_EPS`] and became positive zero.
+    Flushed,
 }
+
+/// Magnitude below which a retained word is flushed to `+0.0`.
+///
+/// The same constant as `miso_engine_lane::FLUSH_EPS`, written out here because this twin is
+/// deliberately independent of the lane crate.
+pub const FLUSH_EPS: f32 = 1.0e-20;
 
 /// One conditioned TPT recurrence step evaluated by the twin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReferenceTptRetainedStep {
-    /// Retained state bits before the step's state boundary.
+    /// Retained state bits before the step.
     pub pre_state_bits: [u32; 2],
-    /// Retained state bits after the step's state boundary.
+    /// Retained state bits after the step's in-kernel flush.
     pub next_state_bits: [u32; 2],
-    /// Selected and output-sanitized sample bits.
+    /// Output sample bits, straight out of the `(m0, m1, m2)` mix.
     pub output_bits: u32,
-    /// The state-boundary classification for this step.
+    /// Whether either retained word was flushed on this step.
     pub action: ReferenceTptRetainedAction,
-    /// Number of invalid-state recovery report increments for this step.
-    pub recovery_delta: u64,
-    /// Whether the selected raw output was nonfinite/subnormal and became positive zero.
-    pub output_sanitized: bool,
 }
 
-/// Bit-identity twin of the `miso_engine_core` scalar `process_tpt_scalar` graph (issue 007).
+/// Hand-written `f32` twin of the master-plan §4.2 `svf_block` recurrence (issues 007 and 085).
 ///
-/// It is **not** an independent oracle: the coefficient calculation and the frozen ascending
-/// multiply/add graph are the production ones, transcribed word for word. It exists so fixture
-/// bits can be regenerated from a scalar twin (master plan §8.3), and it commits only finite
-/// normal or canonical positive-zero state. The independent oracle for this topology is
-/// [`ReferenceSvfStateSpace`](crate::ReferenceSvfStateSpace).
+/// It is **not** an independent oracle for the *response*: the coefficient design and the frozen
+/// operation order are the production ones, transcribed from the equations rather than from the
+/// production source, and it never calls `miso-engine-lane`. What it proves is that the shared
+/// block kernel, at any width, computes the recurrence the master plan writes down -- including
+/// its three single roundings and its D7 flush. The independent oracle for the response is
+/// [`ReferenceSvfStateSpace`](crate::ReferenceSvfStateSpace), and for the time domain it is
+/// [`ReferenceBiquad`](crate::ReferenceBiquad).
+///
+/// Storage is the A1 form: `c1 = t / (1 + t)` with `t = g * (g + k)`, and the output selection is
+/// the `(m0, m1, m2)` mix -- high-pass `(1, -k, -1)`, low-pass `(0, 0, 1)` -- so there is no
+/// per-sample branch on the filter kind.
 #[derive(Clone, Copy, Debug)]
 pub struct ReferenceRetainedTptF32 {
     c1: f32,
     a2: f32,
     a3: f32,
     k: f32,
+    m0: f32,
+    m1: f32,
+    m2: f32,
     s1: f32,
     s2: f32,
     output: ReferenceTptOutput,
@@ -86,11 +96,18 @@ impl ReferenceRetainedTptF32 {
         {
             return None;
         }
+        let (m0, m1, m2) = match output {
+            ReferenceTptOutput::HighPass => (1.0, -k, -1.0),
+            ReferenceTptOutput::LowPass => (0.0, 0.0, 1.0),
+        };
         Some(Self {
             c1,
             a2,
             a3,
             k,
+            m0,
+            m1,
+            m2,
             s1: 0.0,
             s2: 0.0,
             output,
@@ -108,6 +125,32 @@ impl ReferenceRetainedTptF32 {
         ]
     }
 
+    /// Returns the seven stored words `[c1, a2, a3, k, m0, m1, m2]`.
+    #[must_use]
+    pub const fn section_words(self) -> [u32; 7] {
+        [
+            self.c1.to_bits(),
+            self.a2.to_bits(),
+            self.a3.to_bits(),
+            self.k.to_bits(),
+            self.m0.to_bits(),
+            self.m1.to_bits(),
+            self.m2.to_bits(),
+        ]
+    }
+
+    /// The output selection this section was designed for.
+    #[must_use]
+    pub const fn output(self) -> ReferenceTptOutput {
+        self.output
+    }
+
+    /// Overwrites the two retained words.
+    pub fn set_state_bits(&mut self, bits: [u32; 2]) {
+        self.s1 = f32::from_bits(bits[0]);
+        self.s2 = f32::from_bits(bits[1]);
+    }
+
     /// Returns the current two retained state words.
     #[must_use]
     pub const fn state_bits(self) -> [u32; 2] {
@@ -120,91 +163,59 @@ impl ReferenceRetainedTptF32 {
         self.s2 = 0.0;
     }
 
-    /// Applies one frozen non-fused recurrence step.
+    /// Applies one frozen recurrence step (master plan §4.2, operation order verbatim).
+    ///
+    /// ```text
+    /// v3 = v0 - ic2
+    /// d1 = fma(-c1, ic1, a2 * v3)
+    /// v1 = ic1 + d1
+    /// d2 = fma(a3, v3, a2 * ic1)
+    /// v2 = ic2 + d2
+    /// ic1 = flush(ic1 + (d1 + d1))
+    /// ic2 = flush(ic2 + (d2 + d2))
+    /// y  = fma(m2, v2, fma(m1, v1, m0 * v0))
+    /// ```
+    ///
+    /// `-c1` is a sign-bit flip, `d + d` is exact, and each `fma` rounds once -- `f32::mul_add` is
+    /// the hardware instruction where one exists and the correctly rounded `fmaf` where it does
+    /// not, which is the same single rounding either way.
     pub fn process(&mut self, input: f32) -> ReferenceTptRetainedStep {
         let pre_state_bits = self.state_bits();
-        let mut action = self.canonicalize_pre_state();
-        let mut recovery_delta = u64::from(action == ReferenceTptRetainedAction::InvalidRecovery);
 
-        let v3 = input - self.s2;
-        let p1 = self.a2 * v3;
-        let p2 = self.c1 * self.s1;
-        let d1 = p1 - p2;
+        let v0 = input;
+        let v3 = v0 - self.s2;
+        let d1 = (-self.c1).mul_add(self.s1, self.a2 * v3);
         let v1 = self.s1 + d1;
-        let p3 = self.a2 * self.s1;
-        let p4 = self.a3 * v3;
-        let d2 = p3 + p4;
+        let d2 = self.a3.mul_add(v3, self.a2 * self.s1);
         let v2 = self.s2 + d2;
-        let q1 = d1 + d1;
-        let n1 = self.s1 + q1;
-        let q2 = d2 + d2;
-        let n2 = self.s2 + q2;
-        let low = v2;
-        let kh = self.k * v1;
-        let th = input - kh;
-        let high = th - v2;
+        let n1 = self.s1 + (d1 + d1);
+        let n2 = self.s2 + (d2 + d2);
+        let flushed = below_flush_epsilon(n1) | below_flush_epsilon(n2);
+        self.s1 = flush(n1);
+        self.s2 = flush(n2);
+        let y = self.m2.mul_add(v2, self.m1.mul_add(v1, self.m0 * v0));
 
-        if !n1.is_finite() || !n2.is_finite() {
-            self.reset();
-            action = ReferenceTptRetainedAction::InvalidRecovery;
-            recovery_delta = recovery_delta.saturating_add(1);
-            return ReferenceTptRetainedStep {
-                pre_state_bits,
-                next_state_bits: self.state_bits(),
-                output_bits: 0.0_f32.to_bits(),
-                action,
-                recovery_delta,
-                output_sanitized: false,
-            };
-        }
-        let post_action = canonicalize_retained_word(&mut self.s1, n1)
-            | canonicalize_retained_word(&mut self.s2, n2);
-        if post_action && action == ReferenceTptRetainedAction::FiniteNormal {
-            action = ReferenceTptRetainedAction::SubnormalCanonicalization;
-        }
-        let output = match self.output {
-            ReferenceTptOutput::LowPass => low,
-            ReferenceTptOutput::HighPass => high,
-        };
-        let output_sanitized = !output.is_finite() || output.is_subnormal();
         ReferenceTptRetainedStep {
             pre_state_bits,
             next_state_bits: self.state_bits(),
-            output_bits: canonical_output(output).to_bits(),
-            action,
-            recovery_delta,
-            output_sanitized,
-        }
-    }
-
-    fn canonicalize_pre_state(&mut self) -> ReferenceTptRetainedAction {
-        if !self.s1.is_finite() || !self.s2.is_finite() {
-            self.reset();
-            return ReferenceTptRetainedAction::InvalidRecovery;
-        }
-        let s1 = self.s1;
-        let s2 = self.s2;
-        if canonicalize_retained_word(&mut self.s1, s1)
-            | canonicalize_retained_word(&mut self.s2, s2)
-        {
-            ReferenceTptRetainedAction::SubnormalCanonicalization
-        } else {
-            ReferenceTptRetainedAction::FiniteNormal
+            output_bits: y.to_bits(),
+            action: if flushed {
+                ReferenceTptRetainedAction::Flushed
+            } else {
+                ReferenceTptRetainedAction::FiniteNormal
+            },
         }
     }
 }
 
-fn canonicalize_retained_word(target: &mut f32, value: f32) -> bool {
-    *target = if value.is_subnormal() { 0.0 } else { value };
-    value.is_subnormal()
+/// Whether `value` is inside the flush band; `-0.0` is (its magnitude is zero).
+fn below_flush_epsilon(value: f32) -> bool {
+    value.abs() < FLUSH_EPS
 }
 
-fn canonical_output(value: f32) -> f32 {
-    if value.is_finite() && !value.is_subnormal() {
-        value
-    } else {
-        0.0
-    }
+/// `flush(x)`: exactly `+0.0` inside the band, unchanged outside it, NaN untouched.
+fn flush(value: f32) -> f32 {
+    if below_flush_epsilon(value) { 0.0 } else { value }
 }
 
 /// Transfer of the conditioned `(c1, a2, a3, k)` TPT words.
