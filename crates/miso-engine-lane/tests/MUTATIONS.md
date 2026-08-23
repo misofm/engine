@@ -30,6 +30,9 @@ cargo test --locked -p miso-engine-lane --test <test binary>
 | 10 | `svf_block` drops the `s.ic1 = ic1` state write-back | `src/kernels.rs` | `p1_partition` | RED |
 | 11 | `svf_step` returns its taps swapped: `(v2, v1)` instead of `(v1, v2)` | `src/kernels.rs` | `g2_kernel_identity` | RED |
 | 12 | `svf_step` swaps `a2` and `a3` in `d2`: `fma(a2, v3, a3 * ic1)` | `src/kernels.rs` | `g2_kernel_identity` | RED |
+| 13 | `history_push` writes only the low copy, dropping the mirror at `row + 32` | `src/kernels/halfband.rs` | `halfband` | RED |
+| 14 | two even taps are swapped (`h[14]` and `h[16]`), breaking the half-band symmetry | `src/kernels/halfband.rs` | `halfband` | RED |
+| 15 | `HALFBAND63_CENTER_SPLIT` moves from 15 to 16, putting the centre tap one position late | `src/kernels/halfband.rs` | `halfband` | RED |
 
 ## Recorded failures
 
@@ -172,3 +175,17 @@ thread 'g2_svf_step_yields_both_taps_of_one_state' panicked at
   crates/miso-engine-lane/tests/g2_kernel_identity.rs:220:17:
 assertion `left == right` failed: svf_step low-pass tap at width 1, lane 0, frame 0
 ```
+
+### 13-15 — the polyphase half-band module (issue #91)
+
+Added with `src/kernels/halfband.rs`. Row 13 (`history_push` writes one copy instead of two)
+fails `the_double_written_history_addresses_every_age_at_every_position` at age 17 of position 15,
+which is exactly the wrap the mirrored row exists to make contiguous. Row 14 fails
+`the_even_tap_table_is_the_symmetric_half_band` with `tap 6 breaks the half-band symmetry
+h[2k] = h[62-2k]`. Row 15 fails the same test on `HALFBAND63_CENTER_SPLIT`, which is the position
+of the centre tap in the frozen ascending accumulation order; moving it is the mutation that would
+silently reassociate the decimator sum.
+
+The bit-identity of these kernels against the 63-tap graph they replace is *not* proved here: that
+graph lives in `miso-engine-soft-clip`, and the proof is its `tests/polyphase_identity.rs`
+(recorded in that crate's `tests/MUTATIONS.md`).

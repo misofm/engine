@@ -22,6 +22,8 @@
 //! contract: reassociating one of them changes the rendered bits, so a change here is a change to
 //! every pinned fixture in the workspace and needs the fixture re-pin procedure of master plan §8.
 
+pub mod halfband;
+
 use crate::{Lane, flush};
 
 /// Coefficients of one TPT state-variable filter, one set per lane.
