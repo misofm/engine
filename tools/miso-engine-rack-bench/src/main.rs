@@ -497,17 +497,27 @@ impl MixedRuntime {
             Ok(value) => value,
             Err(_) => panic!("mixed production graph"),
         };
+        // #86 F3: twelve post-input nodes at W8 are `12.div_ceil(8) == 2` banks -- one full and
+        // one padded to eight with four identity lanes -- and no scalar post-input tail.
         assert_eq!(
             artifact.prepared_builtin_bank_count(),
-            1,
-            "host-selected full production builtin bank"
+            2,
+            "host-selected production builtin banks, last one padded"
         );
         let builtin_banks: Vec<_> = artifact.prepared_builtin_banks().collect();
-        assert_eq!(builtin_banks.len(), 1);
-        assert_eq!(builtin_banks[0].backend, backend);
-        assert_eq!(builtin_banks[0].width.lanes(), 8);
-        assert_eq!(builtin_banks[0].members.len(), 8);
-        assert!(builtin_banks[0].active_mask.iter().all(|active| *active));
+        assert_eq!(builtin_banks.len(), 2);
+        assert!(
+            builtin_banks
+                .iter()
+                .all(|bank| bank.backend == backend && bank.width.lanes() == 8)
+        );
+        assert_eq!(
+            builtin_banks
+                .iter()
+                .map(|bank| bank.members.len())
+                .collect::<Vec<_>>(),
+            vec![8, 4]
+        );
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch.backend(), backend);
         assert_eq!(cohorts.simd1.banks.len(), 1, "one full track cohort");

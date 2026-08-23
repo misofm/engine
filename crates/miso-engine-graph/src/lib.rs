@@ -187,7 +187,8 @@ pub struct GraphResourceEstimate {
     pub builtin_bank_bytes: u64,
     /// Exact AoSoA scratch payload retained by post-input builtin banks.
     pub builtin_bank_scratch_bytes: u64,
-    /// Number of full retained post-input builtin banks.
+    /// Number of retained post-input builtin banks.  The last bank of a dependency level may
+    /// be padded with identity lanes, so a bank holds `1..=width.lanes()` members.
     pub builtin_bank_count: u64,
     pub largest_allocation_bytes: u64,
     pub incremental_plan_bytes: u64,
@@ -424,20 +425,26 @@ pub struct GraphPreparedEffectBank {
 }
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
+///
+/// Lane `l` is active if and only if `l < members.len()`; lanes `members.len()..width.lanes()`
+/// are identity lanes carried by the bank kernel itself.  Membership is the mask, so no mask is
+/// stored here: `members.len()` is in `1..=width.lanes()` and the executor gathers into and
+/// scatters from exactly those lanes.
 pub struct GraphPreparedBuiltinBank {
     pub backend: KernelBackendV1,
     pub members: Box<[GraphNodeId]>,
-    pub active_mask: Box<[bool]>,
     pub processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
     pub scratch: miso_engine_rack::AoSoaScratch,
 }
 
 /// Address-free prepared builtin-bank metadata available before render binding.
+///
+/// Lane `l` is active if and only if `l < members.len()`; lanes `members.len()..width.lanes()`
+/// are identity lanes.
 pub struct GraphPreparedBuiltinBankInfo<'a> {
     pub backend: KernelBackendV1,
     pub width: miso_engine_effect_contract::BankWidth,
     pub members: &'a [GraphNodeId],
-    pub active_mask: &'a [bool],
 }
 /// Render contract for an already-prepared builtin bank.
 pub trait GraphPreparedBuiltinBankProcessor: Send {
@@ -448,7 +455,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError>;
-    /// Cumulative `[process_calls, architecture_tpt_kernel_calls]` after render is disarmed.
+    /// Cumulative `[process_calls, frames_processed]` after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
     }
@@ -568,7 +575,6 @@ impl PreparedGraphPlan {
                 backend: bank.backend,
                 width: bank.scratch.width(),
                 members: &bank.members,
-                active_mask: &bank.active_mask,
             })
     }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
@@ -591,8 +597,8 @@ impl PreparedGraphPlan {
             })
             .collect();
         for bank in &banks {
-            if bank.members.len() != bank.scratch.width().lanes() as usize
-                || bank.active_mask.len() != bank.members.len()
+            if bank.members.is_empty()
+                || bank.members.len() > bank.scratch.width().lanes() as usize
                 || !bank.scratch.width().matches_backend(bank.backend)
                 || bank.members.iter().any(|node| {
                     !matches!(
@@ -1695,6 +1701,9 @@ impl GraphExecutor {
         bank_index: usize,
         first_sample: u64,
     ) -> Result<(), RenderError> {
+        // Lanes `lanes..width` are the bank's identity padding lanes: they are never gathered
+        // into and never scattered from, their scratch stays at the zero it was allocated with,
+        // and the bank excludes them from its counters and boundary check.
         let lanes = self.builtin_banks[bank_index].members.len();
         for lane in 0..lanes {
             let node_index = self.builtin_banks[bank_index].members[lane];
@@ -3377,6 +3386,66 @@ mod tests {
         )
     }
 
+    /// A padded bank is the normal shape: the last bank of a level holds `1..=W` members and the
+    /// rest of its lanes are identity lanes the executor never touches.  Empty and oversized
+    /// member lists stay rejected.
+    #[test]
+    fn with_builtin_banks_accepts_padded_members_and_rejects_empty_or_oversized() {
+        let attach = |member_count: usize| {
+            let (plan, _, _) = four_track_builtin_plan(970 + member_count as u64, false, true);
+            let members: Vec<_> = plan
+                .required_bindings
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node,
+                        GraphNodeId::TrackStage {
+                            stage: TrackStage::PostInputBuiltins,
+                            ..
+                        }
+                    )
+                })
+                .cloned()
+                .collect();
+            assert_eq!(members.len(), 4);
+            let members: Vec<_> = (0..member_count)
+                .map(|index| {
+                    members
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(GraphNodeId::TrackStage {
+                            track_id: StableGraphId::parse(&format!("extra{index}")).expect("id"),
+                            stage: TrackStage::PostInputBuiltins,
+                        })
+                })
+                .collect();
+            plan.with_builtin_banks(
+                vec![GraphPreparedBuiltinBank {
+                    backend: KernelBackendV1::Aarch64Neon,
+                    members: members.into_boxed_slice(),
+                    processor: Box::<CountingIdentityBuiltin>::default(),
+                    scratch: miso_engine_rack::AoSoaScratch::new_main_only(BankWidth::Four, 1)
+                        .expect("W4 scratch"),
+                }],
+                GraphBuiltinBankResourceEstimate {
+                    bank_count: 1,
+                    ..GraphBuiltinBankResourceEstimate::default()
+                },
+            )
+            .map(|_| ())
+        };
+        for member_count in 1..=4 {
+            assert!(
+                attach(member_count).is_ok(),
+                "{member_count} of four lanes must attach"
+            );
+        }
+        assert_eq!(attach(0), Err(GraphBuiltinBankAttachError::InvalidMembers));
+        // Five distinct members over a four-lane scratch: rejected by the width clause, not by
+        // the duplicate-member clause.
+        assert_eq!(attach(5), Err(GraphBuiltinBankAttachError::InvalidMembers));
+    }
+
     fn four_track_builtin_plan(
         plan_id: u64,
         banked: bool,
@@ -3465,7 +3534,6 @@ mod tests {
             vec![GraphPreparedBuiltinBank {
                 backend: KernelBackendV1::Aarch64Neon,
                 members: members.clone().into_boxed_slice(),
-                active_mask: vec![true; 4].into_boxed_slice(),
                 processor: Box::<CountingIdentityBuiltin>::default(),
                 scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1)
                     .expect("W4 scratch"),

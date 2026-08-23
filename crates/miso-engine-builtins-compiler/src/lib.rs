@@ -95,9 +95,7 @@ pub struct PreparedBuiltinsSession {
 /// It owns the real TPT adapter and is only materialized by the builtin/graph preparation seam.
 pub struct PreparedBuiltinInputBankV1 {
     backend: miso_engine_core::KernelBackendV1,
-    width: miso_engine_effect_contract::BankWidth,
     members: Box<[GraphNodeId]>,
-    active: Box<[bool]>,
     processor: BuiltinBankProcessor,
     scratch: AoSoaScratch,
 }
@@ -105,7 +103,7 @@ pub struct PreparedBuiltinInputBankV1 {
 struct BuiltinBankProcessor {
     bank: BuiltinInputBankV1,
     process_calls: u64,
-    tpt_kernel_calls: u64,
+    frames_processed: u64,
 }
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
@@ -119,38 +117,33 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         let _ = first_sample;
         self.bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
-        self.tpt_kernel_calls = self
-            .tpt_kernel_calls
-            .saturating_add(u64::from(frames).saturating_mul(4));
+        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
         Ok(())
     }
 
     fn qualification_counters(&self) -> [u64; 2] {
-        [self.process_calls, self.tpt_kernel_calls]
+        [self.process_calls, self.frames_processed]
     }
 }
 
 impl PreparedBuiltinInputBankV1 {
-    fn into_graph_bank(self) -> (GraphPreparedBuiltinBank, GraphBuiltinBankResourceEstimate) {
-        let resource = builtin_bank_resource(
-            core::slice::from_ref(&self.members),
-            self.width,
-            self.scratch.quantum(),
-        )
-        .expect("preflighted builtin-bank resource");
-        (
-            GraphPreparedBuiltinBank {
-                backend: self.backend,
-                members: self.members,
-                active_mask: self.active,
-                processor: Box::new(self.processor),
-                scratch: self.scratch,
-            },
-            resource,
-        )
+    /// The whole-layout resource was already computed once, before the graph was touched; this
+    /// only moves ownership, so there is nothing left to recompute here.
+    fn into_graph_bank(self) -> GraphPreparedBuiltinBank {
+        GraphPreparedBuiltinBank {
+            backend: self.backend,
+            members: self.members,
+            processor: Box::new(self.processor),
+            scratch: self.scratch,
+        }
     }
 }
 
+/// Groups every post-input builtin node of a dependency level into `ceil(n / W)` banks.
+///
+/// The last bank of a level is short: it holds `1..=W` members and the bank pads the remaining
+/// lanes with identity lanes.  Every post-input node on a vector host is therefore a bank member,
+/// and scalar post-input bindings survive only when the backend has no bank width at all.
 fn planned_builtin_bank_members(
     inputs: &[(Box<str>, InputBuiltins)],
     dispatch: KernelDispatch,
@@ -183,12 +176,24 @@ fn planned_builtin_bank_members(
     for members in by_level.values_mut() {
         members.sort();
         for group in members.chunks(width.lanes() as usize) {
-            if group.len() == width.lanes() as usize {
-                groups.push(group.to_vec().into_boxed_slice());
-            }
+            groups.push(group.to_vec().into_boxed_slice());
         }
     }
     groups
+}
+
+/// Builds one padded bank from `inputs.len()` tracks in member order.
+///
+/// Lanes `inputs.len()..width.lanes()` become the bank's identity lanes: the builtins crate owns
+/// that contract (`BuiltinInputBankV1::new` accepts `1..=W` inputs and pads the rest), and this
+/// is the single call site, so the compiler never builds a mask of its own.
+fn build_input_bank(
+    dispatch: KernelDispatch,
+    width: miso_engine_effect_contract::BankWidth,
+    inputs: Vec<InputBuiltins>,
+) -> BuiltinInputBankV1 {
+    BuiltinInputBankV1::new(dispatch.backend(), width, inputs)
+        .expect("planner emits 1..=W members at the width the selected backend chose")
 }
 
 fn builtin_bank_resource(
@@ -200,35 +205,38 @@ fn builtin_bank_resource(
     let lanes = u64::from(width.lanes());
     if groups
         .iter()
-        .any(|members| u64::try_from(members.len()).ok() != Some(lanes))
+        .any(|members| members.is_empty() || members.len() as u64 > lanes)
     {
         return None;
     }
-    let member_array_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>())
-        .ok()?
-        .checked_mul(lanes)?;
+    let node_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>()).ok()?;
     let processor_bytes = u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).ok()?;
-    let active_bytes = lanes;
+    // Two planes: a fixed-stage bank has no sidechain surface (`AoSoaScratch::new_main_only`).
     let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
     let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
-    let scratch_samples_per_bank = scratch_plane_samples.checked_mul(4)?;
+    let scratch_samples_per_bank = scratch_plane_samples.checked_mul(2)?;
     let scratch_bytes_per_bank = scratch_samples_per_bank.checked_mul(4)?;
     let mut member_string_bytes = 0_u64;
     let mut largest_member_string = 0_u64;
-    for member in groups.iter().flat_map(|members| members.iter()) {
-        let GraphNodeId::TrackStage { track_id, .. } = member else {
-            return None;
-        };
-        let bytes = u64::try_from(track_id.as_str().len()).ok()?;
-        member_string_bytes = member_string_bytes.checked_add(bytes)?;
-        largest_member_string = largest_member_string.max(bytes);
+    let mut payload_bytes = 0_u64;
+    let mut largest_member_array = 0_u64;
+    for members in groups {
+        // A padded bank owns exactly the ids it holds, not a full-width array.
+        let member_array_bytes = node_bytes.checked_mul(u64::try_from(members.len()).ok()?)?;
+        largest_member_array = largest_member_array.max(member_array_bytes);
+        payload_bytes = payload_bytes
+            .checked_add(member_array_bytes)?
+            .checked_add(processor_bytes)?;
+        for member in members.iter() {
+            let GraphNodeId::TrackStage { track_id, .. } = member else {
+                return None;
+            };
+            let bytes = u64::try_from(track_id.as_str().len()).ok()?;
+            member_string_bytes = member_string_bytes.checked_add(bytes)?;
+            largest_member_string = largest_member_string.max(bytes);
+        }
     }
-    let fixed_payload_per_bank = member_array_bytes
-        .checked_add(processor_bytes)?
-        .checked_add(active_bytes)?;
-    let payload_bytes = fixed_payload_per_bank
-        .checked_mul(bank_count)?
-        .checked_add(member_string_bytes)?;
+    let payload_bytes = payload_bytes.checked_add(member_string_bytes)?;
     let scratch_samples = scratch_samples_per_bank.checked_mul(bank_count)?;
     let scratch_bytes = scratch_bytes_per_bank.checked_mul(bank_count)?;
     let metadata_bytes = u64::try_from(core::mem::size_of::<GraphPreparedBuiltinBank>())
@@ -240,9 +248,8 @@ fn builtin_bank_resource(
         scratch_bytes,
         scratch_samples,
         metadata_bytes,
-        largest_allocation_bytes: member_array_bytes
+        largest_allocation_bytes: largest_member_array
             .max(processor_bytes)
-            .max(active_bytes)
             .max(largest_member_string)
             .max(scratch_plane_bytes)
             .max(metadata_bytes),
@@ -856,8 +863,15 @@ impl PreparedBuiltinsSession {
         builtin_bank_resource(&groups, width, self.seal.quantum)
     }
 
-    /// Materialize full post-input builtin banks using the already-selected host dispatch.
-    /// Incomplete groups deliberately retain their original scalar bindings.
+    /// Materialize post-input builtin banks using the already-selected host dispatch.
+    ///
+    /// Every post-input node in a level with a vector backend is banked; the last bank of a
+    /// level is padded with identity lanes.  Scalar `InputProcessor` bindings remain only when
+    /// `dispatch.bank_width()` is `None`.
+    ///
+    /// Lowering is infallible after `graph_builtin_bank_resource`: `with_builtin_banks` consumes
+    /// the plan on error, so the read-only preflight is what makes the attach transactional and
+    /// the `expect`s here are this crate's own planner invariants.
     pub fn into_graph_artifact_with_banks<R>(
         mut self,
         graph: PreparedGraphPlan,
@@ -879,7 +893,6 @@ impl PreparedBuiltinsSession {
         let mut selected = BTreeSet::new();
         let mut banks = Vec::with_capacity(groups.len());
         for members in groups {
-            let active = vec![true; members.len()].into_boxed_slice();
             let inputs = members
                 .iter()
                 .map(|member| {
@@ -888,33 +901,29 @@ impl PreparedBuiltinsSession {
                     };
                     bank_inputs
                         .remove(track_id.as_str())
-                        .expect("prepared builtin member ownership")
+                        .expect("planner members are owned prepared builtin tracks")
                 })
                 .collect();
-            let bank = BuiltinInputBankV1::new(dispatch.backend(), width, inputs)
-                .expect("selected backend and exact bank width are preparation-validated");
+            let bank = build_input_bank(dispatch, width, inputs);
             selected.extend(members.iter().cloned());
             banks.push(PreparedBuiltinInputBankV1 {
                 backend: dispatch.backend(),
-                width,
                 members,
-                active,
                 processor: BuiltinBankProcessor {
                     bank,
                     process_calls: 0,
-                    tpt_kernel_calls: 0,
+                    frames_processed: 0,
                 },
-                scratch: AoSoaScratch::new(width, self.seal.quantum)
+                scratch: AoSoaScratch::new_main_only(width, self.seal.quantum)
                     .expect("prepared nonzero graph quantum"),
             });
         }
         self.processors
             .retain(|binding| !selected.contains(&binding.node));
-        let mut graph_banks = Vec::with_capacity(banks.len());
-        for bank in banks {
-            let (bank, _per_bank_resource) = bank.into_graph_bank();
-            graph_banks.push(bank);
-        }
+        let graph_banks: Vec<_> = banks
+            .into_iter()
+            .map(PreparedBuiltinInputBankV1::into_graph_bank)
+            .collect();
         let graph = graph
             .with_builtin_banks(graph_banks, resource)
             .expect("validated fixed builtin member shape");
@@ -2528,12 +2537,25 @@ mod tests {
                 nodes: (10..17).map(node).collect(),
             },
         ];
-        for (dispatch, expected_groups) in [
+        // The 1 / 9 / 7 layout, banked per level with the last bank of each level padded:
+        // W4 -> 1 | 4 4 1 | 4 3 and W8 -> 1 | 8 1 | 7.  Hand counts of `n.div_ceil(W)` banks per
+        // level; every post-input node is a member, so no level contributes a scalar tail.
+        for (dispatch, expected_sizes) in [
             (
                 KernelDispatch::select(TargetCapabilities::from_detected(
                     true, false, false, false,
                 )),
-                3,
+                &[1, 4, 4, 1, 4, 3][..],
+            ),
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(
+                    false, true, false, false,
+                )),
+                &[1, 4, 4, 1, 4, 3][..],
+            ),
+            (
+                KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, true)),
+                &[1, 8, 1, 7][..],
             ),
             // D4: AVX2 without FMA has no bank width at all -- one arithmetic graph everywhere
             // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
@@ -2541,11 +2563,18 @@ mod tests {
                 KernelDispatch::select(TargetCapabilities::from_detected(
                     false, false, true, false,
                 )),
-                0,
+                &[][..],
             ),
         ] {
             let groups = planned_builtin_bank_members(&inputs, dispatch, &levels);
-            assert_eq!(groups.len(), expected_groups);
+            let sizes: Vec<_> = groups.iter().map(|members| members.len()).collect();
+            assert_eq!(sizes, expected_sizes, "{:?}", dispatch.backend());
+            assert_eq!(
+                sizes.iter().sum::<usize>(),
+                if expected_sizes.is_empty() { 0 } else { 17 },
+                "every post-input node is banked once"
+            );
+            let mut group_levels = Vec::new();
             assert!(groups.iter().all(|members| {
                 let member_levels: BTreeSet<_> = members
                     .iter()
@@ -2557,14 +2586,117 @@ mod tests {
                             .level
                     })
                     .collect();
+                group_levels.extend(member_levels.iter().copied());
                 member_levels.len() == 1 && members.windows(2).all(|pair| pair[0] < pair[1])
             }));
+            assert!(
+                group_levels.windows(2).all(|pair| pair[0] <= pair[1]),
+                "banks are emitted in dependency-level order"
+            );
         }
         let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
             false, false, false, false,
         ));
         assert!(planned_builtin_bank_members(&inputs, scalar, &levels).is_empty());
     }
+    /// F4/F11: a bank is charged for the two main planes it actually owns and for the member ids
+    /// it actually holds -- a padded bank is not charged a full-width id array, and no bank is
+    /// charged the two sidechain planes a fixed stage can never reach.
+    #[test]
+    fn builtin_bank_resource_charges_two_planes_and_actual_members() {
+        let node = |index: usize| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(&format!("bank{index}")).expect("id"),
+            stage: TrackStage::PostInputBuiltins,
+        };
+        let quantum = 64_u32;
+        for (width, sizes) in [
+            (miso_engine_effect_contract::BankWidth::Four, &[4, 3][..]),
+            (miso_engine_effect_contract::BankWidth::Eight, &[8, 1][..]),
+            (miso_engine_effect_contract::BankWidth::Eight, &[5][..]),
+        ] {
+            let mut next = 0_usize;
+            let groups: Vec<Box<[GraphNodeId]>> = sizes
+                .iter()
+                .map(|size| {
+                    (0..*size)
+                        .map(|_| {
+                            next += 1;
+                            node(next - 1)
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect();
+            let resource = builtin_bank_resource(&groups, width, quantum)
+                .expect("padded layout is chargeable");
+
+            // Hand formula, written from `size_of` rather than from the function under test.
+            let lanes = u64::from(width.lanes());
+            let banks = sizes.len() as u64;
+            let node_bytes = core::mem::size_of::<GraphNodeId>() as u64;
+            let processor_bytes = core::mem::size_of::<BuiltinBankProcessor>() as u64;
+            let plane_bytes = u64::from(quantum) * lanes * 4;
+            let string_lengths: Vec<u64> = groups
+                .iter()
+                .flat_map(|members| members.iter())
+                .map(|member| match member {
+                    GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().len() as u64,
+                    _ => unreachable!("member kind"),
+                })
+                .collect();
+            let strings: u64 = string_lengths.iter().sum();
+            let largest_string = string_lengths.iter().copied().max().expect("a member");
+            assert_eq!(resource.bank_count, banks);
+            assert_eq!(
+                resource.scratch_samples,
+                banks * u64::from(quantum) * lanes * 2
+            );
+            assert_eq!(resource.scratch_bytes, banks * plane_bytes * 2);
+            assert_eq!(
+                resource.payload_bytes,
+                sizes
+                    .iter()
+                    .map(|size| node_bytes * *size as u64 + processor_bytes)
+                    .sum::<u64>()
+                    + strings
+            );
+            assert_eq!(
+                resource.metadata_bytes,
+                banks * core::mem::size_of::<GraphPreparedBuiltinBank>() as u64
+            );
+            assert_eq!(
+                resource.largest_allocation_bytes,
+                [
+                    node_bytes * *sizes.iter().max().expect("a bank") as u64,
+                    processor_bytes,
+                    largest_string,
+                    plane_bytes,
+                    banks * core::mem::size_of::<GraphPreparedBuiltinBank>() as u64,
+                ]
+                .into_iter()
+                .max()
+                .expect("a term")
+            );
+        }
+        // Only an empty or oversized group is unchargeable now.
+        assert!(
+            builtin_bank_resource(
+                &[Vec::new().into_boxed_slice()],
+                miso_engine_effect_contract::BankWidth::Four,
+                64
+            )
+            .is_none()
+        );
+        assert!(
+            builtin_bank_resource(
+                &[(0..5).map(node).collect::<Vec<_>>().into_boxed_slice()],
+                miso_engine_effect_contract::BankWidth::Four,
+                64
+            )
+            .is_none()
+        );
+    }
+
     fn handle(value: u64) -> MeterHandle {
         MeterHandle(NonZeroU64::new(value).expect("nonzero test meter handle"))
     }

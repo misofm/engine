@@ -71,7 +71,16 @@ fn main() {
     assert_eq!(initial.report.sha256, replacement.report.sha256);
     assert!(initial.pdc_samples > 0);
     assert!(initial.prepared_builtin_bank_count > 0);
-    assert!(initial.scalar_builtin_tail_count > 0);
+    // #86 F3: every post-input node is a bank member on a vector host; the last bank of the
+    // level is padded with identity lanes, so the audit exercises a padded bank and no scalar
+    // post-input tail survives.
+    assert_eq!(initial.scalar_builtin_tail_count, 0);
+    assert!(
+        initial.prepared_builtin_bank_lanes > 0
+            && initial.prepared_builtin_bank_member_count % initial.prepared_builtin_bank_lanes
+                != 0,
+        "the audited layout must contain a padded bank"
+    );
     assert_eq!(initial.metadata.selection, SchedulerSelectionV1::Parallel);
     assert_eq!(initial.metadata.resources.scheduler.selected_lanes, 4);
     assert_eq!(initial.metadata.resources.scheduler.worker_count, 3);
