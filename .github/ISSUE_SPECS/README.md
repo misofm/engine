@@ -35,13 +35,16 @@ owns only benchmark-wrapper operational hardening and promotion of those exact b
 dependency of issues 007–010 and does not authorize another issue-006 benchmark run.
 
 Open audit Issue 099 identified one bounded native-binding correctness defect: dependency-level
-members retain Kahn ready-pop order even though the accepted native binder requires strict node-ID
-order. Issue 122, **Emit sorted graph dependency levels for valid native binding**, owns only the
-deterministic level-member reconstruction, reverse-route-ID parallel-submix regression and exact
-native single-thread/dependency-wave proof. It preserves the sequential schedule and defers open
-Issue 098's executor/buffer-coloring correction. Issue 122 follows accepted Issues 006 and 039,
-uses Sol High/Sol XHigh with one pass plus one HOLD, prohibits benchmark/timing/workload execution
-and gates Issue 026.
+members retained Kahn ready-pop order even though the accepted native binder requires strict
+node-ID order. Accepted Issue 122, **Emit sorted graph dependency levels for valid native
+binding**, owns only the deterministic level-member reconstruction, reverse-route-ID
+parallel-submix regression and exact native single-thread/dependency-wave proof. Open audit Issue
+098 F1 separately proves that the preserved Kahn sequential schedule can trigger a retained bank
+before later members' inputs exist. Issue 123, **Emit a level-major sequential graph schedule for
+bank correctness**, owns only the exact flattened-level schedule, matching buffer recoloring,
+transactional scalar/native bind guards and bank-audio/hash proof. It follows accepted Issues 006,
+039 and 122, defers Issue-098 F2–F13, uses Sol High/Sol XHigh with one pass plus one HOLD, and gates
+Issue 026 without benchmark or timing.
 
 Issue 032 corrects the repository-wide launch sample-rate policy after issue 007 accepted its
 launch filter recurrence: 44,100/48,000/88,200/96,000 Hz are the exact launch session/render set;

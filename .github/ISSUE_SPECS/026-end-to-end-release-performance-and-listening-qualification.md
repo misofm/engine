@@ -38,6 +38,7 @@ Relaxing gates for schedule, declaring third-party Wasm shipped, delivery encodi
 - Transport-neutral binary control protocol
 - Deterministic graph compiler, sends, submixes, sidechains, and PDC
 - Emit sorted graph dependency levels for valid native binding
+- Emit a level-major sequential graph schedule for bank correctness
 - Separate builtin benchmark render timing from meter evidence collection
 - Issue-007 builtin filter and matrix human listening qualification
 - Production SIMD builtin bank graph retention and reachability qualification
