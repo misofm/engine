@@ -1,26 +1,34 @@
 //! Safe preallocated AoSoA rack primitives.
 //!
 //! The compiler owns all structural decisions. This crate only accepts prepared dimensions and
-//! invokes a prepared homogeneous bank over owned, sample-major scratch.
+//! sequences already-prepared bank stages over owned, sample-major scratch.
+//!
+//! Master plan #83 §4.5: planar -> AoSoA and back happen **once per bank chain per block**, in the
+//! rack executor, never per slot. [`BankChain`] is that executor: one gather, then every slot of
+//! the chain over the resident block, then one scatter. [`BankChain::transposes`] counts the
+//! round-trips so the audit tooling can prove the law.
 #![allow(missing_docs)]
 
+use miso_engine_core::realtime::RenderError;
 use miso_engine_core::{KernelBackendV1, TargetCapabilities};
 use miso_engine_effect_contract::{
-    BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProgramKeyV1,
-    PreparedAutomationSpan, PreparedNativeEffectBank,
+    BankWidth, EffectBankProcessBlock, EffectProgramKeyV1, PreparedNativeEffectBank,
+    PreparedSidechainPort,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RackError {
-    ZeroFrames,
-    FramesAboveQuantum,
-    WidthMismatch,
+    ZeroQuantum,
     Overflow,
     Shape,
-    FirstSampleOverflow,
+    WidthMismatch,
 }
 
 /// The retained dispatch result. `select` is control-plane-only and pure.
+///
+/// Transitional carrier of [`KernelBackendV1`]; deleted by #95 when the effect contract takes
+/// `miso_engine_lane::Backend` directly. It deliberately holds **no** backend-to-width table of
+/// its own: [`KernelBackendV1::lanes`] is the single source (#96 F5).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KernelDispatch {
     backend: KernelBackendV1,
@@ -37,12 +45,13 @@ impl KernelDispatch {
     pub const fn backend(self) -> KernelBackendV1 {
         self.backend
     }
+    /// Derived from core's single lane table. `KernelBackendV1` is `#[non_exhaustive]`, so
+    /// matching on `lanes()` is the only wildcard-free route to it.
     #[must_use]
     pub const fn bank_width(self) -> Option<BankWidth> {
-        match self.backend {
-            KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon => Some(BankWidth::Four),
-            KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma => Some(BankWidth::Eight),
-            KernelBackendV1::Scalar => None,
+        match self.backend.lanes() {
+            4 => Some(BankWidth::Four),
+            8 => Some(BankWidth::Eight),
             _ => None,
         }
     }
@@ -55,78 +64,57 @@ pub enum RackLocationV1 {
     Simd2 = 2,
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum RoutingClassV1 {
-    MainOnly = 1,
-    SidechainUnconnected = 2,
-    SidechainConnected = 3,
-}
-
+/// The ordered per-track program of one SIMD rack.
+///
+/// There is no rate, quantum or routing field: every [`EffectProgramKeyV1`] slot already carries
+/// `sample_rate`, `quantum` and `ports.sidechain`, so a second copy could only disagree (#96 F5.4).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RackSlotKeyV1 {
-    pub program: EffectProgramKeyV1,
-    pub occurrence: u32,
-}
-
-/// Semantic cohort key: no track IDs, parameter values, state bytes, hashes, or serialization.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RackProgramSignatureV1 {
+pub struct RackProgramV1 {
     pub rack: RackLocationV1,
-    pub sample_rate: u32,
-    pub quantum: u32,
-    pub slots: Box<[RackSlotKeyV1]>,
-    pub routing: RoutingClassV1,
+    pub slots: Box<[EffectProgramKeyV1]>,
 }
 
-impl RackProgramSignatureV1 {
-    pub fn new(
-        rack: RackLocationV1,
-        sample_rate: u32,
-        quantum: u32,
-        slots: Vec<EffectProgramKeyV1>,
-        routing: RoutingClassV1,
-    ) -> Result<Self, RackError> {
-        if sample_rate == 0 || quantum == 0 {
-            return Err(RackError::Shape);
-        }
-        let mut occurrences = std::collections::BTreeMap::<EffectProgramKeyV1, u32>::new();
-        let slots = slots
-            .into_iter()
-            .map(|program| {
-                let occurrence = occurrences.entry(program.clone()).or_insert(0);
-                let result = RackSlotKeyV1 {
-                    program,
-                    occurrence: *occurrence,
-                };
-                *occurrence = occurrence.saturating_add(1);
-                result
-            })
-            .collect();
-        Ok(Self {
-            rack,
-            sample_rate,
-            quantum,
-            slots,
-            routing,
-        })
-    }
+impl RackProgramV1 {
     #[must_use]
-    pub fn is_subsequence_of(&self, candidate: &Self) -> Option<Box<[bool]>> {
-        if self.rack != candidate.rack
-            || self.sample_rate != candidate.sample_rate
-            || self.quantum != candidate.quantum
-            || self.routing != candidate.routing
-        {
+    pub fn new(rack: RackLocationV1, slots: Vec<EffectProgramKeyV1>) -> Self {
+        Self {
+            rack,
+            slots: slots.into_boxed_slice(),
+        }
+    }
+    /// `true` iff the program is non-empty and no slot declares a connected sidechain.
+    ///
+    /// An empty program needs no bank at all, and a connected sidechain reads a second graph
+    /// buffer that a homogeneous bank has no port for (#96 F5.1/F9).
+    #[must_use]
+    pub fn is_bankable(&self) -> bool {
+        !self.slots.is_empty()
+            && !self.slots.iter().any(|slot| {
+                matches!(
+                    slot.ports.sidechain,
+                    PreparedSidechainPort::Connected { .. }
+                )
+            })
+    }
+    /// Greedy leftmost subsequence match of `self.slots` inside `leader.slots`.
+    ///
+    /// Returns the leader-indexed activity mask (`true` = this track runs that slot, `false` = the
+    /// slot is an identity for this lane), or `None` when no match exists. Slots compare by
+    /// [`EffectProgramKeyV1`] equality only - never by occurrence index (#96 F5.3). Greedy
+    /// leftmost matching decides subsequence membership exactly: any match can be left-shifted
+    /// into the greedy one.
+    #[must_use]
+    pub fn subsequence_mask(&self, leader: &Self) -> Option<Box<[bool]>> {
+        if self.rack != leader.rack || self.slots.len() > leader.slots.len() {
             return None;
         }
         let mut cursor = 0usize;
-        let mut mask = vec![false; candidate.slots.len()];
+        let mut mask = vec![false; leader.slots.len()];
         for slot in &self.slots {
-            while cursor < candidate.slots.len() && candidate.slots[cursor] != *slot {
+            while cursor < leader.slots.len() && leader.slots[cursor] != *slot {
                 cursor += 1;
             }
-            if cursor == candidate.slots.len() {
+            if cursor == leader.slots.len() {
                 return None;
             }
             mask[cursor] = true;
@@ -137,61 +125,30 @@ impl RackProgramSignatureV1 {
 }
 
 /// Owned left/right sample-major scratch. Its logical index is `sample * lanes + lane`.
+///
+/// Two planes, not four: the bank sidechain planes were never read and are gone (#96 F9). A bank
+/// sidechain block, if one is ever needed, is a separate read-only block allocated by the owner
+/// that declares it (master plan §4.1).
 pub struct AoSoaScratch {
     width: BankWidth,
     quantum: u32,
     left: Box<[f32]>,
     right: Box<[f32]>,
-    sidechain_left: Box<[f32]>,
-    sidechain_right: Box<[f32]>,
 }
 
 impl AoSoaScratch {
-    /// Four planes: two main and two sidechain, for banks with a sidechain surface.
     pub fn new(width: BankWidth, quantum: u32) -> Result<Self, RackError> {
-        Self::with_planes(width, quantum, true)
-    }
-
-    /// Two main planes only, for fixed-stage banks that have no sidechain surface.
-    ///
-    /// The post-input builtin bank is such a stage: it is not automatable and has no sidechain
-    /// port, so the two sidechain planes `new` allocates are dead, cap-consuming bytes it can
-    /// never reach ([`AoSoaScratch::builtin_planes_mut`] hands out only the main planes).
-    /// [`AoSoaScratch::gather_sidechain`] and [`AoSoaScratch::process`] with `sidechain` set
-    /// reject a scratch built this way rather than indexing empty storage.
-    pub fn new_main_only(width: BankWidth, quantum: u32) -> Result<Self, RackError> {
-        Self::with_planes(width, quantum, false)
-    }
-
-    /// Whether this scratch owns sidechain planes.
-    ///
-    /// `Box<[f32]>::default()` is an empty slice and not an allocation, and a zero-quantum
-    /// scratch is already rejected, so emptiness is exactly "no sidechain planes".
-    #[must_use]
-    pub const fn has_sidechain_planes(&self) -> bool {
-        !self.sidechain_left.is_empty()
-    }
-
-    fn with_planes(width: BankWidth, quantum: u32, sidechain: bool) -> Result<Self, RackError> {
         if quantum == 0 {
-            return Err(RackError::ZeroFrames);
+            return Err(RackError::ZeroQuantum);
         }
         let length = (quantum as usize)
             .checked_mul(width.lanes() as usize)
             .ok_or(RackError::Overflow)?;
-        let plane = || vec![0.0; length].into_boxed_slice();
-        let (sidechain_left, sidechain_right) = if sidechain {
-            (plane(), plane())
-        } else {
-            (Box::default(), Box::default())
-        };
         Ok(Self {
             width,
             quantum,
-            left: plane(),
-            right: plane(),
-            sidechain_left,
-            sidechain_right,
+            left: vec![0.0; length].into_boxed_slice(),
+            right: vec![0.0; length].into_boxed_slice(),
         })
     }
     #[must_use]
@@ -202,185 +159,236 @@ impl AoSoaScratch {
     pub const fn quantum(&self) -> u32 {
         self.quantum
     }
-    pub fn gather(
-        &mut self,
-        inputs_left: &[&[f32]],
-        inputs_right: &[&[f32]],
-        frames: u32,
-    ) -> Result<(), RackError> {
-        self.checked(frames, inputs_left.len(), inputs_right.len())?;
+
+    /// Copy one planar track into its stable AoSoA lane. Shape is a `debug_assert`: the compiler
+    /// fixed it once (master plan §4.3).
+    fn gather_lane(&mut self, lane: usize, left: &[f32], right: &[f32], frames: u32) {
         let lanes = self.width.lanes() as usize;
-        for sample in 0..frames as usize {
-            for lane in 0..lanes {
-                let index = sample * lanes + lane;
-                self.left[index] = inputs_left[lane][sample];
-                self.right[index] = inputs_right[lane][sample];
-            }
+        let len = frames as usize * lanes;
+        debug_assert!(lane < lanes);
+        debug_assert!(left.len() == frames as usize && right.len() == frames as usize);
+        debug_assert!(len <= self.left.len());
+        for (chunk, &sample) in self.left[..len].chunks_exact_mut(lanes).zip(left) {
+            chunk[lane] = sample;
         }
-        Ok(())
+        for (chunk, &sample) in self.right[..len].chunks_exact_mut(lanes).zip(right) {
+            chunk[lane] = sample;
+        }
     }
 
-    /// Copy one planar track into its stable AoSoA lane without allocating.
-    pub fn gather_lane(
-        &mut self,
-        lane: usize,
-        left: &[f32],
-        right: &[f32],
-        frames: u32,
-    ) -> Result<(), RackError> {
-        self.checked(
-            frames,
-            self.width.lanes() as usize,
-            self.width.lanes() as usize,
-        )?;
-        if lane >= self.width.lanes() as usize
-            || left.len() != frames as usize
-            || right.len() != frames as usize
-        {
-            return Err(RackError::Shape);
-        }
+    /// Copy one stable AoSoA lane back into its planar graph buffer.
+    fn scatter_lane(&self, lane: usize, left: &mut [f32], right: &mut [f32], frames: u32) {
         let lanes = self.width.lanes() as usize;
-        for sample in 0..frames as usize {
-            self.left[sample * lanes + lane] = left[sample];
-            self.right[sample * lanes + lane] = right[sample];
+        let len = frames as usize * lanes;
+        debug_assert!(lane < lanes);
+        debug_assert!(left.len() == frames as usize && right.len() == frames as usize);
+        debug_assert!(len <= self.left.len());
+        for (chunk, sample) in self.left[..len].chunks_exact(lanes).zip(left.iter_mut()) {
+            *sample = chunk[lane];
         }
-        Ok(())
+        for (chunk, sample) in self.right[..len].chunks_exact(lanes).zip(right.iter_mut()) {
+            *sample = chunk[lane];
+        }
     }
+}
 
-    /// Gather sidechain inputs into the separate owned AoSoA sidechain scratch.
-    pub fn gather_sidechain(
-        &mut self,
-        inputs_left: &[&[f32]],
-        inputs_right: &[&[f32]],
-        frames: u32,
-    ) -> Result<(), RackError> {
-        if !self.has_sidechain_planes() {
-            return Err(RackError::Shape);
-        }
-        self.checked(frames, inputs_left.len(), inputs_right.len())?;
-        let lanes = self.width.lanes() as usize;
-        for sample in 0..frames as usize {
-            for lane in 0..lanes {
-                let index = sample * lanes + lane;
-                self.sidechain_left[index] = inputs_left[lane][sample];
-                self.sidechain_right[index] = inputs_right[lane][sample];
-            }
-        }
-        Ok(())
-    }
-    pub fn scatter(
-        &self,
-        outputs_left: &mut [&mut [f32]],
-        outputs_right: &mut [&mut [f32]],
-        frames: u32,
-    ) -> Result<(), RackError> {
-        self.checked(frames, outputs_left.len(), outputs_right.len())?;
-        let lanes = self.width.lanes() as usize;
-        for sample in 0..frames as usize {
-            for lane in 0..lanes {
-                let index = sample * lanes + lane;
-                outputs_left[lane][sample] = self.left[index];
-                outputs_right[lane][sample] = self.right[index];
-            }
-        }
-        Ok(())
-    }
+/// The resident AoSoA block handed to one stage. `left.len() == right.len() == frames * lanes`.
+pub struct BankBlock<'a> {
+    pub left: &'a mut [f32],
+    pub right: &'a mut [f32],
+    pub frames: u32,
+    pub first_sample: u64,
+    pub lanes: usize,
+}
 
-    /// Copy one stable AoSoA lane to an existing planar graph buffer without allocating.
-    pub fn scatter_lane(
-        &self,
-        lane: usize,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: u32,
-    ) -> Result<(), RackError> {
-        self.checked(
-            frames,
-            self.width.lanes() as usize,
-            self.width.lanes() as usize,
-        )?;
-        if lane >= self.width.lanes() as usize
-            || left.len() != frames as usize
-            || right.len() != frames as usize
-        {
-            return Err(RackError::Shape);
-        }
-        let lanes = self.width.lanes() as usize;
-        for sample in 0..frames as usize {
-            left[sample] = self.left[sample * lanes + lane];
-            right[sample] = self.right[sample * lanes + lane];
-        }
-        Ok(())
+/// One stage of a bank chain.
+///
+/// This is the seam #86 (builtin banks) and #98 (graph bank execution) implement against: a stage
+/// owns its prepared processor and sees only the resident block. Shape is infallible here - it was
+/// validated once at prepare - so `Err` is the stage's own render failure.
+pub trait BankStage: Send {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError>;
+    /// Cumulative `[process_calls, kernel_calls]`, read only after render is disarmed.
+    fn qualification_counters(&self) -> [u64; 2] {
+        [0, 0]
     }
-    /// Borrow the gathered main AoSoA planes for a fixed-stage bank processor.
-    ///
-    /// This is intentionally narrower than the effect-bank API: callers cannot reach
-    /// sidechain storage or change the prepared width/quantum contract.
-    pub fn builtin_planes_mut(
-        &mut self,
-        frames: u32,
-    ) -> Result<(&mut [f32], &mut [f32]), RackError> {
-        self.checked(
-            frames,
-            self.width.lanes() as usize,
-            self.width.lanes() as usize,
-        )?;
-        let length = frames as usize * self.width.lanes() as usize;
-        Ok((&mut self.left[..length], &mut self.right[..length]))
-    }
-    pub fn process(
-        &mut self,
-        bank: &mut dyn PreparedNativeEffectBank,
-        frames: u32,
-        first_sample: u64,
-        automation: &[PreparedAutomationSpan],
-        offsets: &[u32],
-        sidechain: bool,
-    ) -> Result<BankProcessReport, RackError> {
-        if sidechain && !self.has_sidechain_planes() {
-            return Err(RackError::Shape);
-        }
-        if bank.metadata().width != self.width {
+}
+
+/// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
+///
+/// Width, quantum and the automation offsets are fixed here once (#96 F8): the render path calls
+/// no `metadata()` and performs no `checked_add`.
+pub struct EffectBankStage {
+    processor: Box<dyn PreparedNativeEffectBank>,
+    width: BankWidth,
+    quantum: u32,
+    offsets: Box<[u32]>,
+}
+
+impl EffectBankStage {
+    /// Errors with [`RackError::WidthMismatch`] if the prepared processor is not this width.
+    pub fn new(
+        processor: Box<dyn PreparedNativeEffectBank>,
+        width: BankWidth,
+        quantum: u32,
+    ) -> Result<Self, RackError> {
+        if processor.metadata().width != width {
             return Err(RackError::WidthMismatch);
         }
-        self.checked(
-            frames,
-            self.width.lanes() as usize,
-            self.width.lanes() as usize,
-        )?;
-        first_sample
-            .checked_add(u64::from(frames))
-            .ok_or(RackError::FirstSampleOverflow)?;
-        let length = frames as usize * self.width.lanes() as usize;
-        let sidechain = sidechain.then_some((
-            &self.sidechain_left[..length],
-            &self.sidechain_right[..length],
-        ));
+        if quantum == 0 {
+            return Err(RackError::ZeroQuantum);
+        }
+        Ok(Self {
+            processor,
+            width,
+            quantum,
+            offsets: vec![0_u32; width.lanes() as usize + 1].into_boxed_slice(),
+        })
+    }
+}
+
+impl BankStage for EffectBankStage {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let block = EffectBankProcessBlock::new(
-            &mut self.left[..length],
-            &mut self.right[..length],
-            sidechain,
-            frames,
+            block.left,
+            block.right,
+            None,
+            block.frames,
             self.width,
-            first_sample,
-            automation,
-            offsets,
+            block.first_sample,
+            &[],
+            &self.offsets,
             self.quantum,
         )
-        .map_err(|_| RackError::Shape)?;
-        Ok(bank.process_bank(block))
+        .map_err(|_| RenderError::InvalidEnvelope)?;
+        // D7's once-per-block boundary check and its counters belong to effect-runtime (#95); the
+        // descriptive bank report is deliberately dropped here, exactly as it was before #96.
+        let _ = self.processor.process_bank(block);
+        Ok(())
     }
-    fn checked(&self, frames: u32, left_lanes: usize, right_lanes: usize) -> Result<(), RackError> {
-        if frames == 0 {
-            return Err(RackError::ZeroFrames);
-        }
-        if frames > self.quantum {
-            return Err(RackError::FramesAboveQuantum);
-        }
-        if left_lanes != self.width.lanes() as usize || right_lanes != self.width.lanes() as usize {
+}
+
+/// One slot of a chain: a stage plus the lanes for which it is *not* an identity.
+pub struct BankSlot {
+    pub stage: Box<dyn BankStage>,
+    pub active_lanes: Box<[bool]>,
+}
+
+/// Per-lane planar views a chain gathers from and scatters to. `lane < lanes` always.
+pub trait BankMembers {
+    fn plane(&self, lane: usize) -> (&[f32], &[f32]);
+    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]);
+}
+
+/// One bank chain: a resident L/R AoSoA block plus its ordered slots.
+///
+/// Exactly one gather and one scatter per [`run`](BankChain::run), whatever the slot count
+/// (master plan §4.5).
+pub struct BankChain {
+    scratch: AoSoaScratch,
+    lanes: usize,
+    active: Box<[bool]>,
+    slots: Box<[BankSlot]>,
+    transposes: u64,
+}
+
+impl BankChain {
+    /// Validates the whole shape once, off the render thread: `active` and every slot mask have
+    /// exactly `lanes` entries, a slot may only be active on an active lane, and at least one lane
+    /// is active. Scratch lanes start at `+0.0`, so an inactive lane can never hand stale garbage
+    /// to the block boundary check.
+    pub fn new(
+        mut scratch: AoSoaScratch,
+        active: Box<[bool]>,
+        slots: Vec<BankSlot>,
+    ) -> Result<Self, RackError> {
+        let lanes = scratch.width.lanes() as usize;
+        if active.len() != lanes || !active.iter().any(|lane| *lane) {
             return Err(RackError::Shape);
         }
+        if slots.iter().any(|slot| {
+            slot.active_lanes.len() != lanes
+                || slot
+                    .active_lanes
+                    .iter()
+                    .zip(active.iter())
+                    .any(|(slot_lane, chain_lane)| *slot_lane && !*chain_lane)
+        }) {
+            return Err(RackError::Shape);
+        }
+        scratch.left.fill(0.0);
+        scratch.right.fill(0.0);
+        Ok(Self {
+            scratch,
+            lanes,
+            active,
+            slots: slots.into_boxed_slice(),
+            transposes: 0,
+        })
+    }
+
+    /// Gather every active lane, run every non-identity slot over the resident block, scatter every
+    /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
+    pub fn run<M: BankMembers + ?Sized>(
+        &mut self,
+        members: &mut M,
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
+        let len = frames as usize * self.lanes;
+        for lane in 0..self.lanes {
+            if self.active[lane] {
+                let (left, right) = members.plane(lane);
+                self.scratch.gather_lane(lane, left, right, frames);
+            }
+        }
+        self.transposes = self.transposes.saturating_add(1);
+        for slot in &mut self.slots {
+            if slot.active_lanes.iter().any(|lane| *lane) {
+                slot.stage.process(BankBlock {
+                    left: &mut self.scratch.left[..len],
+                    right: &mut self.scratch.right[..len],
+                    frames,
+                    first_sample,
+                    lanes: self.lanes,
+                })?;
+            }
+        }
+        for lane in 0..self.lanes {
+            if self.active[lane] {
+                let (left, right) = members.plane_mut(lane);
+                self.scratch.scatter_lane(lane, left, right, frames);
+            }
+        }
         Ok(())
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.scratch.width
+    }
+    #[must_use]
+    pub const fn quantum(&self) -> u32 {
+        self.scratch.quantum
+    }
+    #[must_use]
+    pub fn active(&self) -> &[bool] {
+        &self.active
+    }
+    /// Completed planar/AoSoA round-trips: exactly one per rendered block per chain.
+    #[must_use]
+    pub const fn transposes(&self) -> u64 {
+        self.transposes
+    }
+    #[must_use]
+    pub fn qualification_counters(&self) -> [u64; 2] {
+        self.slots.iter().fold([0, 0], |mut total, slot| {
+            let counters = slot.stage.qualification_counters();
+            total[0] = total[0].saturating_add(counters[0]);
+            total[1] = total[1].saturating_add(counters[1]);
+            total
+        })
     }
 }
 
@@ -388,6 +396,41 @@ impl AoSoaScratch {
 mod tests {
     use super::*;
     use miso_engine_core::TargetCapabilities;
+
+    struct PassThrough;
+    impl BankStage for PassThrough {
+        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    struct Planes {
+        left: Vec<Vec<f32>>,
+        right: Vec<Vec<f32>>,
+    }
+    impl BankMembers for Planes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            (&self.left[lane], &self.right[lane])
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            (&mut self.left[lane], &mut self.right[lane])
+        }
+    }
+
+    fn seeded(state: &mut u64) -> f32 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        f32::from_bits((z ^ (z >> 31)) as u32)
+    }
+
+    fn slot(active_lanes: Vec<bool>, stage: Box<dyn BankStage>) -> BankSlot {
+        BankSlot {
+            stage,
+            active_lanes: active_lanes.into_boxed_slice(),
+        }
+    }
 
     #[test]
     fn issue068_all_capability_tuples_select_exact_backend_and_width() {
@@ -412,15 +455,10 @@ mod tests {
                         } else {
                             KernelBackendV1::Scalar
                         };
-                        let expected_width = match expected {
-                            KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon => {
-                                Some(BankWidth::Four)
-                            }
-                            KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma => {
-                                Some(BankWidth::Eight)
-                            }
-                            KernelBackendV1::Scalar => None,
-                            _ => unreachable!("frozen backend matrix"),
+                        let expected_width = match expected.lanes() {
+                            4 => Some(BankWidth::Four),
+                            8 => Some(BankWidth::Eight),
+                            _ => None,
                         };
                         let dispatch = KernelDispatch::select(capabilities);
                         assert_eq!(KernelBackendV1::select(capabilities), expected);
@@ -434,104 +472,277 @@ mod tests {
 
     #[test]
     fn dispatch_requires_avx2_for_fma() {
+        for (wasm, neon, avx2, fma) in [
+            (false, false, false, true),
+            (false, false, true, false),
+            (false, true, false, true),
+            (true, false, false, true),
+        ] {
+            let capabilities = TargetCapabilities::from_detected(wasm, neon, avx2, fma);
+            assert_eq!(
+                KernelDispatch::select(capabilities).backend(),
+                KernelBackendV1::select(capabilities)
+            );
+        }
         assert_eq!(
             KernelDispatch::select(TargetCapabilities::from_detected(false, false, false, true))
                 .backend(),
             KernelBackendV1::Scalar
         );
-        assert_eq!(
-            KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, false))
-                .backend(),
-            KernelBackendV1::X86Avx2
-        );
     }
 
+    /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
+    /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
     #[test]
-    fn sample_major_gather_and_scatter_preserve_dual_mono_lanes() {
-        let mut scratch = AoSoaScratch::new(BankWidth::Four, 3).expect("prepare scratch");
-        let left = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
-        let right = [[-1.0, -2.0], [-3.0, -4.0], [-5.0, -6.0], [-7.0, -8.0]];
-        let left_refs: Vec<&[f32]> = left.iter().map(|lane| lane.as_slice()).collect();
-        let right_refs: Vec<&[f32]> = right.iter().map(|lane| lane.as_slice()).collect();
-        scratch.gather(&left_refs, &right_refs, 2).expect("gather");
-        let mut out_left = [[0.0; 2]; 4];
-        let mut out_right = [[0.0; 2]; 4];
-        let mut out_left_refs: Vec<&mut [f32]> = out_left
-            .iter_mut()
-            .map(|lane| lane.as_mut_slice())
-            .collect();
-        let mut out_right_refs: Vec<&mut [f32]> = out_right
-            .iter_mut()
-            .map(|lane| lane.as_mut_slice())
-            .collect();
-        scratch
-            .scatter(&mut out_left_refs, &mut out_right_refs, 2)
-            .expect("scatter");
-        assert_eq!(out_left, left);
-        assert_eq!(out_right, right);
+    fn gather_scatter_round_trip_is_bit_exact() {
+        let frames = 128_u32;
+        let lanes = 8_usize;
+        let mut state = 0x0123_4567_89ab_cdef_u64;
+        let mut planes = Planes {
+            left: (0..lanes)
+                .map(|_| (0..frames).map(|_| seeded(&mut state)).collect())
+                .collect(),
+            right: (0..lanes)
+                .map(|_| (0..frames).map(|_| seeded(&mut state)).collect())
+                .collect(),
+        };
+        for (index, value) in [
+            f32::NAN,
+            f32::from_bits(0x7fc0_dead),
+            f32::from_bits(0xffc0_beef),
+            -0.0,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            planes.left[index % lanes][index] = value;
+            planes.right[index % lanes][index + 8] = value;
+        }
+        let expected_left = planes.left.clone();
+        let expected_right = planes.right.clone();
+        let active = vec![true, true, false, true, true, true, false, true];
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch"),
+            active.clone().into_boxed_slice(),
+            vec![slot(active.clone(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        chain.run(&mut planes, frames, 0).expect("run");
+        for lane in 0..lanes {
+            for frame in 0..frames as usize {
+                assert_eq!(
+                    planes.left[lane][frame].to_bits(),
+                    expected_left[lane][frame].to_bits(),
+                    "left lane={lane} frame={frame}"
+                );
+                assert_eq!(
+                    planes.right[lane][frame].to_bits(),
+                    expected_right[lane][frame].to_bits(),
+                    "right lane={lane} frame={frame}"
+                );
+            }
+        }
+        assert_eq!(chain.transposes(), 1);
     }
 
+    /// T2: a stage sees the frame-major index law of master plan §4.1.
     #[test]
-    fn main_only_scratch_has_two_planes_and_rejects_sidechain_use() {
-        let mut full = AoSoaScratch::new(BankWidth::Four, 3).expect("four-plane scratch");
-        let mut main_only =
-            AoSoaScratch::new_main_only(BankWidth::Four, 3).expect("two-plane scratch");
-        assert!(full.has_sidechain_planes());
-        assert!(!main_only.has_sidechain_planes());
-        assert_eq!(main_only.width(), full.width());
-        assert_eq!(main_only.quantum(), full.quantum());
-
-        // The main planes behave identically: the builtin bank surface is unchanged.
-        let left = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
-        let right = [[-1.0, -2.0], [-3.0, -4.0], [-5.0, -6.0], [-7.0, -8.0]];
-        let left_refs: Vec<&[f32]> = left.iter().map(|lane| lane.as_slice()).collect();
-        let right_refs: Vec<&[f32]> = right.iter().map(|lane| lane.as_slice()).collect();
-        full.gather(&left_refs, &right_refs, 2).expect("gather");
-        main_only
-            .gather(&left_refs, &right_refs, 2)
-            .expect("gather");
-        let (full_left, full_right) = full.builtin_planes_mut(2).expect("full planes");
-        let expected: (Vec<f32>, Vec<f32>) = (full_left.to_vec(), full_right.to_vec());
-        let (main_left, main_right) = main_only.builtin_planes_mut(2).expect("main planes");
-        assert_eq!(main_left, expected.0.as_slice());
-        assert_eq!(main_right, expected.1.as_slice());
-
-        // The dead surface is refused, not silently indexed into empty storage.
-        assert_eq!(
-            main_only.gather_sidechain(&left_refs, &right_refs, 2),
-            Err(RackError::Shape)
-        );
-        assert_eq!(
-            main_only.process(&mut RejectedBank, 2, 0, &[], &[], true),
-            Err(RackError::Shape)
-        );
-        assert!(full.gather_sidechain(&left_refs, &right_refs, 2).is_ok());
+    fn stage_sees_frame_major_layout() {
+        struct Checker {
+            expected: Vec<Vec<f32>>,
+        }
+        impl BankStage for Checker {
+            fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+                for (lane, plane) in self.expected.iter().enumerate() {
+                    for (frame, sample) in plane.iter().enumerate() {
+                        assert_eq!(
+                            block.left[frame * block.lanes + lane].to_bits(),
+                            sample.to_bits(),
+                            "lane={lane} frame={frame}"
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+        let frames = 7_u32;
+        let mut planes = Planes {
+            left: (0..4)
+                .map(|lane| {
+                    (0..frames)
+                        .map(|frame| (lane * 100 + frame) as f32)
+                        .collect()
+                })
+                .collect(),
+            right: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
+        };
+        let expected = planes.left.clone();
+        let active = vec![true; 4];
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
+            active.clone().into_boxed_slice(),
+            vec![slot(active, Box::new(Checker { expected }))],
+        )
+        .expect("chain");
+        chain.run(&mut planes, frames, 0).expect("run");
     }
 
-    /// A bank that fails the test if it is ever reached: the sidechain guard runs first.
-    struct RejectedBank;
-    impl PreparedNativeEffectBank for RejectedBank {
-        fn metadata(&self) -> miso_engine_effect_contract::PreparedBankMetadata {
-            panic!("the sidechain-plane guard must reject before the bank is consulted")
+    /// T3: a slot that is an identity on every lane is never executed, and the chain still counts
+    /// exactly one transpose per block.
+    #[test]
+    fn identity_everywhere_slot_is_not_executed() {
+        struct Counting {
+            slot: usize,
+            calls: u64,
         }
-        fn reset(&mut self, _: miso_engine_effect_contract::ResetKind) {}
-        fn process_bank(&mut self, _: EffectBankProcessBlock<'_>) -> BankProcessReport {
-            unreachable!("guarded")
+        impl BankStage for Counting {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                self.calls += 1;
+                Ok(())
+            }
+            fn qualification_counters(&self) -> [u64; 2] {
+                let mut counters = [0, 0];
+                counters[self.slot] = self.calls;
+                counters
+            }
         }
-        fn snapshot_track_state_payload(
-            &self,
-            _: u32,
-            _: miso_engine_effect_contract::StatePayloadOutput<'_>,
-        ) -> Result<(), miso_engine_effect_contract::StatePayloadError> {
-            unreachable!("guarded")
+        let frames = 16_u32;
+        let mut planes = Planes {
+            left: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
+            right: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
+        };
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![
+                slot(vec![true; 4], Box::new(Counting { slot: 0, calls: 0 })),
+                slot(vec![false; 4], Box::new(Counting { slot: 1, calls: 0 })),
+            ],
+        )
+        .expect("chain");
+        for block in 1..=5_u64 {
+            chain
+                .run(&mut planes, frames, block * u64::from(frames))
+                .expect("run");
+            assert_eq!(chain.transposes(), block);
         }
-        fn restore_track_state_payload(
-            &mut self,
-            _: u32,
-            _: u32,
-            _: miso_engine_effect_contract::StatePayloadInput<'_>,
-        ) -> Result<(), miso_engine_effect_contract::StatePayloadError> {
-            unreachable!("guarded")
+        assert_eq!(
+            chain.qualification_counters(),
+            [5, 0],
+            "the live slot ran once per block; the identity-everywhere slot never ran"
+        );
+    }
+
+    /// T4: `BankChain::new` rejects every mask-shape violation, including a slot active on a lane
+    /// the chain never gathers.
+    #[test]
+    fn chain_new_rejects_mask_shape_and_lane_implication() {
+        let scratch = || AoSoaScratch::new(BankWidth::Four, 8).expect("scratch");
+        assert_eq!(
+            BankChain::new(
+                scratch(),
+                vec![true, true, false, false].into_boxed_slice(),
+                vec![slot(vec![true, true, true, false], Box::new(PassThrough))],
+            )
+            .err(),
+            Some(RackError::Shape),
+            "a slot may not be active on a lane the chain never gathers"
+        );
+        assert_eq!(
+            BankChain::new(
+                scratch(),
+                vec![true; 3].into_boxed_slice(),
+                vec![slot(vec![true; 4], Box::new(PassThrough))],
+            )
+            .err(),
+            Some(RackError::Shape),
+            "the chain mask must have exactly `lanes` entries"
+        );
+        assert_eq!(
+            BankChain::new(
+                scratch(),
+                vec![true; 4].into_boxed_slice(),
+                vec![slot(vec![true; 5], Box::new(PassThrough))],
+            )
+            .err(),
+            Some(RackError::Shape),
+            "a slot mask must have exactly `lanes` entries"
+        );
+        assert_eq!(
+            BankChain::new(
+                scratch(),
+                vec![false; 4].into_boxed_slice(),
+                vec![slot(vec![false; 4], Box::new(PassThrough))],
+            )
+            .err(),
+            Some(RackError::Shape),
+            "a chain with no active lane is not a bank"
+        );
+        assert!(
+            BankChain::new(
+                scratch(),
+                vec![true, true, false, false].into_boxed_slice(),
+                vec![slot(vec![true, false, false, false], Box::new(PassThrough))],
+            )
+            .is_ok()
+        );
+    }
+
+    /// T5: the scratch is exactly two planes per bank (#96 F9 deleted the sidechain pair).
+    #[test]
+    fn scratch_allocates_exactly_two_planes() {
+        let scratch = AoSoaScratch::new(BankWidth::Eight, 128).expect("scratch");
+        assert_eq!(scratch.left.len(), 1024);
+        assert_eq!(scratch.right.len(), 1024);
+        assert_eq!(
+            core::mem::size_of::<AoSoaScratch>(),
+            core::mem::size_of::<(Box<[f32]>, Box<[f32]>, u32, BankWidth)>(),
+            "AoSoaScratch owns exactly two planes plus width and quantum"
+        );
+        assert_eq!(
+            AoSoaScratch::new(BankWidth::Four, 0).err(),
+            Some(RackError::ZeroQuantum)
+        );
+    }
+
+    /// The chain never gathers into or scatters from an inactive lane, so a padded group cannot
+    /// disturb an inactive member's planar buffer even when a stage writes the whole block.
+    #[test]
+    fn inactive_lanes_are_never_gathered_or_scattered() {
+        struct FillOnes;
+        impl BankStage for FillOnes {
+            fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+                block.left.fill(1.0);
+                block.right.fill(1.0);
+                Ok(())
+            }
         }
+        let frames = 4_u32;
+        let mut planes = Planes {
+            left: (0..4)
+                .map(|lane| vec![(lane * 10) as f32; frames as usize])
+                .collect(),
+            right: (0..4)
+                .map(|lane| vec![-((lane * 10) as f32); frames as usize])
+                .collect(),
+        };
+        let active = vec![true, false, true, false];
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
+            active.clone().into_boxed_slice(),
+            vec![slot(active, Box::new(FillOnes))],
+        )
+        .expect("chain");
+        chain.run(&mut planes, frames, 0).expect("run");
+        assert_eq!(planes.left[0], vec![1.0; frames as usize]);
+        assert_eq!(planes.left[1], vec![10.0; frames as usize]);
+        assert_eq!(planes.left[2], vec![1.0; frames as usize]);
+        assert_eq!(planes.left[3], vec![30.0; frames as usize]);
+        assert_eq!(planes.right[1], vec![-10.0; frames as usize]);
+        assert_eq!(planes.right[3], vec![-30.0; frames as usize]);
     }
 }
