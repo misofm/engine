@@ -5,7 +5,7 @@
 Qualify the completed native C ABI control/render product and WAV/RF64 reference runner across the
 launch native target boundary without changing product bytes or rerunning descriptive benchmarks.
 
-**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 115 AND 113.** Sol High implements; Sol XHigh
+**STATELESS SOL XHIGH BRIEF / WAITING FOR ISSUES 116 AND 113.** Sol High implements; Sol XHigh
 briefs and verifies. One pass plus one bounded HOLD correction is the complete budget. A second HOLD
 stops. Benchmark/timing counts are zero and must remain zero.
 
@@ -14,15 +14,20 @@ under this exact title after the docs checkpoint is upstream. This record makes 
 
 ## Dependencies by exact title
 
-- **Close portable native PCM runner publication and seal the reference tool** (Issue 115)
+- **Seal portable native PCM runner under an explicit output-directory ownership contract**
+  (Issue 116)
 - **Close C ABI control/event transport and transactional plan replacement** (Issue 113)
+
+Stopped **Close portable native PCM runner publication and seal the reference tool** (Issue 115)
+contributes technical input through accepted Issue 116 only; it is not a dependency and cannot be
+qualified here.
 
 This issue gates **End-to-end release, performance, and listening qualification** (Issue 026). It
 does not gate Issue 025, which consumes Issue 113 directly.
 
 ## Qualification-only matrix
 
-Freeze the accepted #115/#113 candidate before implementation and pin the installed header, static/
+Freeze the accepted #116/#113 candidate before implementation and pin the installed header, static/
 shared libraries, runner binary/source, Cargo locks, fixture manifests and protocol/session corpora.
 No product correction is permitted here.
 
@@ -62,7 +67,7 @@ benchmark entry. Shell/parser mutations must prove those rejects.
 Allowed changes are a new `tools/miso-engine-capi-qualification/**` package if needed,
 `fixtures/capi-qualification/v1/**`, `docs/C_ABI_V1_QUALIFICATION.md`, new exact target/qualification
 checker and mutation scripts, minimal manifests/lock rows, and this issue's evidence/routing docs.
-Existing CAPI/source/protocol/session/graph/DSP code, installed headers, Issue-115 runner code and
+Existing CAPI/source/protocol/session/graph/DSP code, installed headers, Issue-116 runner code and
 all accepted fixtures are read-only.
 
 Gates are locked compile/test for the qualification tool, warning-denied Clippy/rustdoc, installed

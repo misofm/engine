@@ -2,15 +2,18 @@
 
 ## Outcome and readiness
 
-Accept the stopped Issue-073 reference runner without weakening its output contract: replace the
-non-Linux pathname check/use fallback with a platform-specific publication boundary whose accepted
-final is bound to the exact held file identity, prove Windows and Unix compilation, then run one
-fresh full nonbenchmark runner seal.
+Attempt to accept the stopped Issue-073 reference runner without weakening its output contract by
+replacing the non-Linux pathname check/use fallback with platform-specific publication. The
+technical checkpoint proves held-handle no-replace publication and target compilation, but the
+frozen visible-partial contract cannot provide identity-conditional pathname deletion against a
+concurrent same-privilege directory-entry mutation.
 
-**STATELESS SOL XHIGH BRIEF / READY AFTER ISSUE-073 STOP CHECKPOINT.** Sol High implements; Sol
-XHigh briefs and adversarially verifies. One implementation pass plus one bounded HOLD correction
-is the complete budget; a second HOLD stops. Benchmark, timing, real workload, playback and
-listening counts start at and remain zero.
+**TERMINAL SECOND-HOLD STOP / NO OVERALL PASS.** Sol High implemented the focused checkpoint and
+Sol XHigh found the remaining cleanup check/use gap. The bounded correction established that Linux
+and Apple expose no atomic `(path still names this held file) then unlink` primitive for the frozen
+visible named partial. Quarantine or rename merely moves the same gap. The two-pass budget is
+exhausted; no full runner seal is authorized. Benchmark, timing, real workload, playback and
+listening counts are all zero.
 
 Read-only inspection on 2026-08-23 found remote Issue 115 unallocated. Root must create and
 synchronize it under this exact title after the docs checkpoint is upstream. This record performs
@@ -25,8 +28,9 @@ Accepted product dependencies:
 
 Stopped **Native WAV/RF64 reference runner over frozen C ABI V1** (Issue 073) is technical input,
 not an accepted dependency. Preserve its exact runner/manifest/checker hashes and 15-test focused
-evidence from the terminal record. Issue 114 must depend on accepted Issue 115 plus Issue 113; it
-may not qualify or repair stopped Issue 073.
+evidence from the terminal record. Stateless Issue 116 consumes this issue's technical checkpoint
+under an explicit exclusive-output-directory contract. Issue 114 must depend on accepted Issue 116
+plus Issue 113; it may not qualify or repair stopped Issues 073 or 115.
 
 ## Sole product correction
 
@@ -112,7 +116,35 @@ matrix is authorized.
 
 ## Acceptance
 
-Issue 115 passes only when the portable publication path has no ownership check/use gap, both
-Windows and Apple Unix compile boundaries pass, Sol XHigh verifies the full runner seal, and all
-prohibited counters remain zero. Focused green without the fresh seal is not overall PASS. PASS
-unblocks Issue 114; it does not claim Issue-113 control transport or cross-target qualification.
+Issue 115 could have passed only if the portable publication path had no ownership check/use gap,
+both Windows and Apple Unix compile boundaries passed, Sol XHigh verified the full runner seal, and
+all prohibited counters remained zero. Those conditions were not met: focused green without the
+fresh seal is not overall PASS, and Issue 115 does not unblock Issue 114.
+
+## Terminal evidence and decision
+
+Focused checkpoint `99f081f327bd250343a80f928aa099c994ca8e59` (tree
+`8f883e6dbbb31a4dd7350239c81a40466560e7e2`) is retained as technical input only. Its exact changed
+authorities are:
+
+- runner library `9df99e837c23c81ee7df2ddf983941af6e9f5830b2333a95b12e613554159894`;
+- runner documentation `2d5a69e6f3f47c3c6bb5e3e9582056bd44d92087581a6ba0ada01339056b003a`;
+- portability checker `ceac1ed25f6ff816fb0a0743408daa0be20f5d40a1651073fcead3fdbb7c8407`;
+  and
+- checker mutations `26ddcf8b4db0ed02a45c2a245acbc5475f724a0e21a61d774c3b0b04e5ca6008`.
+
+The implementation retained the partial handle, added explicit Linux/Android, Apple and Windows
+publication adapters, passed 16 runner tests and the reported focused compile/lint/docs/policy/
+target-compile gates, and changed no frozen C ABI, fixture or CLI authority. Sol XHigh's first review
+HOLD found that success, failure and `Drop` cleanup still performed `path_is_owned(path)` followed by
+a separate pathname unlink. A same-privilege actor can replace that entry between the two calls,
+causing an unowned sentinel to be deleted. The fake mutation occurred before its combined fake
+check/removal and therefore did not prove the real interstitial window.
+
+The sole bounded correction could not close that requirement without changing the contract:
+Windows has retained-handle disposition/rename mechanisms, but Linux `unlinkat` has no
+`AT_EMPTY_PATH` unlink and Apple unlink remains name-based. Moving the entry to quarantine leaves
+the same identity-check/unlink race. Sol High made no post-HOLD implementation edits. This is the
+terminal second HOLD: Issue 115 is **STOPPED**, has **NO OVERALL PASS**, does not authorize a full
+runner seal, and does not unblock Issue 114. Issue 116 owns the stateless contract correction; no
+retry is permitted here.
