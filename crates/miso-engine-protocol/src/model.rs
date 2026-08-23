@@ -721,6 +721,38 @@ pub struct SessionCommit {
     pub applied_operations: usize,
 }
 
+/// An owned, not-yet-authoritative session compilation produced by resolving one exact
+/// transaction against one exact base revision.  Dropping it changes no live session state.
+///
+/// This type intentionally exposes only the immutable compilation needed by downstream
+/// control-plane preparation.  Installation remains package-private so protocol replay, events,
+/// and the authoritative model are committed together by [`crate::ProtocolController`].
+pub struct PreparedSessionTransaction {
+    base_revision: SessionRevision,
+    compiled: CompiledSession,
+    applied_operations: usize,
+}
+
+impl PreparedSessionTransaction {
+    /// Borrow the prospective immutable compilation without making it authoritative.
+    #[must_use]
+    pub const fn compiled(&self) -> &CompiledSession {
+        &self.compiled
+    }
+
+    /// Revision the prospective compilation will own if committed.
+    #[must_use]
+    pub fn revision(&self) -> SessionRevision {
+        SessionRevision(self.compiled.normalized_model().revision)
+    }
+
+    /// Number of edits resolved in wire order.
+    #[must_use]
+    pub const fn applied_operations(&self) -> usize {
+        self.applied_operations
+    }
+}
+
 /// Atomic transaction rejection with a precise resolving operation index when one exists.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionStoreError {
@@ -802,6 +834,17 @@ impl SessionStore {
         expected_revision: ExpectedRevision,
         edits: &[SessionEditV1],
     ) -> Result<SessionCommit, SessionStoreError> {
+        let prepared = self.prepare_transaction(expected_revision, edits)?;
+        Ok(self.commit_prepared(prepared))
+    }
+
+    /// Resolve and compile one transaction without changing the authoritative session triple.
+    /// The returned affine value owns every prospective allocation and is safe to discard.
+    pub fn prepare_transaction(
+        &self,
+        expected_revision: ExpectedRevision,
+        edits: &[SessionEditV1],
+    ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
         };
@@ -830,11 +873,27 @@ impl SessionStore {
                 diagnostics,
             }
         })?;
-        self.compiled = compiled;
-        Ok(SessionCommit {
-            revision: SessionRevision(next_revision),
+        Ok(PreparedSessionTransaction {
+            base_revision: current,
+            compiled,
             applied_operations: edits.len(),
         })
+    }
+
+    /// Install a preparation whose base revision was checked by the controller immediately
+    /// before this call.  Moving the complete compilation is allocation-free and non-fallible.
+    pub(crate) fn commit_prepared(
+        &mut self,
+        prepared: PreparedSessionTransaction,
+    ) -> SessionCommit {
+        debug_assert_eq!(self.revision(), prepared.base_revision);
+        let revision = prepared.revision();
+        let applied_operations = prepared.applied_operations;
+        self.compiled = prepared.compiled;
+        SessionCommit {
+            revision,
+            applied_operations,
+        }
     }
 }
 

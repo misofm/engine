@@ -4,7 +4,12 @@
 //! The consumer operations below only move fixed `Copy` slots; they do not decode, allocate,
 //! compile, publish a plan, or structurally mutate a session.
 
-use core::{fmt, num::NonZeroUsize};
+use core::{
+    fmt,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+use std::sync::Arc;
 
 use miso_engine_core::realtime::{
     Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, bounded_spsc,
@@ -440,6 +445,8 @@ impl ReliableSlot {
 #[derive(Debug)]
 pub struct ReliableEventReservation {
     generation: QueueGeneration,
+    reservations: Arc<AtomicUsize>,
+    armed: bool,
 }
 
 /// Multiple atomic reliable-event capacity holds for one structural invalidation.
@@ -447,6 +454,26 @@ pub struct ReliableEventReservation {
 pub struct ReliableEventReservations {
     generation: QueueGeneration,
     remaining: usize,
+    reservations: Arc<AtomicUsize>,
+}
+
+impl Drop for ReliableEventReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.reservations.fetch_sub(1, Ordering::AcqRel);
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for ReliableEventReservations {
+    fn drop(&mut self) {
+        if self.remaining != 0 {
+            self.reservations
+                .fetch_sub(self.remaining, Ordering::AcqRel);
+            self.remaining = 0;
+        }
+    }
 }
 
 /// Coalescing key for permitted lossy meter/counter telemetry only.
@@ -605,7 +632,7 @@ pub struct ProtocolQueues {
     automation_frontier: Option<SampleTime>,
     automation_density: Box<[AutomationDensityEntry]>,
     automation_intervals: Box<[AutomationIntervalEntry]>,
-    reliable_event_reservations: usize,
+    reliable_event_reservations: Arc<AtomicUsize>,
 }
 
 /// One prepared aggregate count of queued automation record starts for an absolute render block.
@@ -656,7 +683,7 @@ impl ProtocolQueues {
                 .into_boxed_slice(),
             automation_intervals: vec![AutomationIntervalEntry::default(); density_entries]
                 .into_boxed_slice(),
-            reliable_event_reservations: 0,
+            reliable_event_reservations: Arc::new(AtomicUsize::new(0)),
             config,
         })
     }
@@ -762,12 +789,13 @@ impl ProtocolQueues {
 
     /// Enqueue a reliable event or preserve it exactly on full.
     pub fn try_enqueue_event(&mut self, value: ReliableSlot) -> Result<(), ReliableEnqueueError> {
-        if self.reliable_event_reservations != 0
+        let reserved = self.reliable_event_reservations.load(Ordering::Acquire);
+        if reserved != 0
             && self
                 .events
                 .report(QueueKind::ReliableEvent)
                 .occupancy
-                .saturating_add(u64::try_from(self.reliable_event_reservations).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(reserved).unwrap_or(u64::MAX))
                 >= u64::try_from(self.events.producer.capacity()).unwrap_or(u64::MAX)
         {
             return Err(ReliableEnqueueError {
@@ -793,16 +821,19 @@ impl ProtocolQueues {
     /// the caller with a typed report and does not modify either queue state or a session store.
     pub fn reserve_reliable_event(&mut self) -> Result<ReliableEventReservation, QueueReport> {
         let report = self.report(QueueKind::ReliableEvent);
-        if report
-            .occupancy
-            .saturating_add(u64::try_from(self.reliable_event_reservations).unwrap_or(u64::MAX))
-            >= u64::try_from(report.capacity).unwrap_or(u64::MAX)
+        if report.occupancy.saturating_add(
+            u64::try_from(self.reliable_event_reservations.load(Ordering::Acquire))
+                .unwrap_or(u64::MAX),
+        ) >= u64::try_from(report.capacity).unwrap_or(u64::MAX)
         {
             return Err(report);
         }
-        self.reliable_event_reservations = self.reliable_event_reservations.saturating_add(1);
+        self.reliable_event_reservations
+            .fetch_add(1, Ordering::AcqRel);
         Ok(ReliableEventReservation {
             generation: report.generation,
+            reservations: Arc::clone(&self.reliable_event_reservations),
+            armed: true,
         })
     }
 
@@ -813,7 +844,7 @@ impl ProtocolQueues {
         count: usize,
     ) -> Result<ReliableEventReservations, QueueReport> {
         let report = self.report(QueueKind::ReliableEvent);
-        let reserved = self.reliable_event_reservations;
+        let reserved = self.reliable_event_reservations.load(Ordering::Acquire);
         let capacity = report.capacity;
         if count
             > capacity
@@ -822,10 +853,12 @@ impl ProtocolQueues {
         {
             return Err(report);
         }
-        self.reliable_event_reservations = reserved.saturating_add(count);
+        self.reliable_event_reservations
+            .fetch_add(count, Ordering::AcqRel);
         Ok(ReliableEventReservations {
             generation: report.generation,
             remaining: count,
+            reservations: Arc::clone(&self.reliable_event_reservations),
         })
     }
 
@@ -837,9 +870,10 @@ impl ProtocolQueues {
     ) {
         debug_assert_eq!(reservations.generation, self.events.producer.generation());
         debug_assert_ne!(reservations.remaining, 0);
-        debug_assert_ne!(self.reliable_event_reservations, 0);
+        debug_assert_ne!(self.reliable_event_reservations.load(Ordering::Acquire), 0);
         reservations.remaining = reservations.remaining.saturating_sub(1);
-        self.reliable_event_reservations = self.reliable_event_reservations.saturating_sub(1);
+        self.reliable_event_reservations
+            .fetch_sub(1, Ordering::AcqRel);
         match self.events.producer.try_push(value) {
             Ok(()) => {}
             Err(_) => unreachable!("a reserved reliable-event slot must remain available"),
@@ -849,22 +883,21 @@ impl ProtocolQueues {
     /// Release all uncommitted multi-event reservation capacity on a failed transaction.
     pub fn release_reliable_events(&mut self, reservations: ReliableEventReservations) {
         debug_assert_eq!(reservations.generation, self.events.producer.generation());
-        debug_assert!(self.reliable_event_reservations >= reservations.remaining);
-        self.reliable_event_reservations = self
-            .reliable_event_reservations
-            .saturating_sub(reservations.remaining);
+        drop(reservations);
     }
 
     /// Publish the exact event covered by a prior reservation. The reservation makes a full
     /// outcome unreachable because `ProtocolQueues` has one exclusive control-side producer.
     pub fn commit_reliable_event(
         &mut self,
-        reservation: ReliableEventReservation,
+        mut reservation: ReliableEventReservation,
         value: ReliableSlot,
     ) {
         debug_assert_eq!(reservation.generation, self.events.producer.generation());
-        debug_assert_ne!(self.reliable_event_reservations, 0);
-        self.reliable_event_reservations = self.reliable_event_reservations.saturating_sub(1);
+        debug_assert_ne!(self.reliable_event_reservations.load(Ordering::Acquire), 0);
+        self.reliable_event_reservations
+            .fetch_sub(1, Ordering::AcqRel);
+        reservation.armed = false;
         match self.events.producer.try_push(value) {
             Ok(()) => {}
             Err(_) => unreachable!("a reserved reliable-event slot must remain available"),
@@ -874,8 +907,7 @@ impl ProtocolQueues {
     /// Release a pre-commit reservation when session validation rejects its transaction.
     pub fn release_reliable_event(&mut self, reservation: ReliableEventReservation) {
         debug_assert_eq!(reservation.generation, self.events.producer.generation());
-        debug_assert_ne!(self.reliable_event_reservations, 0);
-        self.reliable_event_reservations = self.reliable_event_reservations.saturating_sub(1);
+        drop(reservation);
     }
 
     /// Stage the latest permitted lossy telemetry. Only a same key coalesces; a distinct key at

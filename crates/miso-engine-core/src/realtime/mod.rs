@@ -23,8 +23,8 @@ pub use plan::{
     RenderError, RenderIo, RenderReport, RenderTime,
 };
 pub use plan_exchange::{
-    PlanExchangeConfig, PlanPublisher, PlanRetirer, PublishError, RealtimePlanOwner,
-    RealtimeRenderReport, SwapOutcome, plan_exchange,
+    PlanExchangeConfig, PlanPublisher, PlanReplacementReservation, PlanReplacementReservationError,
+    PlanRetirer, PublishError, RealtimePlanOwner, RealtimeRenderReport, SwapOutcome, plan_exchange,
 };
 pub use spsc::{
     Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
@@ -167,6 +167,179 @@ mod tests {
         assert_eq!(report.swap, SwapOutcome::Applied);
         assert_eq!(report.active_epoch, PlanEpoch(2));
         assert_eq!(report.render.plan_id, 3);
+    }
+
+    #[test]
+    fn reserved_replacement_preowns_publication_epoch_and_retirement_credit() {
+        let config = PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::new(1).expect("one"),
+            retirement_capacity: NonZeroUsize::new(1).expect("one"),
+        };
+        let (mut publisher, mut realtime, mut retirer) =
+            plan_exchange(prepared(1), config).expect("exchange");
+        let reservation = publisher
+            .reserve_replacement(prepared(2))
+            .expect("complete reservation");
+        assert_eq!(reservation.epoch(), PlanEpoch(1));
+        assert_eq!(reservation.commit(), PlanEpoch(1));
+        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
+        assert_eq!(realtime.active_plan_id(), 2);
+
+        assert!(matches!(
+            publisher.reserve_replacement(prepared(3)),
+            Err(PlanReplacementReservationError::RetirementFull(returned))
+                if returned.program().plan_id() == 3
+        ));
+        let retired = retirer.try_reclaim().expect("reserved retirement");
+        assert_eq!(retired.0, PlanEpoch(0));
+        let reservation = publisher
+            .reserve_replacement(prepared(3))
+            .expect("reclaimed credit");
+        assert_eq!(reservation.epoch(), PlanEpoch(2));
+        reservation.commit();
+        assert_eq!(render_once(&mut realtime, 2).swap, SwapOutcome::Applied);
+        assert_eq!(realtime.active_plan_id(), 3);
+    }
+
+    #[test]
+    fn replacement_cancel_releases_both_credits_without_consuming_epoch() {
+        let config = PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::new(1).expect("one"),
+            retirement_capacity: NonZeroUsize::new(1).expect("one"),
+        };
+        let (mut publisher, mut realtime, _retirer) =
+            plan_exchange(prepared(1), config).expect("exchange");
+        let returned = publisher
+            .reserve_replacement(prepared(2))
+            .expect("reservation")
+            .cancel();
+        assert_eq!(returned.program().plan_id(), 2);
+        let replacement = publisher
+            .reserve_replacement(returned)
+            .expect("credits released");
+        assert_eq!(replacement.epoch(), PlanEpoch(1));
+        drop(replacement);
+        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::None);
+
+        let replacement = publisher
+            .reserve_replacement(prepared(3))
+            .expect("drop released credits");
+        assert_eq!(replacement.commit(), PlanEpoch(1));
+        assert_eq!(render_once(&mut realtime, 2).active_epoch, PlanEpoch(1));
+    }
+
+    #[test]
+    fn replacement_reservation_freezes_failure_precedence_and_serial_order() {
+        let config = PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::new(2).expect("two"),
+            retirement_capacity: NonZeroUsize::new(2).expect("two"),
+        };
+        let (mut publisher, mut realtime, mut retirer) =
+            plan_exchange(prepared(1), config).expect("exchange");
+        let incompatible = PreparedRenderPlan::prepare(PrepareRenderPlan {
+            plan_id: 99,
+            envelope: RenderEnvelope {
+                sample_rate: SampleRateHz(44_100),
+                quantum: QuantumFrames(2),
+                input_channels: None,
+                output_channels: NonZeroUsize::new(1).expect("one"),
+            },
+            scratch: &[],
+            parameter_defaults: &[],
+            event_capacity: 0,
+        })
+        .expect("other envelope");
+        assert!(matches!(
+            publisher.reserve_replacement(incompatible),
+            Err(PlanReplacementReservationError::Incompatible(returned))
+                if returned.program().plan_id() == 99
+        ));
+
+        publisher
+            .reserve_replacement(prepared(2))
+            .expect("first")
+            .commit();
+        publisher
+            .reserve_replacement(prepared(3))
+            .expect("second")
+            .commit();
+        assert!(matches!(
+            publisher.reserve_replacement(prepared(4)),
+            Err(PlanReplacementReservationError::PublicationFull(returned))
+                if returned.program().plan_id() == 4
+        ));
+        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
+        assert_eq!(render_once(&mut realtime, 2).render.plan_id, 3);
+        assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
+        assert_eq!(retirer.try_reclaim().expect("second").0, PlanEpoch(1));
+    }
+
+    #[test]
+    fn reservation_never_strands_a_queued_legacy_predecessor() {
+        let (mut publisher, mut realtime, mut retirer) = plan_exchange(
+            prepared(1),
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(2).expect("two"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            },
+        )
+        .expect("exchange");
+        assert!(matches!(publisher.publish(prepared(2)), Ok(PlanEpoch(1))));
+        let candidate = match publisher.reserve_replacement(prepared(3)) {
+            Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
+            _ => panic!("queued legacy predecessor must retain the retirement credit"),
+        };
+        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
+        assert!(matches!(
+            publisher.reserve_replacement(candidate),
+            Err(PlanReplacementReservationError::RetirementFull(_))
+        ));
+        assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
+        publisher
+            .reserve_replacement(prepared(3))
+            .expect("credit after predecessor reclaim")
+            .commit();
+        assert_eq!(render_once(&mut realtime, 2).render.plan_id, 3);
+    }
+
+    #[test]
+    fn reservation_never_strands_a_pending_legacy_predecessor() {
+        let (mut publisher, mut realtime, mut retirer) = plan_exchange(
+            prepared(1),
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(2).expect("two"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            },
+        )
+        .expect("exchange");
+        assert!(publisher.publish(prepared(2)).is_ok());
+        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
+        assert!(publisher.publish(prepared(3)).is_ok());
+        assert_eq!(
+            render_once(&mut realtime, 2).swap,
+            SwapOutcome::DeferredRetirementFull
+        );
+        let candidate = match publisher.reserve_replacement(prepared(4)) {
+            Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
+            _ => panic!("pending legacy predecessor must retain FIFO progress"),
+        };
+        assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
+        assert_eq!(render_once(&mut realtime, 4).render.plan_id, 3);
+        assert!(matches!(
+            publisher.reserve_replacement(candidate),
+            Err(PlanReplacementReservationError::RetirementFull(_))
+        ));
+        assert_eq!(retirer.try_reclaim().expect("plan two").0, PlanEpoch(1));
+        publisher
+            .reserve_replacement(prepared(4))
+            .expect("credit after pending predecessor")
+            .commit();
+        assert_eq!(render_once(&mut realtime, 6).render.plan_id, 4);
+        assert_eq!(retirer.try_reclaim().expect("plan three").0, PlanEpoch(2));
+        let canceled = publisher
+            .reserve_replacement(prepared(5))
+            .expect("no leaked predecessor or retirement credit");
+        drop(canceled);
     }
 
     fn render_once(owner: &mut RealtimePlanOwner, sample: u64) -> RealtimeRenderReport {

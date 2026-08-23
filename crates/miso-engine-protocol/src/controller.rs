@@ -6,6 +6,10 @@
 
 use core::{fmt, num::NonZeroUsize};
 use std::collections::VecDeque;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
@@ -15,12 +19,13 @@ use crate::{
     DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EncodeError, EventPayload,
     ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterAutomationRate,
     ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
-    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest, ProtocolCodec,
-    ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, SampleTime,
-    SessionCommitted, SessionEditV1, SessionRevision, SessionSnapshot, SessionStore,
-    SessionStoreError, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TelemetryKey,
-    TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
-    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
+    PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
+    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEditV1, SessionRevision,
+    SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
+    TransportSnapshot, TransportState, TransportStateEvent, TypedEventFrame,
+    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
@@ -119,6 +124,7 @@ struct ReplayEntry {
 }
 
 /// Bounded exact-byte replay cache. It intentionally covers one endpoint lifetime only.
+#[derive(Clone)]
 pub struct ReplayCache {
     config: ReplayCacheConfig,
     entries: VecDeque<ReplayEntry>,
@@ -778,6 +784,124 @@ pub enum CommandFrameProcessError {
     },
     /// A framed replay entry unexpectedly lacked its exact full response bytes.
     Internal,
+    /// One affine structural preparation still owns this controller generation.
+    PreparedCommandOutstanding,
+}
+
+/// One closed command-preparation outcome. Immediate outcomes have already completed the accepted
+/// one-call behavior; structural outcomes own all prospective state and remain invisible.
+pub enum PreparedCommandFrame {
+    /// No external plan is required; these exact canonical bytes are ready for caller output.
+    Immediate(PreparedImmediateCommandFrame),
+    /// A valid structural replacement awaits external plan preparation and reservation.
+    Structural(Box<PreparedStructuralCommand>),
+}
+
+/// Exact canonical response bytes for a token-free immediate decision.
+pub struct PreparedImmediateCommandFrame {
+    bytes: Vec<u8>,
+}
+
+impl PreparedImmediateCommandFrame {
+    /// Exact response bytes already accepted by the controller.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the exact response is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Atomically copy the complete canonical response to caller output.
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        copy_complete_frame(&self.bytes, output)
+    }
+}
+
+/// Opaque affine structural preparation bound to one exact controller identity and generation.
+/// It is deliberately neither `Clone` nor publicly constructible.
+pub struct PreparedStructuralCommand {
+    owner: Arc<AtomicU64>,
+    generation: u64,
+    request_id: RequestId,
+    previous_revision: SessionRevision,
+    prospective_session: Option<PreparedSessionTransaction>,
+    prospective_replay: Option<ReplayCache>,
+    response: Option<ControllerResponse>,
+    event_reservations: Option<crate::ReliableEventReservations>,
+    event_sequence: u64,
+    cancellation_batches: usize,
+    applied_operations: u32,
+    armed: bool,
+}
+
+impl PreparedStructuralCommand {
+    /// Borrow the complete prospective session compilation for downstream source/plan binding.
+    #[must_use]
+    pub fn prospective_session(&self) -> &PreparedSessionTransaction {
+        self.prospective_session
+            .as_ref()
+            .expect("live affine token owns prospective session")
+    }
+
+    /// Exact canonical response byte count retained for post-publication caller output.
+    #[must_use]
+    pub fn response_len(&self) -> usize {
+        self.response
+            .as_ref()
+            .and_then(|response| response.frame_bytes.as_ref())
+            .map_or(0, Vec::len)
+    }
+}
+
+impl Drop for PreparedStructuralCommand {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.owner.compare_exchange(
+                self.generation,
+                self.generation.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.armed = false;
+        }
+    }
+}
+
+/// A committed structural response kept private until the caller has published its matched plan.
+pub struct CommittedCommandFrame {
+    bytes: Vec<u8>,
+}
+
+impl CommittedCommandFrame {
+    /// Exact committed response length.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the response is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Atomically copy the complete committed response to caller output.
+    pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        copy_complete_frame(&self.bytes, output)
+    }
+}
+
+/// Affinity/use rejection before the non-fallible prepared state application begins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedCommandCommitError {
+    /// The token belongs to a different exact controller allocation.
+    WrongController,
+    /// Controller state changed or this generation was canceled/consumed.
+    StaleGeneration,
 }
 
 /// Bounded event-egress outcome. The caller always owns output; short output leaves the exact
@@ -856,6 +980,7 @@ pub struct ProtocolController<P: ControlProvider> {
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
     pending_telemetry_event: PendingTelemetryEvent,
+    structural_generation: Arc<AtomicU64>,
 }
 
 impl<P: ControlProvider> ProtocolController<P> {
@@ -922,11 +1047,15 @@ impl<P: ControlProvider> ProtocolController<P> {
             pending_meter_record: None,
             pending_counter_record: None,
             pending_telemetry_event: PendingTelemetryEvent::None,
+            structural_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return self.response(request.request_id, StatusCode::Backpressure, Vec::new());
+        }
         match self
             .replay
             .preflight(request.request_id, request.canonical_bytes)
@@ -1070,6 +1199,243 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// output at least as large as the advertised `maximum_cached_response_bytes` reservation;
     /// that pre-dispatch requirement is distinct from an exact codec frame length.
     pub fn process_command_frame_into(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        match self.prepare_command_frame(input, scratch, output.len())? {
+            PreparedCommandFrame::Immediate(response) => response
+                .write_into(output)
+                .map_err(CommandFrameProcessError::Encode),
+            PreparedCommandFrame::Structural(prepared) => {
+                let committed = self
+                    .commit_prepared_structural(*prepared)
+                    .map_err(|_| CommandFrameProcessError::Internal)?;
+                committed
+                    .write_into(output)
+                    .map_err(CommandFrameProcessError::Encode)
+            }
+        }
+    }
+
+    /// Prepare one complete command. Valid structural commands return an invisible affine token;
+    /// every other accepted decision completes through the byte-identical one-call machinery.
+    pub fn prepare_command_frame(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
+            return Err(CommandFrameProcessError::PreparedCommandOutstanding);
+        }
+        let header = self
+            .codec
+            .decode_correlatable_command_header(input)
+            .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        if header.message_id != MessageId::SessionTransactionApply {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        if self.replay.is_new_request(header.request_id)
+            && output_capacity < self.replay.config().max_response_bytes
+        {
+            return Err(CommandFrameProcessError::OutputReservationTooSmall {
+                required: self.replay.config().max_response_bytes,
+            });
+        }
+
+        let mut prospective_replay = self.replay.clone();
+        if prospective_replay.preflight(header.request_id, input) != ReplayDecision::Execute {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let decoded = match self.codec.decode_typed_command(input, scratch) {
+            Ok(decoded) => decoded,
+            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        };
+        let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        };
+        if !self.config.provider_features.session_events
+            || self.config.maximum_transaction_edits == 0
+            || edits.is_empty()
+            || edits.len() > self.config.maximum_transaction_edits as usize
+            || !matches!(header.expected_revision, ExpectedRevision::Exact(_))
+            || matches!(
+                header.expected_revision,
+                ExpectedRevision::Exact(revision) if revision != self.session.revision()
+            )
+        {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let cancellation_batches =
+            usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
+                .unwrap_or(usize::MAX);
+        let required_events = cancellation_batches.saturating_add(1);
+        let event_report = self.queues.report(crate::QueueKind::ReliableEvent);
+        if required_events
+            > event_report
+                .capacity
+                .saturating_sub(usize::try_from(event_report.occupancy).unwrap_or(usize::MAX))
+        {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let event_sequence = self.next_reliable_event_sequence;
+        if event_sequence
+            .checked_add(u64::try_from(required_events).unwrap_or(u64::MAX))
+            .is_none()
+        {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let applied_operations = match u32::try_from(edits.len()) {
+            Ok(value) => value,
+            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        };
+        let prospective_session = match self
+            .session
+            .prepare_transaction(header.expected_revision, &edits)
+        {
+            Ok(value) => value,
+            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        };
+        let bytes = match self
+            .encode_transaction_applied_payload(TransactionApplied { applied_operations })
+        {
+            Ok(bytes) => bytes,
+            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        };
+        let mut response = self.response_at_revision(
+            header.request_id,
+            StatusCode::Ok,
+            prospective_session.revision(),
+            bytes,
+        );
+        let frame = self
+            .encode_controller_response_frame(header.message_id, &response)
+            .map_err(CommandFrameProcessError::Encode)?;
+        if frame.len() > output_capacity {
+            return Err(CommandFrameProcessError::Encode(
+                EncodeError::OutputTooSmall {
+                    required: frame.len(),
+                },
+            ));
+        }
+        response.frame_bytes = Some(frame);
+        prospective_replay
+            .complete(header.request_id, input, response.clone())
+            .map_err(|_| CommandFrameProcessError::Internal)?;
+        let event_reservations = match self.queues.reserve_reliable_events(required_events) {
+            Ok(reservations) => reservations,
+            Err(_) => return self.process_immediate_command(input, scratch, output_capacity),
+        };
+
+        let current = self.structural_generation.load(Ordering::Acquire);
+        let generation = current
+            .checked_add(1)
+            .filter(|generation| generation & 1 == 1)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        self.structural_generation
+            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        Ok(PreparedCommandFrame::Structural(Box::new(
+            PreparedStructuralCommand {
+                owner: Arc::clone(&self.structural_generation),
+                generation,
+                request_id: header.request_id,
+                previous_revision: self.session.revision(),
+                prospective_session: Some(prospective_session),
+                prospective_replay: Some(prospective_replay),
+                response: Some(response),
+                event_reservations: Some(event_reservations),
+                event_sequence,
+                cancellation_batches,
+                applied_operations,
+                armed: true,
+            },
+        )))
+    }
+
+    fn process_immediate_command(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        let capacity = output_capacity.min(self.replay.config().max_response_bytes);
+        let mut bytes = vec![0_u8; capacity];
+        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
+        bytes.truncate(written);
+        Ok(PreparedCommandFrame::Immediate(
+            PreparedImmediateCommandFrame { bytes },
+        ))
+    }
+
+    /// Validate token affinity/currentness, then apply every prepared controller mutation without
+    /// another fallible semantic or capacity decision.
+    pub fn commit_prepared_structural(
+        &mut self,
+        mut prepared: PreparedStructuralCommand,
+    ) -> Result<CommittedCommandFrame, PreparedCommandCommitError> {
+        if !Arc::ptr_eq(&self.structural_generation, &prepared.owner) {
+            return Err(PreparedCommandCommitError::WrongController);
+        }
+        if self.structural_generation.load(Ordering::Acquire) != prepared.generation
+            || self.session.revision() != prepared.previous_revision
+            || usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
+                .unwrap_or(usize::MAX)
+                != prepared.cancellation_batches
+        {
+            return Err(PreparedCommandCommitError::StaleGeneration);
+        }
+        let mut event_reservations = prepared
+            .event_reservations
+            .take()
+            .expect("affine token owns exact event reservations");
+        let effective_sample = self.provider.current_sample();
+        let commit = self.session.commit_prepared(
+            prepared
+                .prospective_session
+                .take()
+                .expect("affine token owns prospective session"),
+        );
+        debug_assert_eq!(
+            commit.applied_operations,
+            prepared.applied_operations as usize
+        );
+        self.queues.commit_reserved_reliable_event(
+            &mut event_reservations,
+            ReliableSlot::session_committed(
+                commit.revision,
+                prepared.event_sequence,
+                prepared.request_id,
+                prepared.previous_revision,
+                prepared.applied_operations,
+            ),
+        );
+        self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
+        let _ = self.cancel_queued_automation_reserved(
+            &mut event_reservations,
+            AutomationCancellationReason::RevisionChanged,
+            Some(effective_sample),
+        );
+        self.replay = prepared
+            .prospective_replay
+            .take()
+            .expect("affine token owns prospective replay");
+        let response = prepared
+            .response
+            .take()
+            .expect("affine token owns committed response");
+        let bytes = response
+            .frame_bytes
+            .expect("prepared structural response is a complete frame");
+        self.structural_generation
+            .store(prepared.generation.saturating_add(1), Ordering::Release);
+        prepared.armed = false;
+        Ok(CommittedCommandFrame { bytes })
+    }
+
+    fn process_command_frame_into_legacy(
         &mut self,
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
@@ -1405,8 +1771,18 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.session
     }
 
+    /// Immutably inspect prepared queue reports without disturbing an outstanding reservation.
+    #[must_use]
+    pub const fn queues(&self) -> &ProtocolQueues {
+        &self.queues
+    }
+
     /// Mutably borrow preallocated protocol queues for fixed render-side consumption fixtures.
     pub fn queues_mut(&mut self) -> &mut ProtocolQueues {
+        assert!(
+            !self.structural_outstanding(),
+            "prepared structural command owns exact queue reservations"
+        );
         &mut self.queues
     }
 
@@ -1424,6 +1800,10 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Replace only typed provider/event enablement for endpoint configuration tests/hosts.
     pub fn set_provider_features(&mut self, features: ProviderFeatures) {
+        assert!(
+            !self.structural_outstanding(),
+            "prepared structural command freezes provider features"
+        );
         self.config.provider_features = features;
     }
 
@@ -1435,6 +1815,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         observed_sample: SampleTime,
         records: &[MeterRecord],
     ) -> Result<(), EventEgressError> {
+        if self.structural_outstanding() {
+            return Err(EventEgressError::ReliableQueueFull(
+                self.queues.report(crate::QueueKind::ReliableEvent),
+            ));
+        }
         if !self.config.provider_features.meters
             || self.telemetry_configuration.meter_handles.is_empty()
             || self.telemetry_configuration.meter_period_blocks == 0
@@ -1477,6 +1862,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         revision: SessionRevision,
         snapshot: &CounterSnapshot,
     ) -> Result<(), EventEgressError> {
+        if self.structural_outstanding() {
+            return Err(EventEgressError::ReliableQueueFull(
+                self.queues.report(crate::QueueKind::ReliableEvent),
+            ));
+        }
         if !self.config.provider_features.counters
             || self.telemetry_configuration.counter_ids.is_empty()
             || self.telemetry_configuration.counter_period_blocks == 0
@@ -1516,6 +1906,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         revision: SessionRevision,
         event: DiagnosticEvent,
     ) -> Result<(), EventEgressError> {
+        if self.structural_outstanding() {
+            return Err(EventEgressError::ReliableQueueFull(
+                self.queues.report(crate::QueueKind::ReliableEvent),
+            ));
+        }
         if !self.config.provider_features.diagnostics
             || !self.telemetry_configuration.diagnostics_enabled
             || (event.diagnostic.severity as u8)
@@ -2139,6 +2534,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self,
         request_id: RequestId,
         status: StatusCode,
+        bytes: Vec<u8>,
+    ) -> ControllerResponse {
+        self.response_at_revision(request_id, status, self.session.revision(), bytes)
+    }
+
+    fn response_at_revision(
+        &self,
+        request_id: RequestId,
+        status: StatusCode,
+        revision: SessionRevision,
         mut bytes: Vec<u8>,
     ) -> ControllerResponse {
         if status != StatusCode::Ok && bytes.is_empty() {
@@ -2174,7 +2579,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         ControllerResponse {
             request_id,
             status,
-            revision: self.session.revision(),
+            revision,
             bytes,
             frame_bytes: None,
         }
@@ -2684,10 +3089,17 @@ impl<P: ControlProvider> ProtocolController<P> {
         reason: AutomationCancellationReason,
         effective_sample: Option<SampleTime>,
     ) -> Result<u64, QueueReport> {
+        if self.structural_outstanding() {
+            return Err(self.queues.report(crate::QueueKind::ReliableEvent));
+        }
         let batches = usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
             .unwrap_or(usize::MAX);
         let mut reservations = self.queues.reserve_reliable_events(batches)?;
         self.cancel_queued_automation_reserved(&mut reservations, reason, effective_sample)
+    }
+
+    fn structural_outstanding(&self) -> bool {
+        self.structural_generation.load(Ordering::Acquire) & 1 != 0
     }
 
     fn cancel_queued_automation_reserved(
@@ -3448,6 +3860,192 @@ mod tests {
             .expect("owned response");
         assert!(owned[..length].iter().any(|byte| *byte != 0x3c));
         assert!(owned[length..].iter().all(|byte| *byte == 0x3c));
+    }
+
+    #[test]
+    fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call() {
+        let transaction = [SessionEditV1::SetSessionId {
+            session_id: miso_engine_session::StableId::parse("prepared-session").expect("ID"),
+        }];
+        let input = full_command(
+            1,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&transaction),
+        );
+
+        let mut accepted = controller(8, 2);
+        let mut accepted_output = [0_u8; 2048];
+        let accepted_len = accepted
+            .process_command_frame_into_legacy(
+                &input,
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                &mut accepted_output,
+            )
+            .expect("accepted one-call path");
+        let accepted_event = accepted.queues_mut().try_dequeue_event().expect("event");
+
+        let mut endpoint = controller(8, 2);
+        let before_snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let before_event = endpoint
+            .queues_mut()
+            .report(crate::QueueKind::ReliableEvent);
+        let prepared = match endpoint
+            .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+            .expect("prepare")
+        {
+            PreparedCommandFrame::Structural(prepared) => *prepared,
+            PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+        };
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+        assert_eq!(endpoint.session().canonical_snapshot(), before_snapshot);
+        assert!(endpoint.replay().is_empty());
+        assert_eq!(
+            endpoint.queues().report(crate::QueueKind::ReliableEvent),
+            before_event
+        );
+        assert_eq!(
+            prepared.prospective_session().revision(),
+            SessionRevision(8)
+        );
+        assert!(
+            prepared
+                .prospective_session()
+                .compiled()
+                .canonical_toml()
+                .contains("prepared-session")
+        );
+
+        let committed = endpoint
+            .commit_prepared_structural(prepared)
+            .expect("affine commit");
+        let mut output = [0xa5_u8; 2048];
+        let committed_len = committed.write_into(&mut output).expect("committed bytes");
+        assert_eq!(committed_len, accepted_len);
+        assert_eq!(&output[..committed_len], &accepted_output[..accepted_len]);
+        assert!(output[committed_len..].iter().all(|byte| *byte == 0xa5));
+        assert_eq!(endpoint.session().revision(), SessionRevision(8));
+        assert_eq!(
+            endpoint.queues_mut().try_dequeue_event().expect("event"),
+            accepted_event
+        );
+        assert_eq!(endpoint.replay().len(), 1);
+    }
+
+    #[test]
+    fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
+        fn structural(
+            endpoint: &mut ProtocolController<MockProvider>,
+            input: &[u8],
+        ) -> PreparedStructuralCommand {
+            match endpoint
+                .prepare_command_frame(input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+                .expect("prepare")
+            {
+                PreparedCommandFrame::Structural(prepared) => *prepared,
+                PreparedCommandFrame::Immediate(_) => panic!("expected structural token"),
+            }
+        }
+
+        let edit = |name: &'static str| {
+            [SessionEditV1::SetSessionId {
+                session_id: miso_engine_session::StableId::parse(name).expect("ID"),
+            }]
+        };
+        let first_edits = edit("token-first");
+        let first = full_command(
+            1,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::SessionTransactionApply(&first_edits),
+        );
+        let mut owner = controller(8, 2);
+        let mut other = controller(8, 2);
+
+        let canceled = structural(&mut owner, &first);
+        assert!(matches!(
+            owner.prepare_command_frame(&first, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048,),
+            Err(CommandFrameProcessError::PreparedCommandOutstanding)
+        ));
+        let blocked = owner.process(capability(99, b"must-not-enter-replay"));
+        assert_eq!(blocked.status, StatusCode::Backpressure);
+        assert!(owner.replay().is_empty());
+        assert_eq!(owner.session().revision(), SessionRevision(7));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = owner.queues_mut();
+            }))
+            .is_err()
+        );
+        assert!(matches!(
+            owner.enqueue_diagnostic_event(
+                SessionRevision(7),
+                DiagnosticEvent {
+                    diagnostic: retained_diagnostic(1, crate::DiagnosticSeverity::Error),
+                },
+            ),
+            Err(EventEgressError::ReliableQueueFull(_))
+        ));
+        assert!(
+            owner
+                .cancel_pending_automation(
+                    AutomationCancellationReason::ExplicitReconfiguration,
+                    Some(SampleTime(0)),
+                )
+                .is_err()
+        );
+        drop(canceled);
+        assert_eq!(owner.session().revision(), SessionRevision(7));
+        assert!(owner.replay().is_empty());
+        owner
+            .queues_mut()
+            .try_enqueue_event(ReliableSlot::session_committed(
+                SessionRevision(7),
+                77,
+                id(77),
+                SessionRevision(6),
+                1,
+            ))
+            .expect("drop released exact reservation");
+        let _ = owner
+            .queues_mut()
+            .try_dequeue_event()
+            .expect("clear reservation probe");
+
+        let wrong_owner = structural(&mut owner, &first);
+        assert!(matches!(
+            other.commit_prepared_structural(wrong_owner),
+            Err(PreparedCommandCommitError::WrongController)
+        ));
+        assert_eq!(owner.session().revision(), SessionRevision(7));
+        assert_eq!(other.session().revision(), SessionRevision(7));
+
+        let stale = structural(&mut owner, &first);
+        owner.structural_generation.fetch_add(2, Ordering::AcqRel);
+        assert!(matches!(
+            owner.commit_prepared_structural(stale),
+            Err(PreparedCommandCommitError::StaleGeneration)
+        ));
+        owner.structural_generation.fetch_add(1, Ordering::AcqRel);
+
+        let first_token = structural(&mut owner, &first);
+        owner
+            .commit_prepared_structural(first_token)
+            .expect("first serial commit");
+        let _ = owner
+            .queues_mut()
+            .try_dequeue_event()
+            .expect("serial event consumer");
+        let second_edits = edit("token-second");
+        let second = full_command(
+            2,
+            ExpectedRevision::Exact(SessionRevision(8)),
+            crate::CommandPayload::SessionTransactionApply(&second_edits),
+        );
+        let second_token = structural(&mut owner, &second);
+        owner
+            .commit_prepared_structural(second_token)
+            .expect("second serial commit");
+        assert_eq!(owner.session().revision(), SessionRevision(9));
+        assert_eq!(owner.replay().len(), 2);
     }
 
     #[test]

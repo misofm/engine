@@ -28,8 +28,8 @@ pub use message_wire::{
     TransportState, TransportStateEvent,
 };
 pub use model::{
-    SessionCommit, SessionEditError, SessionEditOpcode, SessionEditV1, SessionStore,
-    SessionStoreError, apply_session_edit,
+    PreparedSessionTransaction, SessionCommit, SessionEditError, SessionEditOpcode, SessionEditV1,
+    SessionStore, SessionStoreError, apply_session_edit,
 };
 pub use queue::{
     AutomationBatchError, AutomationBatchSlot, AutomationEnqueueError, AutomationKind,
@@ -68,8 +68,10 @@ pub const AUTOMATION_BATCH_RECORDS: usize = 256;
 pub const AUTOMATION_RECORD_BYTES: usize = 32;
 pub use conformance::{ConformanceDecoder, ConformanceFrame, complete_schema_corpus};
 pub use controller::{
-    CommandFrameProcessError, ControlCommand, ControlProvider, ControllerRequest,
-    ControllerResponse, MockProvider, MockProviderConfig, ParameterProviderError,
-    ProtocolController, ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig,
-    ReplayCacheError, ReplayDecision,
+    CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
+    ControllerRequest, ControllerResponse, MockProvider, MockProviderConfig,
+    ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
+    PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
+    ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
+    ReplayDecision,
 };
