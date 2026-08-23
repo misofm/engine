@@ -68,9 +68,7 @@ fn bench_input_stage_ns_per_track_frame() {
     let mut left = signal(FRAMES);
     let mut right = signal(FRAMES);
     for _ in 0..256 {
-        chain.process_input(
-            DualMonoBlock::new(&mut left, &mut right, 0).expect("warm-up block"),
-        );
+        chain.process_input(DualMonoBlock::new(&mut left, &mut right, 0).expect("warm-up block"));
     }
     // The source is copied back in every block. Without it, feeding a filter its own output
     // twenty thousand times drives every sample into the subnormal range, and the microseconds

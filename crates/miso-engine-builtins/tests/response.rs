@@ -9,8 +9,8 @@
 use miso_engine_builtins::*;
 use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
 use miso_engine_dsp_reference::{
-    ReferenceBiquad, ReferenceFilterKind, ReferenceTptOutput, ReferenceTptStateSpace,
-    rbj_butterworth_magnitude_db,
+    ReferenceBiquad, ReferenceFilterKind, ReferenceSvfStateSpace, ReferenceTptOutput,
+    ReferenceTptStateSpace, rbj_butterworth_magnitude_db,
 };
 
 /// The prepared `(c1, a2, a3, k)` words of one section, read from the production design.
@@ -24,19 +24,19 @@ fn designed(rate: u32, cutoff: f32, high_pass: bool) -> (f32, f32, f32, f32) {
     )
 }
 
-/// The state-space model of a prepared section, built from its cast words.
-fn state_space(rate: u32, cutoff: f64, high_pass: bool) -> ReferenceTptStateSpace {
-    let (c1, a2, a3, k) = designed(rate, cutoff as f32, high_pass);
-    ReferenceTptStateSpace::from_cast_coefficients(
-        c1,
-        a2,
-        a3,
-        k,
-        if high_pass {
-            ReferenceTptOutput::HighPass
-        } else {
-            ReferenceTptOutput::LowPass
-        },
+/// The state-space model of a prepared section, built from **all seven** of its cast words.
+///
+/// The output mix is read from production rather than re-derived from `k`, so an error in the
+/// `(m0, m1, m2)` set the kernel actually applies is visible to the response gates. The model
+/// itself is `miso-engine-dsp-reference`'s, derived from the recurrence in #105.
+fn state_space(rate: u32, cutoff: f64, high_pass: bool) -> ReferenceSvfStateSpace {
+    let words = test_support::section_words(rate, cutoff as f32, high_pass).expect("section");
+    let [c1, a2, a3, _, m0, m1, m2] = words.map(f32::from_bits);
+    ReferenceSvfStateSpace::new(
+        f64::from(c1),
+        f64::from(a2),
+        f64::from(a3),
+        [f64::from(m0), f64::from(m1), f64::from(m2)],
     )
 }
 

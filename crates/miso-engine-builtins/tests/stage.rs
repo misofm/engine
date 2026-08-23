@@ -283,6 +283,49 @@ fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
                     "width={lanes}, members={members}, padding lane={lane}"
                 );
             }
+
+            // A padding lane whose *state* is non-finite is excluded from the boundary check and
+            // from every counter. Sanitisation already makes a padding lane's samples inert, so
+            // this is the only way its exclusion is load-bearing -- and it is: without the
+            // `active` mask, one padding lane would zero the whole block's member output.
+            if members < lanes {
+                let fresh = || {
+                    BuiltinInputBankV1::new(
+                        backend,
+                        width,
+                        (0..members)
+                            .map(|index| prepared_input(48_000, parameters_for(index)))
+                            .collect(),
+                    )
+                    .expect("fresh bank")
+                };
+                let mut bank = fresh();
+                let mut control = fresh();
+                let mut poisoned = test_support::bank_lane_state_words(&bank, members);
+                poisoned[0] = f32::NAN.to_bits();
+                test_support::set_bank_lane_state_words(&mut bank, members, poisoned);
+                let mut poisoned_left = left.clone();
+                let mut poisoned_right = right.clone();
+                let mut control_left = left.clone();
+                let mut control_right = right.clone();
+                let poisoned_report =
+                    bank.process(&mut poisoned_left, &mut poisoned_right, FRAMES as u32);
+                let control_report =
+                    control.process(&mut control_left, &mut control_right, FRAMES as u32);
+                assert_eq!(
+                    poisoned_report, control_report,
+                    "width={lanes}, members={members}, padding-lane counters"
+                );
+                for frame in 0..FRAMES {
+                    for lane in 0..members {
+                        assert_eq!(
+                            poisoned_left[frame * lanes + lane].to_bits(),
+                            control_left[frame * lanes + lane].to_bits(),
+                            "width={lanes}, members={members}, lane={lane}, frame={frame}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
