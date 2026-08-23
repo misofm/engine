@@ -794,19 +794,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
     }
 
-    fn snapshot(&self, output: &mut StatePayloadOutput<'_>) -> Result<(), StatePayloadError> {
-        let layout = self.layout();
-        payload::validate_lengths(
-            &layout,
-            (output.common.len(), output.left.len(), output.right.len()),
-        )
-        .map_err(codec_error)?;
-        payload::write_header(&layout, output.common);
-        self.write_lane(0, 0, output.left);
-        self.write_lane(1, 0, output.right);
-        Ok(())
-    }
-
     fn snapshot_lane(
         &self,
         lane: usize,
@@ -991,7 +978,7 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
         &self,
         mut output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        self.snapshot(&mut output)
+        self.snapshot_lane(0, &mut output)
     }
 
     fn restore_state_payload(
