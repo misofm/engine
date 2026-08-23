@@ -46,11 +46,11 @@ pub const CASE_COUNT: usize = 5;
 
 /// Human-readable name of each case, indexed by case number.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
-    "limiter/noise_dual_mono",
-    "limiter/noise_linked",
-    "limiter/near_nyquist_w_min",
-    "limiter/impulse_train_long_lookahead",
-    "limiter/subnormal_release_flush",
+    "dual_mono/noise",
+    "maximum/noise",
+    "dual_mono/near_nyquist_w_min",
+    "dual_mono/impulse_train_long_lookahead",
+    "dual_mono/subnormal_release_flush",
 ];
 
 /// The pinned digest of each case, generated from the scalar `Lane` instantiation.
