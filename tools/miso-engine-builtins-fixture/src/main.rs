@@ -1,6 +1,8 @@
 //! Deterministic issue-007 expected-output fixture generator and checker.
 
 use core::fmt::Write as _;
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -632,6 +634,7 @@ fn graph_tap_artifact_v1() -> miso_engine_graph_compiler::PreparedGraphBuiltinsA
     )
     .expect("prepare builtins");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: 7,
         effects,
         builtins,

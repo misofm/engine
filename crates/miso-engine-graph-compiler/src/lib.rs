@@ -8,7 +8,7 @@ use miso_engine_builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
     PreparedBuiltinsSession,
 };
-use miso_engine_core::{realtime::RenderEnvelope, target_capabilities};
+use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use miso_engine_effect_contract::{
     LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
@@ -20,7 +20,12 @@ use miso_engine_graph::{
     PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
     StableGraphId, TrackStage,
 };
-use miso_engine_rack::{KernelDispatch, RackLocationV1, RackProgramV1};
+/// Re-exported so a caller can name the compile input without taking a `miso-engine-rack`
+/// dependency of its own: dispatch is this crate's input now, so this crate publishes its type
+/// (#99 F6). The host CPU is read by the caller -- `miso_engine_core::target_capabilities()` --
+/// and never inside the compiler.
+pub use miso_engine_rack::KernelDispatch;
+use miso_engine_rack::{RackLocationV1, RackProgramV1};
 use miso_engine_rack_compiler::{
     BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups,
 };
@@ -33,6 +38,18 @@ pub struct GraphCompileRequest {
     pub plan_id: u64,
     pub effects: EffectPreparedSession,
     pub caps: GraphCompileCaps,
+    /// The kernel dispatch the SIMD-rack and builtin banks are planned for.
+    ///
+    /// Compile is a pure function of its inputs (#99 F6). The host CPU is read exactly once, by
+    /// the caller that owns the render target -- `miso-engine-capi` and the web host do it at
+    /// plan-build time -- never inside the compiler. Before this, `KernelDispatch::select(
+    /// target_capabilities())` ran *inside* compile, so the same `GraphCompileRequest` produced
+    /// different banks, a different scratch allocation and a different capped resource estimate
+    /// on different machines, and the scalar fallback could not be exercised without feature
+    /// injection. The semantic graph -- schedule, levels, PDC, reductions, canonical bytes -- is
+    /// deliberately independent of this value; only the bank overlay and the bank half of the
+    /// estimate depend on it.
+    pub dispatch: KernelDispatch,
 }
 pub struct GraphCompiler;
 pub struct PreparedGraphArtifact {
@@ -49,6 +66,8 @@ pub struct GraphBuiltinsCompileRequest {
     pub effects: EffectPreparedSession,
     pub builtins: PreparedBuiltinsSession,
     pub caps: GraphCompileCaps,
+    /// See [`GraphCompileRequest::dispatch`] (#99 F6).
+    pub dispatch: KernelDispatch,
 }
 /// The one-way, sealed builtin attachment result.
 ///
@@ -190,6 +209,7 @@ impl GraphCompiler {
             effects,
             builtins,
             caps,
+            dispatch,
         } = request;
         let builtin_diagnostics = builtins.validate_for_session(&effects.session);
         if !builtin_diagnostics.0.is_empty() {
@@ -222,6 +242,7 @@ impl GraphCompiler {
                 plan_id,
                 effects,
                 caps,
+                dispatch,
             },
             &builtin_tails,
             Some(&builtins),
@@ -235,7 +256,6 @@ impl GraphCompiler {
                 });
             }
         };
-        let dispatch = compiled.report.rack_cohorts.dispatch;
         let levels = compiled.report.dependency_levels.clone();
         Ok(builtins.into_graph_artifact_with_banks(
             compiled.graph,
@@ -262,6 +282,7 @@ impl GraphCompiler {
             plan_id,
             effects,
             caps,
+            dispatch,
         } = request;
         let mut diagnostics = Vec::new();
         if !caps.all_nonzero() {
@@ -570,7 +591,6 @@ impl GraphCompiler {
         let buffers = buffer_assignments(&schedule, &edges);
         let ports = ports_for(&nodes, &edges);
         let reductions = reduction_records(&nodes, &edges);
-        let dispatch = KernelDispatch::select(target_capabilities());
         let (banks, rack_cohorts) = match bind_rack_banks(&effects, &effect_ids, &levels, dispatch)
         {
             Ok(value) => value,
@@ -2124,6 +2144,17 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dispatch every in-crate test compiles with.
+    ///
+    /// #99 F6 made dispatch an explicit compile input; these tests keep the *previous* behaviour
+    /// -- the host's detected capabilities -- so bank membership, scratch allocation and the
+    /// capped estimate are unchanged by that move on any given machine.
+    /// `scalar_dispatch_compiles_without_banks_on_any_host` is the test that exercises the other
+    /// value, which was unreachable before without feature injection.
+    fn host_dispatch() -> KernelDispatch {
+        KernelDispatch::select(target_capabilities())
+    }
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
     use miso_engine_builtins_compiler::{
@@ -2874,6 +2905,7 @@ mod tests {
         )
         .expect("compiled session");
         GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
                 session: compiled,
@@ -2931,6 +2963,7 @@ mod tests {
         )
         .expect("compiled reverse-route submix session");
         GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
                 session,
@@ -3334,8 +3367,96 @@ mod tests {
         assert_eq!(first.report.dot, second.report.dot);
     }
 
+    /// #99 F6: dispatch is an input, so the scalar path is reachable on any host and the
+    /// semantic graph does not move when it is taken.
+    ///
+    /// The same twelve-track prepared session is compiled twice: once with the host's detected
+    /// dispatch (which banks on an AVX2/NEON/simd128 machine) and once with the scalar dispatch.
+    /// Scalar must produce zero banks, and every semantic output -- schedule, dependency levels,
+    /// route timings, inserted delays, reductions, route transforms, buffer assignments and the
+    /// canonical bytes/SHA -- must be byte-identical to the banked compile. That is the property
+    /// the crate documents ("changing a host backend cannot change graph semantics") and it was
+    /// previously untestable, because compile read the CPU itself.
     #[test]
-    fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
+    fn scalar_dispatch_compiles_without_banks_on_any_host() {
+        let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        ));
+        assert!(
+            scalar.bank_width().is_none(),
+            "the scalar dispatch must not offer a bank width"
+        );
+        let (_, _, banked_effects) = twelve_track_bank_fixture();
+        let banked = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 771,
+            effects: banked_effects,
+            caps: integration_caps(),
+            dispatch: host_dispatch(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        let (_, _, scalar_effects) = twelve_track_bank_fixture();
+        let plain = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 771,
+            effects: scalar_effects,
+            caps: integration_caps(),
+            dispatch: scalar,
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+
+        assert_eq!(plain.graph.prepared_bank_count(), 0);
+        let expected_banked = host_dispatch()
+            .bank_width()
+            .map_or(0, |width| 12 / width.lanes() as usize);
+        assert_eq!(banked.graph.prepared_bank_count(), expected_banked);
+        // Non-vacuity: on a host that cannot bank at all, both compiles bind zero banks and the
+        // comparison proves nothing. Recorded rather than skipped, so a scalar CI host is visible
+        // as a gap in the evidence instead of a silent pass. The delivery host is x86-64-v3
+        // (AVX2+FMA), where this is 1 bank of 8 plus a 4-track scalar tail.
+        assert!(
+            expected_banked > 0,
+            "host cannot form banks; scalar_dispatch_compiles_without_banks_on_any_host is \
+             vacuous here and its evidence must be taken on an AVX2/NEON/simd128 host"
+        );
+
+        assert_eq!(
+            plain.report.sequential_schedule,
+            banked.report.sequential_schedule
+        );
+        assert_eq!(
+            plain.report.dependency_levels,
+            banked.report.dependency_levels
+        );
+        assert_eq!(plain.report.route_timings, banked.report.route_timings);
+        assert_eq!(plain.report.inserted_delays, banked.report.inserted_delays);
+        assert_eq!(plain.report.reductions, banked.report.reductions);
+        assert_eq!(
+            plain.report.route_transforms,
+            banked.report.route_transforms
+        );
+        assert_eq!(
+            plain.report.buffer_assignments,
+            banked.report.buffer_assignments
+        );
+        assert_eq!(plain.report.output_latency, banked.report.output_latency);
+        assert_eq!(plain.report.output_tail, banked.report.output_tail);
+        assert_eq!(
+            plain.report.canonical_debug_bytes,
+            banked.report.canonical_debug_bytes
+        );
+        assert_eq!(plain.report.sha256, banked.report.sha256);
+        assert_eq!(plain.report.dot, banked.report.dot);
+        assert_eq!(plain.report.rack_cohorts.dispatch, scalar);
+    }
+
+    /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
+    ///
+    /// Shared by the bank-binding test and by `scalar_dispatch_compiles_without_banks_on_any_host`
+    /// (#99 F6), which needs the *same* prepared session compiled twice under two dispatches.
+    fn twelve_track_bank_fixture() -> (
+        miso_engine_session::CompiledSession,
+        NativeEffectRegistry,
+        EffectPreparedSession,
+    ) {
         let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
@@ -3400,7 +3521,14 @@ mod tests {
             },
         )
         .expect("effects");
+        (session, registry, effects)
+    }
+
+    #[test]
+    fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
+        let (session, registry, effects) = twelve_track_bank_fixture();
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 998,
             effects,
             caps: integration_caps(),
@@ -3494,6 +3622,7 @@ mod tests {
         )
         .expect("scalar effects");
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 999,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -3790,6 +3919,7 @@ mod tests {
             .expect("audit builtins");
             let audit_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
                     plan_id: 1_000,
                     effects: audit_effects,
                     builtins: audit_builtins,
@@ -3973,6 +4103,7 @@ mod tests {
             )
             .expect("prepared cohort-boundary effects");
             let artifact = GraphCompiler::compile(GraphCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: 1_096,
                 effects,
                 caps: integration_caps(),
@@ -4105,12 +4236,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar effects");
         let bank_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_042,
             effects: bank_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_043,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4313,6 +4446,7 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_044,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -4408,12 +4542,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar compressor effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_013,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("compressor graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_014,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4589,6 +4725,7 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(960))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -4642,12 +4779,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar gate/expander effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_014,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("gate/expander graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4831,6 +4970,7 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(480))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_016,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -4886,12 +5026,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar limiter effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_050,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_051,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5186,6 +5328,7 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_052,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -5220,6 +5363,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_053,
             effects: cap_effects,
             caps: constrained_caps,
@@ -5296,12 +5440,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar multiband effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_080,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("multiband graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_081,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5567,6 +5713,7 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass multiband effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_082,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -5596,6 +5743,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_083,
             effects: cap_effects,
             caps: constrained_caps,
@@ -5672,12 +5820,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar soft-clip effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_100,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_101,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5944,6 +6094,7 @@ mod tests {
                 && entry.metadata.tail == TailSamples::Finite(29)
         }));
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_102,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -5973,6 +6124,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_103,
             effects: cap_effects,
             caps: constrained_caps,
@@ -6047,12 +6199,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar transient-shaper effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_120,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("transient-shaper graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_121,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -6291,6 +6445,7 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass transient-shaper effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_122,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -6322,6 +6477,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_123,
             effects: cap_effects,
             caps: constrained_caps,
@@ -6394,6 +6550,7 @@ mod tests {
         }));
 
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_130,
             effects,
             caps: integration_caps(),
@@ -6608,6 +6765,7 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass delays");
         let bypass = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_131,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -6626,6 +6784,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero delay plan estimate");
         let failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_132,
             effects: cap_effects,
             caps: constrained,
@@ -6674,6 +6833,7 @@ mod tests {
         )
         .expect("builtins");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 77,
             effects: EffectPreparedSession {
                 session: compiled,
@@ -6755,6 +6915,7 @@ mod tests {
             )
             .expect("builtins");
             GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id,
                 effects: EffectPreparedSession {
                     session,
@@ -6990,6 +7151,7 @@ mod tests {
         )
         .expect("compiled cap session");
         let base = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 79,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7015,6 +7177,7 @@ mod tests {
         )
         .expect("baseline builtins");
         let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 80,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7048,6 +7211,7 @@ mod tests {
         )
         .expect("returned builtins");
         let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 81,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7160,6 +7324,7 @@ mod tests {
             )
             .expect("prepared seeded builtins");
             let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: u64::from(layout) + 50_000,
                 effects: EffectPreparedSession {
                     session: compiled.clone(),
@@ -7189,6 +7354,7 @@ mod tests {
             .expect("independently prepared native seeded builtins");
             let native_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
                     plan_id: u64::from(layout) + 60_000,
                     effects: EffectPreparedSession {
                         session: compiled,
@@ -7500,6 +7666,7 @@ mod tests {
             .expect("builtins");
             builtins.test_only_corrupt_for_compiler_test(corruption);
             let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: 78,
                 effects: EffectPreparedSession {
                     session: compiled,
@@ -7959,6 +8126,7 @@ mod tests {
         )
         .expect("session");
         let changed = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1,
             effects: EffectPreparedSession {
                 session,
@@ -7999,6 +8167,7 @@ mod tests {
         )
         .expect("session");
         let compiled = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1,
             effects: EffectPreparedSession {
                 session,

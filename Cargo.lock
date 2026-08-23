@@ -907,6 +907,7 @@ name = "miso-engine-graph-bench"
 version = "0.1.0"
 dependencies = [
  "miso-engine-conformance",
+ "miso-engine-core",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-graph",

@@ -3,6 +3,8 @@
 #![allow(unsafe_code)]
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     time::Instant,
@@ -500,6 +502,7 @@ fn prepare_real_meter_tap_artifact(
     )
     .expect("frozen builtin tap requests");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: ISSUE.into(),
         effects,
         builtins,

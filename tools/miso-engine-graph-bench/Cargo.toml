@@ -10,6 +10,7 @@ name = "miso_engine_graph_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-core.workspace = true
 miso-engine-conformance.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true

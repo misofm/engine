@@ -489,6 +489,7 @@ impl MixedRuntime {
         )
         .expect("mixed effect preparation");
         let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: KernelDispatch::select(target_capabilities()),
             plan_id: 38,
             effects,
             builtins,
