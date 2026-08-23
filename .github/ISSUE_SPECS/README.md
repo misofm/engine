@@ -124,11 +124,11 @@ identical C ABI replacement evidence and lifecycle ownership**, then stopped at 
 verdict at technical checkpoint `ecd7253`: layout identity, eager ownership, literal command/event
 vectors, production-origin stimulation, real lifecycle wrappers and the ordered 6x6 matrix are
 verified technical input, but a new public mutable protocol event producer remained and plan/model/
-source oracle inputs were still high-level pins with ineffective mutations. Issue 121, **Close
-CAPI-owned render events and primitive replacement resource authority**, consumes that checkpoint
-plus accepted Issues 005, 003 and 022, owns only those two residuals, and gates Issue 025 directly.
-Issue 114, **Qualify native C ABI and reference runner target matrix**, joins accepted Issues 116
-and 121 and alone owns native platform/runner qualification before Issue 026. Issues 101
+source oracle inputs were still high-level pins with ineffective mutations. Accepted Issue 121,
+**Close CAPI-owned render events and primitive replacement resource authority**, closed those two
+residuals with strict Sol XHigh PASS and gates Issue 025 directly. Issue 114, **Qualify native C ABI
+and reference runner target matrix**, is ready for Sol High pass 1 from accepted Issues 116 and 121
+and alone owns native platform/runner qualification before Issue 026. Issues 101
 and 112 change
 no public/resource shape and defer the
 source audit's F2–F12. Issue 023 consumes Issue 022 directly. Issue 024, **Launch scalar and simd128 AudioWorklet host**,
