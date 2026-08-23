@@ -260,7 +260,7 @@ impl ProtocolCodec {
         {
             return Err(EncodeError::MessageKindMismatch);
         }
-        let mut sizing = CountSink::new(self.limits());
+        let mut sizing = CountSink::new(transaction_envelope_limits(self.limits()));
         encode_transaction_payload_into(&mut sizing, transaction.edits)?;
         let required = crate::OUTER_HEADER_BYTES
             .checked_add(sizing.written())
@@ -302,7 +302,7 @@ impl ProtocolCodec {
         );
         let mut writer = SliceSink::new(
             &mut output[crate::OUTER_HEADER_BYTES..required],
-            self.limits(),
+            transaction_envelope_limits(self.limits()),
         );
         encode_transaction_payload_into(&mut writer, transaction.edits)?;
         debug_assert_eq!(writer.written(), required - crate::OUTER_HEADER_BYTES);
@@ -316,12 +316,9 @@ impl ProtocolCodec {
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
         let limits = self.limits();
-        let envelope_codec = ProtocolCodec::new(crate::ProtocolLimits {
-            // The transaction/edit/payload wrappers are fixed protocol envelopes. They do not
-            // consume the configured logical model-message nesting allowance.
-            max_nesting: limits.max_nesting.saturating_add(3),
-            ..limits
-        });
+        // The transaction/edit/payload wrappers are fixed protocol envelopes. They do not consume
+        // the configured logical model-message nesting allowance.
+        let envelope_codec = ProtocolCodec::new(transaction_envelope_limits(limits));
         let frame = envelope_codec.decode(input, scratch)?;
         let Some(header) = frame.header.command() else {
             return Err(DecodeError::MessageKindMismatch);
@@ -379,10 +376,7 @@ impl ProtocolCodec {
     ) -> Result<DecodedSessionTransaction<'a>, DecodeError> {
         let header = transaction_header(frame)?;
         let limits = self.limits();
-        let envelope_limits = crate::ProtocolLimits {
-            max_nesting: limits.max_nesting.saturating_add(3),
-            ..limits
-        };
+        let envelope_limits = transaction_envelope_limits(limits);
         let top = Message::bounded(frame.payload, header.tlv_count, envelope_limits, 0)
             .schema_spec(&schema::session::transaction::SPEC)?;
         let count = u32::try_from(values_spec!(top, schema::session::transaction::EDIT)?.count())
@@ -458,7 +452,7 @@ fn tx_start_message(sink: &mut dyn Sink, count: u32) -> Result<(), EncodeError> 
 }
 
 fn tx_field(sink: &mut dyn Sink, spec: FieldSpec, value: &[u8]) -> Result<(), EncodeError> {
-    sink.field(spec.id, spec.wire.raw(), value)
+    sink.field_spec(spec, value)
 }
 
 fn tx_u8(sink: &mut dyn Sink, spec: FieldSpec, value: u8) -> Result<(), EncodeError> {
@@ -493,16 +487,23 @@ fn tx_message(
     spec: FieldSpec,
     mut encode: impl FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
 ) -> Result<(), EncodeError> {
-    sink.nested(spec.id, &mut encode)
+    sink.nested_spec(spec, &mut encode)
+}
+
+const fn transaction_envelope_limits(limits: crate::ProtocolLimits) -> crate::ProtocolLimits {
+    crate::ProtocolLimits {
+        max_nesting: limits.max_nesting.saturating_add(3),
+        ..limits
+    }
 }
 
 fn encode_transaction_payload_into(
     sink: &mut dyn Sink,
     edits: &[SessionEditV1],
 ) -> Result<(), EncodeError> {
-    if tx_count(0, edits.len())? > sink.limits().max_tlv_count {
-        return Err(EncodeError::LimitExceeded);
-    }
+    let count = schema::session::transaction::SPEC
+        .field_count(&[(schema::session::transaction::EDIT, edits.len())])?;
+    sink.check_field_count(count)?;
     for edit in edits {
         tx_message(sink, schema::session::transaction::EDIT, |nested| {
             tx_edit_message(nested, edit)
@@ -512,7 +513,7 @@ fn encode_transaction_payload_into(
 }
 
 fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
-    tx_start_message(sink, 2)?;
+    tx_start_message(sink, schema::session::edit::SPEC.field_count(&[])?)?;
     tx_u16(sink, schema::session::edit::OPCODE, edit.opcode().raw())?;
     tx_message(sink, schema::session::edit::PAYLOAD, |nested| {
         tx_edit_payload(nested, edit)
@@ -520,50 +521,16 @@ fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
 }
 
 fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
-    let fields = schema::session::payload_spec(edit.opcode()).fields;
+    let spec = schema::session::payload_spec(edit.opcode());
+    let fields = spec.fields;
     let count = match edit {
-        SessionEditV1::SetSessionId { .. }
-        | SessionEditV1::SetSampleRateHz { .. }
-        | SessionEditV1::SetQuantumFrames { .. }
-        | SessionEditV1::SetRenderProfile { .. }
-        | SessionEditV1::SetOutputProfile { .. }
-        | SessionEditV1::SetLimits { .. }
-        | SessionEditV1::UpsertSource { .. }
-        | SessionEditV1::RemoveSource { .. }
-        | SessionEditV1::UpsertTrack { .. }
-        | SessionEditV1::RemoveTrack { .. }
-        | SessionEditV1::UpsertSubmix { .. }
-        | SessionEditV1::RemoveSubmix { .. }
-        | SessionEditV1::UpsertOutput { .. }
-        | SessionEditV1::RemoveOutput { .. }
-        | SessionEditV1::UpsertRoute { .. }
-        | SessionEditV1::RemoveRoute { .. }
-        | SessionEditV1::UpsertAutomation { .. }
-        | SessionEditV1::RemoveAutomation { .. } => 1,
-        SessionEditV1::SetSourceSampleRateHz { .. }
-        | SessionEditV1::SetSourceContent { .. }
-        | SessionEditV1::SetSourceMapping { .. }
-        | SessionEditV1::SetTrackBuiltins { .. }
-        | SessionEditV1::SetTrackFader { .. }
-        | SessionEditV1::SetTrackMatrixOrPan { .. }
-        | SessionEditV1::SetRouteSource { .. }
-        | SessionEditV1::SetRouteDestination { .. }
-        | SessionEditV1::SetRouteChannelMatrix { .. }
-        | SessionEditV1::SetRouteGainDb { .. }
-        | SessionEditV1::SetAutomationTarget { .. } => 2,
-        SessionEditV1::SetTrackRack { .. } => 3,
-        SessionEditV1::SetTrackSourceAssignment { .. }
-        | SessionEditV1::PutTrackEffect { .. }
-        | SessionEditV1::SetEffectIdentity { .. }
-        | SessionEditV1::SetEffectQuality { .. }
-        | SessionEditV1::SetEffectBypass { .. }
-        | SessionEditV1::SetEffectLinkMode { .. }
-        | SessionEditV1::SetEffectSidechain { .. }
-        | SessionEditV1::UpsertEffectParam { .. } => 4,
-        SessionEditV1::RemoveTrackEffect { .. } => 3,
-        SessionEditV1::SetTrackEffectOrder { effect_ids, .. } => tx_count(2, effect_ids.len())?,
-        SessionEditV1::RemoveEffectParam { .. } => 5,
-        SessionEditV1::SetAutomationSegments { segments, .. } => tx_count(1, segments.len())?,
+        SessionEditV1::SetTrackEffectOrder { effect_ids, .. } => {
+            spec.field_count(&[(fields[2], effect_ids.len())])?
+        }
+        SessionEditV1::SetAutomationSegments { segments, .. } => {
+            spec.field_count(&[(fields[1], segments.len())])?
+        }
+        _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
     match edit {
@@ -2477,6 +2444,46 @@ mod tests {
         let mut overflow =
             CountSink::with_length_for_test(usize::MAX, crate::ProtocolLimits::default());
         assert_eq!(overflow.raw(&[0]), Err(EncodeError::LimitExceeded));
+    }
+
+    #[test]
+    fn transaction_encoder_reserves_envelope_depth_for_frozen_deep_fixture() {
+        let flat_edits = [SessionEditV1::SetSessionId {
+            session_id: id("depth-envelope"),
+        }];
+        let flat = SessionTransactionFrame {
+            request_id: RequestId::new(35).expect("request"),
+            expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+            edits: &flat_edits,
+        };
+        let zero_logical_depth = ProtocolCodec::new(crate::ProtocolLimits {
+            max_nesting: 0,
+            ..crate::ProtocolLimits::default()
+        });
+        let flat_len = zero_logical_depth
+            .encoded_session_transaction_len(&flat)
+            .expect("three fixed envelopes do not consume logical nesting");
+        let mut flat_bytes = vec![0; flat_len];
+        zero_logical_depth
+            .encode_session_transaction(&flat, &mut flat_bytes)
+            .expect("flat transaction encodes at zero logical depth");
+
+        let deep_edits = complete_all_opcode_fixture();
+        let deep = SessionTransactionFrame {
+            request_id: RequestId::new(36).expect("request"),
+            expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+            edits: &deep_edits,
+        };
+        assert!(
+            ProtocolCodec::default()
+                .encoded_session_transaction_len(&deep)
+                .is_ok(),
+            "canonical deep transaction remains encodable"
+        );
+        assert_eq!(
+            zero_logical_depth.encoded_session_transaction_len(&deep),
+            Err(EncodeError::LimitExceeded)
+        );
     }
 
     #[test]

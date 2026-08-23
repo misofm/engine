@@ -521,6 +521,7 @@ pub(crate) trait Sink {
         self.raw(&0_u32.to_le_bytes())
     }
 
+    #[cfg(test)]
     fn field(&mut self, id: u16, wire: u8, value: &[u8]) -> Result<(), EncodeError> {
         let length = u32::try_from(value.len()).map_err(|_| EncodeError::LimitExceeded)?;
         let mut prefix = [0_u8; TLV_PREFIX_BYTES];
@@ -544,6 +545,7 @@ pub(crate) trait Sink {
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError>;
 
+    #[cfg(test)]
     fn nested(
         &mut self,
         id: u16,
@@ -574,16 +576,25 @@ pub(crate) trait Sink {
 pub(crate) struct CountSink {
     length: usize,
     limits: ProtocolLimits,
+    depth: u8,
 }
 
 impl CountSink {
     pub(crate) const fn new(limits: ProtocolLimits) -> Self {
-        Self { length: 0, limits }
+        Self {
+            length: 0,
+            limits,
+            depth: 0,
+        }
     }
 
     #[cfg(test)]
     pub(crate) const fn with_length_for_test(length: usize, limits: ProtocolLimits) -> Self {
-        Self { length, limits }
+        Self {
+            length,
+            limits,
+            depth: 0,
+        }
     }
 }
 
@@ -626,9 +637,18 @@ impl Sink for CountSink {
         _mandatory: bool,
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError> {
+        if self.depth >= self.limits.max_nesting {
+            return Err(EncodeError::LimitExceeded);
+        }
         self.raw(&[0_u8; TLV_PREFIX_BYTES])?;
         let body_start = self.length;
-        body(self)?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(EncodeError::LimitExceeded)?;
+        let result = body(self);
+        self.depth -= 1;
+        result?;
         let body_len = self.length - body_start;
         u32::try_from(body_len).map_err(|_| EncodeError::LimitExceeded)?;
         self.raw(&[0_u8; 7][..padding(body_len)])
@@ -639,6 +659,7 @@ pub(crate) struct SliceSink<'a> {
     output: &'a mut [u8],
     length: usize,
     limits: ProtocolLimits,
+    depth: u8,
 }
 
 impl<'a> SliceSink<'a> {
@@ -647,6 +668,7 @@ impl<'a> SliceSink<'a> {
             output,
             length: 0,
             limits,
+            depth: 0,
         }
     }
 }
@@ -703,6 +725,9 @@ impl Sink for SliceSink<'_> {
         mandatory: bool,
         body: &mut dyn FnMut(&mut dyn Sink) -> Result<(), EncodeError>,
     ) -> Result<(), EncodeError> {
+        if self.depth >= self.limits.max_nesting {
+            return Err(EncodeError::LimitExceeded);
+        }
         let field_start = self.length;
         let mut prefix = [0_u8; TLV_PREFIX_BYTES];
         prefix[..2].copy_from_slice(&id.to_le_bytes());
@@ -710,7 +735,13 @@ impl Sink for SliceSink<'_> {
         prefix[3] = u8::from(mandatory);
         self.raw(&prefix)?;
         let body_start = self.length;
-        body(self)?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(EncodeError::LimitExceeded)?;
+        let result = body(self);
+        self.depth -= 1;
+        result?;
         let body_len = self.length - body_start;
         let value_len = u32::try_from(body_len).map_err(|_| EncodeError::LimitExceeded)?;
         self.output[field_start + 4..field_start + 8].copy_from_slice(&value_len.to_le_bytes());
@@ -721,6 +752,54 @@ impl Sink for SliceSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_sinks_enforce_depth_and_restore_it_after_body_errors() {
+        let zero = ProtocolLimits {
+            max_nesting: 0,
+            ..ProtocolLimits::default()
+        };
+        let mut sizing_body_calls = 0;
+        let mut sizing = CountSink::new(zero);
+        assert_eq!(
+            sizing.nested(1, &mut |_| {
+                sizing_body_calls += 1;
+                Ok(())
+            }),
+            Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(sizing_body_calls, 0);
+        assert_eq!(sizing.depth, 0);
+
+        let mut output = [0xa5; 64];
+        let mut writing_body_calls = 0;
+        let mut writer = SliceSink::new(&mut output, zero);
+        assert_eq!(
+            writer.nested(1, &mut |_| {
+                writing_body_calls += 1;
+                Ok(())
+            }),
+            Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(writing_body_calls, 0);
+        assert_eq!(writer.depth, 0);
+        assert_eq!(writer.written(), 0);
+
+        let one = ProtocolLimits {
+            max_nesting: 1,
+            ..ProtocolLimits::default()
+        };
+        let mut sizing = CountSink::new(one);
+        assert_eq!(
+            sizing.nested(1, &mut |sink| { sink.nested(2, &mut |_| Ok(())) }),
+            Err(EncodeError::LimitExceeded)
+        );
+        assert_eq!(sizing.depth, 0);
+        sizing
+            .nested(3, &mut |sink| sink.message_header(0))
+            .expect("depth restored after nested body error");
+        assert_eq!(sizing.depth, 0);
+    }
 
     #[test]
     fn nested_body_runs_once_per_sink_and_patches_length() {
