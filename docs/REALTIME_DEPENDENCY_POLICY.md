@@ -86,6 +86,37 @@ available standard atomic type is lock-free, and the supported native/mobile tar
 read-modify-write retry. Browser launch uses `LocalRing` on its single render agent; the inspected
 baseline Wasm object contains no atomic opcode and makes no cross-agent shared-memory claim.
 
+## Panic behaviour by profile
+
+Issue 083 (master plan D12) gives the workspace one release profile: `lto = "fat"`,
+`codegen-units = 1`, `panic = "abort"`, `debug = 1`, with `[profile.bench]` inheriting it so a
+benchmark measures the shipped code. Fat LTO and a single codegen unit are what let a consumer's
+instantiation of the `#[inline(always)]` generic kernel bodies in `crates/miso-engine-lane` collapse
+into the intended straight-line loop; `debug = 1` keeps line tables so a profile or a core dump
+names a kernel, and costs build time and artifact size, never speed.
+
+`panic = "abort"` is a deliberate, user-visible change and is recorded here rather than hidden:
+
+- A release build has **no unwinding**. `std::panic::catch_unwind` still compiles and still returns
+  `Ok` on the normal path, but it can no longer contain a panic: the process aborts instead. The
+  affected boundaries are `crates/miso-engine-capi/src/ffi.rs` (`catch_result`, `catch_destroy`,
+  which map a contained panic to `RESULT_INTERNAL`), `hosts/miso-engine-host-web/src/ffi.rs`, the
+  `catch_unwind` probes inside `crates/miso-engine-conformance`, and the `panic_unwinds` counter in
+  `tools/miso-engine-rack-bench`. In a release artifact each of those is a diagnostic that no longer
+  fires; none of them is load-bearing for a call that does not panic, so behaviour on a passing host
+  is unchanged.
+- Embedders must read this as: **the C ABI does not convert a panic into `RESULT_INTERNAL` in a
+  release build of `libmiso_engine_capi`.** A panic is an engine defect, and unwinding across a C or
+  Wasm frame is undefined by either ABI, so aborting is the honest contract. `RESULT_INTERNAL` stays
+  in the ABI for the internal failures that are returned, not thrown.
+- The browser artifacts built by `scripts/build-web-audioworklet.sh` are `--release` builds and
+  therefore inherit `panic = "abort"`: a panic inside the AudioWorklet traps the module instead of
+  returning `RESULT_INTERNAL` to the worklet shim.
+- Cargo ignores the `panic` setting when it builds a test or benchmark harness, so
+  `cargo test --release` (including the Loom race model and every gate that runs in release) still
+  unwinds and `#[should_panic]` still works. That was verified by inspecting the `rustc`
+  command lines: a release binary is compiled with `-C panic=abort`, a release test harness is not.
+
 ## Issue 004 control-plane parser dependencies
 
 `miso-engine-session` is not render-reachable. It depends one way on `miso-engine-core` only for

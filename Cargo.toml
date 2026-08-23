@@ -110,3 +110,27 @@ correctness = "deny"
 suspicious = "deny"
 perf = "deny"
 undocumented_unsafe_blocks = "deny"
+
+# Master plan #83 D12. One release profile for every artifact the engine ships, so a benchmark, a
+# CI probe and a shipped host all measure and execute the same code.
+#
+# `lto = "fat"` and `codegen-units = 1` exist for one reason: the block kernels of
+# `crates/miso-engine-lane` are `#[inline(always)]` generic bodies that a consumer instantiates at
+# its own lane width. They only become the intended straight-line loop when the optimizer can see
+# across crate boundaries. `debug = 1` keeps line tables so a profile or a core dump names a
+# kernel, and costs build time and artifact size, never speed.
+#
+# `panic = "abort"` is the audible decision: a panic on a render thread has no recovery worth the
+# unwinding machinery, and an unwind through a C or Wasm frame is not defined by either ABI. It
+# changes what `catch_unwind` does in release builds -- see docs/REALTIME_DEPENDENCY_POLICY.md,
+# "Panic behaviour by profile". Cargo ignores this setting when it builds a test or benchmark
+# harness, so `cargo test --release` still unwinds and `#[should_panic]` still works.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+# Benchmarks measure the shipped profile, never a separately tuned one.
+[profile.bench]
+inherits = "release"
