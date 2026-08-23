@@ -498,7 +498,11 @@ impl GraphCompiler {
         if !diagnostics.is_empty() {
             return Err(failure(effects, diagnostics));
         }
-        let (schedule, levels) = topo(&nodes, &edges).expect("acyclic graph has schedule");
+        let levels = topo(&nodes, &edges).expect("acyclic graph has schedule");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         if schedule.len() as u64 > caps.maximum_schedule_items
             || levels.len() as u64 > caps.maximum_dependency_levels
         {
@@ -1276,10 +1280,7 @@ fn max_tail(a: TailSamples, b: TailSamples) -> TailSamples {
         (TailSamples::Finite(a), TailSamples::Finite(b)) => TailSamples::Finite(a.max(b)),
     }
 }
-fn topo(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Option<(Vec<GraphNodeId>, Vec<DependencyLevel>)> {
+fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
     let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
     let mut successors: BTreeMap<_, Vec<_>> = nodes
         .iter()
@@ -1302,7 +1303,7 @@ fn topo(
         .iter()
         .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
         .collect();
-    let mut schedule = Vec::new();
+    let mut processed = 0_usize;
     let mut levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
     let mut node_levels = BTreeMap::new();
     while let Some(node) = ready.pop_first() {
@@ -1314,7 +1315,7 @@ fn topo(
             .map_or(0, |value| value + 1);
         node_levels.insert(node.clone(), level);
         levels.entry(level).or_default().push(node.clone());
-        schedule.push(node.clone());
+        processed += 1;
         for successor in &successors[&node] {
             let degree = degree.get_mut(successor)?;
             *degree -= 1;
@@ -1323,19 +1324,18 @@ fn topo(
             }
         }
     }
-    if schedule.len() != nodes.len() {
+    if processed != nodes.len() {
         None
     } else {
         for nodes in levels.values_mut() {
             nodes.sort();
         }
-        Some((
-            schedule,
+        Some(
             levels
                 .into_iter()
                 .map(|(level, nodes)| DependencyLevel { level, nodes })
                 .collect(),
-        ))
+        )
     }
 }
 #[cfg(test)]
@@ -2915,6 +2915,14 @@ mod tests {
         {
             return Err("edge dependency");
         }
+        if report.sequential_schedule
+            != levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect::<Vec<_>>()
+        {
+            return Err("schedule level order");
+        }
         Ok(())
     }
 
@@ -3069,16 +3077,16 @@ mod tests {
             "route:to-a-submix",
             "route:to-z-submix",
             "submix:a-submix",
-            "route:z-downstream",
             "submix:z-submix",
             "route:a-downstream",
+            "route:z-downstream",
             "output:main-out",
         ];
         reverse_fixture_identity_contract(
             &baseline.report,
             &baseline.report.dependency_levels,
             &expected_schedule,
-            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
@@ -3122,62 +3130,42 @@ mod tests {
         ];
         assert_eq!(level_transcript, expected_levels);
 
-        let levels_by_node: BTreeMap<_, _> = baseline
-            .report
-            .dependency_levels
-            .iter()
-            .flat_map(|level| {
-                level
-                    .nodes
-                    .iter()
-                    .cloned()
-                    .map(move |node| (node, level.level))
-            })
-            .collect();
-        let mut legacy_levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
-        for node in &baseline.report.sequential_schedule {
-            legacy_levels
-                .entry(levels_by_node[node])
-                .or_default()
-                .push(node.clone());
-        }
-        let legacy_levels: Vec<_> = legacy_levels
-            .into_iter()
-            .map(|(level, nodes)| DependencyLevel { level, nodes })
-            .collect();
+        let mut legacy_report = baseline.report.clone();
+        legacy_report.sequential_schedule.swap(11, 12);
+        legacy_report.sequential_schedule.swap(10, 11);
         assert_eq!(
-            legacy_levels[9]
-                .nodes
+            legacy_report
+                .sequential_schedule
                 .iter()
                 .map(node_text)
                 .collect::<Vec<_>>(),
-            ["route:z-downstream", "route:a-downstream"]
+            [
+                "track:vocal:input",
+                "track:vocal:post-input-builtins",
+                "track:vocal:post-simd1",
+                "track:vocal:post-dynamic",
+                "track:vocal:post-simd2-pre-fader",
+                "track:vocal:post-fader",
+                "track:vocal:post-matrix",
+                "route:to-a-submix",
+                "route:to-z-submix",
+                "submix:a-submix",
+                "route:z-downstream",
+                "submix:z-submix",
+                "route:a-downstream",
+                "output:main-out",
+            ]
         );
         assert_eq!(
-            dependency_level_contract(&baseline.report, &legacy_levels),
-            Err("member order")
+            dependency_level_contract(&legacy_report, &legacy_report.dependency_levels),
+            Err("schedule level order")
         );
-        let legacy_canonical = canonical_with_levels(&baseline.report, &legacy_levels);
-        let without_levels = |bytes: &[u8]| {
-            core::str::from_utf8(bytes)
-                .expect("canonical UTF-8")
-                .lines()
-                .filter(|line| !line.starts_with("level\t"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            without_levels(&legacy_canonical),
-            without_levels(&baseline.report.canonical_debug_bytes)
-        );
+        let legacy_canonical =
+            canonical_with_levels(&legacy_report, &legacy_report.dependency_levels);
         assert_ne!(legacy_canonical, baseline.report.canonical_debug_bytes);
         assert_eq!(
-            hex_sha256(&legacy_canonical),
-            "6676779806af8bb20c9abb287a39488512fc7c0972e96f6cd300f469539bd770"
-        );
-        assert_eq!(
             baseline.report.sha256,
-            "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce"
+            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5"
         );
         let mut reversed = baseline.report.dependency_levels.clone();
         reversed[9].nodes.reverse();
@@ -3205,9 +3193,9 @@ mod tests {
                 &schedule_corruption,
                 &schedule_corruption.dependency_levels,
                 &expected_schedule,
-                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
-            Err("schedule identity")
+            Err("schedule level order")
         );
         let mut canonical_corruption = baseline.report.clone();
         canonical_corruption.canonical_debug_bytes[0] ^= 1;
@@ -3216,7 +3204,7 @@ mod tests {
                 &canonical_corruption,
                 &canonical_corruption.dependency_levels,
                 &expected_schedule,
-                "3e5c3e43fc220ec91eb159d18749bec44fd96fba3f6ef908850c850d995582ce",
+                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
             Err("canonical identity")
         );
@@ -3361,6 +3349,15 @@ mod tests {
             .bank_width()
             .map_or(0, |width| 12 / width.lanes() as usize);
         assert_eq!(artifact.graph.prepared_bank_count(), expected);
+        assert_eq!(
+            artifact.report.sequential_schedule,
+            artifact
+                .report
+                .dependency_levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect::<Vec<_>>()
+        );
         let canonical = artifact.report.canonical_debug_bytes.clone();
         assert_eq!(canonical, artifact.report.canonical_debug_bytes);
         let bank_delays = artifact.report.inserted_delays.clone();
@@ -3511,6 +3508,87 @@ mod tests {
             worst.1.1
         );
 
+        let native_effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("native oracle effects");
+        let native_artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 1_000,
+            effects: native_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("native oracle graph: {:?}", failure.diagnostics));
+        let native_envelope = native_artifact.graph.envelope;
+        let native_nodes = native_artifact
+            .graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+            .collect();
+        let native = native_artifact
+            .graph
+            .bind_native(
+                GraphRuntimeBindings {
+                    envelope: native_envelope,
+                    nodes: native_nodes,
+                    observers: Vec::new(),
+                },
+                NativeGraphBindConfigV1 {
+                    render_mode: NativeGraphRenderModeV1::SingleThread,
+                    scheduler: NativeSchedulerConfigV1::new(
+                        NonZeroUsize::new(4).expect("four lanes"),
+                        true,
+                    ),
+                    maximum_retained_bytes: 1 << 28,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("native oracle bind: {}", failure.code));
+        assert!(matches!(
+            native.metadata.selection,
+            SchedulerSelectionV1::Sequential(_)
+        ));
+        let mut native_plan = native.into_plan();
+        let mut native_pcm = vec![0.0_f32; frames * 2];
+        native_plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
+                        .expect("native output"),
+                },
+                RenderTime { absolute_sample: 0 },
+            )
+            .expect("native oracle render");
+        for ((bank, scalar), native) in pcm.iter().zip(&scalar_pcm).zip(&native_pcm) {
+            let tolerance = 1.0e-6 + 2.0e-5 * scalar.abs();
+            assert!((*bank - *scalar).abs() <= tolerance);
+            assert!((*native - *scalar).abs() <= tolerance);
+        }
+        let pcm_hash = |samples: &[f32]| {
+            samples
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
+                    (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+        const LEVEL_MAJOR_MIXED_HASH: u64 = 0x4763_3fd9_831d_49c3;
+        assert_eq!(pcm_hash(&scalar_pcm), LEVEL_MAJOR_MIXED_HASH);
+        assert_eq!(pcm_hash(&native_pcm), LEVEL_MAJOR_MIXED_HASH);
+        assert_eq!(pcm_hash(&pcm), LEVEL_MAJOR_MIXED_HASH);
+        let mut zero_first = scalar_pcm.clone();
+        let first_nonzero = zero_first
+            .iter()
+            .position(|sample| *sample != 0.0)
+            .expect("mixed fixture has output");
+        zero_first[first_nonzero] = 0.0;
+        assert_ne!(pcm_hash(&zero_first), LEVEL_MAJOR_MIXED_HASH);
+
         // Host dispatch is deliberately detected only while preparing the normal artifact above.
         // These two direct, off-render binding probes exercise both legal factory widths on every
         // development host without pretending that a four-lane runtime was executed on x86.
@@ -3557,6 +3635,24 @@ mod tests {
                 bank.members.len()
                     == dispatch.bank_width().expect("vector backend").lanes() as usize
             }));
+            let assigned: BTreeMap<_, _> = artifact
+                .report
+                .buffer_assignments
+                .iter()
+                .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
+                .collect();
+            for bank in &banks {
+                let buffers: BTreeSet<_> = bank
+                    .members
+                    .iter()
+                    .map(|member| assigned[&GraphNodeId::Effect(member.clone())])
+                    .collect();
+                assert_eq!(
+                    buffers.len(),
+                    bank.members.len(),
+                    "simultaneously live bank outputs retain distinct colors"
+                );
+            }
         }
 
         let ids_for = |prepared: &EffectPreparedSession| {
@@ -3663,6 +3759,127 @@ mod tests {
             12,
             "factory failure retained every scalar input"
         );
+
+        // A separately prepared native graph seals the same 100,000-block corpus without
+        // invoking the env-gated product audit. Render only a bounded prefix, require its exact
+        // 28-block input/filter recurrence three consecutive times, then reference-hash that
+        // closed cycle through the remaining corpus. This is independent of the sequential
+        // executor and the pinned hash.
+        let seal_effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("native corpus-seal effects");
+        let seal_builtins = prepare_session_builtins(
+            &session,
+            &[],
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("native corpus-seal builtins");
+        let seal_artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            plan_id: 1_001,
+            effects: seal_effects,
+            builtins: seal_builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("native corpus-seal graph: {:?}", failure.diagnostics));
+        let seal_envelope = seal_artifact.envelope();
+        let seal_nodes = seal_artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+            .collect();
+        let seal_bound = seal_artifact
+            .into_bound_native(
+                GraphRuntimeBindings {
+                    envelope: seal_envelope,
+                    nodes: seal_nodes,
+                    observers: Vec::new(),
+                },
+                NativeGraphBindConfigV1 {
+                    render_mode: NativeGraphRenderModeV1::SingleThread,
+                    scheduler: NativeSchedulerConfigV1::new(
+                        NonZeroUsize::new(4).expect("four lanes"),
+                        true,
+                    ),
+                    maximum_retained_bytes: 1 << 28,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("native corpus-seal bind: {}", failure.code));
+        assert!(matches!(
+            seal_bound.prepared.metadata.selection,
+            SchedulerSelectionV1::Sequential(_)
+        ));
+        let mut seal_plan = seal_bound.prepared.into_plan();
+        let mut seal_pcm = vec![0.0_f32; frames * 2];
+        let mut prefix_blocks = Vec::<Box<[u32]>>::with_capacity(4_096);
+        let mut reference_hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut mutated_hash = reference_hash;
+        for rendered_block in 0..4_096_u64 {
+            seal_plan
+                .render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut seal_pcm, 2, frames, frames)
+                            .expect("native corpus-seal output"),
+                    },
+                    RenderTime {
+                        absolute_sample: rendered_block * frames as u64,
+                    },
+                )
+                .expect("native corpus-seal prefix render");
+            let current_bits: Box<[_]> = seal_pcm.iter().map(|sample| sample.to_bits()).collect();
+            for (sample_index, bits) in current_bits.iter().copied().enumerate() {
+                reference_hash =
+                    (reference_hash ^ u64::from(bits)).wrapping_mul(0x0000_0100_0000_01b3);
+                let mutated = if rendered_block == 0 && sample_index == 0 {
+                    bits ^ 1
+                } else {
+                    bits
+                };
+                mutated_hash =
+                    (mutated_hash ^ u64::from(mutated)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            prefix_blocks.push(current_bits);
+        }
+        let periodic_tail = (1..=prefix_blocks.len() / 3)
+            .find(|period| {
+                let first = prefix_blocks.len() - 3 * period;
+                prefix_blocks[first..first + period]
+                    == prefix_blocks[first + period..first + 2 * period]
+                    && prefix_blocks[first + period..first + 2 * period]
+                        == prefix_blocks[first + 2 * period..]
+            })
+            .expect("bounded native prefix reaches a repeated bit-exact period");
+        assert_eq!(periodic_tail, 28, "exact native reference period");
+        let cycle = &prefix_blocks[prefix_blocks.len() - periodic_tail..];
+        for block in prefix_blocks.len()..100_000 {
+            for bits in cycle[(block - prefix_blocks.len()) % periodic_tail].iter() {
+                reference_hash =
+                    (reference_hash ^ u64::from(*bits)).wrapping_mul(0x0000_0100_0000_01b3);
+                mutated_hash =
+                    (mutated_hash ^ u64::from(*bits)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        const LEVEL_MAJOR_100K_HASH: u64 = 0xf8ee_8fef_8f42_3df4;
+        const STALE_KAHN_100K_HASH: u64 = 0x9f30_db02_2065_6d79;
+        assert_eq!(reference_hash, LEVEL_MAJOR_100K_HASH);
+        assert_ne!(reference_hash, STALE_KAHN_100K_HASH);
+        assert_ne!(mutated_hash, LEVEL_MAJOR_100K_HASH);
 
         // The Issue-037 production audit is explicit-release-only. It intentionally binds the
         // sealed builtin artifact, rather than the old scalar fixture effect bank, and proves
@@ -3807,7 +4024,7 @@ mod tests {
                 "exact real HPF/LPF TPT kernel calls for independent L/R lanes"
             );
             assert_eq!(
-                output_hash, 0x9f30_db02_2065_6d79,
+                output_hash, LEVEL_MAJOR_100K_HASH,
                 "deterministic mixed output hash"
             );
         }
@@ -6827,7 +7044,7 @@ mod tests {
         }
         assert_eq!(completed, 100);
         assert_eq!(
-            transcript, 0xc85b_2209_8007_7824,
+            transcript, 0x4965_aa76_4307_e393,
             "frozen Issue-037 seeded layout transcript"
         );
     }
@@ -7078,7 +7295,11 @@ mod tests {
             graph_node("effect", 3, TailSamples::Finite(5)),
         ];
         let edges = [edge("serial", "source", "effect")];
-        let (schedule, _) = topo(&nodes, &edges).expect("acyclic");
+        let levels = topo(&nodes, &edges).expect("acyclic");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         let latencies = nodes
             .iter()
             .map(|node| (node.id.clone(), node.latency))
@@ -7135,7 +7356,11 @@ mod tests {
                 path: "$.routes[id=late-main]".to_owned(),
             },
         ];
-        let (schedule, _) = topo(&nodes, &edges).expect("acyclic output graph");
+        let levels = topo(&nodes, &edges).expect("acyclic output graph");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
         let latencies = nodes
             .iter()
             .map(|node| (node.id.clone(), node.latency))
@@ -7217,6 +7442,85 @@ mod tests {
         assert_eq!(assigned[&route_a], 1);
         assert_eq!(assigned[&route_b], 2);
         assert_eq!(assigned[&output], 0);
+    }
+
+    #[test]
+    fn level_major_compiler_coloring_matches_independent_live_intervals() {
+        let artifact = compile_reverse_route_submix_fixture(123_200);
+        let report = artifact.report;
+        let flattened: Vec<_> = report
+            .dependency_levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+        assert_eq!(report.sequential_schedule, flattened);
+        assert_eq!(
+            report.buffer_assignments,
+            buffer_assignments(&flattened, &report.edges)
+        );
+
+        let mut old_kahn = flattened.clone();
+        old_kahn.swap(11, 12);
+        old_kahn.swap(10, 11);
+        assert_ne!(old_kahn, flattened);
+        assert_ne!(
+            buffer_assignments(&old_kahn, &report.edges),
+            report.buffer_assignments,
+            "old Kahn coloring cannot be retained under level-major execution"
+        );
+
+        let positions: BTreeMap<_, _> = flattened
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(position, node)| (node, position))
+            .collect();
+        let assigned: BTreeMap<_, _> = report
+            .buffer_assignments
+            .iter()
+            .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
+            .collect();
+        let intervals: Vec<_> = flattened
+            .iter()
+            .map(|node| {
+                let start = positions[node];
+                let end = report
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.source.node == *node)
+                    .map(|edge| positions[&edge.destination.node])
+                    .max()
+                    .unwrap_or(start);
+                (node, assigned[node], start, end)
+            })
+            .collect();
+        for (index, left) in intervals.iter().enumerate() {
+            for right in &intervals[index + 1..] {
+                if left.1 != right.1 || left.3 < right.2 {
+                    continue;
+                }
+                let aliases_identity_boundary = is_identity_boundary(right.0)
+                    && report
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.destination.node == *right.0)
+                        .count()
+                        == 1
+                    && report
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.source.node == *left.0)
+                        .count()
+                        == 1
+                    && report.edges.iter().any(|edge| {
+                        edge.source.node == *left.0 && edge.destination.node == *right.0
+                    });
+                assert!(
+                    aliases_identity_boundary,
+                    "overlapping non-alias live intervals"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7411,10 +7715,18 @@ mod tests {
             let second_cycle = cycle_witness(&nodes, &edges);
             assert_eq!(first_cycle, second_cycle);
             if first_cycle.is_none() {
-                let (first_schedule, first_levels) = topo(&nodes, &edges).expect("acyclic");
-                let (second_schedule, second_levels) = topo(&nodes, &edges).expect("repeat");
-                assert_eq!(first_schedule, second_schedule);
+                let first_levels = topo(&nodes, &edges).expect("acyclic");
+                let second_levels = topo(&nodes, &edges).expect("repeat");
                 assert_eq!(first_levels, second_levels);
+                let first_schedule: Vec<_> = first_levels
+                    .iter()
+                    .flat_map(|level| level.nodes.iter().cloned())
+                    .collect();
+                let second_schedule: Vec<_> = second_levels
+                    .iter()
+                    .flat_map(|level| level.nodes.iter().cloned())
+                    .collect();
+                assert_eq!(first_schedule, second_schedule);
                 let latencies = nodes
                     .iter()
                     .map(|node| (node.id.clone(), node.latency))
