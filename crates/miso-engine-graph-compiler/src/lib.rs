@@ -20,8 +20,10 @@ use miso_engine_graph::{
     PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
     StableGraphId, TrackStage,
 };
-use miso_engine_rack::{KernelDispatch, RackLocationV1, RackProgramSignatureV1, RoutingClassV1};
-use miso_engine_rack_compiler::{CompiledRackCohortsV1, RackTrackInputV1, compile_rack_cohorts_v1};
+use miso_engine_rack::{KernelDispatch, RackLocationV1, RackProgramV1};
+use miso_engine_rack_compiler::{
+    BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups,
+};
 use miso_engine_session::{
     ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration,
 };
@@ -117,15 +119,65 @@ pub struct GraphCompileReport {
     pub dot: String,
     /// Off-render SIMD-rack cohort decision. It is deliberately absent from graph identity,
     /// schedule, PDC and reductions: changing a host backend cannot change graph semantics.
-    pub rack_cohorts: GraphRackCohortReport,
+    pub rack_cohorts: GraphRackBankReport,
 }
 
-/// Stable rack cohorts for the two bankable graph boundaries.
+/// The bound SIMD-rack bank plan.
+///
+/// Deliberately absent from graph identity, schedule, PDC and reductions: changing a host backend
+/// cannot change graph semantics. This report is the **bound** plan, from the same planner that
+/// produced the banks - never a second planner's opinion (#96 F1).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GraphRackCohortReport {
+pub struct GraphRackBankReport {
     pub dispatch: KernelDispatch,
-    pub simd1: CompiledRackCohortsV1,
-    pub simd2: CompiledRackCohortsV1,
+    pub plan: BankPlan<EffectNodeId>,
+    /// `plan.groups[i]` was bound as a homogeneous bank iff `bound[i]`.
+    pub bound: Vec<bool>,
+}
+
+impl GraphRackBankReport {
+    pub fn groups_in(
+        &self,
+        rack: RackLocationV1,
+    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+        self.plan
+            .groups
+            .iter()
+            .filter(move |group| group.rack == rack)
+    }
+    pub fn bound_groups_in(
+        &self,
+        rack: RackLocationV1,
+    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+        self.plan
+            .groups
+            .iter()
+            .zip(self.bound.iter())
+            .filter(move |(group, bound)| **bound && group.rack == rack)
+            .map(|(group, _)| group)
+    }
+    /// Members of unbound (padded) groups plus the never-bankable candidates, in id order: exactly
+    /// the effects that render on the per-node scalar path.
+    #[must_use]
+    pub fn scalar_in(&self, rack: RackLocationV1) -> Vec<EffectNodeId> {
+        let mut ids: Vec<EffectNodeId> = self
+            .plan
+            .groups
+            .iter()
+            .zip(self.bound.iter())
+            .filter(|(group, bound)| !**bound && group.rack == rack)
+            .flat_map(|(group, _)| group.members.iter().flatten().cloned())
+            .chain(
+                self.plan
+                    .scalar
+                    .iter()
+                    .filter(|id| rack_location(id.rack) == Some(rack))
+                    .cloned(),
+            )
+            .collect();
+        ids.sort();
+        ids
+    }
 }
 
 impl GraphCompiler {
@@ -518,8 +570,9 @@ impl GraphCompiler {
         let buffers = buffer_assignments(&schedule, &edges);
         let ports = ports_for(&nodes, &edges);
         let reductions = reduction_records(&nodes, &edges);
-        let rack_cohorts = rack_cohort_report(&effects);
-        let banks = match bind_rack_banks(&effects, &effect_ids, &levels, rack_cohorts.dispatch) {
+        let dispatch = KernelDispatch::select(target_capabilities());
+        let (banks, rack_cohorts) = match bind_rack_banks(&effects, &effect_ids, &levels, dispatch)
+        {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
@@ -699,73 +752,43 @@ impl GraphCompiler {
     }
 }
 
-fn rack_cohort_report(effects: &EffectPreparedSession) -> GraphRackCohortReport {
-    let dispatch = KernelDispatch::select(target_capabilities());
-    let model = effects.session.normalized_model();
-    let compile = |location: RackLocationV1, rack: RackId| {
-        let tracks = model
-            .tracks
-            .iter()
-            .map(|track| {
-                let entries: Vec<_> = effects
-                    .entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.track_id == track.id.as_str() && rack_id(entry.rack) == rack
-                    })
-                    .map(|entry| entry.metadata.program_key())
-                    .collect();
-                let routing = if effects.entries.iter().any(|entry| {
-                    entry.track_id == track.id.as_str()
-                        && rack_id(entry.rack) == rack
-                        && matches!(
-                            entry.metadata.ports.sidechain,
-                            PreparedSidechainPort::Connected { .. }
-                        )
-                }) {
-                    RoutingClassV1::SidechainConnected
-                } else if effects.entries.iter().any(|entry| {
-                    entry.track_id == track.id.as_str()
-                        && rack_id(entry.rack) == rack
-                        && matches!(
-                            entry.metadata.ports.sidechain,
-                            PreparedSidechainPort::Unconnected { .. }
-                        )
-                }) {
-                    RoutingClassV1::SidechainUnconnected
-                } else {
-                    RoutingClassV1::MainOnly
-                };
-                RackTrackInputV1 {
-                    track_id: track.id.as_str().into(),
-                    signature: RackProgramSignatureV1::new(
-                        location,
-                        effects.session.sample_rate().0,
-                        effects.session.quantum().0,
-                        entries,
-                        routing,
-                    )
-                    .expect("validated nonzero session envelope"),
-                }
-            })
-            .collect();
-        compile_rack_cohorts_v1(tracks, dispatch).expect("stable track IDs were session-validated")
-    };
-    GraphRackCohortReport {
-        dispatch,
-        simd1: compile(RackLocationV1::Simd1, RackId::Simd1),
-        simd2: compile(RackLocationV1::Simd2, RackId::Simd2),
+/// The `RackLocationV1` a graph rack id addresses, or `None` for the dynamic rack.
+const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
+    match rack {
+        RackId::Simd1 => Some(RackLocationV1::Simd1),
+        RackId::Simd2 => Some(RackLocationV1::Simd2),
+        RackId::Dynamic => None,
     }
 }
 
+/// Plan the SIMD-rack cohorts and bind the ones that can be bound.
+///
+/// The planner is `miso_engine_rack_compiler::plan_bank_groups` - the single cohort planner in the
+/// workspace. #96 binds only full groups: every effect factory rejects `requests.len() != lanes`
+/// and the contract has no per-lane mask yet (#96 F7), so a padded group's members stay on the
+/// per-node scalar path, exactly as they did before. #99 flips that once #95 adds the lane mask.
 fn bind_rack_banks(
     effects: &EffectPreparedSession,
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
     levels: &[DependencyLevel],
     dispatch: KernelDispatch,
-) -> Result<Vec<miso_engine_graph::GraphPreparedEffectBank>, GraphDiagnostic> {
+) -> Result<
+    (
+        Vec<miso_engine_graph::GraphPreparedEffectBank>,
+        GraphRackBankReport,
+    ),
+    GraphDiagnostic,
+> {
+    let empty = |dispatch| GraphRackBankReport {
+        dispatch,
+        plan: BankPlan {
+            groups: Vec::new(),
+            scalar: Vec::new(),
+        },
+        bound: Vec::new(),
+    };
     let Some(width) = dispatch.bank_width() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), empty(dispatch)));
     };
     let level_by_node: BTreeMap<_, _> = levels
         .iter()
@@ -777,76 +800,92 @@ fn bind_rack_banks(
                 .map(move |node| (node, level.level))
         })
         .collect();
-    let mut candidates = BTreeMap::new();
+    let mut entry_by_id = BTreeMap::new();
+    let mut candidates_by_level: BTreeMap<u64, Vec<CohortCandidate<EffectNodeId>>> =
+        BTreeMap::new();
     for entry in &effects.entries {
         let rack = rack_id(entry.rack);
-        if !matches!(rack, RackId::Simd1 | RackId::Simd2)
-            || matches!(
-                entry.metadata.ports.sidechain,
-                PreparedSidechainPort::Connected { .. }
-            )
-        {
+        let Some(location) = rack_location(rack) else {
+            continue;
+        };
+        let id = ids[&(entry.track_id.clone(), rack, entry.effect_id.clone())].clone();
+        let Some(level) = level_by_node.get(&GraphNodeId::Effect(id.clone())).copied() else {
+            continue;
+        };
+        entry_by_id.insert(id.clone(), entry);
+        candidates_by_level
+            .entry(level)
+            .or_default()
+            .push(CohortCandidate {
+                id,
+                program: RackProgramV1::new(location, vec![entry.metadata.program_key()]),
+            });
+    }
+    let levels_in: Vec<_> = candidates_by_level
+        .into_iter()
+        .map(|(level, candidates)| CohortLevel { level, candidates })
+        .collect();
+    let plan = plan_bank_groups(&levels_in, width)
+        .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+
+    let mut banks = Vec::new();
+    let mut bound = Vec::with_capacity(plan.groups.len());
+    for group in &plan.groups {
+        if !group.is_full() {
+            bound.push(false);
             continue;
         }
-        candidates
-            .entry((rack, entry.metadata.program_key()))
-            .or_insert_with(Vec::new)
-            .push(entry);
-    }
-    let mut banks = Vec::new();
-    for ((rack, program), entries) in candidates {
-        for members in entries.chunks(width.lanes() as usize) {
-            if members.len() != width.lanes() as usize
-                || members
-                    .iter()
-                    .any(|entry| !std::sync::Arc::ptr_eq(&entry.factory, &members[0].factory))
-            {
-                continue;
-            }
-            let member_ids: Vec<_> = members
-                .iter()
-                .map(|entry| ids[&(entry.track_id.clone(), rack, entry.effect_id.clone())].clone())
-                .collect();
-            let Some(first_level) = level_by_node
-                .get(&GraphNodeId::Effect(member_ids[0].clone()))
-                .copied()
-            else {
-                continue;
-            };
-            if member_ids.iter().any(|id| {
-                level_by_node.get(&GraphNodeId::Effect(id.clone())).copied() != Some(first_level)
-            }) {
-                continue;
-            }
-            let requests: Vec<_> = members
-                .iter()
-                .map(|entry| entry.bank_preparation.request())
-                .collect();
-            let request = PrepareEffectBankRequest {
-                backend: dispatch.backend(),
-                width,
-                requests: &requests,
-            };
-            let Some(processor) = members[0]
-                .factory
-                .bind_homogeneous_bank(request)
-                .map_err(|error| diag(error.code, "$.effects"))?
-            else {
-                continue;
-            };
-            if processor.metadata().width != width || processor.metadata().program_key != program {
-                return Err(diag("graph.effect.bank_metadata", "$.effects"));
-            }
-            let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
-                .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-            banks.push(miso_engine_graph::GraphPreparedEffectBank {
-                members: member_ids.into_boxed_slice(),
-                processor,
-                scratch,
-            });
+        let members: Vec<_> = group
+            .members
+            .iter()
+            .map(|id| entry_by_id[id.as_ref().expect("full group")])
+            .collect();
+        let requests: Vec<_> = members
+            .iter()
+            .map(|entry| entry.bank_preparation.request())
+            .collect();
+        let request = PrepareEffectBankRequest {
+            backend: dispatch.backend(),
+            width,
+            requests: &requests,
+        };
+        // Equal program key implies the same registry factory: the registry maps one `EffectId` to
+        // one `Arc` (#96 F12), so the old per-chunk `Arc::ptr_eq` scan proved nothing.
+        let Some(processor) = members[0]
+            .factory
+            .bind_homogeneous_bank(request)
+            .map_err(|error| diag(error.code, "$.effects"))?
+        else {
+            bound.push(false);
+            continue;
+        };
+        if processor.metadata().width != width
+            || processor.metadata().program_key != group.program[0]
+        {
+            return Err(diag("graph.effect.bank_metadata", "$.effects"));
         }
+        let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
+            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
+        banks.push(miso_engine_graph::GraphPreparedEffectBank {
+            members: group
+                .members
+                .iter()
+                .map(|id| id.clone().expect("full group"))
+                .collect(),
+            active_mask: group.active_mask.clone(),
+            processor,
+            scratch,
+        });
+        bound.push(true);
     }
-    Ok(banks)
+    Ok((
+        banks,
+        GraphRackBankReport {
+            dispatch,
+            plan,
+            bound,
+        },
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -880,13 +919,16 @@ fn effect_bank_resource(
         let lanes = u64::from(bank.scratch.width().lanes());
         if bank.scratch.quantum() != quantum
             || u64::try_from(bank.members.len()).ok()? != lanes
+            || u64::try_from(bank.active_mask.len()).ok()? != lanes
+            || !bank.active_mask.iter().all(|lane| *lane)
             || bank.processor.metadata().width != bank.scratch.width()
         {
             return None;
         }
         let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
         let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
-        let scratch_samples = scratch_plane_samples.checked_mul(4)?;
+        // L and R only: the sidechain planes were never read (#96 F9).
+        let scratch_samples = scratch_plane_samples.checked_mul(2)?;
         let scratch_bytes = scratch_samples.checked_mul(4)?;
         let runtime_buffer_samples = scratch_plane_samples.checked_mul(2)?;
         let runtime_buffer_bytes = runtime_buffer_samples.checked_mul(4)?;
@@ -902,7 +944,12 @@ fn effect_bank_resource(
         let member_array_bytes = u64::try_from(core::mem::size_of::<EffectNodeId>())
             .ok()?
             .checked_mul(lanes)?;
-        resource.metadata_bytes = resource.metadata_bytes.checked_add(member_array_bytes)?;
+        // One `bool` per lane for the bank's active mask, mirroring the builtin-bank accounting.
+        let active_mask_bytes = lanes;
+        resource.metadata_bytes = resource
+            .metadata_bytes
+            .checked_add(member_array_bytes)?
+            .checked_add(active_mask_bytes)?;
         resource.largest_allocation_bytes = resource
             .largest_allocation_bytes
             .max(member_array_bytes)
@@ -3535,17 +3582,26 @@ mod tests {
                     )
                 })
                 .collect();
-            let banks =
+            let lanes = dispatch.bank_width().expect("vector backend").lanes() as usize;
+            let (banks, report) =
                 bind_rack_banks(&rebound, &ids, &artifact.report.dependency_levels, dispatch)
                     .expect("off-render factory bind");
-            assert_eq!(
-                banks.len(),
-                12 / dispatch.bank_width().expect("vector backend").lanes() as usize
-            );
+            assert_eq!(banks.len(), 12 / lanes);
             assert!(banks.iter().all(|bank| {
-                bank.members.len()
-                    == dispatch.bank_width().expect("vector backend").lanes() as usize
+                bank.members.len() == lanes && bank.active_mask.iter().all(|active| *active)
             }));
+            // The report is the bound plan: one `bound` flag per planned group, and the padded
+            // remainder group is planned but deliberately left unbound (#96 F6/F7).
+            assert_eq!(report.bound.len(), report.plan.groups.len());
+            assert_eq!(
+                report.bound.iter().filter(|bound| **bound).count(),
+                banks.len()
+            );
+            assert_eq!(
+                report.scalar_in(RackLocationV1::Simd1).len()
+                    + report.scalar_in(RackLocationV1::Simd2).len(),
+                12 % lanes
+            );
         }
 
         let ids_for = |prepared: &EffectPreparedSession| {
@@ -3592,11 +3648,19 @@ mod tests {
             eight,
         )
         .expect("connected sidechain is scalar fallback, not failure");
-        assert!(connected_banks.iter().all(|bank| {
+        assert!(connected_banks.0.iter().all(|bank| {
             bank.members
                 .iter()
                 .all(|member| member.track_id.as_str() != "bank0")
         }));
+        assert!(
+            connected_banks
+                .1
+                .scalar_in(RackLocationV1::Simd1)
+                .iter()
+                .any(|member| member.track_id.as_str() == "bank0"),
+            "a connected sidechain never banks, and the report says so"
+        );
 
         let same_wave = prepare_native_session_effects(
             &session,
@@ -3609,18 +3673,46 @@ mod tests {
         )
         .expect("reprepare same-wave fallback");
         let same_wave_ids = ids_for(&same_wave);
-        let first = GraphNodeId::Effect(
-            same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone(),
-        );
+        let first_id =
+            same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone();
+        let first = GraphNodeId::Effect(first_id.clone());
         let mut incompatible_levels = artifact.report.dependency_levels.clone();
         for level in &mut incompatible_levels {
             level.nodes.retain(|node| node != &first);
         }
-        assert!(
+        // F12: a bank never crosses a dependency level. Before #96 the whole chunk holding a
+        // level-incompatible member was dropped; the planner now partitions by level *before*
+        // chunking, so the member itself never banks while its level-compatible peers still do.
+        let (split_banks, split_report) =
             bind_rack_banks(&same_wave, &same_wave_ids, &incompatible_levels, eight)
-                .expect("same-wave incompatibility is scalar fallback")
-                .is_empty()
+                .expect("a level split is a scalar fallback, not a failure");
+        assert!(
+            split_banks
+                .iter()
+                .all(|bank| bank.members.iter().all(|member| member != &first_id)),
+            "an unscheduled effect never joins a bank"
         );
+        let split_levels: BTreeMap<_, _> = incompatible_levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .nodes
+                    .iter()
+                    .cloned()
+                    .map(move |node| (node, level.level))
+            })
+            .collect();
+        for group in &split_report.plan.groups {
+            for member in group.members.iter().flatten() {
+                assert_eq!(
+                    split_levels
+                        .get(&GraphNodeId::Effect(member.clone()))
+                        .copied(),
+                    Some(group.level),
+                    "every planned group is level-uniform"
+                );
+            }
+        }
 
         let rejecting_registry = NativeEffectRegistry::new([
             Box::new(BankBindErrorFactory) as Box<dyn NativeEffectFactory>
@@ -3876,18 +3968,47 @@ mod tests {
         });
         assert_eq!(bank_artifact.graph.prepared_bank_count(), expected_banks);
         assert_eq!(
-            bank_artifact.report.rack_cohorts.simd1.banks.len(),
+            bank_artifact
+                .report
+                .rack_cohorts
+                .bound_groups_in(RackLocationV1::Simd1)
+                .count(),
             expected_banks
         );
         assert_eq!(
-            bank_artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            bank_artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
             expected_scalar_tails
         );
         assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
+        // #96: the report is the *bound* plan. Cohort planning is still independent of the
+        // factory's legal scalar fallback -- the planned groups are identical -- but a group the
+        // factory declined is now reported as unbound, so its members show up in the scalar set
+        // instead of being invisible there.
         assert_eq!(
-            scalar_artifact.report.rack_cohorts.simd1.scalar_tails.len(),
-            expected_scalar_tails,
+            scalar_artifact.report.rack_cohorts.plan.groups,
+            bank_artifact.report.rack_cohorts.plan.groups,
             "cohort planning is independent of the factory's legal scalar fallback"
+        );
+        assert!(
+            scalar_artifact
+                .report
+                .rack_cohorts
+                .bound
+                .iter()
+                .all(|bound| !*bound)
+        );
+        assert_eq!(
+            scalar_artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
+            9,
+            "a declined bind puts every member on the per-node scalar path"
         );
         assert_eq!(
             bank_artifact.report.sequential_schedule,
@@ -4149,34 +4270,47 @@ mod tests {
             let expected_scalar_tails = 1 + 9 % lanes;
             assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
             assert_eq!(
-                artifact.report.rack_cohorts.simd1.banks.len(),
+                artifact
+                    .report
+                    .rack_cohorts
+                    .bound_groups_in(RackLocationV1::Simd1)
+                    .count(),
                 expected_banks
             );
             assert_eq!(
-                artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+                artifact
+                    .report
+                    .rack_cohorts
+                    .scalar_in(RackLocationV1::Simd1)
+                    .len(),
                 expected_scalar_tails
             );
             assert!(
                 artifact
                     .report
                     .rack_cohorts
-                    .simd1
-                    .scalar_tails
+                    .scalar_in(RackLocationV1::Simd1)
                     .iter()
-                    .any(|tail| tail.track_id.as_ref() == "eq8")
+                    .any(|id| id.track_id.as_str() == "eq8")
             );
             assert!(
                 artifact
                     .report
                     .rack_cohorts
-                    .simd1
-                    .scalar_tails
+                    .scalar_in(RackLocationV1::Simd1)
                     .iter()
-                    .any(|tail| tail.track_id.as_ref() == "eq9")
+                    .any(|id| id.track_id.as_str() == "eq9")
             );
         } else {
             assert_eq!(artifact.graph.prepared_bank_count(), 0);
-            assert_eq!(artifact.report.rack_cohorts.simd1.scalar_tails.len(), 10);
+            assert_eq!(
+                artifact
+                    .report
+                    .rack_cohorts
+                    .scalar_in(RackLocationV1::Simd1)
+                    .len(),
+                10
+            );
         }
         assert_eq!(
             artifact.report.sequential_schedule,
@@ -4370,43 +4504,54 @@ mod tests {
             let expected_scalar_tails = 1 + 9 % lanes;
             assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
             assert_eq!(
-                artifact.report.rack_cohorts.simd1.banks.len(),
+                artifact
+                    .report
+                    .rack_cohorts
+                    .bound_groups_in(RackLocationV1::Simd1)
+                    .count(),
                 expected_banks
             );
             assert!(
                 artifact
                     .report
                     .rack_cohorts
-                    .simd1
-                    .banks
-                    .iter()
-                    .all(|bank| bank.members.len() == lanes)
+                    .bound_groups_in(RackLocationV1::Simd1)
+                    .all(|bank| bank.active_count() == lanes)
             );
             assert_eq!(
-                artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+                artifact
+                    .report
+                    .rack_cohorts
+                    .scalar_in(RackLocationV1::Simd1)
+                    .len(),
                 expected_scalar_tails
             );
             assert!(
                 artifact
                     .report
                     .rack_cohorts
-                    .simd1
-                    .scalar_tails
+                    .scalar_in(RackLocationV1::Simd1)
                     .iter()
-                    .any(|tail| tail.track_id.as_ref() == "eq8")
+                    .any(|id| id.track_id.as_str() == "eq8")
             );
             assert!(
                 artifact
                     .report
                     .rack_cohorts
-                    .simd1
-                    .scalar_tails
+                    .scalar_in(RackLocationV1::Simd1)
                     .iter()
-                    .any(|tail| tail.track_id.as_ref() == "eq9")
+                    .any(|id| id.track_id.as_str() == "eq9")
             );
         } else {
             assert_eq!(artifact.graph.prepared_bank_count(), 0);
-            assert_eq!(artifact.report.rack_cohorts.simd1.scalar_tails.len(), 10);
+            assert_eq!(
+                artifact
+                    .report
+                    .rack_cohorts
+                    .scalar_in(RackLocationV1::Simd1)
+                    .len(),
+                10
+            );
         }
         assert_eq!(
             artifact.report.sequential_schedule,
@@ -4604,23 +4749,30 @@ mod tests {
         });
         assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.banks.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .bound_groups_in(RackLocationV1::Simd1)
+                .count(),
             expected_banks
         );
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
             .report
             .rack_cohorts
-            .simd1
-            .banks
-            .iter()
+            .bound_groups_in(RackLocationV1::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
-                    .map(|member| member.track_id.to_string())
+                    .flatten()
+                    .map(|member| member.track_id.as_str().to_owned())
                     .collect()
             })
             .collect();
@@ -4641,10 +4793,9 @@ mod tests {
         let actual_tails: Vec<_> = artifact
             .report
             .rack_cohorts
-            .simd1
-            .scalar_tails
+            .scalar_in(RackLocationV1::Simd1)
             .iter()
-            .map(|tail| tail.track_id.to_string())
+            .map(|tail| tail.track_id.as_str().to_owned())
             .collect();
         let expected_tails: Vec<_> =
             (expected_banks * width.map_or(1, |width| width.lanes() as usize)..10)
@@ -4655,24 +4806,23 @@ mod tests {
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
         let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_metadata_bytes = bank_count
-            * u64::try_from(core::mem::size_of::<
+            * (u64::try_from(core::mem::size_of::<
                 miso_engine_graph::GraphPreparedEffectBank,
             >())
             .expect("bank metadata size")
+                + lanes)
             + artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .banks
-                .iter()
-                .flat_map(|bank| bank.members.iter())
+                .bound_groups_in(RackLocationV1::Simd1)
+                .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
                         .expect("member metadata size")
-                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
                         + u64::try_from("true-peak-limiter".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
@@ -5009,23 +5159,30 @@ mod tests {
         });
         assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.banks.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .bound_groups_in(RackLocationV1::Simd1)
+                .count(),
             expected_banks
         );
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
             .report
             .rack_cohorts
-            .simd1
-            .banks
-            .iter()
+            .bound_groups_in(RackLocationV1::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
-                    .map(|member| member.track_id.to_string())
+                    .flatten()
+                    .map(|member| member.track_id.as_str().to_owned())
                     .collect()
             })
             .collect();
@@ -5048,10 +5205,9 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .scalar_tails
+                .scalar_in(RackLocationV1::Simd1)
                 .iter()
-                .map(|tail| tail.track_id.to_string())
+                .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
             (expected_tail_start..10)
                 .map(|index| format!("eq{index}"))
@@ -5063,24 +5219,23 @@ mod tests {
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
         let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_metadata_bytes = bank_count
-            * u64::try_from(core::mem::size_of::<
+            * (u64::try_from(core::mem::size_of::<
                 miso_engine_graph::GraphPreparedEffectBank,
             >())
             .expect("bank metadata size")
+                + lanes)
             + artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .banks
-                .iter()
-                .flat_map(|bank| bank.members.iter())
+                .bound_groups_in(RackLocationV1::Simd1)
+                .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
                         .expect("member metadata size")
-                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
                         + u64::try_from("multiband-compressor".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
@@ -5380,23 +5535,30 @@ mod tests {
         });
         assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.banks.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .bound_groups_in(RackLocationV1::Simd1)
+                .count(),
             expected_banks
         );
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
             .report
             .rack_cohorts
-            .simd1
-            .banks
-            .iter()
+            .bound_groups_in(RackLocationV1::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
-                    .map(|member| member.track_id.to_string())
+                    .flatten()
+                    .map(|member| member.track_id.as_str().to_owned())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -5416,10 +5578,9 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .scalar_tails
+                .scalar_in(RackLocationV1::Simd1)
                 .iter()
-                .map(|tail| tail.track_id.to_string())
+                .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
             (tail_start..10)
                 .map(|index| format!("eq{index}"))
@@ -5431,24 +5592,23 @@ mod tests {
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
         let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_metadata_bytes = bank_count
-            * u64::try_from(core::mem::size_of::<
+            * (u64::try_from(core::mem::size_of::<
                 miso_engine_graph::GraphPreparedEffectBank,
             >())
             .expect("bank metadata size")
+                + lanes)
             + artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .banks
-                .iter()
-                .flat_map(|bank| bank.members.iter())
+                .bound_groups_in(RackLocationV1::Simd1)
+                .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
                         .expect("member metadata size")
-                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
                         + u64::try_from("soft-clip".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
@@ -5752,23 +5912,30 @@ mod tests {
         });
         assert_eq!(artifact.graph.prepared_bank_count(), expected_banks);
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.banks.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .bound_groups_in(RackLocationV1::Simd1)
+                .count(),
             expected_banks
         );
         assert_eq!(
-            artifact.report.rack_cohorts.simd1.scalar_tails.len(),
+            artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
             .report
             .rack_cohorts
-            .simd1
-            .banks
-            .iter()
+            .bound_groups_in(RackLocationV1::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
-                    .map(|member| member.track_id.to_string())
+                    .flatten()
+                    .map(|member| member.track_id.as_str().to_owned())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -5788,10 +5955,9 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .scalar_tails
+                .scalar_in(RackLocationV1::Simd1)
                 .iter()
-                .map(|tail| tail.track_id.to_string())
+                .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
             (tail_start..10)
                 .map(|index| format!("eq{index}"))
@@ -5803,24 +5969,23 @@ mod tests {
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
         let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 4 * 4;
+        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_metadata_bytes = bank_count
-            * u64::try_from(core::mem::size_of::<
+            * (u64::try_from(core::mem::size_of::<
                 miso_engine_graph::GraphPreparedEffectBank,
             >())
             .expect("bank metadata size")
+                + lanes)
             + artifact
                 .report
                 .rack_cohorts
-                .simd1
-                .banks
-                .iter()
-                .flat_map(|bank| bank.members.iter())
+                .bound_groups_in(RackLocationV1::Simd1)
+                .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
                         .expect("member metadata size")
-                        + u64::try_from(member.track_id.len()).expect("track ID bytes")
+                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
                         + u64::try_from("transient-shaper".len()).expect("effect ID bytes")
                 })
                 .sum::<u64>();
@@ -6079,22 +6244,13 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("delay graph: {:?}", failure.diagnostics));
         assert_eq!(artifact.graph.prepared_bank_count(), 0);
-        for cohorts in [
-            &artifact.report.rack_cohorts.simd1,
-            &artifact.report.rack_cohorts.simd2,
-        ] {
-            assert!(cohorts.banks.iter().all(|bank| {
-                bank.members
-                    .iter()
-                    .all(|member| member.active_slots.is_empty())
-            }));
-            assert!(
-                cohorts
-                    .scalar_tails
-                    .iter()
-                    .all(|member| member.active_slots.is_empty())
-            );
+        // Every delay lives in the dynamic rack, so neither SIMD rack has a candidate at all: the
+        // planner sees an empty pool and produces no groups and no scalar members.
+        for rack in [RackLocationV1::Simd1, RackLocationV1::Simd2] {
+            assert_eq!(artifact.report.rack_cohorts.groups_in(rack).count(), 0);
+            assert!(artifact.report.rack_cohorts.scalar_in(rack).is_empty());
         }
+        assert!(artifact.report.rack_cohorts.plan.groups.is_empty());
         assert_eq!(artifact.report.estimate.effect_bank_count, 0);
         assert_eq!(artifact.report.estimate.effect_bank_scratch_bytes, 0);
         assert_eq!(artifact.report.estimate.effect_bank_runtime_buffer_bytes, 0);
@@ -6525,7 +6681,7 @@ mod tests {
             // Two planes, not four: a fixed-stage bank has no sidechain surface (#86 F4).
             assert_eq!(
                 resource.builtin_bank_scratch_bytes,
-                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 4 * 2
+                expected_banks as u64 * u64::from(artifact.envelope().quantum.0) * width * 2 * 4
             );
         }
         let envelope = artifact.envelope();

@@ -27,7 +27,7 @@ use miso_engine_graph::{
     TrackStage,
 };
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
-use miso_engine_rack::KernelDispatch;
+use miso_engine_rack::{KernelDispatch, RackLocationV1};
 use miso_engine_session::{
     CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
     SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
@@ -520,29 +520,30 @@ impl MixedRuntime {
         );
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch.backend(), backend);
-        assert_eq!(cohorts.simd1.banks.len(), 1, "one full track cohort");
-        assert_eq!(cohorts.simd1.banks[0].members.len(), 8);
-        assert_eq!(
-            cohorts.simd1.banks[0]
-                .members
-                .iter()
-                .flat_map(|member| member.active_slots.iter())
-                .filter(|active| !**active)
-                .count(),
-            2,
-            "two explicit identity/missing positions"
+        // #96: the report is the *bound* plan, from the same planner that produced the banks.
+        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocationV1::Simd1).collect();
+        // Two program keys reach SIMD rack 1 here: the bypassed leading slot that eight tracks
+        // carry, and the main slot that ten tracks carry. Each forms one full eight-lane bank; the
+        // main slot's two remaining tracks form a padded group that #96 leaves unbound.
+        assert_eq!(bound_groups.len(), 2, "two full effect-bank cohorts");
+        assert!(
+            bound_groups.iter().all(|group| group.is_full()),
+            "only full groups are bound in #96"
         );
-        let compatible_tails = cohorts
-            .simd1
-            .scalar_tails
+        assert!(bound_groups.iter().all(|group| group.active_count() == 8));
+        assert_eq!(
+            bound_groups.len() as u64,
+            artifact.graph_resource_estimate().effect_bank_count,
+            "the report is the bound plan: one bound group per prepared bank"
+        );
+        let scalar = cohorts.scalar_in(RackLocationV1::Simd1);
+        let compatible_tails = scalar
             .iter()
-            .filter(|member| member.track_id.starts_with("rack"))
+            .filter(|member| member.track_id.as_str().starts_with("rack"))
             .count();
-        let incompatible_fallbacks = cohorts
-            .simd1
-            .scalar_tails
+        let incompatible_fallbacks = scalar
             .iter()
-            .filter(|member| member.track_id.starts_with("fallback"))
+            .filter(|member| member.track_id.as_str().starts_with("fallback"))
             .count();
         assert_eq!(compatible_tails, 2, "stable compatible scalar tail");
         assert_eq!(incompatible_fallbacks, 2, "connected-sidechain fallback");

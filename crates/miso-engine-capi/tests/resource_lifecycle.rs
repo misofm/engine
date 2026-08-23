@@ -445,7 +445,7 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         graph_incremental_plan_bytes: 195_022,
         graph_metadata_bytes: 50_039,
         graph_delay_bytes: 0,
-        effect_bank_scratch_bytes: 16_384,
+        effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
         builtin_bank_bytes: 3_027,
@@ -1332,8 +1332,12 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
             bytes: bank_lanes * (3 + "soft-clip".len() as u64),
         },
         PrimitiveOwner {
-            name: "effect-bank four-plane scratch",
-            bytes: effect_bank_plane * 4,
+            name: "effect-bank active mask",
+            bytes: bytes::<bool>(bank_lanes as usize),
+        },
+        PrimitiveOwner {
+            name: "effect-bank two-plane scratch",
+            bytes: effect_bank_plane * 2,
         },
         PrimitiveOwner {
             name: "effect-bank two-plane runtime",

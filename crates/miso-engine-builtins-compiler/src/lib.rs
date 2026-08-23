@@ -211,7 +211,7 @@ fn builtin_bank_resource(
     }
     let node_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>()).ok()?;
     let processor_bytes = u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).ok()?;
-    // Two planes: a fixed-stage bank has no sidechain surface (`AoSoaScratch::new_main_only`).
+    // Two planes: `AoSoaScratch` has no sidechain surface at all (#96 F9 deleted it).
     let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
     let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
     let scratch_samples_per_bank = scratch_plane_samples.checked_mul(2)?;

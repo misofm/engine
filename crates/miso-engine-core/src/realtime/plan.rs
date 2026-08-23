@@ -93,6 +93,12 @@ pub trait PreparedPlanExecutor: Send {
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// Cumulative planar/AoSoA round-trips performed by every bank chain, read only after
+    /// rendering is disarmed. Master plan §4.5 fixes this at one per bank chain per block.
+    #[doc(hidden)]
+    fn bank_transposes(&self) -> u64 {
+        0
+    }
     /// Copy cumulative auxiliary-worker audit snapshots after render is disarmed.
     #[doc(hidden)]
     fn copy_worker_audit_snapshots(&self, _output: &mut [super::audit::AuditSnapshot]) -> usize {
@@ -228,6 +234,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::qualification_counters)
+    }
+    /// Read the cumulative bank transpose count outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_transposes(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank transpose counters are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, PreparedPlanExecutor::bank_transposes)
     }
     /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
     #[doc(hidden)]

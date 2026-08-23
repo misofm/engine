@@ -27,6 +27,9 @@ use miso_engine_native_scheduler::{
     NativeSchedulerJobV1, NativeSchedulerV1, RenderPartitionV1, RenderWaveV1,
     SchedulerDispatchErrorV1, SchedulerPrepareErrorV1, partition_stable_units_v1,
 };
+use miso_engine_rack::{
+    AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage, EffectBankStage,
+};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StableGraphId(String);
@@ -177,7 +180,7 @@ pub struct GraphResourceEstimate {
     pub declared_effect_bytes: u64,
     /// Number of full homogeneous native-effect banks retained by the graph.
     pub effect_bank_count: u64,
-    /// Exact four-plane AoSoA scratch payload retained by native-effect banks.
+    /// Exact two-plane (L and R) AoSoA scratch payload retained by native-effect banks.
     pub effect_bank_scratch_bytes: u64,
     /// Exact additional per-member output buffers required while a bank is gathered/scattered.
     pub effect_bank_runtime_buffer_bytes: u64,
@@ -420,8 +423,11 @@ pub struct GraphPreparedEffect {
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
     pub members: Box<[EffectNodeId]>,
+    /// `true` for every lane that carries a member. #96 binds only full groups, so this is all
+    /// `true` today; the field exists so a padded group can be bound without a second bank shape.
+    pub active_mask: Box<[bool]>,
     pub processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
-    pub scratch: miso_engine_rack::AoSoaScratch,
+    pub scratch: AoSoaScratch,
 }
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
@@ -434,7 +440,7 @@ pub struct GraphPreparedBuiltinBank {
     pub backend: KernelBackendV1,
     pub members: Box<[GraphNodeId]>,
     pub processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
-    pub scratch: miso_engine_rack::AoSoaScratch,
+    pub scratch: AoSoaScratch,
 }
 
 /// Address-free prepared builtin-bank metadata available before render binding.
@@ -1349,21 +1355,47 @@ struct GraphExecutor {
     reduction_scratch: Box<[f32]>,
     banks: Vec<RuntimeBank>,
     bank_rendered: Box<[bool]>,
-    builtin_banks: Vec<RuntimeBuiltinBank>,
+    builtin_banks: Vec<RuntimeBank>,
     builtin_bank_rendered: Box<[bool]>,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, usize)]>,
     sanitized_samples: u64,
 }
+/// One bank chain bound into the sequential executor. Effect banks and builtin banks differ only
+/// in which stage their single slot carries, so they share this one shape and one render loop.
 struct RuntimeBank {
     members: Box<[usize]>,
-    processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
-    scratch: miso_engine_rack::AoSoaScratch,
+    /// Runtime output buffer of each member, resolved once so `run` never indexes `nodes`.
+    output_buffers: Box<[usize]>,
+    chain: BankChain,
 }
-struct RuntimeBuiltinBank {
-    members: Box<[usize]>,
-    processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
-    scratch: miso_engine_rack::AoSoaScratch,
+
+/// Adapter that lets a compiler-owned builtin bank act as a chain slot.
+struct BuiltinStage(Box<dyn GraphPreparedBuiltinBankProcessor>);
+impl BankStage for BuiltinStage {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.0
+            .process(block.left, block.right, block.frames, block.first_sample)
+    }
+    fn qualification_counters(&self) -> [u64; 2] {
+        self.0.qualification_counters()
+    }
+}
+
+/// Planar per-lane view over the sequential executor's runtime buffers.
+struct SequentialMembers<'a> {
+    buffers: &'a mut [StereoBuffer],
+    outputs: &'a [usize],
+}
+impl BankMembers for SequentialMembers<'_> {
+    fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+        let buffer = &self.buffers[self.outputs[lane]];
+        (&buffer.left, &buffer.right)
+    }
+    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+        let buffer = &mut self.buffers[self.outputs[lane]];
+        (&mut buffer.left, &mut buffer.right)
+    }
 }
 impl GraphExecutor {
     #[allow(clippy::too_many_arguments)]
@@ -1546,29 +1578,59 @@ impl GraphExecutor {
             .enumerate()
             .map(|(index, node)| (node, index))
             .collect();
+        let runtime_bank = |members: Box<[usize]>,
+                            scratch: AoSoaScratch,
+                            active: Box<[bool]>,
+                            stage: Box<dyn BankStage>| {
+            let output_buffers: Box<[usize]> = members
+                .iter()
+                .map(|member| nodes[*member].output_buffer)
+                .collect();
+            let chain = BankChain::new(
+                scratch,
+                active.clone(),
+                vec![BankSlot {
+                    stage,
+                    active_lanes: active,
+                }],
+            )
+            .expect("validated bank shape");
+            RuntimeBank {
+                members,
+                output_buffers,
+                chain,
+            }
+        };
         let runtime_banks = banks
             .into_iter()
-            .map(|bank| RuntimeBank {
-                members: bank
+            .map(|bank| {
+                let members = bank
                     .members
                     .iter()
                     .cloned()
                     .map(|member| node_indices[&GraphNodeId::Effect(member)])
-                    .collect(),
-                processor: bank.processor,
-                scratch: bank.scratch,
+                    .collect();
+                let width = bank.scratch.width();
+                let quantum = bank.scratch.quantum();
+                let stage = EffectBankStage::new(bank.processor, width, quantum)
+                    .expect("validated bank width");
+                runtime_bank(members, bank.scratch, bank.active_mask, Box::new(stage))
             })
             .collect::<Vec<_>>();
         let runtime_builtin_banks = builtin_banks
             .into_iter()
-            .map(|bank| RuntimeBuiltinBank {
-                members: bank
+            .map(|bank| {
+                let members = bank
                     .members
                     .iter()
                     .map(|member| node_indices[member])
-                    .collect(),
-                processor: bank.processor,
-                scratch: bank.scratch,
+                    .collect();
+                runtime_bank(
+                    members,
+                    bank.scratch,
+                    bank.active_mask,
+                    Box::new(BuiltinStage(bank.processor)),
+                )
             })
             .collect::<Vec<_>>();
         let source_input_buffers = source_set
@@ -1646,99 +1708,49 @@ impl GraphExecutor {
         }
     }
 
-    fn render_bank(&mut self, bank_index: usize, first_sample: u64) -> Result<(), RenderError> {
-        let lanes = self.banks[bank_index].members.len();
-        for lane in 0..lanes {
-            let node_index = self.banks[bank_index].members[lane];
-            self.prepare_inputs(node_index);
-            self.reduce_main_inputs(node_index);
-            let output_buffer = self.nodes[node_index].output_buffer;
-            self.banks[bank_index]
-                .scratch
-                .gather_lane(
-                    lane,
-                    &self.buffers[output_buffer].left,
-                    &self.buffers[output_buffer].right,
-                    self.buffers[output_buffer].left.len() as u32,
-                )
-                .map_err(|_| RenderError::InvalidEnvelope)?;
-        }
-        let frames = self.buffers[self.nodes[self.banks[bank_index].members[0]].output_buffer]
-            .left
-            .len() as u32;
-        let offsets_four = [0_u32; 5];
-        let offsets_eight = [0_u32; 9];
-        let offsets = if lanes == 4 {
-            &offsets_four[..]
-        } else {
-            &offsets_eight[..]
-        };
-        let bank = &mut self.banks[bank_index];
-        bank.scratch
-            .process(
-                bank.processor.as_mut(),
-                frames,
-                first_sample,
-                &[],
-                offsets,
-                false,
-            )
-            .map_err(|_| RenderError::InvalidEnvelope)?;
-        for lane in 0..lanes {
-            let node_index = self.banks[bank_index].members[lane];
-            let output_buffer = self.nodes[node_index].output_buffer;
-            let buffer = &mut self.buffers[output_buffer];
-            self.banks[bank_index]
-                .scratch
-                .scatter_lane(lane, &mut buffer.left, &mut buffer.right, frames)
-                .map_err(|_| RenderError::InvalidEnvelope)?;
-        }
-        Ok(())
-    }
-
-    fn render_builtin_bank(
+    /// The single bank loop: one gather, every non-identity slot, one scatter (master plan §4.5).
+    ///
+    /// `builtin` selects which bank vector the index addresses; the loop itself is identical.
+    fn render_chain(
         &mut self,
         bank_index: usize,
+        builtin: bool,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        // Lanes `lanes..width` are the bank's identity padding lanes: they are never gathered
-        // into and never scattered from, their scratch stays at the zero it was allocated with,
-        // and the bank excludes them from its counters and boundary check.
-        let lanes = self.builtin_banks[bank_index].members.len();
+        // A padded group's lanes `members.len()..width` are the bank's identity padding lanes:
+        // `BankChain` never gathers into or scatters from them, their scratch stays at the zero it
+        // was allocated with, and the bank excludes them from its counters and boundary check.
+        let lanes = if builtin {
+            self.builtin_banks[bank_index].members.len()
+        } else {
+            self.banks[bank_index].members.len()
+        };
         for lane in 0..lanes {
-            let node_index = self.builtin_banks[bank_index].members[lane];
+            let node_index = if builtin {
+                self.builtin_banks[bank_index].members[lane]
+            } else {
+                self.banks[bank_index].members[lane]
+            };
             self.prepare_inputs(node_index);
             self.reduce_main_inputs(node_index);
-            let output_buffer = self.nodes[node_index].output_buffer;
-            self.builtin_banks[bank_index]
-                .scratch
-                .gather_lane(
-                    lane,
-                    &self.buffers[output_buffer].left,
-                    &self.buffers[output_buffer].right,
-                    self.buffers[output_buffer].left.len() as u32,
-                )
-                .map_err(|_| RenderError::InvalidEnvelope)?;
         }
-        let frames = self.buffers
-            [self.nodes[self.builtin_banks[bank_index].members[0]].output_buffer]
-            .left
-            .len() as u32;
-        let bank = &mut self.builtin_banks[bank_index];
-        let (left, right) = bank
-            .scratch
-            .builtin_planes_mut(frames)
-            .map_err(|_| RenderError::InvalidEnvelope)?;
-        bank.processor.process(left, right, frames, first_sample)?;
-        for lane in 0..lanes {
-            let node_index = bank.members[lane];
-            let output_buffer = self.nodes[node_index].output_buffer;
-            let buffer = &mut self.buffers[output_buffer];
-            bank.scratch
-                .scatter_lane(lane, &mut buffer.left, &mut buffer.right, frames)
-                .map_err(|_| RenderError::InvalidEnvelope)?;
-        }
-        Ok(())
+        let GraphExecutor {
+            buffers,
+            banks,
+            builtin_banks,
+            ..
+        } = self;
+        let bank = if builtin {
+            &mut builtin_banks[bank_index]
+        } else {
+            &mut banks[bank_index]
+        };
+        let frames = buffers[bank.output_buffers[0]].left.len() as u32;
+        let mut view = SequentialMembers {
+            buffers: buffers.as_mut_slice(),
+            outputs: &bank.output_buffers,
+        };
+        bank.chain.run(&mut view, frames, first_sample)
     }
 }
 impl PreparedPlanExecutor for GraphExecutor {
@@ -1771,12 +1783,12 @@ impl PreparedPlanExecutor for GraphExecutor {
             if matches!(self.nodes[node_index].kind, RuntimeNodeKind::SourceInput) {
             } else if let Some(bank) = bank {
                 if !self.bank_rendered[bank] {
-                    self.render_bank(bank, time.absolute_sample)?;
+                    self.render_chain(bank, false, time.absolute_sample)?;
                     self.bank_rendered[bank] = true;
                 }
             } else if let Some(bank) = builtin_bank {
                 if !self.builtin_bank_rendered[bank] {
-                    self.render_builtin_bank(bank, time.absolute_sample)?;
+                    self.render_chain(bank, true, time.absolute_sample)?;
                     self.builtin_bank_rendered[bank] = true;
                 }
             } else {
@@ -1843,12 +1855,24 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 
     fn qualification_counters(&self) -> [u64; 2] {
-        self.builtin_banks.iter().fold([0, 0], |mut total, bank| {
-            let counters = bank.processor.qualification_counters();
-            total[0] = total[0].saturating_add(counters[0]);
-            total[1] = total[1].saturating_add(counters[1]);
-            total
-        })
+        self.banks
+            .iter()
+            .chain(self.builtin_banks.iter())
+            .fold([0, 0], |mut total, bank| {
+                let counters = bank.chain.qualification_counters();
+                total[0] = total[0].saturating_add(counters[0]);
+                total[1] = total[1].saturating_add(counters[1]);
+                total
+            })
+    }
+
+    fn bank_transposes(&self) -> u64 {
+        self.banks
+            .iter()
+            .chain(self.builtin_banks.iter())
+            .fold(0_u64, |total, bank| {
+                total.saturating_add(bank.chain.transposes())
+            })
     }
 }
 
@@ -2486,16 +2510,27 @@ impl NativeRuntimeNode {
 #[cfg(not(target_arch = "wasm32"))]
 enum NativeGraphUnit {
     Node(NativeRuntimeNode),
-    EffectBank {
+    /// Effect banks and builtin banks are the same unit: a member set plus one chain.
+    Bank {
         members: Box<[NativeRuntimeNode]>,
-        processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
-        scratch: miso_engine_rack::AoSoaScratch,
+        chain: BankChain,
     },
-    BuiltinBank {
-        members: Box<[NativeRuntimeNode]>,
-        processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
-        scratch: miso_engine_rack::AoSoaScratch,
-    },
+}
+
+/// Planar per-lane view over a native bank unit's member outputs.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeMembers<'a>(&'a mut [NativeRuntimeNode]);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BankMembers for NativeMembers<'_> {
+    fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+        let output = &self.0[lane].output;
+        (&output.left, &output.right)
+    }
+    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+        let output = &mut self.0[lane].output;
+        (&mut output.left, &mut output.right)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2503,18 +2538,14 @@ impl NativeGraphUnit {
     fn member(&self, member: usize) -> Option<&NativeRuntimeNode> {
         match self {
             Self::Node(node) => (member == 0).then_some(node),
-            Self::EffectBank { members, .. } | Self::BuiltinBank { members, .. } => {
-                members.get(member)
-            }
+            Self::Bank { members, .. } => members.get(member),
         }
     }
 
     fn member_mut(&mut self, member: usize) -> Option<&mut NativeRuntimeNode> {
         match self {
             Self::Node(node) => (member == 0).then_some(node),
-            Self::EffectBank { members, .. } | Self::BuiltinBank { members, .. } => {
-                members.get_mut(member)
-            }
+            Self::Bank { members, .. } => members.get_mut(member),
         }
     }
 
@@ -2525,94 +2556,51 @@ impl NativeGraphUnit {
     ) -> Result<(), RenderError> {
         match self {
             Self::Node(node) => node.execute(first_sample, sanitized_samples),
-            Self::EffectBank {
-                members,
-                processor,
-                scratch,
-            } => {
+            Self::Bank { members, chain } => {
                 let frames = members
                     .first()
                     .ok_or(RenderError::InvalidEnvelope)?
                     .output
                     .left
                     .len() as u32;
-                for (lane, member) in members.iter_mut().enumerate() {
+                for member in members.iter_mut() {
                     member.reduce(sanitized_samples);
-                    scratch
-                        .gather_lane(lane, &member.output.left, &member.output.right, frames)
-                        .map_err(|_| RenderError::InvalidEnvelope)?;
                 }
-                let offsets_four = [0_u32; 5];
-                let offsets_eight = [0_u32; 9];
-                let offsets = if members.len() == 4 {
-                    &offsets_four[..]
-                } else {
-                    &offsets_eight[..]
-                };
-                scratch
-                    .process(
-                        processor.as_mut(),
-                        frames,
-                        first_sample,
-                        &[],
-                        offsets,
-                        false,
-                    )
-                    .map_err(|_| RenderError::InvalidEnvelope)?;
-                for (lane, member) in members.iter_mut().enumerate() {
-                    scratch
-                        .scatter_lane(
-                            lane,
-                            &mut member.output.left,
-                            &mut member.output.right,
-                            frames,
-                        )
-                        .map_err(|_| RenderError::InvalidEnvelope)?;
-                }
-                Ok(())
-            }
-            Self::BuiltinBank {
-                members,
-                processor,
-                scratch,
-            } => {
-                let frames = members
-                    .first()
-                    .ok_or(RenderError::InvalidEnvelope)?
-                    .output
-                    .left
-                    .len() as u32;
-                for (lane, member) in members.iter_mut().enumerate() {
-                    member.reduce(sanitized_samples);
-                    scratch
-                        .gather_lane(lane, &member.output.left, &member.output.right, frames)
-                        .map_err(|_| RenderError::InvalidEnvelope)?;
-                }
-                let (left, right) = scratch
-                    .builtin_planes_mut(frames)
-                    .map_err(|_| RenderError::InvalidEnvelope)?;
-                processor.process(left, right, frames, first_sample)?;
-                for (lane, member) in members.iter_mut().enumerate() {
-                    scratch
-                        .scatter_lane(
-                            lane,
-                            &mut member.output.left,
-                            &mut member.output.right,
-                            frames,
-                        )
-                        .map_err(|_| RenderError::InvalidEnvelope)?;
-                }
-                Ok(())
+                chain.run(&mut NativeMembers(members), frames, first_sample)
             }
         }
     }
 
     fn qualification_counters(&self) -> [u64; 2] {
         match self {
-            Self::BuiltinBank { processor, .. } => processor.qualification_counters(),
-            Self::Node(_) | Self::EffectBank { .. } => [0, 0],
+            Self::Bank { chain, .. } => chain.qualification_counters(),
+            Self::Node(_) => [0, 0],
         }
     }
+
+    fn bank_transposes(&self) -> u64 {
+        match self {
+            Self::Bank { chain, .. } => chain.transposes(),
+            Self::Node(_) => 0,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_bank_chain(
+    scratch: AoSoaScratch,
+    active: Box<[bool]>,
+    stage: Box<dyn BankStage>,
+) -> BankChain {
+    BankChain::new(
+        scratch,
+        active.clone(),
+        vec![BankSlot {
+            stage,
+            active_lanes: active,
+        }],
+    )
+    .expect("validated bank shape")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2777,10 +2765,17 @@ impl NativeGraphExecutor {
                                     )
                                 })
                                 .collect();
-                            NativeGraphUnit::EffectBank {
+                            let width = bank.scratch.width();
+                            let quantum = bank.scratch.quantum();
+                            let stage = EffectBankStage::new(bank.processor, width, quantum)
+                                .expect("validated bank width");
+                            NativeGraphUnit::Bank {
                                 members,
-                                processor: bank.processor,
-                                scratch: bank.scratch,
+                                chain: native_bank_chain(
+                                    bank.scratch,
+                                    bank.active_mask,
+                                    Box::new(stage),
+                                ),
                             }
                         }
                         NativeUnitBlueprintKind::BuiltinBank(index) => {
@@ -2805,10 +2800,13 @@ impl NativeGraphExecutor {
                                     )
                                 })
                                 .collect();
-                            NativeGraphUnit::BuiltinBank {
+                            NativeGraphUnit::Bank {
                                 members,
-                                processor: bank.processor,
-                                scratch: bank.scratch,
+                                chain: native_bank_chain(
+                                    bank.scratch,
+                                    bank.active_mask,
+                                    Box::new(BuiltinStage(bank.processor)),
+                                ),
                             }
                         }
                     };
@@ -2962,6 +2960,17 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
                     let counters = unit.qualification_counters();
                     total[0] = total[0].saturating_add(counters[0]);
                     total[1] = total[1].saturating_add(counters[1]);
+                }
+            }
+            total
+        })
+    }
+
+    fn bank_transposes(&self) -> u64 {
+        self.waves.iter().fold(0_u64, |mut total, wave| {
+            for parcel in wave.recovered_parcels() {
+                for unit in &parcel.units {
+                    total = total.saturating_add(unit.bank_transposes());
                 }
             }
             total
