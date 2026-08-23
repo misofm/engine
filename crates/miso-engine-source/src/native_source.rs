@@ -110,7 +110,8 @@ pub struct NativeSourceResourceReport {
     pub worker_control_queue_alignment_bytes: u64,
     /// Exact SPSC worker-event queue header and slot payload bytes.
     pub worker_event_queue_bytes: u64,
-    /// Exact worker event queue item capacity: ready plus one snapshot-or-terminal slot.
+    /// Exact three-item worker event capacity: SourceReady, at most one synchronous Snapshot,
+    /// and one slot reserved for Terminal.
     pub worker_event_queue_items: u64,
     /// Largest worker-event queue allocation request.
     pub worker_event_queue_largest_allocation_bytes: u64,
