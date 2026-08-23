@@ -2773,7 +2773,7 @@ mod tests {
     }
 
     #[test]
-    fn one_failed_job_is_terminal_while_its_set_peer_keeps_progressing() {
+    fn terminal_event_carries_decode_failure_and_other_sources_continue() {
         let samples: Vec<f32> = (0_u16..20).map(f32::from).collect();
         let wave = float32_wave(&samples);
         let region = NativeWaveRegion {
@@ -2861,7 +2861,26 @@ mod tests {
             healthy_controller.wait_for_event().expect("healthy ready"),
             NativeSourceWorkerEvent::SourceReady { .. }
         ));
-        let _ = read_one(&mut consumer);
+        for quantum in 0_u16..4 {
+            let (pcm, report) = read_one(&mut consumer);
+            let first = quantum * 4;
+            assert_eq!(
+                pcm,
+                [
+                    f32::from(first),
+                    f32::from(first + 1),
+                    f32::from(first + 2),
+                    f32::from(first + 3),
+                ],
+                "healthy peer quantum {quantum} after failed peer termination"
+            );
+            assert_eq!(report.copied_frames, 4);
+            assert_eq!(report.underrun_frames, 0);
+            healthy_controller
+                .try_wake()
+                .expect("healthy peer remains live after failed peer termination");
+            sync_worker(&mut healthy_controller);
+        }
         healthy_controller
             .try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -2987,6 +3006,282 @@ mod tests {
                 controller.try_wake(),
                 Err(NativeSourceWorkerControlError::Stopped)
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_decode_thread_cpu_is_bounded_and_one_thread_serves_a_set() {
+        use core::num::NonZeroUsize;
+        use miso_engine_core::realtime::{PlanarBufferMut, RenderEnvelope, RenderIo, RenderTime};
+        use miso_engine_effect_contract::{LatencySamples, TailSamples};
+        use miso_engine_graph::{
+            DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphPortId, GraphPortKind,
+            GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
+            PreparedGraphPlan, PreparedGraphPlanParts,
+        };
+
+        const SOURCE_COUNT: usize = 8;
+        const QUANTUM: u32 = 128;
+        const REGION_FRAMES: u64 = QUANTUM as u64 * 9;
+
+        struct Noop;
+        impl GraphRuntimeProcessor for Noop {
+            fn process(
+                &mut self,
+                _block: miso_engine_graph::GraphBindingBlock<'_>,
+            ) -> Result<(), miso_engine_core::realtime::RenderError> {
+                Ok(())
+            }
+        }
+
+        let mut session_toml =
+            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+                .expect("session");
+        session_toml.limits.memory_bytes = 64 * 1024 * 1024;
+        session_toml.sources[0].mapping.region.length_samples = REGION_FRAMES;
+        let source_template = session_toml.sources[0].clone();
+        let track_template = session_toml.tracks[0].clone();
+        for index in 1..SOURCE_COUNT {
+            let mut source = source_template.clone();
+            source.id = StableId::parse(&format!("voice{index}")).expect("unique source stable ID");
+            source.content.locator = format!("host:voice{index}");
+            let mut track = track_template.clone();
+            track.id = StableId::parse(&format!("vocal{index}")).expect("unique track stable ID");
+            track.source_id = source.id.clone();
+            session_toml.sources.push(source);
+            session_toml.tracks.push(track);
+        }
+        let session = compile_session(
+            &session_toml,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled eight-source session");
+        let wave = stereo_float32_wave(&vec![0.25; REGION_FRAMES as usize * 2]);
+        let mut resolver = SessionResolver {
+            assets: (0..SOURCE_COUNT)
+                .map(|_| NativeResolvedAsset {
+                    observed_identity: b"sha256:demo".to_vec(),
+                    reader: Cursor::new(wave.clone()),
+                })
+                .collect(),
+            calls: 0,
+        };
+        let prepared = prepare_native_session_sources(&session, &mut resolver, session_caps())
+            .expect("prepare eight sources on one worker");
+        assert_eq!(resolver.calls, SOURCE_COUNT);
+        assert_eq!(prepared.controllers.len(), SOURCE_COUNT);
+        let rust_thread_id = prepared.controllers[0].worker.id();
+        assert!(
+            prepared
+                .controllers
+                .iter()
+                .all(|controller| controller.worker.id() == rust_thread_id),
+            "all eight controllers must share one Rust worker thread ID"
+        );
+        let (source_set, mut controllers, _) = prepared.into_parts();
+        for controller in &mut controllers {
+            assert!(matches!(
+                controller.wait_for_event().expect("source ready"),
+                NativeSourceWorkerEvent::SourceReady { .. }
+            ));
+        }
+
+        let tid = wait_for_only_source_worker_task(Duration::from_secs(10));
+        let render_wait_ticks = measure_exclusive_source_worker_ticks(
+            tid,
+            Duration::from_millis(500),
+            Duration::from_secs(10),
+        );
+        assert!(
+            render_wait_ticks <= 5,
+            "ring-full source-set worker consumed {render_wait_ticks} CPU ticks in 500 ms"
+        );
+
+        let envelope = RenderEnvelope {
+            sample_rate: session.sample_rate(),
+            quantum: session.quantum(),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two outputs"),
+        };
+        let input_nodes: Vec<_> = session
+            .normalized_model()
+            .tracks
+            .iter()
+            .map(|track| GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(track.id.as_str()).expect("compiled track ID"),
+                stage: TrackStage::Input,
+            })
+            .collect();
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let mut nodes: Vec<_> = input_nodes
+            .iter()
+            .cloned()
+            .map(|id| GraphNode {
+                id,
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.push(GraphNode {
+            id: output.clone(),
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+        });
+        let edges: Vec<_> = input_nodes
+            .iter()
+            .enumerate()
+            .map(|(index, input)| GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse(&format!("source-route{index}"))
+                        .expect("route ID"),
+                },
+                source: GraphPortId {
+                    node: input.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: format!("$.routes[{index}]"),
+            })
+            .collect();
+        let mut schedule = input_nodes.clone();
+        schedule.push(output.clone());
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 124,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule.clone(),
+            dependency_levels: vec![
+                DependencyLevel {
+                    level: 0,
+                    nodes: input_nodes.clone(),
+                },
+                DependencyLevel {
+                    level: 1,
+                    nodes: vec![output.clone()],
+                },
+            ],
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings: schedule,
+            routes: Vec::new(),
+            effects: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let mut plan = match graph.bind_with_source_set(
+            GraphRuntimeBindings {
+                envelope,
+                nodes: vec![miso_engine_graph::GraphNodeBinding::new(
+                    output,
+                    Box::new(Noop),
+                )],
+                observers: Vec::new(),
+            },
+            source_set,
+        ) {
+            Ok(plan) => plan,
+            Err(failure) => panic!("eight-source bind failed: {}", failure.code),
+        };
+        let mut output_pcm = vec![0.0_f32; usize::from(2_u16) * QUANTUM as usize];
+        let mut render = |block: u64| {
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(
+                        &mut output_pcm,
+                        2,
+                        QUANTUM as usize,
+                        QUANTUM as usize,
+                    )
+                    .expect("output shape"),
+                },
+                RenderTime {
+                    absolute_sample: block * u64::from(QUANTUM),
+                },
+            )
+            .expect("source-set render");
+        };
+        render(0);
+        for controller in &mut controllers {
+            sync_worker(controller);
+        }
+        // The final snapshot is published before that job submits its pending block. A second
+        // scheduler pass proves all eight final EOF blocks are in their rings before rendering.
+        sync_worker(&mut controllers[0]);
+        for block in 1..=9 {
+            render(block);
+        }
+        for controller in &mut controllers {
+            sync_worker(controller);
+        }
+
+        let eof_ticks = measure_exclusive_source_worker_ticks(
+            tid,
+            Duration::from_millis(500),
+            Duration::from_secs(10),
+        );
+        assert!(
+            eof_ticks <= 1,
+            "EOF-inactive source-set worker consumed {eof_ticks} CPU ticks in 500 ms"
+        );
+        println!(
+            "eight-source shared worker tid={tid} ring_full_ticks={render_wait_ticks} eof_ticks={eof_ticks}"
+        );
+        drop(plan);
+        for controller in &mut controllers {
+            assert!(matches!(
+                controller.wait_for_event().expect("stopped terminal"),
+                NativeSourceWorkerEvent::Terminal {
+                    exit: NativeSourceWorkerExit::Stopped,
+                    ..
+                }
+            ));
         }
     }
 
@@ -3619,6 +3914,87 @@ mod tests {
             consumer.read_block(&mut planes).expect("read")
         };
         (output, report)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn source_worker_tasks() -> Vec<u32> {
+        let mut tids = Vec::new();
+        for entry in std::fs::read_dir("/proc/self/task").expect("read process tasks") {
+            let entry = entry.expect("task entry");
+            let Ok(tid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(name) = std::fs::read_to_string(entry.path().join("comm")) else {
+                continue;
+            };
+            if name.trim_end() == "miso-engine-sou" {
+                tids.push(tid);
+            }
+        }
+        tids.sort_unstable();
+        tids
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_only_source_worker_task(timeout: Duration) -> u32 {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let tids = source_worker_tasks();
+            if let [tid] = tids.as_slice() {
+                return *tid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected exactly one miso-engine-sou task, observed {tids:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn source_worker_cpu_ticks(tid: u32) -> u64 {
+        let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat"))
+            .expect("read source worker stat");
+        let close = stat.rfind(')').expect("stat command terminator");
+        let fields: Vec<_> = stat[close + 1..].split_whitespace().collect();
+        let user = fields
+            .get(11)
+            .expect("stat utime")
+            .parse::<u64>()
+            .expect("numeric utime");
+        let system = fields
+            .get(12)
+            .expect("stat stime")
+            .parse::<u64>()
+            .expect("numeric stime");
+        user.checked_add(system).expect("worker CPU ticks")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn measure_exclusive_source_worker_ticks(
+        tid: u32,
+        interval: Duration,
+        timeout: Duration,
+    ) -> u64 {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            while source_worker_tasks().as_slice() != [tid] {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parallel source workers did not clear before CPU sampling"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            let start = source_worker_cpu_ticks(tid);
+            thread::sleep(interval);
+            if source_worker_tasks().as_slice() == [tid] {
+                return source_worker_cpu_ticks(tid).saturating_sub(start);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parallel source workers remained active across CPU sampling"
+            );
+        }
     }
 
     fn sync_worker(controller: &mut NativeSourceController) {
