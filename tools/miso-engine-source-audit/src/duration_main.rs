@@ -323,10 +323,10 @@ mod tests {
         let capture = capture(&path, QUANTUM.into()).expect("capture bounded unit accounting");
         remove_file(&path).expect("remove bounded unit WAVE");
 
-        assert_eq!(capture.layout.len(), 16);
-        assert_eq!(layout_total(&capture.layout).expect("layout total"), 4_504);
+        assert_eq!(capture.layout.len(), 17);
+        assert_eq!(layout_total(&capture.layout).expect("layout total"), 5_248);
         let canonical = canonical_accounting(&capture);
-        assert_eq!(fnv1a64(canonical.as_bytes()), 0xbc5d_f020_c1e8_ea1a);
+        assert_eq!(fnv1a64(canonical.as_bytes()), 0x9fb3_5467_02f4_ff41);
         println!(
             "issue041 accounting fnv1a64={:016x} bytes={} minute_identity=wave-f32le-mono-48000-2880000-11520044-materialized multi_hour_identity=wave-f32le-mono-48000-518400000-2073600044-sparse accounting={canonical}",
             fnv1a64(canonical.as_bytes()),
