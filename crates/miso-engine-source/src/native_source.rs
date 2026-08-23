@@ -2760,6 +2760,54 @@ mod tests {
     }
 
     #[test]
+    fn invalid_graph_mapping_stops_carried_worker_before_consumer_cleanup() {
+        use miso_engine_core::realtime::RenderEnvelope;
+
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut native_resolver = resolver(&[0.25; 4], b"exact-identity");
+        let prepared = prepare_native_source(&mut native_resolver, request(region), caps())
+            .expect("prepare native source carrier");
+        let (mut controller, source) = prepared.into_graph_source();
+        controller.wait_for_event().expect("source ready");
+
+        let error = match prepare_graph_source_set(
+            RenderEnvelope {
+                sample_rate: SampleRateHz(48_000),
+                quantum: QuantumFrames(4),
+                input_channels: None,
+                output_channels: NonZeroUsize::new(2).expect("two outputs"),
+            },
+            vec![source],
+            vec![SourceGraphTrackMapping {
+                node: GraphNodeId::Output {
+                    output_id: StableGraphId::parse("main").expect("output ID"),
+                },
+                source_index: 0,
+                left_channel: 0,
+                right_channel: 0,
+            }],
+        ) {
+            Ok(_) => panic!("invalid mapping unexpectedly sealed"),
+            Err(error) => error,
+        };
+        assert_eq!(error, crate::SourceGraphSourceSetError::SourceIndex);
+        assert!(matches!(
+            controller.wait_for_event().expect("cleanup terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::Stopped,
+                ..
+            }
+        ));
+        assert_eq!(
+            controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
+    }
+
+    #[test]
     fn retired_graph_plan_is_the_native_worker_join_owner() {
         use core::num::NonZeroUsize;
         use miso_engine_core::realtime::{

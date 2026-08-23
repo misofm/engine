@@ -1386,14 +1386,14 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 
 /// One render-owned source endpoint moved into the graph fan-out wrapper.
 pub struct SourceGraphSource {
+    #[cfg(not(target_arch = "wasm32"))]
+    retirement_worker: Option<NativeSourceWorker>,
     consumer: PcmSourceConsumer,
     resources: SourceResourceReport,
     /// Fixed native worker/decoder bytes not represented by the ring report.
     additional_overhead_bytes: u64,
     /// Largest fixed worker/decoder allocation, if larger than the ring allocation.
     additional_largest_allocation_bytes: u64,
-    #[cfg(not(target_arch = "wasm32"))]
-    retirement_worker: Option<NativeSourceWorker>,
 }
 
 impl SourceGraphSource {
@@ -1658,6 +1658,8 @@ pub fn prepare_graph_source_set(
     }
     let quantum = usize::try_from(envelope.quantum.0)
         .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
+    // Until extraction below, SourceGraphSource field order guarantees every early-return path
+    // stops/joins its worker before dropping the paired consumer.
     let retained = source_set_retained_resources(&sources, &mappings, quantum)?;
     let mut pcm_payload = 0_u64;
     let mut overhead = 0_u64;
@@ -1750,6 +1752,19 @@ mod tests {
     #[test]
     fn set_driver_declares_worker_tokens_before_source_consumers() {
         let source = include_str!("lib.rs");
+        let carrier_start = source
+            .find("pub struct SourceGraphSource")
+            .expect("pre-sealing source carrier declaration");
+        let carrier = &source[carrier_start..];
+        let carrier_worker = carrier
+            .find("retirement_worker:")
+            .expect("carrier worker token field");
+        let carrier_consumer = carrier.find("consumer:").expect("carrier consumer field");
+        assert!(
+            carrier_worker < carrier_consumer,
+            "pre-sealing worker token must drop before its consumer"
+        );
+
         let start = source
             .find("struct SourceGraphSourceSetDriver")
             .expect("set driver declaration");
