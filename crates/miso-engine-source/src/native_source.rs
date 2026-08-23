@@ -2683,6 +2683,83 @@ mod tests {
     }
 
     #[test]
+    fn graph_set_driver_retains_all_native_workers_until_set_drop() {
+        use core::mem::size_of;
+        use miso_engine_core::realtime::RenderEnvelope;
+
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+        let mut first_resolver = resolver(&[0.25; 4], b"exact-identity");
+        let mut second_resolver = resolver(&[0.5; 4], b"exact-identity");
+        let first = prepare_native_source(&mut first_resolver, request(region), caps())
+            .expect("prepare first native source");
+        let second = prepare_native_source(&mut second_resolver, request(region), caps())
+            .expect("prepare second native source");
+        let (mut first_controller, first_source) = first.into_graph_source();
+        let (mut second_controller, second_source) = second.into_graph_source();
+        first_controller.wait_for_event().expect("first ready");
+        second_controller.wait_for_event().expect("second ready");
+        let sources = vec![first_source, second_source];
+        let retained = crate::source_set_retained_resources(&sources, &[], 4)
+            .expect("exact set retained resources");
+        assert_eq!(retained.retirement_workers.item_count, 2);
+        assert_eq!(
+            retained.retirement_workers.bytes,
+            u64::try_from(size_of::<NativeSourceWorker>() * 2).expect("worker box bytes")
+        );
+        assert_eq!(retained.source_planes.item_count, 2);
+        assert!(retained.source_planes.bytes > 0);
+
+        let source_set = prepare_graph_source_set(
+            RenderEnvelope {
+                sample_rate: SampleRateHz(48_000),
+                quantum: QuantumFrames(4),
+                input_channels: None,
+                output_channels: NonZeroUsize::new(2).expect("two outputs"),
+            },
+            sources,
+            Vec::new(),
+        )
+        .expect("seal set-owned workers");
+        assert!(
+            first_controller.events.try_pop().is_err(),
+            "first worker terminated before graph-set drop"
+        );
+        assert!(
+            second_controller.events.try_pop().is_err(),
+            "second worker terminated before graph-set drop"
+        );
+        first_controller.try_wake().expect("first remains live");
+        second_controller.try_wake().expect("second remains live");
+
+        drop(source_set);
+        assert!(matches!(
+            first_controller.wait_for_event().expect("first terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::Stopped,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second_controller.wait_for_event().expect("second terminal"),
+            NativeSourceWorkerEvent::Terminal {
+                exit: NativeSourceWorkerExit::Stopped,
+                ..
+            }
+        ));
+        assert_eq!(
+            first_controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
+        assert_eq!(
+            second_controller.try_wake(),
+            Err(NativeSourceWorkerControlError::Stopped)
+        );
+    }
+
+    #[test]
     fn retired_graph_plan_is_the_native_worker_join_owner() {
         use core::num::NonZeroUsize;
         use miso_engine_core::realtime::{

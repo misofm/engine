@@ -251,6 +251,7 @@ pub struct SourceSetRetainedResourceReport {
     pub mappings: SourceRetainedAllocation,
     pub claims: SourceRetainedAllocation,
     pub driver: SourceRetainedAllocation,
+    pub retirement_workers: SourceRetainedAllocation,
     pub source_planes: SourceRetainedAllocation,
     pub owned_stable_id_payloads: SourceRetainedAllocation,
 }
@@ -262,6 +263,7 @@ impl SourceSetRetainedResourceReport {
             self.mappings.bytes,
             self.claims.bytes,
             self.driver.bytes,
+            self.retirement_workers.bytes,
             self.source_planes.bytes,
             self.owned_stable_id_payloads.bytes,
         ]
@@ -275,6 +277,7 @@ impl SourceSetRetainedResourceReport {
             self.mappings.largest_allocation_bytes,
             self.claims.largest_allocation_bytes,
             self.driver.largest_allocation_bytes,
+            self.retirement_workers.largest_allocation_bytes,
             self.source_planes.largest_allocation_bytes,
             self.owned_stable_id_payloads.largest_allocation_bytes,
         ]
@@ -1452,20 +1455,13 @@ struct GraphSourceEntry {
     consumer: PcmSourceConsumer,
     channel_count: u32,
     planes: Box<[f32]>,
-    #[cfg(not(target_arch = "wasm32"))]
-    retirement_worker: Option<NativeSourceWorker>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for GraphSourceEntry {
-    fn drop(&mut self) {
-        // The containing source set is owned by a prepared plan. Its drop therefore performs
-        // native stop/join only during off-render source-set or retired-plan reclamation.
-        drop(self.retirement_worker.take());
-    }
 }
 
 struct SourceGraphSourceSetDriver {
+    /// Declared first so native workers stop/join before source consumers are dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(dead_code)]
+    workers: Box<[NativeSourceWorker]>,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -1496,6 +1492,20 @@ fn source_set_retained_resources(
     let mappings_report = allocation_class::<SourceGraphTrackMapping>(mappings.len())?;
     let claims = allocation_class::<GraphSourceInputClaim>(mappings.len())?;
     let driver = allocation_class::<SourceGraphSourceSetDriver>(1)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let retirement_workers = allocation_class::<NativeSourceWorker>(
+        sources
+            .iter()
+            .filter(|source| source.retirement_worker.is_some())
+            .count(),
+    )?;
+    #[cfg(target_arch = "wasm32")]
+    let retirement_workers = SourceRetainedAllocation {
+        item_count: 0,
+        bytes: 0,
+        largest_allocation_bytes: 0,
+        alignment_bytes: 1,
+    };
     let mut planes = SourceRetainedAllocation {
         item_count: 0,
         bytes: 0,
@@ -1545,6 +1555,7 @@ fn source_set_retained_resources(
         mappings: mappings_report,
         claims,
         driver,
+        retirement_workers,
         source_planes: planes,
         owned_stable_id_payloads: ids,
     })
@@ -1653,6 +1664,11 @@ pub fn prepare_graph_source_set(
     let mut overhead = 0_u64;
     let mut largest = 0_u64;
     let mut entries = Vec::with_capacity(sources.len());
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut workers = Vec::with_capacity(
+        usize::try_from(retained.retirement_workers.item_count)
+            .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?,
+    );
     for source in sources {
         let channel_count = source.consumer.channel_count();
         let samples = usize::try_from(channel_count)
@@ -1669,12 +1685,14 @@ pub fn prepare_graph_source_set(
         largest = largest
             .max(source.resources.largest_allocation_bytes)
             .max(source.additional_largest_allocation_bytes);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(worker) = source.retirement_worker {
+            workers.push(worker);
+        }
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
             channel_count,
             planes: vec![0.0; samples].into_boxed_slice(),
-            #[cfg(not(target_arch = "wasm32"))]
-            retirement_worker: source.retirement_worker,
         });
     }
     overhead = overhead
@@ -1714,6 +1732,8 @@ pub fn prepare_graph_source_set(
             largest_allocation_bytes: largest,
         },
         Box::new(SourceGraphSourceSetDriver {
+            #[cfg(not(target_arch = "wasm32"))]
+            workers: workers.into_boxed_slice(),
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
@@ -1726,6 +1746,22 @@ mod tests {
     use super::*;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_driver_declares_worker_tokens_before_source_consumers() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("struct SourceGraphSourceSetDriver")
+            .expect("set driver declaration");
+        let body = &source[start..];
+        let workers = body.find("workers:").expect("worker token field");
+        let sources = body.find("sources:").expect("consumer field");
+        assert!(
+            workers < sources,
+            "worker tokens must drop before source consumers"
+        );
+    }
 
     fn config(channels: u32, quantum: u32, capacity: u64) -> PcmSourceRingConfig {
         PcmSourceRingConfig {
