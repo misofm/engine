@@ -1196,3 +1196,239 @@ impl NativeEffectFactory for GateExpanderFactory {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miso_engine_effect_contract::{
+        PrepareEffectLimits, PreparedPortsV1, validate_descriptor_v1,
+    };
+    use miso_engine_effect_runtime::params::ParameterKind;
+
+    impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
+        /// Test-only fault injection: makes one lane's smoothed gain a NaN.
+        ///
+        /// Issue #48 forbids a public injection API, so this exists only under `cfg(test)` and is
+        /// the only way to reach the case where the *state* is non-finite while the output block
+        /// is not — which is exactly the case `exp2_lane`'s NaN-swallowing clamp creates.
+        fn inject_nonfinite_gain(&mut self, lane: usize, channel: usize) {
+            lane_set(&mut self.state[channel].gain_db, lane, f32::NAN);
+        }
+    }
+
+    fn values(threshold: f32) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        let defaults = [threshold, 20.0, 48.0, 6.0, 1.0, 0.0, 5.0, 10.0];
+        core::array::from_fn(|index| InitialParameterValue {
+            parameter_index: (index / 2) as u32,
+            channel: if index % 2 == 0 {
+                ParameterChannel::Left
+            } else {
+                ParameterChannel::Right
+            },
+            value: defaults[index / 2],
+        })
+    }
+
+    fn metadata(values: &[InitialParameterValue]) -> PreparedEffectMetadata {
+        let quality = GATE_EXPANDER_DESCRIPTOR_V1
+            .qualities
+            .iter()
+            .find(|quality| quality.sample_rate == 48_000)
+            .expect("launch rate");
+        expected_prepared_metadata(
+            &GATE_EXPANDER_DESCRIPTOR_V1,
+            PrepareEffectRequest {
+                sample_rate: 48_000,
+                quantum: 128,
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                ports: PreparedPortsV1 {
+                    sidechain: PreparedSidechainPort::Unconnected {
+                        id: port_id("sidechain-in"),
+                        required: false,
+                    },
+                },
+                initial_values: values,
+                limits: PrepareEffectLimits {
+                    maximum_total_state_bytes: quality.maximum_state.total().expect("total"),
+                    maximum_scratch_bytes: 64,
+                    maximum_automation_spans_per_block: 16,
+                },
+            },
+        )
+        .expect("prepared metadata")
+    }
+
+    fn noise(seed: u64, frames: usize) -> Vec<f32> {
+        let mut state = seed | 1;
+        (0..frames)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let word = (state >> 32) as u32;
+                (f32::from((word >> 16) as u16) * (2.0 / 65_536.0) - 1.0) * 0.3
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_runtime_parameter_specs_agree_with_the_frozen_descriptor() {
+        validate_descriptor_v1(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
+        for (index, descriptor) in GATE_EXPANDER_PARAMETERS_V1.iter().enumerate() {
+            let spec = GATE_SPECS[index];
+            assert_eq!(spec.kind, ParameterKind::Continuous, "parameter {index}");
+            assert_eq!(Some(spec.minimum), descriptor.minimum, "min {index}");
+            assert_eq!(Some(spec.maximum), descriptor.maximum, "max {index}");
+            assert_eq!(spec.default, descriptor.default_value, "default {index}");
+            let expected = match descriptor.mapping {
+                ParameterMapping::Linear => {
+                    miso_engine_effect_runtime::params::ParameterMapping::Linear
+                }
+                ParameterMapping::Logarithmic => {
+                    miso_engine_effect_runtime::params::ParameterMapping::Logarithmic
+                }
+                other => panic!("parameter {index} has an unexpected mapping {other:?}"),
+            };
+            assert_eq!(spec.mapping, expected, "mapping {index}");
+        }
+        for (index, descriptor) in GATE_EXPANDER_PARAMETERS_V1.iter().enumerate() {
+            assert_eq!(
+                descriptor.smoothing_samples,
+                if index < RAMP_COUNT { RAMP_SAMPLES } else { 0 },
+                "smoothing {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn injected_nonfinite_gain_has_scalar_w8_parity() {
+        const FRAMES: usize = 128;
+        const WARM: usize = 5;
+        if Backend::current() != Backend::Simd8 {
+            return;
+        }
+        let track_values: [_; MAX_WIDTH] =
+            core::array::from_fn(|track| values(-20.0 - track as f32));
+        let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
+        for (track, set) in track_values.iter().enumerate() {
+            defaults[track] = initial_defaults(set).expect("initial values");
+        }
+        let shared = metadata(&track_values[0]);
+        let mut bank = PreparedGate::<Simd8, false>::new(shared, Some(BankWidth::Eight), defaults)
+            .expect("bank");
+        let mut control =
+            PreparedGate::<Simd8, false>::new(shared, Some(BankWidth::Eight), defaults)
+                .expect("control bank");
+        let mut peers: Vec<PreparedGate<f32, false>> = (0..MAX_WIDTH)
+            .map(|track| {
+                let mut lane_defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
+                lane_defaults[0] = defaults[track];
+                PreparedGate::<f32, false>::new(shared, None, lane_defaults).expect("peer")
+            })
+            .collect();
+
+        let sources: Vec<Vec<f32>> = (0..MAX_WIDTH)
+            .map(|track| noise(17 + track as u64, FRAMES * (WARM + 1)))
+            .collect();
+        let mut bank_reports = [ProcessReport::default(); MAX_WIDTH];
+        let mut peer_reports = [ProcessReport::default(); MAX_WIDTH];
+        let mut bank_left = vec![0.0_f32; FRAMES * MAX_WIDTH];
+        let mut bank_right = vec![0.0_f32; FRAMES * MAX_WIDTH];
+        let mut control_left = bank_left.clone();
+        let mut control_right = bank_right.clone();
+        let mut peer_left = vec![vec![0.0_f32; FRAMES]; MAX_WIDTH];
+        let mut peer_right = vec![vec![0.0_f32; FRAMES]; MAX_WIDTH];
+
+        for block in 0..=WARM {
+            if block == WARM {
+                bank.inject_nonfinite_gain(3, 0);
+                peers[3].inject_nonfinite_gain(0, 0);
+            }
+            for track in 0..MAX_WIDTH {
+                for frame in 0..FRAMES {
+                    let sample = sources[track][block * FRAMES + frame];
+                    bank_left[frame * MAX_WIDTH + track] = sample;
+                    bank_right[frame * MAX_WIDTH + track] = sample;
+                    control_left[frame * MAX_WIDTH + track] = sample;
+                    control_right[frame * MAX_WIDTH + track] = sample;
+                    peer_left[track][frame] = sample;
+                    peer_right[track][frame] = sample;
+                }
+            }
+            bank_reports = [ProcessReport::default(); MAX_WIDTH];
+            peer_reports = [ProcessReport::default(); MAX_WIDTH];
+            bank.run_block(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                FRAMES,
+                &mut bank_reports,
+            );
+            control.run_block(
+                &mut control_left,
+                &mut control_right,
+                None,
+                FRAMES,
+                &mut [ProcessReport::default(); MAX_WIDTH],
+            );
+            for track in 0..MAX_WIDTH {
+                let mut single = [ProcessReport::default(); MAX_WIDTH];
+                peers[track].run_block(
+                    &mut peer_left[track],
+                    &mut peer_right[track],
+                    None,
+                    FRAMES,
+                    &mut single,
+                );
+                peer_reports[track] = single[0];
+            }
+        }
+
+        // The NaN never reaches the output: `exp2_lane`'s D8 clamp swallows it, so `A` is finite
+        // and `z * A` is finite. Only the block-end scan of the gain words sees it.
+        for track in 0..MAX_WIDTH {
+            for frame in 0..FRAMES {
+                assert_eq!(
+                    bank_left[frame * MAX_WIDTH + track].to_bits(),
+                    peer_left[track][frame].to_bits(),
+                    "left track {track} frame {frame}"
+                );
+                assert_eq!(
+                    bank_right[frame * MAX_WIDTH + track].to_bits(),
+                    peer_right[track][frame].to_bits(),
+                    "right track {track} frame {frame}"
+                );
+            }
+            assert_eq!(bank_reports[track], peer_reports[track], "report {track}");
+            if track == 3 {
+                assert_eq!(bank_reports[track].recovered_left_samples, FRAMES as u64);
+                assert_eq!(bank_reports[track].recovered_right_samples, 0);
+                for frame in 0..FRAMES {
+                    assert_eq!(bank_left[frame * MAX_WIDTH + track].to_bits(), 0);
+                }
+                assert_eq!(lane_get(bank.state[0].gain_db, 3).to_bits(), 0, "G is +0");
+                assert_eq!(lane_get(bank.state[0].hysteresis.open, 3), OPEN_WORD);
+                assert_eq!(
+                    lane_get(bank.state[0].hysteresis.hold, 3),
+                    lane_get(bank.coef[0].hold_samples, 3)
+                );
+            } else {
+                assert_eq!(bank_reports[track], ProcessReport::default());
+                for frame in 0..FRAMES {
+                    assert_eq!(
+                        bank_left[frame * MAX_WIDTH + track].to_bits(),
+                        control_left[frame * MAX_WIDTH + track].to_bits(),
+                        "track {track} is untouched by track 3's recovery"
+                    );
+                }
+            }
+            assert_eq!(
+                bank_right[3].to_bits(),
+                control_right[3].to_bits(),
+                "the right channel of track 3 is untouched"
+            );
+        }
+    }
+}
