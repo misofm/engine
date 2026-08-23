@@ -99,19 +99,25 @@ pub enum BuiltinParameterError {
     MatrixSmoothing,
 }
 
+/// What one `process` call sanitised and recovered.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BuiltinProcessReport {
+    /// Input samples replaced by positive zero at the input stage, over both channels.
+    ///
+    /// A sample is sanitised when its magnitude is not below `1e30`, which includes every NaN
+    /// (D7). A subnormal input is **not** sanitised: it is a legal finite sample.
     pub sanitized_input: u64,
+    /// Always zero. Retained for API stability: D7 replaced per-sample output sanitisation with
+    /// the once-per-block boundary check the two counters below report.
     pub sanitized_output: u64,
-    /// Invalid retained-state recoveries for the left lane only.
+    /// Left-channel lane-blocks whose output failed the boundary check.
     ///
-    /// Finite subnormal retained values are canonicalized to positive zero before they can be
-    /// committed; they do not increment this counter.
+    /// The check runs once per block, per lane, on the output of the recursive stage; a failing
+    /// lane has its block zeroed and both of its sections reset. This counts lane-blocks, not
+    /// samples, and never counts a padding lane.
     pub recovered_left_state: u64,
-    /// Invalid retained-state recoveries for the right lane only.
-    ///
-    /// Finite subnormal retained values are canonicalized to positive zero before they can be
-    /// committed; they do not increment this counter.
+    /// Right-channel lane-blocks whose output failed the boundary check; see
+    /// [`BuiltinProcessReport::recovered_left_state`].
     pub recovered_right_state: u64,
 }
 

@@ -69,7 +69,7 @@ detection_matches="$({
     rg -n 'is_x86_feature_detected|is_aarch64_feature_detected' crates hosts tools --glob '*.rs' || true
 } | rg -v '^crates/miso-engine-lane/src/backend\.rs:|^crates/miso-engine-lane/src/lib\.rs:|'"$legacy_arch"'|'"$legacy_detect" || true)"
 # Wave-2 consumers still call the legacy detection; they are enumerated, not open-ended.
-detection_matches="$(printf '%s' "$detection_matches" | rg -v '^crates/miso-engine-(parametric-eq|builtins)/src/lib\.rs:' || true)"  # removed by #84
+detection_matches="$(printf '%s' "$detection_matches" | rg -v '^crates/miso-engine-parametric-eq/src/lib\.rs:' || true)"  # removed by #87
 [[ -z "$detection_matches" ]] || {
     printf '%s\n' "$detection_matches" >&2
     fail "runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)"
