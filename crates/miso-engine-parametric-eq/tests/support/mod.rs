@@ -17,9 +17,9 @@ use miso_engine_parametric_eq::{
 
 /// Bytes in each channel section of a version-2 payload.
 pub const LANE_BYTES: usize = 304;
-/// Bytes in the common section: none — the two channels share no state (wave-2 decision W2-D2
-/// keeps the shared codec's two-word header out of this crate).
-pub const COMMON_BYTES: usize = 0;
+/// Bytes in the common section: the shared codec's two-word header (version, data word count).
+/// The two channels share no state, so the effect adds no common words of its own.
+pub const COMMON_BYTES: usize = 8;
 /// Words one band occupies in a lane section.
 pub const WORDS_PER_BAND: usize = 19;
 

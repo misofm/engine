@@ -13,7 +13,9 @@ cannot be made red by breaking the thing it claims to certify is the failure mod
 to rule out.
 
 Host: `x86_64` (Zen 5 class), `rustc 1.97.1`, workspace `.cargo/config.toml` pin
-`-C target-feature=+avx2,+fma`, debug profile.
+`-C target-feature=+avx2,+fma`, debug profile. Rows 17 and 23 were re-run after the state payload
+adopted the shared codec's two-word header inside layout version 2 (W2-D2's never-bump-twice rule);
+every other row is unchanged by that amendment.
 
 Reproduce one row with:
 
@@ -42,7 +44,8 @@ cargo test --locked -p miso-engine-parametric-eq --test <test binary>
 | 14 | `design_svf_v1` drops its spectral-norm guard | `src/lib.rs` | `analytic` | SURVIVED |
 | 15 | the automation domain check always validates against the frequency spec | `src/lib.rs` | `contract` | RED |
 | 16 | a settled band accepts stored words that disagree with its stored parameters | `src/lib.rs` | `contract` | RED |
-| 17 | the payload length check accepts trailing bytes (`<` instead of `!=`) | `src/lib.rs` | `contract` | RED |
+| 17 | the payload header stamps version 1 | `src/lib.rs` | `contract` | RED |
+| 23 | the descriptor advertises `common_bytes = 0` while the codec stamps a header | `src/lib.rs` | `contract` | RED |
 | 18 | `word_spectral_norm` drops the off-diagonal term of `M^T M` | `src/lib.rs` | `analytic` | RED |
 | 19 | the corpus reads a lane back from the mirrored AoSoA offset | `src/corpus.rs` | `determinism` | RED |
 | 20 | the bypass path renders instead of copying the dry block | `src/lib.rs` | `contract` | RED |
@@ -144,8 +147,10 @@ event that would make the region reachable.
 rejected and `malformed_automation_rejects_each_span_without_losing_valid_targets` counts seven
 invalid spans instead of six. 16 accepts a settled band whose stored coefficient words disagree
 with its stored parameters — a payload that would render something the session does not describe.
-17 accepts a payload longer than the layout, whose surplus is either another layout's data or
-uninitialised memory. 20 renders the
+17 stamps the wrong version into the header, so a version-2 payload rejects itself — which is the
+whole point of the header: the caller's out-of-band `state_layout_version` is a claim, word 0 is
+evidence. 23 lets the descriptor advertise a common section the codec does not write, so every
+snapshot is refused for length. 20 renders the
 signal on the bypass path, and `bypass_copies_dry_bits_and_leaves_the_state_alone` fails because
 bypass must preserve the dry bits *and* the latency, not approximate them.
 

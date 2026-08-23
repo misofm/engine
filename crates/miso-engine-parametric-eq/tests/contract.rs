@@ -19,7 +19,7 @@ use miso_engine_parametric_eq::{
 };
 use support::{
     COMMON_BYTES, LANE_BYTES, SECTIONS, WORDS_PER_BAND, band_word, point, process_zeros, request,
-    set_initial, single_section_values, snapshot, values,
+    set_initial, single_section_values, snapshot, values, word,
 };
 
 /// The frozen public surface: identifiers, domains, smoothing and the version-2 state size.
@@ -416,27 +416,25 @@ fn a_payload_of_the_wrong_length_is_rejected() {
         .expect("prepare");
     let (common, left, right) = snapshot(effect.as_ref());
     for (common_len, left_len, right_len) in [
-        (4_usize, LANE_BYTES, LANE_BYTES),
-        (0, LANE_BYTES - 4, LANE_BYTES),
-        (0, LANE_BYTES, LANE_BYTES + 4),
+        (COMMON_BYTES - 4, LANE_BYTES, LANE_BYTES),
+        (COMMON_BYTES + 4, LANE_BYTES, LANE_BYTES),
+        (COMMON_BYTES, LANE_BYTES - 4, LANE_BYTES),
+        (COMMON_BYTES, LANE_BYTES, LANE_BYTES + 4),
     ] {
-        let mut common_bytes = vec![0_u8; common_len];
-        common_bytes[..common.len().min(common_len)]
-            .copy_from_slice(&common[..common.len().min(common_len)]);
-        let mut left_bytes = vec![0_u8; left_len];
-        let take = left.len().min(left_len);
-        left_bytes[..take].copy_from_slice(&left[..take]);
-        let mut right_bytes = vec![0_u8; right_len];
-        let take = right.len().min(right_len);
-        right_bytes[..take].copy_from_slice(&right[..take]);
+        let resize = |source: &[u8], length: usize| {
+            let mut bytes = vec![0_u8; length];
+            let take = source.len().min(length);
+            bytes[..take].copy_from_slice(&source[..take]);
+            bytes
+        };
         assert_eq!(
             effect.restore_state_payload(
                 2,
                 StatePayloadInput {
-                    common: &common_bytes,
-                    left: &left_bytes,
-                    right: &right_bytes,
-                }
+                    common: &resize(&common, common_len),
+                    left: &resize(&left, left_len),
+                    right: &resize(&right, right_len),
+                },
             ),
             Err(StatePayloadError {
                 code: "effect.state.length"
@@ -444,6 +442,54 @@ fn a_payload_of_the_wrong_length_is_rejected() {
             "sections {common_len}/{left_len}/{right_len}"
         );
     }
+}
+
+/// The header makes a payload self-describing, so a stale one rejects itself.
+///
+/// The out-of-band `state_layout_version` argument is the caller's claim; word 0 is the payload's
+/// own. Both are checked, and the version is checked before the word count so that a payload from
+/// an older layout reports the version it actually is rather than the length that version implies.
+#[test]
+fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
+    let values = values();
+    let mut effect = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    let (common, left, right) = snapshot(effect.as_ref());
+    assert_eq!(word(&common, 0), 2, "the layout version is stamped");
+    assert_eq!(
+        word(&common, 1),
+        (SECTIONS * WORDS_PER_BAND * 2) as u32,
+        "the data word count is stamped"
+    );
+
+    let mut stale = common;
+    stale[0] = 1;
+    assert_eq!(
+        effect.restore_state_payload(
+            2,
+            StatePayloadInput::new(&stale, &left, &right, effect.metadata().state_sizes)
+                .expect("input"),
+        ),
+        Err(StatePayloadError {
+            code: "effect.state.version"
+        }),
+        "a version-1 payload cannot pass as version 2 even when the caller says it is"
+    );
+
+    let mut miscounted = common;
+    miscounted[4] = 0xff;
+    assert_eq!(
+        effect.restore_state_payload(
+            2,
+            StatePayloadInput::new(&miscounted, &left, &right, effect.metadata().state_sizes)
+                .expect("input"),
+        ),
+        Err(StatePayloadError {
+            code: "effect.state.length"
+        }),
+        "a payload whose header disagrees with its own body is not a payload"
+    );
 }
 
 /// A payload whose words are out of domain or inconsistent with its parameters is rejected whole.
