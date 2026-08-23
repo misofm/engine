@@ -624,25 +624,23 @@ impl ProtocolCodec {
             return Err(DecodeError::NonzeroReserved);
         }
         let payload = &input[OUTER_HEADER_BYTES..];
-        let count = parse_tlvs(payload, tlv_count, 0, self.limits, scratch, true)?;
+        let top_level_spec =
+            if message_id == MessageId::CapabilitiesGet && kind == FrameKind::Command {
+                Some(&crate::schema::capabilities_request::SPEC)
+            } else {
+                None
+            };
+        let count = parse_tlvs(
+            payload,
+            tlv_count,
+            0,
+            self.limits,
+            scratch,
+            true,
+            top_level_spec,
+        )?;
         if count != tlv_count {
             return Err(DecodeError::InvalidTlv);
-        }
-        if message_id == MessageId::CapabilitiesGet && kind == FrameKind::Command {
-            let mut cursor = 0_usize;
-            for _ in 0..tlv_count {
-                let prefix = payload
-                    .get(cursor..cursor + TLV_PREFIX_BYTES)
-                    .ok_or(DecodeError::Truncated)?;
-                if prefix[3] & 1 != 0 {
-                    return Err(DecodeError::UnknownRequiredField);
-                }
-                let length = usize::try_from(read_u32(prefix, 4)?)
-                    .map_err(|_| DecodeError::LimitExceeded)?;
-                cursor = cursor
-                    .checked_add(TLV_PREFIX_BYTES + length + padding(length))
-                    .ok_or(DecodeError::LimitExceeded)?;
-            }
         }
         let header = match kind {
             FrameKind::Command => {
@@ -896,6 +894,7 @@ fn parse_tlvs(
     limits: ProtocolLimits,
     scratch: &mut DecodeScratch<'_>,
     top_level: bool,
+    top_level_spec: Option<&'static crate::schema::MessageSpec>,
 ) -> Result<u32, DecodeError> {
     let mut cursor = 0usize;
     let mut previous_id = 0u16;
@@ -934,6 +933,23 @@ fn parse_tlvs(
             .ok_or(DecodeError::Truncated)?;
         if padding_bytes.iter().any(|byte| *byte != 0) {
             return Err(DecodeError::InvalidTlv);
+        }
+        if let Some(spec) = top_level_spec {
+            let field_spec = spec
+                .fields
+                .binary_search_by_key(&field_id, |candidate| candidate.id)
+                .ok()
+                .map(|position| spec.fields[position]);
+            match field_spec {
+                Some(field_spec)
+                    if field_spec.wire.raw() != wire_type
+                        || field_spec.mandatory != (flags & 1 != 0) =>
+                {
+                    return Err(DecodeError::InvalidTlv);
+                }
+                None if flags & 1 != 0 => return Err(DecodeError::UnknownRequiredField),
+                _ => {}
+            }
         }
         if top_level {
             scratch.push(field_id)?;
@@ -989,7 +1005,7 @@ fn validate_value(
             if read_u32(nested_header, 4)? != 0 {
                 return Err(DecodeError::NonzeroReserved);
             }
-            parse_tlvs(&value[8..], count, depth + 1, limits, scratch, false)?;
+            parse_tlvs(&value[8..], count, depth + 1, limits, scratch, false, None)?;
         }
         12 if !value.len().is_multiple_of(2) => return Err(DecodeError::InvalidValueLength),
         13 | 15 if !value.len().is_multiple_of(4) => {

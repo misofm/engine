@@ -1,7 +1,9 @@
 //! Frozen complete-schema byte and decoder conformance.
 
 use miso_engine_protocol::{
-    ConformanceDecoder, DecodeScratch, ProtocolCodec, complete_schema_corpus,
+    ConformanceDecoder, DecodeScratch, ParameterAutomationRate, ParameterChannel,
+    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterMetadataPage, ParameterRack,
+    ParameterUnit, ParameterValueKind, ProtocolCodec, complete_schema_corpus,
 };
 
 #[test]
@@ -31,6 +33,47 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
         assert!(decoded.is_ok(), "{} must decode", frame.name);
     }
     assert_eq!(hash, 0x88a8_ee6a_6d9e_4acc);
+}
+
+#[test]
+fn descriptor_handle_required_flag_is_frozen() {
+    let codec = ProtocolCodec::default();
+    let page = ParameterMetadataPage {
+        last_handle: 1,
+        eof: true,
+        descriptors: vec![ParameterDescriptor {
+            handle: 1,
+            track_id: "track".to_owned(),
+            rack: ParameterRack::Dynamic,
+            effect_id: "effect".to_owned(),
+            parameter_id: 1,
+            channel: ParameterChannel::Left,
+            value_kind: ParameterValueKind::F32,
+            unit: ParameterUnit::Linear,
+            domain: ParameterDomain::Continuous,
+            minimum: Some(0.0),
+            maximum: Some(1.0),
+            default: 0.5,
+            mapping: ParameterMapping::Linear,
+            automation_rate: ParameterAutomationRate::Sample,
+            smoothing_samples: 0,
+            flags: 3,
+            display_name: None,
+            display_unit: None,
+            enum_choices: Vec::new(),
+        }],
+    };
+    let mut bytes = vec![
+        0;
+        codec
+            .encoded_parameter_metadata_page_len(&page)
+            .expect("metadata length")
+    ];
+    codec
+        .encode_parameter_metadata_page(&page, &mut bytes)
+        .expect("metadata encode");
+    assert_eq!(bytes[51], 1, "descriptor handle stays mandatory");
+    assert_eq!(codec.decode_parameter_metadata_page(&bytes, 3), Ok(page));
 }
 
 const fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {

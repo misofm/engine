@@ -6,6 +6,7 @@
 
 use crate::{
     DecodeError, EncodeError, ProtocolCodec,
+    schema::{capabilities_request, descriptor, enum_choice},
     session_wire::{Message, Rule},
 };
 
@@ -814,7 +815,7 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<(), DecodeError> {
-        top_level_message(self, payload, count)?.schema(&[])
+        top_level_message(self, payload, count)?.schema_spec(&capabilities_request::SPEC)
     }
 
     /// Exact caller-output length for a snapshot request.
@@ -2803,38 +2804,51 @@ fn write_descriptor(
         + u32::from(value.display_name.is_some())
         + u32::from(value.display_unit.is_some())
         + value.enum_choices.len() as u32;
+    macro_rules! field {
+        ($spec:expr, $bytes:expr) => {
+            writer.field($spec.id, $spec.wire.raw(), $spec.mandatory, $bytes)
+        };
+    }
     writer.nested_start(id, true, body, fields)?;
-    writer.field(1, WIRE_U32, true, &value.handle.to_le_bytes())?;
-    writer.field(2, WIRE_UTF8, true, value.track_id.as_bytes())?;
-    writer.field(3, WIRE_U8, true, &[value.rack as u8])?;
-    writer.field(4, WIRE_UTF8, true, value.effect_id.as_bytes())?;
-    writer.field(5, WIRE_U32, true, &value.parameter_id.to_le_bytes())?;
-    writer.field(6, WIRE_U8, true, &[value.channel as u8])?;
-    writer.field(7, WIRE_U8, true, &[value.value_kind as u8])?;
-    writer.field(8, WIRE_U8, true, &[value.unit as u8])?;
-    writer.field(9, WIRE_U8, true, &[value.domain as u8])?;
+    field!(descriptor::HANDLE, &value.handle.to_le_bytes())?;
+    field!(descriptor::TRACK_ID, value.track_id.as_bytes())?;
+    field!(descriptor::RACK, &[value.rack as u8])?;
+    field!(descriptor::EFFECT_ID, value.effect_id.as_bytes())?;
+    field!(descriptor::PARAMETER_ID, &value.parameter_id.to_le_bytes())?;
+    field!(descriptor::CHANNEL, &[value.channel as u8])?;
+    field!(descriptor::VALUE_KIND, &[value.value_kind as u8])?;
+    field!(descriptor::UNIT, &[value.unit as u8])?;
+    field!(descriptor::DOMAIN, &[value.domain as u8])?;
     if let Some(v) = value.minimum {
-        writer.field(10, WIRE_F32, false, &v.to_le_bytes())?;
+        field!(descriptor::MINIMUM, &v.to_le_bytes())?;
     }
     if let Some(v) = value.maximum {
-        writer.field(11, WIRE_F32, false, &v.to_le_bytes())?;
+        field!(descriptor::MAXIMUM, &v.to_le_bytes())?;
     }
-    writer.field(12, WIRE_F32, true, &value.default.to_le_bytes())?;
-    writer.field(13, WIRE_U8, true, &[value.mapping as u8])?;
-    writer.field(14, WIRE_U8, true, &[value.automation_rate as u8])?;
-    writer.field(15, WIRE_U32, true, &value.smoothing_samples.to_le_bytes())?;
-    writer.field(16, WIRE_U32, true, &value.flags.to_le_bytes())?;
+    field!(descriptor::DEFAULT, &value.default.to_le_bytes())?;
+    field!(descriptor::MAPPING, &[value.mapping as u8])?;
+    field!(descriptor::AUTOMATION_RATE, &[value.automation_rate as u8])?;
+    field!(
+        descriptor::SMOOTHING_SAMPLES,
+        &value.smoothing_samples.to_le_bytes()
+    )?;
+    field!(descriptor::FLAGS, &value.flags.to_le_bytes())?;
     if let Some(v) = &value.display_name {
-        writer.field(17, WIRE_UTF8, false, v.as_bytes())?;
+        field!(descriptor::DISPLAY_NAME, v.as_bytes())?;
     }
     if let Some(v) = &value.display_unit {
-        writer.field(18, WIRE_UTF8, false, v.as_bytes())?;
+        field!(descriptor::DISPLAY_UNIT, v.as_bytes())?;
     }
     for choice in &value.enum_choices {
         let total = enum_choice_len(codec, choice)?;
-        writer.nested_start(19, false, total - NESTED_HEADER_BYTES, 2)?;
-        writer.field(1, WIRE_F32, true, &choice.value.to_le_bytes())?;
-        writer.field(2, WIRE_UTF8, true, choice.label.as_bytes())?;
+        writer.nested_start(
+            descriptor::ENUM_CHOICE.id,
+            descriptor::ENUM_CHOICE.mandatory,
+            total - NESTED_HEADER_BYTES,
+            2,
+        )?;
+        field!(enum_choice::VALUE, &choice.value.to_le_bytes())?;
+        field!(enum_choice::LABEL, choice.label.as_bytes())?;
         writer.finish_nested(total - NESTED_HEADER_BYTES)?;
     }
     writer.finish_nested(body)
@@ -2871,27 +2885,7 @@ fn decode_descriptor(
     codec: &ProtocolCodec,
     message: Message<'_>,
 ) -> Result<ParameterDescriptor, DecodeError> {
-    message.schema(&[
-        Rule::one(1),
-        Rule::one(2),
-        Rule::one(3),
-        Rule::one(4),
-        Rule::one(5),
-        Rule::one(6),
-        Rule::one(7),
-        Rule::one(8),
-        Rule::one(9),
-        Rule::optional(10),
-        Rule::optional(11),
-        Rule::one(12),
-        Rule::one(13),
-        Rule::one(14),
-        Rule::one(15),
-        Rule::one(16),
-        Rule::optional(17),
-        Rule::optional(18),
-        Rule::optional_repeated(19),
-    ])?;
+    message.schema_spec(&descriptor::SPEC)?;
     let choices = message
         .values(19, WIRE_MESSAGE)?
         .map(|v| decode_choice(codec, nested_message(codec, v, 2)?))
@@ -2933,7 +2927,7 @@ fn decode_descriptor(
     Ok(value)
 }
 fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoice, DecodeError> {
-    message.schema(&[Rule::one(1), Rule::one(2)])?;
+    message.schema_spec(&enum_choice::SPEC)?;
     let value = read_f32(message.one(1, WIRE_F32)?)?;
     if !value.is_finite() {
         return Err(DecodeError::InvalidTlv);
@@ -4654,6 +4648,7 @@ mod tests {
         codec
             .encode_parameter_metadata_page(&page, &mut metadata)
             .expect("encode");
+        assert_eq!(metadata[51], 1, "descriptor handle stays mandatory");
         assert_eq!(codec.decode_parameter_metadata_page(&metadata, 3), Ok(page));
         for end in 0..metadata.len() {
             assert!(

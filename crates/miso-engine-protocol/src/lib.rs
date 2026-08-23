@@ -10,6 +10,7 @@ mod controller;
 mod message_wire;
 mod model;
 mod queue;
+mod schema;
 #[allow(dead_code)] // Test-only allocating comparator remains beside the direct encoder.
 mod session_wire;
 mod typed_frame;

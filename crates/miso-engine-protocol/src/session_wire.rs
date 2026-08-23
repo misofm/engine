@@ -1759,6 +1759,45 @@ impl<'a> Message<'a> {
         Ok(())
     }
 
+    pub(crate) fn schema_spec(
+        &self,
+        spec: &'static crate::schema::MessageSpec,
+    ) -> Result<(), DecodeError> {
+        debug_assert!(!spec.name.is_empty());
+        for field in &self.fields {
+            let field_spec = spec
+                .fields
+                .binary_search_by_key(&field.id, |candidate| candidate.id)
+                .ok()
+                .map(|index| spec.fields[index]);
+            match field_spec {
+                Some(field_spec)
+                    if field.mandatory != field_spec.mandatory
+                        || crate::schema::Wire::from_raw(field.wire) != Some(field_spec.wire)
+                        || (field_spec.wire == crate::schema::Wire::Message)
+                            != field_spec.nested.is_some() =>
+                {
+                    return Err(DecodeError::InvalidTlv);
+                }
+                None if field.mandatory => return Err(DecodeError::UnknownRequiredField),
+                _ => {}
+            }
+        }
+        for field_spec in spec.fields {
+            if !field_spec.repeated
+                && self
+                    .fields
+                    .iter()
+                    .filter(|field| field.id == field_spec.id)
+                    .count()
+                    > 1
+            {
+                return Err(DecodeError::InvalidTlv);
+            }
+        }
+        Ok(())
+    }
+
     /// Apply a tagged-variant schema. Optional extensions remain skippable, but a field ID that
     /// belongs to this tagged message and not to the selected variant is never an extension.
     pub(crate) fn tagged_schema(
