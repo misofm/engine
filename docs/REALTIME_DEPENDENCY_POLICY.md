@@ -58,6 +58,17 @@ The source-policy checker currently accepts unsafe syntax in exactly four source
 `tools/miso-engine-protocol-bench/src/main.rs`. The latter two are the only Issue-005
 audit/benchmark exceptions; no sibling source file in either tool is permitted to use unsafe code.
 
+That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
+with each approved issue and is the authority; the script, not this paragraph, is what CI runs.
+Reconciling the two belongs to the #104 evidence triage. Two categories have been added since:
+the C-ABI boundary files (`crates/miso-engine-capi/src/ffi.rs`,
+`crates/miso-engine-effect-package/src/ffi.rs`, `hosts/miso-engine-host-web/src/ffi.rs` and their
+tests), and **test-only counting global allocators** — `miso-engine-builtins-compiler`,
+`miso-engine-effect-package` and, from audit #92, `miso-engine-transient-shaper`. The last category
+is `unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds two relaxed
+atomic counters, in a `tests/` file that no production target links; it exists to *prove* the render
+path allocates nothing, which is the policy this document states.
+
 `scripts/check-realtime-policy.sh` extracts explicitly marked render-reachable regions and rejects
 allocation/growth, locks, waits, I/O, logging, networking, process/thread APIs, and async surfaces.
 Its mutation suite proves allocation, lock, log, and unsafe-scope violations are rejected, including
