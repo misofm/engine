@@ -327,12 +327,12 @@ const INPUT_PROCESSOR_BYTES_V1: u64 = 168;
 const FADER_PROCESSOR_BYTES_V1: u64 = 16;
 const MATRIX_PROCESSOR_BYTES_V1: u64 = 136;
 const GRAPH_OBSERVER_BINDING_BYTES_V1: u64 = 80;
-const METER_CONSUMER_BYTES_V1: u64 = 64;
+const METER_CONSUMER_BYTES_V1: u64 = 72;
 const METER_REQUEST_SEAL_BYTES_V1: u64 = 56;
 const OBSERVER_SEAL_BYTES_V1: u64 = 32;
 const CONSUMER_SEAL_BYTES_V1: u64 = 32;
-const METER_QUEUE_HEADER_BYTES_V1: u64 = 72;
-const METER_OBSERVER_BYTES_V1: u64 = 216;
+const METER_QUEUE_HEADER_BYTES_V1: u64 = 256;
+const METER_OBSERVER_BYTES_V1: u64 = 224;
 const METER_SNAPSHOT_BYTES_V1: u64 = 160;
 
 /// One parsed independent response row from the checked V1 CSV.
@@ -3540,7 +3540,7 @@ fn verify_pinned_native_resource_abi_v1() -> Result<(), String> {
             })
         || queue.slot_count != 2
         || queue.ring_header_bytes != METER_QUEUE_HEADER_BYTES_V1 as usize
-        || queue.ring_header_align != 8
+        || queue.ring_header_align != 64
         || queue.slot_payload_bytes != resource_product_v1(2, METER_SNAPSHOT_BYTES_V1)? as usize
         || queue.slot_payload_align != 8
     {
@@ -5219,7 +5219,7 @@ mod tests {
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
-            "0db5f432ff338537f3368e6d4922f907792c946a11037a31d6f56e09c26d96e8",
+            "c33781cfb1335de913b549456399016c28635dc5b0c9aacd169c4c6495e1956d",
             "accepted joined-corpus manifest identity"
         );
 

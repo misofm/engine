@@ -41,9 +41,9 @@ done < <(find "$realtime_root" -name '*.rs' -type f | sort)
 [[ "$marker_count" -ge 4 ]] || fail "expected at least four marked realtime regions"
 
 if rg -n \
-    'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp' \
+    'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' \
     "$scratch_file"; then
-    fail "marked realtime code contains an allocation, lock, I/O, log, wait, or syscall surface"
+    fail "marked realtime code contains an allocation, lock, I/O, log, wait, syscall or panic surface"
 fi
 
 if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \

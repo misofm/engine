@@ -6,15 +6,65 @@
 
 #![allow(unsafe_code)]
 
-use core::{
-    alloc::Layout,
-    cell::{Cell, UnsafeCell},
-    marker::PhantomData,
-    mem::MaybeUninit,
-    num::NonZeroUsize,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-use std::sync::Arc;
+use core::{alloc::Layout, cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZeroUsize};
+use sync::{Arc, AtomicUsize, Ordering, UnsafeCell};
+
+/// The concurrency primitives the ring is built from.
+///
+/// Under `--cfg loom` the real ring is instantiated on loom's `Arc`, `AtomicUsize` and
+/// `UnsafeCell`, so `spsc_loom` explores *this* code rather than a hand-written model of it
+/// (#84 phase B). `cfg(loom)` is only a supported configuration for `cargo test`; a non-test
+/// loom build is not a shape this crate promises to link.
+#[cfg(not(loom))]
+mod sync {
+    pub(super) use core::cell::UnsafeCell;
+    pub(super) use core::sync::atomic::{AtomicUsize, Ordering};
+    pub(super) use std::sync::Arc;
+
+    /// Exclusive access to a slot's storage, spelled the way loom's `UnsafeCell` spells it.
+    #[inline(always)]
+    pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
+        body(cell.get())
+    }
+
+    /// Read a cursor with exclusive access, without an atomic operation.
+    #[inline(always)]
+    pub(super) fn load_exclusive(cursor: &mut AtomicUsize) -> usize {
+        *cursor.get_mut()
+    }
+}
+#[cfg(loom)]
+mod sync {
+    pub(super) use loom::cell::UnsafeCell;
+    pub(super) use loom::sync::Arc;
+    pub(super) use loom::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
+        cell.with_mut(body)
+    }
+
+    /// Loom's `AtomicUsize` has no `get_mut`; `unsync_load` is its exclusive-access read.
+    pub(super) fn load_exclusive(cursor: &mut AtomicUsize) -> usize {
+        // SAFETY: `&mut` proves no other thread can be touching this cursor.
+        unsafe { cursor.unsync_load() }
+    }
+}
+
+/// Wrap a ring cursor by comparison instead of by `%`.
+///
+/// `slot_count` is `capacity + 1` and is never a power of two, so the remainder operator compiles
+/// to an integer division (20-40 cycles) on the hottest line of the queue. The compare is taken
+/// once per `slot_count` operations and is perfectly predicted in between (#84 F6).
+#[inline(always)]
+const fn wrap_increment(cursor: usize, slot_count: usize) -> usize {
+    let next = cursor + 1;
+    if next == slot_count { 0 } else { next }
+}
+
+/// One cache line to itself, so a `Release` store by one endpoint cannot invalidate the line the
+/// other endpoint reads on its fast path (#84 F6).
+#[repr(align(64))]
+struct CachePadded<T>(T);
 
 /// Immutable queue generation selected by the owning control plane.
 #[repr(transparent)]
@@ -83,12 +133,17 @@ pub struct QueueEmpty {
 }
 
 struct Ring<T> {
+    // Read-mostly header. Both endpoints read these on every operation and neither ever writes
+    // them, so they share one line without generating coherence traffic.
     slots: Box<[UnsafeCell<MaybeUninit<T>>]>,
     slots_len: usize,
     logical_capacity: usize,
     generation: QueueGeneration,
-    producer: AtomicUsize,
-    consumer: AtomicUsize,
+    // One cache line per cursor, after the header, so `SharedRingAllocation` keeps mirroring
+    // `ArcInner`'s `{ strong, weak, data }` order (#84 phase B; pinned by
+    // `ring_header_is_arc_counts_plus_three_cache_lines`).
+    producer: CachePadded<AtomicUsize>,
+    consumer: CachePadded<AtomicUsize>,
 }
 
 // `bounded_spsc_internal` retains this ring behind an `Arc`.  The resource helper exposes the
@@ -126,16 +181,17 @@ unsafe impl<T: Send> Sync for Ring<T> {}
 
 impl<T> Drop for Ring<T> {
     fn drop(&mut self) {
-        let mut cursor = *self.consumer.get_mut();
-        let producer = *self.producer.get_mut();
+        let mut cursor = sync::load_exclusive(&mut self.consumer.0);
+        let producer = sync::load_exclusive(&mut self.producer.0);
+        let slots_len = self.slots_len;
         while cursor != producer {
             // SAFETY: endpoint destruction is complete before the final `Arc<Ring<T>>` drop, and
             // every cursor position in the half-open consumer..producer range is initialized
             // exactly once. No producer or consumer can access a slot concurrently here.
-            unsafe {
-                self.slots[cursor].get_mut().assume_init_drop();
-            }
-            cursor = (cursor + 1) % self.slots_len;
+            sync::with_mut(&self.slots[cursor], |slot| unsafe {
+                (*slot).assume_init_drop();
+            });
+            cursor = wrap_increment(cursor, slots_len);
         }
     }
 }
@@ -144,6 +200,15 @@ impl<T> Drop for Ring<T> {
 pub struct Producer<T: Send + 'static> {
     ring: Arc<Ring<T>>,
     local: usize,
+    /// Last consumer cursor this producer observed.
+    ///
+    /// A peer cursor only advances and never passes its partner, so the true consumer cursor
+    /// always lies on the ring arc `[cached_consumer, local]`. "Full" means `next == consumer`
+    /// with `next = local + 1`, and `next` is on that arc only when `cached_consumer == next`.
+    /// So "not full by the cached value" implies "not full by the true value", and the shared
+    /// line is read only when the queue *looks* full (#84 F6). Visibility is unchanged: the
+    /// `Acquire` reload below is the same load the old code did unconditionally.
+    cached_consumer: usize,
     successes: u64,
     full: u64,
     _not_sync: PhantomData<Cell<()>>,
@@ -152,6 +217,13 @@ pub struct Producer<T: Send + 'static> {
 pub struct Consumer<T: Send + 'static> {
     ring: Arc<Ring<T>>,
     local: usize,
+    /// Last producer cursor this consumer observed; the mirror of
+    /// [`Producer::cached_consumer`]. The true producer cursor lies on `[cached_producer, local)`,
+    /// which excludes `local` unless `cached_producer == local`, so "not empty by the cached
+    /// value" implies "not empty by the true value". Every slot in `[local, cached_producer)` was
+    /// published by a `Release` store that happened-before the `Acquire` load that produced
+    /// `cached_producer`, so the cache never weakens publication.
+    cached_producer: usize,
     successes: u64,
     empty: u64,
     _not_sync: PhantomData<Cell<()>>,
@@ -192,17 +264,19 @@ pub(crate) fn bounded_spsc_internal<T: Send + 'static>(
         .ok_or(SpscError::CapacityOverflow)?;
     let mut slots = Vec::with_capacity(slots_len);
     slots.resize_with(slots_len, || UnsafeCell::new(MaybeUninit::uninit()));
+    #[allow(clippy::redundant_closure_for_method_calls)]
     let ring = Arc::new(Ring {
         slots: slots.into_boxed_slice(),
         slots_len,
         logical_capacity: capacity.get(),
         generation,
-        producer: AtomicUsize::new(0),
-        consumer: AtomicUsize::new(0),
+        producer: CachePadded(AtomicUsize::new(0)),
+        consumer: CachePadded(AtomicUsize::new(0)),
     });
     let producer = Producer {
         ring: Arc::clone(&ring),
         local: 0,
+        cached_consumer: 0,
         successes: 0,
         full: 0,
         _not_sync: PhantomData,
@@ -212,6 +286,7 @@ pub(crate) fn bounded_spsc_internal<T: Send + 'static>(
         Consumer {
             ring,
             local: 0,
+            cached_producer: 0,
             successes: 0,
             empty: 0,
             _not_sync: PhantomData,
@@ -248,46 +323,40 @@ impl<T: Send + 'static> Producer<T> {
     pub const fn overflow_count(&self) -> u64 {
         self.full
     }
+    /// Whether `next` is the consumer's cursor, reloading the shared line only if it looks so.
+    ///
+    /// See [`Producer::cached_consumer`] for why one reload settles it.
+    fn is_full_at(&mut self, next: usize) -> bool {
+        if next != self.cached_consumer {
+            return false;
+        }
+        self.cached_consumer = self.ring.consumer.0.load(Ordering::Acquire);
+        next == self.cached_consumer
+    }
     /// Try one bounded push; it never retries or blocks.
     pub fn try_push(&mut self, value: T) -> Result<(), QueueFull<T>> {
-        let local = self.local;
-        let (next, full, generation) = {
-            let ring = self.ring();
-            (
-                (local + 1) % ring.slots_len,
-                (local + 1) % ring.slots_len == ring.consumer.load(Ordering::Acquire),
-                ring.generation,
-            )
-        };
-        if full {
+        let next = wrap_increment(self.local, self.ring.slots_len);
+        if self.is_full_at(next) {
             self.full = self.full.saturating_add(1);
             return Err(QueueFull {
                 value,
-                generation,
+                generation: self.ring.generation,
                 full_count: self.full,
             });
         }
-        let ring = self.ring();
         // SAFETY: only this producer writes its local slot after acquiring consumer's cursor.
-        unsafe {
-            (*ring.slots[self.local].get()).write(value);
-        }
-        ring.producer.store(next, Ordering::Release);
+        sync::with_mut(&self.ring.slots[self.local], |slot| unsafe {
+            (*slot).write(value);
+        });
+        self.ring.producer.0.store(next, Ordering::Release);
         self.local = next;
         self.successes = self.successes.saturating_add(1);
         Ok(())
     }
     /// Reserve one slot without publishing it. Only realtime exchange uses this transactionally.
     pub(crate) fn try_reserve(&mut self) -> Option<PushPermit<'_, T>> {
-        let local = self.local;
-        let (next, full) = {
-            let ring = self.ring();
-            (
-                (local + 1) % ring.slots_len,
-                (local + 1) % ring.slots_len == ring.consumer.load(Ordering::Acquire),
-            )
-        };
-        if full {
+        let next = wrap_increment(self.local, self.ring.slots_len);
+        if self.is_full_at(next) {
             self.full = self.full.saturating_add(1);
             None
         } else {
@@ -301,13 +370,16 @@ impl<T: Send + 'static> Producer<T> {
 impl<T: Send + 'static> PushPermit<'_, T> {
     /// Write and publish the reserved item exactly once.
     pub(crate) fn commit(self, value: T) {
-        let ring = self.producer.ring();
         let local = self.producer.local;
         // SAFETY: `try_reserve` acquired free capacity and only the unique producer owns this slot.
-        unsafe {
-            (*ring.slots[local].get()).write(value);
-        }
-        ring.producer.store(self.next, Ordering::Release);
+        sync::with_mut(&self.producer.ring.slots[local], |slot| unsafe {
+            (*slot).write(value);
+        });
+        self.producer
+            .ring
+            .producer
+            .0
+            .store(self.next, Ordering::Release);
         self.producer.local = self.next;
         self.producer.successes = self.producer.successes.saturating_add(1);
     }
@@ -347,30 +419,33 @@ impl<T: Send + 'static> Consumer<T> {
     /// worker is idle; it never pops and never touches the empty/underrun counters.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.local == self.ring().producer.load(Ordering::Acquire)
+        self.local == self.ring().producer.0.load(Ordering::Acquire)
+    }
+    /// Whether the queue is empty, reloading the shared line only if it looks so.
+    ///
+    /// See [`Consumer::cached_producer`] for why one reload settles it.
+    fn is_drained(&mut self) -> bool {
+        if self.local != self.cached_producer {
+            return false;
+        }
+        self.cached_producer = self.ring.producer.0.load(Ordering::Acquire);
+        self.local == self.cached_producer
     }
     /// Try one bounded pop; it never retries or blocks.
     pub fn try_pop(&mut self) -> Result<T, QueueEmpty> {
-        let local = self.local;
-        let (is_empty, generation) = {
-            let ring = self.ring();
-            (
-                local == ring.producer.load(Ordering::Acquire),
-                ring.generation,
-            )
-        };
-        if is_empty {
+        if self.is_drained() {
             self.empty = self.empty.saturating_add(1);
             return Err(QueueEmpty {
-                generation,
+                generation: self.ring.generation,
                 empty_count: self.empty,
             });
         }
-        let ring = self.ring();
         // SAFETY: producer release + this acquire publishes initialization; only consumer reads it.
-        let value = unsafe { (*ring.slots[self.local].get()).assume_init_read() };
-        let next = (local + 1) % ring.slots_len;
-        ring.consumer.store(next, Ordering::Release);
+        let value = sync::with_mut(&self.ring.slots[self.local], |slot| unsafe {
+            (*slot).assume_init_read()
+        });
+        let next = wrap_increment(self.local, self.ring.slots_len);
+        self.ring.consumer.0.store(next, Ordering::Release);
         self.local = next;
         self.successes = self.successes.saturating_add(1);
         Ok(value)
@@ -380,7 +455,11 @@ impl<T: Send + 'static> Consumer<T> {
 
 /// Browser/single-owner fallback ring. It contains no atomics and makes no shared-memory claim.
 pub struct LocalRing<T: Copy> {
-    slots: Box<[Option<T>]>,
+    /// `MaybeUninit<T>` rather than `Option<T>`: the discriminant was a per-slot byte the browser
+    /// render ring paid for on every push, and `Option::take().expect(..)` put a panic path inside
+    /// a `REALTIME_POLICY` region (#84 F12). `head`/`tail` already carry the occupancy the
+    /// discriminant duplicated.
+    slots: Box<[MaybeUninit<T>]>,
     capacity: usize,
     head: usize,
     tail: usize,
@@ -395,8 +474,10 @@ impl<T: Copy> LocalRing<T> {
             .get()
             .checked_add(1)
             .ok_or(SpscError::CapacityOverflow)?;
+        let mut storage = Vec::with_capacity(slots);
+        storage.resize_with(slots, MaybeUninit::uninit);
         Ok(Self {
-            slots: vec![None; slots].into_boxed_slice(),
+            slots: storage.into_boxed_slice(),
             capacity: capacity.get(),
             head: 0,
             tail: 0,
@@ -408,7 +489,7 @@ impl<T: Copy> LocalRing<T> {
     // REALTIME_POLICY_BEGIN
     /// Push without retry.
     pub fn try_push(&mut self, value: T) -> Result<(), QueueFull<T>> {
-        let next = (self.head + 1) % self.slots.len();
+        let next = wrap_increment(self.head, self.slots.len());
         if next == self.tail {
             self.full = self.full.saturating_add(1);
             Err(QueueFull {
@@ -417,7 +498,7 @@ impl<T: Copy> LocalRing<T> {
                 full_count: self.full,
             })
         } else {
-            self.slots[self.head] = Some(value);
+            self.slots[self.head].write(value);
             self.head = next;
             Ok(())
         }
@@ -431,10 +512,11 @@ impl<T: Copy> LocalRing<T> {
                 empty_count: self.empty,
             })
         } else {
-            let value = self.slots[self.tail]
-                .take()
-                .expect("prepared local ring slot");
-            self.tail = (self.tail + 1) % self.slots.len();
+            // SAFETY: `head` and `tail` are the single owner's cursors, so every slot in the
+            // half-open `tail..head` range was written by `try_push` and not yet read. `T: Copy`,
+            // so reading a slot twice could not double-drop even if the cursors were wrong.
+            let value = unsafe { self.slots[self.tail].assume_init() };
+            self.tail = wrap_increment(self.tail, self.slots.len());
             Ok(value)
         }
     }
@@ -473,54 +555,41 @@ impl<T: Copy> LocalRing<T> {
 
 #[cfg(all(test, loom))]
 mod loom_tests {
-    use loom::cell::UnsafeCell;
-    use loom::sync::Arc;
-    use loom::sync::atomic::{AtomicUsize, Ordering};
-    use loom::thread;
+    use super::{QueueGeneration, bounded_spsc};
+    use core::num::NonZeroUsize;
 
-    struct ModelRing {
-        slots: [UnsafeCell<usize>; 2],
-        producer: AtomicUsize,
-        consumer: AtomicUsize,
-    }
-
+    /// #84 phase B: the model is the **real** ring, instantiated on loom's atomics and cells by
+    /// the `sync` shim at the top of this module. Three items through a two-slot queue force one
+    /// wrap, one cached-full reload and one cached-empty reload under every interleaving loom
+    /// explores, which is exactly what the cursor caches of `try_push`/`try_pop` have to survive.
     #[test]
-    fn spsc_loom_publication_visibility_and_reuse() {
+    fn spsc_loom_real_ring_fifo_with_cached_cursors() {
         loom::model(|| {
-            let ring = Arc::new(ModelRing {
-                slots: [UnsafeCell::new(0), UnsafeCell::new(0)],
-                producer: AtomicUsize::new(0),
-                consumer: AtomicUsize::new(0),
-            });
-            let producer_ring = Arc::clone(&ring);
-            let producer = thread::spawn(move || {
-                let local = 0;
-                let next = 1;
-                assert_ne!(
-                    next,
-                    producer_ring.consumer.load(Ordering::Acquire),
-                    "one-slot model unexpectedly full"
-                );
-                producer_ring.slots[local].with_mut(|slot| {
-                    // SAFETY: the model has one producer, and the acquired consumer cursor proves
-                    // this slot is not being read.
-                    unsafe { *slot = 0x5a5a }
-                });
-                producer_ring.producer.store(next, Ordering::Release);
-            });
-            let consumer = thread::spawn(move || {
-                while ring.producer.load(Ordering::Acquire) == 0 {
-                    thread::yield_now();
+            let (mut producer, mut consumer) =
+                bounded_spsc::<usize>(NonZeroUsize::new(2).expect("two"), QueueGeneration(1))
+                    .expect("ring");
+            let writer = loom::thread::spawn(move || {
+                for value in 0..3 {
+                    while producer.try_push(value).is_err() {
+                        loom::thread::yield_now();
+                    }
                 }
-                let value = ring.slots[0].with(|slot| {
-                    // SAFETY: acquiring producer cursor 1 proves slot zero was initialized.
-                    unsafe { *slot }
-                });
-                assert_eq!(value, 0x5a5a);
-                ring.consumer.store(1, Ordering::Release);
             });
-            producer.join().expect("producer");
-            consumer.join().expect("consumer");
+            let reader = loom::thread::spawn(move || {
+                for expected in 0..3 {
+                    loop {
+                        match consumer.try_pop() {
+                            Ok(got) => {
+                                assert_eq!(got, expected);
+                                break;
+                            }
+                            Err(_) => loom::thread::yield_now(),
+                        }
+                    }
+                }
+            });
+            writer.join().expect("producer");
+            reader.join().expect("consumer");
         });
     }
 }
@@ -598,5 +667,40 @@ mod tests {
         assert_eq!(producer.success_count(), ITEMS);
         assert_eq!(consumer.success_count(), ITEMS);
         assert_eq!(checksum, u128::from(ITEMS) * u128::from(ITEMS - 1) / 2);
+    }
+
+    /// #84 phase B, eval B-3: the ring header is `Arc`'s two counts followed by three cache
+    /// lines -- the read-mostly header, the producer cursor and the consumer cursor. The oracle is
+    /// `core::alloc::Layout` (the compiler), never a copied run output; the fixture pins that
+    /// number so the resource oracles cannot drift from it silently.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn ring_header_is_arc_counts_plus_three_cache_lines() {
+        let payload =
+            super::bounded_spsc_retained_payload::<u64>(NonZeroUsize::new(1).expect("one"))
+                .expect("layout");
+        assert_eq!(
+            (
+                payload.slot_count,
+                payload.ring_header_bytes,
+                payload.ring_header_align
+            ),
+            (2, 256, 64)
+        );
+        assert_eq!(core::mem::size_of::<super::Ring<u64>>(), 192);
+    }
+
+    /// The compare-wrap is the only wrap law in this module, and it agrees with `%` everywhere.
+    #[test]
+    fn wrap_increment_agrees_with_remainder() {
+        for slot_count in 1..=9_usize {
+            for cursor in 0..slot_count {
+                assert_eq!(
+                    super::wrap_increment(cursor, slot_count),
+                    (cursor + 1) % slot_count,
+                    "cursor {cursor} of {slot_count}"
+                );
+            }
+        }
     }
 }
