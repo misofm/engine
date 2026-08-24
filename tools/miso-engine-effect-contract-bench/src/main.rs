@@ -1,18 +1,14 @@
 //! Native-effect conformance, realtime audit, fixture check, and two-round benchmark driver.
 #![allow(missing_docs, unsafe_code)]
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    env,
-    hint::black_box,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
-};
+use miso_engine_bench_support::stats::per_mille as nearest_rank;
+use std::{env, hint::black_box, time::Instant};
 
+use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_conformance::{
     ConformanceConfig, DualAccumulatorDelayFactory, run_effect_conformance,
 };
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::realtime::audit;
 use miso_engine_effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, PreparedBankMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, StatePayloadError,
@@ -23,49 +19,6 @@ use miso_engine_effect_contract::{
     ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1,
     PreparedSidechainPort,
 };
-
-struct AuditedAllocator;
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-static DEALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-
-// SAFETY: all methods forward the original pointer/layout contract to the system allocator. The
-// armed path terminates immediately rather than unwinding through `GlobalAlloc`.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the valid layout is forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the valid layout is forwarded unchanged to the system allocator.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: this pointer/layout pair came from this allocator and is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original allocation contract and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 struct NoopBank {
     metadata: PreparedBankMetadata,
@@ -262,8 +215,7 @@ fn benchmark() {
         ] {
             let observations = 1000_u64;
             let mut samples = Vec::with_capacity(observations as usize);
-            ALLOCATIONS.store(0, Ordering::Relaxed);
-            DEALLOCATIONS.store(0, Ordering::Relaxed);
+            let allocator_mark = bench_alloc::counters();
             for index in 0..observations {
                 let started = Instant::now();
                 match workload {
@@ -349,8 +301,9 @@ fn benchmark() {
             let p99 = nearest_rank(&samples, 990);
             let p99_9 = nearest_rank(&samples, 999);
             let max = samples[samples.len() - 1];
-            let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-            let deallocations = DEALLOCATIONS.load(Ordering::Relaxed);
+            let allocator = bench_alloc::delta_since(allocator_mark);
+            let allocations = allocator.allocations;
+            let deallocations = allocator.deallocations;
             let width = match workload {
                 "bank4_noop" => 4,
                 "bank8_noop" => 8,
@@ -376,11 +329,6 @@ fn benchmark() {
     }
 }
 
-fn nearest_rank(sorted: &[u128], permille: usize) -> u128 {
-    let rank = (permille * sorted.len()).div_ceil(1000).max(1);
-    sorted[rank - 1]
-}
-
 fn metadata(name: &str) -> String {
     env::var(name)
         .ok()
@@ -390,6 +338,10 @@ fn metadata(name: &str) -> String {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
         [mode] if mode == "--conformance" => conformance(),

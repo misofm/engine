@@ -6,11 +6,8 @@
 //! the audited region. Any allocation, deallocation, lock, log or syscall between the markers is a
 //! violation; the process aborts on the first one.
 
-#![allow(unsafe_code)]
-
-use std::alloc::{GlobalAlloc, Layout, System};
-
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_core::realtime::audit;
 use miso_engine_delay::{DELAY_PARAMETERS_V1, DelayFactory};
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
@@ -24,47 +21,6 @@ const QUANTUM: u32 = 128;
 const SAMPLE_RATE: u32 = 48_000;
 /// Blocks between automation events, so a 128-update crossfade is always in flight.
 const EVENT_BLOCKS: u64 = 64;
-
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every method forwards the unchanged allocation contract to the system allocator. An
-// armed allocation aborts instead of unwinding through the allocator boundary.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: `layout` originates from the allocator caller and is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: `layout` originates from the allocator caller and is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: the caller's original pointer/layout contract is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the caller's original allocation contract is forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 struct OffRenderDrop {
     effects: Vec<Box<dyn PreparedNativeEffect>>,
@@ -80,6 +36,10 @@ impl Drop for OffRenderDrop {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     assert_eq!(
         parse_blocks(),
         BLOCKS,

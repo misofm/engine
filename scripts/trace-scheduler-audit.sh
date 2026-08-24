@@ -64,10 +64,10 @@ run_mode() {
     local prefix="$root/trace"
     mkdir -p "$root"
     if [[ "$pace" == 1 ]]; then
-        MISO_ENGINE_SCHEDULER_AUDIT_PACED=1 strace -ff -ttt -qq -o "$prefix" "$binary" \
+        MISO_ENGINE_SCHEDULER_AUDIT_PACED=1 strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" \
             >"$root/audit.json"
     else
-        strace -ff -ttt -qq -o "$prefix" "$binary" >"$root/audit.json"
+        strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" >"$root/audit.json"
     fi
 
     mapfile -t trace_files < <(find "$root" -maxdepth 1 -type f -name 'trace.*' | LC_ALL=C sort)

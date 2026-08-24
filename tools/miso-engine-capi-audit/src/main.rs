@@ -2,7 +2,7 @@
 
 #![allow(unsafe_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use miso_engine_bench_support::alloc as bench_alloc;
 use std::ptr;
 
 use miso_engine_capi::{
@@ -13,50 +13,7 @@ use miso_engine_capi::{
     miso_engine_v2_plan_destroy, miso_engine_v2_render_f32_planar, miso_engine_v2_session_destroy,
     miso_engine_v2_source_submit_planar_f32,
 };
-use miso_engine_core::realtime::audit::{
-    self, AuditSnapshot, ForbiddenOperation, record_allocator_violation,
-};
-
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: Every operation forwards the original pointer/layout contract unchanged to `System`.
-// An armed violation aborts rather than unwinding through the allocator implementation.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: The valid caller-provided layout is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: The valid caller-provided layout is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: The original allocator pointer/layout pair is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: The original pointer/layout and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
+use miso_engine_core::realtime::audit::{self, AuditSnapshot};
 
 const CALLS: u64 = 100_000;
 const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -309,6 +266,10 @@ const fn audit_limits() -> CompileLimits {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let mut prepared = PreparedAudit::prepare().expect("prepare Issue-022 C audit plan");
     let evidence = prepared.run();
     println!("{}", evidence.to_json());

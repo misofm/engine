@@ -10,6 +10,7 @@ name = "miso_engine_bootstrap_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 miso-engine-lane.workspace = true
 
 [features]

@@ -18,10 +18,10 @@ create_fixture() {
         "$root/crates/miso-engine-effect-package/tests" \
         "$root/crates/miso-engine-session/tests" \
         "$root/hosts/miso-engine-host-web/src" \
+        "$root/tools/miso-engine-bench-support/src" \
         "$root/tools/miso-engine-capi-audit/src" \
         "$root/tools/miso-engine-native-pcm-runner/src" \
-        "$root/tools/miso-engine-realtime-audit/src" \
-        "$root/tools/miso-engine-protocol-audit/src" \
+        "$root/tools/miso-engine-protocol-bench/src" \
         "$root/tools/miso-engine-rack-bench/src"
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
@@ -92,20 +92,20 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn frozen_c_abi_adapter() {}' \
         >"$root/tools/miso-engine-native-pcm-runner/src/lib.rs"
+    # #104 phase B: the fourteen audited `GlobalAlloc` copies became one. `bench-support/src/alloc.rs`
+    # is the only file under `tools/` that owns the allocator wrapper, and eleven tool paths left
+    # this list because they no longer contain `unsafe` at all.
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
-        'unsafe impl Send for Audit {}' \
-        'struct Audit;' \
-        >"$root/tools/miso-engine-realtime-audit/src/main.rs"
+        'unsafe impl GlobalAlloc for AuditedAllocator {}' \
+        'struct AuditedAllocator;' \
+        >"$root/tools/miso-engine-bench-support/src/alloc.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
-        'unsafe impl Send for ProtocolAudit {}' \
-        'struct ProtocolAudit;' \
-        >"$root/tools/miso-engine-protocol-audit/src/main.rs"
+        'unsafe fn follow() {}' \
+        >"$root/tools/miso-engine-protocol-bench/src/main.rs"
     printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe impl Send for RackBenchmarkAudit {}' \
-        'struct RackBenchmarkAudit;' \
+        'fn measure() {}' \
         >"$root/tools/miso-engine-rack-bench/src/main.rs"
 }
 
@@ -141,7 +141,7 @@ expect_failure panic-path-macro \
 expect_failure unsafe-scope \
     'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure unsafe-outside-exact-allowlist \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-protocol-audit/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-protocol-bench/src/other.rs"'
 expect_failure unsafe-outside-capi-audit-main \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-capi-audit/src/other.rs"'
 expect_failure unsafe-outside-native-pcm-runner-lib \

@@ -1,14 +1,12 @@
 //! Deterministic Issue-010 source-ring realtime and duration-independent resource audit.
 
-#![allow(unsafe_code)]
-
+use miso_engine_bench_support::alloc as bench_alloc;
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     io::{Read, Seek, SeekFrom},
     num::NonZeroUsize,
 };
 
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::realtime::audit;
 use miso_engine_core::{
     QuantumFrames, SampleRateHz,
     realtime::{PlanarBufferMut, RenderEnvelope, RenderIo, RenderTime},
@@ -29,48 +27,11 @@ use miso_engine_source::{
 const BLOCKS: u64 = 100_000;
 const QUANTUM: u32 = 128;
 
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: each call forwards the original allocation contract to the system allocator. A render
-// allocation/deallocation aborts before the allocation can become observable.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: this forwards the caller's valid allocation layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: this forwards the caller's valid allocation layout unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: this forwards the original valid pointer/layout pair unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: this forwards the original valid allocation contract unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
-
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let mut resolver = Resolver::new(SyntheticWave::new(u64::from(QUANTUM) * 4));
     let request = NativeSourcePrepareRequest {
         locator: "audit:synthetic-wave".to_owned(),

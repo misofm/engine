@@ -4,12 +4,10 @@
 //! session/effect/builtin/graph lowering path, a `RealtimePlanOwner`, and the bounded retirement
 //! exchange while all allocation and forbidden-operation hooks are armed by the render entrypoint.
 
-#![allow(unsafe_code)]
-
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_graph_compiler::Backend;
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     collections::BTreeSet,
     sync::{
         Arc, Mutex,
@@ -23,7 +21,7 @@ use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, prepare_session_builtins,
 };
 use miso_engine_conformance::DualAccumulatorDelayFactory;
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::realtime::audit::{self, ForbiddenOperation};
 use miso_engine_core::realtime::{
     Consumer, PlanExchangeConfig, PlanRetirer, PlanarBufferMut, QueueGeneration, RealtimePlanOwner,
     RealtimeRenderReport, RenderError, RenderIo, RenderTime, SwapOutcome, bounded_spsc_move,
@@ -57,47 +55,6 @@ const ACCEPTED_GRAPH_PCM: &[u8] =
     include_bytes!("../../../fixtures/builtins/v1/pcm/graph-taps.f32le");
 const ACCEPTED_GRAPH_METERS: &str =
     include_str!("../../../fixtures/builtins/v1/meters/graph-taps.jsonl");
-
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every operation forwards unchanged arguments to the system allocator. The armed path
-// aborts rather than unwinding through `GlobalAlloc`.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forward the supplied valid layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forward the supplied valid layout unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: forward the original pointer/layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forward the original pointer/layout and requested size unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 type DropRecords = Arc<Mutex<Vec<(u64, ThreadId)>>>;
 
@@ -181,6 +138,10 @@ fn run_retirement_worker(
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     match std::env::args().nth(1).as_deref() {
         None => run_audit(),
         Some("--probe") => run_probe(

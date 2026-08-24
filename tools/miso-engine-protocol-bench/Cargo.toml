@@ -10,6 +10,7 @@ name = "miso_engine_protocol_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 flatbuffers = "=25.12.19" # Comparison tool only; no engine/runtime target dependency.
 miso-engine-protocol.workspace = true
 miso-engine-session.workspace = true

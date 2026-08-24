@@ -8,13 +8,9 @@
 #![allow(unsafe_code)] // Isolated allocation instrumentation, identical in scope to protocol audit.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-    env, fs,
-    process::Command,
-    time::Instant,
-};
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_bench_support::json::escape;
+use std::{cell::Cell, env, fs, process::Command, time::Instant};
 
 use miso_engine_protocol::{
     AutomationEnqueue, AutomationKind, AutomationRecord, Backpressure, BackpressureQueueKind,
@@ -43,71 +39,27 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// FNV-1a over each stable label and normalized logical record. Updated only with corpus changes.
 pub(crate) const CORPUS_CHECKSUM: u64 = 0x9eee_4fcb_61be_3b9e;
 
-struct AllocationCounter;
-
+// #104 F4: the arm/disarm pair reads the one audited allocator's totals instead of a private
+// thread-local counter fed by a fourteenth copy of the `GlobalAlloc` wrapper. It counts the same
+// events -- `alloc`, `alloc_zeroed` and `realloc`, with their requested byte counts.
 std::thread_local! {
-    static ALLOCATION_COUNT: Cell<u64> = const { Cell::new(0) };
-    static ALLOCATION_BYTES: Cell<u64> = const { Cell::new(0) };
-    static ALLOCATION_ARMED: Cell<bool> = const { Cell::new(false) };
-}
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AllocationCounter = AllocationCounter;
-
-fn count_allocation(bytes: usize) {
-    ALLOCATION_ARMED.with(|armed| {
-        if armed.get() {
-            ALLOCATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
-            ALLOCATION_BYTES.with(|total| {
-                total.set(
-                    total
-                        .get()
-                        .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX)),
-                )
-            });
-        }
-    });
-}
-
-// SAFETY: the benchmark-only wrapper forwards each valid allocation contract unchanged to
-// `System`; it merely records requested allocation sizes in thread-local counters.
-unsafe impl GlobalAlloc for AllocationCounter {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_allocation(layout.size());
-        // SAFETY: forwards the valid layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_allocation(layout.size());
-        // SAFETY: forwards the valid layout unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: forwards the original valid pointer/layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        count_allocation(size);
-        // SAFETY: forwards the original valid pointer/layout and requested size unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
+    static ALLOCATION_MARK: Cell<bench_alloc::Counters> = const {
+        Cell::new(bench_alloc::Counters {
+            allocations: 0,
+            deallocations: 0,
+            reallocations: 0,
+            requested_bytes: 0,
+        })
+    };
 }
 
 fn arm_allocations() {
-    ALLOCATION_COUNT.with(|count| count.set(0));
-    ALLOCATION_BYTES.with(|bytes| bytes.set(0));
-    ALLOCATION_ARMED.with(|armed| armed.set(true));
+    ALLOCATION_MARK.with(|mark| mark.set(bench_alloc::counters()));
 }
 
 fn disarm_allocations() -> (u64, u64) {
-    ALLOCATION_ARMED.with(|armed| armed.set(false));
-    (
-        ALLOCATION_COUNT.with(Cell::get),
-        ALLOCATION_BYTES.with(Cell::get),
-    )
+    let moved = bench_alloc::delta_since(ALLOCATION_MARK.with(Cell::get));
+    (moved.allocations, moved.requested_bytes)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1385,6 +1337,10 @@ fn warmup(
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     #[cfg(target_arch = "wasm32")]
     {
         assert_eq!(corpus_checksum(), CORPUS_CHECKSUM);
@@ -1592,25 +1548,6 @@ fn command(args: &[&str]) -> String {
         .filter(|output| !output.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
 }
-fn escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                write!(escaped, "\\u{:04x}", character as u32).expect("string write");
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

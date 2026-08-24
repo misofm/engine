@@ -1,13 +1,8 @@
 //! Deterministic caller-buffer allocation audit for the issue-005 protocol surface.
 
-#![allow(unsafe_code)]
+use std::num::NonZeroUsize;
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-    num::NonZeroUsize,
-};
-
+use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_protocol::{
     AutomationEnqueue, AutomationRecord, CommandPayload, ControlCommand, ControllerRequest,
     CounterId, CounterSnapshot, CounterValue, DecodeScratch, DiagnosticsRequest, EventPayload,
@@ -19,63 +14,18 @@ use miso_engine_protocol::{
 };
 use miso_engine_session::{CompileCaps, StableId, parse_session_toml};
 
-struct AuditAllocator;
-
-std::thread_local! {
-    static ARMED: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditAllocator = AuditAllocator;
-
-fn count_allocation() {
-    ARMED.with(|armed| {
-        if armed.get() {
-            ALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
-        }
-    });
-}
-
-// SAFETY: this audit-only global allocator forwards every valid pointer/layout contract unchanged
-// to `System`; while armed it only increments thread-local counters and never owns, retains, or
-// alters allocator data. The audit is isolated in this non-production tool.
-unsafe impl GlobalAlloc for AuditAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_allocation();
-        // SAFETY: forwards the caller's valid layout unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_allocation();
-        // SAFETY: forwards the caller's valid layout unchanged to the system allocator.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: forwards the original allocator pointer/layout pair unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        count_allocation();
-        // SAFETY: forwards the original pointer/layout and requested size unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
-
 fn request_id(value: u64) -> RequestId {
     RequestId::new(value).expect("nonzero request ID")
 }
 
 fn assert_zero_allocations(operation: impl FnOnce()) {
-    ALLOCATIONS.with(|count| count.set(0));
-    ARMED.with(|armed| armed.set(true));
+    // #104 F4: the same audited allocator every other tool uses. The thread-local armed counter
+    // this replaces counted the same events; it just counted them in a fourteenth copy of the
+    // wrapper.
+    let mark = bench_alloc::counters();
     operation();
-    ARMED.with(|armed| armed.set(false));
     assert_eq!(
-        ALLOCATIONS.with(Cell::get),
+        bench_alloc::delta_since(mark).allocations,
         0,
         "caller-buffer path allocated"
     );
@@ -551,6 +501,10 @@ fn run_audit(corpus: &mut Corpus, egress: &mut EgressCorpus) {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let mut corpus = prepare_corpus();
     let mut egress = prepare_egress_corpus();
     run_audit(&mut corpus, &mut egress);

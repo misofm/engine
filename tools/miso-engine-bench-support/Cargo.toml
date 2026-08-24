@@ -1,17 +1,17 @@
 [package]
-name = "miso-engine-realtime-audit"
-version.workspace = true
+name = "miso-engine-bench-support"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+version.workspace = true
 
-[[bin]]
-name = "miso_engine_realtime_audit"
-path = "src/main.rs"
+[lib]
+name = "miso_engine_bench_support"
+path = "src/lib.rs"
 
 [dependencies]
-miso-engine-bench-support.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+sha2.workspace = true
 
 [lints]
 workspace = true

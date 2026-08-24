@@ -2,10 +2,10 @@
 //!
 //! Its results are descriptive harness evidence only; this is not a render-performance claim.
 
+use miso_engine_bench_support::json::escape as json_escape;
 use miso_engine_lane::Backend;
 use std::{
     env,
-    fmt::Write as _,
     hint::black_box,
     time::{Duration, Instant},
 };
@@ -86,29 +86,6 @@ fn metadata(name: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| json_escape(&value))
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn json_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\u{08}' => escaped.push_str("\\b"),
-            '\u{0c}' => escaped.push_str("\\f"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{00}'..='\u{1f}' => {
-                write!(&mut escaped, "\\u{:04x}", character as u32)
-                    .expect("writing to a String cannot fail");
-            }
-            _ => escaped.push(character),
-        }
-    }
-
-    escaped
 }
 
 fn json_u128_array(values: impl Iterator<Item = u128>) -> String {

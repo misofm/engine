@@ -48,6 +48,13 @@ jobs:
         run: |
           bash scripts/check-env-vocabulary.sh
           bash scripts/test-env-vocabulary.sh
+      # #104 F4/phase B: one audited allocator, one JSON escaper, one nearest-rank percentile and
+      # one counted digest sink under tools/, and the ratchet listing the subjects already moved
+      # onto the shared timer.
+      - name: Bench harness duplication policy and mutation tests
+        run: |
+          bash scripts/check-bench-policy.sh
+          bash scripts/test-bench-policy.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh

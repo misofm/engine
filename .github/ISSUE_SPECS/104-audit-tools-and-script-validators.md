@@ -149,3 +149,93 @@ Not done in phase C: metadata is still gathered from the environment rather than
 runner that forgets to export a name still produces a `missing_metadata` entry rather than a
 correct value. Making `Metadata::gather()` read `/proc/cpuinfo`, `rustc -vV` and `scaling_governor`
 itself -- which is what actually closes F2 -- belongs with the shared support library of phase B.
+
+### Phase B -- one harness under `tools/` (2026-08-24)
+
+**Delivered:** the shared harness that finding F4 asks for, and the structural form of F1.
+**Not delivered:** the 19-package to 2-package collapse (F5). Read the honest scope note at the end.
+
+`tools/miso-engine-bench-support` is a test-only library with five modules and 22 unit tests:
+
+| module | replaces | note |
+|---|---|---|
+| `alloc` | 17 copies of the audited `GlobalAlloc` wrapper in three behavioural variants | one `#[global_allocator]`, `Mode::{Abort, Count}`, always-on process counters |
+| `json` | 7 escapers, two of which emitted invalid JSON | RFC 8259 section 7 in full |
+| `stats` | 6 nearest-rank percentiles with three edge behaviours | Hyndman and Fan type 1, `clamp(1, len)` |
+| `digest` | the scattered `sha2` use in the timed subjects | `Sha256Sink` counts its own updates |
+| `timing` | `Instant::now` around a workload | `timed` panics if the timed body hashed anything |
+
+All three historical allocator behaviours are preserved and each is exercised:
+
+* abort on an armed violation (12 tools) -- `scripts/test-realtime-audit-hooks.sh` and
+  `scripts/test-builtins-{audit,graph-audit}-probes.sh` still abort on all nine probes;
+* count and continue (`builtins-audit`'s `ABORT_ALLOCATOR_VIOLATION` switch, now
+  `alloc::set_mode(Mode::Count)`) -- the probes report their own deliberate violation;
+* process totals (`effect-contract-bench`'s statics, now `counters()`/`delta_since`), and the
+  protocol audit/bench thread-local armed counter, now a mark-and-delta over the same totals.
+
+Every converted binary calls `alloc::assert_installed()` before it arms anything. A
+`#[global_allocator]` registered by a dependency that is never named may not be linked at all, and
+an audit that is silently off reports success for every gate below it.
+
+Counts, `05a0822` to here (`grep -rlE` over `tools/**/*.rs`):
+
+| | before | after |
+|---|---|---|
+| `unsafe impl GlobalAlloc` | 17 | 1 |
+| `#[global_allocator]` | 17 | 1 |
+| JSON escapers | 7 | 1 |
+| nearest-rank percentiles | 6 | 1 |
+| files with `#![allow(unsafe_code)]` | 18 | 5 |
+| `tools/` Rust lines | 27,746 | 27,467 |
+
+The unsafe ownership list in `scripts/check-realtime-policy.sh` lost eleven tool paths and gained
+one: it is now `bench-support/src/alloc.rs`, `capi-audit`, `native-pcm-runner`, `protocol-bench`
+(flatbuffers `unsafe fn follow`) and `wasm-gate-guest`.
+
+F1 made structural: `timing::timed` samples `digest`'s thread-local update counter on both sides of
+the clock and panics if the body hashed anything, so "the timed region is the workload and
+arithmetic, never evidence collection" is a property of the run rather than of a review.
+`rack-bench` is converted and is the first entry of the conversion ratchet in
+`scripts/check-bench-policy.sh`: a listed subject must measure through `timing::timed` and must own
+no `Instant::now`, `Sha256::new` or `sha2::` of its own. The list grows as subjects convert; it
+never shrinks. `rack-bench`'s `input_sha256` and `output_sha256` are unchanged -- `Sha256Sink`
+wraps the same `sha2::Sha256` and feeds it the same bytes in the same order.
+
+Gates: `scripts/check-bench-policy.sh` + `scripts/test-bench-policy.sh` (12 mutations), wired into
+CI beside the vocabulary gate. Deleting each of the checker's three `fail` calls in turn lets
+`second-allocator`, `new-unsafe-owner` and `production-dependency` escape, so each rule family is
+proven red. Separately, adding a non-elidable `vec![7u8; 64]` inside
+`protocol-audit`'s `assert_zero_allocations` window aborts the run (exit 134), which proves the
+allocation counter substitution is still sensitive rather than trivially zero.
+
+Two gates outside the sweep regressed on the phase-C marker rename and were repaired here: the
+renamed trace markers are longer than strace's default 32-byte string limit, so
+`trace-builtins-graph-audit.sh` and `trace-scheduler-audit.sh` could no longer find
+`MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN` (35 bytes) or `MISO_ENGINE_SCHEDULER_PHASE_PREPARED` (36
+bytes) in the trace. Every `scripts/trace-*.sh` now passes `-s 200`. `trace-source-audit.sh` was
+already broken before this branch -- `miso-engine-source-audit` gained a second `[[bin]]` and the
+bare `cargo run -p` became ambiguous, the same drift as `check-builtins-fixtures.sh` -- and is
+fixed with `--bin`. All seven trace gates pass.
+
+**Scope note -- what phase B did not do.** The 19-package to 2-package collapse (`miso-engine-bench`
+and `miso-engine-audit` with subcommands) is *not* done. It was not attempted, deliberately, and
+this is the reason rather than an excuse:
+
+* It is 27.5k Rust lines across 19 packages with ~80 invocation sites in `scripts/` and
+  `.github/workflows/ci.yml`, and every subject owns a frozen record schema with its own validator.
+* The plan comment on #104 makes the move conditional on an E1 golden comparison -- build the old
+  binaries at the base commit, run every subject under both, and diff `jq -S` output with a named
+  exemption list -- precisely because "preserve every currently-green gate's behaviour" is not
+  checkable by review at that size. Doing the move without E1 would risk silently changing an
+  accepted record's key set, which the plan forbids outright.
+* Merging 19 packages into one also unifies their cargo features, so `miso-engine-graph/test-support`
+  and `miso-engine-source/test-support` would compile into subjects that today do not have them.
+  That needs the feature partition the plan specifies (`native`, `protocol-corpus`,
+  `flatbuffers-comparison`), not a mechanical move.
+
+Phase B delivered the plan's step 1, which is the named prerequisite for step 2 ("M, mostly
+mechanical moves once F4 exists"). The remaining work is step 2 onward: the package collapse, the
+in-process metadata gatherer that actually closes F2, one `run-benchmark.sh`, one `trace-audit.sh`,
+and the typed `cargo metadata` dependency-boundary check. It should be a bounded successor issue
+with the E1 golden harness as its first commit.

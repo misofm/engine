@@ -10,6 +10,7 @@ name = "miso_engine_effect_contract_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-effect-contract.workspace = true
 miso-engine-conformance.workspace = true

@@ -1,62 +1,16 @@
 //! Deterministic issue-003 realtime audit and bounded descriptive benchmark.
 
-#![allow(unsafe_code)]
-
 use core::num::NonZeroUsize;
-use miso_engine_core::realtime::audit::{
-    self, AuditSnapshot, ForbiddenOperation, record_allocator_violation,
-};
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_bench_support::json::escape as json_escape;
+use miso_engine_core::realtime::audit::{self, AuditSnapshot, ForbiddenOperation};
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanarBufferMut, PrepareRenderPlan, PreparedRenderPlan, RenderEnvelope,
     RenderIo, RenderTime, SwapOutcome, plan_exchange,
 };
 use miso_engine_core::{QuantumFrames, SampleRateHz};
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
-use std::fmt::Write as _;
 use std::time::{Duration, Instant};
-
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every method preserves `GlobalAlloc`'s pointer/layout contract by forwarding unchanged
-// arguments to `System`; the audit branch terminates without unwinding through the allocator.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: this wrapper forwards the unchanged valid layout to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: this wrapper forwards the unchanged valid layout to the system allocator.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: the pointer/layout pair came from this allocator and is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocation came from this allocator; the original layout and requested new
-        // size are forwarded unchanged to the system allocator.
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
 
 #[derive(Clone, Copy)]
 struct RoundEvidence {
@@ -185,6 +139,10 @@ fn run_probe(operation: ForbiddenOperation) -> ! {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let (mode, blocks, trace_markers) = parse_arguments();
     match mode {
         Mode::Probe(operation) => run_probe(operation),
@@ -308,25 +266,6 @@ fn metadata(name: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| json_escape(&value))
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn json_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{00}'..='\u{1f}' => {
-                write!(&mut escaped, "\\u{:04x}", character as u32)
-                    .expect("writing to a String cannot fail");
-            }
-            _ => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 fn json_u128_array(values: impl Iterator<Item = u128>) -> String {

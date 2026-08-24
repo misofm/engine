@@ -1,21 +1,13 @@
 //! One-million-call allocation and forbidden-operation audit for prepared scalar builtins.
 
-#![allow(unsafe_code)]
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, Ordering};
+use miso_engine_bench_support::alloc as bench_alloc;
 
 use miso_engine_builtins::{
     BuiltinChain, BuiltinParameters, BuiltinProcessReport, BuiltinResetKind, ChannelParameters,
     DualMonoBlock, Matrix2x2,
 };
-use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
+use miso_engine_core::realtime::audit::{self, ForbiddenOperation};
 
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-static ABORT_ALLOCATOR_VIOLATION: AtomicBool = AtomicBool::new(true);
 const BLOCKS: u64 = 1_000_000;
 const QUANTUM: usize = 128;
 const EXPECTED_SCHEDULE_PCM: &[u8] = include_bytes!("../fixtures/v1/direct-schedule.pcm.f32le");
@@ -25,56 +17,16 @@ const AUDIT_MANIFEST_SHA256: &str =
 const AUDIT_RESULT_SHA256: &str =
     "91f326645f8ddd0fd5edb4d8c476bfce24830dec3c1b0d3fcf73f49e6da201c8";
 
-// SAFETY: each operation forwards the unchanged allocation contract to the system allocator.
-// The armed branch aborts instead of unwinding through the allocator implementation.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation)
-            && ABORT_ALLOCATOR_VIOLATION.load(Ordering::Relaxed)
-        {
-            std::process::abort();
-        }
-        // SAFETY: the supplied layout is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation)
-            && ABORT_ALLOCATOR_VIOLATION.load(Ordering::Relaxed)
-        {
-            std::process::abort();
-        }
-        // SAFETY: the supplied layout is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation)
-            && ABORT_ALLOCATOR_VIOLATION.load(Ordering::Relaxed)
-        {
-            std::process::abort();
-        }
-        // SAFETY: the original pointer/layout contract is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation)
-            && ABORT_ALLOCATOR_VIOLATION.load(Ordering::Relaxed)
-        {
-            std::process::abort();
-        }
-        // SAFETY: the original pointer/layout and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
-
 enum Mode {
     Audit,
     Probe(ForbiddenOperation),
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     let mode = parse_arguments();
     match mode {
         Mode::Audit => run_audit(),
@@ -259,7 +211,9 @@ fn assert_schedule_block(block: u64, left: &[f32; QUANTUM], right: &[f32; QUANTU
 fn run_probe(operation: ForbiddenOperation) -> ! {
     audit::warm_up();
     audit::reset();
-    ABORT_ALLOCATOR_VIOLATION.store(false, Ordering::Relaxed);
+    // #104 F4: the probe suppresses only the abort, exactly as the private
+    // `ABORT_ALLOCATOR_VIOLATION` switch did; the violation is still recorded in the core counters.
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
     audit::in_render_scope(|| {
         if operation == ForbiddenOperation::PanicUnwind {
             panic!("deliberate panic/unwind detector probe");

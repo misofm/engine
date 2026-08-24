@@ -2,14 +2,12 @@
 //!
 //! The binary has no command-line control surface. The fixed shell runner supplies only the
 //! warmup/round environment, while this program owns fixed 48 kHz, 128-frame production DSP.
-#![allow(unsafe_code)]
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_bench_support::json::escape as json_escape;
+use miso_engine_bench_support::stats;
 
-use core::fmt::Write as _;
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    time::Instant,
-};
-
+use miso_engine_bench_support::digest::{Sha256Sink, sha256_hex};
+use miso_engine_bench_support::timing;
 use miso_engine_builtins::{
     BuiltinChain, BuiltinInputBankV1, BuiltinParameters, ChannelParameters, DualMonoBlock,
 };
@@ -17,7 +15,7 @@ use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins
 use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::{
     PlanarBufferMut, RenderIo, RenderTime,
-    audit::{self, ForbiddenOperation, record_allocator_violation},
+    audit::{self},
 };
 use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
@@ -32,44 +30,6 @@ use miso_engine_session::{
     CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
     SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
 };
-use sha2::{Digest, Sha256};
-
-struct AuditedAllocator;
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every method forwards the allocator's original pointer/layout contract unchanged. An
-// allocation while the render audit is armed aborts instead of unwinding through `GlobalAlloc`.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original pointer/layout pair is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original allocation contract and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM: usize = 128;
@@ -122,6 +82,10 @@ struct Measurement {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     assert_eq!(
         std::env::args_os().count(),
         1,
@@ -168,8 +132,8 @@ fn host_backend() -> Backend {
 fn measure(workload: Workload, backend: Backend) -> (Measurement, Shape) {
     let mut runtime = Runtime::prepare(workload, backend);
     let mut durations = Vec::with_capacity(OBSERVATIONS);
-    let mut input_hash = Sha256::new();
-    let mut output_hash = Sha256::new();
+    let mut input_hash = Sha256Sink::new();
+    let mut output_hash = Sha256Sink::new();
     audit::warm_up();
     audit::reset();
     let mut render_errors = 0_u64;
@@ -183,12 +147,15 @@ fn measure(workload: Workload, backend: Backend) -> (Measurement, Shape) {
             observation as u64,
             &mut input_hash,
         );
-        let started = Instant::now();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.render(observation as u64)
-        }));
-        let ns = u64::try_from(started.elapsed().as_nanos()).expect("duration fits u64")
-            / QUANTUM as u64;
+        // #104 F1, made structural: `timing::timed` samples the shared digest sink's update
+        // counter on both sides of the clock and panics if the body hashed anything. The input
+        // identity above and the output identity below are both outside it, by construction.
+        let (elapsed_ns, result) = timing::timed(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.render(observation as u64)
+            }))
+        });
+        let ns = elapsed_ns / QUANTUM as u64;
         match result {
             Ok(Ok(())) => {}
             Ok(Err(())) => render_errors += 1,
@@ -199,8 +166,8 @@ fn measure(workload: Workload, backend: Backend) -> (Measurement, Shape) {
     }
     let measurement = Measurement {
         ns_per_frame: durations,
-        input_sha256: hex_digest(input_hash.finalize()),
-        output_sha256: hex_digest(output_hash.finalize()),
+        input_sha256: input_hash.finish_hex(),
+        output_sha256: output_hash.finish_hex(),
         audit: audit::snapshot(),
         render_errors,
         panic_unwinds,
@@ -235,7 +202,7 @@ impl Runtime {
             Self::Mixed(value) => value.render(observation),
         }
     }
-    fn hash_output(&self, hash: &mut Sha256) {
+    fn hash_output(&self, hash: &mut Sha256Sink) {
         match self {
             Self::Scalar(value) => value.hash_output(hash),
             Self::Bank(value) => value.hash_output(hash),
@@ -304,7 +271,7 @@ impl ScalarRuntime {
         }
         Ok(())
     }
-    fn hash_output(&self, hash: &mut Sha256) {
+    fn hash_output(&self, hash: &mut Sha256Sink) {
         for track in 0..self.left.len() {
             hash_f32_into(hash, self.left[track].iter());
             hash_f32_into(hash, self.right[track].iter());
@@ -345,7 +312,7 @@ impl BankRuntime {
             .process(&mut self.left, &mut self.right, QUANTUM as u32);
         Ok(())
     }
-    fn hash_output(&self, hash: &mut Sha256) {
+    fn hash_output(&self, hash: &mut Sha256Sink) {
         for track in 0..8 {
             hash_f32_into(
                 hash,
@@ -598,7 +565,7 @@ impl MixedRuntime {
             .map(|_| ())
             .map_err(|_| ())
     }
-    fn hash_output(&self, hash: &mut Sha256) {
+    fn hash_output(&self, hash: &mut Sha256Sink) {
         hash_f32_into(hash, self.output.iter());
     }
 }
@@ -736,7 +703,7 @@ fn asymmetric_input(track: usize, frame: usize, observation: u64) -> (f32, f32) 
         -(ramp * (0.5 + lane * 0.125) - phase * 0.75),
     )
 }
-fn hash_semantic_input(tracks: usize, observation: u64, hash: &mut Sha256) {
+fn hash_semantic_input(tracks: usize, observation: u64, hash: &mut Sha256Sink) {
     for track in 0..tracks {
         for channel in 0..2 {
             for frame in 0..QUANTUM {
@@ -756,19 +723,11 @@ fn backend_name(backend: Backend) -> &'static str {
         _ => panic!("the frozen host workload requires the eight-lane backend"),
     }
 }
-fn hash_f32_into<'a>(hash: &mut Sha256, values: impl Iterator<Item = &'a f32>) {
+fn hash_f32_into<'a>(hash: &mut Sha256Sink, values: impl Iterator<Item = &'a f32>) {
     for value in values {
         hash.update(value.to_bits().to_le_bytes());
     }
 }
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    let mut result = String::with_capacity(64);
-    for byte in bytes.as_ref() {
-        write!(&mut result, "{byte:02x}").expect("string");
-    }
-    result
-}
-
 struct Identities {
     candidate_commit_sha256: String,
     binary_sha256: String,
@@ -779,7 +738,7 @@ impl Identities {
         Self {
             candidate_commit_sha256: required_sha256("MISO_ENGINE_BENCH_CANDIDATE_SHA256"),
             binary_sha256: required_sha256("MISO_ENGINE_BENCH_BINARY_SHA256"),
-            fixture_sha256: hex_digest(Sha256::digest(FIXTURE_BYTES)),
+            fixture_sha256: sha256_hex(FIXTURE_BYTES),
         }
     }
 }
@@ -852,10 +811,6 @@ fn metadata_value(name: &str) -> Option<String> {
         !value.is_empty() && value != "unknown" && value != "default" && value.is_ascii()
     })
 }
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn record_json(
     workload: Workload,
     round: u32,
@@ -922,7 +877,7 @@ impl Percentiles {
         assert_eq!(samples.len(), OBSERVATIONS);
         let mut values = samples.to_vec();
         values.sort_unstable();
-        let rank = |n: usize| values[(values.len() * n).div_ceil(1_000) - 1];
+        let rank = |n: usize| stats::per_mille(&values, n);
         Self {
             min: values[0],
             p50: rank(500),
@@ -971,11 +926,11 @@ mod tests {
     #[test]
     fn semantic_input_identity_is_layout_independent_and_workload_specific() {
         let identify = |tracks| {
-            let mut hash = Sha256::new();
+            let mut hash = Sha256Sink::new();
             for observation in 0..OBSERVATIONS as u64 {
                 hash_semantic_input(tracks, observation, &mut hash);
             }
-            hex_digest(hash.finalize())
+            hash.finish_hex()
         };
         assert_eq!(identify(8), identify(8));
         assert_ne!(identify(8), identify(12));

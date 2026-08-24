@@ -20,7 +20,7 @@ command -v strace >/dev/null 2>&1 || {
 mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
-strace -ff -qq -ttt -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
+strace -ff -qq -ttt -s 200 -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
 "$validator" "$trace_root" MISO_ENGINE_BUILTINS_RT_BEGIN MISO_ENGINE_BUILTINS_RT_END 7 \
   >"$trace_root/validator.json"
 jq -e '

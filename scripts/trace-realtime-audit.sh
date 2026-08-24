@@ -19,7 +19,7 @@ mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
 
-strace -ff -qq -o "$trace_prefix" "$binary" \
+strace -ff -qq -s 200 -o "$trace_prefix" "$binary" \
     --blocks "$blocks" --audit --trace-markers \
     >"$trace_root/audit.json"
 

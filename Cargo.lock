@@ -630,9 +630,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-bench-support"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-core",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "miso-engine-bootstrap-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-lane",
 ]
 
@@ -652,6 +661,7 @@ dependencies = [
 name = "miso-engine-builtins-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-builtins",
  "miso-engine-builtins-compiler",
  "miso-engine-conformance",
@@ -669,6 +679,7 @@ dependencies = [
 name = "miso-engine-builtins-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-builtins",
  "miso-engine-builtins-compiler",
  "miso-engine-conformance",
@@ -731,6 +742,7 @@ dependencies = [
 name = "miso-engine-capi-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-capi",
  "miso-engine-core",
 ]
@@ -762,6 +774,7 @@ dependencies = [
 name = "miso-engine-conformance-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-conformance",
 ]
 
@@ -822,6 +835,7 @@ dependencies = [
 name = "miso-engine-effect-contract-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-contract",
@@ -831,6 +845,7 @@ dependencies = [
 name = "miso-engine-effect-interchange-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-core",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
@@ -896,6 +911,7 @@ dependencies = [
 name = "miso-engine-graph-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-compressor",
  "miso-engine-core",
  "miso-engine-delay",
@@ -910,6 +926,7 @@ dependencies = [
 name = "miso-engine-graph-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-compiler",
@@ -1049,6 +1066,7 @@ dependencies = [
 name = "miso-engine-protocol-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-protocol",
  "miso-engine-session",
 ]
@@ -1058,6 +1076,7 @@ name = "miso-engine-protocol-bench"
 version = "0.1.0"
 dependencies = [
  "flatbuffers",
+ "miso-engine-bench-support",
  "miso-engine-protocol",
  "miso-engine-session",
 ]
@@ -1074,6 +1093,7 @@ dependencies = [
 name = "miso-engine-rack-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-builtins",
  "miso-engine-builtins-compiler",
  "miso-engine-conformance",
@@ -1101,6 +1121,7 @@ dependencies = [
 name = "miso-engine-realtime-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-core",
 ]
 
@@ -1108,6 +1129,7 @@ dependencies = [
 name = "miso-engine-scheduler-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-core",
  "miso-engine-graph",
  "miso-engine-scheduler-fixture",
@@ -1117,6 +1139,7 @@ dependencies = [
 name = "miso-engine-scheduler-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-builtins-compiler",
  "miso-engine-core",
  "miso-engine-effect-compiler",
@@ -1152,6 +1175,7 @@ dependencies = [
 name = "miso-engine-session-bench"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-session",
 ]
 
@@ -1181,6 +1205,7 @@ dependencies = [
 name = "miso-engine-source-audit"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-graph",
