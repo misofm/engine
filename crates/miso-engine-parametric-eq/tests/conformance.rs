@@ -1,31 +1,9 @@
-//! The parametric EQ against the shared effect-contract conformance harness (issue #95, eval E6).
+//! Effect-contract conformance (issue 011 harness) against the production factory.
 //!
-//! A second, structurally different effect: zero declared latency, a much larger parameter table,
-//! and a per-lane state payload that carries the runtime codec's two-word header. Together with
-//! `miso-engine-compressor/tests/conformance.rs` (882 samples of lookahead, a linked detector,
-//! a lookahead ring whose index advances on silence) it is what stops the harness from quietly
-//! re-specialising to one effect's shape.
+//! Zero declared latency, the largest parameter table, and a per-lane payload carrying the runtime codec's two-word header.
 //!
-//! Red mutation (run and observed RED): return `LatencySamples(1)` from the EQ's quality rows
-//! while the kernel stays at zero delay, and `latency.impulse` fails.
-
-use miso_engine_conformance::{ConformanceConfig, run_effect_conformance};
-use miso_engine_parametric_eq::ParametricEqFactory;
-
-#[test]
-fn the_parametric_eq_passes_the_effect_contract_launch_gates() {
-    let report = run_effect_conformance(
-        &ParametricEqFactory,
-        ConformanceConfig {
-            quantum: 128,
-            blocks: 1,
-        },
-    );
-    assert!(
-        report.launch_gates.failures.is_empty(),
-        "launch gate failures: {:?}",
-        report.launch_gates.failures
-    );
-    assert!(report.launch_gates.prepared_configurations > 0);
-    assert!(report.passed());
-}
+//! Issue #105 phase 2 F1: the harness runs against every production `NativeEffectFactory`, not
+//! just its own reference mock. The whole test is the macro -- see
+//! `miso_engine_conformance::effect_conformance_test!` for what it gates and why the two
+//! dev-dependencies are load-bearing.
+miso_engine_conformance::effect_conformance_test!(miso_engine_parametric_eq::ParametricEqFactory);

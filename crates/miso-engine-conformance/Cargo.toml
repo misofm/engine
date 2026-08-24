@@ -24,6 +24,10 @@ realtime-audit = ["miso-engine-core/realtime-audit"]
 [dev-dependencies]
 # This crate's own tests assert that fault probes are DETECTED, so they need the real hooks.
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+# Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). The harness's
+# allocation gate is a `GlobalAlloc` measurement, so the test binary that exercises it has to
+# install one. Test-only: `check-conformance-boundaries.sh` still pins `[dependencies]` exactly.
+miso-engine-bench-support.workspace = true
 
 [lints]
 workspace = true

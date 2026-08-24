@@ -75,9 +75,26 @@ actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 
 
 # The shared harness is test scaffolding. A production package depending on it would put a
 # `#[global_allocator]` and an abort-on-allocation policy into a shipped artifact.
-if grep -rn 'miso-engine-bench-support' crates hosts --include='Cargo.toml' 2>/dev/null; then
-    fail 'a production package depends on the bench support crate'
-fi
+#
+# Amended by #105 phase 2, deliberately and narrowly: a `[dev-dependencies]` edge from a crate
+# under `crates/` is allowed, because it cannot reach a shipped artifact (dev dependencies are not
+# part of any non-test build graph -- `scripts/check-realtime-audit-leak.sh` proves that with
+# `cargo tree -e features,no-dev`), and because it is what makes the effect-contract conformance
+# allocation gate real. `run_effect_conformance` can only observe an allocation inside an armed
+# render scope if the *test binary* that calls it installs the audited counting allocator; the
+# harness refuses to run with `harness.allocator_not_installed` when it is missing, so the edge is
+# load-bearing rather than convenient. `hosts/` keeps the absolute ban in both sections: a host
+# adapter is the artifact.
+while IFS= read -r manifest; do
+    violation="$(awk -v file="$manifest" '
+        /^\[/ { section = $0 }
+        /miso-engine-bench-support/ {
+            dev = section ~ /dev-dependencies/ && file ~ /^crates\//
+            if (!dev) { print file ": " $0; exit }
+        }
+    ' "$manifest")"
+    [[ -z "$violation" ]] || fail "a production package depends on the bench support crate: $violation"
+done < <(find crates hosts -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | sort)
 
 printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
     "$(printf '%s\n' "$expected_unsafe" | wc -l | tr -d ' ')" "${#timed_subjects[@]}"

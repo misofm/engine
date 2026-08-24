@@ -1,5 +1,17 @@
 //! Semantic runtime and adversarial detector regression coverage.
+//!
+//! Issue #105 F2: this binary installs the workspace's one audited global allocator (#104 phase B,
+//! registered inside `miso-engine-bench-support` itself) in count-and-continue mode, which is what
+//! makes `run_effect_conformance`'s `process.allocation` verdict a real measurement. Without it
+//! the harness stops with `harness.allocator_not_installed` rather than reporting a vacuous pass.
+use miso_engine_bench_support::alloc as audited_allocator;
 use miso_engine_lane::Backend;
+
+/// Arm the counting allocator once for every test in this binary.
+fn armed() {
+    audited_allocator::assert_installed();
+    audited_allocator::set_mode(audited_allocator::Mode::Count);
+}
 
 use miso_engine_conformance::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory, FaultKind,
@@ -152,6 +164,7 @@ fn smoothers_and_segments_finish_on_the_exact_update_or_endpoint() {
 
 #[test]
 fn correct_mock_passes_every_enabled_conformance_gate() {
+    armed();
     let report = run_effect_conformance(
         &DualAccumulatorDelayFactory::correct(),
         ConformanceConfig {
@@ -172,25 +185,38 @@ fn correct_mock_passes_every_enabled_conformance_gate() {
 
 #[test]
 fn every_faulty_mock_is_detected() {
-    for fault in [
-        FaultKind::AllocationHook,
-        FaultKind::DeallocationHook,
-        FaultKind::LockHook,
-        FaultKind::IoHook,
-        FaultKind::NetworkHook,
-        FaultKind::LogHook,
-        FaultKind::SyscallHook,
-        FaultKind::SharedLaneState,
-        FaultKind::ChangingMetadata,
-        FaultKind::ChangingTail,
-        FaultKind::LatencyChangingBypass,
-        FaultKind::BadResources,
-        FaultKind::MalformedSpanAcceptance,
-        FaultKind::NonfinitePropagation,
-        FaultKind::NondeterministicSnapshot,
-        FaultKind::PartialSnapshot,
-        FaultKind::BadRestore,
-        FaultKind::Panic,
+    armed();
+    // The second column names the failure string the fault must produce, where the fault has one.
+    // `None` means "detected, string not pinned here" -- the hook faults all reach the harness as
+    // a panic out of `audit::forbidden`, and pinning `process.panic` for them would only restate
+    // the classification rule rather than gate the detector.
+    for (fault, expected) in [
+        (FaultKind::AllocationHook, None),
+        (FaultKind::DeallocationHook, None),
+        (FaultKind::LockHook, None),
+        (FaultKind::IoHook, None),
+        (FaultKind::NetworkHook, None),
+        (FaultKind::LogHook, None),
+        (FaultKind::SyscallHook, None),
+        (FaultKind::SharedLaneState, None),
+        (FaultKind::ChangingMetadata, None),
+        (FaultKind::ChangingTail, None),
+        (FaultKind::LatencyChangingBypass, None),
+        (FaultKind::BadResources, None),
+        (FaultKind::MalformedSpanAcceptance, None),
+        (FaultKind::NonfinitePropagation, None),
+        (FaultKind::NondeterministicSnapshot, None),
+        (FaultKind::PartialSnapshot, None),
+        (FaultKind::BadRestore, None),
+        (FaultKind::Panic, Some("process.panic")),
+        // Issue #105 phase 2, evals E10/E12/E13.
+        (FaultKind::HeapAllocation, Some("process.allocation")),
+        (
+            FaultKind::PartitionDependent,
+            Some("process.partition_invariance"),
+        ),
+        (FaultKind::StickyReset, Some("reset.snapshot_differs")),
+        (FaultKind::BypassDelayMismatch, Some("latency.bypass_delay")),
     ] {
         let report = run_effect_conformance(
             &DualAccumulatorDelayFactory::faulty(fault),
@@ -200,11 +226,19 @@ fn every_faulty_mock_is_detected() {
             },
         );
         assert!(!report.passed(), "fault {fault:?} escaped detection");
+        if let Some(expected) = expected {
+            assert!(
+                report.launch_gates.failures.contains(&expected),
+                "fault {fault:?} was detected as {:?}, not {expected:?}",
+                report.launch_gates.failures
+            );
+        }
     }
 }
 
 #[test]
 fn extended_rate_failures_are_reported_but_do_not_fail_launch_gates() {
+    armed();
     let report = run_effect_conformance(
         &DualAccumulatorDelayFactory::faulty(FaultKind::ExtendedRatePreparation),
         ConformanceConfig {

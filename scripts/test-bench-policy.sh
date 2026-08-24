@@ -91,4 +91,22 @@ printf '[dev-dependencies]\nmiso-engine-bench-support.workspace = true\n' \
     >"$case_root/hosts/miso-engine-host-native/Cargo.toml"
 expect_failure host-dependency
 
+# #105 phase 2 amended the rule to be section-aware. These two cases pin both halves of it: the
+# dev edge the conformance allocation gate needs is legal under crates/, and the same crate
+# growing a real dependency on the harness is not.
+new_case crates-dev-dependency-is-allowed
+mkdir -p "$case_root/crates/miso-engine-compressor"
+printf '[dev-dependencies]\nmiso-engine-bench-support.workspace = true\n' \
+    >"$case_root/crates/miso-engine-compressor/Cargo.toml"
+check >/dev/null || {
+    printf 'bench policy rejects the #105 conformance dev edge under crates/\n' >&2
+    exit 1
+}
+
+new_case crates-dev-dependency-promoted-to-a-real-one
+mkdir -p "$case_root/crates/miso-engine-compressor"
+printf '[dependencies]\nmiso-engine-bench-support.workspace = true\n\n[dev-dependencies]\nsha2.workspace = true\n' \
+    >"$case_root/crates/miso-engine-compressor/Cargo.toml"
+expect_failure crates-dev-dependency-promoted-to-a-real-one
+
 printf 'bench policy mutations: ok\n'

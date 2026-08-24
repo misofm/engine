@@ -15,6 +15,12 @@ miso-engine-lane.workspace = true
 miso-engine-math.workspace = true
 
 [dev-dependencies]
+# Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
+# makes the conformance harness's `process.allocation` gate a real measurement; the harness
+# refuses to run without it.
+miso-engine-bench-support.workspace = true
+# Issue #105 phase 2: effect-contract conformance harness against the production factory.
+miso-engine-conformance = { workspace = true, features = ["realtime-audit"] }
 miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
 sha2.workspace = true

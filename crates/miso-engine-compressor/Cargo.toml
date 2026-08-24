@@ -15,6 +15,10 @@ miso-engine-lane.workspace = true
 miso-engine-math.workspace = true
 
 [dev-dependencies]
+# Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
+# makes the conformance harness's `process.allocation` gate a real measurement; the harness
+# refuses to run without it.
+miso-engine-bench-support.workspace = true
 # The independent f64 oracle is test-only and never reachable from production code.
 miso-engine-dsp-reference.workspace = true
 # Frozen SplitMix64 fixture generator for the timing example and the eval corpora.

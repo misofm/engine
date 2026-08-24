@@ -751,6 +751,7 @@ dependencies = [
 name = "miso-engine-compressor"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-conformance",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
@@ -764,6 +765,7 @@ dependencies = [
 name = "miso-engine-conformance"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
@@ -789,6 +791,8 @@ dependencies = [
 name = "miso-engine-delay"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
@@ -886,6 +890,8 @@ dependencies = [
 name = "miso-engine-gate-expander"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
@@ -1015,6 +1021,8 @@ dependencies = [
 name = "miso-engine-multiband-compressor"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -1044,6 +1052,7 @@ dependencies = [
 name = "miso-engine-parametric-eq"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
  "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-dsp-reference",
@@ -1183,6 +1192,8 @@ dependencies = [
 name = "miso-engine-soft-clip"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -1233,6 +1244,8 @@ dependencies = [
 name = "miso-engine-transient-shaper"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -1245,6 +1258,8 @@ dependencies = [
 name = "miso-engine-true-peak-limiter"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",

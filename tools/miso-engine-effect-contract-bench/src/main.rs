@@ -158,6 +158,11 @@ fn audit_process(blocks: u64, markers: bool) {
 }
 
 fn conformance() {
+    // #105 phase 2: `run_effect_conformance` proves its own allocation detector is live by
+    // allocating inside an armed render scope on purpose, so this invocation counts and continues
+    // instead of aborting. `--audit` (the mode that asserts zero violations) keeps the default
+    // abort policy: it is a different process.
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
     let report = run_effect_conformance(
         &DualAccumulatorDelayFactory::correct(),
         ConformanceConfig {
