@@ -15,7 +15,7 @@ output="$(
     MISO_ENGINE_BENCH_TARGET_FEATURES="$target_features" \
     MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER=native-cli \
     MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="not measured; descriptive baseline" \
-    cargo run --locked --release -q -p miso-engine-session-bench
+    cargo run --locked --release -q -p miso-engine-bench -- session
 )"
 
 [[ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" == 4 ]] || {

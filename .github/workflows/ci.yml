@@ -93,8 +93,8 @@ jobs:
         run: cargo test --locked --release -p miso-engine-delay --all-targets
       - name: Delay realtime allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-graph-audit --bin miso_engine_graph_audit_delay
-          ./target/release/miso_engine_graph_audit_delay --blocks 100000
+          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
+          ./target/release/miso_engine_audit delay --blocks 100000
       - name: Multiband compressor gates in release (audit #94)
         run: cargo test --locked --release -p miso-engine-multiband-compressor
       - name: Soft-clip gates (polyphase identity, lane identity, partitions, digests) in release
@@ -107,14 +107,14 @@ jobs:
           bash scripts/check-parametric-eq-targets.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-graph-audit --bin miso_engine_graph_audit_parametric_eq
-          ./target/release/miso_engine_graph_audit_parametric_eq --blocks 100000
+          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
+          ./target/release/miso_engine_audit parametric-eq --blocks 100000
       - name: Gate/expander gates (oracle bound, lane identity, partition, state, digests) in release
         run: cargo test --locked --release -p miso-engine-gate-expander
       - name: Gate/expander realtime audit (100,000 blocks, W8 bank and connected scalar)
         run: |
-          cargo build --locked --release -p miso-engine-graph-audit --bin miso_engine_graph_audit_gate_expander
-          ./target/release/miso_engine_graph_audit_gate_expander | tee target/gate-expander-audit.json
+          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
+          ./target/release/miso_engine_audit gate-expander | tee target/gate-expander-audit.json
           grep -q '"total_violations":0' target/gate-expander-audit.json
       - name: Builtins gates (reference recurrence, lane identity, partitions, digests) in release
         run: cargo test --locked --release -p miso-engine-builtins
@@ -130,19 +130,19 @@ jobs:
         run: bash scripts/run-protocol-allocation-audit.sh
       - name: Protocol benchmark runner build and negative argument checks (no benchmark)
         run: |
-          cargo check --locked -p miso-engine-protocol-bench --all-targets
+          cargo check --locked -p miso-engine-bench --all-targets
           bash scripts/test-protocol-benchmark.sh
       - name: Realtime race model
         run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p miso-engine-core spsc_loom
       - name: Realtime audit hooks and syscall trace
         run: |
-          cargo build --locked --release -p miso-engine-realtime-audit
-          bash scripts/test-realtime-audit-hooks.sh target/release/miso_engine_realtime_audit
-          timeout 120s bash scripts/trace-realtime-audit.sh target/release/miso_engine_realtime_audit 1000000
+          cargo build --locked --release -p miso-engine-audit
+          bash scripts/test-realtime-audit-hooks.sh target/release/miso_engine_audit
+          timeout 120s bash scripts/trace-realtime-audit.sh target/release/miso_engine_audit 1000000
       - name: Native effect one-million-call allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-effect-contract-bench
-          timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/miso_engine_effect_contract_bench 1000000
+          cargo build --locked --release -p miso-engine-bench
+          timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/miso_engine_bench 1000000
       - name: Conformance boundaries and research corpus
         run: |
           bash scripts/check-conformance-boundaries.sh
@@ -343,7 +343,7 @@ jobs:
           bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
           test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
       - name: Build issue-003 audit harness
-        run: cargo build --locked --release -p miso-engine-realtime-audit
+        run: cargo build --locked --release -p miso-engine-audit
       - name: Run one descriptive two-round realtime benchmark
         run: |
           set -o pipefail

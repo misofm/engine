@@ -630,19 +630,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-audit"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-builtins",
+ "miso-engine-builtins-compiler",
+ "miso-engine-capi",
+ "miso-engine-compressor",
+ "miso-engine-conformance",
+ "miso-engine-core",
+ "miso-engine-delay",
+ "miso-engine-dsp-reference",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-gate-expander",
+ "miso-engine-graph",
+ "miso-engine-graph-compiler",
+ "miso-engine-lane",
+ "miso-engine-parametric-eq",
+ "miso-engine-protocol",
+ "miso-engine-session",
+ "miso-engine-source",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "miso-engine-bench"
+version = "0.1.0"
+dependencies = [
+ "flatbuffers",
+ "miso-engine-bench-support",
+ "miso-engine-builtins",
+ "miso-engine-builtins-compiler",
+ "miso-engine-conformance",
+ "miso-engine-core",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-effect-package",
+ "miso-engine-graph",
+ "miso-engine-graph-compiler",
+ "miso-engine-lane",
+ "miso-engine-protocol",
+ "miso-engine-rack",
+ "miso-engine-session",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "miso-engine-bench-support"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "miso-engine-bootstrap-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-lane",
 ]
 
 [[package]]
@@ -654,41 +694,6 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-lane",
  "miso-engine-math",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "miso-engine-builtins-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-builtins",
- "miso-engine-builtins-compiler",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-dsp-reference",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "miso-engine-builtins-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-builtins",
- "miso-engine-builtins-compiler",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
  "sha2 0.11.0",
 ]
 
@@ -708,23 +713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miso-engine-builtins-fixture"
-version = "0.1.0"
-dependencies = [
- "miso-engine-builtins",
- "miso-engine-builtins-compiler",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-dsp-reference",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "miso-engine-capi"
 version = "0.1.0"
 dependencies = [
@@ -736,15 +724,6 @@ dependencies = [
  "miso-engine-protocol",
  "miso-engine-session",
  "miso-engine-source",
-]
-
-[[package]]
-name = "miso-engine-capi-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-capi",
- "miso-engine-core",
 ]
 
 [[package]]
@@ -770,14 +749,6 @@ dependencies = [
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-lane",
-]
-
-[[package]]
-name = "miso-engine-conformance-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-conformance",
 ]
 
 [[package]]
@@ -836,29 +807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miso-engine-effect-contract-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-effect-contract",
-]
-
-[[package]]
-name = "miso-engine-effect-interchange-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-effect-package",
- "miso-engine-lane",
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "miso-engine-effect-package"
 version = "0.1.0"
 dependencies = [
@@ -911,36 +859,6 @@ dependencies = [
  "miso-engine-lane",
  "miso-engine-native-scheduler",
  "miso-engine-rack",
-]
-
-[[package]]
-name = "miso-engine-graph-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-compressor",
- "miso-engine-core",
- "miso-engine-delay",
- "miso-engine-effect-contract",
- "miso-engine-gate-expander",
- "miso-engine-graph",
- "miso-engine-lane",
- "miso-engine-parametric-eq",
-]
-
-[[package]]
-name = "miso-engine-graph-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1086,49 +1004,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "miso-engine-protocol-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-protocol",
- "miso-engine-session",
-]
-
-[[package]]
-name = "miso-engine-protocol-bench"
-version = "0.1.0"
-dependencies = [
- "flatbuffers",
- "miso-engine-bench-support",
- "miso-engine-protocol",
- "miso-engine-session",
-]
-
-[[package]]
 name = "miso-engine-rack"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
-]
-
-[[package]]
-name = "miso-engine-rack-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-builtins",
- "miso-engine-builtins-compiler",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-lane",
- "miso-engine-rack",
- "miso-engine-session",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1141,65 +1021,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "miso-engine-realtime-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-core",
-]
-
-[[package]]
-name = "miso-engine-scheduler-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-core",
- "miso-engine-graph",
- "miso-engine-scheduler-fixture",
-]
-
-[[package]]
-name = "miso-engine-scheduler-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-builtins-compiler",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
-]
-
-[[package]]
-name = "miso-engine-scheduler-fixture"
-version = "0.1.0"
-dependencies = [
- "miso-engine-builtins-compiler",
- "miso-engine-conformance",
- "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
- "miso-engine-session",
-]
-
-[[package]]
 name = "miso-engine-session"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "miso-engine-session-bench"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-session",
 ]
 
 [[package]]
@@ -1224,26 +1051,6 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-graph",
  "miso-engine-session",
-]
-
-[[package]]
-name = "miso-engine-source-audit"
-version = "0.1.0"
-dependencies = [
- "miso-engine-bench-support",
- "miso-engine-core",
- "miso-engine-effect-contract",
- "miso-engine-graph",
- "miso-engine-source",
-]
-
-[[package]]
-name = "miso-engine-source-fixture"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
- "miso-engine-source",
- "sha2 0.11.0",
 ]
 
 [[package]]

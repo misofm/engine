@@ -2,7 +2,7 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/miso_engine_builtins_audit"
+binary="$workspace_dir/target/release/miso_engine_audit"
 trace_root="$workspace_dir/target/issue7/strace"
 validator="$workspace_dir/scripts/validate-realtime-trace.sh"
 
@@ -12,7 +12,7 @@ validator="$workspace_dir/scripts/validate-realtime-trace.sh"
 }
 
 cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p miso-engine-builtins-audit
+  -p miso-engine-audit
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the builtins realtime syscall gate\n' >&2
   exit 1
@@ -20,7 +20,7 @@ command -v strace >/dev/null 2>&1 || {
 mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
-strace -ff -qq -ttt -s 200 -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
+strace -ff -qq -ttt -s 200 -o "$trace_prefix" "$binary" builtins >"$trace_root/audit.json"
 "$validator" "$trace_root" MISO_ENGINE_BUILTINS_RT_BEGIN MISO_ENGINE_BUILTINS_RT_END 7 \
   >"$trace_root/validator.json"
 jq -e '

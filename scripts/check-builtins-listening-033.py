@@ -39,8 +39,6 @@ ZERO_COUNTERS = {
     "reveal_invocations": 0,
     "valid_human_responses": 0,
 }
-PRE_SEAL_COUNTERS = {**ZERO_COUNTERS, "preflight_invocations": 0, "preparation_invocations": 0}
-PREFLIGHT_COUNTERS = {**ZERO_COUNTERS, "preparation_invocations": 0}
 QUALIFICATION_AUTHORITIES = {"preparation", "responses", "reveal"}
 COPIED_PACKET_INPUTS = {
     "public/FACILITATOR.md": "dsp-research/listening/issue033/FACILITATOR.md",
@@ -242,80 +240,6 @@ def assemble_preparation(manifest_path: Path, commit: str, tree: str, output: Pa
         destination.write(descriptor)
 
 
-def authority_projection(root: Path, include_binary: bool) -> dict:
-    paths = {
-        "cargo_lock": "Cargo.lock",
-        "checker": "scripts/check-builtins-listening-033.sh",
-        "facilitator": "dsp-research/listening/issue033/FACILITATOR.md",
-        "filter_preregistration": "dsp-research/listening/issue007-filter-abx-preregistration.md",
-        "fixtures_manifest": "fixtures/builtins/v1/MANIFEST.tsv",
-        "legacy_checker": "scripts/check-builtins-listening.sh",
-        "listening_template": "dsp-research/listening/TEMPLATE.md",
-        "lifecycle": "scripts/test-builtins-listening-033.sh",
-        "matrix_preregistration": "dsp-research/listening/issue007-matrix-ramp-preregistration.md",
-        "policy_mutation": "scripts/test-builtins-listening-033-policy.sh",
-        "preflight": "scripts/preflight-builtins-listening-033.sh",
-        "prepare": "scripts/prepare-builtins-listening-033.sh",
-        "probe": "fixtures/conformance/v1/prng-noise-048000-dual-mono.mepcm",
-        "product": "crates/miso-engine-builtins/src/lib.rs",
-        "product_compiler": "crates/miso-engine-builtins-compiler/src/lib.rs",
-        "provenance_template": "dsp-research/listening/issue033/provenance.template.json",
-        "qualification_schema": "dsp-research/listening/issue033/qualification.schema.json",
-        "renderer": "tools/miso-engine-builtins-fixture/src/listening_main.rs",
-        "response_form": "dsp-research/listening/issue033/response-form.jsonl",
-        "response_schema": "dsp-research/listening/issue033/response.schema.json",
-        "reveal_schema": "dsp-research/listening/issue033/reveal.schema.json",
-        "preparation_schema": "dsp-research/listening/issue033/preparation.schema.json",
-        "tool_manifest": "tools/miso-engine-builtins-fixture/Cargo.toml",
-        "validator": "scripts/check-builtins-listening-033.py",
-    }
-    projection = {name: sha256(root / path) for name, path in paths.items()}
-    inbox = root / "target/issue33/inbox"
-    projection.update({
-        "provenance": sha256(inbox / "provenance.json"),
-        "seed": sha256(inbox / "seed.txt"),
-        "source": sha256(inbox / "source.mepcm"),
-    })
-    projection["binary"] = sha256(root / "target/issue33/miso_engine_builtins_fixture_listening") if include_binary else None
-    return projection
-
-
-def validate_issue110(root: Path) -> None:
-    directory = root / "target/issue110"
-    if not directory.is_dir() or directory.is_symlink():
-        raise Invalid("Issue-110 directory")
-    if sorted(path.name for path in directory.iterdir()) != sorted(ISSUE110):
-        raise Invalid("Issue-110 membership")
-    for name, digest in ISSUE110.items():
-        path = directory / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1 or sha256(path) != digest:
-            raise Invalid("Issue-110 identity")
-    if (directory / "builtins-benchmark.raw.jsonl").stat().st_ino == (directory / "builtins-benchmark.jsonl").stat().st_ino:
-        raise Invalid("Issue-110 raw/accepted alias")
-
-
-def validate_seal(kind: str, path: Path, root: Path, commit: str, tree: str) -> None:
-    if kind not in ("preparation", "preflight") or not HEX40.fullmatch(commit) or not HEX40.fullmatch(tree):
-        raise Invalid("seal invocation")
-    validate_issue110(root)
-    value = load_canonical(path)
-    exact_keys(value, {"authorities", "branch", "candidate_commit", "candidate_tree", "counters", "issue", "issue110_artifacts", "kind", "schema_version"}, "seal")
-    expected_kind = f"issue033_listening_{kind}_seal"
-    expected_counters = PRE_SEAL_COUNTERS if kind == "preparation" else PREFLIGHT_COUNTERS
-    if value != {
-        "authorities": authority_projection(root, kind == "preflight"),
-        "branch": "codex/listening-033",
-        "candidate_commit": commit,
-        "candidate_tree": tree,
-        "counters": expected_counters,
-        "issue": 33,
-        "issue110_artifacts": ISSUE110,
-        "kind": expected_kind,
-        "schema_version": 1,
-    }:
-        raise Invalid("seal authority mismatch")
-
-
 def validate_renderer_output(root: Path, exact_public: bool = True) -> dict:
     public = root / "public"
     private = root / "private"
@@ -444,26 +368,6 @@ def validate_packet(root: Path) -> None:
             raw = path.read_bytes()
             if any(word.encode() in raw for word in ("\"seed\"", "source_path")):
                 raise Invalid("public mapping leakage")
-
-
-def write_seal(kind: str, path: Path, root: Path, commit: str, tree: str) -> None:
-    include_binary = kind == "preflight"
-    if kind not in ("preparation", "preflight"):
-        raise Invalid("seal kind")
-    value = {
-        "authorities": authority_projection(root, include_binary),
-        "branch": "codex/listening-033",
-        "candidate_commit": commit,
-        "candidate_tree": tree,
-        "counters": PRE_SEAL_COUNTERS if kind == "preparation" else PREFLIGHT_COUNTERS,
-        "issue": 33,
-        "issue110_artifacts": ISSUE110,
-        "kind": f"issue033_listening_{kind}_seal",
-        "schema_version": 1,
-    }
-    with path.open("xb") as destination:
-        destination.write(canonical(value))
-    validate_seal(kind, path, root, commit, tree)
 
 
 def validate_preparation(value: object) -> None:
@@ -1045,10 +949,6 @@ def main(arguments: list[str]) -> int:
             validate_render_manifest(load_canonical(Path(arguments[1])))
         elif len(arguments) == 5 and arguments[0] == "--assemble":
             assemble_preparation(Path(arguments[1]), arguments[2], arguments[3], Path(arguments[4]))
-        elif len(arguments) == 6 and arguments[0] == "--seal":
-            validate_seal(arguments[1], Path(arguments[2]), Path(arguments[3]), arguments[4], arguments[5])
-        elif len(arguments) == 6 and arguments[0] == "--write-seal":
-            write_seal(arguments[1], Path(arguments[2]), Path(arguments[3]), arguments[4], arguments[5])
         elif len(arguments) == 2 and arguments[0] == "--packet":
             validate_packet(Path(arguments[1]))
         elif len(arguments) == 2 and arguments[0] == "--renderer-output":
@@ -1075,7 +975,7 @@ def main(arguments: list[str]) -> int:
             low, high = wilson(k)
             print(json.dumps({"k":k,"n":20,"p_denominator":denominator,"p_numerator":numerator,"p_two_sided":format(p,".17g"),"wilson_high":format(high,".17g"),"wilson_low":format(low,".17g")}, sort_keys=True, separators=(",",":")))
         else:
-            raise Invalid("usage: check-builtins-listening-033.py --self-test|--provenance FILE|--source MEPCM PROVENANCE|--render-manifest FILE|--assemble MANIFEST COMMIT TREE OUTPUT|--seal KIND FILE ROOT COMMIT TREE|--preparation FILE|--responses FILE|--reveal FILE RESPONSES KEY_FILE|--qualification FILE PREPARATION RESPONSES REVEAL KEY_FILE|--stats K")
+            raise Invalid("usage: check-builtins-listening-033.py --self-test|--provenance FILE|--source MEPCM PROVENANCE|--render-manifest FILE|--assemble MANIFEST COMMIT TREE OUTPUT|--preparation FILE|--responses FILE|--reveal FILE RESPONSES KEY_FILE|--qualification FILE PREPARATION RESPONSES REVEAL KEY_FILE|--stats K")
     except (Invalid, OSError, ValueError) as error:
         print(f"Issue-033 validation failure: {error}", file=sys.stderr)
         return 1

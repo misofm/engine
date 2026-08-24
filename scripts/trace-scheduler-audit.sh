@@ -14,7 +14,7 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/miso_engine_scheduler_audit"
+binary="$workspace_dir/target/release/miso_engine_audit"
 trace_root="${MISO_ENGINE_SCHEDULER_TRACE_ROOT:-$workspace_dir/target/issue039/scheduler-audit-strace}"
 blocks=10000
 workers=3
@@ -31,7 +31,7 @@ command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
 [[ ! -e "$trace_root" ]] || fail "refusing to overwrite preserved trace directory: $trace_root"
 
 cargo build --quiet --offline --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-    -p miso-engine-scheduler-audit
+    -p miso-engine-audit
 mkdir -p "$trace_root"
 
 marker_timestamp() {
@@ -64,10 +64,10 @@ run_mode() {
     local prefix="$root/trace"
     mkdir -p "$root"
     if [[ "$pace" == 1 ]]; then
-        MISO_ENGINE_SCHEDULER_AUDIT_PACED=1 strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" \
+        MISO_ENGINE_SCHEDULER_AUDIT_PACED=1 strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" scheduler \
             >"$root/audit.json"
     else
-        strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" >"$root/audit.json"
+        strace -ff -ttt -qq -s 200 -o "$prefix" "$binary" scheduler >"$root/audit.json"
     fi
 
     mapfile -t trace_files < <(find "$root" -maxdepth 1 -type f -name 'trace.*' | LC_ALL=C sort)

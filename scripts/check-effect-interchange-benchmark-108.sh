@@ -65,7 +65,7 @@ fi
 root="$(cd "${1:-.}" && pwd)"
 cd "$root"
 
-benchmark=tools/miso-engine-effect-interchange-bench/src/main.rs
+benchmark=tools/miso-engine-bench/src/effect_interchange.rs
 [[ -f "$benchmark" && ! -L "$benchmark" ]] || fail "missing benchmark source: $benchmark"
 validate_benchmark_source "$benchmark"
 for path in \

@@ -14,7 +14,7 @@ Command form: `cargo test -p miso-engine-builtins --test <file> <name> -- --exac
 | M3a | every bank lane takes lane 0's coefficients (`zip(sections)` → `sections[0]`) | `builtins/src/lib.rs` (`svf_coef`) | T3 `bank_is_bit_identical_to_scalar_stage_at_every_width` | FAILED, `width=4, members=3, lane=1, frame=0` |
 | M3c | report counters sum every lane, not only the members (`take(self.members)` → `take(L::WIDTH)`) | `builtins/src/lib.rs` (`InputStage::members_sum`) | T3, padding-lane arm | FAILED, `width=4, members=1` |
 | M4 | high-pass mix `m1 = -k` → `-k * 1.001` | `builtins/src/lib.rs` (`SvfSection::design`) | T1, T2 **and** the determinism corpus | all three FAILED |
-| M5 | the fixture oracle drops the identity-section `-0.0` mapping | `tools/miso-engine-builtins-fixture/src/main.rs` | `issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability` | FAILED at the PCM semantics check |
+| M5 | the fixture oracle drops the identity-section `-0.0` mapping | `tools/miso-engine-audit/src/fixture_builtins.rs` | `issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability` | FAILED at the PCM semantics check |
 | M6 | the boundary check zeroes the whole block instead of the masked lanes | `lane/src/kernels/builtins.rs` (`zero_lanes_block`) | T6 `boundary_check_is_lane_local_per_block` | FAILED, `width=4, lane=0, frame=0` |
 | M7 | the matrix ramp segment is one frame short (`.min(frames)` → `.min(frames).saturating_sub(1)`) | `builtins/src/lib.rs` (`MatrixStage::process`) | T7 `partition_invariance_over_master_plan_quanta` | FAILED, `quantum=1, frame=0` |
 | M8 | the ramp recomputes its step per sample (D11 → the pre-#83 law) | `lane/src/kernels/builtins.rs` (`matrix2x2_ramp_block`) | T8 `matrix_ramp_matches_reference_d11_law` | FAILED, `samples=2, frame=0, ll` |
@@ -64,7 +64,7 @@ mutation that binds, and it is red.
 
 `input_chain_block` is a **scheduling** change, so the gate that matters most for it is the one that
 would notice if it were not: the whole pinned corpus. `every_corpus_case_matches_its_pin_at_every_width`,
-`cargo run -p miso-engine-builtins-fixture -- --check fixtures/builtins/v1` and the one-million-block
+`cargo run -p miso-engine-audit -- fixture-builtins --check fixtures/builtins/v1` and the one-million-block
 issue-069 audit (`pcm_digest 8d344c7e864545a1`) all pass **unchanged**, and `git status` over
 `fixtures/`, the audit evidence and `corpus.rs` is empty. Nothing was re-pinned for it.
 

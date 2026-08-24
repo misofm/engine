@@ -124,8 +124,8 @@ cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p target/release
-cp "$MISO_ENGINE_TEST_FAKE_BENCH" target/release/miso_engine_scheduler_bench
-chmod 755 target/release/miso_engine_scheduler_bench
+cp "$MISO_ENGINE_TEST_FAKE_BENCH" target/release/miso_engine_bench
+chmod 755 target/release/miso_engine_bench
 EOF
 cat >"$template/bin/rustc" <<'EOF'
 #!/usr/bin/env bash

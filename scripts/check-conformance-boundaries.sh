@@ -43,7 +43,7 @@ fi
 
 dependency_names() {
     awk '
-        /^\[dependencies\]$/ { dependencies = 1; next }
+        /^\[dependencies\]$/ || /^\[target[.].*[.]dependencies\]$/ { dependencies = 1; next }
         /^\[/ { dependencies = 0 }
         dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
             name = $0
@@ -60,9 +60,9 @@ expected_conformance=$'miso-engine-core\nmiso-engine-dsp-reference\nmiso-engine-
     printf 'conformance boundary failure: conformance dependencies changed\n' >&2
     exit 1
 }
-expected_conformance_bench=$'miso-engine-bench-support\nmiso-engine-conformance'
-[[ "$(dependency_names tools/miso-engine-conformance-bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
-    printf 'conformance boundary failure: benchmark may depend only on conformance and the shared bench harness\n' >&2
+expected_conformance_bench=$'flatbuffers\nmiso-engine-bench-support\nmiso-engine-builtins\nmiso-engine-builtins-compiler\nmiso-engine-conformance\nmiso-engine-core\nmiso-engine-effect-compiler\nmiso-engine-effect-contract\nmiso-engine-effect-package\nmiso-engine-graph\nmiso-engine-graph-compiler\nmiso-engine-lane\nmiso-engine-protocol\nmiso-engine-rack\nmiso-engine-session\nsha2'
+[[ "$(dependency_names tools/miso-engine-bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
+    printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2
     exit 1
 }
 

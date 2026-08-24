@@ -16,58 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PREDECESSOR = ROOT / "scripts/check-builtins-listening-033.py"
-PREDECESSOR_SHA256 = "3f5c348e3a0e1d93560e347968a8647f65d2ed3672a28e1f79f4bcf8e83eb163"
-BRANCH = "codex/listening-111"
-COUNTERS_PRE = {
-    "audio_playback_invocations": 0,
-    "completed_listening_records": 0,
-    "human_listening_sessions": 0,
-    "human_trial_attempts": 0,
-    "preflight_invocations": 0,
-    "preparation_invocations": 0,
-    "reveal_invocations": 0,
-    "valid_human_responses": 0,
-}
-# #104 phase A: this table is only read by `--seal`/`--write-seal`, which are now unreachable --
-# the Issue-033 and Issue-111 preflight/prepare/lifecycle wrappers that produced and consumed the
-# seals were retired (#83 wave-4 decision W4-D2), so ten of the paths below no longer exist.
-# Dropping the seal modes from both listening validators is a bounded follow-up recorded in
-# `.github/ISSUE_SPECS/104-audit-tools-and-script-validators.md`.
-AUTHORITY_PATHS = {
-    "cargo_lock": "Cargo.lock",
-    "facilitator": "dsp-research/listening/issue033/FACILITATOR.md",
-    "filter_preregistration": "dsp-research/listening/issue007-filter-abx-preregistration.md",
-    "fixture_manifest": "fixtures/builtins/v1/MANIFEST.tsv",
-    "fixture_tool_manifest": "tools/miso-engine-builtins-fixture/Cargo.toml",
-    "legacy_checker": "scripts/check-builtins-listening.sh",
-    "listening_template": "dsp-research/listening/TEMPLATE.md",
-    "matrix_preregistration": "dsp-research/listening/issue007-matrix-ramp-preregistration.md",
-    "predecessor_checker": "scripts/check-builtins-listening-033.sh",
-    "predecessor_facilitator_readme": "dsp-research/listening/issue033/README.md",
-    "predecessor_lifecycle": "scripts/test-builtins-listening-033.sh",
-    "predecessor_policy": "scripts/test-builtins-listening-033-policy.sh",
-    "predecessor_preflight": "scripts/preflight-builtins-listening-033.sh",
-    "predecessor_prepare": "scripts/prepare-builtins-listening-033.sh",
-    "predecessor_preparation_schema": "dsp-research/listening/issue033/preparation.schema.json",
-    "predecessor_provenance_template": "dsp-research/listening/issue033/provenance.template.json",
-    "predecessor_qualification_schema": "dsp-research/listening/issue033/qualification.schema.json",
-    "predecessor_response_form": "dsp-research/listening/issue033/response-form.jsonl",
-    "predecessor_response_schema": "dsp-research/listening/issue033/response.schema.json",
-    "predecessor_reveal_schema": "dsp-research/listening/issue033/reveal.schema.json",
-    "predecessor_validator": "scripts/check-builtins-listening-033.py",
-    "probe": "fixtures/conformance/v1/prng-noise-048000-dual-mono.mepcm",
-    "product": "crates/miso-engine-builtins/src/lib.rs",
-    "product_compiler": "crates/miso-engine-builtins-compiler/src/lib.rs",
-    "renderer": "tools/miso-engine-builtins-fixture/src/listening_main.rs",
-    "successor_checker": "scripts/check-builtins-listening-111.sh",
-    "successor_lifecycle": "scripts/test-builtins-listening-111.sh",
-    "successor_policy": "scripts/test-builtins-listening-111-policy.sh",
-    "successor_preflight": "scripts/preflight-builtins-listening-111.sh",
-    "successor_prepare": "scripts/prepare-builtins-listening-111.sh",
-    "successor_validator": "scripts/check-builtins-listening-111.py",
-}
-
-
+PREDECESSOR_SHA256 = "6654089b2a9cd466da531ed929dbe77c0005875d8bbfc8eb9a7d74c80a76fccc"
 class Invalid(ValueError):
     pass
 
@@ -144,63 +93,12 @@ def validate_linked(
     )
 
 
-def authority_projection(root: Path, include_binary: bool) -> dict[str, str | None]:
-    projection = {name: sha256(root / path) for name, path in AUTHORITY_PATHS.items()}
-    inbox = root / "target/issue111/inbox"
-    projection.update(
-        {
-            "provenance": sha256(inbox / "provenance.json"),
-            "seed": sha256(inbox / "seed.txt"),
-            "source": sha256(inbox / "source.mepcm"),
-            "binary": sha256(root / "target/issue111/miso_engine_builtins_fixture_listening")
-            if include_binary
-            else None,
-        }
-    )
-    return projection
-
-
-def seal_value(kind: str, root: Path, commit: str, tree: str) -> dict:
-    if kind not in ("preparation", "preflight") or not re_hex(commit, 40) or not re_hex(tree, 40):
-        raise Invalid("seal invocation")
-    old = predecessor()
-    old.validate_issue110(root)
-    counters = dict(COUNTERS_PRE)
-    if kind == "preflight":
-        counters["preflight_invocations"] = 1
-    return {
-        "authorities": authority_projection(root, kind == "preflight"),
-        "branch": BRANCH,
-        "candidate_commit": commit,
-        "candidate_tree": tree,
-        "counters": counters,
-        "issue": 111,
-        "issue110_artifacts": old.ISSUE110,
-        "kind": f"issue111_listening_{kind}_seal",
-        "schema_version": 1,
-    }
-
-
 def re_hex(value: object, length: int) -> bool:
     return (
         type(value) is str
         and len(value) == length
         and all(character in "0123456789abcdef" for character in value)
     )
-
-
-def write_seal(kind: str, path: Path, root: Path, commit: str, tree: str) -> None:
-    with path.open("xb") as destination:
-        destination.write(canonical(seal_value(kind, root, commit, tree)))
-    validate_seal(kind, path, root, commit, tree)
-
-
-def validate_seal(kind: str, path: Path, root: Path, commit: str, tree: str) -> None:
-    require_regular(path)
-    old = predecessor()
-    value = old.load_canonical(path)
-    if value != seal_value(kind, root, commit, tree):
-        raise Invalid("successor seal authority mismatch")
 
 
 def write_mode(path: Path, content: bytes, mode: int) -> None:
@@ -540,12 +438,8 @@ def main(arguments: list[str]) -> int:
             validate_packet(Path(arguments[1]))
         elif len(arguments) == 5 and arguments[0] == "--linked":
             validate_linked(*(Path(argument) for argument in arguments[1:]))
-        elif len(arguments) == 6 and arguments[0] == "--seal":
-            validate_seal(arguments[1], Path(arguments[2]), Path(arguments[3]), arguments[4], arguments[5])
-        elif len(arguments) == 6 and arguments[0] == "--write-seal":
-            write_seal(arguments[1], Path(arguments[2]), Path(arguments[3]), arguments[4], arguments[5])
         else:
-            raise Invalid("usage: check-builtins-listening-111.py --self-test|--packet PACKET|--linked PACKET RESPONSES REVEAL QUALIFICATION|--seal KIND FILE ROOT COMMIT TREE|--write-seal KIND FILE ROOT COMMIT TREE")
+            raise Invalid("usage: check-builtins-listening-111.py --self-test|--packet PACKET|--linked PACKET RESPONSES REVEAL QUALIFICATION")
     except (Invalid, OSError, ValueError) as error:
         print(f"Issue-111 validation failure: {error}", file=sys.stderr)
         return 1

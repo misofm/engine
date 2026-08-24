@@ -67,7 +67,7 @@ artifact. `x86_64-unknown-linux-gnu` carries the evidence that needs Linux facil
 | evidence | how it is produced | targets |
 |---|---|---|
 | coordinator/worker syscall counts (steady and paced) | `scripts/trace-scheduler-audit.sh` (strace, `/proc`) | `x86_64-unknown-linux-gnu` only |
-| worker idle CPU between blocks | `/proc/<tid>/stat` in `miso_engine_scheduler_audit` | `x86_64-unknown-linux-gnu` only |
+| worker idle CPU between blocks | `/proc/<tid>/stat` in `miso_engine_audit` | `x86_64-unknown-linux-gnu` only |
 | determinism, pool lifetime, wake protocol, bounded recovery, weighted split | `cargo test -p miso-engine-native-scheduler -p miso-engine-graph` | every native target |
 | compilation of the parallel path | `cargo check --target x86_64-apple-darwin -p miso-engine-graph`, and `aarch64-unknown-linux-gnu` where its std is installed | macOS/aarch64 |
 

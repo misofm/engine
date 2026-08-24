@@ -42,12 +42,12 @@ for path in \
     scripts/preflight-effect-interchange-benchmark.sh \
     scripts/run-effect-interchange-benchmark.sh \
     scripts/test-effect-interchange-benchmark.sh \
-    tools/miso-engine-effect-interchange-bench/Cargo.toml \
-    tools/miso-engine-effect-interchange-bench/src/main.rs \
+    tools/miso-engine-bench/Cargo.toml \
+    tools/miso-engine-bench/src/effect_interchange.rs \
     docs/EFFECT_INTERCHANGE_QUALIFICATION_V1.md; do
     [[ -f "$path" ]] || fail "missing qualification path $path"
 done
-benchmark=tools/miso-engine-effect-interchange-bench/src/main.rs
+benchmark=tools/miso-engine-bench/src/effect_interchange.rs
 rg -q 'const OBSERVATIONS: usize = 256;' "$benchmark" ||
     fail 'benchmark observation count changed'
 for workload in descriptor_verify_identity_a package_verify_cid_select_a state_verify_reencode_current migration_two_step_bank_restore; do
@@ -88,7 +88,7 @@ PY
 fi
 rg -q 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py ||
     fail 'validator observation contract changed'
-if rg -n 'serde|criterion|iai|rand' tools/miso-engine-effect-interchange-bench/Cargo.toml; then
+if rg -n 'serde|criterion|iai|rand' tools/miso-engine-bench/Cargo.toml; then
     fail 'benchmark gained a new dependency family'
 fi
 
@@ -126,7 +126,7 @@ rg -Fq '/^Export\[/' scripts/check-effect-interchange-targets.sh ||
 rg -Fq -- '-> "' scripts/check-effect-interchange-targets.sh ||
     fail 'Wasm export parser does not select explicit export arrows'
 
-if rg -n 'miso-engine-effect-interchange|effect_interchange_qualification' \
+if rg -n 'miso-engine-effect-interchange|^miso-engine-bench([.]workspace)?[[:space:]]*=|effect_interchange_qualification' \
     crates/*/Cargo.toml hosts/*/Cargo.toml 2>/dev/null; then
     fail 'qualification dependency reached a production package'
 fi
