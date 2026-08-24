@@ -561,7 +561,9 @@ impl AudioWorkletEngineHost {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
-        let quantum = usize::try_from(self.config.quantum_frames).expect("validated u32 quantum");
+        // Lossless on every supported target (wasm32 and every 64-bit host); `try_from` would
+        // leave an `expect_failed` trap owner in the render export's call graph.
+        let quantum = self.config.quantum_frames as usize;
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
@@ -608,6 +610,9 @@ impl AudioWorkletEngineHost {
     }
 
     /// Release all prepared ownership. Repeated disposal is harmless.
+    ///
+    /// This runs in the worklet's `port.onmessage` handler, never inside `process()`; it is the
+    /// single point where the plan, the compiled session and the source rings are freed.
     pub fn dispose(&mut self) -> u32 {
         self.ready = None;
         self.buffers = None;
@@ -621,10 +626,26 @@ impl AudioWorkletEngineHost {
         code
     }
 
+    /// Record a sticky failure without ever releasing ownership.
+    ///
+    /// `self.ready` **is** this host's one-slot retirement queue (AGENTS.md: "the displaced plan
+    /// goes to a bounded retirement queue and is reclaimed off the render thread"). `fail` is
+    /// reachable from `render_next`, which the AudioWorklet calls on the rendering thread, so it
+    /// must not move, overwrite or drop the plan, the compiled session or the source rings:
+    /// dropping them would free `Arc<spsc::Ring<_>>` payloads and run `dlmalloc::free` inside
+    /// `process()`. The ownership stays exactly where it is and only [`Self::dispose`] — a control
+    /// path call, delivered on `port.onmessage` — reclaims it.
+    ///
+    /// A separate `retired` field would not help: `self.retired = self.ready.take()` compiles to a
+    /// conditional `drop_glue::<Option<ReadyOwnership>>` call on the overwritten value, which the
+    /// call-graph gate sees even though it never executes.
+    ///
+    /// The output block is filled with positive zero so a failed render emits silence rather than
+    /// the previous quantum.
     fn fail(&mut self, code: u32, diagnostic: &[u8]) -> u32 {
-        self.ready = None;
         self.status.state = STATE_FAILED;
         if let Some(buffers) = self.buffers.as_mut() {
+            buffers.output_pcm.fill(0.0);
             self.diagnostic_len = diagnostic.len().min(buffers.diagnostic.len());
             buffers.diagnostic[..self.diagnostic_len]
                 .copy_from_slice(&diagnostic[..self.diagnostic_len]);
