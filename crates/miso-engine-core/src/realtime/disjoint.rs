@@ -135,6 +135,9 @@ impl DisjointArena {
     }
 }
 
+/// Both planes of one written buffer plus both planes of one read buffer.
+pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a [f32]));
+
 /// One parcel's checked view of the shared arena.
 ///
 /// The lease is the only way to reach arena storage. It is `Send` (it travels with its parcel to
@@ -361,11 +364,7 @@ impl ArenaLeaseV1 {
 
     /// Both planes of one written buffer plus both planes of one read buffer.
     #[inline]
-    pub fn write_read_stereo(
-        &mut self,
-        out: u32,
-        input: u32,
-    ) -> ((&mut [f32], &mut [f32]), (&[f32], &[f32])) {
+    pub fn write_read_stereo(&mut self, out: u32, input: u32) -> ArenaStereoPair<'_> {
         let out_index = self.checked_write(out);
         let in_index = self.effective(input);
         debug_assert_ne!(out_index, in_index, "a read may not alias its own output");

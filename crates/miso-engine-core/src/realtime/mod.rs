@@ -16,7 +16,8 @@ pub use buffer::{
     BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferRef, PlanarBufferSpec,
 };
 pub use disjoint::{
-    ARENA_SILENCE_BUFFER, ArenaLeaseSetBuilder, ArenaLeaseV1, DisjointArena, DisjointArenaError,
+    ARENA_SILENCE_BUFFER, ArenaLeaseSetBuilder, ArenaLeaseV1, ArenaStereoPair, DisjointArena,
+    DisjointArenaError,
 };
 pub use parameter::{
     ParameterEvent, ParameterEventBuffer, ParameterEventError, ParameterSlot, ParameterValues,
