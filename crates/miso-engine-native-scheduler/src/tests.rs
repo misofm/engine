@@ -596,7 +596,7 @@ fn command_queue_full_preserves_unmoved_parcels() {
         Err(SchedulerDispatchErrorV1::CommandQueueFull { worker_id }) => {
             assert_eq!(worker_id, 1);
         }
-        _ => panic!("command publication fault was not reported"),
+        other => panic!("command publication fault was not reported: {other:?}"),
     }
     assert!(rendered.all_recovered());
     drop(rendered);
