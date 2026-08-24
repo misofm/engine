@@ -406,8 +406,8 @@ fn source_channel_cap_is_optional() {
 /// absence of `Sync` is asserted by the `compile_fail` doctest below, because a negative bound
 /// cannot be written as a runtime assertion.
 ///
-/// Red mutation: add `unsafe impl Sync for PreparedHost {}` -> `PreparedHost`'s `compile_fail`
-/// doctest in `src/prepare.rs` starts compiling, and the doctest fails.
+/// Red mutation: hand-write a `Sync` implementation for `PreparedHost` -> `PreparedHost`'s
+/// `compile_fail` doctest in `src/prepare.rs` starts compiling, and the doctest fails.
 #[test]
 fn contract_types_are_send_and_not_sync() {
     fn assert_send<T: Send>() {}
