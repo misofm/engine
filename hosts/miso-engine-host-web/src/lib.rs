@@ -15,11 +15,15 @@
 //! rejected source generation `0`.
 
 use core::mem::{MaybeUninit, size_of};
+use core::num::{NonZeroU32, NonZeroUsize};
 
+use miso_engine_builtins::{Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
+use miso_engine_builtins_compiler::{MeterConsumer, TrackControlProducer, TrackControlRecordV1};
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_host_core::{
-    CompiledSession, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
-    SourceSubmission, control_table_bytes, prepare_host_session, source_id_arena_bytes,
+    CompiledSession, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
+    source_id_arena_bytes,
 };
 
 /// Frozen browser host ABI version 1.0.
@@ -78,6 +82,58 @@ pub const BUFFER_SOURCE_PCM: u32 = 3;
 pub const BUFFER_DIAGNOSTIC: u32 = 4;
 /// Contiguous dual-mono output buffer.
 pub const BUFFER_OUTPUT_PCM: u32 = 5;
+/// Fixed live-console command staging buffer (issue #137 D1).
+pub const BUFFER_COMMAND: u32 = 6;
+/// Fixed decimated meter-frame buffer (issue #137 D2).
+pub const BUFFER_METER_FRAME: u32 = 7;
+
+/// Exact byte size of one staged `miso.command.v1` record.
+pub const COMMAND_RECORD_BYTES: u32 = 48;
+/// Largest number of records one `miso.command.v1` submission may stage.
+///
+/// The staging buffer is allocated at preparation for exactly this many records, so a submission
+/// can never grow the module's memory and the render path never sees an allocation.
+pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
+/// Per-track control-queue depth used when the configuration asks for the default.
+pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
+
+/// Retarget the track's pan pair (`left`, `right`) over an explicit ramp window.
+pub const COMMAND_PAN: u32 = 1;
+/// Retarget the track's full 2x2 matrix over an explicit ramp window.
+pub const COMMAND_MATRIX: u32 = 2;
+/// Set a lane fader in decibels. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+pub const COMMAND_FADER_DB: u32 = 3;
+/// Set a lane mute. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+pub const COMMAND_MUTE: u32 = 4;
+/// Set an effect parameter. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+pub const COMMAND_EFFECT_PARAM: u32 = 5;
+/// Set an effect bypass. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+pub const COMMAND_EFFECT_BYPASS: u32 = 6;
+
+/// The submission was admitted whole.
+pub const COMMAND_REASON_NONE: u32 = 0;
+/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value.
+pub const COMMAND_REASON_MALFORMED: u32 = 1;
+/// `track_index` is not a track of the compiled session.
+pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
+/// `rack` is not one of the three declared racks.
+pub const COMMAND_REASON_UNKNOWN_RACK: u32 = 3;
+/// `effect_index` is not an effect of the addressed rack.
+pub const COMMAND_REASON_UNKNOWN_EFFECT: u32 = 4;
+/// `parameter_id` is not a parameter of the addressed effect.
+pub const COMMAND_REASON_UNKNOWN_PARAMETER: u32 = 5;
+/// A value is outside the addressed parameter's declared domain.
+pub const COMMAND_REASON_DOMAIN: u32 = 6;
+/// The record is well formed and correctly addressed, but this ABI version cannot apply its kind.
+///
+/// This is not "malformed" and it is not "unknown target": the parameter exists and the value is
+/// legal, and the engine has no post-preparation write path for it. The parameter-metadata JSON
+/// (deliverable 4) marks every such parameter, so a caller never has to discover this at runtime.
+pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
+/// A bounded control queue had no room for the submission; nothing was admitted.
+pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
+/// The host is not `STATE_READY`.
+pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
 
 /// The longest main-thread stall the default source ring hides without an underrun.
 ///
@@ -106,6 +162,40 @@ pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32
     let quanta = stall_frames.div_ceil(quantum_frames as u64) + 2;
     (quanta * quantum_frames as u64) as u32
 }
+
+/// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
+pub const DEFAULT_METER_BLOCKS: u32 = 12;
+
+/// Exact versioned live-console command report shared with JavaScript (issue #137 D1).
+///
+/// One submission is one transaction: either every staged record was admitted, or none was and
+/// `rejected_index`/`reason` name the first record that broke a rule. `applied_at_sample` is the
+/// absolute sample the admitted records take effect at -- the first sample of the next rendered
+/// block, because the matrix stage drains its queue at the top of the block before it touches a
+/// single sample of audio.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebCommandReportV1 {
+    /// Exact structure byte size.
+    pub struct_size: u32,
+    /// ABI version.
+    pub abi_version: u32,
+    /// One of the frozen `RESULT_*` values.
+    pub result: u32,
+    /// One of the frozen `COMMAND_REASON_*` values.
+    pub reason: u32,
+    /// Zero-based index of the first refused record, or `0` when the submission was admitted.
+    pub rejected_index: u32,
+    /// Number of records admitted by this submission: the whole batch, or zero.
+    pub admitted: u32,
+    /// Absolute sample at which the admitted records take effect.
+    pub applied_at_sample: u64,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 2],
+}
+
+/// Byte size of [`WebCommandReportV1`].
+pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
 
 /// Byte size of [`WebPrepareConfigV1`].
 pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfigV1>() as u32;
@@ -168,8 +258,24 @@ pub struct WebPrepareConfigV1 {
     pub maximum_meter_items: u64,
     /// Maximum meter bytes.
     pub maximum_meter_bytes: u64,
+    /// Per-track live-console control-queue depth in records, or `0` to attach no control channel
+    /// and no command staging at all (issue #137 D1).
+    ///
+    /// Carved out of the frozen configuration's first reserved word, which every V1 writer already
+    /// sets to zero. Zero is the honest form of "no live console": no queue is allocated, no
+    /// staging buffer is allocated, the matrix processors keep the exact storage they had before
+    /// this ABI existed, and a submission is refused with [`RESULT_UNSUPPORTED`]. The 192-byte
+    /// layout is unchanged either way.
+    pub console_command_queue_records: u64,
+    /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
+    ///
+    /// Zero is the honest form of "metering off costs nothing": no observer is bound, so the
+    /// render path does not fold a single sample. A nonzero value binds one post-matrix meter per
+    /// track with a `blocks * quantum_frames` window; the port lease then gates whether a finished
+    /// window is posted. `12` is ~31 frames per second at 48 kHz with a 128-frame quantum.
+    pub console_meter_blocks: u64,
     /// Required-zero expansion words.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 2],
 }
 
 impl WebPrepareConfigV1 {
@@ -202,7 +308,19 @@ impl WebPrepareConfigV1 {
             maximum_meter_streams: 1_024,
             maximum_meter_items: 1 << 20,
             maximum_meter_bytes: 16 << 20,
-            reserved: [0; 4],
+            console_command_queue_records: 0,
+            console_meter_blocks: 0,
+            reserved: [0; 2],
+        }
+    }
+
+    /// The launch defaults with the live web console attached (issue #137 D1/D2).
+    #[must_use]
+    pub const fn console_defaults(sample_rate_hz: u32, quantum_frames: u32) -> Self {
+        Self {
+            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+            ..Self::launch_defaults(sample_rate_hz, quantum_frames)
         }
     }
 }
@@ -301,6 +419,8 @@ struct PreparedBuffers {
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
     output_pcm: Box<[f32]>,
+    /// Fixed `MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES` live-console staging (issue #137 D1).
+    command: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
 }
 
@@ -316,7 +436,35 @@ type FfiSourceStaging<'a> = (
 /// the source consumers) before its control-side producers, and the compiled session model outlives
 /// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
+    /// Issue #137 D1: control-side producers, declared first so they are released before the plan
+    /// that owns their consumer endpoints.
+    controls: Vec<TrackControlProducer>,
+    /// Per-track room needed by the submission being validated. Allocated at compilation.
+    command_wanted: Box<[u32]>,
+    /// Decoded submission staging, `MAXIMUM_COMMAND_RECORDS` long. Allocated at compilation.
+    command_decoded: Box<[(u32, TrackControlRecordV1)]>,
+    /// Per-track records admitted since the last successful render.
+    ///
+    /// The browser's control plane and render plane are the same thread and the matrix stage
+    /// drains its whole queue at the top of every block, so a successful render empties every
+    /// control queue. That is what makes this an exact free-slot count rather than an estimate,
+    /// and it is what lets a submission be refused *before* anything is pushed.
+    in_flight: Box<[u32]>,
+    /// Canonical normalized track order: the addressing authority for `track_index`.
+    tracks: Vec<Box<str>>,
+    /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
+    /// command is answered with `UNKNOWN_RACK` / `UNKNOWN_EFFECT` before anything else.
+    rack_effects: Box<[[u32; 3]]>,
     host: PreparedHost,
+    /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
+    /// when `console_meter_blocks` was zero, in which case no observer exists at all.
+    meters: Vec<MeterConsumer>,
+    /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
+    meter_frame: Box<[f32]>,
+    /// Master peaks folded over the rendered block while the lease is on.
+    master_peak: [f32; 2],
+    /// Windows folded into `meter_frame` since the host was compiled.
+    meter_windows: u64,
     /// Retained so the browser bridge keeps charging itself for the compiled model it holds; the
     /// V1 browser ABI has no session query, so nothing reads it.
     _session: CompiledSession,
@@ -327,6 +475,9 @@ pub struct AudioWorkletEngineHost {
     config: WebPrepareConfigV1,
     status: WebStatusV1,
     resources: WebResourceReportV1,
+    command_report: WebCommandReportV1,
+    /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
+    meter_lease: bool,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
     diagnostic_len: usize,
@@ -353,6 +504,8 @@ impl AudioWorkletEngineHost {
                 reserved: [0; 4],
             },
             resources: empty_resource_report(backend),
+            command_report: empty_command_report(),
+            meter_lease: false,
             buffers: None,
             ready: None,
             diagnostic_len: 0,
@@ -380,6 +533,58 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn resources(&self) -> &WebResourceReportV1 {
         &self.resources
+    }
+
+    /// Read the last live-console submission report (issue #137 D1).
+    #[must_use]
+    pub const fn command_report(&self) -> &WebCommandReportV1 {
+        &self.command_report
+    }
+
+    /// Canonical normalized track order, the addressing authority for `track_index`.
+    #[must_use]
+    pub fn console_tracks(&self) -> &[Box<str>] {
+        self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
+    }
+
+    /// The decimated meter frame: two peaks per track, then master left and right (issue #137 D2).
+    #[must_use]
+    pub fn meter_frame(&self) -> &[f32] {
+        self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
+    }
+
+    /// Number of complete meter windows folded since compilation.
+    #[must_use]
+    pub fn meter_windows(&self) -> u64 {
+        self.ready.as_ref().map_or(0, |ready| ready.meter_windows)
+    }
+
+    /// Whether meter observers were attached at preparation (issue #137 D2).
+    #[must_use]
+    pub fn meters_attached(&self) -> bool {
+        self.ready
+            .as_ref()
+            .is_some_and(|ready| !ready.meters.is_empty())
+    }
+
+    /// Take or release the meter lease. Returns the frozen result code.
+    ///
+    /// A lease over a host that attached no observers is refused with [`RESULT_UNSUPPORTED`]: the
+    /// caller asked for numbers this preparation cannot produce, and silently reporting zeros
+    /// would be worse than saying so.
+    pub fn set_meter_lease(&mut self, enabled: bool) -> u32 {
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        if enabled && !self.meters_attached() {
+            return self.record(RESULT_UNSUPPORTED);
+        }
+        self.meter_lease = enabled;
+        if let Some(ready) = self.ready.as_mut() {
+            ready.master_peak = [0.0, 0.0];
+            ready.meter_frame.fill(0.0);
+        }
+        self.record(RESULT_OK)
     }
 
     /// Allocate and publish every fixed staging buffer transactionally.
@@ -427,6 +632,55 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn output_pcm(&self) -> Option<&[f32]> {
         self.buffers.as_ref().map(|value| &*value.output_pcm)
+    }
+
+    /// Mutable live-console command staging, or `None` when no console was attached.
+    ///
+    /// This is the buffer the JavaScript side writes records into through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`; it is public so an embedding that
+    /// drives the safe host directly -- the native parity twin, the metadata round-trip gate --
+    /// stages exactly the bytes the browser stages.
+    pub fn command_staging_mut(&mut self) -> Option<&mut [u8]> {
+        self.buffers
+            .as_mut()
+            .map(|value| &mut *value.command)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Exact byte size of the live-console command staging buffer; zero when none was attached.
+    #[must_use]
+    pub fn command_staging_bytes(&self) -> u64 {
+        self.buffers
+            .as_ref()
+            .map_or(0, |value| value.command.len() as u64)
+    }
+
+    /// Whether preparation attached a live-console control channel (issue #137 D1).
+    #[must_use]
+    pub fn console_attached(&self) -> bool {
+        self.ready
+            .as_ref()
+            .is_some_and(|ready| !ready.controls.is_empty())
+    }
+
+    /// Copy one canonical console track ID into source-ID staging; returns its byte length.
+    pub(crate) fn copy_console_track_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let Some(id) = ready.tracks.get(index as usize) else {
+            return 0;
+        };
+        let bytes = id.as_bytes();
+        let length = bytes.len();
+        let Some(buffers) = self.buffers.as_mut() else {
+            return 0;
+        };
+        let Some(target) = buffers.source_id.get_mut(..length) else {
+            return 0;
+        };
+        target.copy_from_slice(bytes);
+        u32::try_from(length).unwrap_or(0)
     }
 
     pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
@@ -563,10 +817,155 @@ impl AudioWorkletEngineHost {
             Ok(report) => {
                 self.status.next_absolute_sample = report.next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
+                // Issue #137 D1: the matrix stage drained every control queue at the top of this
+                // block, so the exact free-slot count is the whole capacity again.
+                ready.in_flight.fill(0);
+                // Issue #137 D2: the master bus is the host's own output plane, so there is
+                // nothing to observe and nothing to expose -- one branch and one pass over a
+                // buffer already in cache, and only while the lease is held.
+                if self.meter_lease {
+                    // Indexed with `get`, never with a range: a slice index would put
+                    // `slice_index_fail` in the render export's call graph, and the shipped
+                    // artifact's gate would -- correctly -- refuse the build.
+                    let mut peaks = ready.master_peak;
+                    for (plane, peak) in peaks.iter_mut().enumerate() {
+                        let start = plane * quantum;
+                        let Some(samples) = buffers
+                            .output_pcm
+                            .get(start..)
+                            .and_then(|tail| tail.get(..quantum))
+                        else {
+                            break;
+                        };
+                        for sample in samples {
+                            let magnitude = sample.abs();
+                            if magnitude > *peak {
+                                *peak = magnitude;
+                            }
+                        }
+                    }
+                    ready.master_peak = peaks;
+                }
                 self.record(RESULT_OK)
             }
             Err(_) => self.fail(RESULT_RENDER_REJECTED, b"web.render.rejected\t$\n"),
         }
+    }
+
+    /// Admit one staged `miso.command.v1` submission as a single transaction (issue #137 D1).
+    ///
+    /// # The two-pass shape is the contract, not an optimisation
+    ///
+    /// Pass one validates every record -- shape, addressing, domain, and free queue room -- and
+    /// pushes nothing. Pass two pushes. A submission is therefore all-or-nothing: eval E4's
+    /// "engine state untouched" is a property of the code, not of a lucky ordering, and eval E3's
+    /// flood is refused before a single record reaches a queue.
+    ///
+    /// # Why this is not on the render thread's critical path
+    ///
+    /// This runs from `port.onmessage`, which the user agent dispatches between render quanta on
+    /// the same thread as `process()`. It performs no allocation, no compilation and no plan
+    /// replacement: both staging arrays were allocated at compilation, and the call moves at most
+    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues. The block that
+    /// follows drains them.
+    pub fn submit_commands(&mut self, count: u32) -> u32 {
+        self.command_report = empty_command_report();
+        if self.status.state != STATE_READY {
+            return self.finish_commands(RESULT_WRONG_STATE, COMMAND_REASON_WRONG_STATE, 0, 0);
+        }
+        if count > MAXIMUM_COMMAND_RECORDS {
+            return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
+        }
+        if !self.console_attached() {
+            return self.finish_commands(RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND, 0, 0);
+        }
+        let applied_at_sample = self.status.next_absolute_sample;
+        let staged = count as usize * COMMAND_RECORD_BYTES as usize;
+        if self.buffers.is_none() {
+            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
+        }
+        if self.ready.is_none() {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        }
+        // Disjoint borrows: the staged bytes live in `buffers`, the console lives in `ready`.
+        let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.console\t$\n");
+        };
+        let Some(bytes) = buffers.command.get(..staged) else {
+            return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
+        };
+        match admit_commands(ready, bytes, count as usize) {
+            Ok(()) => {
+                self.command_report.applied_at_sample = applied_at_sample;
+                self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
+            }
+            Err(CommandRejection {
+                result,
+                reason,
+                index,
+            }) => self.finish_commands(result, reason, index, 0),
+        }
+    }
+
+    /// Drain every finished meter window into the frame buffer (issue #137 D2).
+    ///
+    /// Returns the number of complete windows folded by this call. Zero work happens without the
+    /// lease, and a host prepared with `console_meter_blocks == 0` has no observer to drain.
+    ///
+    /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
+    /// buffer allocated at compilation.
+    pub fn poll_meters(&mut self) -> u32 {
+        if !self.meter_lease || self.status.state != STATE_READY {
+            return 0;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return 0;
+        };
+        // Every index below is a `get_mut`, never a `[]`: a bounds check would put
+        // `panic_bounds_check` in this export's call graph, and this export is called from
+        // `process()`, so the shipped artifact's gate covers it exactly as it covers the render
+        // export.
+        let mut windows = 0_u32;
+        for (index, meter) in ready.meters.iter_mut().enumerate() {
+            let mut popped = 0_u32;
+            while let Ok(snapshot) = meter.consumer.try_pop() {
+                let MeterSnapshot { left, right, .. } = snapshot;
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
+                    *slot = left.sample_peak;
+                }
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
+                    *slot = right.sample_peak;
+                }
+                popped = popped.saturating_add(1);
+            }
+            // Every track's meter shares one window length and one start sample, so they finish
+            // together; the minimum is the number of windows the whole frame actually covers.
+            windows = if index == 0 {
+                popped
+            } else {
+                windows.min(popped)
+            };
+        }
+        let master = ready.meter_frame.len().saturating_sub(2);
+        for (plane, peak) in ready.master_peak.iter().enumerate() {
+            if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
+                *slot = *peak;
+            }
+        }
+        ready.master_peak = [0.0, 0.0];
+        ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
+        windows
+    }
+
+    fn finish_commands(&mut self, result: u32, reason: u32, index: u32, admitted: u32) -> u32 {
+        self.command_report.result = result;
+        self.command_report.reason = reason;
+        self.command_report.rejected_index = index;
+        self.command_report.admitted = admitted;
+        if admitted == 0 {
+            self.command_report.applied_at_sample = self.status.next_absolute_sample;
+        }
+        self.record(result)
     }
 
     pub(crate) fn record_boundary_result(&mut self, code: u32) -> u32 {
@@ -590,6 +989,7 @@ impl AudioWorkletEngineHost {
     /// This runs in the worklet's `port.onmessage` handler, never inside `process()`; it is the
     /// single point where the plan, the compiled session and the source rings are freed.
     pub fn dispose(&mut self) -> u32 {
+        self.meter_lease = false;
         self.ready = None;
         self.buffers = None;
         self.diagnostic_len = 0;
@@ -627,6 +1027,275 @@ impl AudioWorkletEngineHost {
                 .copy_from_slice(&diagnostic[..self.diagnostic_len]);
         }
         self.record(code)
+    }
+}
+
+/// One refused submission: the frozen result, the typed reason, and the offending record.
+struct CommandRejection {
+    result: u32,
+    reason: u32,
+    index: u32,
+}
+
+/// One decoded, still-unapplied `miso.command.v1` record (issue #137 D1).
+///
+/// # The frozen 48-byte little-endian layout
+///
+/// | offset | width | field |
+/// |---|---|---|
+/// | 0 | u8 | `kind`, one of the `COMMAND_*` values |
+/// | 1 | u8 | `rack`: `0` simd1, `1` dynamic, `2` simd2, `255` not applicable |
+/// | 2 | u8 | `channel`: `0` left, `1` right, `2` both, `255` not applicable |
+/// | 3 | u8 | required zero |
+/// | 4 | u32 | `track_index` into the canonical normalized track order |
+/// | 8 | u32 | `effect_index` within the addressed rack |
+/// | 12 | u32 | `parameter_id` from the effect contract |
+/// | 16 | u32 | `smoothing_samples`, the ramp window for a retarget |
+/// | 20 | u32 | required zero |
+/// | 24..40 | 4 x f32 | `value0..value3` |
+/// | 40 | u64 | required zero |
+///
+/// There is no string on this path. The identity mapping a caller needs -- track index to track
+/// ID, effect index to effect ID, parameter ID to name and domain -- is deliverable 4's build-time
+/// metadata plus the session map the ready message carries, never a per-command lookup.
+#[derive(Clone, Copy)]
+struct CommandRecord {
+    kind: u32,
+    rack: u8,
+    channel: u8,
+    track_index: u32,
+    effect_index: u32,
+    parameter_id: u32,
+    smoothing_samples: u32,
+    values: [f32; 4],
+}
+
+impl CommandRecord {
+    fn decode(bytes: &[u8]) -> Result<Self, u32> {
+        if bytes.len() != COMMAND_RECORD_BYTES as usize {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        let word = |offset: usize| {
+            u32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        };
+        if bytes[3] != 0 || word(20) != 0 || bytes[40..48].iter().any(|value| *value != 0) {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        let kind = u32::from(bytes[0]);
+        if !matches!(
+            kind,
+            COMMAND_PAN
+                | COMMAND_MATRIX
+                | COMMAND_FADER_DB
+                | COMMAND_MUTE
+                | COMMAND_EFFECT_PARAM
+                | COMMAND_EFFECT_BYPASS
+        ) {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        let mut values = [0.0_f32; 4];
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = f32::from_le_bytes([
+                bytes[24 + index * 4],
+                bytes[25 + index * 4],
+                bytes[26 + index * 4],
+                bytes[27 + index * 4],
+            ]);
+            if !value.is_finite() {
+                return Err(COMMAND_REASON_MALFORMED);
+            }
+        }
+        Ok(Self {
+            kind,
+            rack: bytes[1],
+            channel: bytes[2],
+            track_index: word(4),
+            effect_index: word(8),
+            parameter_id: word(12),
+            smoothing_samples: word(16),
+            values,
+        })
+    }
+
+    /// Lower one addressed record onto the single live builtin surface, or say why it cannot be.
+    ///
+    /// `matrix_ll/lr/rl/rr` are the only builtin parameters whose declared update rate is
+    /// `BuiltinParameterUpdateRate::BlockTarget`; `fader_db`, `mute` and every effect parameter
+    /// declare `PreparedOnly` or have no post-preparation write path at all, so they are refused
+    /// with [`COMMAND_REASON_UNSUPPORTED_KIND`] *after* their addressing and domain have been
+    /// checked. A caller can therefore tell "you addressed nothing" from "you addressed something
+    /// this engine cannot move yet", and deliverable 4's metadata tells it which is which before
+    /// it ever sends one.
+    fn into_matrix(self, rack_effects: [u32; 3]) -> Result<TrackControlRecordV1, u32> {
+        match self.kind {
+            COMMAND_PAN => {
+                if self.rack != 255
+                    || self.channel != 255
+                    || self.values[2] != 0.0
+                    || self.values[3] != 0.0
+                {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                let matrix = pan_matrix(self.values[0], self.values[1])
+                    .map_err(|_| COMMAND_REASON_DOMAIN)?;
+                Ok(TrackControlRecordV1 {
+                    matrix,
+                    smoothing_samples: self.smoothing_samples,
+                })
+            }
+            COMMAND_MATRIX => {
+                if self.rack != 255 || self.channel != 255 {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                let matrix = Matrix2x2 {
+                    ll: self.values[0],
+                    lr: self.values[1],
+                    rl: self.values[2],
+                    rr: self.values[3],
+                }
+                .checked()
+                .map_err(|_| COMMAND_REASON_DOMAIN)?;
+                Ok(TrackControlRecordV1 {
+                    matrix,
+                    smoothing_samples: self.smoothing_samples,
+                })
+            }
+            COMMAND_FADER_DB => {
+                if self.rack != 255 || self.channel > 2 {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                if !(-144.0..=24.0).contains(&self.values[0]) {
+                    return Err(COMMAND_REASON_DOMAIN);
+                }
+                Err(COMMAND_REASON_UNSUPPORTED_KIND)
+            }
+            COMMAND_MUTE => {
+                if self.rack != 255 || self.channel > 2 {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                if self.values[0] != 0.0 && self.values[0] != 1.0 {
+                    return Err(COMMAND_REASON_DOMAIN);
+                }
+                Err(COMMAND_REASON_UNSUPPORTED_KIND)
+            }
+            COMMAND_EFFECT_PARAM | COMMAND_EFFECT_BYPASS => {
+                if self.rack > 2 {
+                    return Err(COMMAND_REASON_UNKNOWN_RACK);
+                }
+                if self.effect_index >= rack_effects[self.rack as usize] {
+                    return Err(COMMAND_REASON_UNKNOWN_EFFECT);
+                }
+                if self.kind == COMMAND_EFFECT_PARAM {
+                    if self.channel > 2 {
+                        return Err(COMMAND_REASON_MALFORMED);
+                    }
+                    if self.parameter_id == 0 {
+                        return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+                    }
+                } else if self.channel != 255 || (self.values[0] != 0.0 && self.values[0] != 1.0) {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                Err(COMMAND_REASON_UNSUPPORTED_KIND)
+            }
+            _ => Err(COMMAND_REASON_MALFORMED),
+        }
+    }
+}
+
+/// Validate a whole staged submission, then admit it. Nothing is pushed unless everything passes.
+fn admit_commands(
+    ready: &mut ReadyOwnership,
+    bytes: &[u8],
+    count: usize,
+) -> Result<(), CommandRejection> {
+    let record_bytes = COMMAND_RECORD_BYTES as usize;
+    let track_count = ready.tracks.len();
+    ready.command_wanted.fill(0);
+    for index in 0..count {
+        let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
+        let command = CommandRecord::decode(record).map_err(|reason| CommandRejection {
+            result: RESULT_INVALID_ARGUMENT,
+            reason,
+            index: index as u32,
+        })?;
+        let track = command.track_index as usize;
+        if track >= track_count {
+            return Err(CommandRejection {
+                result: RESULT_INVALID_ARGUMENT,
+                reason: COMMAND_REASON_UNKNOWN_TRACK,
+                index: index as u32,
+            });
+        }
+        let applied = command
+            .into_matrix(ready.rack_effects[track])
+            .map_err(|reason| CommandRejection {
+                result: if reason == COMMAND_REASON_UNSUPPORTED_KIND {
+                    RESULT_UNSUPPORTED
+                } else {
+                    RESULT_INVALID_ARGUMENT
+                },
+                reason,
+                index: index as u32,
+            })?;
+        ready.command_wanted[track] += 1;
+        ready.command_decoded[index] = (command.track_index, applied);
+    }
+    for index in 0..count {
+        let track = ready.command_decoded[index].0 as usize;
+        let needed = ready.command_wanted[track];
+        let Some(producer) = ready.controls.get(track) else {
+            return Err(CommandRejection {
+                result: RESULT_UNSUPPORTED,
+                reason: COMMAND_REASON_UNSUPPORTED_KIND,
+                index: index as u32,
+            });
+        };
+        let capacity = u32::try_from(producer.producer.capacity()).unwrap_or(0);
+        if ready.in_flight[track].saturating_add(needed) > capacity {
+            return Err(CommandRejection {
+                result: RESULT_BACKPRESSURE,
+                reason: COMMAND_REASON_BACKPRESSURE,
+                index: index as u32,
+            });
+        }
+    }
+    for index in 0..count {
+        let (track, record) = ready.command_decoded[index];
+        let track = track as usize;
+        let Some(producer) = ready.controls.get_mut(track) else {
+            return Err(CommandRejection {
+                result: RESULT_INTERNAL,
+                reason: COMMAND_REASON_UNSUPPORTED_KIND,
+                index: index as u32,
+            });
+        };
+        if producer.producer.try_push(record).is_err() {
+            return Err(CommandRejection {
+                result: RESULT_INTERNAL,
+                reason: COMMAND_REASON_BACKPRESSURE,
+                index: index as u32,
+            });
+        }
+        ready.in_flight[track] += 1;
+    }
+    Ok(())
+}
+
+const fn empty_command_report() -> WebCommandReportV1 {
+    WebCommandReportV1 {
+        struct_size: COMMAND_REPORT_BYTES,
+        abi_version: ABI_VERSION,
+        result: RESULT_OK,
+        reason: COMMAND_REASON_NONE,
+        rejected_index: 0,
+        admitted: 0,
+        applied_at_sample: 0,
+        reserved: [0; 2],
     }
 }
 
@@ -684,6 +1353,14 @@ fn prepare_buffers(
     let output_pcm_bytes = u64::from(config.quantum_frames)
         .checked_mul(8)
         .ok_or(RESULT_PREPARE_REJECTED)?;
+    let command_records = if config.console_command_queue_records == 0 {
+        0
+    } else {
+        MAXIMUM_COMMAND_RECORDS
+    };
+    let command_bytes = u64::from(command_records)
+        .checked_mul(u64::from(COMMAND_RECORD_BYTES))
+        .ok_or(RESULT_PREPARE_REJECTED)?;
     let plane_reference_bytes = u64::from(config.maximum_source_channels)
         .checked_mul(size_of::<&[f32]>() as u64)
         .ok_or(RESULT_PREPARE_REJECTED)?;
@@ -703,6 +1380,7 @@ fn prepare_buffers(
         u64::from(config.source_id_bytes),
         source_pcm_bytes,
         output_pcm_bytes,
+        command_bytes,
         bridge_metadata,
     ];
     let retained = checked_sum(rows)?;
@@ -723,6 +1401,7 @@ fn prepare_buffers(
         source_id: boxed_zero_u8(config.source_id_bytes)?,
         source_pcm: boxed_zero_f32(source_samples)?,
         output_pcm: boxed_zero_f32(u64::from(config.quantum_frames) * 2)?,
+        command: boxed_zero_u8(command_records * COMMAND_RECORD_BYTES)?,
         plane_references: boxed_uninit_planes(config.maximum_source_channels)?,
     };
     let mut report = empty_resource_report(selected_backend());
@@ -744,7 +1423,9 @@ fn validate_config(config: WebPrepareConfigV1) -> Result<(), u32> {
     if config.struct_size != PREPARE_CONFIG_BYTES || config.abi_version != ABI_VERSION {
         return Err(RESULT_ABI_MISMATCH);
     }
-    if config.reserved != [0; 4]
+    if config.reserved != [0; 2]
+        || config.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
+        || config.console_meter_blocks > u64::from(u32::MAX)
         || !matches!(config.sample_rate_hz, 44_100 | 48_000 | 88_200 | 96_000)
         || config.quantum_frames == 0
         || config.session_toml_bytes == 0
@@ -854,7 +1535,9 @@ fn compile_ready(
     mut report: WebResourceReportV1,
 ) -> Result<(ReadyOwnership, WebResourceReportV1), Vec<u8>> {
     let caps = prepare_caps(config);
-    let (session, host) = prepare_host_session(toml, &caps).map_err(|value| value.into_bytes())?;
+    let console = console_request(config).ok_or_else(|| fixed_diagnostic("web.console.config"))?;
+    let (session, host, handles) = prepare_host_session_with_console(toml, &caps, &console)
+        .map_err(|value| value.into_bytes())?;
     let engine = host.report;
 
     // Browser-only: every source ID must fit the fixed staging buffer JavaScript writes it into.
@@ -904,13 +1587,99 @@ fn compile_ready(
     report.graph_metadata_bytes = engine.graph_metadata_bytes;
     report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
-    Ok((
-        ReadyOwnership {
-            host,
-            _session: session,
+    let track_count = handles.tracks.len();
+    let mut rack_effects = Vec::new();
+    rack_effects
+        .try_reserve_exact(track_count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    for track in &session.normalized_model().tracks {
+        let count = |effects: usize| -> Result<u32, Vec<u8>> {
+            u32::try_from(effects).map_err(|_| fixed_diagnostic("web.console.effects"))
+        };
+        rack_effects.push([
+            count(track.simd1.effects.len())?,
+            count(track.dynamic.effects.len())?,
+            count(track.simd2.effects.len())?,
+        ]);
+    }
+    let ready = ReadyOwnership {
+        controls: handles.track_controls,
+        command_wanted: boxed_zero_u32(track_count)?,
+        command_decoded: boxed_command_staging()?,
+        in_flight: boxed_zero_u32(track_count)?,
+        tracks: handles.tracks,
+        rack_effects: rack_effects.into_boxed_slice(),
+        host,
+        meters: handles.meters,
+        meter_frame: boxed_zero_meter_frame(track_count)?,
+        master_peak: [0.0, 0.0],
+        meter_windows: 0,
+        _session: session,
+    };
+    Ok((ready, report))
+}
+
+/// Translate the browser configuration's two console words into the facade's console request.
+///
+/// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
+/// render path folds nothing at all. The port lease is a second, finer switch over posting.
+fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
+    let control_queue_depth = match config.console_command_queue_records {
+        0 => None,
+        records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
+    };
+    let meter_period_frames = if config.console_meter_blocks == 0 {
+        None
+    } else {
+        let blocks = u32::try_from(config.console_meter_blocks).ok()?;
+        Some(NonZeroU32::new(blocks.checked_mul(config.quantum_frames)?)?)
+    };
+    Some(HostConsoleRequestV1 {
+        control_queue_depth,
+        meter_period_frames,
+        // One window per track per post, plus headroom for a control-side stall of a few windows.
+        meter_queue_depth: NonZeroUsize::new(8)?,
+        meter_tap: MeterTap::PostMatrix,
+    })
+}
+
+fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    value.resize(count, 0);
+    Ok(value.into_boxed_slice())
+}
+
+fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
+    let count = track_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    value.resize(count, 0.0);
+    Ok(value.into_boxed_slice())
+}
+
+fn boxed_command_staging() -> Result<Box<[(u32, TrackControlRecordV1)]>, Vec<u8>> {
+    let count = MAXIMUM_COMMAND_RECORDS as usize;
+    let empty = (
+        0_u32,
+        TrackControlRecordV1 {
+            matrix: Matrix2x2::IDENTITY,
+            smoothing_samples: 0,
         },
-        report,
-    ))
+    );
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    value.resize(count, empty);
+    Ok(value.into_boxed_slice())
 }
 
 /// One `code\t$\n` diagnostic line for a rule that names no session path.

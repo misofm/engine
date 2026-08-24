@@ -995,11 +995,30 @@ impl<L: Lane> MatrixStage<L> {
 
     /// Retargets one lane. D11: one division per coefficient per event, never per sample.
     fn set_target(&mut self, lane: usize, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
+        let samples = if lane < L::WIDTH {
+            self.smoothing_samples[lane]
+        } else {
+            0
+        };
+        self.set_target_over(lane, target, samples)
+    }
+
+    /// Retargets one lane over an explicit ramp window, and adopts that window as the lane's own.
+    ///
+    /// Issue #137 D1: a live console changes the pan window with the pan, so the retarget and the
+    /// window are one event. `set_target` is exactly this call with the prepared window, so the
+    /// two cannot drift.
+    fn set_target_over(
+        &mut self,
+        lane: usize,
+        target: Matrix2x2,
+        samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
         let target = target.checked()?;
         if lane >= L::WIDTH {
             return Err(BuiltinParameterError::LaneLength);
         }
-        let samples = self.smoothing_samples[lane];
+        self.smoothing_samples[lane] = samples;
         let current = self.read_current()[lane];
         let mut targets = self.ramp.target.map(lane_read::<L>);
         let mut steps = self.ramp.step.map(lane_read::<L>);
@@ -1380,6 +1399,24 @@ impl FaderMuteBuiltins {
 impl MatrixBuiltins {
     pub fn set_target(&mut self, target: Matrix2x2) -> Result<(), BuiltinParameterError> {
         self.stage.set_target(0, target)
+    }
+    /// Retarget the 2x2 matrix over an explicit ramp window (issue #137 D1).
+    ///
+    /// The window becomes this stage's smoothing window, so a subsequent [`Self::set_target`]
+    /// uses it too. `matrix_ll/lr/rl/rr` are the only builtin parameters whose declared update
+    /// rate is `BuiltinParameterUpdateRate::BlockTarget`, which is why this is the one live
+    /// builtin setter the ABI admits.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::MatrixDomain`] when a coefficient is outside `[-1, 1]` or is not
+    /// finite.
+    pub fn set_target_smoothed(
+        &mut self,
+        target: Matrix2x2,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        self.stage.set_target_over(0, target, smoothing_samples)
     }
     /// Renders one already-validated block. Feed-forward with `|m| <= 1`: no checks, no counters.
     pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {

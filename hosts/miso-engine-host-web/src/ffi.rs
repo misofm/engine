@@ -14,9 +14,10 @@
 #![allow(unsafe_code)]
 
 use crate::{
-    ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, PREPARE_CONFIG_BYTES, RESULT_INTERNAL,
-    RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY, WebPrepareConfigV1,
+    ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
+    BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
+    PREPARE_CONFIG_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY,
+    WebPrepareConfigV1,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -101,6 +102,17 @@ fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
         BUFFER_OUTPUT_PCM => host
             .output_pcm()
             .map_or(ptr::null_mut(), |value| value.as_ptr().cast_mut().cast()),
+        BUFFER_COMMAND => host
+            .command_staging_mut()
+            .map_or(ptr::null_mut(), <[u8]>::as_mut_ptr),
+        BUFFER_METER_FRAME => {
+            let frame = host.meter_frame();
+            if frame.is_empty() {
+                ptr::null_mut()
+            } else {
+                frame.as_ptr().cast_mut().cast()
+            }
+        }
         _ => ptr::null_mut(),
     }
 }
@@ -113,6 +125,8 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         BUFFER_SOURCE_PCM => resources.source_pcm_staging_bytes,
         BUFFER_DIAGNOSTIC => resources.diagnostic_bytes,
         BUFFER_OUTPUT_PCM => resources.output_pcm_bytes,
+        BUFFER_COMMAND => host.command_staging_bytes(),
+        BUFFER_METER_FRAME => (host.meter_frame().len() * 4) as u64,
         _ => return 0,
     };
     u32::try_from(bytes).unwrap_or(0)
@@ -310,6 +324,64 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
     with_host(handle, 0, |host| {
         pointer_u32(ptr::from_ref(host.resources()))
     })
+}
+
+/// Admit one staged live-console command submission (issue #137 D1).
+///
+/// `count` records were written into [`BUFFER_COMMAND`]. The submission is one transaction: the
+/// return value is the frozen result code, and
+/// [`miso_engine_web_v1_command_report_ptr`] names the first refused record and why.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.submit_commands(count)
+    })
+}
+
+/// Return the stable live-console command-report address or zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        pointer_u32(ptr::from_ref(host.command_report()))
+    })
+}
+
+/// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        if enabled > 1 {
+            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+        }
+        host.set_meter_lease(enabled == 1)
+    })
+}
+
+/// Drain finished meter windows into the frame buffer; returns the number of complete windows.
+///
+/// Called from `process()` after the render export, so it is allocation-free and bounded: it moves
+/// `Copy` snapshots out of queues sized at compilation into a buffer sized at compilation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
+    with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters)
+}
+
+/// Return the number of tracks the live console addresses, or zero before compilation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.console_tracks().len()).unwrap_or(0)
+    })
+}
+
+/// Copy one canonical track ID into the source-ID staging buffer; returns its byte length.
+///
+/// Zero means "no such track" or "the ID does not fit the staged buffer": the caller reads the
+/// bytes out of [`BUFFER_SOURCE_ID`], which preparation already sized for the longest ID in the
+/// session, and a session whose IDs did not fit was refused at compilation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -> u32 {
+    with_host_mut(handle, 0, |host| host.copy_console_track_id(index))
 }
 
 /// Return the stable status address or zero for an invalid handle.

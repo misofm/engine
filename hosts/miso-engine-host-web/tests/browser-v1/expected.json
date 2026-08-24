@@ -59,8 +59,8 @@
         "sourceIdBytes": "1024",
         "sourcePcmStagingBytes": "4096",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3473",
-        "bridgeRetainedBytes": "1074849",
+        "bridgeMetadataBytes": "3625",
+        "bridgeRetainedBytes": "1075001",
         "largestBridgeAllocationBytes": "1048576",
         "sourceTotalBytes": "2206",
         "sourceOverheadBytes": "1182",
@@ -83,6 +83,57 @@
       },
       "pcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
     },
-    "nativePcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
+    "nativePcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e",
+    "commandTimeline": {
+      "reports": {
+        "matrix": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "128"
+        },
+        "unknownTrack": {
+          "result": 1,
+          "reason": 2,
+          "rejectedIndex": 0,
+          "admitted": 0,
+          "appliedAtSample": "256"
+        },
+        "flood": {
+          "result": 6,
+          "reason": 8,
+          "rejectedIndex": 0,
+          "admitted": 0,
+          "appliedAtSample": "256"
+        },
+        "unsupported": {
+          "result": 7,
+          "reason": 7,
+          "rejectedIndex": 0,
+          "admitted": 0,
+          "appliedAtSample": "256"
+        },
+        "pan": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "384"
+        }
+      },
+      "beforeDisposeStatus": {
+        "state": 2,
+        "lastResult": 0,
+        "backend": 1,
+        "sampleRateHz": 48000,
+        "quantumFrames": 128,
+        "nextAbsoluteSample": "768",
+        "renderedQuanta": "6",
+        "memoryBytes": 2359296
+      },
+      "pcmF32leSha256": "9b60e90f3415690ed5a285169dd5b1770780c99172afacea97955fb52c8f3da7"
+    },
+    "nativeCommandTimelinePcmF32leSha256": "9b60e90f3415690ed5a285169dd5b1770780c99172afacea97955fb52c8f3da7"
   }
 }

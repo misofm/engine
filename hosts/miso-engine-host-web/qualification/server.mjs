@@ -13,6 +13,8 @@ const ARTIFACT_NAMES = new Set([
   "miso-engine-v2-audio-worklet.js",
   "miso-engine-v2-audio-worklet-host.js",
   "miso-engine-v2-audio-worklet-host.d.ts",
+  // Issue #137 D4: the parameter metadata ships with the module and is served with it.
+  "miso-engine-v2-parameter-metadata.json",
 ]);
 const CONTENT_TYPES = new Map([
   [".d.ts", "text/plain; charset=utf-8"],
@@ -31,7 +33,7 @@ function contentType(file) {
 async function exactArtifacts(directory) {
   const names = await readdir(directory);
   if (names.length !== ARTIFACT_NAMES.size || names.some((name) => !ARTIFACT_NAMES.has(name))) {
-    throw new Error("artifact directory must contain the exact shipped four-file set");
+    throw new Error("artifact directory must contain the exact shipped five-file set");
   }
   for (const name of names) {
     if (!(await stat(path.join(directory, name))).isFile()) {

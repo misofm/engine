@@ -15,7 +15,11 @@ const PLAYWRIGHT_VERSION = JSON.parse(
   await readFile(path.join(HERE, "node_modules", "playwright", "package.json"), "utf8"),
 ).version;
 const ENGINES = { chromium, firefox, webkit };
-const MUTATIONS = ["attestation", "boot", "native-corpus-digest", "main-thread-stall"];
+const MUTATIONS = [
+  "attestation", "boot", "native-corpus-digest", "main-thread-stall",
+  // Issue #137 E8/E6: the live-console row and the console load carried across the stall.
+  "control-path-applied", "control-path-meter", "control-path-command", "stall-console-load",
+];
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -48,7 +52,31 @@ function validate(browserName, result) {
     && corpus.browserDigests.length === 2
     && corpus.browserDigests.every((digest) => digest === corpus.nativeDigest)
     && corpus.freshContextIdentity === true, "browser PCM differs from the native corpus pin");
+  // #137 E8: one parameter change reached the DSP and did exactly what it declared, and the
+  // decimated meter stream produced frames of the declared width whose master peak is a real
+  // observation of the rendered output rather than a zero.
+  const live = result.console;
+  gate(browserName, "control-path", live?.commandResult === 0 && live?.commandReason === 0
+    && live?.commandAdmitted === 1 && live?.appliedAtSample === "0"
+    && Array.isArray(live?.tracks) && live.tracks.length === 1,
+  "the live-console command was not admitted");
+  gate(browserName, "control-path", live?.exactRetargetedOutput === true
+    && live?.renderedDigest === live?.expectedDigest,
+  "the applied parameter change did not produce the exact declared output");
+  gate(browserName, "control-path", live?.metersAttached === true
+    && live?.meterLeaseResult === 0 && live?.telemetryLeaseResult === 0
+    && live?.meterFrames >= 1 && live?.meterFrameWidth === 4
+    && live?.masterPeak > 0 && live?.masterPeak <= live?.inputPeak,
+  "no usable meter frame arrived while the lease was held");
+  gate(browserName, "control-path", live?.telemetryFrames >= 1,
+    "no render-telemetry frame arrived over a full window");
+
   const stall = result.stall;
+  // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
+  // path and the meter fold both live across the fault.
+  gate(browserName, "main-thread-stall", stall?.consoleCommandResult === 0
+    && stall?.consoleMeterLeaseResult === 0 && stall?.consoleMeterFrames >= 1,
+  "the stall did not carry a live command and meter load");
   gate(browserName, "main-thread-stall", stall?.minimumStallMs === 100
     && stall?.requestedStallMs >= 100
     && stall?.measuredStallMs >= 100
@@ -69,6 +97,10 @@ function mutate(result, mutation) {
   if (mutation === "boot") copy.boot.ready = false;
   if (mutation === "native-corpus-digest") copy.corpus.browserDigests[0] = "0".repeat(64);
   if (mutation === "main-thread-stall") copy.stall.measuredStallMs = 0;
+  if (mutation === "control-path-applied") copy.console.exactRetargetedOutput = false;
+  if (mutation === "control-path-meter") copy.console.masterPeak = 0;
+  if (mutation === "control-path-command") copy.console.commandAdmitted = 0;
+  if (mutation === "stall-console-load") copy.stall.consoleMeterFrames = 0;
   return copy;
 }
 
@@ -92,6 +124,7 @@ function normalizedRow(browserName, browserVersion, outcome) {
       attestation: "pass",
       audioWorkletBoot: passed ? "pass" : "not-applicable",
       nativeCorpusDigest: passed ? "pass" : "not-applicable",
+      controlPath: passed ? "pass" : "not-applicable",
       mainThreadStall: passed ? "pass" : "not-applicable",
     },
   };

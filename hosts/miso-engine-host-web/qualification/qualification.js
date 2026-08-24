@@ -5,6 +5,13 @@ const DEFAULT_RING_FRAMES = 5120;
 const STALL_FRAMES = DEFAULT_RING_FRAMES;
 const STALL_RENDER_FRAMES = STALL_FRAMES;
 const REQUESTED_STALL_MS = 120;
+// Issue #137: the console rows. 130 blocks is one full 128-block telemetry window plus slack, and
+// a two-block meter window makes the decimated cadence observable inside it.
+const CONSOLE_BLOCKS = 130;
+const CONSOLE_FRAMES = CONSOLE_BLOCKS * QUANTUM_FRAMES;
+const CONSOLE_COMMAND_QUEUE_RECORDS = 64n;
+const CONSOLE_METER_BLOCKS = 2n;
+const COMMAND_MATRIX = 2;
 const MINIMUM_STALL_MS = 100;
 const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
@@ -18,8 +25,13 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
-function limits(sourceRingFrames) {
+// Issue #137 D1/D2: the two console words. Zero in both is the frozen pre-#137 shape -- no control
+// channel, no meter observers -- which is what the corpus and attestation gates keep using so
+// their digests and resource rows are untouched by the console's existence.
+function limits(sourceRingFrames, consoleCommandQueueRecords = 0n, consoleMeterBlocks = 0n) {
   return {
+    consoleCommandQueueRecords,
+    consoleMeterBlocks,
     sessionTomlBytes: 1 << 20,
     diagnosticBytes: 1 << 14,
     sourceIdBytes: 1 << 10,
@@ -232,17 +244,132 @@ async function diagnoseGlobals() {
   });
 }
 
+/// #137 E8: a live-console row -- one parameter change applied and one meter frame received.
+///
+/// The command is awaited before rendering starts, so its acknowledgement names sample `0` and the
+/// whole rendered block is post-command: the browser leg proves *that* a change reached the DSP
+/// and *what* it did, while the exact-sample transition is proved bit for bit by the native and
+/// raw-Wasm command-timeline oracles. The retarget halves the left matrix coefficient, so the
+/// expected output is the submitted left plane at half gain and the right plane untouched --
+/// computed here, not read back, so a console that quietly did nothing cannot pass.
+async function runConsoleQualification(createHost, sessionToml) {
+  const context = new OfflineAudioContext(2, CONSOLE_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    quantumFrames: QUANTUM_FRAMES,
+    sessionToml,
+    limits: limits(CONSOLE_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+
+  const meterFrames = [];
+  const telemetryFrames = [];
+  const expected = [new Float32Array(CONSOLE_FRAMES), new Float32Array(CONSOLE_FRAMES)];
+  let inputPeak = 0;
+  for (let block = 0; block < CONSOLE_BLOCKS; block += 1) {
+    const planes = sourcePlanes(block);
+    for (let frame = 0; frame < QUANTUM_FRAMES; frame += 1) {
+      expected[0][block * QUANTUM_FRAMES + frame] = planes[0][frame] * 0.5;
+      expected[1][block * QUANTUM_FRAMES + frame] = planes[1][frame];
+      inputPeak = Math.max(inputPeak, Math.abs(planes[0][frame]), Math.abs(planes[1][frame]));
+    }
+    const acknowledgement = await host.submitSource({
+      requestId: block + 1,
+      sourceId: "console-source",
+      generation: 1n,
+      startFrame: BigInt(block * QUANTUM_FRAMES),
+      sampleRateHz: SAMPLE_RATE,
+      planes,
+      frames: QUANTUM_FRAMES,
+      endOfRegion: block === CONSOLE_BLOCKS - 1,
+    });
+    if (acknowledgement.result !== 0) throw new Error("console prefill rejected");
+  }
+
+  // Request IDs are strictly monotonic across the whole port, so the leases and the command are
+  // taken after the prefill they will be observed over.
+  const map = await host.sessionMap();
+  const meterLease = await host.meters({
+    requestId: 10001,
+    enabled: true,
+    onFrame: (frame) => meterFrames.push(frame),
+  });
+  const telemetryLease = await host.telemetry({
+    requestId: 10002,
+    enabled: true,
+    onFrame: (frame) => telemetryFrames.push(frame),
+  });
+
+  const command = await host.command({
+    requestId: 20001,
+    commands: [{
+      kind: COMMAND_MATRIX,
+      rack: 255,
+      channel: 255,
+      trackIndex: 0,
+      effectIndex: 0,
+      parameterId: 0,
+      smoothingSamples: 0,
+      values: [0.5, 0, 0, 1],
+    }],
+  });
+
+  const rendered = await context.startRendering();
+  // Frames posted from the render thread arrive as tasks; yield until the queue is drained.
+  for (let spin = 0; spin < 8 && meterFrames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  await host.dispose();
+  const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
+
+  let exact = true;
+  for (let channel = 0; channel < 2; channel += 1) {
+    for (let frame = 0; frame < CONSOLE_FRAMES; frame += 1) {
+      if (!Object.is(actual[channel][frame], expected[channel][frame])) exact = false;
+    }
+  }
+  const peaks = meterFrames.map((frame) => Array.from(frame.peaks));
+  const masterPeak = peaks.reduce(
+    (highest, frame) => Math.max(highest, frame[frame.length - 2], frame[frame.length - 1]),
+    0,
+  );
+  return {
+    tracks: map.tracks,
+    metersAttached: map.metersAttached,
+    commandResult: command.result,
+    commandReason: command.reason,
+    commandAdmitted: command.admitted,
+    appliedAtSample: command.appliedAtSample.toString(),
+    meterLeaseResult: meterLease.result,
+    telemetryLeaseResult: telemetryLease.result,
+    meterFrames: meterFrames.length,
+    telemetryFrames: telemetryFrames.length,
+    meterFrameWidth: peaks.length === 0 ? 0 : peaks[0].length,
+    masterPeak,
+    inputPeak,
+    exactRetargetedOutput: exact,
+    expectedDigest: await pcmDigest(expected, CONSOLE_FRAMES),
+    renderedDigest: await pcmDigest(actual, CONSOLE_FRAMES),
+  };
+}
+
 async function runStallQualification(createHost, sessionToml) {
   const context = new OfflineAudioContext(2, STALL_RENDER_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
     quantumFrames: QUANTUM_FRAMES,
     sessionToml,
-    limits: limits(DEFAULT_RING_FRAMES),
+    // #137 E6: the stall runs with a live console attached and its meter lease held, so the
+    // 100 ms fault is survived under exactly the command and metering load a mixing console
+    // imposes -- and the frozen exact-output requirement is unchanged.
+    limits: limits(DEFAULT_RING_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
   host.node.connect(context.destination);
+  const stallMeterFrames = [];
 
   const blocks = STALL_FRAMES / QUANTUM_FRAMES;
   const expected = [new Float32Array(STALL_FRAMES), new Float32Array(STALL_FRAMES)];
@@ -262,6 +389,29 @@ async function runStallQualification(createHost, sessionToml) {
     });
     if (acknowledgement.result !== 0) throw new Error("stall prefill rejected");
   }
+
+  const meterLease = await host.meters({
+    requestId: 30001,
+    enabled: true,
+    onFrame: (frame) => stallMeterFrames.push(frame),
+  });
+  // #137 E6: an identity retarget admitted immediately before the fault. It changes no
+  // coefficient -- the stall session's pan is already the identity matrix -- so the frozen exact
+  // digest still applies, while the control path, its queue and the meter fold are all live
+  // across the stall.
+  const stallCommand = await host.command({
+    requestId: 30002,
+    commands: [{
+      kind: COMMAND_MATRIX,
+      rack: 255,
+      channel: 255,
+      trackIndex: 0,
+      effectIndex: 0,
+      parameterId: 0,
+      smoothingSamples: 0,
+      values: [1, 0, 0, 1],
+    }],
+  });
 
   // An exact-length offline context needs no non-portable suspend point: rendering begins before
   // the main-realm fault and consumes all 40 prefilled quanta while that realm is unavailable.
@@ -285,6 +435,9 @@ async function runStallQualification(createHost, sessionToml) {
   }
 
   return {
+    consoleCommandResult: stallCommand.result,
+    consoleMeterLeaseResult: meterLease.result,
+    consoleMeterFrames: stallMeterFrames.length,
     requestedStallMs: REQUESTED_STALL_MS,
     minimumStallMs: MINIMUM_STALL_MS,
     measuredStallMs,
@@ -302,6 +455,7 @@ async function runStallQualification(createHost, sessionToml) {
 export async function runQualification() {
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
+    consoleResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v2-audio-worklet-host.js"),
@@ -309,14 +463,19 @@ export async function runQualification() {
       fetch("/fixture/session.toml"),
       fetch("/fixture/source.json"),
       fetch("/qualification/stall-session.toml"),
+      fetch("/qualification/console-session.toml"),
     ]);
-  if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok) {
+  if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
+      || !consoleResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
   const sessionToml = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
   const stallSessionToml = new TextEncoder().encode(await stallResponse.text());
+  // Issue #137 E8: the console row needs a region long enough for one full 128-block telemetry
+  // window, which the 40-block stall region is not.
+  const consoleSessionToml = new TextEncoder().encode(await consoleResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
 
   if (!simd128) {
@@ -333,6 +492,7 @@ export async function runQualification() {
       },
       boot: { ready: false, backend: null },
       corpus: null,
+      console: null,
       stall: null,
     };
   }
@@ -362,6 +522,15 @@ export async function runQualification() {
   const digests = await Promise.all(
     correctness.runs.map((run) => pcmDigest(run.pcm, CORPUS_FRAMES)),
   );
+  let live;
+  try {
+    live = await runConsoleQualification(createMisoAudioWorkletHost, consoleSessionToml);
+  } catch (error) {
+    const diagnostic = await diagnoseReady(consoleSessionToml);
+    throw new Error(`console qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
   let stall;
   try {
     stall = await runStallQualification(createMisoAudioWorkletHost, stallSessionToml);
@@ -383,6 +552,7 @@ export async function runQualification() {
       browserDigests: digests,
       freshContextIdentity: digests[0] === digests[1],
     },
+    console: live,
     stall,
   };
 }

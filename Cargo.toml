@@ -39,6 +39,7 @@ members = [
     "tools/miso-engine-native-pcm-runner",
     "tools/miso-engine-wasm-gate-corpus",
     "tools/miso-engine-wasm-gate-guest",
+    "tools/miso-engine-parameter-metadata",
     "tools/miso-engine-wasm-gates",
 ]
 resolver = "3"
@@ -80,6 +81,7 @@ miso-engine-graph = { path = "crates/miso-engine-graph", version = "0.1.0" }
 miso-engine-graph-compiler = { path = "crates/miso-engine-graph-compiler", version = "0.1.0" }
 miso-engine-host-core = { path = "crates/miso-engine-host-core", version = "0.1.0" }
 miso-engine-native-scheduler = { path = "crates/miso-engine-native-scheduler", version = "0.1.0" }
+miso-engine-host-web = { path = "hosts/miso-engine-host-web", version = "0.1.0" }
 miso-engine-bench-support = { path = "tools/miso-engine-bench-support", version = "0.1.0" }
 miso-engine-wasm-gate-corpus = { path = "tools/miso-engine-wasm-gate-corpus", version = "0.1.0" }
 miso-engine-wasm-gate-guest = { path = "tools/miso-engine-wasm-gate-guest", version = "0.1.0" }

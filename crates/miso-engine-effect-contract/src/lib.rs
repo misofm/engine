@@ -1389,6 +1389,14 @@ impl NativeEffectRegistry {
     pub fn is_empty(&self) -> bool {
         self.factories.is_empty()
     }
+    /// Every registered descriptor, in stable [`EffectId`] order (issue #137 D4).
+    ///
+    /// The parameter-metadata codegen reads the registry through this, so "an effect in the
+    /// registry is missing from the emitted metadata" is not a rule anyone has to remember to
+    /// check: there is no other list to fall out of step with.
+    pub fn descriptors(&self) -> impl Iterator<Item = &'static EffectDescriptorV1> + '_ {
+        self.factories.values().map(|factory| factory.descriptor())
+    }
 }
 /// The exact `(parameter_index, channel)` sequence a prepare request must carry, in order.
 ///

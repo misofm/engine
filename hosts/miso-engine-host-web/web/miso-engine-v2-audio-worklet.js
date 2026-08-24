@@ -2,14 +2,26 @@ const ABI_VERSION = 0x00010000;
 const CONFIG_BYTES = 192;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
+const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
+const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SESSION_TOML = 1;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
+const BUFFER_COMMAND = 6;
+const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
 const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
+
+// Issue #137 D1/D2/D3.
+const COMMAND_RECORD_BYTES = 48;
+const MAXIMUM_COMMAND_RECORDS = 256;
+const COMMAND_REPORT_BYTES = 48;
+// The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
+// a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
+const TELEMETRY_WINDOW_BLOCKS = 128;
 
 const INIT_FIELDS = [
   "requestId", "module", "backend", "sampleRateHz", "quantumFrames", "sessionToml", "limits",
@@ -21,12 +33,30 @@ const LIMIT_FIELDS = [
   "maximumSourceTotalBytes", "maximumSourceOverheadBytes", "maximumEffectStateBytes",
   "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
   "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
+  "consoleCommandQueueRecords", "consoleMeterBlocks",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
   "endOfRegion",
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
+const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
+const LEASE_FIELDS = ["tag", "requestId", "enabled"];
+
+/// The render clock (issue #137 D3).
+///
+/// `WorkletGlobalScope` does not include `Performance` in the specification, and user agents
+/// disagree about exposing it, so the clock is probed once at construction and the telemetry frame
+/// reports the resolution it actually got. `currentTime` is deliberately not used: it advances by
+/// exactly one quantum per block no matter how long the render took, so it can measure the
+/// deadline but never the work.
+function renderClock() {
+  const now = globalThis.performance?.now;
+  if (typeof now === "function") {
+    return { read: () => globalThis.performance.now(), resolutionMs: 0.005 };
+  }
+  return { read: () => Date.now(), resolutionMs: 1 };
+}
 
 function exactFields(value, fields) {
   if (value === null || typeof value !== "object") return false;
@@ -41,6 +71,10 @@ function u32(value) {
 
 function positiveU64(value) {
   return typeof value === "bigint" && value > 0n && value <= 0xffffffffn;
+}
+
+function validU64(value) {
+  return typeof value === "bigint" && value >= 0n && value <= 0xffffffffn;
 }
 
 function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
@@ -111,6 +145,17 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.handle = 0;
     this.handleDisposed = false;
     this.initializationErrorPosted = false;
+    // Issue #137: both leases start released, so a session that never asks for a console pays a
+    // single `false` test per block and nothing else.
+    this.meterLease = false;
+    this.telemetryLease = false;
+    this.meterSequence = 0;
+    this.telemetryBlocks = 0;
+    this.telemetryElapsedMs = 0;
+    this.telemetryBudgetMs = 0;
+    this.telemetryPeakMs = 0;
+    this.telemetryDeadlineMisses = 0;
+    this.clock = renderClock();
     this.port.onmessage = (event) => this.receive(event.data);
     try {
       const result = this.initialize(options?.processorOptions);
@@ -224,6 +269,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         || status.nextAbsoluteSample !== 0n || status.renderedQuanta !== 0n) {
       return RESULT_INVALID_ARGUMENT;
     }
+    if (!this.bindConsole(init)) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -235,6 +281,87 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     });
     this.ready = true;
     return RESULT_OK;
+  }
+
+  /// Bind every live-console view and preallocate every frame the render callback posts.
+  ///
+  /// Issue #137: nothing in `process()` may allocate, so every message body, every typed-array
+  /// copy and every track identity is built here, once, on the construction path that is already
+  /// allowed to allocate. `process()` mutates the frozen shapes and posts them; the structured
+  /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
+  /// avoid.
+  bindConsole(init) {
+    this.consoleAttached = init.limits.consoleCommandQueueRecords !== 0n;
+    const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
+    const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_COMMAND,
+    );
+    const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
+    if (!u32(reportPointer) || reportPointer === 0) return false;
+    this.commandReport = new DataView(this.memoryBuffer, reportPointer, COMMAND_REPORT_BYTES);
+    if (this.consoleAttached) {
+      if (!u32(commandPointer) || commandPointer === 0
+          || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
+      this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
+    } else if (commandPointer !== 0 || commandCapacity !== 0) {
+      // A released console must own no staging at all; a nonzero row here would mean the engine
+      // charged for a buffer the ABI says does not exist.
+      return false;
+    }
+
+    this.trackCount = this.exports.miso_engine_web_v1_console_track_count(this.handle);
+    if (!u32(this.trackCount)) return false;
+    // `TextDecoder` is no more guaranteed in a `WorkletGlobalScope` than `TextEncoder` is, and
+    // a session track ID is `[a-z][a-z0-9._-]{0,126}` by the session schema, so every byte is
+    // ASCII by construction. A byte that is not is a corrupt artifact, not a decoding problem.
+    this.trackIds = [];
+    for (let index = 0; index < this.trackCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_console_track_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      this.trackIds.push(id);
+    }
+
+    const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
+      this.handle,
+      BUFFER_METER_FRAME,
+    );
+    const frameCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_METER_FRAME,
+    );
+    this.metersAttached = init.limits.consoleMeterBlocks !== 0n;
+    if (this.metersAttached) {
+      if (!u32(framePointer) || framePointer === 0
+          || frameCapacity !== (this.trackCount * 2 + 2) * 4) return false;
+      this.meterView = new Float32Array(this.memoryBuffer, framePointer, frameCapacity / 4);
+      this.meterMessage = {
+        tag: "miso.meter.v1",
+        sequence: 0,
+        windows: 0,
+        trackCount: this.trackCount,
+        peaks: new Float32Array(frameCapacity / 4),
+      };
+    }
+    this.telemetryMessage = {
+      tag: "miso.telemetry.v1",
+      sequence: 0,
+      blocks: TELEMETRY_WINDOW_BLOCKS,
+      cpuPercent: 0,
+      peakBlockMs: 0,
+      meanBlockMs: 0,
+      budgetMs: 0,
+      deadlineMisses: 0,
+      resolutionMs: this.clock.resolutionMs,
+      belowResolution: true,
+    };
+    return true;
   }
 
   failInitialization(result, requestId) {
@@ -282,10 +409,18 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     if (values64.some((value) => !positiveU64(value))) {
       throw new RangeError("Invalid u64 preparation limit");
     }
+    // Issue #137 D1/D2: the two console words are the first two of the frozen configuration's
+    // four reserved words. Zero in both is exactly what every pre-#137 writer wrote and means
+    // "default command-queue depth, no meter observers attached".
+    const consoleWords = [limits.consoleCommandQueueRecords, limits.consoleMeterBlocks];
+    if (consoleWords.some((value) => !validU64(value))) {
+      throw new RangeError("Invalid u64 console configuration word");
+    }
     const view = new DataView(this.exports.memory.buffer, pointer, CONFIG_BYTES);
     values32.forEach((value, index) => view.setUint32(index * 4, value, true));
     values64.forEach((value, index) => view.setBigUint64(40 + index * 8, value, true));
-    for (let index = 0; index < 4; index += 1) view.setBigUint64(160 + index * 8, 0n, true);
+    consoleWords.forEach((value, index) => view.setBigUint64(160 + index * 8, value, true));
+    for (let index = 0; index < 2; index += 1) view.setBigUint64(176 + index * 8, 0n, true);
   }
 
   readResources() {
@@ -382,6 +517,21 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSource(message);
     } else if (message?.tag === "miso.seek.v1" && exactFields(message, SEEK_FIELDS)) {
       this.receiveSeek(message);
+    } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
+      this.receiveCommand(message);
+    } else if (message?.tag === "miso.meters.v1" && exactFields(message, LEASE_FIELDS)) {
+      this.receiveMeterLease(message);
+    } else if (message?.tag === "miso.telemetry.v1" && exactFields(message, LEASE_FIELDS)) {
+      this.receiveTelemetryLease(message);
+    } else if (message?.tag === "miso.sessionmap.v1"
+        && exactFields(message, ["tag", "requestId"])) {
+      this.port.postMessage({
+        tag: "miso.sessionmap.v1",
+        requestId: message.requestId,
+        result: RESULT_OK,
+        tracks: [...this.trackIds],
+        metersAttached: this.metersAttached === true,
+      });
     } else if (message?.tag === "miso.status.v1"
         && exactFields(message, ["tag", "requestId"])) {
       this.port.postMessage({
@@ -431,6 +581,97 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.acknowledge(message.requestId, result, message.planes);
   }
 
+  /// Copy one staged `miso.command.v1` submission into Wasm and admit it (issue #137 D1).
+  ///
+  /// The records arrive as one flat transferable byte block, so a whole fader gesture costs one
+  /// message and one copy rather than one message per parameter. The block is handed straight back
+  /// on the acknowledgement, exactly as source planes are, so the caller keeps its storage.
+  receiveCommand(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || !u32(message.count) || message.count > MAXIMUM_COMMAND_RECORDS
+        || !(message.records instanceof Uint8Array)
+        || !(message.records.buffer instanceof ArrayBuffer)
+        || (typeof SharedArrayBuffer !== "undefined"
+          && message.records.buffer instanceof SharedArrayBuffer)
+        || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    if (!this.consoleAttached) {
+      // A session prepared with `consoleCommandQueueRecords === 0n` has no control channel and no
+      // staging buffer. That is a typed refusal of a well-formed request, not a protocol error, so
+      // the batch is acknowledged and its record block goes back to the caller untouched.
+      this.port.postMessage({
+        tag: "miso.ack.v1",
+        requestId: message.requestId,
+        result: RESULT_UNSUPPORTED,
+        reason: COMMAND_REASON_UNSUPPORTED_KIND,
+        rejectedIndex: 0,
+        admitted: 0,
+        appliedAtSample: 0n,
+        records: message.records,
+      }, [message.records.buffer]);
+      return;
+    }
+    this.commandStaging.set(message.records, 0);
+    const result = this.exports.miso_engine_web_v1_command_submit(this.handle, message.count);
+    const report = this.commandReport;
+    if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
+        || report.getUint32(4, true) !== ABI_VERSION
+        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
+      this.sticky(RESULT_INTERNAL, message.requestId);
+      return;
+    }
+    this.port.postMessage({
+      tag: "miso.ack.v1",
+      requestId: message.requestId,
+      result,
+      reason: report.getUint32(12, true),
+      rejectedIndex: report.getUint32(16, true),
+      admitted: report.getUint32(20, true),
+      appliedAtSample: report.getBigUint64(24, true),
+      records: message.records,
+    }, [message.records.buffer]);
+  }
+
+  /// Take or release the decimated meter lease (issue #137 D2).
+  receiveMeterLease(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || typeof message.enabled !== "boolean") {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    const result = this.exports.miso_engine_web_v1_meter_lease(
+      this.handle,
+      message.enabled ? 1 : 0,
+    );
+    if (result === RESULT_OK) {
+      this.meterLease = message.enabled;
+      this.meterSequence = 0;
+    }
+    this.acknowledge(message.requestId, result);
+  }
+
+  /// Take or release the render-telemetry lease (issue #137 D3).
+  ///
+  /// JavaScript only: Wasm never learns that the lease exists, and with the lease released the
+  /// render callback makes no timing call at all.
+  receiveTelemetryLease(message) {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+        || typeof message.enabled !== "boolean") {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    this.telemetryLease = message.enabled;
+    this.telemetryBlocks = 0;
+    this.telemetryElapsedMs = 0;
+    this.telemetryBudgetMs = 0;
+    this.telemetryPeakMs = 0;
+    this.telemetryDeadlineMisses = 0;
+    this.telemetryMessage.sequence = 0;
+    this.acknowledge(message.requestId, RESULT_OK);
+  }
+
   receiveSeek(message) {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
         || typeof message.sourceId !== "string" || typeof message.generation !== "bigint"
@@ -467,6 +708,50 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /// Fold one finished meter window and post it (issue #137 D2).
+  ///
+  /// Allocation-free on this side: `meter_poll` moves `Copy` snapshots into a Wasm buffer sized at
+  /// compilation, `set` copies them into a `Float32Array` allocated at construction, and the frozen
+  /// message body is mutated in place. The structured clone `postMessage` performs is the only
+  /// allocation, and it is the one this ABI exists to pay: one flat numeric payload per window
+  /// instead of one per block.
+  postMeterFrame() {
+    const windows = this.exports.miso_engine_web_v1_meter_poll(this.handle);
+    if (windows === 0) return;
+    this.meterSequence += 1;
+    this.meterMessage.sequence = this.meterSequence;
+    this.meterMessage.windows = windows;
+    this.meterMessage.peaks.set(this.meterView);
+    this.port.postMessage(this.meterMessage);
+  }
+
+  /// Fold one render-time window and post it (issue #137 D3).
+  recordRenderTime(elapsedMs, frames) {
+    const budgetMs = (frames / this.sampleRateHz) * 1000;
+    this.telemetryElapsedMs += elapsedMs;
+    this.telemetryBudgetMs += budgetMs;
+    if (elapsedMs > this.telemetryPeakMs) this.telemetryPeakMs = elapsedMs;
+    if (elapsedMs > budgetMs) this.telemetryDeadlineMisses += 1;
+    this.telemetryBlocks += 1;
+    if (this.telemetryBlocks < TELEMETRY_WINDOW_BLOCKS) return;
+    const frame = this.telemetryMessage;
+    frame.sequence += 1;
+    frame.cpuPercent = (this.telemetryElapsedMs / this.telemetryBudgetMs) * 100;
+    frame.peakBlockMs = this.telemetryPeakMs;
+    frame.meanBlockMs = this.telemetryElapsedMs / this.telemetryBlocks;
+    frame.budgetMs = this.telemetryBudgetMs / this.telemetryBlocks;
+    frame.deadlineMisses = this.telemetryDeadlineMisses;
+    // A window that measured exactly zero did not prove the render is free; it proved the clock
+    // could not see it. Saying so is the whole point of shipping the resolution alongside.
+    frame.belowResolution = this.telemetryElapsedMs === 0;
+    this.port.postMessage(frame);
+    this.telemetryBlocks = 0;
+    this.telemetryElapsedMs = 0;
+    this.telemetryBudgetMs = 0;
+    this.telemetryPeakMs = 0;
+    this.telemetryDeadlineMisses = 0;
+  }
+
   process(_inputs, outputs) {
     if (this.disposed) {
       this.silence(outputs);
@@ -491,6 +776,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     // here as a throw. There is no `catch_unwind` inside Rust to convert it, so the containment is
     // this: sticky RESULT_INTERNAL and positive-zero output, never a torn or stale block. The user
     // agent may also fire `processorerror`; both paths end with the node silent and disposable.
+    // Issue #137 D3: no clock is read while the lease is released.
+    const started = this.telemetryLease ? this.clock.read() : 0;
     let result;
     try {
       result = this.exports.miso_engine_web_v1_render(this.handle, actualFrames);
@@ -511,6 +798,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     }
     output[0].set(this.outputLeft);
     output[1].set(this.outputRight);
+    if (this.meterLease) this.postMeterFrame();
+    if (this.telemetryLease) this.recordRenderTime(this.clock.read() - started, actualFrames);
     return true;
   }
   // PROCESS_POLICY_END

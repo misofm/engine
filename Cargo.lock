@@ -884,6 +884,7 @@ dependencies = [
 name = "miso-engine-host-core"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-builtins",
  "miso-engine-builtins-compiler",
  "miso-engine-core",
  "miso-engine-effect-compiler",
@@ -914,6 +915,8 @@ dependencies = [
 name = "miso-engine-host-web"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-builtins",
+ "miso-engine-builtins-compiler",
  "miso-engine-core",
  "miso-engine-host-core",
  "miso-engine-session",
@@ -964,6 +967,17 @@ name = "miso-engine-native-scheduler"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+]
+
+[[package]]
+name = "miso-engine-parameter-metadata"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-builtins",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-host-web",
 ]
 
 [[package]]
