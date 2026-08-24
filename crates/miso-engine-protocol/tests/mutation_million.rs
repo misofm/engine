@@ -19,8 +19,8 @@ fn one_million_deterministic_mutations_cover_complete_schema_closed_dispatch() {
     let seeds = complete_schema_corpus();
     assert_eq!(
         seeds.len(),
-        46,
-        "11 commands (including all-opcode transaction) + 11 success + 18 non-OK + 6 events"
+        48,
+        "12 commands (including nudge and all-opcode transaction) + 12 success + 18 non-OK + 6 events"
     );
     assert!(seeds.iter().any(|seed| {
         seed.name == "command.session_transaction_apply"

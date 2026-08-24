@@ -13,6 +13,7 @@ default = []
 
 [dependencies]
 miso-engine-core.workspace = true
+miso-engine-effect-contract.workspace = true
 miso-engine-session.workspace = true
 
 [lints]

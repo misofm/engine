@@ -498,6 +498,7 @@ pub(crate) fn compile_children(
             display_name: None,
             display_unit: None,
             enum_choices: Vec::new(),
+            named_nudges: Vec::new(),
         },
     )
     .map_err(|_| failure("capi.resource.allocation"))?;

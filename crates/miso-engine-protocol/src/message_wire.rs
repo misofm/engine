@@ -10,7 +10,7 @@ use crate::{
         CountSink, Fields as Message, Sink, SliceSink, read_f32, read_u8, read_u16, read_u32,
         read_u64,
     },
-    schema::{self, descriptor, enum_choice},
+    schema::{self, descriptor, enum_choice, named_nudge},
 };
 
 #[cfg(test)]
@@ -370,6 +370,32 @@ pub struct ParameterDescriptor {
     pub display_name: Option<String>,
     pub display_unit: Option<String>,
     pub enum_choices: Vec<EnumChoice>,
+    /// Empty for legacy metadata, otherwise exactly xs/sm/md/lg/xl with current-position deltas.
+    pub named_nudges: Vec<NamedNudge>,
+}
+/// One agent-facing named step with its normalized size and signed current-position deltas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(missing_docs)]
+pub struct NamedNudge {
+    pub size: crate::NudgeSize,
+    pub normalized_step: f32,
+    pub decrement: f32,
+    pub increment: f32,
+}
+/// Typed server-resolved relative effect-parameter command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub struct NudgeEffectParam {
+    pub parameter_handle: u32,
+    pub size: crate::NudgeSize,
+    pub count: i16,
+}
+/// Successful nudge response echoing the resolved absolute parameter value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(missing_docs)]
+pub struct EffectParamNudged {
+    pub parameter_handle: u32,
+    pub resolved_value: f32,
 }
 /// Typed metadata query cursor and bounded page limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1068,6 +1094,96 @@ impl ProtocolCodec {
                 schema::transaction_applied::APPLIED_OPERATIONS
             )?)?,
         })
+    }
+
+    /// Encode a server-resolved named nudge command payload.
+    pub fn encode_nudge_effect_param(
+        &self,
+        value: NudgeEffectParam,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let mut sizing = CountSink::new(self.limits());
+        write_nudge_effect_param(&mut sizing, value)?;
+        let required = checked_sink_len(self, &mut sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_nudge_effect_param(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a server-resolved named nudge command payload.
+    pub fn decode_nudge_effect_param(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<NudgeEffectParam, DecodeError> {
+        let message = Message::top_level(payload, count, self.limits())?;
+        let message = message.schema_spec(&schema::nudge_effect_param::SPEC)?;
+        let count_bytes = one_spec!(message, schema::nudge_effect_param::COUNT)?;
+        let count = i64::from_le_bytes(
+            count_bytes
+                .try_into()
+                .map_err(|_| DecodeError::InvalidValueLength)?,
+        );
+        let value = NudgeEffectParam {
+            parameter_handle: read_u32(one_spec!(
+                message,
+                schema::nudge_effect_param::PARAMETER_HANDLE
+            )?)?,
+            size: crate::NudgeSize::from_raw(read_u8(one_spec!(
+                message,
+                schema::nudge_effect_param::SIZE
+            )?)? as u32)
+            .ok_or(DecodeError::InvalidTlv)?,
+            count: i16::try_from(count).map_err(|_| DecodeError::InvalidTlv)?,
+        };
+        if value.parameter_handle == 0 || value.count == 0 {
+            return Err(DecodeError::InvalidTlv);
+        }
+        Ok(value)
+    }
+
+    /// Encode a successful named nudge result payload.
+    pub fn encode_effect_param_nudged(
+        &self,
+        value: EffectParamNudged,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let mut sizing = CountSink::new(self.limits());
+        write_effect_param_nudged(&mut sizing, value)?;
+        let required = checked_sink_len(self, &mut sizing)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_effect_param_nudged(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a successful named nudge result payload.
+    pub fn decode_effect_param_nudged(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<EffectParamNudged, DecodeError> {
+        let message = Message::top_level(payload, count, self.limits())?;
+        let message = message.schema_spec(&schema::effect_param_nudged::SPEC)?;
+        let value = EffectParamNudged {
+            parameter_handle: read_u32(one_spec!(
+                message,
+                schema::effect_param_nudged::PARAMETER_HANDLE
+            )?)?,
+            resolved_value: read_f32(one_spec!(
+                message,
+                schema::effect_param_nudged::RESOLVED_VALUE
+            )?)?,
+        };
+        if value.parameter_handle == 0 || !value.resolved_value.is_finite() {
+            return Err(DecodeError::InvalidTlv);
+        }
+        Ok(value)
     }
 
     /// Encode/decode helpers for the four-field reliable session-committed event.
@@ -2358,6 +2474,47 @@ pub(crate) fn write_transaction_applied(
     )
 }
 
+pub(crate) fn write_nudge_effect_param(
+    sink: &mut dyn Sink,
+    value: NudgeEffectParam,
+) -> Result<(), EncodeError> {
+    if value.parameter_handle == 0 || value.count == 0 {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::nudge_effect_param::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::nudge_effect_param::PARAMETER_HANDLE,
+        &value.parameter_handle.to_le_bytes()
+    )?;
+    write_spec!(sink, schema::nudge_effect_param::SIZE, &[value.size as u8])?;
+    write_spec!(
+        sink,
+        schema::nudge_effect_param::COUNT,
+        &i64::from(value.count).to_le_bytes()
+    )
+}
+
+pub(crate) fn write_effect_param_nudged(
+    sink: &mut dyn Sink,
+    value: EffectParamNudged,
+) -> Result<(), EncodeError> {
+    if value.parameter_handle == 0 || !value.resolved_value.is_finite() {
+        return Err(EncodeError::LimitExceeded);
+    }
+    sink.check_field_count(schema::effect_param_nudged::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::effect_param_nudged::PARAMETER_HANDLE,
+        &value.parameter_handle.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::effect_param_nudged::RESOLVED_VALUE,
+        &value.resolved_value.to_le_bytes()
+    )
+}
+
 pub(crate) fn write_session_committed(
     sink: &mut dyn Sink,
     value: SessionCommitted,
@@ -2824,6 +2981,7 @@ fn write_descriptor(
             usize::from(value.display_unit.is_some()),
         ),
         (descriptor::ENUM_CHOICE, value.enum_choices.len()),
+        (descriptor::NAMED_NUDGE, value.named_nudges.len()),
     ])?;
     sink.nested_spec(spec, &mut |sink| {
         sink.message_header(fields)?;
@@ -2880,7 +3038,28 @@ fn write_descriptor(
         for choice in &value.enum_choices {
             write_enum_choice(codec, sink, choice)?;
         }
+        for nudge in &value.named_nudges {
+            write_named_nudge(sink, nudge)?;
+        }
         Ok(())
+    })
+}
+
+fn write_named_nudge(sink: &mut dyn Sink, value: &NamedNudge) -> Result<(), EncodeError> {
+    if !named_nudge_is_valid(value) {
+        return Err(EncodeError::LimitExceeded);
+    }
+    let fields = named_nudge::SPEC.field_count(&[])?;
+    sink.nested_spec(descriptor::NAMED_NUDGE, &mut |sink| {
+        sink.message_header(fields)?;
+        write_spec!(sink, named_nudge::SIZE, &[value.size as u8])?;
+        write_spec!(
+            sink,
+            named_nudge::NORMALIZED_STEP,
+            &value.normalized_step.to_le_bytes()
+        )?;
+        write_spec!(sink, named_nudge::DECREMENT, &value.decrement.to_le_bytes())?;
+        write_spec!(sink, named_nudge::INCREMENT, &value.increment.to_le_bytes())
     })
 }
 
@@ -2935,6 +3114,9 @@ fn decode_descriptor(
     let choices = values_spec!(message, descriptor::ENUM_CHOICE)?
         .map(|v| decode_choice(codec, Message::nested_at_depth(v, codec.limits(), 2)?))
         .collect::<Result<Vec<_>, _>>()?;
+    let named_nudges = values_spec!(message, descriptor::NAMED_NUDGE)?
+        .map(|v| decode_named_nudge(Message::nested_at_depth(v, codec.limits(), 2)?))
+        .collect::<Result<Vec<_>, _>>()?;
     let value = ParameterDescriptor {
         handle: read_u32(one_spec!(message, descriptor::HANDLE)?)?,
         track_id: read_string(codec, one_spec!(message, descriptor::TRACK_ID)?)?.to_owned(),
@@ -2966,11 +3148,35 @@ fn decode_descriptor(
             .map(|v| read_string(codec, v).map(str::to_owned))
             .transpose()?,
         enum_choices: choices,
+        named_nudges,
     };
     if !descriptor_is_valid(codec.limits(), &value) {
         return Err(DecodeError::InvalidTlv);
     }
     Ok(value)
+}
+fn decode_named_nudge(message: Message<'_>) -> Result<NamedNudge, DecodeError> {
+    let message = message.schema_spec(&named_nudge::SPEC)?;
+    let value = NamedNudge {
+        size: crate::NudgeSize::from_raw(read_u8(one_spec!(message, named_nudge::SIZE)?)? as u32)
+            .ok_or(DecodeError::InvalidTlv)?,
+        normalized_step: read_f32(one_spec!(message, named_nudge::NORMALIZED_STEP)?)?,
+        decrement: read_f32(one_spec!(message, named_nudge::DECREMENT)?)?,
+        increment: read_f32(one_spec!(message, named_nudge::INCREMENT)?)?,
+    };
+    if !named_nudge_is_valid(&value) {
+        return Err(DecodeError::InvalidTlv);
+    }
+    Ok(value)
+}
+
+fn named_nudge_is_valid(value: &NamedNudge) -> bool {
+    value.normalized_step.is_finite()
+        && value.normalized_step > 0.0
+        && value.decrement.is_finite()
+        && value.decrement <= 0.0
+        && value.increment.is_finite()
+        && value.increment >= 0.0
 }
 fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoice, DecodeError> {
     let message = message.schema_spec(&enum_choice::SPEC)?;
@@ -2985,6 +3191,17 @@ fn decode_choice(codec: &ProtocolCodec, message: Message<'_>) -> Result<EnumChoi
 }
 fn descriptor_is_valid(limits: crate::ProtocolLimits, value: &ParameterDescriptor) -> bool {
     if value.handle == 0 || value.flags & !7 != 0 || !value.default.is_finite() {
+        return false;
+    }
+    if !(value.named_nudges.is_empty()
+        || (value.named_nudges.len() == 5
+            && value.named_nudges.iter().all(named_nudge_is_valid)
+            && value
+                .named_nudges
+                .iter()
+                .enumerate()
+                .all(|(index, nudge)| nudge.size as usize == index + 1)))
+    {
         return false;
     }
     if value.track_id.len() > limits.max_string_bytes
@@ -3533,7 +3750,8 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 4) != 0) != has_command(0x0002))
         || ((value.flags.0 & (1 << 5) != 0) != has_command(0x0006))
         || ((value.flags.0 & (1 << 6) != 0) != has_command(0x0009))
-        || ((value.flags.0 & (1 << 7) != 0) != (has_command(0x0004) && has_command(0x0005)))
+        || ((value.flags.0 & (1 << 7) != 0)
+            != (has_command(0x0004) && has_command(0x0005) && has_command(0x000c)))
         || ((value.flags.0 & (1 << 8) != 0) != has_command(0x0007))
         || ((value.flags.0 & (1 << 9) != 0) != has_event(0x8020))
         || ((value.flags.0 & (1 << 10) != 0) != (has_command(0x000a) && has_event(0x8021)))
@@ -3543,6 +3761,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || (has_command(0x0003) != has_event(0x8001))
         || (has_event(0x8001) != has_event(0x8002))
         || (has_command(0x0004) != has_command(0x0005))
+        || (has_command(0x0005) != has_command(0x000c))
         || (has_command(0x0008) != has_event(0x8010))
         || (has_command(0x000a) != has_event(0x8021))
         || (has_command(0x000b) != has_event(0x8030))
@@ -3555,7 +3774,7 @@ fn allocated_id(id: u16, event: bool) -> bool {
     if event {
         matches!(id, 0x8001 | 0x8002 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
     } else {
-        matches!(id, 1..=11)
+        matches!(id, 1..=12)
     }
 }
 
@@ -4487,6 +4706,75 @@ mod tests {
     }
 
     #[test]
+    fn named_nudge_payloads_roundtrip_and_reject_abi_mutations() {
+        let codec = ProtocolCodec::default();
+        let command = NudgeEffectParam {
+            parameter_handle: 7,
+            size: crate::NudgeSize::Md,
+            count: -3,
+        };
+        let mut bytes = [0_u8; 64];
+        let length = codec
+            .encode_nudge_effect_param(command, &mut bytes)
+            .unwrap();
+        assert_eq!(
+            codec.decode_nudge_effect_param(&bytes[..length], 3),
+            Ok(command)
+        );
+
+        let mut bad_size = bytes[..length].to_vec();
+        bad_size[24] = 6;
+        assert_eq!(
+            codec.decode_nudge_effect_param(&bad_size, 3),
+            Err(DecodeError::InvalidTlv)
+        );
+        let mut zero_count = bytes[..length].to_vec();
+        zero_count[40..48].copy_from_slice(&0_i64.to_le_bytes());
+        assert_eq!(
+            codec.decode_nudge_effect_param(&zero_count, 3),
+            Err(DecodeError::InvalidTlv)
+        );
+        let mut wide_count = bytes[..length].to_vec();
+        wide_count[40..48].copy_from_slice(&32_768_i64.to_le_bytes());
+        assert_eq!(
+            codec.decode_nudge_effect_param(&wide_count, 3),
+            Err(DecodeError::InvalidTlv)
+        );
+        assert_eq!(
+            codec.encode_nudge_effect_param(
+                NudgeEffectParam {
+                    count: 0,
+                    ..command
+                },
+                &mut bytes
+            ),
+            Err(EncodeError::LimitExceeded)
+        );
+
+        let response = EffectParamNudged {
+            parameter_handle: 7,
+            resolved_value: 0.25,
+        };
+        let length = codec
+            .encode_effect_param_nudged(response, &mut bytes)
+            .unwrap();
+        assert_eq!(
+            codec.decode_effect_param_nudged(&bytes[..length], 2),
+            Ok(response)
+        );
+        assert_eq!(
+            codec.encode_effect_param_nudged(
+                EffectParamNudged {
+                    resolved_value: f32::NAN,
+                    ..response
+                },
+                &mut bytes
+            ),
+            Err(EncodeError::LimitExceeded)
+        );
+    }
+
+    #[test]
     fn b1b_fixed_goldens_and_every_byte_truncation() {
         let codec = codec();
         let request = SessionSnapshotRequest {
@@ -4584,7 +4872,7 @@ mod tests {
         assert_eq!(
             hex(&frame),
             concat!(
-                "4d49534f43544c0001000000300003000180000040000000000000000000000008000000000000000400000000000000",
+                "4d49534f43544c0001000100300003000180000040000000000000000000000008000000000000000400000000000000",
                 "01000401080000000100000000000000020004010800000002000000000000000300040108000000070000000000000004000301040000000300000000000000"
             )
         );
@@ -4623,6 +4911,7 @@ mod tests {
             display_name: Some("Threshold".to_owned()),
             display_unit: Some("dB".to_owned()),
             enum_choices: Vec::new(),
+            named_nudges: Vec::new(),
         };
         let page = ParameterMetadataPage {
             last_handle: 1,
@@ -4735,6 +5024,7 @@ mod tests {
             display_name: None,
             display_unit: None,
             enum_choices: choices,
+            named_nudges: Vec::new(),
         }
     }
 
@@ -5890,7 +6180,7 @@ mod tests {
             &canceled_bytes,
             6,
             concat!(
-                "4d49534f43544c00010000003000030002800000600000000000000000000000",
+                "4d49534f43544c00010001003000030002800000600000000000000000000000",
                 "07000000000000000600000000000000",
                 "0100040108000000010000000000000002000401080000000200000000000000",
                 "0300020102000000030000000000000004000101010000000100000000000000",
@@ -5902,7 +6192,7 @@ mod tests {
             &meter_bytes,
             4,
             concat!(
-                "4d49534f43544c00010000003000030020800000480000000000000000000000",
+                "4d49534f43544c00010001003000030020800000480000000000000000000000",
                 "07000000000000000400000000000000",
                 "0100040108000000090000000000000002000201020000000100000000000000",
                 "0300020102000000100000000000000004000a01100000000100000002000300",
@@ -5914,7 +6204,7 @@ mod tests {
             &counter_bytes,
             2,
             concat!(
-                "4d49534f43544c00010000003000030021800000400000000000000000000000",
+                "4d49534f43544c00010001003000030021800000400000000000000000000000",
                 "07000000000000000200000000000000",
                 "0100040108000000090000000000000002000b01280000000200000000000000",
                 "0100030104000000050000000000000002000401080000000200000000000000"
@@ -5925,7 +6215,7 @@ mod tests {
             &diagnostic_bytes,
             1,
             concat!(
-                "4d49534f43544c00010000003000030030800000400000000000000000000000",
+                "4d49534f43544c00010001003000030030800000400000000000000000000000",
                 "07000000000000000100000000000000",
                 "01000b013800000003000000000000000100090103000000612e620000000000",
                 "0200010101000000030000000000000007000400080000000300000000000000"

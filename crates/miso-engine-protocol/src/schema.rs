@@ -277,7 +277,7 @@ pub(crate) mod enum_choice {
 }
 
 pub(crate) mod descriptor {
-    use super::{FieldSpec, MessageSpec, Wire, enum_choice};
+    use super::{FieldSpec, MessageSpec, Wire, enum_choice, named_nudge};
 
     pub(crate) const HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
     pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(2, Wire::Utf8);
@@ -298,6 +298,7 @@ pub(crate) mod descriptor {
     pub(crate) const DISPLAY_NAME: FieldSpec = FieldSpec::opt(17, Wire::Utf8);
     pub(crate) const DISPLAY_UNIT: FieldSpec = FieldSpec::opt(18, Wire::Utf8);
     pub(crate) const ENUM_CHOICE: FieldSpec = FieldSpec::msg(19, false, true, &enum_choice::SPEC);
+    pub(crate) const NAMED_NUDGE: FieldSpec = FieldSpec::msg(20, false, true, &named_nudge::SPEC);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ParameterDescriptor",
         fields: &[
@@ -320,7 +321,41 @@ pub(crate) mod descriptor {
             DISPLAY_NAME,
             DISPLAY_UNIT,
             ENUM_CHOICE,
+            NAMED_NUDGE,
         ],
+    };
+}
+
+pub(crate) mod named_nudge {
+    use super::*;
+    pub(crate) const SIZE: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const NORMALIZED_STEP: FieldSpec = FieldSpec::req(2, Wire::F32);
+    pub(crate) const DECREMENT: FieldSpec = FieldSpec::req(3, Wire::F32);
+    pub(crate) const INCREMENT: FieldSpec = FieldSpec::req(4, Wire::F32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "NamedNudge",
+        fields: &[SIZE, NORMALIZED_STEP, DECREMENT, INCREMENT],
+    };
+}
+
+pub(crate) mod nudge_effect_param {
+    use super::*;
+    pub(crate) const PARAMETER_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const SIZE: FieldSpec = FieldSpec::req(2, Wire::U8);
+    pub(crate) const COUNT: FieldSpec = FieldSpec::req(3, Wire::I64);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "NudgeEffectParam",
+        fields: &[PARAMETER_HANDLE, SIZE, COUNT],
+    };
+}
+
+pub(crate) mod effect_param_nudged {
+    use super::*;
+    pub(crate) const PARAMETER_HANDLE: FieldSpec = FieldSpec::req(1, Wire::U32);
+    pub(crate) const RESOLVED_VALUE: FieldSpec = FieldSpec::req(2, Wire::F32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "EffectParamNudged",
+        fields: &[PARAMETER_HANDLE, RESOLVED_VALUE],
     };
 }
 
@@ -1536,6 +1571,9 @@ mod tests {
             &capabilities_request::SPEC,
             &enum_choice::SPEC,
             &descriptor::SPEC,
+            &named_nudge::SPEC,
+            &nudge_effect_param::SPEC,
+            &effect_param_nudged::SPEC,
             &snapshot_request::SPEC,
             &snapshot::SPEC,
             &transaction_applied::SPEC,

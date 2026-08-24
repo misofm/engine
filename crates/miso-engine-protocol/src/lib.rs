@@ -20,14 +20,16 @@ pub use message_wire::{
     Backpressure, BackpressureQueueKind, Capabilities, CapabilityFlags, CounterId, CounterSnapshot,
     CounterSnapshotRef, CounterValue, CountersRequest, DecodedAutomationEnqueue,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticSeverity,
-    DiagnosticsPage, DiagnosticsRequest, EnumChoice, MeterBatch, MeterComponent, MeterRecord,
-    NonOkResponse, ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
-    ParameterMapping, ParameterMetadataPage, ParameterMetadataRequest, ParameterRack,
-    ParameterStatePage, ParameterStateRecord, ParameterStateRequest, ParameterUnit,
-    ParameterValueKind, PathSegment, SessionCommitted, SessionSnapshot, SessionSnapshotRequest,
-    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportState, TransportStateEvent,
+    DiagnosticsPage, DiagnosticsRequest, EffectParamNudged, EnumChoice, MeterBatch, MeterComponent,
+    MeterRecord, NamedNudge, NonOkResponse, NudgeEffectParam, ParameterAutomationRate,
+    ParameterChannel, ParameterDescriptor, ParameterDomain, ParameterMapping,
+    ParameterMetadataPage, ParameterMetadataRequest, ParameterRack, ParameterStatePage,
+    ParameterStateRecord, ParameterStateRequest, ParameterUnit, ParameterValueKind, PathSegment,
+    SessionCommitted, SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
+    TransportStateEvent,
 };
+pub use miso_engine_effect_contract::NudgeSize;
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEditError, SessionEditOpcode, SessionEditV1,
     SessionStore, SessionStoreError, apply_session_edit,
@@ -58,8 +60,10 @@ pub use wire::{
 
 /// The current, frozen BTLV wire major version.
 pub const PROTOCOL_MAJOR_V1: u16 = 1;
-/// The current, frozen BTLV wire minor version.
+/// The original frozen BTLV wire minor version.
 pub const PROTOCOL_MINOR_V1: u16 = 0;
+/// The current additive BTLV wire minor version.
+pub const PROTOCOL_MINOR_CURRENT: u16 = 1;
 /// Exact bytes in every BTLV outer header.
 pub const OUTER_HEADER_BYTES: usize = 48;
 /// Exact bytes in every BTLV TLV prefix.

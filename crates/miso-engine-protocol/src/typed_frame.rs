@@ -9,12 +9,12 @@ use crate::{
     AutomationCanceled, AutomationEnqueue, AutomationEnqueued, Capabilities, CommandHeader,
     CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
     DecodedAutomationEnqueue, DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent,
-    DiagnosticsPage, DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId,
-    MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ParameterMetadataPage, ParameterMetadataRequest,
-    ParameterStatePage, ParameterStateRequest, ProtocolCodec, RequestId, ResponseHeader,
-    SessionCommitted, SessionEditV1, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
-    StatusCode, TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent,
+    DiagnosticsPage, DiagnosticsRequest, EffectParamNudged, EncodeError, EventHeader, FrameKind,
+    MessageId, MeterBatch, NonOkResponse, NudgeEffectParam, OUTER_HEADER_BYTES,
+    ParameterMetadataPage, ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
+    ProtocolCodec, RequestId, ResponseHeader, SessionCommitted, SessionEditV1, SessionRevision,
+    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -51,6 +51,7 @@ pub enum CommandPayload<'a> {
     TelemetryConfigure(&'a TelemetryConfiguration),
     CountersGet(&'a CountersRequest),
     DiagnosticsGet(DiagnosticsRequest),
+    NudgeEffectParam(NudgeEffectParam),
 }
 
 /// One typed command frame with a command-only revision precondition.
@@ -75,6 +76,7 @@ pub enum SuccessResponsePayload<'a> {
     TelemetryConfiguration(TelemetryConfiguration),
     CounterSnapshot(CounterSnapshot),
     DiagnosticsPage(DiagnosticsPage),
+    EffectParamNudged(EffectParamNudged),
 }
 
 /// One typed successful response frame. The payload selects and fixes the echoed command ID.
@@ -127,6 +129,7 @@ pub enum DecodedCommandPayload<'a> {
     TelemetryConfigure(TelemetryConfiguration),
     CountersGet(CountersRequest),
     DiagnosticsGet(DiagnosticsRequest),
+    NudgeEffectParam(NudgeEffectParam),
 }
 
 /// A strictly decoded kind-specific command header and its exact registered payload.
@@ -150,6 +153,7 @@ pub enum DecodedSuccessResponsePayload<'a> {
     TelemetryConfiguration(TelemetryConfiguration),
     CounterSnapshot(CounterSnapshot),
     DiagnosticsPage(DiagnosticsPage),
+    EffectParamNudged(EffectParamNudged),
 }
 
 /// A strictly decoded response payload selected by its non-OK status or successful schema.
@@ -197,6 +201,7 @@ impl<'a> CommandPayload<'a> {
             Self::TelemetryConfigure(_) => MessageId::TelemetryConfigure,
             Self::CountersGet(_) => MessageId::CountersGet,
             Self::DiagnosticsGet(_) => MessageId::DiagnosticsGet,
+            Self::NudgeEffectParam(_) => MessageId::NudgeEffectParam,
         }
     }
 }
@@ -215,6 +220,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::TelemetryConfiguration(_) => MessageId::TelemetryConfigure,
             Self::CounterSnapshot(_) => MessageId::CountersGet,
             Self::DiagnosticsPage(_) => MessageId::DiagnosticsGet,
+            Self::EffectParamNudged(_) => MessageId::NudgeEffectParam,
         }
     }
 }
@@ -449,6 +455,9 @@ impl ProtocolCodec {
             MessageId::DiagnosticsGet => DecodedCommandPayload::DiagnosticsGet(
                 self.decode_diagnostics_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::NudgeEffectParam => DecodedCommandPayload::NudgeEffectParam(
+                self.decode_nudge_effect_param(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedCommandFrame { header, payload })
@@ -509,6 +518,9 @@ impl ProtocolCodec {
             MessageId::DiagnosticsGet => DecodedSuccessResponsePayload::DiagnosticsPage(
                 self.decode_diagnostics_page(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::NudgeEffectParam => DecodedSuccessResponsePayload::EffectParamNudged(
+                self.decode_effect_param_nudged(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedResponseFrame::Success { header, payload })
@@ -558,6 +570,7 @@ fn command_requires_exact_revision(payload: &CommandPayload<'_>) -> bool {
             | CommandPayload::AutomationEnqueue(_)
             | CommandPayload::TransportSet(_)
             | CommandPayload::TelemetryConfigure(_)
+            | CommandPayload::NudgeEffectParam(_)
     )
 }
 
@@ -568,6 +581,7 @@ const fn command_message_requires_exact(message_id: MessageId) -> bool {
             | MessageId::AutomationEnqueue
             | MessageId::TransportSet
             | MessageId::TelemetryConfigure
+            | MessageId::NudgeEffectParam
     )
 }
 
@@ -684,6 +698,9 @@ fn write_command_payload(
         CommandPayload::DiagnosticsGet(value) => {
             crate::message_wire::write_diagnostics_request(sink, *value)
         }
+        CommandPayload::NudgeEffectParam(value) => {
+            crate::message_wire::write_nudge_effect_param(sink, *value)
+        }
     }
 }
 
@@ -730,6 +747,9 @@ fn write_success_payload(
         SuccessResponsePayload::DiagnosticsPage(value) => {
             crate::message_wire::write_diagnostics_page(codec, sink, value)
         }
+        SuccessResponsePayload::EffectParamNudged(value) => {
+            crate::message_wire::write_effect_param_nudged(sink, *value)
+        }
     }
 }
 
@@ -769,7 +789,7 @@ mod tests {
     fn capabilities<'a>() -> Capabilities<'a> {
         Capabilities {
             minimum_version: crate::ProtocolVersion::V1,
-            maximum_version: crate::ProtocolVersion::V1,
+            maximum_version: crate::ProtocolVersion::CURRENT,
             maximum_frame_bytes: 4096,
             maximum_tlvs: 1024,
             maximum_string_bytes: 1024,
@@ -790,7 +810,7 @@ mod tests {
             maximum_diagnostic_page_items: 256,
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
-            supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
             flags: crate::CapabilityFlags::B4_BASE,
         }
@@ -1056,6 +1076,18 @@ mod tests {
                 },
                 MessageId::DiagnosticsGet,
             ),
+            (
+                TypedCommandFrame {
+                    request_id: request_id(),
+                    expected_revision: crate::ExpectedRevision::Exact(SessionRevision(7)),
+                    payload: CommandPayload::NudgeEffectParam(NudgeEffectParam {
+                        parameter_handle: 1,
+                        size: crate::NudgeSize::Xs,
+                        count: 1,
+                    }),
+                },
+                MessageId::NudgeEffectParam,
+            ),
         ];
         for (frame, expected_id) in &frames {
             assert_command_frame(&codec, frame, *expected_id);
@@ -1210,6 +1242,17 @@ mod tests {
                     }),
                 },
                 MessageId::DiagnosticsGet,
+            ),
+            (
+                TypedSuccessResponseFrame {
+                    request_id: request_id(),
+                    revision: SessionRevision(7),
+                    payload: SuccessResponsePayload::EffectParamNudged(EffectParamNudged {
+                        parameter_handle: 1,
+                        resolved_value: 0.25,
+                    }),
+                },
+                MessageId::NudgeEffectParam,
             ),
         ];
         for (frame, expected_id) in &responses {

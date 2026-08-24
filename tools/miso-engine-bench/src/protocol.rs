@@ -286,11 +286,11 @@ fn request_id(value: u64) -> RequestId {
 }
 
 fn capabilities() -> Capabilities<'static> {
-    const COMMANDS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const COMMANDS: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     const EVENTS: &[u16] = &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030];
     Capabilities {
         minimum_version: ProtocolVersion::V1,
-        maximum_version: ProtocolVersion::V1,
+        maximum_version: ProtocolVersion::CURRENT,
         maximum_frame_bytes: MAX_FRAME_BYTES as u64,
         maximum_tlvs: 1024,
         maximum_string_bytes: 1024,
@@ -381,6 +381,7 @@ fn corpus() -> Vec<WorkFrame> {
             display_name: Some(format!("Parameter {index:03}")),
             display_unit: Some("dB".to_owned()),
             enum_choices: Vec::new(),
+            named_nudges: Vec::new(),
         })
         .collect::<Vec<_>>();
     let second_descriptor_page = descriptors.split_off(128);

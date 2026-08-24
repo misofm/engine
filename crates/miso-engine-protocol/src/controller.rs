@@ -23,16 +23,16 @@ use crate::{
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
     CapabilityFlags, CommandHeader, CounterSnapshot, CounterSnapshotRef, CounterTelemetryRecord,
     CounterValue, CountersRequest, DecodeError, DecodeScratch, DecodedCommandPayload, Diagnostic,
-    DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EncodeError, EventPayload,
-    ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterAutomationRate,
-    ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
-    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
-    PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
-    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEditV1, SessionRevision,
-    SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
-    TransportSnapshot, TransportState, TransportStateEvent, TypedEventFrame,
-    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EffectParamNudged, EncodeError,
+    EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse,
+    NudgeEffectParam, ParameterAutomationRate, ParameterDescriptor, ParameterDomain,
+    ParameterHandle, ParameterMetadataPage, ParameterMetadataRequest, ParameterStatePage,
+    ParameterStateRequest, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
+    ReliablePayload, ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEditV1,
+    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
+    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
@@ -1049,6 +1049,9 @@ pub enum ControlCommand<'a> {
     DiagnosticsGet {
         request: DiagnosticsRequest,
     },
+    NudgeEffectParam {
+        request: NudgeEffectParam,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1059,6 +1062,7 @@ impl ControlCommand<'_> {
                 | Self::AutomationEnqueue { .. }
                 | Self::TransportSet { .. }
                 | Self::TelemetryConfigure { .. }
+                | Self::NudgeEffectParam { .. }
         )
     }
 
@@ -1075,6 +1079,7 @@ impl ControlCommand<'_> {
             Self::TelemetryConfigure { .. } => MessageId::TelemetryConfigure,
             Self::CountersGet { .. } => MessageId::CountersGet,
             Self::DiagnosticsGet { .. } => MessageId::DiagnosticsGet,
+            Self::NudgeEffectParam { .. } => MessageId::NudgeEffectParam,
         }
     }
 }
@@ -1107,7 +1112,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 11],
+    commands: [u16; 12],
     command_len: u8,
     events: [u16; 6],
     event_len: u8,
@@ -1130,6 +1135,7 @@ enum Body {
     Telemetry(TelemetryConfiguration),
     Counters(CounterSnapshot),
     Diagnostics(DiagnosticsPage),
+    EffectParamNudged(EffectParamNudged),
     NonOk(NonOkResponse),
 }
 
@@ -1244,7 +1250,14 @@ struct StructuralCommandPlan {
     cancellation_batches: usize,
     required_events: usize,
     applied_operations: u32,
+    response: StructuralResponse,
     response_measure: crate::btlv::MessageMeasure,
+}
+
+#[derive(Clone, Copy)]
+enum StructuralResponse {
+    TransactionApplied,
+    EffectParamNudged(EffectParamNudged),
 }
 
 // Keeping the structural plan inline avoids introducing a heap allocation into the direct
@@ -1675,6 +1688,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::DiagnosticsGet(request) => {
                 ControlCommand::DiagnosticsGet { request }
             }
+            DecodedCommandPayload::NudgeEffectParam(request) => {
+                ControlCommand::NudgeEffectParam { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -1758,12 +1774,20 @@ impl<P: ControlProvider> ProtocolController<P> {
         plan: StructuralCommandPlan,
     ) -> Result<PreparedStructuralCommand, CommandFrameProcessError> {
         let revision = plan.prospective_session.revision();
+        let payload = match plan.response {
+            StructuralResponse::TransactionApplied => {
+                SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                    applied_operations: plan.applied_operations,
+                })
+            }
+            StructuralResponse::EffectParamNudged(value) => {
+                SuccessResponsePayload::EffectParamNudged(value)
+            }
+        };
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: plan.applied_operations,
-            }),
+            payload,
         };
         #[cfg(test)]
         RESPONSE_STAGING_VECS.with(|allocations| {
@@ -1826,13 +1850,16 @@ impl<P: ControlProvider> ProtocolController<P> {
     }
 
     fn plan_structural_command(
-        &self,
+        &mut self,
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output_capacity: usize,
         header: CommandHeader,
     ) -> Result<StructuralCommandDisposition, CommandFrameProcessError> {
-        if header.message_id != MessageId::SessionTransactionApply {
+        if !matches!(
+            header.message_id,
+            MessageId::SessionTransactionApply | MessageId::NudgeEffectParam
+        ) {
             return Ok(StructuralCommandDisposition::Legacy);
         }
         let is_new_request = self.replay.is_new_request(header.request_id);
@@ -1846,6 +1873,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if !self.config.provider_features.session_events
             || self.config.maximum_transaction_edits == 0
+            || (header.message_id == MessageId::NudgeEffectParam
+                && !self.config.provider_features.parameters)
             || !matches!(header.expected_revision, ExpectedRevision::Exact(_))
             || matches!(
                 header.expected_revision,
@@ -1870,24 +1899,85 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
-        let DecodedCommandPayload::SessionTransactionApply(edits) = decoded.payload else {
-            return Ok(StructuralCommandDisposition::Immediate {
-                replay_plan,
-                outcome: self.non_ok(StatusCode::Internal, None),
-            });
+        let (prospective_session, applied_operations, response) = match decoded.payload {
+            DecodedCommandPayload::SessionTransactionApply(edits) => {
+                if edits.is_empty() {
+                    return Ok(StructuralCommandDisposition::Immediate {
+                        replay_plan,
+                        outcome: self.non_ok(StatusCode::InvalidField, None),
+                    });
+                }
+                if edits.len() > self.config.maximum_transaction_edits as usize {
+                    return Ok(StructuralCommandDisposition::Immediate {
+                        replay_plan,
+                        outcome: self.non_ok(StatusCode::LimitExceeded, None),
+                    });
+                }
+                let applied_operations = match u32::try_from(edits.len()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.non_ok(StatusCode::LimitExceeded, None),
+                        });
+                    }
+                };
+                let prospective_session = match self
+                    .session
+                    .prepare_transaction(header.expected_revision, &edits)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.transaction_error_outcome(&error),
+                        });
+                    }
+                };
+                (
+                    prospective_session,
+                    applied_operations,
+                    StructuralResponse::TransactionApplied,
+                )
+            }
+            DecodedCommandPayload::NudgeEffectParam(request) => {
+                let (edit, resolved_value) = match self.resolve_nudge_edit(request) {
+                    Ok(value) => value,
+                    Err(status) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.non_ok(status, None),
+                        });
+                    }
+                };
+                let prospective_session = match self
+                    .session
+                    .prepare_transaction(header.expected_revision, &[edit])
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(StructuralCommandDisposition::Immediate {
+                            replay_plan,
+                            outcome: self.transaction_error_outcome(&error),
+                        });
+                    }
+                };
+                (
+                    prospective_session,
+                    1,
+                    StructuralResponse::EffectParamNudged(EffectParamNudged {
+                        parameter_handle: request.parameter_handle,
+                        resolved_value,
+                    }),
+                )
+            }
+            _ => {
+                return Ok(StructuralCommandDisposition::Immediate {
+                    replay_plan,
+                    outcome: self.non_ok(StatusCode::Internal, None),
+                });
+            }
         };
-        if edits.is_empty() {
-            return Ok(StructuralCommandDisposition::Immediate {
-                replay_plan,
-                outcome: self.non_ok(StatusCode::InvalidField, None),
-            });
-        }
-        if edits.len() > self.config.maximum_transaction_edits as usize {
-            return Ok(StructuralCommandDisposition::Immediate {
-                replay_plan,
-                outcome: self.non_ok(StatusCode::LimitExceeded, None),
-            });
-        }
         let cancellation_batches =
             usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
                 .unwrap_or(usize::MAX);
@@ -1913,34 +2003,21 @@ impl<P: ControlProvider> ProtocolController<P> {
                 outcome: self.non_ok(StatusCode::Internal, None),
             });
         }
-        let applied_operations = match u32::try_from(edits.len()) {
-            Ok(value) => value,
-            Err(_) => {
-                return Ok(StructuralCommandDisposition::Immediate {
-                    replay_plan,
-                    outcome: self.non_ok(StatusCode::LimitExceeded, None),
-                });
-            }
-        };
-        let prospective_session = match self
-            .session
-            .prepare_transaction(header.expected_revision, &edits)
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(StructuralCommandDisposition::Immediate {
-                    replay_plan,
-                    outcome: self.transaction_error_outcome(&error),
-                });
-            }
-        };
         let revision = prospective_session.revision();
+        let payload = match response {
+            StructuralResponse::TransactionApplied => {
+                SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                    applied_operations,
+                })
+            }
+            StructuralResponse::EffectParamNudged(value) => {
+                SuccessResponsePayload::EffectParamNudged(value)
+            }
+        };
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations,
-            }),
+            payload,
         };
         let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
             Ok(measure) => measure,
@@ -1977,6 +2054,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 cancellation_batches,
                 required_events,
                 applied_operations,
+                response,
                 response_measure,
             },
         ))
@@ -1990,12 +2068,20 @@ impl<P: ControlProvider> ProtocolController<P> {
         plan: StructuralCommandPlan,
     ) -> Result<usize, CommandFrameProcessError> {
         let revision = plan.prospective_session.revision();
+        let payload = match plan.response {
+            StructuralResponse::TransactionApplied => {
+                SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
+                    applied_operations: plan.applied_operations,
+                })
+            }
+            StructuralResponse::EffectParamNudged(value) => {
+                SuccessResponsePayload::EffectParamNudged(value)
+            }
+        };
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-                applied_operations: plan.applied_operations,
-            }),
+            payload,
         };
         let written = self
             .codec
@@ -2301,6 +2387,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::DiagnosticsGet(request) => {
                 ControlCommand::DiagnosticsGet { request }
             }
+            DecodedCommandPayload::NudgeEffectParam(request) => {
+                ControlCommand::NudgeEffectParam { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -2399,6 +2488,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             (MessageId::DiagnosticsGet, Body::Diagnostics(value)) => {
                 encode_success!(SuccessResponsePayload::DiagnosticsPage(value))
+            }
+            (MessageId::NudgeEffectParam, Body::EffectParamNudged(value)) => {
+                encode_success!(SuccessResponsePayload::EffectParamNudged(value))
             }
             _ => Err(EncodeError::MessageKindMismatch),
         }
@@ -2958,7 +3050,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 features.session_events && self.config.maximum_transaction_edits != 0
             }
             ControlCommand::ParameterMetadataGet { .. }
-            | ControlCommand::ParameterStateGet { .. } => features.parameters,
+            | ControlCommand::ParameterStateGet { .. }
+            | ControlCommand::NudgeEffectParam { .. } => features.parameters,
             ControlCommand::TransportGet => features.transport,
             ControlCommand::TransportSet { .. } => features.transport && features.transport_events,
             ControlCommand::CountersGet { .. } => features.counters,
@@ -3083,7 +3176,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::ParameterMetadataGet {
                 request: parameter_request,
             } => match self.provider.parameter_metadata(*parameter_request) {
-                Ok(page) => self.ok(Body::ParameterMetadata(page)),
+                Ok(mut page) => {
+                    for descriptor in &mut page.descriptors {
+                        self.populate_named_nudge_deltas(descriptor);
+                    }
+                    self.ok(Body::ParameterMetadata(page))
+                }
                 Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::ParameterStateGet {
@@ -3236,6 +3334,132 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
                 Err(error) => self.non_ok(status_for_parameter(error), None),
             },
+            ControlCommand::NudgeEffectParam {
+                request: nudge_request,
+            } => {
+                let (edit, resolved_value) = match self.resolve_nudge_edit(*nudge_request) {
+                    Ok(value) => value,
+                    Err(status) => return self.non_ok(status, None),
+                };
+                let previous_revision = self.session.revision();
+                let event_sequence = self.next_reliable_event_sequence;
+                let cancellation_batches =
+                    usize::try_from(self.queues.report(crate::QueueKind::Automation).occupancy)
+                        .unwrap_or(usize::MAX);
+                let required_events = cancellation_batches.saturating_add(1);
+                let mut reservations = match self.queues.reserve_reliable_events(required_events) {
+                    Ok(value) => value,
+                    Err(report) => return self.queue_backpressure_outcome(report),
+                };
+                match self
+                    .session
+                    .apply_transaction(request.expected_revision, &[edit])
+                {
+                    Ok(commit) => {
+                        self.queues.commit_reserved_reliable_event(
+                            &mut reservations,
+                            ReliableSlot::session_committed(
+                                commit.revision,
+                                event_sequence,
+                                request.request_id,
+                                previous_revision,
+                                1,
+                            ),
+                        );
+                        self.next_reliable_event_sequence = event_sequence.saturating_add(1);
+                        let effective_sample = self.provider.current_sample();
+                        let _ = self.cancel_queued_automation_reserved(
+                            &mut reservations,
+                            AutomationCancellationReason::RevisionChanged,
+                            Some(effective_sample),
+                        );
+                        self.ok_at_revision(
+                            commit.revision,
+                            Body::EffectParamNudged(EffectParamNudged {
+                                parameter_handle: nudge_request.parameter_handle,
+                                resolved_value,
+                            }),
+                        )
+                    }
+                    Err(error) => {
+                        self.queues.release_reliable_events(reservations);
+                        self.transaction_error_outcome(&error)
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_nudge_edit(
+        &mut self,
+        request: NudgeEffectParam,
+    ) -> Result<(SessionEditV1, f32), StatusCode> {
+        let descriptor = self
+            .provider
+            .parameter_descriptor(ParameterHandle(request.parameter_handle))
+            .map_err(status_for_parameter)?
+            .clone();
+        let track_id = miso_engine_session::StableId::parse(&descriptor.track_id)
+            .ok_or(StatusCode::InvalidField)?;
+        let effect_id = miso_engine_session::StableId::parse(&descriptor.effect_id)
+            .ok_or(StatusCode::InvalidField)?;
+        let current = self
+            .session
+            .effect_parameter_value(
+                &track_id,
+                descriptor.rack.into_session(),
+                &effect_id,
+                descriptor.parameter_id,
+                descriptor.channel.into_session(),
+            )
+            .map_err(|_| StatusCode::NotFound)?
+            .unwrap_or(descriptor.default);
+        let resolved_value =
+            resolve_named_nudge_value(&descriptor, current, request.size, request.count)
+                .ok_or(StatusCode::InvalidField)?;
+        Ok((
+            SessionEditV1::UpsertEffectParam {
+                track_id,
+                rack_name: descriptor.rack.into_session(),
+                effect_id,
+                param: miso_engine_session::EffectParam {
+                    parameter_id: descriptor.parameter_id,
+                    channel: descriptor.channel.into_session(),
+                    unit: descriptor.unit.into_session(),
+                    value: resolved_value,
+                },
+            },
+            resolved_value,
+        ))
+    }
+
+    fn populate_named_nudge_deltas(&self, descriptor: &mut ParameterDescriptor) {
+        if descriptor.named_nudges.is_empty() {
+            return;
+        }
+        let current = miso_engine_session::StableId::parse(&descriptor.track_id)
+            .zip(miso_engine_session::StableId::parse(&descriptor.effect_id))
+            .and_then(|(track_id, effect_id)| {
+                self.session
+                    .effect_parameter_value(
+                        &track_id,
+                        descriptor.rack.into_session(),
+                        &effect_id,
+                        descriptor.parameter_id,
+                        descriptor.channel.into_session(),
+                    )
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(descriptor.default);
+        let snapshot = descriptor.clone();
+        for nudge in &mut descriptor.named_nudges {
+            if let Some(value) = resolve_named_nudge_value(&snapshot, current, nudge.size, -1) {
+                nudge.decrement = value - current;
+            }
+            if let Some(value) = resolve_named_nudge_value(&snapshot, current, nudge.size, 1) {
+                nudge.increment = value - current;
+            }
         }
     }
 
@@ -3354,12 +3578,12 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 11];
+        let mut commands = [0_u16; 12];
         let mut command_len = 0_usize;
-        for id in 1_u16..=11 {
+        for id in 1_u16..=12 {
             let enabled = match id {
                 3 => session_transactions,
-                4 | 5 => features.parameters,
+                4 | 5 | 12 => features.parameters,
                 7 => features.transport,
                 8 => features.transport && features.transport_events,
                 10 => features.counters,
@@ -3435,7 +3659,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         let replay = self.replay.config();
         Capabilities {
             minimum_version: crate::ProtocolVersion::V1,
-            maximum_version: crate::ProtocolVersion::V1,
+            maximum_version: crate::ProtocolVersion::CURRENT,
             maximum_frame_bytes: self.codec.limits().max_frame_bytes as u64,
             maximum_tlvs: self.codec.limits().max_tlv_count,
             maximum_string_bytes: self.codec.limits().max_string_bytes as u64,
@@ -3816,6 +4040,79 @@ fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
     }
 }
 
+fn contract_mapping(
+    value: crate::ParameterMapping,
+) -> miso_engine_effect_contract::ParameterMapping {
+    match value {
+        crate::ParameterMapping::Linear => miso_engine_effect_contract::ParameterMapping::Linear,
+        crate::ParameterMapping::Logarithmic => {
+            miso_engine_effect_contract::ParameterMapping::Logarithmic
+        }
+        crate::ParameterMapping::Exponential => {
+            miso_engine_effect_contract::ParameterMapping::Exponential
+        }
+        crate::ParameterMapping::Stepped => miso_engine_effect_contract::ParameterMapping::Stepped,
+    }
+}
+
+fn resolve_named_nudge_value(
+    descriptor: &ParameterDescriptor,
+    current: f32,
+    size: crate::NudgeSize,
+    count: i16,
+) -> Option<f32> {
+    if count == 0 || !current.is_finite() {
+        return None;
+    }
+    let step = descriptor
+        .named_nudges
+        .iter()
+        .find(|nudge| nudge.size == size)?
+        .normalized_step;
+    let target = match descriptor.domain {
+        ParameterDomain::Continuous => {
+            let (minimum, maximum) = descriptor.minimum.zip(descriptor.maximum)?;
+            let mapping = contract_mapping(descriptor.mapping);
+            let current_x = miso_engine_effect_contract::inverse_map_normalized(
+                mapping, minimum, maximum, current,
+            )?;
+            let target_x = (current_x + f32::from(count) * step).clamp(0.0, 1.0);
+            miso_engine_effect_contract::map_normalized(mapping, minimum, maximum, target_x)?
+        }
+        ParameterDomain::Boolean => {
+            let current_x = match current.to_bits() {
+                0 => 0.0,
+                0x3f80_0000 => 1.0,
+                _ => return None,
+            };
+            if (current_x + f32::from(count) * step).clamp(0.0, 1.0) < 0.5 {
+                0.0
+            } else {
+                1.0
+            }
+        }
+        ParameterDomain::Enumeration => {
+            let length = descriptor.enum_choices.len();
+            let current_index = descriptor
+                .enum_choices
+                .iter()
+                .position(|choice| choice.value.to_bits() == current.to_bits())?;
+            let current_x = current_index as f32 / length.checked_sub(1)? as f32;
+            let position =
+                (current_x + f32::from(count) * step).clamp(0.0, 1.0) * (length - 1) as f32;
+            let lower = position.floor() as usize;
+            let upper = position.ceil() as usize;
+            let index = if position - lower as f32 <= upper as f32 - position {
+                lower
+            } else {
+                upper
+            };
+            descriptor.enum_choices.get(index)?.value
+        }
+    };
+    Some(if target == 0.0 { 0.0 } else { target })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3855,10 +4152,11 @@ mod tests {
         assert_eq!(core::mem::size_of::<ReplayEntry>(), 56);
         assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
         // #84 phase B re-pin (+96): the controller embeds twelve spsc endpoints across its
-        // queues, each +8 for the cached peer cursor.
+        // queues, each +8 for the cached peer cursor. #127 adds exactly 24 bytes: MockProvider's
+        // inline automation ParameterDescriptor gains one Vec<NamedNudge> (ptr/len/cap).
         assert_eq!(
             core::mem::size_of::<ProtocolController<MockProvider>>(),
-            6_088
+            6_112
         );
         assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
     }
@@ -4242,9 +4540,9 @@ mod tests {
             handle: 1,
             track_id: "vocal".to_owned(),
             rack: crate::ParameterRack::Dynamic,
-            effect_id: "comp".to_owned(),
+            effect_id: "eq".to_owned(),
             parameter_id: 1,
-            channel: crate::ParameterChannel::Left,
+            channel: crate::ParameterChannel::Both,
             value_kind: crate::ParameterValueKind::F32,
             unit: crate::ParameterUnit::Db,
             domain: crate::ParameterDomain::Continuous,
@@ -4258,7 +4556,27 @@ mod tests {
             display_name: None,
             display_unit: None,
             enum_choices: Vec::new(),
+            named_nudges: named_nudges(0.05),
         }
+    }
+
+    fn named_nudges(xs: f32) -> Vec<crate::NamedNudge> {
+        [
+            crate::NudgeSize::Xs,
+            crate::NudgeSize::Sm,
+            crate::NudgeSize::Md,
+            crate::NudgeSize::Lg,
+            crate::NudgeSize::Xl,
+        ]
+        .into_iter()
+        .zip(miso_engine_effect_contract::NUDGE_MULTIPLIERS_V1)
+        .map(|(size, multiplier)| crate::NamedNudge {
+            size,
+            normalized_step: xs * f32::from(multiplier),
+            decrement: 0.0,
+            increment: 0.0,
+        })
+        .collect()
     }
 
     fn retained_diagnostic(sequence: u64, severity: crate::DiagnosticSeverity) -> Diagnostic {
@@ -4329,6 +4647,176 @@ mod tests {
             .process_command_frame_into(input, &mut DecodeScratch::new(&mut fields), &mut output)
             .expect("full-frame processing");
         output[..length].to_vec()
+    }
+
+    fn decoded_nudge_value(bytes: &[u8]) -> (SessionRevision, crate::EffectParamNudged) {
+        let codec = ProtocolCodec::default();
+        match codec
+            .decode_typed_response(bytes, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .expect("typed nudge response")
+        {
+            crate::DecodedTypedResponseFrame::Success {
+                header,
+                payload: crate::DecodedSuccessResponsePayload::EffectParamNudged(value),
+            } => (header.revision, value),
+            _ => panic!("expected successful nudge response"),
+        }
+    }
+
+    #[test]
+    fn named_nudge_is_structural_replay_safe_clamped_and_described() {
+        let request = crate::NudgeEffectParam {
+            parameter_handle: 1,
+            size: crate::NudgeSize::Xs,
+            count: 1,
+        };
+        let input = full_command(
+            90,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::NudgeEffectParam(request),
+        );
+        let mut endpoint = controller(8, 1);
+        let prepared = endpoint
+            .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 64]), 2048)
+            .expect("nudge prepares");
+        let PreparedCommandFrame::Structural(prepared) = prepared else {
+            panic!("nudge must wait for replacement-plan publication");
+        };
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+        let committed = endpoint
+            .commit_prepared_structural(*prepared)
+            .expect("published nudge commits");
+        let mut response = vec![0; committed.len()];
+        let written = committed.write_into(&mut response).unwrap();
+        response.truncate(written);
+        let (revision, nudged) = decoded_nudge_value(&response);
+        assert_eq!(revision, SessionRevision(8));
+        assert_eq!(nudged.parameter_handle, 1);
+        let expected_xs = miso_engine_effect_contract::map_normalized(
+            miso_engine_effect_contract::ParameterMapping::Linear,
+            -1.0,
+            1.0,
+            0.55,
+        )
+        .unwrap();
+        assert_eq!(nudged.resolved_value.to_bits(), expected_xs.to_bits());
+
+        let replay = process_full_command(&mut endpoint, &input);
+        assert_eq!(
+            replay, response,
+            "identical request replays exact response bytes"
+        );
+
+        let stale = full_command(
+            91,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::NudgeEffectParam(request),
+        );
+        let stale_response = process_full_command(&mut endpoint, &stale);
+        match ProtocolCodec::default()
+            .decode_typed_response(&stale_response, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .unwrap()
+        {
+            crate::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                assert_eq!(header.status, StatusCode::RevisionConflict);
+            }
+            _ => panic!("stale nudge must conflict"),
+        }
+
+        let mut clamped = controller(8, 1);
+        let clamp_input = full_command(
+            92,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::NudgeEffectParam(crate::NudgeEffectParam {
+                size: crate::NudgeSize::Xl,
+                ..request
+            }),
+        );
+        let clamp_response = process_full_command(&mut clamped, &clamp_input);
+        assert_eq!(decoded_nudge_value(&clamp_response).1.resolved_value, 1.0);
+
+        let mut unknown = controller(8, 1);
+        let unknown_input = full_command(
+            93,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::NudgeEffectParam(crate::NudgeEffectParam {
+                parameter_handle: 2,
+                ..request
+            }),
+        );
+        let unknown_response = process_full_command(&mut unknown, &unknown_input);
+        match ProtocolCodec::default()
+            .decode_typed_response(&unknown_response, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .unwrap()
+        {
+            crate::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                assert_eq!(header.status, StatusCode::NotFound);
+            }
+            _ => panic!("unknown handle must be not-found"),
+        }
+
+        let mut described = controller(8, 1);
+        let metadata = described.process(ControllerRequest {
+            request_id: id(94),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"describe-nudges",
+            command: ControlCommand::ParameterMetadataGet {
+                request: ParameterMetadataRequest {
+                    after_handle: 0,
+                    limit: 1,
+                },
+            },
+        });
+        let page = ProtocolCodec::default()
+            .decode_parameter_metadata_page(metadata.payload(), 3)
+            .unwrap();
+        let nudges = &page.descriptors[0].named_nudges;
+        assert_eq!(nudges.len(), 5);
+        let expected_down = miso_engine_effect_contract::map_normalized(
+            miso_engine_effect_contract::ParameterMapping::Linear,
+            -1.0,
+            1.0,
+            0.45,
+        )
+        .unwrap();
+        assert_eq!(nudges[0].decrement.to_bits(), expected_down.to_bits());
+        assert_eq!(nudges[0].increment.to_bits(), expected_xs.to_bits());
+    }
+
+    #[test]
+    fn named_nudge_steps_enumerations_by_whole_choices() {
+        let mut endpoint = controller(8, 1);
+        let descriptor = &mut endpoint.provider.parameter_metadata[0];
+        descriptor.domain = ParameterDomain::Enumeration;
+        descriptor.minimum = None;
+        descriptor.maximum = None;
+        descriptor.mapping = crate::ParameterMapping::Stepped;
+        descriptor.enum_choices = vec![
+            crate::EnumChoice {
+                value: 0.0,
+                label: "zero".to_owned(),
+            },
+            crate::EnumChoice {
+                value: 1.0,
+                label: "one".to_owned(),
+            },
+            crate::EnumChoice {
+                value: 2.0,
+                label: "two".to_owned(),
+            },
+        ];
+        descriptor.named_nudges = named_nudges(0.5);
+        let input = full_command(
+            95,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::NudgeEffectParam(crate::NudgeEffectParam {
+                parameter_handle: 1,
+                size: crate::NudgeSize::Xs,
+                count: 1,
+            }),
+        );
+        let response = process_full_command(&mut endpoint, &input);
+        assert_eq!(decoded_nudge_value(&response).1.resolved_value, 1.0);
     }
 
     #[test]
@@ -5938,7 +6426,7 @@ mod tests {
         codec.encode(&get, &mut get_frame).expect("get frame");
         assert_eq!(
             hex(&get_frame),
-            "4d49534f43544c0001000000300001010700000000000000010000000000000000000000000000000000000000000000"
+            "4d49534f43544c0001000100300001010700000000000000010000000000000000000000000000000000000000000000"
         );
         let set = TransportSetRequest {
             state: TransportState::Playing,
@@ -6011,7 +6499,7 @@ mod tests {
         assert_eq!(
             hex(&event_frame),
             concat!(
-                "4d49534f43544c0001000000300003001080000050000000",
+                "4d49534f43544c0001000100300003001080000050000000",
                 "000000000000000007000000000000000500000000000000",
                 "01000401080000000100000000000000",
                 "02000101010000000200000000000000",

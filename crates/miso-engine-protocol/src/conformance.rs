@@ -135,10 +135,18 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             minimum_severity: DiagnosticSeverity::Info
         })
     );
+    command!(
+        "command.nudge_effect_param",
+        CommandPayload::NudgeEffectParam(NudgeEffectParam {
+            parameter_handle: 1,
+            size: NudgeSize::Md,
+            count: -3,
+        })
+    );
 
     let capabilities = Capabilities {
         minimum_version: ProtocolVersion::V1,
-        maximum_version: ProtocolVersion::V1,
+        maximum_version: ProtocolVersion::CURRENT,
         maximum_frame_bytes: 4096,
         maximum_tlvs: 1024,
         maximum_string_bytes: 1024,
@@ -159,7 +167,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        supported_commands: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
@@ -253,6 +261,13 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             last_sequence: 0,
             eof: true,
             diagnostics: Vec::new()
+        })
+    );
+    success!(
+        "response.nudge_effect_param",
+        SuccessResponsePayload::EffectParamNudged(EffectParamNudged {
+            parameter_handle: 1,
+            resolved_value: 0.25,
         })
     );
     for status in [

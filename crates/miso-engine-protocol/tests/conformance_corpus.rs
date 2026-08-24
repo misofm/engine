@@ -10,7 +10,7 @@ use miso_engine_protocol::{
 fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
     let codec = ProtocolCodec::default();
     let corpus = complete_schema_corpus();
-    assert_eq!(corpus.len(), 46);
+    assert_eq!(corpus.len(), 48);
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for frame in &corpus {
         hash = hash_bytes(hash, frame.name.as_bytes());
@@ -32,7 +32,8 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
         };
         assert!(decoded.is_ok(), "{} must decode", frame.name);
     }
-    assert_eq!(hash, 0x88a8_ee6a_6d9e_4acc);
+    // #127 adds the schema-closed nudge command/response pair and emits protocol minor 1.
+    assert_eq!(hash, 0x15b4_f165_48b0_72c5);
 }
 
 #[test]
@@ -79,6 +80,7 @@ fn descriptor_handle_required_flag_is_frozen() {
             display_name: None,
             display_unit: None,
             enum_choices: Vec::new(),
+            named_nudges: Vec::new(),
         }],
     };
     let mut bytes = vec![

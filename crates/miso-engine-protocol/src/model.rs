@@ -827,6 +827,42 @@ impl SessionStore {
         self.compiled.canonical_toml()
     }
 
+    /// Read one effect parameter from the authoritative normalized model.
+    ///
+    /// `Ok(None)` means the effect exists but this parameter is omitted and therefore uses its
+    /// descriptor default. The lookup is control-plane only and does not touch a render plan.
+    pub(crate) fn effect_parameter_value(
+        &self,
+        track_id: &StableId,
+        rack_name: RackName,
+        effect_id: &StableId,
+        parameter_id: u32,
+        channel: miso_engine_session::ParameterChannel,
+    ) -> Result<Option<f32>, SessionEditError> {
+        let track = self
+            .compiled
+            .normalized_model()
+            .tracks
+            .iter()
+            .find(|track| &track.id == track_id)
+            .ok_or(SessionEditError::NotFound)?;
+        let rack = match rack_name {
+            RackName::Simd1 => &track.simd1,
+            RackName::Dynamic => &track.dynamic,
+            RackName::Simd2 => &track.simd2,
+        };
+        let effect = rack
+            .effects
+            .iter()
+            .find(|effect| &effect.id == effect_id)
+            .ok_or(SessionEditError::NotFound)?;
+        Ok(effect
+            .params
+            .iter()
+            .find(|param| param.parameter_id == parameter_id && param.channel == channel)
+            .map(|param| param.value))
+    }
+
     /// Resolve every edit in wire order, compile the final candidate, and atomically retain it.
     /// Any failure leaves the prior `CompiledSession`, model, revision, and snapshot untouched.
     pub fn apply_transaction(
