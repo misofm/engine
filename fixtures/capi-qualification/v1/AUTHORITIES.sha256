@@ -4,7 +4,12 @@ c89b195f0d31ad21852d0a931023c70e1eb4a0caa534bfd6e1692c1e1178fd52  Cargo.lock
 080a2b186b6277d8521f495a09d97db744e42a8591cdc251d7829fcddcc51279  crates/miso-engine-capi/src/abi.rs
 18a9f82c66eece7b2d9c06c670b4c1629fc640dc4944ec843eea28db90d55c0c  crates/miso-engine-capi/src/ffi.rs
 e45b2559e0e7241c922c443a7cdd1024f773653bb90c5134645e1b24e7fcdde0  crates/miso-engine-capi/src/lib.rs
-79ccb21cffa18e731e40dc8b8457f0dc58851c7e8c401dd6292510d5de71ae50  crates/miso-engine-capi/src/runtime.rs
+1896920042f58948ac05d72cc8a8b1d376b74731e822867cdadd5c2084ea79f2  crates/miso-engine-capi/src/runtime/compile.rs
+198960b2a5441eb2eecfc2ee5d991efb7e38e2fe7da9f48850e738294eefc4c4  crates/miso-engine-capi/src/runtime/control.rs
+f64585a4f5c42caafa52b28a5c2b34ed2e26f39db8a059b4575ceeb8740d49ca  crates/miso-engine-capi/src/runtime/error.rs
+a2c3a3d5fdaa8076df7d07b81dc0c8693c69d2afc02b88fbbaf94c7cb9b0be38  crates/miso-engine-capi/src/runtime/mod.rs
+388407074f481a57194a3328bd96f4ffa95bac3fd9ae970040787b4ff95f7c53  crates/miso-engine-capi/src/runtime/plan.rs
+666109dcbdadc3f9d54d03b203e5772bc819c57514ef025bb438cecaa4d79fe7  crates/miso-engine-capi/src/runtime/tests.rs
 c4ac50a3bb397f5714f2ea1cba83c273554b30c301da648bafaa973aaa2b95d7  crates/miso-engine-capi/tests/resource_lifecycle.rs
 7a4fa3549c611ef9f1c88ec0b0db0cb84ae8231bed22da7e16204664d275346a  crates/miso-engine-protocol/src/controller.rs
 bea15fa82401faa72af6f617bd6ed7d59ceab97e90a987a0bac1f1fd49888f1f  crates/miso-engine-protocol/src/lib.rs
