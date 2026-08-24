@@ -405,3 +405,50 @@ fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
     assert_eq!(host.status().state, STATE_DISPOSED);
     assert!(host.output_pcm().is_none());
 }
+
+/// #106 F2. A render failure is sticky, silent, and keeps every allocation alive.
+///
+/// `PreparedRenderPlan::render` has exactly one failure mode reachable with valid buffers: the
+/// `checked_add` on the block start time (`RenderError::TimeOverflow`). Driving it proves the
+/// property the call-graph gate asserts statically — nothing reachable from `render_next` frees.
+///
+/// Red mutation: restore `self.ready = None;` as the first line of `fail` → the
+/// `host.ready.is_some()` assertion fails.
+#[test]
+fn render_failure_retains_ownership_and_silences() {
+    let mut host = ready_host(128);
+    host.buffers
+        .as_mut()
+        .expect("prepared buffers")
+        .output_pcm
+        .fill(-1.0);
+    host.status.next_absolute_sample = u64::MAX;
+
+    assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
+    assert!(
+        host.ready.is_some(),
+        "a render failure must never drop the plan, session or source rings on the audio thread"
+    );
+    assert_eq!(host.status().state, STATE_FAILED);
+    assert!(
+        host.output_pcm()
+            .expect("prepared output")
+            .iter()
+            .all(|sample| sample.to_bits() == 0),
+        "a failed render emits positive-zero silence"
+    );
+    assert_eq!(host.diagnostic(), b"web.render.rejected\t$\n");
+
+    assert_eq!(host.render_next(), RESULT_WRONG_STATE);
+    assert!(
+        host.ready.is_some(),
+        "the retirement slot survives re-entry"
+    );
+
+    assert_eq!(host.dispose(), RESULT_OK);
+    assert!(
+        host.ready.is_none(),
+        "dispose is the single control-path reclamation point"
+    );
+    assert_eq!(host.status().state, STATE_DISPOSED);
+}
