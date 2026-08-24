@@ -665,7 +665,7 @@ pub(crate) fn bank_membership(
 pub(crate) struct RuntimeParts {
     pub(crate) routes: BTreeMap<GraphNodeId, RouteTransform>,
     pub(crate) effects: BTreeMap<GraphNodeId, GraphPreparedEffect>,
-    pub(crate) bindings: BTreeMap<GraphNodeId, Box<dyn GraphRuntimeProcessor>>,
+    pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
     banks: Vec<Option<GraphPreparedEffectBank>>,
@@ -724,7 +724,7 @@ impl RuntimeParts {
             NodeKind::SourceInput
         } else if self.membership.contains_key(&index) {
             NodeKind::BankMember
-        } else if let Some(processor) = self.bindings.remove(node) {
+        } else if let Some(Some(processor)) = self.bindings.remove(node) {
             NodeKind::Bound(processor)
         } else if let Some(effect) = self.effects.remove(node) {
             NodeKind::Effect(effect)

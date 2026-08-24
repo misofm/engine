@@ -1271,11 +1271,28 @@ pub struct GraphBindFailure {
 }
 pub struct GraphNodeBinding {
     pub node: GraphNodeId,
-    processor: Box<dyn GraphRuntimeProcessor>,
+    pub(crate) processor: Option<Box<dyn GraphRuntimeProcessor>>,
 }
 impl GraphNodeBinding {
     pub fn new(node: GraphNodeId, processor: Box<dyn GraphRuntimeProcessor>) -> Self {
-        Self { node, processor }
+        Self {
+            node,
+            processor: Some(processor),
+        }
+    }
+    /// Acknowledge one required external node without supplying a processor.
+    ///
+    /// The node is still *listed* as bound, so a host that forgets a node it must bind still
+    /// fails with `graph.plan.binding`; it is rendered by the executor's own reduction or identity
+    /// kind instead of by a host-supplied pass-through processor. Every host that used to hand the
+    /// executor a do-nothing `GraphRuntimeProcessor` for a submix or output node uses this
+    /// instead, so no host defines one (audit #103 F1).
+    #[must_use]
+    pub fn identity(node: GraphNodeId) -> Self {
+        Self {
+            node,
+            processor: None,
+        }
     }
 }
 pub struct GraphBindingBlock<'a> {
@@ -3017,6 +3034,80 @@ mod tests {
         assert_eq!(failure.code, "graph.plan.binding");
         assert_eq!(failure.bindings.nodes.len(), 3);
         assert_eq!(failure.plan.plan_id, 42);
+    }
+
+    /// `GraphNodeBinding::identity` acknowledges a required node without a host processor: the
+    /// node is still listed (so a genuinely missing binding still fails), and the executor renders
+    /// it with its own reduction kind, bit-for-bit as a do-nothing host processor did.
+    #[test]
+    fn identity_binding_acknowledges_without_a_processor() {
+        struct Constant;
+        impl GraphRuntimeProcessor for Constant {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                block.left.fill(0.25);
+                block.right.fill(-0.5);
+                Ok(())
+            }
+        }
+        let render = |identity: bool| {
+            let (plan, bindings, input) = binding_plan();
+            let bindings = GraphRuntimeBindings {
+                envelope: bindings.envelope,
+                nodes: bindings
+                    .nodes
+                    .into_iter()
+                    .map(|binding| {
+                        if binding.node == input {
+                            GraphNodeBinding::new(binding.node, Box::new(Constant))
+                        } else if identity {
+                            GraphNodeBinding::identity(binding.node)
+                        } else {
+                            binding
+                        }
+                    })
+                    .collect(),
+                observers: bindings.observers,
+            };
+            let mut plan = match plan.bind(bindings) {
+                Ok(plan) => plan,
+                Err(failure) => panic!("identity bindings rejected: {}", failure.code),
+            };
+            let mut samples = [f32::NAN; 2];
+            let output = PlanarBufferMut::try_new(&mut samples, 2, 1, 1).expect("output");
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output,
+                },
+                miso_engine_core::realtime::RenderTime { absolute_sample: 0 },
+            )
+            .expect("render");
+            [samples[0].to_bits(), samples[1].to_bits()]
+        };
+        let identity_bits = render(true);
+        assert_eq!(
+            identity_bits,
+            render(false),
+            "an identity binding must render the same bits as a do-nothing host processor"
+        );
+        assert_eq!(
+            identity_bits,
+            [0.25_f32.to_bits(), (-0.5_f32).to_bits()],
+            "a supplied processor must still run when other nodes bind by identity"
+        );
+
+        let (plan, bindings, _) = binding_plan();
+        let mut nodes = bindings.nodes;
+        nodes.pop();
+        let short = GraphRuntimeBindings {
+            envelope: bindings.envelope,
+            nodes,
+            observers: bindings.observers,
+        };
+        match plan.bind(short) {
+            Ok(_) => panic!("a missing binding was accepted"),
+            Err(failure) => assert_eq!(failure.code, "graph.plan.binding"),
+        }
     }
 
     #[test]
