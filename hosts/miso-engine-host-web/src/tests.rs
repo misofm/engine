@@ -452,3 +452,122 @@ fn render_failure_retains_ownership_and_silences() {
     );
     assert_eq!(host.status().state, STATE_DISPOSED);
 }
+
+/// #106 F1. Every source rule the browser host applies is now the facade's, in the facade's order.
+///
+/// Before the facade this host carried its own copy of these checks in its own order, and it had
+/// already diverged: it built `SourceGeneration(generation)` directly, so generation `0` -- which
+/// is reserved -- reached the ring instead of being named. The browser ABI collapses every
+/// malformed submission to `RESULT_INVALID_ARGUMENT`, so that particular divergence is not
+/// observable through the result code alone; what it bought is the single typed vocabulary, whose
+/// seventeen variants #103's `source_diagnostics.rs` pins one at a time.
+///
+/// What *is* observable here is the order: end-of-region symmetry is decided before the ring is
+/// offered the chunk, so a chunk that ends exactly at the region end without the flag is reported
+/// as malformed rather than as bounded backpressure.
+///
+/// Red mutation (proven): delete the `end_of_region != (end == region_end)` check from
+/// `SourceControlSet::submit` -> that submission returns `RESULT_BACKPRESSURE` (6) instead of
+/// `RESULT_INVALID_ARGUMENT` (1) and this test fails.
+#[test]
+fn facade_source_rules_reach_the_browser_host() {
+    let quantum = 128_usize;
+    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum as u32);
+    config.source_ring_frames = quantum as u32;
+    let toml = one_track_session(quantum as u32);
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        host.diagnostic()
+    );
+
+    let left = vec![0.25_f32; quantum];
+    let right = vec![-0.5_f32; quantum];
+    let planes: [&[f32]; 2] = [&left, &right];
+    let submit = |host: &mut AudioWorkletEngineHost, id: &[u8], generation, start, rate, n| {
+        host.submit_source(id, generation, start, rate, &planes, n, false)
+    };
+
+    // The divergence this job closed: generation 0 is reserved and is now rejected in Rust.
+    let mut host = host;
+    assert_eq!(
+        submit(&mut host, b"fixture-source", 0, 0, 48_000, quantum as u32),
+        RESULT_INVALID_ARGUMENT,
+        "generation 0 is reserved and never reaches the ring as a valid tag"
+    );
+    assert_eq!(
+        submit(&mut host, b"absent-source", 1, 0, 48_000, quantum as u32),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        submit(&mut host, b"fixture-source", 1, 0, 44_100, quantum as u32),
+        RESULT_INVALID_ARGUMENT,
+        "the chunk rate must equal the declared source rate"
+    );
+    assert_eq!(
+        submit(
+            &mut host,
+            b"fixture-source",
+            1,
+            1 << 40,
+            48_000,
+            quantum as u32
+        ),
+        RESULT_INVALID_ARGUMENT,
+        "a chunk outside the mapped region is refused"
+    );
+    // The staging bound is still the host's: a chunk longer than one quantum could not have been
+    // staged by the JavaScript side.
+    assert_eq!(
+        submit(
+            &mut host,
+            b"fixture-source",
+            1,
+            0,
+            48_000,
+            quantum as u32 + 1
+        ),
+        RESULT_INVALID_ARGUMENT
+    );
+    // A valid chunk still succeeds.
+    assert_eq!(
+        submit(&mut host, b"fixture-source", 1, 0, 48_000, quantum as u32),
+        RESULT_OK
+    );
+    // End-of-region symmetry is checked before the ring is offered the chunk: this chunk ends
+    // exactly at the region end, so `end_of_region = false` is the first rule it breaks.
+    assert_eq!(
+        submit(
+            &mut host,
+            b"fixture-source",
+            1,
+            quantum as u64,
+            48_000,
+            quantum as u32
+        ),
+        RESULT_INVALID_ARGUMENT
+    );
+    // Correctly flagged, it reaches the one-quantum ring and reports bounded backpressure.
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            quantum as u64,
+            48_000,
+            &planes,
+            quantum as u32,
+            true
+        ),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(
+        host.seek_source(b"fixture-source", 0, 0),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    assert_eq!(host.status().state, STATE_READY, "no rejection is sticky");
+}
