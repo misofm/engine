@@ -108,11 +108,16 @@ accepted Issue-082 verifier's temporary heap under the exact 4,194,304-byte desc
 those temporaries die before the public package operation returns. The package must not call the
 descriptor verifier and identity helper separately or otherwise validate the same descriptor twice.
 
-Everything native to the package layer—layout arithmetic, canonical repeated-scan sorting,
-table/content parsing, borrowed artifact iteration/selection and CID binary/text coding—performs no
-heap allocation. There is no retained allocation, package-sized copy or hidden artifact-sort
-`Vec`; the encoder uses only caller output and bounded repeated scans, and the verified result
-borrows the original immutable package bytes. Exact allocator-dependent byte counts for the
+Everything native to the package layer—layout arithmetic, canonical ordering through one
+fixed-size stack index of at most 4,096 `u16` slots, table/content parsing, borrowed artifact
+iteration/selection and CID binary/text coding—performs no heap allocation. There is no retained
+allocation, package-sized copy or hidden artifact-sort `Vec`; the encoder uses only caller output
+and that bounded stack index, and the verified result borrows the original immutable package bytes.
+The index is sorted in place with a total comparator over `(canonical key, caller index)`, so the
+emitted permutation and the duplicate-key diagnostic are pure functions of the authoring input and
+independent of the sort algorithm; an allocating stable sort is forbidden. `maximum_artifacts`
+above 4,096 is clamped to 4,096 exactly as `maximum_descriptor_bytes` is clamped to the descriptor
+cap, matching the independent reference's `MAX_ARTIFACTS`, on both encode and borrowed verify. Exact allocator-dependent byte counts for the
 accepted nested Issue-082 temporaries are explicitly deferred to **Canonical effect interchange
 qualification, fuzzing, and benchmark**; Issue 078 freezes their input cap and lifetime, not an
 unprovable allocator layout. These APIs are control/offline only and must not become
@@ -274,6 +279,23 @@ generated-artifact and diff scans. Final counters are `workload_invocations=0`,
 Issue 078 is complete and ready for evidence commit/push, GitHub synchronization and closure. It
 directly unblocks **Third-party WASM package and effect ABI conformance kit** (Issue 027) and
 **Canonical effect interchange qualification, fuzzing, and benchmark** (Issue 081).
+
+## Amendment — audit #97, 2026-08-24
+
+The "bounded repeated scans" wording above was amended to "one fixed-size stack index of at most
+4,096 `u16` slots" after audit #97 measured the repeated-scan encoder at the frozen artifact cap:
+`effect_package_v1_required_size` 1.37 s and `encode_effect_package_v1` 5.55 s for a 366 KB package
+that `verify_effect_package_v1` accepts in 0.33 ms (release, 4,096 one-byte source artifacts). The
+replacement sorts an `[u16; 4096]` stack index in place with `sort_unstable_by` over
+`(canonical key, caller index)`: 3.44 ms for the same `required_size` + `encode` pair, still zero
+package-native heap allocation under the tracking allocator (exactly the 8 nested Issue-082
+descriptor-pass allocations at n = 4,096), and byte-identical output, CIDs and diagnostics — both
+frozen vectors and the independent Python reference corpus are unchanged. The clamp of
+`maximum_artifacts` to 4,096 removes a Rust-only divergence from the reference's `MAX_ARTIFACTS`,
+which already hard-rejected larger counts on both encode and verify. Gate:
+`encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_native_allocation` in
+`crates/miso-engine-effect-package/tests/package_allocation.rs`; the package check script now also
+rejects the allocating stable sorts and `cargo check --locked`s the `fuzz/` crate.
 
 ## Allowed files and non-goals
 

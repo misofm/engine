@@ -8,7 +8,8 @@ use std::alloc::{GlobalAlloc, System};
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::{
     ArtifactSelectionRequestV1, EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectCid,
-    EffectPackageAuthoringV1, EffectPackageLimitsV1, EffectStateLimitsV1, EffectStateReplayViewV1,
+    EffectPackageAuthoringV1, EffectPackageDiagnosticCodeV1, EffectPackageLimitsV1,
+    EffectStateLimitsV1, EffectStateReplayViewV1,
     bind_effect_descriptor_wire_v1, effect_descriptor_identity_v1, effect_package_cid_v1,
     effect_package_v1_required_size, effect_state_v1_requirements, encode_effect_package_v1,
     encode_effect_state_v1, inspect_effect_state_selector_v1, select_effect_package_artifact_v1,
@@ -429,6 +430,83 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
     assert_eq!(cid_boundary_snapshot, select_snapshot);
     println!(
         "issue081_package_allocation descriptor={descriptor_pass:?} package={verify_snapshot:?} postverify={select_snapshot:?}"
+    );
+}
+
+/// The frozen 4,096-artifact cap is the authoring default, not a pathological input: encoding at
+/// the cap must stay allocation-free relative to the one nested descriptor pass and finish in
+/// single-digit milliseconds.
+#[test]
+fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_native_allocation() {
+    let bytes = fixture();
+    let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+    let descriptor = &bytes[96..96 + descriptor_len];
+    let (_, descriptor_pass) = measure(|| effect_descriptor_identity_v1(descriptor, 4_194_304));
+    assert!(descriptor_pass.allocations > 0);
+
+    let count = 4_096usize;
+    let paths: Vec<String> = (0..count)
+        .rev()
+        .map(|index| format!("src/file-{index:04}.rs"))
+        .collect();
+    let contents: Vec<[u8; 1]> = (0..count).map(|index| [index as u8]).collect();
+    let artifacts: Vec<EffectArtifactAuthoringV1<'_>> = (0..count)
+        .map(|index| EffectArtifactAuthoringV1 {
+            kind: EffectArtifactKindV1::Source,
+            path: &paths[index],
+            target: "",
+            features: "",
+            content: &contents[index],
+        })
+        .collect();
+    let authoring = EffectPackageAuthoringV1 {
+        descriptor,
+        artifacts: &artifacts,
+    };
+
+    let started = std::time::Instant::now();
+    let (required, required_snapshot) =
+        measure(|| effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default()));
+    let required = required.unwrap() as usize;
+    let mut output = vec![0; required];
+    let (encoded, encode_snapshot) = measure(|| {
+        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut output)
+    });
+    let elapsed = started.elapsed();
+    assert_eq!(encoded.unwrap(), required);
+    assert_eq!(required_snapshot, descriptor_pass);
+    assert_eq!(encode_snapshot, descriptor_pass);
+    let budget_ms = if cfg!(debug_assertions) { 500 } else { 10 };
+    assert!(
+        elapsed.as_millis() < budget_ms,
+        "required_size + encode at the artifact cap took {elapsed:?}"
+    );
+
+    let verified = verify_effect_package_v1(&output, EffectPackageLimitsV1::default()).unwrap();
+    assert_eq!(verified.artifact_count(), count as u32);
+    assert!(verified.artifacts().map(|artifact| artifact.path()).is_sorted());
+
+    let extra = [EffectArtifactAuthoringV1 {
+        path: "src/zzz.rs",
+        ..artifacts[0]
+    }];
+    let grown: Vec<_> = artifacts.iter().copied().chain(extra).collect();
+    let one_over = EffectPackageAuthoringV1 {
+        descriptor,
+        artifacts: &grown,
+    };
+    let generous = EffectPackageLimitsV1 {
+        maximum_artifacts: u32::MAX,
+        ..EffectPackageLimitsV1::default()
+    };
+    let error = effect_package_v1_required_size(&one_over, generous).unwrap_err();
+    assert_eq!(
+        (error.code, error.byte_offset),
+        (EffectPackageDiagnosticCodeV1::Limit, 48)
+    );
+    println!(
+        "issue097_package_cap artifacts={count} bytes={required} elapsed={elapsed:?} \
+         allocations={encode_snapshot:?}"
     );
 }
 
