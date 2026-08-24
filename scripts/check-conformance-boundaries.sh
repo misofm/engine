@@ -54,7 +54,8 @@ dependency_names() {
     ' "$1" | sort
 }
 
-expected_conformance=$'miso-engine-core\nmiso-engine-dsp-reference\nmiso-engine-effect-contract'
+# #84 phase A: conformance drives lane-generic effect checks, so the Lane trait is in-boundary.
+expected_conformance=$'miso-engine-core\nmiso-engine-dsp-reference\nmiso-engine-effect-contract\nmiso-engine-lane'
 [[ "$(dependency_names crates/miso-engine-conformance/Cargo.toml)" == "$expected_conformance" ]] || {
     printf 'conformance boundary failure: conformance dependencies changed\n' >&2
     exit 1

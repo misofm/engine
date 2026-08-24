@@ -21,7 +21,7 @@ miso-engine-rack.workspace = true
 miso-engine-native-scheduler.workspace = true
 
 [dev-dependencies]
-miso-engine-conformance.workspace = true
+miso-engine-conformance = { workspace = true, features = ["realtime-audit"] }
 
 # Bounded scheduler fault injection is enabled from dev-dependencies only, so it can never reach
 # a host, C-ABI or Wasm artifact; `scripts/check-scheduler-policy.sh` enforces that.

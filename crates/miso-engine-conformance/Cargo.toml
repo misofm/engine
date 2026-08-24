@@ -10,12 +10,20 @@ name = "miso_engine_conformance"
 
 [dependencies]
 miso-engine-lane.workspace = true
-miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-core.workspace = true
 miso-engine-dsp-reference.workspace = true
 miso-engine-effect-contract.workspace = true
 
 [features]
 default = []
+# #84 phase D: forwarding opt-in. A regular dependent of this crate never receives core's
+# render-audit instrumentation unless it asks; `scripts/check-realtime-audit-leak.sh` proves the
+# default graphs of every shippable package stay clean.
+realtime-audit = ["miso-engine-core/realtime-audit"]
+
+[dev-dependencies]
+# This crate's own tests assert that fault probes are DETECTED, so they need the real hooks.
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 
 [lints]
 workspace = true

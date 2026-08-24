@@ -53,6 +53,8 @@ jobs:
         run: |
           bash scripts/check-realtime-policy.sh
           bash scripts/test-realtime-policy.sh
+          bash scripts/check-realtime-audit-leak.sh
+          bash scripts/test-realtime-audit-leak.sh
       - name: Lane numeric-boundary policy and mutation tests
         run: |
           bash scripts/check-lane-policy.sh

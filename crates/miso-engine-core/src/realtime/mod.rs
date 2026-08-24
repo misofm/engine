@@ -23,9 +23,10 @@ pub use plan::{
     RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
 };
 pub use plan_exchange::{
-    PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher, PlanReplacementReservation,
-    PlanReplacementReservationError, PlanRetirer, PublishError, RealtimePlanOwner,
-    RealtimeRenderReport, SwapOutcome, plan_exchange, plan_exchange_resource_report,
+    PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
+    PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
+    RealtimePlanOwner, RealtimeRenderReport, SwapOutcome, plan_exchange,
+    plan_exchange_resource_report,
 };
 pub use spsc::{
     Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
