@@ -419,16 +419,6 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
 }
 impl PreparedGraphPlan {
     fn has_valid_structural_layout(&self) -> bool {
-        // `spec.nodes` is sorted by id: the compiler establishes it, `program::lower` interns node
-        // ids by binary search over it, and both executors are built from the lowered program.
-        if self
-            .spec
-            .nodes
-            .windows(2)
-            .any(|pair| pair[0].id >= pair[1].id)
-        {
-            return false;
-        }
         let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| node.id.clone()).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
             return false;
@@ -2895,7 +2885,7 @@ mod tests {
 
     #[test]
     fn structural_layout_rejects_node_level_edge_and_bank_corruptions() {
-        for corruption in 0..5 {
+        for corruption in 0..6 {
             let (mut graph, bindings, _) = binding_plan();
             match corruption {
                 0 => {
@@ -2908,6 +2898,10 @@ mod tests {
                 4 => {
                     graph.sequential_schedule.pop();
                 }
+                // `program::lower` interns node ids by binary search over `spec.nodes`, so an
+                // unsorted spec is a malformed plan: bind refuses it with the same code rather
+                // than lowering against a binary search that cannot find its nodes.
+                5 => graph.spec.nodes.reverse(),
                 _ => unreachable!(),
             }
             let failure = match graph.bind(bindings) {
@@ -3708,6 +3702,18 @@ mod tests {
     /// What a [`TapRecorder`] writes: how many blocks it saw, and the left-plane bits it saw.
     type TapSink = (Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
 
+    /// Scales its block, so the buffer an alias points at demonstrably changes when the next op
+    /// runs: a tap attached to the wrong op reads the scaled value.
+    struct Scale(f32);
+    impl GraphRuntimeProcessor for Scale {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                *sample *= self.0;
+            }
+            Ok(())
+        }
+    }
+
     /// Records what an observer saw, so a tap on an elided stage can be checked.
     struct TapRecorder(Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
     impl GraphRuntimeObserver for TapRecorder {
@@ -3786,14 +3792,21 @@ mod tests {
                     path: "$.main".to_owned(),
                 });
             }
+            // `PostFader` scales in place, so the buffer the three internal boundaries alias is
+            // rewritten by the very next op: a tap that fires late reads the scaled value.
             let bindings = vec![
                 GraphNodeBinding::new(
                     node(TrackStage::Input),
                     Box::new(SeededSource { state: 0x51ED_0007 }),
                 ),
+                GraphNodeBinding::new(node(TrackStage::PostFader), Box::new(Scale(0.375))),
                 GraphNodeBinding::new(output.clone(), Box::new(Noop)),
             ];
-            let required = vec![node(TrackStage::Input), output.clone()];
+            let required = vec![
+                node(TrackStage::Input),
+                node(TrackStage::PostFader),
+                output.clone(),
+            ];
             let levels = levels_for(&nodes, &edges);
             let schedule: Vec<GraphNodeId> = levels
                 .iter()
@@ -3879,6 +3892,20 @@ mod tests {
             "aliasing must not change one bit"
         );
 
+        // A processor bound to an elided stage would never run, so the bind refuses it rather
+        // than dropping it silently.
+        let (elided_binding, mut elided_bindings) = build(true, None);
+        elided_bindings.nodes.push(GraphNodeBinding::new(
+            node(TrackStage::PostSimd1),
+            Box::new(Scale(2.0)),
+        ));
+        let mut refused = elided_binding;
+        refused.required_bindings.push(node(TrackStage::PostSimd1));
+        match refused.bind(elided_bindings) {
+            Ok(_) => panic!("a binding on an elided stage must be refused"),
+            Err(failure) => assert_eq!(failure.code, "graph.scheduler.layout"),
+        }
+
         // An observer bound to an elided stage still observes its buffer, once per block, and
         // sees exactly what the producing op wrote.
         let calls = Arc::new(AtomicU64::new(0));
@@ -3896,13 +3923,34 @@ mod tests {
         );
         let seen = sink.lock().expect("tap sink").clone();
         assert_eq!(seen.len(), FRAMES * 4);
+        // The tap must see what the producing op wrote -- the seeded source, carried unchanged
+        // through `PostInputBuiltins` and the three aliases -- not what `PostFader` then made of
+        // that same buffer.
+        let mut source = SeededSource { state: 0x51ED_0007 };
+        let mut expected = Vec::with_capacity(FRAMES * 4);
+        for _ in 0..4 {
+            let mut left = [0.0_f32; FRAMES];
+            let mut right = [0.0_f32; FRAMES];
+            source
+                .process(GraphBindingBlock {
+                    left: &mut left,
+                    right: &mut right,
+                    first_sample: 0,
+                })
+                .expect("seeded source");
+            expected.extend(left.iter().map(|sample| sample.to_bits()));
+        }
+        assert_eq!(
+            seen, expected,
+            "the tap observes the producer's buffer, unchanged by any consumer"
+        );
         let left_only: Vec<u32> = observed_bits
             .chunks(FRAMES * 2)
             .flat_map(|block| block[..FRAMES].iter().copied())
             .collect();
-        assert_eq!(
+        assert_ne!(
             seen, left_only,
-            "the tap observes the producer's buffer, unchanged by any consumer"
+            "the next op rewrites that buffer, so a late tap would be detectable"
         );
     }
 

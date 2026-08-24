@@ -1151,7 +1151,9 @@ mod tests {
 
     /// Lays `inputs` out as an arena of `inputs.len() + 1` buffers and reduces into buffer 0.
     fn reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
-        let mut plane = vec![0.0f32; (inputs.len() + 1) * frames];
+        // The output slot starts at a sentinel, never at zero: a reduction that forgets to write
+        // it -- the fan-in-zero fill in particular -- must not be able to pass by accident.
+        let mut plane = vec![f32::from_bits(0x7f7f_7f7f); (inputs.len() + 1) * frames];
         for (index, input) in inputs.iter().enumerate() {
             plane[(index + 1) * frames..][..frames].copy_from_slice(input);
         }
@@ -1337,6 +1339,30 @@ mod tests {
                 right[frame].to_bits(),
                 expected_right.to_bits(),
                 "frame {frame} right"
+            );
+        }
+        // Block lengths that are not a multiple of the lane width, so the scalar tail is walked
+        // and has to agree with the vector body word for word.
+        for block in [1usize, 3, 7, 63, 65, 129, 511] {
+            let mut tail_left = left_in[..block].to_vec();
+            let mut tail_right = right_in[..block].to_vec();
+            mix2x2_block::<FrameLane>(&mut tail_left, &mut tail_right, folded);
+            assert_eq!(
+                (
+                    tail_left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                    tail_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
+                ),
+                (
+                    left[..block]
+                        .iter()
+                        .map(|s| s.to_bits())
+                        .collect::<Vec<_>>(),
+                    right[..block]
+                        .iter()
+                        .map(|s| s.to_bits())
+                        .collect::<Vec<_>>()
+                ),
+                "block {block}: the scalar tail must match the vector body"
             );
         }
         // The fold is not the unfolded form: this is the bit change #98 F4 declares.
