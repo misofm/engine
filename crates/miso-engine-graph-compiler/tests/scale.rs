@@ -1,7 +1,9 @@
 //! Generated graph scale gate above the former 65,536 boundary.
 
+use miso_engine_core::TargetCapabilities;
 use miso_engine_effect_compiler::EffectPreparedSession;
 use miso_engine_graph::GraphCompileCaps;
+use miso_engine_graph_compiler::KernelDispatch;
 use miso_engine_graph_compiler::{GraphCompileRequest, GraphCompiler};
 use miso_engine_session::{
     CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml,
@@ -61,6 +63,9 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let mut constrained = graph_caps();
     constrained.maximum_nodes = 1;
     let failure = GraphCompiler::compile(GraphCompileRequest {
+        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        )),
         plan_id: 1,
         effects: EffectPreparedSession {
             session: session.clone(),
@@ -79,6 +84,9 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     );
 
     let artifact = GraphCompiler::compile(GraphCompileRequest {
+        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        )),
         plan_id: 2,
         effects: EffectPreparedSession {
             session,
@@ -91,5 +99,5 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     assert_eq!(artifact.report.estimate.edges, 393_224);
     assert_eq!(artifact.report.estimate.routes, 1);
     assert_eq!(artifact.report.estimate.effects, 0);
-    assert_eq!(artifact.report.sequential_schedule.len(), 458_761);
+    assert_eq!(artifact.graph.sequential_schedule.len(), 458_761);
 }

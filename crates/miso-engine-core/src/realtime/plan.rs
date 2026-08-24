@@ -124,6 +124,12 @@ pub enum RenderError {
     OutputShape,
     /// Advancing the absolute sample clock would overflow `u64`.
     TimeOverflow,
+    /// A contiguous render was asked to start at a sample other than the one that follows the
+    /// last rendered block. `expected` is the sample the plan is waiting for.
+    TimeDiscontinuity {
+        /// The absolute sample this plan's next contiguous block must start at.
+        expected: u64,
+    },
     /// Internal or external planar storage validation failed.
     Buffer(BufferArenaError),
 }
@@ -155,6 +161,7 @@ pub struct PreparedRenderPlan {
     values: ParameterValues,
     events: ParameterEventBuffer,
     rendered_blocks: u64,
+    next_absolute_sample: u64,
     executor: Option<Box<dyn PreparedPlanExecutor>>,
     _not_sync: Cell<()>,
     #[cfg(test)]
@@ -189,6 +196,7 @@ impl PreparedRenderPlan {
             values: ParameterValues::new(request.parameter_defaults),
             events: ParameterEventBuffer::with_capacity(request.event_capacity),
             rendered_blocks: 0,
+            next_absolute_sample: 0,
             executor: None,
             _not_sync: Cell::new(()),
             #[cfg(test)]
@@ -207,6 +215,22 @@ impl PreparedRenderPlan {
         let mut plan = Self::prepare(request)?;
         plan.executor = Some(executor);
         Ok(plan)
+    }
+    /// The absolute sample the next *contiguous* block must start at.
+    ///
+    /// Zero before the first render; after every successful render it is the previous block's
+    /// `next_absolute_sample`. The clock lives here, in the plan, so that no host has to keep its
+    /// own copy and drift from it -- both the C ABI and the browser host used to.
+    #[must_use]
+    pub const fn next_absolute_sample(&self) -> u64 {
+        self.next_absolute_sample
+    }
+    /// Adopt a continuing timeline, for a plan that replaces a running one.
+    ///
+    /// Only [`super::RealtimePlanOwner`] calls this, at a block boundary, so a plan swap does not
+    /// restart the host's clock at zero.
+    pub(crate) const fn adopt_absolute_sample(&mut self, absolute_sample: u64) {
+        self.next_absolute_sample = absolute_sample;
     }
     /// Immutable structural program.
     #[must_use]
@@ -278,6 +302,23 @@ impl PreparedRenderPlan {
         super::audit::in_render_scope(|| self.render_inner(io, time))
     }
 
+    /// Render the block that must start at [`Self::next_absolute_sample`].
+    ///
+    /// The continuity rule is the engine's, not each host's transcription of it: a host that
+    /// renders a quantum at a time calls this and never compares sample counters itself.
+    pub fn render_contiguous(
+        &mut self,
+        io: RenderIo<'_>,
+        absolute_sample: u64,
+    ) -> Result<RenderReport, RenderError> {
+        if absolute_sample != self.next_absolute_sample {
+            return Err(RenderError::TimeDiscontinuity {
+                expected: self.next_absolute_sample,
+            });
+        }
+        self.render(io, RenderTime { absolute_sample })
+    }
+
     pub(crate) fn render_inner(
         &mut self,
         mut io: RenderIo<'_>,
@@ -308,6 +349,7 @@ impl PreparedRenderPlan {
             }
         }
         self.rendered_blocks = self.rendered_blocks.saturating_add(1);
+        self.next_absolute_sample = next;
         Ok(RenderReport {
             plan_id: self.program.plan_id,
             next_absolute_sample: next,

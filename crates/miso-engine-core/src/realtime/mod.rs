@@ -38,6 +38,65 @@ mod tests {
     use crate::{QuantumFrames, SampleRateHz};
     use core::num::NonZeroUsize;
 
+    /// The plan owns the clock, and a contiguous render is the only caller that has to know the
+    /// rule. Rendering the same block twice is a discontinuity, and the error names the sample the
+    /// plan is waiting for.
+    #[test]
+    fn render_contiguous_rejects_stale_and_accepts_next() {
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: NonZeroUsize::new(2).expect("two"),
+        };
+        let mut plan = PreparedRenderPlan::prepare(PrepareRenderPlan {
+            plan_id: 7,
+            envelope,
+            scratch: &[],
+            parameter_defaults: &[],
+            event_capacity: 0,
+        })
+        .expect("plan");
+        assert_eq!(plan.next_absolute_sample(), 0);
+
+        let mut samples = [0.0_f32; 8];
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+        let report = plan
+            .render_contiguous(
+                RenderIo {
+                    input: None,
+                    output,
+                },
+                0,
+            )
+            .expect("first block");
+        assert_eq!(report.next_absolute_sample, 4);
+        assert_eq!(plan.next_absolute_sample(), 4);
+
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+        assert_eq!(
+            plan.render_contiguous(
+                RenderIo {
+                    input: None,
+                    output,
+                },
+                0,
+            ),
+            Err(RenderError::TimeDiscontinuity { expected: 4 })
+        );
+
+        let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+        plan.render_contiguous(
+            RenderIo {
+                input: None,
+                output,
+            },
+            4,
+        )
+        .expect("second block");
+        assert_eq!(plan.next_absolute_sample(), 8);
+    }
+
     #[test]
     fn arena_and_events_are_fixed_and_disjoint() {
         let spec = PlanarBufferSpec {

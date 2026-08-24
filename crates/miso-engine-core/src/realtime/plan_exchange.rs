@@ -369,7 +369,11 @@ impl RealtimePlanOwner {
         let Some(candidate) = self.pending.take() else {
             return SwapOutcome::None;
         };
+        let continuing = self.active.1.next_absolute_sample();
         let old = core::mem::replace(&mut self.active, (candidate.epoch, candidate.plan));
+        // The timeline belongs to the host, not to any one plan: a plan that takes over mid-stream
+        // continues the outgoing plan's clock instead of restarting at zero.
+        self.active.1.adopt_absolute_sample(continuing);
         placeholder.commit(RetiredPlan {
             epoch: old_epoch,
             plan: old.1,
@@ -378,6 +382,38 @@ impl RealtimePlanOwner {
             self.legacy_outstanding.fetch_sub(1, Ordering::AcqRel);
         }
         SwapOutcome::Applied
+    }
+    /// The absolute sample the next contiguous block must start at.
+    ///
+    /// A plan swap does not reset it: the incoming plan adopts the outgoing plan's clock.
+    #[must_use]
+    pub fn next_absolute_sample(&self) -> u64 {
+        self.active.1.next_absolute_sample()
+    }
+    /// Publish at the boundary, then render the block that must start at
+    /// [`Self::next_absolute_sample`].
+    pub fn render_contiguous(
+        &mut self,
+        io: RenderIo<'_>,
+        absolute_sample: u64,
+    ) -> Result<RealtimeRenderReport, RenderError> {
+        super::audit::in_render_scope(|| {
+            let swap = self.enter_block();
+            let active_epoch = self.active.0;
+            let expected = self.active.1.next_absolute_sample();
+            if absolute_sample != expected {
+                return Err(RenderError::TimeDiscontinuity { expected });
+            }
+            let render = self
+                .active
+                .1
+                .render_inner(io, RenderTime { absolute_sample })?;
+            Ok(RealtimeRenderReport {
+                swap,
+                active_epoch,
+                render,
+            })
+        })
     }
     /// Attempt one block-boundary publication and render through exactly one complete plan.
     pub fn render(

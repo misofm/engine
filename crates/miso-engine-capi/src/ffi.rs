@@ -497,15 +497,11 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(code) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(if code == RESULT_BACKPRESSURE {
-                        b"source.backpressure"
-                    } else {
-                        b"source.submit.rejected"
-                    });
+            Err(error) => {
+                // F6: the facade's typed rejection reaches the caller as its own diagnostic
+                // string, instead of one of two strings for seventeen distinct failures.
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
                 code
             }
         }
@@ -550,15 +546,9 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(code) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(if code == RESULT_BACKPRESSURE {
-                        b"source.seek.backpressure"
-                    } else {
-                        b"source.seek.rejected"
-                    });
+            Err(error) => {
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
                 code
             }
         }
@@ -748,9 +738,12 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         }
         // SAFETY: The caller promises one readable fixed ABI output descriptor for this call.
         let output = unsafe { &*output };
+        // `PlanarOutput` is stereo by contract, so a channel count other than two is an ABI
+        // mismatch, not a render rejection.
         if output.struct_size != crate::PLANAR_OUTPUT_SIZE
             || output.reserved != [0; 2]
             || output.samples.is_null()
+            || output.channels != 2
         {
             return RESULT_INVALID_ARGUMENT;
         }
@@ -765,48 +758,27 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
             error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
             return RESULT_INVALID_ARGUMENT;
         }
-        let frames = state.quantum_frames();
-        let required_samples =
-            match u64::from(output.plane_stride_samples).checked_add(u64::from(output.frames)) {
-                Some(value) => value,
-                None => {
-                    error.store(plan_error::OUTPUT_OVERFLOW, Ordering::Relaxed);
-                    return RESULT_RENDER_REJECTED;
-                }
-            };
-        if output.channels != 2
-            || output.frames != frames
-            || output.plane_stride_samples < frames
-            || required_samples > output.sample_capacity
-            || absolute_sample != state.next_absolute_sample()
-        {
-            error.store(plan_error::CONTRACT_REJECTED, Ordering::Relaxed);
-            return RESULT_RENDER_REJECTED;
-        }
-        let required_samples = match usize::try_from(required_samples) {
-            Ok(value)
-                if value
-                    .checked_mul(core::mem::size_of::<f32>())
-                    .is_some_and(|bytes| bytes <= isize::MAX as usize) =>
-            {
-                value
-            }
+        // One validation pass, each rule checked by whoever owns it (audit #103 F4). The boundary
+        // owns only what is ABI: the descriptor is well formed and the declared capacity is one
+        // addressable slice. `PlanarBufferMut` owns the plane layout; core owns the quantum and
+        // the clock. Nothing here recomputes a byte extent the layout check will compute again.
+        let capacity = match usize::try_from(output.sample_capacity) {
+            Ok(value) if value <= isize::MAX as usize / core::mem::size_of::<f32>() => value,
             _ => {
                 error.store(plan_error::OUTPUT_PLATFORM, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
         };
         let samples_pointer = output.samples;
-        // SAFETY: `output.samples` was proved nonnull and `f32`-aligned above, and scalar
-        // validation proved the exact contiguous region required by two planes is within caller
-        // capacity and at most `isize::MAX` bytes. The caller promises this many writable `f32`
-        // elements exclusively for the duration of the call.
-        let samples = unsafe { core::slice::from_raw_parts_mut(samples_pointer, required_samples) };
+        let stride = output.plane_stride_samples as usize;
+        let frames = output.frames as usize;
+        // SAFETY: `output.samples` was proved nonnull and `f32`-aligned above, and
+        // `capacity * size_of::<f32>() <= isize::MAX`. The ABI's output contract is that the
+        // caller owns exactly `sample_capacity` writable `f32` elements there, exclusively for
+        // the duration of this call.
+        let samples = unsafe { core::slice::from_raw_parts_mut(samples_pointer, capacity) };
         let render_output = match miso_engine_core::realtime::PlanarBufferMut::try_new(
-            samples,
-            2,
-            frames as usize,
-            output.plane_stride_samples as usize,
+            samples, 2, frames, stride,
         ) {
             Ok(value) => value,
             Err(_) => {
@@ -818,8 +790,8 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
             Ok(()) => {
                 let mut peak = 0.0_f32;
                 for channel in 0..2_usize {
-                    let plane = channel * output.plane_stride_samples as usize;
-                    for frame in 0..frames as usize {
+                    let plane = channel * stride;
+                    for frame in 0..frames {
                         // SAFETY: The validated two-plane layout proves this exact sample index is
                         // initialized and readable after the exclusive render borrow ended.
                         let sample = unsafe { *samples_pointer.add(plane + frame) };
@@ -830,8 +802,8 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }
-            Err(()) => {
-                error.store(plan_error::PLAN_REJECTED, Ordering::Relaxed);
+            Err(code) => {
+                error.store(code, Ordering::Relaxed);
                 RESULT_RENDER_REJECTED
             }
         }
@@ -1034,7 +1006,7 @@ pub(crate) fn test_transaction_snapshot(
 pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
     // SAFETY: Test callers retain the exclusively owned live plan for this inspection.
     let plan = unsafe { &(*plan).state };
-    (plan.next_absolute_sample(), plan.resources())
+    (plan.owner.next_absolute_sample(), plan.resources())
 }
 
 #[cfg(test)]
@@ -1570,7 +1542,8 @@ mod tests {
         source_error.data = source_error_storage.as_mut_ptr();
         source_error.capacity_bytes = source_error_storage.len() as u64;
         assert_eq!(last_error(session.cast(), &mut source_error), RESULT_OK);
-        assert_eq!(&source_error_storage, b"source.seek.rejected");
+        // F6: the out-of-region seek now names the rule it broke, not "rejected".
+        assert_eq!(&source_error_storage, b"source.region.outside");
         assert_eq!(
             seek(session, b"fixture-source".as_ptr(), 14, 2, 48_000),
             RESULT_OK
@@ -1870,6 +1843,248 @@ mod tests {
         destroy(engine);
     }
 
+    /// F6, end to end: a rejected source submission or seek reaches a C host as the diagnostic for
+    /// the rule it broke, through the real entry point and the real `last_error` path. Every one of
+    /// these used to be `RESULT_INVALID_ARGUMENT` with `source.submit.rejected` or
+    /// `source.seek.rejected`, which told a host nothing about what to fix.
+    #[test]
+    fn source_rejections_reach_the_c_host_as_their_own_diagnostic() {
+        let (engine, session, plan) = compiled_fixture();
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let stereo = [left.as_ptr(), right.as_ptr()];
+        let three = [left.as_ptr(), right.as_ptr(), left.as_ptr()];
+        let base = || SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: stereo.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+
+        /// `(why, source ID, the one rule this row breaks, the diagnostic a C host must read)`.
+        type Row<'a> = (&'a str, &'a [u8], &'a dyn Fn(&mut SourceChunk), &'a [u8]);
+        // Each row breaks exactly one rule, in the order the facade checks them.
+        let rows: [Row<'_>; 7] = [
+            (
+                "no source carries this ID",
+                b"absent-source",
+                &|_| {},
+                b"source.id.unknown",
+            ),
+            (
+                "start + frames does not fit in u64",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = u64::MAX,
+                b"source.region.overflow",
+            ),
+            (
+                "the chunk rate is not the source's",
+                b"fixture-source",
+                &|chunk| chunk.sample_rate_hz = 44_100,
+                b"source.rate.mismatch",
+            ),
+            (
+                "three planes for a stereo source",
+                b"fixture-source",
+                &|chunk| {
+                    chunk.planes = three.as_ptr();
+                    chunk.plane_count = 3;
+                },
+                b"source.channels.mismatch",
+            ),
+            (
+                "the chunk runs past the mapped region",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = 47_999,
+                b"source.region.outside",
+            ),
+            (
+                "a chunk ending at the region end must say so",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = 47_872,
+                b"source.region.end_mismatch",
+            ),
+            (
+                "generation zero is reserved",
+                b"fixture-source",
+                &|chunk| chunk.generation = 0,
+                b"source.generation.zero",
+            ),
+        ];
+        for (why, id, mutate, diagnostic) in rows {
+            let mut chunk = base();
+            mutate(&mut chunk);
+            assert_eq!(
+                // SAFETY: The session is live and every borrowed plane and ABI struct outlives the
+                // call; the submission is rejected before any plane is read.
+                unsafe {
+                    miso_engine_v2_source_submit_planar_f32(
+                        session,
+                        id.as_ptr(),
+                        id.len() as u64,
+                        &chunk,
+                        &mut report,
+                    )
+                },
+                RESULT_INVALID_ARGUMENT,
+                "{why}"
+            );
+            assert_eq!(read_last_error(session.cast()), diagnostic, "{why}");
+        }
+
+        // The seek path reports through the same table.
+        assert_eq!(
+            seek(session, b"fixture-source".as_ptr(), 14, 1, 48_001),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.region.outside");
+        assert_eq!(
+            seek(session, b"absent-source".as_ptr(), 13, 1, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.id.unknown");
+
+        // An accepted submission clears the diagnostic, so a stale string can never be mistaken
+        // for a fresh rejection.
+        assert_eq!(
+            // SAFETY: As above; this chunk satisfies every rule.
+            unsafe {
+                miso_engine_v2_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &base(),
+                    &mut report,
+                )
+            },
+            RESULT_OK
+        );
+        assert_eq!(report.accepted_frames, 128);
+        assert_eq!(read_last_error(session.cast()), b"");
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// F4: one validation pass, one diagnostic per rule. Each rejection names the single check it
+    /// failed -- five of these used to share the string `render.contract.rejected` -- and none of
+    /// them writes a sample, so the host buffer still holds its pre-call NaN fill.
+    #[test]
+    fn render_rejections_name_their_single_check() {
+        let (engine, session, plan) = compiled_fixture();
+        let mut pcm = vec![f32::NAN; 512];
+        let base = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: 512,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+
+        let cases: [(&str, PlanarOutput, u64, &[u8]); 4] = [
+            (
+                "a short frame count is core's output shape",
+                PlanarOutput { frames: 64, ..base },
+                0,
+                b"render.output.shape",
+            ),
+            (
+                "a stride below the frame count is the layout check",
+                PlanarOutput {
+                    plane_stride_samples: 100,
+                    ..base
+                },
+                0,
+                b"render.output.layout",
+            ),
+            (
+                "two planes past the declared capacity is the layout check",
+                PlanarOutput {
+                    sample_capacity: 255,
+                    ..base
+                },
+                0,
+                b"render.output.layout",
+            ),
+            (
+                "a capacity no slice can address is the platform check",
+                PlanarOutput {
+                    sample_capacity: u64::MAX,
+                    ..base
+                },
+                0,
+                b"render.output.platform",
+            ),
+        ];
+        for (why, output, time, diagnostic) in cases {
+            assert_eq!(
+                // SAFETY: The plan is live and the descriptor is rejected before any write.
+                unsafe { miso_engine_v2_render_f32_planar(plan, time, &output) },
+                RESULT_RENDER_REJECTED,
+                "{why}"
+            );
+            assert_eq!(read_last_error(plan.cast()), diagnostic, "{why}");
+            assert!(
+                pcm.iter().all(|sample| sample.is_nan()),
+                "{why}: a rejected render must not write"
+            );
+        }
+
+        // The clock is the plan's, so the first block must start at zero.
+        assert_eq!(
+            // SAFETY: The plan is live and the descriptor is valid.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &base) },
+            RESULT_RENDER_REJECTED
+        );
+        assert_eq!(read_last_error(plan.cast()), b"render.time.discontinuity");
+        assert!(pcm.iter().all(|sample| sample.is_nan()));
+
+        // `PlanarOutput` is stereo by contract: a channel count of one is an ABI mismatch, not a
+        // render rejection, and never reaches the plan.
+        assert_eq!(
+            // SAFETY: The plan is live and the descriptor is rejected by the ABI check.
+            unsafe {
+                miso_engine_v2_render_f32_planar(
+                    plan,
+                    0,
+                    &PlanarOutput {
+                        channels: 1,
+                        ..base
+                    },
+                )
+            },
+            RESULT_INVALID_ARGUMENT
+        );
+
+        assert_eq!(
+            // SAFETY: The plan is live and the descriptor is valid.
+            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &base) },
+            RESULT_OK
+        );
+        assert!(
+            pcm[..128].iter().all(|sample| !sample.is_nan()),
+            "an accepted render writes the left plane"
+        );
+        assert!(
+            pcm[128..256].iter().all(|sample| !sample.is_nan()),
+            "an accepted render writes the right plane"
+        );
+        assert_eq!(read_last_error(plan.cast()), b"");
+        destroy_fixture(engine, session, plan);
+    }
+
     /// F2 (a): `miso_engine_v2_plan_resources` takes a `const` plan and must be pure. Before this
     /// fix it cleared the render diagnostic through a `RefCell` the render thread also writes.
     #[test]
@@ -1892,7 +2107,7 @@ mod tests {
         );
         assert_eq!(
             read_last_error(plan.cast()),
-            plan_error::text(plan_error::CONTRACT_REJECTED)
+            plan_error::text(plan_error::OUTPUT_LAYOUT)
         );
         let mut resources = empty_report();
         assert_eq!(
@@ -1903,7 +2118,7 @@ mod tests {
         assert_eq!(resources.quantum_frames, 128);
         assert_eq!(
             read_last_error(plan.cast()),
-            plan_error::text(plan_error::CONTRACT_REJECTED),
+            plan_error::text(plan_error::OUTPUT_LAYOUT),
             "a const-plan query must not clear the render diagnostic"
         );
         destroy_fixture(engine, session, plan);

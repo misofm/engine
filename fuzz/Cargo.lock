@@ -133,7 +133,6 @@ version = "0.1.0"
 dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
- "miso-engine-session",
  "sha2",
 ]
 

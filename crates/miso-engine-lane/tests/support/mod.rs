@@ -11,8 +11,8 @@
 use miso_engine_lane::Lane;
 use miso_engine_lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
-    gain_mix_block, one_pole_block, ramp_block, sum_into_block, sum2_block, svf_block,
-    svf_block_ramped,
+    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
+    svf_block, svf_block_ramped,
 };
 
 /// Widest lane count the gates instantiate; every corpus length is a multiple of it.
@@ -366,6 +366,8 @@ pub enum Kernel {
     Sum2,
     /// [`sum_into_block`].
     SumInto,
+    /// [`mix2x2_block`], with the block as the left plane and a scaled copy as the right one.
+    Mix2x2,
 }
 
 /// Every kernel the gates sweep.
@@ -382,6 +384,7 @@ pub const ALL_KERNELS: &[Kernel] = &[
     Kernel::Ramp,
     Kernel::Sum2,
     Kernel::SumInto,
+    Kernel::Mix2x2,
 ];
 
 impl Kernel {
@@ -401,6 +404,7 @@ impl Kernel {
             Self::Ramp => "ramp_block",
             Self::Sum2 => "sum2_block",
             Self::SumInto => "sum_into_block",
+            Self::Mix2x2 => "mix2x2_block",
         }
     }
 
@@ -524,6 +528,10 @@ pub fn run_kernel<L: Lane>(
             Kernel::SumInto => {
                 let other: std::vec::Vec<f32> = block.iter().map(|x| x * 0.25).collect();
                 sum_into_block::<L>(block, &other);
+            }
+            Kernel::Mix2x2 => {
+                let mut other: std::vec::Vec<f32> = block.iter().map(|x| x * -0.75).collect();
+                mix2x2_block::<L>(block, &mut other, [0.9, -0.1, 0.2, 0.8]);
             }
         }
         offset += block_frames;

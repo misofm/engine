@@ -1,6 +1,8 @@
 //! Deterministic issue-007 expected-output fixture generator and checker.
 
 use core::fmt::Write as _;
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -21,9 +23,9 @@ use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effe
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
     GraphBindingBlock, GraphEdgeId, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
-    GraphRuntimeProcessor, TrackStage,
+    GraphRuntimeProcessor, PreparedGraphPlan, TrackStage,
 };
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler};
+use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_session::{
     ChannelMatrix, CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
     parse_session_toml,
@@ -478,7 +480,7 @@ impl GraphRuntimeProcessor for FixtureIdentity {
 
 fn graph_tap_fixtures() -> (Vec<u8>, String) {
     let artifact = graph_tap_artifact_v1();
-    verify_graph_tap_pdc_v1(artifact.report()).expect("fixture PDC");
+    verify_graph_tap_pdc_v1(artifact.graph()).expect("fixture PDC");
     let envelope = artifact.envelope();
     let bindings = artifact
         .external_binding_nodes()
@@ -632,6 +634,7 @@ fn graph_tap_artifact_v1() -> miso_engine_graph_compiler::PreparedGraphBuiltinsA
     )
     .expect("prepare builtins");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: 7,
         effects,
         builtins,
@@ -660,9 +663,9 @@ fn fixture_source_frame_v1(index: usize) -> (f32, f32) {
     }
 }
 
-fn verify_graph_tap_pdc_v1(report: &GraphCompileReport) -> Result<(), String> {
+fn verify_graph_tap_pdc_v1(graph: &PreparedGraphPlan) -> Result<(), String> {
     let timing = |id: &str| {
-        report
+        graph
             .route_timings
             .iter()
             .find(|timing| timing.route_id.as_str() == id)
@@ -670,7 +673,7 @@ fn verify_graph_tap_pdc_v1(report: &GraphCompileReport) -> Result<(), String> {
     };
     let late = timing("to-main")?;
     let early = timing("to-main-early")?;
-    let delays: Vec<_> = report
+    let delays: Vec<_> = graph
         .inserted_delays
         .iter()
         .filter(|delay| {

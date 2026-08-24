@@ -7,6 +7,8 @@ use core::{
     alloc::Layout,
     mem::{MaybeUninit, size_of},
 };
+use miso_engine_core::target_capabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_core::{
@@ -976,6 +978,7 @@ fn compile_ready(
     .map_err(|value| builtin_diagnostics(&value.0))?;
     let builtin_resources = builtins.resource_report();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: KernelDispatch::select(target_capabilities()),
         plan_id: 1,
         effects,
         builtins,

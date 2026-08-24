@@ -4,6 +4,9 @@
 //! only retains the already-validated immutable result and its preallocated render state.
 #![allow(missing_docs)]
 
+pub mod program;
+mod runtime;
+
 use core::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,7 +18,7 @@ use miso_engine_core::{
     },
 };
 use miso_engine_effect_contract::{
-    EffectProcessBlock, LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
+    LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use miso_engine_native_scheduler::{
@@ -27,9 +30,7 @@ use miso_engine_native_scheduler::{
     NativeSchedulerJobV1, NativeSchedulerV1, RenderPartitionV1, RenderWaveV1,
     SchedulerDispatchErrorV1, SchedulerPrepareErrorV1, partition_stable_units_v1,
 };
-use miso_engine_rack::{
-    AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage, EffectBankStage,
-};
+use miso_engine_rack::AoSoaScratch;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StableGraphId(String);
@@ -316,88 +317,38 @@ pub struct RouteTransform {
     pub rl: f32,
     pub rr: f32,
 }
-impl RouteTransform {
-    pub fn transform(self, left: f32, right: f32, sanitized: &mut u64) -> (f32, f32) {
-        let mut l = self.gain * (self.ll * left + self.lr * right);
-        let mut r = self.gain * (self.rl * left + self.rr * right);
-        if !l.is_finite() || l.is_subnormal() {
-            l = 0.0;
-            *sanitized = sanitized.saturating_add(1);
-        }
-        if !r.is_finite() || r.is_subnormal() {
-            r = 0.0;
-            *sanitized = sanitized.saturating_add(1);
-        }
-        (l, r)
-    }
-}
-
-pub fn balanced_pairwise_sum(values: &mut [f32], sanitized: &mut u64) -> f32 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut length = values.len();
-    while length > 1 {
-        let mut write = 0;
-        let mut read = 0;
-        while read + 1 < length {
-            let sum = values[read] + values[read + 1];
-            values[write] = if sum.is_finite() && !sum.is_subnormal() {
-                sum
-            } else {
-                *sanitized = sanitized.saturating_add(1);
-                0.0
-            };
-            write += 1;
-            read += 2;
-        }
-        if read < length {
-            values[write] = values[read];
-            write += 1;
-        }
-        length = write;
-    }
-    values[0]
-}
-
-pub struct CompensationDelay {
-    left: Vec<f32>,
-    right: Vec<f32>,
-    cursor: usize,
-}
-impl CompensationDelay {
-    pub fn new(samples: usize) -> Self {
-        Self {
-            left: vec![0.0; samples],
-            right: vec![0.0; samples],
-            cursor: 0,
-        }
-    }
-    pub fn samples(&self) -> usize {
-        self.left.len()
-    }
-    pub fn reset(&mut self) {
-        self.left.fill(0.0);
-        self.right.fill(0.0);
-        self.cursor = 0;
-    }
-    pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
-        if self.left.is_empty() {
-            return;
-        }
-        for (l, r) in left.iter_mut().zip(right) {
-            let old_l = self.left[self.cursor];
-            let old_r = self.right[self.cursor];
-            self.left[self.cursor] = *l;
-            self.right[self.cursor] = *r;
-            *l = old_l;
-            *r = old_r;
-            self.cursor = (self.cursor + 1) % self.left.len();
+/// The graph's frozen reduction, over one frame's worth of contributions (evidence only).
+///
+/// Render never calls this: it reduces whole blocks through `miso-engine-lane`'s `sum2_block` and
+/// `sum_into_block`. This is the same arithmetic at one frame, exported so the summation-residual
+/// fixture and the compiler's reduction tests measure the production order rather than a private
+/// copy of it -- master plan #83 D9: stable edge-ID order, left-to-right, `-0.0` preserved by the
+/// single-input copy (which is why the reference is `reduce`, never `fold(0.0, +)`).
+#[must_use]
+pub fn reduce_left_to_right(values: &[f32]) -> f32 {
+    match values {
+        [] => 0.0,
+        [single] => *single,
+        [first, second, rest @ ..] => {
+            let mut left = [0.0f32];
+            miso_engine_lane::kernels::sum2_block::<f32>(&mut left, &[*first], &[*second]);
+            for next in rest {
+                miso_engine_lane::kernels::sum_into_block::<f32>(&mut left, &[*next]);
+            }
+            left[0]
         }
     }
 }
 
 pub struct PreparedGraphPlan {
+    /// The executable form of this plan, derived at construction (#99 F2).
+    ///
+    /// Not yet consumed by either executor -- that is the step this seam exists for, and #98
+    /// owns the executor kernels it feeds. It is validated on every compile (see
+    /// `graph_plans_always_lower_to_an_executable_program`), so the shape both executors will be
+    /// rebuilt against is proven on every session the test corpus compiles, before anything
+    /// depends on it.
+    program: Option<program::ExecutionProgram>,
     plan_id: u64,
     pub spec: GraphSpec,
     pub sequential_schedule: Vec<GraphNodeId>,
@@ -642,8 +593,58 @@ impl PreparedGraphPlan {
         self.builtin_banks = banks;
         Ok(self)
     }
+    /// The lowered executable program, or `None` when the plan's schedule, levels and spec
+    /// disagree (which bind-time structural validation rejects).
+    #[must_use]
+    pub fn program(&self) -> Option<&program::ExecutionProgram> {
+        self.program.as_ref()
+    }
+    /// Re-derives the executable program from this plan's *current* semantic fields.
+    ///
+    /// [`program`](Self::program) is derived once at construction and gated on every compile
+    /// (#99 F2). The schedule, levels and inserted delays are public, and the transactional bind
+    /// contract hands a rejected plan back for the caller to repair and re-bind, so binding must
+    /// lower the plan it now holds rather than the one the constructor saw. Lowering is a pure
+    /// function of those fields, so the two can never disagree about an unmodified plan.
+    fn lowered(&self) -> Option<program::ExecutionProgram> {
+        let program = program::lower(
+            &self.spec,
+            &self.sequential_schedule,
+            &self.dependency_levels,
+            &self.inserted_delays,
+        )
+        .ok()?;
+        // A node the lowering elided has no op, so a processor bound to it would never run. The
+        // compiler never asks for one -- the three internal rack boundaries are not bindable
+        // (`program::is_alias_candidate`) -- and a hand-built plan that does is rejected here
+        // rather than silently dropping the binding.
+        let elided_binding = self.required_bindings.iter().any(|node| {
+            program::node_index(&self.spec, node)
+                .is_some_and(|index| program.node_op[index as usize].is_none())
+        });
+        (!elided_binding).then_some(program)
+    }
+    /// The prepared route transforms, by shared reference (#99 F5).
+    #[must_use]
+    pub fn routes(&self) -> &[PreparedRoute] {
+        &self.routes
+    }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
+        // #99 F2: the executable program is *derived* here, from the plan's own spec, schedule,
+        // levels and PDC edges, so it cannot disagree with the semantic graph and no caller has
+        // to supply or maintain it. `None` means those four disagree -- a schedule that is not
+        // the concatenation of the levels, an edge running backwards, an unsorted spec -- which
+        // `has_valid_structural_layout` rejects at bind time anyway. Hand-built plans in tests
+        // are the only things that ever produce it, and they keep working exactly as before.
+        let program = program::lower(
+            &parts.spec,
+            &parts.sequential_schedule,
+            &parts.dependency_levels,
+            &parts.inserted_delays,
+        )
+        .ok();
         Self {
+            program,
             plan_id: parts.plan_id,
             spec: parts.spec,
             sequential_schedule: parts.sequential_schedule,
@@ -770,28 +771,22 @@ impl PreparedGraphPlan {
         if !self.has_valid_structural_layout() {
             return Err((self, bindings, source_set, "graph.scheduler.layout"));
         }
+        let Some(program) = self.lowered() else {
+            return Err((self, bindings, source_set, "graph.scheduler.layout"));
+        };
         let envelope = self.envelope;
-        let executor = GraphExecutor::new(
-            self.spec,
-            self.sequential_schedule,
-            self.inserted_delays,
-            self.buffer_assignments,
-            self.routes,
-            self.effects,
-            self.banks,
-            self.builtin_banks,
-            {
-                let mut observers = self.observers;
-                observers.append(&mut bindings.observers);
-                observers
-            },
-            bindings.nodes,
-            envelope.quantum.0 as usize,
-            source_set.take(),
-        );
+        let plan_id = self.plan_id;
+        let mut plan = self;
+        let observers = {
+            let mut observers = core::mem::take(&mut plan.observers);
+            observers.append(&mut bindings.observers);
+            observers
+        };
+        let executor =
+            GraphExecutor::new(plan, &program, bindings.nodes, observers, source_set.take());
         Ok(PreparedRenderPlan::prepare_with_executor(
             PrepareRenderPlan {
-                plan_id: self.plan_id,
+                plan_id,
                 envelope,
                 scratch: &[],
                 parameter_defaults: &[],
@@ -921,8 +916,15 @@ impl PreparedGraphPlan {
         if !self.has_valid_structural_layout() {
             return Err((self, bindings, source_set, config, "graph.scheduler.layout"));
         }
-        let blueprint = match NativeGraphBlueprint::prepare(&self, config, bindings.observers.len())
-        {
+        let Some(program) = self.lowered() else {
+            return Err((self, bindings, source_set, config, "graph.scheduler.layout"));
+        };
+        let blueprint = match NativeGraphBlueprint::prepare(
+            &self,
+            &program,
+            config,
+            bindings.observers.len(),
+        ) {
             Ok(blueprint) => blueprint,
             Err(code) => {
                 return Err((self, bindings, source_set, config, code));
@@ -980,6 +982,7 @@ impl PreparedGraphPlan {
         let test_preparation_transcript = blueprint.test_preparation_transcript();
         let (executor, metadata) = NativeGraphExecutor::new(
             graph,
+            &program,
             bindings.nodes,
             blueprint,
             scheduler,
@@ -1268,11 +1271,28 @@ pub struct GraphBindFailure {
 }
 pub struct GraphNodeBinding {
     pub node: GraphNodeId,
-    processor: Box<dyn GraphRuntimeProcessor>,
+    pub(crate) processor: Option<Box<dyn GraphRuntimeProcessor>>,
 }
 impl GraphNodeBinding {
     pub fn new(node: GraphNodeId, processor: Box<dyn GraphRuntimeProcessor>) -> Self {
-        Self { node, processor }
+        Self {
+            node,
+            processor: Some(processor),
+        }
+    }
+    /// Acknowledge one required external node without supplying a processor.
+    ///
+    /// The node is still *listed* as bound, so a host that forgets a node it must bind still
+    /// fails with `graph.plan.binding`; it is rendered by the executor's own reduction or identity
+    /// kind instead of by a host-supplied pass-through processor. Every host that used to hand the
+    /// executor a do-nothing `GraphRuntimeProcessor` for a submix or output node uses this
+    /// instead, so no host defines one (audit #103 F1).
+    #[must_use]
+    pub fn identity(node: GraphNodeId) -> Self {
+        Self {
+            node,
+            processor: None,
+        }
     }
 }
 pub struct GraphBindingBlock<'a> {
@@ -1314,447 +1334,69 @@ pub struct PreparedRoute {
     pub transform: RouteTransform,
 }
 
-struct StereoBuffer {
-    left: Box<[f32]>,
-    right: Box<[f32]>,
-}
-impl StereoBuffer {
-    fn new(frames: usize) -> Self {
-        Self {
-            left: vec![0.0; frames].into_boxed_slice(),
-            right: vec![0.0; frames].into_boxed_slice(),
-        }
-    }
-}
-struct RuntimeEdge {
-    source_buffer: usize,
-    sidechain: bool,
-    delay: Option<CompensationDelay>,
-    contribution: StereoBuffer,
-}
-enum RuntimeNodeKind {
-    Identity,
-    SourceInput,
-    Bound(Box<dyn GraphRuntimeProcessor>),
-    Effect(GraphPreparedEffect),
-    BankMember(usize),
-    BuiltinBankMember(usize),
-    Route(RouteTransform),
-    Reduction,
-}
-struct RuntimeNode {
-    incoming: Vec<RuntimeEdge>,
-    output_buffer: usize,
-    kind: RuntimeNodeKind,
-    observers: Vec<GraphNodeObserverBinding>,
-}
+/// The sequential executor: one coloured arena, one pass over the lowered ops.
+///
+/// It is a *driver* over [`runtime`], not a second implementation of anything: node semantics,
+/// reductions, routes, delays and banks all live there and the native executor calls the same
+/// functions (#98 F7).
 struct GraphExecutor {
-    nodes: Vec<RuntimeNode>,
-    buffers: Vec<StereoBuffer>,
-    output_node: usize,
-    reduction_scratch: Box<[f32]>,
-    banks: Vec<RuntimeBank>,
-    bank_rendered: Box<[bool]>,
-    builtin_banks: Vec<RuntimeBank>,
-    builtin_bank_rendered: Box<[bool]>,
+    runtime: runtime::Runtime,
+    output: u32,
     source_set: Option<GraphPreparedSourceSet>,
-    source_input_buffers: Box<[(usize, usize)]>,
-    sanitized_samples: u64,
-}
-/// One bank chain bound into the sequential executor. Effect banks and builtin banks differ only
-/// in which stage their single slot carries, so they share this one shape and one render loop.
-struct RuntimeBank {
-    members: Box<[usize]>,
-    /// Runtime output buffer of each member, resolved once so `run` never indexes `nodes`.
-    output_buffers: Box<[usize]>,
-    chain: BankChain,
+    /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
+    source_input_buffers: Box<[(usize, u32)]>,
 }
 
-/// Adapter that lets a compiler-owned builtin bank act as a chain slot.
-struct BuiltinStage(Box<dyn GraphPreparedBuiltinBankProcessor>);
-impl BankStage for BuiltinStage {
-    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
-        self.0
-            .process(block.left, block.right, block.frames, block.first_sample)
-    }
-    fn qualification_counters(&self) -> [u64; 2] {
-        self.0.qualification_counters()
-    }
-}
-
-/// Planar per-lane view over the sequential executor's runtime buffers.
-struct SequentialMembers<'a> {
-    buffers: &'a mut [StereoBuffer],
-    outputs: &'a [usize],
-}
-impl BankMembers for SequentialMembers<'_> {
-    fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-        let buffer = &self.buffers[self.outputs[lane]];
-        (&buffer.left, &buffer.right)
-    }
-    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-        let buffer = &mut self.buffers[self.outputs[lane]];
-        (&mut buffer.left, &mut buffer.right)
-    }
-}
 impl GraphExecutor {
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        spec: GraphSpec,
-        schedule: Vec<GraphNodeId>,
-        inserted_delays: Vec<InsertedDelay>,
-        buffer_assignments: Vec<BufferAssignment>,
-        routes: Vec<PreparedRoute>,
-        effects: Vec<GraphPreparedEffect>,
-        banks: Vec<GraphPreparedEffectBank>,
-        builtin_banks: Vec<GraphPreparedBuiltinBank>,
-        observer_bindings: Vec<GraphNodeObserverBinding>,
+        plan: PreparedGraphPlan,
+        program: &program::ExecutionProgram,
         bindings: Vec<GraphNodeBinding>,
-        frames: usize,
+        observers: Vec<GraphNodeObserverBinding>,
         source_set: Option<GraphPreparedSourceSet>,
     ) -> Self {
-        let mut assigned_buffers: BTreeMap<_, _> = buffer_assignments
-            .into_iter()
-            .map(|assignment| (assignment.port.node, assignment.buffer_index))
-            .collect();
-        let mut next_buffer = assigned_buffers
-            .values()
-            .copied()
-            .max()
-            .and_then(|maximum| maximum.checked_add(1))
-            .unwrap_or(0);
-        for node in &schedule {
-            assigned_buffers.entry(node.clone()).or_insert_with(|| {
-                let buffer = next_buffer;
-                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
-                buffer
-            });
-        }
-        // Liveness coloring is valid for the scalar schedule, where equal-colored effect outputs
-        // are consumed before the next producer reuses that storage. A homogeneous bank makes all
-        // of its member outputs live together from gather through scatter, so retain distinct
-        // runtime buffers for those original graph nodes. This is an execution-only allocation:
-        // the immutable graph's canonical assignment, reductions, PDC and schedule stay intact.
-        let mut runtime_buffers = assigned_buffers.clone();
-        for bank in &banks {
-            for member in &bank.members {
-                let node = GraphNodeId::Effect(member.clone());
-                runtime_buffers.insert(node, next_buffer);
-                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
-            }
-        }
-        for bank in &builtin_banks {
-            for member in &bank.members {
-                runtime_buffers.insert(member.clone(), next_buffer);
-                next_buffer = next_buffer.checked_add(1).expect("validated buffer count");
-            }
-        }
-        let delays: BTreeMap<_, _> = inserted_delays
-            .into_iter()
-            .map(|delay| (delay.edge_id, delay.samples.0))
-            .collect();
-        let mut routes: BTreeMap<_, _> = routes
-            .into_iter()
-            .map(|route| (route.node, route.transform))
-            .collect();
-        let mut effects: BTreeMap<_, _> = effects
-            .into_iter()
-            .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
-            .collect();
-        let bank_by_node: BTreeMap<_, _> = banks
-            .iter()
-            .enumerate()
-            .flat_map(|(index, bank)| {
-                bank.members
-                    .iter()
-                    .cloned()
-                    .map(move |member| (GraphNodeId::Effect(member), index))
-            })
-            .collect();
-        let builtin_bank_by_node: BTreeMap<_, _> = builtin_banks
-            .iter()
-            .enumerate()
-            .flat_map(|(index, bank)| {
-                bank.members
-                    .iter()
-                    .cloned()
-                    .map(move |member| (member, index))
-            })
-            .collect();
-        let mut bindings: BTreeMap<_, _> = bindings
-            .into_iter()
-            .map(|binding| (binding.node, binding.processor))
-            .collect();
-        let source_input_nodes: BTreeSet<_> = source_set
+        let frames = plan.envelope.quantum.0 as usize;
+        let source_inputs: BTreeSet<_> = source_set
             .as_ref()
             .map(|set| set.claimed_nodes().into_iter().collect())
             .unwrap_or_default();
-        let mut observers: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for observer in observer_bindings {
-            observers
-                .entry(observer.node.clone())
-                .or_default()
-                .push(observer);
-        }
-        for values in observers.values_mut() {
-            values.sort_by_key(|value| value.handle);
-        }
-        let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
-            .iter()
-            .cloned()
-            .map(|node| (node, Vec::new()))
-            .collect();
-        for edge in spec.edges {
-            incoming_by_node
-                .get_mut(&edge.destination.node)
-                .expect("validated destination")
-                .push(edge);
-        }
-        let mut maximum_inputs = 1usize;
-        let mut nodes = Vec::with_capacity(schedule.len());
-        let mut maximum_buffer = 0_u64;
-        for node_id in &schedule {
-            let incoming: Vec<_> = incoming_by_node
-                .remove(node_id)
-                .expect("validated schedule node")
-                .into_iter()
-                .map(|edge| RuntimeEdge {
-                    source_buffer: usize::try_from(runtime_buffers[&edge.source.node])
-                        .expect("validated buffer index"),
-                    sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
-                    delay: delays
-                        .get(&edge.id)
-                        .copied()
-                        .filter(|samples| *samples != 0)
-                        .map(|samples| CompensationDelay::new(samples as usize)),
-                    contribution: StereoBuffer::new(frames),
-                })
-                .collect();
-            maximum_inputs = maximum_inputs.max(incoming.len());
-            let kind = if source_input_nodes.contains(node_id) {
-                RuntimeNodeKind::SourceInput
-            } else if let Some(bank) = builtin_bank_by_node.get(node_id) {
-                RuntimeNodeKind::BuiltinBankMember(*bank)
-            } else if let Some(processor) = bindings.remove(node_id) {
-                RuntimeNodeKind::Bound(processor)
-            } else if let Some(bank) = bank_by_node.get(node_id) {
-                RuntimeNodeKind::BankMember(*bank)
-            } else if let Some(effect) = effects.remove(node_id) {
-                RuntimeNodeKind::Effect(effect)
-            } else if let Some(transform) = routes.remove(node_id) {
-                RuntimeNodeKind::Route(transform)
-            } else if matches!(
-                node_id,
-                GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-            ) {
-                RuntimeNodeKind::Reduction
-            } else {
-                RuntimeNodeKind::Identity
-            };
-            let output_buffer = runtime_buffers[node_id];
-            maximum_buffer = maximum_buffer.max(output_buffer);
-            nodes.push(RuntimeNode {
-                incoming,
-                output_buffer: usize::try_from(output_buffer).expect("validated buffer index"),
-                kind,
-                observers: observers.remove(node_id).unwrap_or_default(),
-            });
-        }
-        let buffer_count = if nodes.is_empty() {
-            0
-        } else {
-            usize::try_from(maximum_buffer)
-                .expect("validated buffer index")
-                .checked_add(1)
-                .expect("validated buffer count")
-        };
-        let output_node = schedule
-            .iter()
-            .position(|node| matches!(node, GraphNodeId::Output { .. }))
-            .expect("validated single output");
-        let node_indices: BTreeMap<_, _> = schedule
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, node)| (node, index))
-            .collect();
-        let runtime_bank = |members: Box<[usize]>,
-                            scratch: AoSoaScratch,
-                            active: Box<[bool]>,
-                            stage: Box<dyn BankStage>| {
-            let output_buffers: Box<[usize]> = members
-                .iter()
-                .map(|member| nodes[*member].output_buffer)
-                .collect();
-            let chain = BankChain::new(
-                scratch,
-                active.clone(),
-                vec![BankSlot {
-                    stage,
-                    active_lanes: active,
-                }],
-            )
-            .expect("validated bank shape");
-            RuntimeBank {
-                members,
-                output_buffers,
-                chain,
-            }
-        };
-        let runtime_banks = banks
-            .into_iter()
-            .map(|bank| {
-                let members = bank
-                    .members
-                    .iter()
-                    .cloned()
-                    .map(|member| node_indices[&GraphNodeId::Effect(member)])
-                    .collect();
-                let width = bank.scratch.width();
-                let quantum = bank.scratch.quantum();
-                let stage = EffectBankStage::new(bank.processor, width, quantum)
-                    .expect("validated bank width");
-                runtime_bank(members, bank.scratch, bank.active_mask, Box::new(stage))
-            })
-            .collect::<Vec<_>>();
-        let runtime_builtin_banks = builtin_banks
-            .into_iter()
-            .map(|bank| {
-                let members: Box<[usize]> = bank
-                    .members
-                    .iter()
-                    .map(|member| node_indices[member])
-                    .collect();
-                let active = trailing_active_mask(members.len(), bank.scratch.width());
-                runtime_bank(
-                    members,
-                    bank.scratch,
-                    active,
-                    Box::new(BuiltinStage(bank.processor)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let source_input_buffers = source_set
+        let source_input_buffers: Box<[(usize, u32)]> = source_set
             .as_ref()
             .map(|set| {
                 set.claims()
                     .iter()
                     .enumerate()
-                    .map(|(claim_index, claim)| (claim_index, node_indices[&claim.node]))
+                    .map(|(claim, entry)| {
+                        let node = program::node_index(&plan.spec, &entry.node)
+                            .expect("validated source claim");
+                        (claim, program.node_buffer[node as usize].0)
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        let output = program.output.0;
+        let parts = runtime::RuntimeParts::new(
+            &plan.spec,
+            plan.routes,
+            plan.effects,
+            plan.banks,
+            plan.builtin_banks,
+            observers,
+            bindings,
+            source_inputs,
+        );
+        let runtime = runtime::build_sequential(program, &plan.spec, parts, frames);
         Self {
-            nodes,
-            buffers: (0..buffer_count)
-                .map(|_| StereoBuffer::new(frames))
-                .collect(),
-            output_node,
-            reduction_scratch: vec![0.0; maximum_inputs].into_boxed_slice(),
-            bank_rendered: vec![false; runtime_banks.len()].into_boxed_slice(),
-            banks: runtime_banks,
-            builtin_bank_rendered: vec![false; runtime_builtin_banks.len()].into_boxed_slice(),
-            builtin_banks: runtime_builtin_banks,
+            runtime,
+            output,
             source_set,
             source_input_buffers,
-            sanitized_samples: 0,
         }
-    }
-
-    fn prepare_inputs(&mut self, node_index: usize) {
-        let current = &mut self.nodes[node_index];
-        for edge in &mut current.incoming {
-            let source = &self.buffers[edge.source_buffer];
-            edge.contribution.left.copy_from_slice(&source.left);
-            edge.contribution.right.copy_from_slice(&source.right);
-            if let Some(delay) = &mut edge.delay {
-                delay.process(&mut edge.contribution.left, &mut edge.contribution.right);
-            }
-        }
-    }
-
-    fn reduce_main_inputs(&mut self, node_index: usize) {
-        let current = &mut self.nodes[node_index];
-        let output = &mut self.buffers[current.output_buffer];
-        let main_inputs = current
-            .incoming
-            .iter()
-            .filter(|edge| !edge.sidechain)
-            .count();
-        for frame in 0..output.left.len() {
-            for (slot, edge) in current
-                .incoming
-                .iter()
-                .filter(|edge| !edge.sidechain)
-                .enumerate()
-            {
-                self.reduction_scratch[slot] = edge.contribution.left[frame];
-            }
-            output.left[frame] = balanced_pairwise_sum(
-                &mut self.reduction_scratch[..main_inputs],
-                &mut self.sanitized_samples,
-            );
-            for (slot, edge) in current
-                .incoming
-                .iter()
-                .filter(|edge| !edge.sidechain)
-                .enumerate()
-            {
-                self.reduction_scratch[slot] = edge.contribution.right[frame];
-            }
-            output.right[frame] = balanced_pairwise_sum(
-                &mut self.reduction_scratch[..main_inputs],
-                &mut self.sanitized_samples,
-            );
-        }
-    }
-
-    /// The single bank loop: one gather, every non-identity slot, one scatter (master plan §4.5).
-    ///
-    /// `builtin` selects which bank vector the index addresses; the loop itself is identical.
-    fn render_chain(
-        &mut self,
-        bank_index: usize,
-        builtin: bool,
-        first_sample: u64,
-    ) -> Result<(), RenderError> {
-        // A padded group's lanes `members.len()..width` are the bank's identity padding lanes:
-        // `BankChain` never gathers into or scatters from them, their scratch stays at the zero it
-        // was allocated with, and the bank excludes them from its counters and boundary check.
-        let lanes = if builtin {
-            self.builtin_banks[bank_index].members.len()
-        } else {
-            self.banks[bank_index].members.len()
-        };
-        for lane in 0..lanes {
-            let node_index = if builtin {
-                self.builtin_banks[bank_index].members[lane]
-            } else {
-                self.banks[bank_index].members[lane]
-            };
-            self.prepare_inputs(node_index);
-            self.reduce_main_inputs(node_index);
-        }
-        let GraphExecutor {
-            buffers,
-            banks,
-            builtin_banks,
-            ..
-        } = self;
-        let bank = if builtin {
-            &mut builtin_banks[bank_index]
-        } else {
-            &mut banks[bank_index]
-        };
-        let frames = buffers[bank.output_buffers[0]].left.len() as u32;
-        let mut view = SequentialMembers {
-            buffers: buffers.as_mut_slice(),
-            outputs: &bank.output_buffers,
-        };
-        bank.chain.run(&mut view, frames, first_sample)
     }
 }
+
 impl PreparedPlanExecutor for GraphExecutor {
+    // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
         _arena: &mut BufferArena,
@@ -1762,139 +1404,59 @@ impl PreparedPlanExecutor for GraphExecutor {
         mut output: PlanarBufferMut<'_>,
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
-        if let Some(source_set) = &mut self.source_set {
+        let Self {
+            runtime,
+            output: output_buffer,
+            source_set,
+            source_input_buffers,
+        } = self;
+        if let Some(source_set) = source_set {
             source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
-            for &(claim_index, node_index) in &self.source_input_buffers {
-                let output_buffer = self.nodes[node_index].output_buffer;
-                let buffer = &mut self.buffers[output_buffer];
-                source_set.copy_track_input(claim_index, &mut buffer.left, &mut buffer.right)?;
+            for &(claim, buffer) in source_input_buffers.iter() {
+                let (left, right) = runtime.buffer_mut(buffer);
+                source_set.copy_track_input(claim, left, right)?;
             }
         }
-        self.bank_rendered.fill(false);
-        self.builtin_bank_rendered.fill(false);
-        for node_index in 0..self.nodes.len() {
-            let bank = match self.nodes[node_index].kind {
-                RuntimeNodeKind::BankMember(index) => Some(index),
-                _ => None,
-            };
-            let builtin_bank = match self.nodes[node_index].kind {
-                RuntimeNodeKind::BuiltinBankMember(index) => Some(index),
-                _ => None,
-            };
-            if matches!(self.nodes[node_index].kind, RuntimeNodeKind::SourceInput) {
-            } else if let Some(bank) = bank {
-                if !self.bank_rendered[bank] {
-                    self.render_chain(bank, false, time.absolute_sample)?;
-                    self.bank_rendered[bank] = true;
-                }
-            } else if let Some(bank) = builtin_bank {
-                if !self.builtin_bank_rendered[bank] {
-                    self.render_chain(bank, true, time.absolute_sample)?;
-                    self.builtin_bank_rendered[bank] = true;
-                }
-            } else {
-                self.prepare_inputs(node_index);
-                self.reduce_main_inputs(node_index);
-            }
-            {
-                let current = &mut self.nodes[node_index];
-                let output_buffer = current.output_buffer;
-                let rendered = &mut self.buffers[output_buffer];
-                match &mut current.kind {
-                    RuntimeNodeKind::Identity
-                    | RuntimeNodeKind::SourceInput
-                    | RuntimeNodeKind::Reduction
-                    | RuntimeNodeKind::BuiltinBankMember(_) => {}
-                    RuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
-                        left: &mut rendered.left,
-                        right: &mut rendered.right,
-                        first_sample: time.absolute_sample,
-                    })?,
-                    RuntimeNodeKind::Route(transform) => {
-                        for frame in 0..rendered.left.len() {
-                            (rendered.left[frame], rendered.right[frame]) = transform.transform(
-                                rendered.left[frame],
-                                rendered.right[frame],
-                                &mut self.sanitized_samples,
-                            );
-                        }
-                    }
-                    RuntimeNodeKind::Effect(effect) => {
-                        let sidechain = current
-                            .incoming
-                            .iter()
-                            .find(|edge| edge.sidechain)
-                            .map(|edge| (&*edge.contribution.left, &*edge.contribution.right));
-                        let block = EffectProcessBlock::new(
-                            &mut rendered.left,
-                            &mut rendered.right,
-                            sidechain,
-                            time.absolute_sample,
-                            &[],
-                            effect.metadata.quantum,
-                        )
-                        .map_err(|_| RenderError::InvalidEnvelope)?;
-                        let _ = effect.processor.process(block);
-                    }
-                    RuntimeNodeKind::BankMember(_) => {}
-                }
-            }
-            let current = &mut self.nodes[node_index];
-            let rendered = &self.buffers[current.output_buffer];
-            for observer in &mut current.observers {
-                observer.observer.observe(GraphObservationBlock {
-                    left: &rendered.left,
-                    right: &rendered.right,
-                    first_sample: time.absolute_sample,
-                })?;
-            }
+        for unit in 0..runtime.units.len() {
+            runtime.execute(unit, time.absolute_sample)?;
+            runtime.observe_unit(unit, time.absolute_sample)?;
         }
-        let rendered = &self.buffers[self.nodes[self.output_node].output_buffer];
-        output.plane_mut(0)?.copy_from_slice(&rendered.left);
-        output.plane_mut(1)?.copy_from_slice(&rendered.right);
+        let (left, right) = runtime.buffer(*output_buffer);
+        output.plane_mut(0)?.copy_from_slice(left);
+        output.plane_mut(1)?.copy_from_slice(right);
         Ok(())
     }
+    // REALTIME_POLICY_END
 
     fn qualification_counters(&self) -> [u64; 2] {
-        self.banks
-            .iter()
-            .chain(self.builtin_banks.iter())
-            .fold([0, 0], |mut total, bank| {
-                let counters = bank.chain.qualification_counters();
-                total[0] = total[0].saturating_add(counters[0]);
-                total[1] = total[1].saturating_add(counters[1]);
-                total
-            })
+        self.runtime.units.iter().fold([0, 0], |mut total, unit| {
+            let counters = unit.qualification_counters();
+            total[0] = total[0].saturating_add(counters[0]);
+            total[1] = total[1].saturating_add(counters[1]);
+            total
+        })
     }
 
     fn bank_transposes(&self) -> u64 {
-        self.banks
+        self.runtime
+            .units
             .iter()
-            .chain(self.builtin_banks.iter())
-            .fold(0_u64, |total, bank| {
-                total.saturating_add(bank.chain.transposes())
-            })
+            .fold(0_u64, |total, unit| total.saturating_add(unit.transposes()))
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NativeNodeLocation {
-    wave: usize,
-    partition: usize,
-    unit: usize,
-    member: usize,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy)]
 enum NativeUnitBlueprintKind {
     Node,
-    EffectBank(usize),
-    BuiltinBank(usize),
+    EffectBank,
+    BuiltinBank,
 }
 
+/// One scheduling unit of the native layout, kept for the preparation transcript and the
+/// scheduler's stable partitioning: a plain op, or a whole homogeneous bank.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 struct NativeUnitBlueprint {
     key: GraphNodeId,
     members: Box<[GraphNodeId]>,
@@ -1902,27 +1464,21 @@ struct NativeUnitBlueprint {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 struct NativeWaveBlueprint {
     level: u64,
     units: Box<[NativeUnitBlueprint]>,
     partitions: Box<[miso_engine_native_scheduler::RenderPartitionRangeV1]>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-struct NativeStageOperation {
-    source: NativeNodeLocation,
-    destination: NativeNodeLocation,
-    destination_edge: usize,
-}
-
+/// The native executor's layout, derived from the lowered program (#99 F2, #98 F2).
+///
+/// A dependency level whose nodes are all elided stage boundaries carries no op and therefore no
+/// wave; the levels that remain keep their order, so every edge still runs forwards.
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphBlueprint {
     waves: Box<[NativeWaveBlueprint]>,
-    stage_operations: Box<[Box<[NativeStageOperation]>]>,
-    observation_order: Box<[Box<[NativeNodeLocation]>]>,
-    output: NativeNodeLocation,
-    locations: BTreeMap<GraphNodeId, NativeNodeLocation>,
+    ranges: Vec<Vec<(usize, usize, usize)>>,
     largest_wave_width: usize,
     unit_count: usize,
     partition_count: usize,
@@ -1930,179 +1486,98 @@ struct NativeGraphBlueprint {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-struct NativeBankMembership {
-    key: GraphNodeId,
-    members: Box<[GraphNodeId]>,
-    kind: NativeUnitBlueprintKind,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 impl NativeGraphBlueprint {
     fn prepare(
         plan: &PreparedGraphPlan,
+        program: &program::ExecutionProgram,
         config: NativeGraphBindConfigV1,
         runtime_observer_count: usize,
     ) -> Result<Self, &'static str> {
         if config.maximum_retained_bytes == 0 {
             return Err("graph.scheduler.cap");
         }
-        let schedule_nodes: BTreeSet<_> = plan.sequential_schedule.iter().cloned().collect();
-        if schedule_nodes.len() != plan.sequential_schedule.len() {
+        let membership = runtime::bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks);
+        let grouped = runtime::waves_of(program, &membership);
+        if grouped.is_empty() {
             return Err("graph.scheduler.layout");
         }
-        let mut level_by_node = BTreeMap::new();
-        for (wave_index, level) in plan.dependency_levels.iter().enumerate() {
-            if level.nodes.is_empty()
-                || level.nodes.windows(2).any(|pair| pair[0] >= pair[1])
-                || level
-                    .nodes
-                    .iter()
-                    .any(|node| level_by_node.insert(node.clone(), wave_index).is_some())
-            {
-                return Err("graph.scheduler.layout");
-            }
-        }
-        if level_by_node.keys().cloned().collect::<BTreeSet<_>>() != schedule_nodes {
-            return Err("graph.scheduler.layout");
-        }
-
-        let mut membership = BTreeMap::new();
-        for (bank_index, bank) in plan.banks.iter().enumerate() {
-            let members: Box<[_]> = bank
-                .members
-                .iter()
-                .cloned()
-                .map(GraphNodeId::Effect)
-                .collect();
-            add_native_bank_membership(
-                &mut membership,
-                &level_by_node,
-                members,
-                NativeUnitBlueprintKind::EffectBank(bank_index),
-            )?;
-        }
-        for (bank_index, bank) in plan.builtin_banks.iter().enumerate() {
-            add_native_bank_membership(
-                &mut membership,
-                &level_by_node,
-                bank.members.clone(),
-                NativeUnitBlueprintKind::BuiltinBank(bank_index),
-            )?;
-        }
-
-        let mut locations = BTreeMap::new();
-        let mut waves = Vec::with_capacity(plan.dependency_levels.len());
+        let mut waves = Vec::with_capacity(grouped.len());
+        let mut ranges = Vec::with_capacity(grouped.len());
         let mut largest_wave_width = 0_usize;
         let mut unit_count = 0_usize;
         let mut partition_count = 0_usize;
         let mut bank_member_count = 0_usize;
-        for (wave_index, level) in plan.dependency_levels.iter().enumerate() {
-            let mut units = Vec::new();
-            for node in &level.nodes {
-                if let Some(bank) = membership.get(node) {
-                    if *node == bank.key {
-                        bank_member_count = bank_member_count
-                            .checked_add(bank.members.len())
-                            .ok_or("graph.scheduler.resource")?;
-                        units.push(NativeUnitBlueprint {
-                            key: bank.key.clone(),
-                            members: bank.members.clone(),
-                            kind: bank.kind,
-                        });
+        for (level, units) in &grouped {
+            let described: Vec<NativeUnitBlueprint> = units
+                .iter()
+                .map(|(bank, ops)| {
+                    let members: Box<[GraphNodeId]> = ops
+                        .iter()
+                        .map(|op| plan.spec.nodes[program.ops[*op].node as usize].id.clone())
+                        .collect();
+                    let key = members.iter().min().cloned().expect("unit has a member");
+                    NativeUnitBlueprint {
+                        key,
+                        members,
+                        kind: match bank {
+                            None => NativeUnitBlueprintKind::Node,
+                            Some(runtime::Membership::Effect(_)) => {
+                                NativeUnitBlueprintKind::EffectBank
+                            }
+                            Some(runtime::Membership::Builtin(_)) => {
+                                NativeUnitBlueprintKind::BuiltinBank
+                            }
+                        },
                     }
-                } else {
-                    units.push(NativeUnitBlueprint {
-                        key: node.clone(),
-                        members: vec![node.clone()].into_boxed_slice(),
-                        kind: NativeUnitBlueprintKind::Node,
-                    });
-                }
-            }
-            units.sort_by(|left, right| left.key.cmp(&right.key));
-            if units.is_empty() || units.windows(2).any(|pair| pair[0].key >= pair[1].key) {
+                })
+                .collect();
+            if described.windows(2).any(|pair| pair[0].key >= pair[1].key) {
                 return Err("graph.scheduler.layout");
             }
-            let ranges = partition_stable_units_v1(
-                core::num::NonZeroUsize::new(units.len()).ok_or("graph.scheduler.layout")?,
+            for unit in &described {
+                if !matches!(unit.kind, NativeUnitBlueprintKind::Node) {
+                    bank_member_count = bank_member_count
+                        .checked_add(unit.members.len())
+                        .ok_or("graph.scheduler.resource")?;
+                }
+            }
+            let partitions = partition_stable_units_v1(
+                core::num::NonZeroUsize::new(described.len()).ok_or("graph.scheduler.layout")?,
                 config.scheduler.render_lanes,
             );
-            for range in &ranges {
-                for (local_unit, unit) in units[range.first_unit..range.end_unit].iter().enumerate()
-                {
-                    for (member, node) in unit.members.iter().enumerate() {
-                        if locations
-                            .insert(
-                                node.clone(),
-                                NativeNodeLocation {
-                                    wave: wave_index,
-                                    partition: range.partition_id,
-                                    unit: local_unit,
-                                    member,
-                                },
-                            )
-                            .is_some()
-                        {
-                            return Err("graph.scheduler.layout");
-                        }
-                    }
-                }
-            }
-            largest_wave_width = largest_wave_width.max(units.len());
+            ranges.push(
+                partitions
+                    .iter()
+                    .map(|range| (range.first_unit, range.end_unit, range.partition_id))
+                    .collect(),
+            );
+            largest_wave_width = largest_wave_width.max(described.len());
             unit_count = unit_count
-                .checked_add(units.len())
+                .checked_add(described.len())
                 .ok_or("graph.scheduler.resource")?;
             partition_count = partition_count
-                .checked_add(ranges.len())
+                .checked_add(partitions.len())
                 .ok_or("graph.scheduler.resource")?;
             waves.push(NativeWaveBlueprint {
-                level: level.level,
-                units: units.into_boxed_slice(),
-                partitions: ranges,
+                level: *level,
+                units: described.into_boxed_slice(),
+                partitions,
             });
         }
-
-        let mut edge_index_by_node: BTreeMap<GraphNodeId, usize> = BTreeMap::new();
-        let mut stage_operations = vec![Vec::new(); waves.len()];
-        for edge in &plan.spec.edges {
-            let source = *locations
-                .get(&edge.source.node)
-                .ok_or("graph.scheduler.layout")?;
-            let destination = *locations
-                .get(&edge.destination.node)
-                .ok_or("graph.scheduler.layout")?;
-            if source.wave >= destination.wave {
-                return Err("graph.scheduler.layout");
-            }
-            let destination_edge = edge_index_by_node
-                .entry(edge.destination.node.clone())
-                .or_default();
-            stage_operations[destination.wave].push(NativeStageOperation {
-                source,
-                destination,
-                destination_edge: *destination_edge,
-            });
-            *destination_edge = destination_edge
-                .checked_add(1)
-                .ok_or("graph.scheduler.resource")?;
-        }
-        let observation_order: Box<[Box<[NativeNodeLocation]>]> = plan
-            .dependency_levels
-            .iter()
-            .map(|level| level.nodes.iter().map(|node| locations[node]).collect())
-            .collect();
-        let output_node = plan
-            .sequential_schedule
-            .iter()
-            .find(|node| matches!(node, GraphNodeId::Output { .. }))
-            .ok_or("graph.scheduler.layout")?;
-        let output = locations[output_node];
+        let staged_edges = program.inputs.len()
+            + program
+                .ops
+                .iter()
+                .filter(|op| op.sidechain.is_some())
+                .count();
         let graph_job_bytes = native_graph_job_bytes(
             plan,
+            program,
             unit_count,
             partition_count,
             bank_member_count,
-            &stage_operations,
+            staged_edges,
+            waves.len(),
             runtime_observer_count,
         )?;
         if graph_job_bytes > config.maximum_retained_bytes {
@@ -2110,13 +1585,7 @@ impl NativeGraphBlueprint {
         }
         Ok(Self {
             waves: waves.into_boxed_slice(),
-            stage_operations: stage_operations
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect(),
-            observation_order,
-            output,
-            locations,
+            ranges,
             largest_wave_width,
             unit_count,
             partition_count,
@@ -2138,8 +1607,8 @@ impl NativeGraphBlueprint {
             for unit in &wave.units {
                 let tag = match unit.kind {
                     NativeUnitBlueprintKind::Node => 1,
-                    NativeUnitBlueprintKind::EffectBank(_) => 2,
-                    NativeUnitBlueprintKind::BuiltinBank(_) => 3,
+                    NativeUnitBlueprintKind::EffectBank => 2,
+                    NativeUnitBlueprintKind::BuiltinBank => 3,
                 };
                 hash = test_transcript_byte(hash, tag);
                 hash = test_transcript_node(hash, &unit.key);
@@ -2152,7 +1621,7 @@ impl NativeGraphBlueprint {
                     retained_bank_members =
                         retained_bank_members.saturating_add(unit.members.len());
                 }
-                if matches!(unit.kind, NativeUnitBlueprintKind::BuiltinBank(_)) {
+                if matches!(unit.kind, NativeUnitBlueprintKind::BuiltinBank) {
                     retained_builtin_bank_units = retained_builtin_bank_units.saturating_add(1);
                     retained_builtin_bank_members =
                         retained_builtin_bank_members.saturating_add(unit.members.len());
@@ -2261,44 +1730,15 @@ fn test_transcript_edge(hash: u64, edge: &GraphEdgeId) -> u64 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn add_native_bank_membership(
-    membership: &mut BTreeMap<GraphNodeId, NativeBankMembership>,
-    level_by_node: &BTreeMap<GraphNodeId, usize>,
-    members: Box<[GraphNodeId]>,
-    kind: NativeUnitBlueprintKind,
-) -> Result<(), &'static str> {
-    let key = members
-        .iter()
-        .min()
-        .cloned()
-        .ok_or("graph.scheduler.layout")?;
-    let level = level_by_node
-        .get(&key)
-        .copied()
-        .ok_or("graph.scheduler.layout")?;
-    if members.iter().any(|member| {
-        level_by_node.get(member).copied() != Some(level) || membership.contains_key(member)
-    }) {
-        return Err("graph.scheduler.layout");
-    }
-    let record = NativeBankMembership {
-        key,
-        members: members.clone(),
-        kind,
-    };
-    for member in members {
-        membership.insert(member, record.clone());
-    }
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn native_graph_job_bytes(
     plan: &PreparedGraphPlan,
+    program: &program::ExecutionProgram,
     unit_count: usize,
     partition_count: usize,
     bank_member_count: usize,
-    stage_operations: &[Vec<NativeStageOperation>],
+    staged_edges: usize,
+    wave_count: usize,
     runtime_observer_count: usize,
 ) -> Result<usize, &'static str> {
     fn add(total: &mut usize, count: usize, size: usize) -> Result<(), &'static str> {
@@ -2308,79 +1748,52 @@ fn native_graph_job_bytes(
         Ok(())
     }
     let frames = plan.envelope.quantum.0 as usize;
+    let stereo_block = 2_usize
+        .checked_mul(frames)
+        .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
+        .ok_or("graph.scheduler.resource")?;
     let mut total = 0_usize;
-    add(
-        &mut total,
-        plan.sequential_schedule.len(),
-        2_usize
-            .checked_mul(frames)
-            .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
-            .ok_or("graph.scheduler.resource")?,
-    )?;
-    add(
-        &mut total,
-        plan.spec.edges.len(),
-        2_usize
-            .checked_mul(frames)
-            .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
-            .ok_or("graph.scheduler.resource")?,
-    )?;
-    let delay_samples = plan
-        .inserted_delays
-        .iter()
-        .try_fold(0_usize, |sum, delay| {
-            sum.checked_add(delay.samples.0 as usize)
-                .ok_or("graph.scheduler.resource")
-        })?;
-    add(&mut total, delay_samples, 2 * core::mem::size_of::<f32>())?;
-    let reduction_slots = plan.spec.nodes.iter().try_fold(0_usize, |sum, node| {
-        let inputs = plan
-            .spec
-            .edges
-            .iter()
-            .filter(|edge| {
-                edge.destination.node == node.id
-                    && edge.destination.kind != GraphPortKind::SidechainInput
-            })
-            .count();
-        sum.checked_add(inputs).ok_or("graph.scheduler.resource")
+    // Every parcel gives each of its ops an output buffer and each incoming edge a staging buffer:
+    // the native executor stages across partitions rather than colouring one shared arena (F8's
+    // pull model is #100's).
+    add(&mut total, program.ops.len(), stereo_block)?;
+    add(&mut total, staged_edges, stereo_block)?;
+    let delay_samples = program.delays.iter().try_fold(0_usize, |sum, line| {
+        sum.checked_add(line.samples as usize)
+            .ok_or("graph.scheduler.resource")
     })?;
-    add(&mut total, reduction_slots, core::mem::size_of::<f32>())?;
+    add(&mut total, delay_samples, 2 * core::mem::size_of::<f32>())?;
     add(
         &mut total,
-        plan.spec.edges.len(),
-        core::mem::size_of::<NativeRuntimeEdge>(),
+        staged_edges,
+        core::mem::size_of::<u32>() + core::mem::size_of::<runtime::StageOperation>(),
     )?;
     add(
         &mut total,
-        unit_count,
-        core::mem::size_of::<NativeGraphUnit>(),
+        program.ops.len(),
+        core::mem::size_of::<runtime::RuntimeOp>(),
     )?;
     add(
         &mut total,
-        bank_member_count,
-        core::mem::size_of::<NativeRuntimeNode>(),
+        unit_count.saturating_add(bank_member_count),
+        core::mem::size_of::<runtime::RuntimeUnit>(),
     )?;
     add(
         &mut total,
         partition_count,
         core::mem::size_of::<RenderPartitionV1<NativeGraphPartitionJob>>()
-            + core::mem::size_of::<miso_engine_native_scheduler::RenderPartitionRangeV1>(),
+            + core::mem::size_of::<miso_engine_native_scheduler::RenderPartitionRangeV1>()
+            + core::mem::size_of::<runtime::Runtime>(),
     )?;
     add(
         &mut total,
-        plan.dependency_levels.len(),
+        wave_count,
         core::mem::size_of::<RenderWaveV1<NativeGraphPartitionJob>>(),
     )?;
     add(
         &mut total,
-        stage_operations.iter().map(Vec::len).sum(),
-        core::mem::size_of::<NativeStageOperation>(),
-    )?;
-    add(
-        &mut total,
-        plan.sequential_schedule.len(),
-        core::mem::size_of::<NativeNodeLocation>(),
+        program.ops.len(),
+        core::mem::size_of::<runtime::NodeLocation>(),
     )?;
     add(
         &mut total,
@@ -2393,276 +1806,47 @@ fn native_graph_job_bytes(
     Ok(total)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeRuntimeEdge {
-    sidechain: bool,
-    delay: Option<CompensationDelay>,
-    contribution: StereoBuffer,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-enum NativeRuntimeNodeKind {
-    Identity,
-    Bound(Box<dyn GraphRuntimeProcessor>),
-    Effect(GraphPreparedEffect),
-    Route(RouteTransform),
-    Reduction,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeRuntimeNode {
-    incoming: Box<[NativeRuntimeEdge]>,
-    output: StereoBuffer,
-    source_input: bool,
-    reduction_scratch: Box<[f32]>,
-    kind: NativeRuntimeNodeKind,
-    observers: Box<[GraphNodeObserverBinding]>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeRuntimeNode {
-    fn reduce(&mut self, sanitized_samples: &mut u64) {
-        let main_inputs = self.incoming.iter().filter(|edge| !edge.sidechain).count();
-        for frame in 0..self.output.left.len() {
-            for (slot, edge) in self
-                .incoming
-                .iter()
-                .filter(|edge| !edge.sidechain)
-                .enumerate()
-            {
-                self.reduction_scratch[slot] = edge.contribution.left[frame];
-            }
-            self.output.left[frame] = balanced_pairwise_sum(
-                &mut self.reduction_scratch[..main_inputs],
-                sanitized_samples,
-            );
-            for (slot, edge) in self
-                .incoming
-                .iter()
-                .filter(|edge| !edge.sidechain)
-                .enumerate()
-            {
-                self.reduction_scratch[slot] = edge.contribution.right[frame];
-            }
-            self.output.right[frame] = balanced_pairwise_sum(
-                &mut self.reduction_scratch[..main_inputs],
-                sanitized_samples,
-            );
-        }
-    }
-
-    fn execute(
-        &mut self,
-        first_sample: u64,
-        sanitized_samples: &mut u64,
-    ) -> Result<(), RenderError> {
-        if !self.source_input {
-            self.reduce(sanitized_samples);
-        }
-        match &mut self.kind {
-            NativeRuntimeNodeKind::Identity | NativeRuntimeNodeKind::Reduction => {}
-            NativeRuntimeNodeKind::Bound(processor) => processor.process(GraphBindingBlock {
-                left: &mut self.output.left,
-                right: &mut self.output.right,
-                first_sample,
-            })?,
-            NativeRuntimeNodeKind::Route(transform) => {
-                for frame in 0..self.output.left.len() {
-                    (self.output.left[frame], self.output.right[frame]) = transform.transform(
-                        self.output.left[frame],
-                        self.output.right[frame],
-                        sanitized_samples,
-                    );
-                }
-            }
-            NativeRuntimeNodeKind::Effect(effect) => {
-                let sidechain = self
-                    .incoming
-                    .iter()
-                    .find(|edge| edge.sidechain)
-                    .map(|edge| (&*edge.contribution.left, &*edge.contribution.right));
-                let block = EffectProcessBlock::new(
-                    &mut self.output.left,
-                    &mut self.output.right,
-                    sidechain,
-                    first_sample,
-                    &[],
-                    effect.metadata.quantum,
-                )
-                .map_err(|_| RenderError::InvalidEnvelope)?;
-                let _ = effect.processor.process(block);
-            }
-        }
-        Ok(())
-    }
-
-    fn observe(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        for observer in &mut self.observers {
-            observer.observer.observe(GraphObservationBlock {
-                left: &self.output.left,
-                right: &self.output.right,
-                first_sample,
-            })?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-enum NativeGraphUnit {
-    Node(NativeRuntimeNode),
-    /// Effect banks and builtin banks are the same unit: a member set plus one chain.
-    Bank {
-        members: Box<[NativeRuntimeNode]>,
-        chain: BankChain,
-    },
-}
-
-/// Planar per-lane view over a native bank unit's member outputs.
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeMembers<'a>(&'a mut [NativeRuntimeNode]);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl BankMembers for NativeMembers<'_> {
-    fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-        let output = &self.0[lane].output;
-        (&output.left, &output.right)
-    }
-    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-        let output = &mut self.0[lane].output;
-        (&mut output.left, &mut output.right)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeGraphUnit {
-    fn member(&self, member: usize) -> Option<&NativeRuntimeNode> {
-        match self {
-            Self::Node(node) => (member == 0).then_some(node),
-            Self::Bank { members, .. } => members.get(member),
-        }
-    }
-
-    fn member_mut(&mut self, member: usize) -> Option<&mut NativeRuntimeNode> {
-        match self {
-            Self::Node(node) => (member == 0).then_some(node),
-            Self::Bank { members, .. } => members.get_mut(member),
-        }
-    }
-
-    fn execute(
-        &mut self,
-        first_sample: u64,
-        sanitized_samples: &mut u64,
-    ) -> Result<(), RenderError> {
-        match self {
-            Self::Node(node) => node.execute(first_sample, sanitized_samples),
-            Self::Bank { members, chain } => {
-                let frames = members
-                    .first()
-                    .ok_or(RenderError::InvalidEnvelope)?
-                    .output
-                    .left
-                    .len() as u32;
-                for member in members.iter_mut() {
-                    member.reduce(sanitized_samples);
-                }
-                chain.run(&mut NativeMembers(members), frames, first_sample)
-            }
-        }
-    }
-
-    fn qualification_counters(&self) -> [u64; 2] {
-        match self {
-            Self::Bank { chain, .. } => chain.qualification_counters(),
-            Self::Node(_) => [0, 0],
-        }
-    }
-
-    fn bank_transposes(&self) -> u64 {
-        match self {
-            Self::Bank { chain, .. } => chain.transposes(),
-            Self::Node(_) => 0,
-        }
-    }
-}
-
-/// A padded group's active mask **is** its membership: the planner emits `Some` members before
-/// every `None`, so lane `i` is active exactly while `i < members`. The mask is therefore derived
-/// here and stored nowhere (#86 F9's graph half).
-fn trailing_active_mask(
-    members: usize,
-    width: miso_engine_effect_contract::BankWidth,
-) -> Box<[bool]> {
-    (0..width.lanes() as usize)
-        .map(|lane| lane < members)
-        .collect()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_bank_chain(
-    scratch: AoSoaScratch,
-    active: Box<[bool]>,
-    stage: Box<dyn BankStage>,
-) -> BankChain {
-    BankChain::new(
-        scratch,
-        active.clone(),
-        vec![BankSlot {
-            stage,
-            active_lanes: active,
-        }],
-    )
-    .expect("validated bank shape")
-}
-
+/// One partition's work: the ops of one parcel over that parcel's own arena.
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphPartitionJob {
-    units: Box<[NativeGraphUnit]>,
+    runtime: runtime::Runtime,
     first_sample: u64,
-    sanitized_samples: u64,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeGraphPartitionJob {
-    fn node(&self, location: NativeNodeLocation) -> Option<&NativeRuntimeNode> {
-        self.units.get(location.unit)?.member(location.member)
-    }
-
-    fn node_mut(&mut self, location: NativeNodeLocation) -> Option<&mut NativeRuntimeNode> {
-        self.units
-            .get_mut(location.unit)?
-            .member_mut(location.member)
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeSchedulerJobV1 for NativeGraphPartitionJob {
     type Error = RenderError;
 
+    // REALTIME_POLICY_BEGIN
     fn execute(&mut self) -> Result<(), Self::Error> {
-        for unit in &mut self.units {
-            unit.execute(self.first_sample, &mut self.sanitized_samples)?;
+        for unit in 0..self.runtime.units.len() {
+            self.runtime.execute(unit, self.first_sample)?;
         }
         Ok(())
     }
+    // REALTIME_POLICY_END
 }
 
+/// The native dependency-wave executor: the same [`runtime`] model, one arena per parcel.
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphExecutor {
     waves: Box<[RenderWaveV1<NativeGraphPartitionJob>]>,
-    stage_operations: Box<[Box<[NativeStageOperation]>]>,
-    observation_order: Box<[Box<[NativeNodeLocation]>]>,
-    output: NativeNodeLocation,
+    stage_operations: Box<[Box<[runtime::StageOperation]>]>,
+    /// Per wave, the `(partition, unit)` pairs to observe, in the same stable unit order the
+    /// sequential executor walks.
+    observation: Box<[Box<[runtime::ObservedUnit]>]>,
+    output: runtime::NodeLocation,
     scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
     source_set: Option<GraphPreparedSourceSet>,
-    source_input_targets: Box<[(usize, NativeNodeLocation)]>,
+    source_input_targets: Box<[(usize, runtime::NodeLocation)]>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeGraphExecutor {
+    #[allow(clippy::too_many_arguments)]
     fn new(
-        graph: PreparedGraphPlan,
+        plan: PreparedGraphPlan,
+        program: &program::ExecutionProgram,
         bindings: Vec<GraphNodeBinding>,
         blueprint: NativeGraphBlueprint,
         scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
@@ -2671,187 +1855,54 @@ impl NativeGraphExecutor {
         #[cfg(feature = "test-support")]
         test_preparation_transcript: NativeGraphPreparationTranscriptV1,
     ) -> (Self, NativeGraphPreparedMetadataV1) {
+        let frames = plan.envelope.quantum.0 as usize;
+        let source_inputs: BTreeSet<_> = source_set
+            .as_ref()
+            .map(|set| set.claimed_nodes().into_iter().collect())
+            .unwrap_or_default();
+        let parts = runtime::RuntimeParts::new(
+            &plan.spec,
+            plan.routes,
+            plan.effects,
+            plan.banks,
+            plan.builtin_banks,
+            plan.observers,
+            bindings,
+            source_inputs,
+        );
+        let native = runtime::build_native(program, &plan.spec, parts, frames, &blueprint.ranges);
         let source_input_targets = source_set
             .as_ref()
             .map(|set| {
                 set.claims()
                     .iter()
                     .enumerate()
-                    .map(|(claim_index, claim)| (claim_index, blueprint.locations[&claim.node]))
+                    .map(|(claim, entry)| (claim, native.locations[&entry.node]))
                     .collect()
             })
             .unwrap_or_default();
-        let source_input_nodes: BTreeSet<_> = source_set
-            .as_ref()
-            .map(|set| set.claimed_nodes().into_iter().collect())
-            .unwrap_or_default();
-        let PreparedGraphPlan {
-            spec,
-            inserted_delays,
-            routes,
-            effects,
-            banks,
-            builtin_banks,
-            observers,
-            envelope,
-            ..
-        } = graph;
-        let frames = envelope.quantum.0 as usize;
-        let delays: BTreeMap<_, _> = inserted_delays
-            .into_iter()
-            .map(|delay| (delay.edge_id, delay.samples.0))
-            .collect();
-        let mut routes: BTreeMap<_, _> = routes
-            .into_iter()
-            .map(|route| (route.node, route.transform))
-            .collect();
-        let mut effects: BTreeMap<_, _> = effects
-            .into_iter()
-            .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
-            .collect();
-        let mut bindings: BTreeMap<_, _> = bindings
-            .into_iter()
-            .map(|binding| (binding.node, binding.processor))
-            .collect();
-        let mut observers_by_node: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for observer in observers {
-            observers_by_node
-                .entry(observer.node.clone())
-                .or_default()
-                .push(observer);
-        }
-        for values in observers_by_node.values_mut() {
-            values.sort_by_key(|observer| observer.handle);
-        }
-        let mut incoming_by_node: BTreeMap<_, Vec<_>> = spec
-            .nodes
-            .iter()
-            .map(|node| (node.id.clone(), Vec::new()))
-            .collect();
-        for edge in spec.edges {
-            incoming_by_node
-                .get_mut(&edge.destination.node)
-                .expect("validated native destination")
-                .push(edge);
-        }
-        let mut banks: Vec<_> = banks.into_iter().map(Some).collect();
-        let mut builtin_banks: Vec<_> = builtin_banks.into_iter().map(Some).collect();
-        let mut rendered_waves = Vec::with_capacity(blueprint.waves.len());
-        for wave in blueprint.waves {
-            let mut units: Vec<Option<NativeGraphUnit>> = wave
-                .units
-                .into_vec()
-                .into_iter()
-                .map(|unit| {
-                    let prepared = match unit.kind {
-                        NativeUnitBlueprintKind::Node => NativeGraphUnit::Node(build_native_node(
-                            &unit.members[0],
-                            false,
-                            frames,
-                            &mut incoming_by_node,
-                            &delays,
-                            &mut routes,
-                            &mut effects,
-                            &mut bindings,
-                            &mut observers_by_node,
-                            source_input_nodes.contains(&unit.members[0]),
-                        )),
-                        NativeUnitBlueprintKind::EffectBank(index) => {
-                            let bank = banks[index]
-                                .take()
-                                .expect("validated effect bank ownership");
-                            let members = unit
-                                .members
-                                .iter()
-                                .map(|member| {
-                                    build_native_node(
-                                        member,
-                                        true,
-                                        frames,
-                                        &mut incoming_by_node,
-                                        &delays,
-                                        &mut routes,
-                                        &mut effects,
-                                        &mut bindings,
-                                        &mut observers_by_node,
-                                        source_input_nodes.contains(member),
-                                    )
-                                })
-                                .collect();
-                            let width = bank.scratch.width();
-                            let quantum = bank.scratch.quantum();
-                            let stage = EffectBankStage::new(bank.processor, width, quantum)
-                                .expect("validated bank width");
-                            NativeGraphUnit::Bank {
-                                members,
-                                chain: native_bank_chain(
-                                    bank.scratch,
-                                    bank.active_mask,
-                                    Box::new(stage),
-                                ),
-                            }
-                        }
-                        NativeUnitBlueprintKind::BuiltinBank(index) => {
-                            let bank = builtin_banks[index]
-                                .take()
-                                .expect("validated builtin bank ownership");
-                            let members = unit
-                                .members
-                                .iter()
-                                .map(|member| {
-                                    build_native_node(
-                                        member,
-                                        true,
-                                        frames,
-                                        &mut incoming_by_node,
-                                        &delays,
-                                        &mut routes,
-                                        &mut effects,
-                                        &mut bindings,
-                                        &mut observers_by_node,
-                                        source_input_nodes.contains(member),
-                                    )
-                                })
-                                .collect();
-                            let active =
-                                trailing_active_mask(unit.members.len(), bank.scratch.width());
-                            NativeGraphUnit::Bank {
-                                members,
-                                chain: native_bank_chain(
-                                    bank.scratch,
-                                    active,
-                                    Box::new(BuiltinStage(bank.processor)),
-                                ),
-                            }
-                        }
-                    };
-                    Some(prepared)
-                })
-                .collect();
-            let partitions = wave
+        let mut waves = Vec::with_capacity(native.parcels.len());
+        for (wave, parcels) in native.parcels.into_iter().enumerate() {
+            let partitions = blueprint.waves[wave]
                 .partitions
                 .iter()
-                .map(|range| {
-                    let partition_units = (range.first_unit..range.end_unit)
-                        .map(|index| units[index].take().expect("one stable unit owner"))
-                        .collect();
+                .copied()
+                .zip(parcels)
+                .map(|(range, runtime)| {
                     RenderPartitionV1::new(
-                        *range,
+                        range,
                         NativeGraphPartitionJob {
-                            units: partition_units,
+                            runtime,
                             first_sample: 0,
-                            sanitized_samples: 0,
                         },
                     )
                 })
                 .collect();
-            rendered_waves.push(
-                RenderWaveV1::new(wave.level, partitions).expect("validated native wave layout"),
+            waves.push(
+                RenderWaveV1::new(native.levels[wave], partitions)
+                    .expect("validated native wave layout"),
             );
         }
-        debug_assert!(incoming_by_node.values().all(Vec::is_empty));
-        debug_assert!(bindings.is_empty());
-        debug_assert!(observers_by_node.values().all(Vec::is_empty));
         let metadata = NativeGraphPreparedMetadataV1 {
             selection: scheduler.selection(),
             resources,
@@ -2860,10 +1911,18 @@ impl NativeGraphExecutor {
         };
         (
             Self {
-                waves: rendered_waves.into_boxed_slice(),
-                stage_operations: blueprint.stage_operations,
-                observation_order: blueprint.observation_order,
-                output: blueprint.output,
+                waves: waves.into_boxed_slice(),
+                stage_operations: native
+                    .stage_operations
+                    .into_iter()
+                    .map(Vec::into_boxed_slice)
+                    .collect(),
+                observation: native
+                    .observation
+                    .into_iter()
+                    .map(Vec::into_boxed_slice)
+                    .collect(),
+                output: native.output,
                 scheduler,
                 source_set,
                 source_input_targets,
@@ -2872,6 +1931,7 @@ impl NativeGraphExecutor {
         )
     }
 
+    // REALTIME_POLICY_BEGIN
     fn stage_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
         let (previous, current_and_later) = self.waves.split_at_mut(wave_index);
         let current = current_and_later
@@ -2884,44 +1944,29 @@ impl NativeGraphExecutor {
             let source = previous
                 .get(operation.source.wave)
                 .and_then(|wave| wave.recovered_parcel(operation.source.partition))
-                .and_then(|parcel| parcel.node(operation.source))
-                .ok_or(RenderError::InvalidEnvelope)?;
-            let destination = current
-                .recovered_parcel_mut(operation.destination.partition)
-                .and_then(|parcel| parcel.node_mut(operation.destination))
-                .ok_or(RenderError::InvalidEnvelope)?;
-            let edge = destination
-                .incoming
-                .get_mut(operation.destination_edge)
-                .ok_or(RenderError::InvalidEnvelope)?;
-            edge.contribution.left.copy_from_slice(&source.output.left);
-            edge.contribution
-                .right
-                .copy_from_slice(&source.output.right);
-            if let Some(delay) = &mut edge.delay {
-                delay.process(&mut edge.contribution.left, &mut edge.contribution.right);
-            }
+                .ok_or(RenderError::InvalidEnvelope)?
+                .runtime
+                .buffer(operation.source.buffer);
+            current
+                .recovered_parcel_mut(operation.destination_partition)
+                .ok_or(RenderError::InvalidEnvelope)?
+                .runtime
+                .stage_into(operation.destination_buffer, operation.line, source);
         }
         Ok(())
     }
 
     fn observe_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
-        for location in self.observation_order[wave_index].iter().copied() {
+        for (partition, unit) in self.observation[wave_index].iter().copied() {
             self.waves[wave_index]
-                .recovered_parcel_mut(location.partition)
-                .and_then(|parcel| parcel.node_mut(location))
+                .recovered_parcel_mut(partition)
                 .ok_or(RenderError::InvalidEnvelope)?
-                .observe(first_sample)?;
+                .runtime
+                .observe_unit(unit, first_sample)?;
         }
         Ok(())
     }
-
-    fn node(&self, location: NativeNodeLocation) -> Option<&NativeRuntimeNode> {
-        self.waves
-            .get(location.wave)?
-            .recovered_parcel(location.partition)?
-            .node(location)
-    }
+    // REALTIME_POLICY_END
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2936,16 +1981,13 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
     ) -> Result<(), RenderError> {
         if let Some(source_set) = &mut self.source_set {
             source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
-            for &(claim_index, location) in &self.source_input_targets {
-                let node = self.waves[location.wave]
+            for &(claim, location) in &self.source_input_targets {
+                let (left, right) = self.waves[location.wave]
                     .recovered_parcel_mut(location.partition)
-                    .and_then(|parcel| parcel.node_mut(location))
-                    .ok_or(RenderError::InvalidEnvelope)?;
-                source_set.copy_track_input(
-                    claim_index,
-                    &mut node.output.left,
-                    &mut node.output.right,
-                )?;
+                    .ok_or(RenderError::InvalidEnvelope)?
+                    .runtime
+                    .buffer_mut(location.buffer);
+                source_set.copy_track_input(claim, left, right)?;
             }
         }
         for wave_index in 0..self.waves.len() {
@@ -2961,9 +2003,13 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
             }
             self.observe_wave(wave_index, time.absolute_sample)?;
         }
-        let rendered = self.node(self.output).ok_or(RenderError::InvalidEnvelope)?;
-        output.plane_mut(0)?.copy_from_slice(&rendered.output.left);
-        output.plane_mut(1)?.copy_from_slice(&rendered.output.right);
+        let (left, right) = self.waves[self.output.wave]
+            .recovered_parcel(self.output.partition)
+            .ok_or(RenderError::InvalidEnvelope)?
+            .runtime
+            .buffer(self.output.buffer);
+        output.plane_mut(0)?.copy_from_slice(left);
+        output.plane_mut(1)?.copy_from_slice(right);
         Ok(())
     }
     // REALTIME_POLICY_END
@@ -2971,7 +2017,7 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
     fn qualification_counters(&self) -> [u64; 2] {
         self.waves.iter().fold([0_u64, 0_u64], |mut total, wave| {
             for parcel in wave.recovered_parcels() {
-                for unit in &parcel.units {
+                for unit in parcel.runtime.units.iter() {
                     let counters = unit.qualification_counters();
                     total[0] = total[0].saturating_add(counters[0]);
                     total[1] = total[1].saturating_add(counters[1]);
@@ -2984,8 +2030,8 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
     fn bank_transposes(&self) -> u64 {
         self.waves.iter().fold(0_u64, |mut total, wave| {
             for parcel in wave.recovered_parcels() {
-                for unit in &parcel.units {
-                    total = total.saturating_add(unit.bank_transposes());
+                for unit in parcel.runtime.units.iter() {
+                    total = total.saturating_add(unit.transposes());
                 }
             }
             total
@@ -3000,64 +2046,6 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn build_native_node(
-    node_id: &GraphNodeId,
-    bank_member: bool,
-    frames: usize,
-    incoming_by_node: &mut BTreeMap<GraphNodeId, Vec<GraphEdge>>,
-    delays: &BTreeMap<GraphEdgeId, u64>,
-    routes: &mut BTreeMap<GraphNodeId, RouteTransform>,
-    effects: &mut BTreeMap<GraphNodeId, GraphPreparedEffect>,
-    bindings: &mut BTreeMap<GraphNodeId, Box<dyn GraphRuntimeProcessor>>,
-    observers: &mut BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
-    source_input: bool,
-) -> NativeRuntimeNode {
-    let incoming: Vec<_> = incoming_by_node
-        .remove(node_id)
-        .expect("validated native node")
-        .into_iter()
-        .map(|edge| NativeRuntimeEdge {
-            sidechain: edge.destination.kind == GraphPortKind::SidechainInput,
-            delay: delays
-                .get(&edge.id)
-                .copied()
-                .filter(|samples| *samples != 0)
-                .map(|samples| CompensationDelay::new(samples as usize)),
-            contribution: StereoBuffer::new(frames),
-        })
-        .collect();
-    let main_inputs = incoming.iter().filter(|edge| !edge.sidechain).count();
-    let kind = if bank_member {
-        NativeRuntimeNodeKind::Identity
-    } else if let Some(processor) = bindings.remove(node_id) {
-        NativeRuntimeNodeKind::Bound(processor)
-    } else if let Some(effect) = effects.remove(node_id) {
-        NativeRuntimeNodeKind::Effect(effect)
-    } else if let Some(transform) = routes.remove(node_id) {
-        NativeRuntimeNodeKind::Route(transform)
-    } else if matches!(
-        node_id,
-        GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-    ) {
-        NativeRuntimeNodeKind::Reduction
-    } else {
-        NativeRuntimeNodeKind::Identity
-    };
-    NativeRuntimeNode {
-        incoming: incoming.into_boxed_slice(),
-        output: StereoBuffer::new(frames),
-        source_input,
-        reduction_scratch: vec![0.0; main_inputs].into_boxed_slice(),
-        kind,
-        observers: observers
-            .remove(node_id)
-            .unwrap_or_default()
-            .into_boxed_slice(),
-    }
-}
-
 pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
     u64::from(quantum.0).checked_mul(count)
 }
@@ -3065,14 +2053,15 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::CompensationDelay;
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::LAUNCH_SAMPLE_RATES;
     use miso_engine_effect_contract::{
-        BankWidth, EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode,
-        LinkModeSet, NativeEffectFactory, ParameterChannel, PortDescriptorV1, PortId, PortLayout,
-        PortRole, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1,
-        PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError, StatePayloadInput,
-        StatePayloadOutput, StatePayloadSizes,
+        BankWidth, EffectDescriptorV1, EffectId, EffectProcessBlock, EffectQuality,
+        InitialParameterValue, LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel,
+        PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectLimits, PrepareEffectRequest,
+        PreparedPortsV1, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
+        StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
     use std::sync::{
         Arc,
@@ -3271,6 +2260,14 @@ mod tests {
         }
     }
 
+    /// Hand-built plans list their nodes in whatever order reads best; the compiler always emits
+    /// them sorted by id, and `program::lower` interns ids by binary search over that order, so
+    /// the helpers sort here rather than making every fixture do it by hand.
+    fn sorted_nodes(mut nodes: Vec<GraphNode>) -> Vec<GraphNode> {
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        nodes
+    }
+
     fn empty_estimate() -> GraphResourceEstimate {
         GraphResourceEstimate {
             logical_nodes: 0,
@@ -3371,7 +2368,7 @@ mod tests {
             PreparedGraphPlan::new(PreparedGraphPlanParts {
                 plan_id: 42,
                 spec: GraphSpec {
-                    nodes: graph_nodes,
+                    nodes: sorted_nodes(graph_nodes),
                     ports: Vec::new(),
                     edges: vec![edge],
                 },
@@ -3574,7 +2571,7 @@ mod tests {
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id,
             spec: GraphSpec {
-                nodes,
+                nodes: sorted_nodes(nodes),
                 ports: Vec::new(),
                 edges,
             },
@@ -3905,7 +2902,7 @@ mod tests {
 
     #[test]
     fn structural_layout_rejects_node_level_edge_and_bank_corruptions() {
-        for corruption in 0..5 {
+        for corruption in 0..6 {
             let (mut graph, bindings, _) = binding_plan();
             match corruption {
                 0 => {
@@ -3918,6 +2915,10 @@ mod tests {
                 4 => {
                     graph.sequential_schedule.pop();
                 }
+                // `program::lower` interns node ids by binary search over `spec.nodes`, so an
+                // unsorted spec is a malformed plan: bind refuses it with the same code rather
+                // than lowering against a binary search that cannot find its nodes.
+                5 => graph.spec.nodes.reverse(),
                 _ => unreachable!(),
             }
             let failure = match graph.bind(bindings) {
@@ -3964,14 +2965,12 @@ mod tests {
         assert_eq!(r, [0.0, 0.0, 4.0]);
     }
     #[test]
-    fn reduction_is_fixed_pairwise() {
-        let mut values = [1.0, 2.0, 3.0];
-        let mut sanitized = 0;
-        assert_eq!(balanced_pairwise_sum(&mut values, &mut sanitized), 6.0);
+    fn reduction_is_left_to_right() {
+        assert_eq!(reduce_left_to_right(&[1.0, 2.0, 3.0]), 6.0);
     }
 
     #[test]
-    fn pairwise_reduction_meets_analytic_bound_and_ignores_completion_order() {
+    fn left_to_right_reduction_meets_analytic_bound_and_ignores_completion_order() {
         let fixtures = [
             vec![1.0_f32; 257],
             (0..257)
@@ -3988,22 +2987,23 @@ mod tests {
                 .iter()
                 .map(|value| f64::from(value.abs()))
                 .sum::<f64>();
-            let levels = fixture.len().next_power_of_two().ilog2();
+            // D9 is a left-to-right recursive summation, so the classical bound is
+            // `gamma_{n-1} * sum|x_i|` with `gamma_k = k u / (1 - k u)`, `u = 2^-24`
+            // (Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., eq. 4.4) --
+            // `n - 1` additions rather than the balanced tree's `log2 n` levels.
+            let steps = (fixture.len() - 1) as f64;
             let u = 2.0_f64.powi(-24);
-            let gamma = f64::from(levels) * u / (1.0 - f64::from(levels) * u);
+            let gamma = steps * u / (1.0 - steps * u);
             let bound = gamma * sum_abs + fixture.len() as f64 * f64::from(f32::MIN_POSITIVE);
-            let mut values = fixture;
-            let mut sanitized = 0;
-            let actual = balanced_pairwise_sum(&mut values, &mut sanitized);
-            assert_eq!(sanitized, 0);
+            let actual = reduce_left_to_right(&fixture);
             assert!((f64::from(actual) - reference).abs() <= bound);
         }
 
         let canonical: Vec<_> = (0..65)
             .map(|index| (index, (index as f32 + 1.0).recip()))
             .collect();
-        let mut baseline_values: Vec<_> = canonical.iter().map(|(_, value)| *value).collect();
-        let baseline = balanced_pairwise_sum(&mut baseline_values, &mut 0).to_bits();
+        let baseline_values: Vec<_> = canonical.iter().map(|(_, value)| *value).collect();
+        let baseline = reduce_left_to_right(&baseline_values).to_bits();
         let mut state = 0x6d69_736f_6772_6170_u64;
         for _ in 0..100 {
             let mut completed = canonical.clone();
@@ -4014,13 +3014,10 @@ mod tests {
                 completed.swap(index, state as usize % (index + 1));
             }
             // Worker completion order is discarded; the frozen semantic ID order controls the
-            // reduction tree.
+            // reduction order.
             completed.sort_by_key(|(id, _)| *id);
-            let mut values: Vec<_> = completed.iter().map(|(_, value)| *value).collect();
-            assert_eq!(
-                balanced_pairwise_sum(&mut values, &mut 0).to_bits(),
-                baseline
-            );
+            let values: Vec<_> = completed.iter().map(|(_, value)| *value).collect();
+            assert_eq!(reduce_left_to_right(&values).to_bits(), baseline);
         }
     }
 
@@ -4037,6 +3034,80 @@ mod tests {
         assert_eq!(failure.code, "graph.plan.binding");
         assert_eq!(failure.bindings.nodes.len(), 3);
         assert_eq!(failure.plan.plan_id, 42);
+    }
+
+    /// `GraphNodeBinding::identity` acknowledges a required node without a host processor: the
+    /// node is still listed (so a genuinely missing binding still fails), and the executor renders
+    /// it with its own reduction kind, bit-for-bit as a do-nothing host processor did.
+    #[test]
+    fn identity_binding_acknowledges_without_a_processor() {
+        struct Constant;
+        impl GraphRuntimeProcessor for Constant {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                block.left.fill(0.25);
+                block.right.fill(-0.5);
+                Ok(())
+            }
+        }
+        let render = |identity: bool| {
+            let (plan, bindings, input) = binding_plan();
+            let bindings = GraphRuntimeBindings {
+                envelope: bindings.envelope,
+                nodes: bindings
+                    .nodes
+                    .into_iter()
+                    .map(|binding| {
+                        if binding.node == input {
+                            GraphNodeBinding::new(binding.node, Box::new(Constant))
+                        } else if identity {
+                            GraphNodeBinding::identity(binding.node)
+                        } else {
+                            binding
+                        }
+                    })
+                    .collect(),
+                observers: bindings.observers,
+            };
+            let mut plan = match plan.bind(bindings) {
+                Ok(plan) => plan,
+                Err(failure) => panic!("identity bindings rejected: {}", failure.code),
+            };
+            let mut samples = [f32::NAN; 2];
+            let output = PlanarBufferMut::try_new(&mut samples, 2, 1, 1).expect("output");
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output,
+                },
+                miso_engine_core::realtime::RenderTime { absolute_sample: 0 },
+            )
+            .expect("render");
+            [samples[0].to_bits(), samples[1].to_bits()]
+        };
+        let identity_bits = render(true);
+        assert_eq!(
+            identity_bits,
+            render(false),
+            "an identity binding must render the same bits as a do-nothing host processor"
+        );
+        assert_eq!(
+            identity_bits,
+            [0.25_f32.to_bits(), (-0.5_f32).to_bits()],
+            "a supplied processor must still run when other nodes bind by identity"
+        );
+
+        let (plan, bindings, _) = binding_plan();
+        let mut nodes = bindings.nodes;
+        nodes.pop();
+        let short = GraphRuntimeBindings {
+            envelope: bindings.envelope,
+            nodes,
+            observers: bindings.observers,
+        };
+        match plan.bind(short) {
+            Ok(_) => panic!("a missing binding was accepted"),
+            Err(failure) => assert_eq!(failure.code, "graph.plan.binding"),
+        }
     }
 
     #[test]
@@ -4112,7 +3183,7 @@ mod tests {
         let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: u64::from(rate),
             spec: GraphSpec {
-                nodes,
+                nodes: sorted_nodes(nodes),
                 ports: Vec::new(),
                 edges: vec![edge(input_a.clone(), "a"), edge(input_b.clone(), "b")],
             },
@@ -4171,7 +3242,877 @@ mod tests {
         (plan, bindings)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    // ---- 50 random DAG sessions: the executor bit-identity gate (#98 F2) ----------------------
+
+    /// Adds its sidechain when one is connected, and otherwise trims: the random corpus needs an
+    /// effect that is legal both with and without a sidechain edge.
+    struct OptionalSidechainSum {
+        metadata: PreparedEffectMetadata,
+    }
+    impl PreparedNativeEffect for OptionalSidechainSum {
+        fn metadata(&self) -> PreparedEffectMetadata {
+            self.metadata
+        }
+        fn reset(&mut self, _kind: ResetKind) {}
+        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+            match block.sidechain {
+                Some((side_left, side_right)) => {
+                    for frame in 0..block.left.len() {
+                        block.left[frame] += side_left[frame];
+                        block.right[frame] += side_right[frame];
+                    }
+                }
+                None => {
+                    for frame in 0..block.left.len() {
+                        block.left[frame] *= 0.75;
+                        block.right[frame] *= 0.75;
+                    }
+                }
+            }
+            ProcessReport::default()
+        }
+        fn snapshot_state_payload(
+            &self,
+            _output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _state_layout_version: u32,
+            _input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
+    /// Frozen xorshift64: the generator must not depend on host RNG state.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Seeded noise, so a bound input is a deterministic signal rather than a constant.
+    struct SeededSource {
+        state: u32,
+    }
+    impl GraphRuntimeProcessor for SeededSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for frame in 0..block.left.len() {
+                self.state = self
+                    .state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                let value = f32::from(((self.state >> 16) & 0xffff) as i16) / 3_276.8;
+                block.left[frame] = value;
+                block.right[frame] = -value * 0.5;
+            }
+            Ok(())
+        }
+    }
+
+    /// A stateful bound stage: proves the executors advance identical state, not just bits.
+    struct Recursive {
+        coefficient: f32,
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for Recursive {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for frame in 0..block.left.len() {
+                self.left = miso_engine_lane::softfma::fma_f32_via_f64(
+                    self.coefficient,
+                    self.left,
+                    block.left[frame] * 0.5,
+                );
+                self.right = miso_engine_lane::softfma::fma_f32_via_f64(
+                    self.coefficient,
+                    self.right,
+                    block.right[frame] * 0.5,
+                );
+                block.left[frame] = self.left;
+                block.right[frame] = self.right;
+            }
+            Ok(())
+        }
+    }
+
+    /// Longest-path dependency levels of a hand-built DAG, the way the compiler's `topo` emits
+    /// them: level `1 + max(predecessor level)`, nodes ascending within a level, schedule the
+    /// concatenation. Test-only -- production has exactly one level derivation, in the compiler.
+    fn levels_for(nodes: &[GraphNodeId], edges: &[GraphEdge]) -> Vec<DependencyLevel> {
+        let mut level: BTreeMap<GraphNodeId, u64> =
+            nodes.iter().cloned().map(|node| (node, 0)).collect();
+        for _ in 0..nodes.len() {
+            let mut changed = false;
+            for edge in edges {
+                let source = level[&edge.source.node];
+                let destination = level[&edge.destination.node];
+                if destination < source + 1 {
+                    level.insert(edge.destination.node.clone(), source + 1);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut by_level: BTreeMap<u64, Vec<GraphNodeId>> = BTreeMap::new();
+        for (node, value) in level {
+            by_level.entry(value).or_default().push(node);
+        }
+        by_level
+            .into_iter()
+            .map(|(level, mut nodes)| {
+                nodes.sort();
+                DependencyLevel { level, nodes }
+            })
+            .collect()
+    }
+
+    /// Builds one seeded random session: tracks with their seven stage boundaries, optional
+    /// rack effects with sidechains from other tracks, submixes, routes from arbitrary send taps,
+    /// and PDC on a random subset of edges. Calling it twice with the same seed produces two
+    /// structurally identical plans with independent processor state.
+    fn random_dag_plan(seed: u64) -> (PreparedGraphPlan, GraphRuntimeBindings) {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(16),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let effect_metadata = PreparedEffectMetadata {
+            descriptor: &SUM_DESCRIPTOR,
+            sample_rate: 48_000,
+            quantum: 16,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::Connected {
+                    id: SUM_SIDECHAIN,
+                    required: false,
+                },
+            },
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity: 0,
+        };
+        let track_count = 1 + (xorshift(&mut state) % 5) as usize;
+        let submix_count = (xorshift(&mut state) % 3) as usize;
+        let stages = [
+            TrackStage::Input,
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostSimd1,
+            TrackStage::PostDynamic,
+            TrackStage::PostSimd2PreFader,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let track_id = |track: usize| StableGraphId::parse(&format!("t{track}")).expect("track ID");
+        let stage_node = |track: usize, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: track_id(track),
+            stage,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+
+        let mut nodes: Vec<GraphNodeId> = Vec::new();
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut bindings: Vec<GraphNodeBinding> = Vec::new();
+        let mut required: Vec<GraphNodeId> = Vec::new();
+        let mut routes: Vec<PreparedRoute> = Vec::new();
+        let mut effects: Vec<GraphPreparedEffect> = Vec::new();
+        let mut delays: Vec<InsertedDelay> = Vec::new();
+        let mut taps: Vec<GraphNodeId> = Vec::new();
+
+        let main_edge = |source: &GraphNodeId, destination: &GraphNodeId| GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: destination.clone(),
+            },
+            source: GraphPortId {
+                node: source.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: destination.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.main".to_owned(),
+        };
+
+        for track in 0..track_count {
+            // The stage chain, with an optional rack effect spliced into two of the boundaries.
+            let mut chain: Vec<GraphNodeId> = Vec::new();
+            for (index, stage) in stages.iter().enumerate() {
+                chain.push(stage_node(track, *stage));
+                let rack = match index {
+                    1 => Some(RackId::Simd1),
+                    2 => Some(RackId::Dynamic),
+                    _ => None,
+                };
+                if let Some(rack) = rack
+                    && xorshift(&mut state).is_multiple_of(2)
+                {
+                    chain.push(GraphNodeId::Effect(EffectNodeId {
+                        track_id: track_id(track),
+                        rack,
+                        effect_id: StableGraphId::parse(&format!("fx{index}")).expect("effect ID"),
+                    }));
+                }
+            }
+            for node in &chain {
+                nodes.push(node.clone());
+                if matches!(node, GraphNodeId::TrackStage { .. }) {
+                    taps.push(node.clone());
+                }
+                if let GraphNodeId::Effect(id) = node {
+                    effects.push(GraphPreparedEffect {
+                        id: id.clone(),
+                        metadata: effect_metadata,
+                        processor: Box::new(OptionalSidechainSum {
+                            metadata: effect_metadata,
+                        }),
+                    });
+                }
+            }
+            for pair in chain.windows(2) {
+                edges.push(main_edge(&pair[0], &pair[1]));
+            }
+            // The input is always bound; some later boundaries carry a recursive processor.
+            bindings.push(GraphNodeBinding::new(
+                chain[0].clone(),
+                Box::new(SeededSource {
+                    state: 0x51ED_0000 + track as u32,
+                }),
+            ));
+            required.push(chain[0].clone());
+            for node in chain.iter().skip(1) {
+                let bindable = matches!(
+                    node,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins
+                            | TrackStage::PostFader
+                            | TrackStage::PostMatrix,
+                        ..
+                    }
+                );
+                if bindable && xorshift(&mut state).is_multiple_of(3) {
+                    bindings.push(GraphNodeBinding::new(
+                        node.clone(),
+                        Box::new(Recursive {
+                            coefficient: 0.25 + (xorshift(&mut state) % 64) as f32 / 256.0,
+                            left: 0.0,
+                            right: 0.0,
+                        }),
+                    ));
+                    required.push(node.clone());
+                }
+            }
+        }
+
+        let submixes: Vec<GraphNodeId> = (0..submix_count)
+            .map(|index| GraphNodeId::Submix {
+                submix_id: StableGraphId::parse(&format!("s{index}")).expect("submix ID"),
+            })
+            .collect();
+
+        // Routes: every track sends from one or two arbitrary taps; every submix that received a
+        // send routes on to the output, so the output's fan-in varies from 1 to well past four.
+        let mut route_index = 0_usize;
+        let mut fed_submixes: BTreeSet<usize> = BTreeSet::new();
+        let mut output_fed = false;
+        for track in 0..track_count {
+            let sends = 1 + (xorshift(&mut state) % 2) as usize;
+            for _ in 0..sends {
+                let track_taps: Vec<&GraphNodeId> = taps
+                    .iter()
+                    .filter(|node| {
+                        matches!(node, GraphNodeId::TrackStage { track_id: id, .. }
+                            if id.as_str() == format!("t{track}"))
+                    })
+                    .collect();
+                let source = track_taps[(xorshift(&mut state) as usize) % track_taps.len()].clone();
+                let destination = if submixes.is_empty() || xorshift(&mut state).is_multiple_of(3) {
+                    output_fed = true;
+                    output.clone()
+                } else {
+                    let index = (xorshift(&mut state) as usize) % submixes.len();
+                    fed_submixes.insert(index);
+                    submixes[index].clone()
+                };
+                let route_id =
+                    StableGraphId::parse(&format!("r{route_index:03}")).expect("route ID");
+                route_index += 1;
+                let route_node = GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                };
+                nodes.push(route_node.clone());
+                edges.push(GraphEdge {
+                    id: GraphEdgeId::RouteSource {
+                        route_id: route_id.clone(),
+                    },
+                    source: GraphPortId {
+                        node: source,
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: route_node.clone(),
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: "$.route.source".to_owned(),
+                });
+                edges.push(GraphEdge {
+                    id: GraphEdgeId::RouteDestination {
+                        route_id: route_id.clone(),
+                    },
+                    source: GraphPortId {
+                        node: route_node.clone(),
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: destination,
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: "$.route.destination".to_owned(),
+                });
+                // Non-trivial 2x2 matrices and gains, so the folded route is actually exercised.
+                let coefficient =
+                    |state: &mut u64| (xorshift(state) % 2_001) as f32 / 1_000.0 - 1.0;
+                routes.push(PreparedRoute {
+                    node: route_node,
+                    transform: RouteTransform {
+                        gain: 0.25 + (xorshift(&mut state) % 1_500) as f32 / 1_000.0,
+                        ll: coefficient(&mut state),
+                        lr: coefficient(&mut state),
+                        rl: coefficient(&mut state),
+                        rr: coefficient(&mut state),
+                    },
+                });
+            }
+        }
+        for (index, submix) in submixes.iter().enumerate() {
+            if !fed_submixes.contains(&index) {
+                continue;
+            }
+            nodes.push(submix.clone());
+            let route_id = StableGraphId::parse(&format!("r{route_index:03}")).expect("route ID");
+            route_index += 1;
+            let route_node = GraphNodeId::Route {
+                route_id: route_id.clone(),
+            };
+            nodes.push(route_node.clone());
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                source: GraphPortId {
+                    node: submix.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: route_node.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.submix.source".to_owned(),
+            });
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: route_id.clone(),
+                },
+                source: GraphPortId {
+                    node: route_node.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.submix.destination".to_owned(),
+            });
+            output_fed = true;
+            routes.push(PreparedRoute {
+                node: route_node,
+                transform: RouteTransform {
+                    gain: 1.0,
+                    ll: 0.75,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+            });
+        }
+        assert!(output_fed, "seed {seed}: the output must be fed");
+        nodes.push(output.clone());
+        bindings.push(GraphNodeBinding::new(output.clone(), Box::new(Noop)));
+        required.push(output.clone());
+
+        // Sidechains: each dynamic-rack effect may listen to an earlier track's input boundary,
+        // which is always scheduled before it.
+        let effect_nodes: Vec<GraphNodeId> = nodes
+            .iter()
+            .filter(|node| {
+                matches!(node, GraphNodeId::Effect(id) if matches!(id.rack, RackId::Dynamic))
+            })
+            .cloned()
+            .collect();
+        for node in effect_nodes {
+            if !xorshift(&mut state).is_multiple_of(2) {
+                continue;
+            }
+            let GraphNodeId::Effect(id) = &node else {
+                unreachable!()
+            };
+            let source_track = (xorshift(&mut state) as usize) % track_count;
+            if format!("t{source_track}") == id.track_id.as_str() {
+                continue;
+            }
+            edges.push(GraphEdge {
+                id: GraphEdgeId::EffectSidechain {
+                    effect: id.clone(),
+                    port: SUM_SIDECHAIN.as_str().to_owned(),
+                },
+                source: GraphPortId {
+                    node: stage_node(source_track, TrackStage::Input),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: node.clone(),
+                    kind: GraphPortKind::SidechainInput,
+                    effect_port: Some(SUM_SIDECHAIN.as_str().to_owned()),
+                },
+                path: "$.sidechain".to_owned(),
+            });
+        }
+
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        nodes.sort();
+        let levels = levels_for(&nodes, &edges);
+        let schedule: Vec<GraphNodeId> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+
+        // PDC on a random subset of edges, in the order the compiler would emit it.
+        for edge in &edges {
+            if !xorshift(&mut state).is_multiple_of(4) {
+                continue;
+            }
+            delays.push(InsertedDelay {
+                node: GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(edge.id.clone()),
+                },
+                edge_id: edge.id.clone(),
+                samples: LatencySamples(1 + xorshift(&mut state) % 40),
+            });
+        }
+
+        let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 700_000 + seed,
+            spec: GraphSpec {
+                nodes: sorted_nodes(
+                    nodes
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels,
+            route_timings: Vec::new(),
+            inserted_delays: delays,
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: required,
+            routes,
+            effects,
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        (
+            plan,
+            GraphRuntimeBindings {
+                envelope,
+                nodes: bindings,
+                observers: Vec::new(),
+            },
+        )
+    }
+
+    fn render_blocks(plan: &mut PreparedRenderPlan, frames: usize, blocks: u64) -> Vec<u32> {
+        let mut bits = Vec::with_capacity(blocks as usize * frames * 2);
+        let mut samples = vec![0.0_f32; frames * 2];
+        for block in 0..blocks {
+            samples.fill(0.0);
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut samples, 2, frames, frames)
+                        .expect("output"),
+                },
+                miso_engine_core::realtime::RenderTime {
+                    absolute_sample: block * frames as u64,
+                },
+            )
+            .expect("render");
+            bits.extend(samples.iter().map(|sample| sample.to_bits()));
+        }
+        bits
+    }
+
+    /// What a [`TapRecorder`] writes: how many blocks it saw, and the left-plane bits it saw.
+    type TapSink = (Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
+
+    /// Scales its block, so the buffer an alias points at demonstrably changes when the next op
+    /// runs: a tap attached to the wrong op reads the scaled value.
+    struct Scale(f32);
+    impl GraphRuntimeProcessor for Scale {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                *sample *= self.0;
+            }
+            Ok(())
+        }
+    }
+
+    /// Records what an observer saw, so a tap on an elided stage can be checked.
+    struct TapRecorder(Arc<AtomicU64>, Arc<std::sync::Mutex<Vec<u32>>>);
+    impl GraphRuntimeObserver for TapRecorder {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let mut sink = self.1.lock().expect("tap sink");
+            sink.extend(block.left.iter().map(|sample| sample.to_bits()));
+            Ok(())
+        }
+    }
+
+    /// E9. The three internal rack boundaries are pure aliases, so the lowering elides them and
+    /// the executors never copy through them -- and the audio is bit-identical to the same plan
+    /// with those stages materialised by a copy-through processor. An observer on an elided stage
+    /// still sees the buffer, because a tap fires immediately after the op that last wrote it.
+    ///
+    /// Red mutation (`tests/MUTATIONS.md`): resolve an alias to its immediate producer instead of
+    /// the root of the chain, or attach a tap's observers to the consumer instead of the producer.
+    #[test]
+    fn aliased_identity_stages_do_not_change_audio() {
+        const FRAMES: usize = 16;
+        let stages = [
+            TrackStage::Input,
+            TrackStage::PostInputBuiltins,
+            TrackStage::PostSimd1,
+            TrackStage::PostDynamic,
+            TrackStage::PostSimd2PreFader,
+            TrackStage::PostFader,
+            TrackStage::PostMatrix,
+        ];
+        let node = |stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("t0").expect("track ID"),
+            stage,
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let build = |materialise: bool, observed: Option<TapSink>| {
+            let mut nodes: Vec<GraphNodeId> = stages
+                .iter()
+                .copied()
+                .filter(|stage| {
+                    materialise
+                        || !matches!(
+                            stage,
+                            TrackStage::PostSimd1
+                                | TrackStage::PostDynamic
+                                | TrackStage::PostSimd2PreFader
+                        )
+                })
+                .map(node)
+                .collect();
+            nodes.push(output.clone());
+            let mut edges = Vec::new();
+            for pair in nodes.windows(2) {
+                edges.push(GraphEdge {
+                    id: GraphEdgeId::TrackMain {
+                        target: pair[1].clone(),
+                    },
+                    source: GraphPortId {
+                        node: pair[0].clone(),
+                        kind: GraphPortKind::MainOutput,
+                        effect_port: None,
+                    },
+                    destination: GraphPortId {
+                        node: pair[1].clone(),
+                        kind: GraphPortKind::MainInput,
+                        effect_port: None,
+                    },
+                    path: "$.main".to_owned(),
+                });
+            }
+            // `PostFader` scales in place, so the buffer the three internal boundaries alias is
+            // rewritten by the very next op: a tap that fires late reads the scaled value.
+            let bindings = vec![
+                GraphNodeBinding::new(
+                    node(TrackStage::Input),
+                    Box::new(SeededSource { state: 0x51ED_0007 }),
+                ),
+                GraphNodeBinding::new(node(TrackStage::PostFader), Box::new(Scale(0.375))),
+                GraphNodeBinding::new(output.clone(), Box::new(Noop)),
+            ];
+            let required = vec![
+                node(TrackStage::Input),
+                node(TrackStage::PostFader),
+                output.clone(),
+            ];
+            let levels = levels_for(&nodes, &edges);
+            let schedule: Vec<GraphNodeId> = levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect();
+            let observers = match &observed {
+                Some((calls, sink)) => vec![GraphNodeObserverBinding::new(
+                    node(TrackStage::PostDynamic),
+                    0,
+                    Box::new(TapRecorder(Arc::clone(calls), Arc::clone(sink))),
+                )],
+                None => Vec::new(),
+            };
+            let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: u64::from(materialise) + 900,
+                spec: GraphSpec {
+                    nodes: sorted_nodes(
+                        nodes
+                            .iter()
+                            .cloned()
+                            .map(|id| GraphNode {
+                                id,
+                                latency: LatencySamples(0),
+                                tail: TailSamples::Finite(0),
+                            })
+                            .collect(),
+                    ),
+                    ports: Vec::new(),
+                    edges,
+                },
+                sequential_schedule: schedule,
+                dependency_levels: levels,
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: empty_estimate(),
+                envelope,
+                required_bindings: required,
+                routes: Vec::new(),
+                effects: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers,
+            });
+            (
+                plan,
+                GraphRuntimeBindings {
+                    envelope,
+                    nodes: bindings,
+                    observers: Vec::new(),
+                },
+            )
+        };
+
+        // The full chain elides exactly the three internal boundaries; the control graph omits
+        // them entirely, which is what "these boundaries carry signal unchanged" means.
+        let (aliased, aliased_bindings) = build(true, None);
+        let program = aliased.program().expect("lowered");
+        assert_eq!(
+            program.taps.len(),
+            3,
+            "three internal boundaries are aliases"
+        );
+        assert_eq!(program.ops.len(), 5);
+        assert!(program.buffers <= 2, "the arena is coloured, not per-node");
+        let (materialised, materialised_bindings) = build(false, None);
+        assert_eq!(
+            materialised.program().expect("lowered").taps.len(),
+            0,
+            "the control graph has no boundary to alias"
+        );
+        assert_eq!(materialised.program().expect("lowered").ops.len(), 5);
+
+        let mut aliased_plan = aliased
+            .bind(aliased_bindings)
+            .unwrap_or_else(|failure| panic!("aliased bind: {}", failure.code));
+        let mut materialised_plan = materialised
+            .bind(materialised_bindings)
+            .unwrap_or_else(|failure| panic!("materialised bind: {}", failure.code));
+        assert_eq!(
+            render_blocks(&mut aliased_plan, FRAMES, 4),
+            render_blocks(&mut materialised_plan, FRAMES, 4),
+            "aliasing must not change one bit"
+        );
+
+        // A processor bound to an elided stage would never run, so the bind refuses it rather
+        // than dropping it silently.
+        let (elided_binding, mut elided_bindings) = build(true, None);
+        elided_bindings.nodes.push(GraphNodeBinding::new(
+            node(TrackStage::PostSimd1),
+            Box::new(Scale(2.0)),
+        ));
+        let mut refused = elided_binding;
+        refused.required_bindings.push(node(TrackStage::PostSimd1));
+        match refused.bind(elided_bindings) {
+            Ok(_) => panic!("a binding on an elided stage must be refused"),
+            Err(failure) => assert_eq!(failure.code, "graph.scheduler.layout"),
+        }
+
+        // An observer bound to an elided stage still observes its buffer, once per block, and
+        // sees exactly what the producing op wrote.
+        let calls = Arc::new(AtomicU64::new(0));
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (observed, observed_bindings) =
+            build(true, Some((Arc::clone(&calls), Arc::clone(&sink))));
+        let mut observed_plan = observed
+            .bind(observed_bindings)
+            .unwrap_or_else(|failure| panic!("observed bind: {}", failure.code));
+        let observed_bits = render_blocks(&mut observed_plan, FRAMES, 4);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "one tap observation per block"
+        );
+        let seen = sink.lock().expect("tap sink").clone();
+        assert_eq!(seen.len(), FRAMES * 4);
+        // The tap must see what the producing op wrote -- the seeded source, carried unchanged
+        // through `PostInputBuiltins` and the three aliases -- not what `PostFader` then made of
+        // that same buffer.
+        let mut source = SeededSource { state: 0x51ED_0007 };
+        let mut expected = Vec::with_capacity(FRAMES * 4);
+        for _ in 0..4 {
+            let mut left = [0.0_f32; FRAMES];
+            let mut right = [0.0_f32; FRAMES];
+            source
+                .process(GraphBindingBlock {
+                    left: &mut left,
+                    right: &mut right,
+                    first_sample: 0,
+                })
+                .expect("seeded source");
+            expected.extend(left.iter().map(|sample| sample.to_bits()));
+        }
+        assert_eq!(
+            seen, expected,
+            "the tap observes the producer's buffer, unchanged by any consumer"
+        );
+        let left_only: Vec<u32> = observed_bits
+            .chunks(FRAMES * 2)
+            .flat_map(|block| block[..FRAMES].iter().copied())
+            .collect();
+        assert_ne!(
+            seen, left_only,
+            "the next op rewrites that buffer, so a late tap would be detectable"
+        );
+    }
+
+    /// THE gate for #98 F2: on fifty seeded random DAGs -- stage chains, rack effects with
+    /// sidechains, submixes, sends from arbitrary taps, non-trivial 2x2 routes and PDC on a
+    /// quarter of the edges -- the sequential executor and the native dependency-wave executor
+    /// render bit-identical PCM over eight blocks, at every worker-lane count.
+    ///
+    /// Red mutation (`tests/MUTATIONS.md`): stage a native edge from the wrong producer, or make
+    /// the sequential executor read a delayed edge before staging it.
+    #[test]
+    fn fifty_random_dag_sessions_render_bit_identically_in_both_executors() {
+        const FRAMES: usize = 16;
+        const BLOCKS: u64 = 8;
+        let mut nontrivial = 0_usize;
+        for seed in 0..50_u64 {
+            let (sequential_plan, sequential_bindings) = random_dag_plan(seed);
+            let fan_in = sequential_plan
+                .spec
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                .count();
+            if fan_in >= 4 {
+                nontrivial += 1;
+            }
+            let mut sequential = sequential_plan
+                .bind(sequential_bindings)
+                .unwrap_or_else(|failure| panic!("seed {seed} sequential bind: {}", failure.code));
+            let sequential_bits = render_blocks(&mut sequential, FRAMES, BLOCKS);
+            assert!(
+                sequential_bits.iter().any(|bits| *bits != 0),
+                "seed {seed}: the corpus must not be silent"
+            );
+
+            for lanes in [1_usize, 2, 4] {
+                for mode in [
+                    NativeGraphRenderModeV1::SingleThread,
+                    NativeGraphRenderModeV1::DependencyWaves,
+                ] {
+                    let (native_plan, native_bindings) = random_dag_plan(seed);
+                    let bound = native_plan
+                        .bind_native(
+                            native_bindings,
+                            NativeGraphBindConfigV1 {
+                                render_mode: mode,
+                                scheduler: NativeSchedulerConfigV1::new(
+                                    core::num::NonZeroUsize::new(lanes).expect("lanes"),
+                                    true,
+                                ),
+                                maximum_retained_bytes: 1 << 28,
+                            },
+                        )
+                        .unwrap_or_else(|failure| {
+                            panic!("seed {seed} native bind: {}", failure.code)
+                        });
+                    let mut native = bound.into_plan();
+                    assert_eq!(
+                        render_blocks(&mut native, FRAMES, BLOCKS),
+                        sequential_bits,
+                        "seed {seed}, {lanes} lanes, {mode:?}: executors disagree"
+                    );
+                }
+            }
+        }
+        assert!(
+            nontrivial >= 10,
+            "the corpus must contain output fan-ins past the balanced/left-to-right divergence"
+        );
+    }
+
     #[test]
     fn native_dependency_waves_match_sequential_state_and_pcm_at_launch_rates() {
         for rate in [44_100_u32, 48_000, 88_200, 96_000] {
@@ -4429,7 +4370,7 @@ mod tests {
         let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: 77,
             spec: GraphSpec {
-                nodes,
+                nodes: sorted_nodes(nodes),
                 ports: Vec::new(),
                 edges,
             },
@@ -4646,15 +4587,17 @@ mod tests {
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: if delay_main { 91 } else { 92 },
             spec: GraphSpec {
-                nodes: schedule
-                    .iter()
-                    .cloned()
-                    .map(|id| GraphNode {
-                        id,
-                        latency: LatencySamples(0),
-                        tail: TailSamples::Finite(0),
-                    })
-                    .collect(),
+                nodes: sorted_nodes(
+                    schedule
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
                 ports: Vec::new(),
                 edges: vec![main_edge, sidechain_edge, route_source, route_destination],
             },
@@ -4925,7 +4868,7 @@ mod tests {
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: u64::from(rate) + u64::from(quantum),
             spec: GraphSpec {
-                nodes: graph_nodes,
+                nodes: sorted_nodes(graph_nodes),
                 ports: Vec::new(),
                 edges,
             },

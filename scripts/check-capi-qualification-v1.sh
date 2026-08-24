@@ -28,7 +28,10 @@ rg -Fq 'UNDEFINED_TYPES' "$object_checker" || fail 'object parser lacks import c
     fail "unknown checker mode $mode"
 
 LC_ALL=C sort -c -k2,2 "$authorities" || fail 'authority manifest is not path-sorted'
-[[ $(wc -l <"$authorities" | tr -d ' ') -eq 21 ]] || fail 'authority membership changed'
+# 26, not 21: audit #103 split `crates/miso-engine-capi/src/runtime.rs` into six modules. Only the
+# membership count moved; no hash of an unchanged file was re-sealed, and this check still fails on
+# the accepted-authority drift that predates that split. Re-running the qualification is issue #26.
+[[ $(wc -l <"$authorities" | tr -d ' ') -eq 26 ]] || fail 'authority membership changed'
 sha256sum --check --strict "$authorities" >/dev/null || fail 'accepted authority drifted'
 
 LC_ALL=C sort -c "$symbols" || fail 'expected symbols are not sorted'

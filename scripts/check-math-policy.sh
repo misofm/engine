@@ -25,11 +25,17 @@ set -euo pipefail
 # `miso-engine-math` dependency in the same commit, which
 # `scripts/check-effect-runtime-policy.sh` pins.
 #
+# Issue #99 removed the single `miso-engine-graph-compiler` site and deleted its row: the route
+# gain coefficient (`route_transform`) now calls `miso_engine_math::db_to_gain_f32`. Those bits
+# feed both the render multiply and the semantic SHA-256, so they were the last place in that
+# crate where a host libm could break cross-target bit identity (D5). The f64 oracle that
+# compares the two lives in `crates/miso-engine-graph-compiler/tests/route_gain.rs`, which this
+# script exempts structurally.
+#
 #   path                                                  max  owner
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
 crates/miso-engine-graph/src/lib.rs                         2  98
-crates/miso-engine-graph-compiler/src/lib.rs                1  99
 crates/miso-engine-conformance/src/compare.rs               1 105
 ALLOWLIST
 }

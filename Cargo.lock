@@ -716,12 +716,10 @@ dependencies = [
 name = "miso-engine-capi"
 version = "0.1.0"
 dependencies = [
- "miso-engine-builtins-compiler",
  "miso-engine-core",
- "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-graph",
- "miso-engine-graph-compiler",
+ "miso-engine-host-core",
  "miso-engine-lane",
  "miso-engine-protocol",
  "miso-engine-session",
@@ -848,7 +846,6 @@ dependencies = [
  "miso-engine-gate-expander",
  "miso-engine-multiband-compressor",
  "miso-engine-parametric-eq",
- "miso-engine-session",
  "miso-engine-soft-clip",
  "miso-engine-transient-shaper",
  "miso-engine-true-peak-limiter",
@@ -885,6 +882,7 @@ dependencies = [
  "miso-engine-conformance",
  "miso-engine-core",
  "miso-engine-effect-contract",
+ "miso-engine-lane",
  "miso-engine-native-scheduler",
  "miso-engine-rack",
 ]
@@ -907,6 +905,7 @@ name = "miso-engine-graph-bench"
 version = "0.1.0"
 dependencies = [
  "miso-engine-conformance",
+ "miso-engine-core",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-graph",
@@ -926,10 +925,26 @@ dependencies = [
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-graph",
+ "miso-engine-lane",
+ "miso-engine-math",
  "miso-engine-rack",
  "miso-engine-rack-compiler",
  "miso-engine-session",
  "sha2 0.11.0",
+]
+
+[[package]]
+name = "miso-engine-host-core"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-builtins-compiler",
+ "miso-engine-core",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-graph",
+ "miso-engine-graph-compiler",
+ "miso-engine-session",
+ "miso-engine-source",
 ]
 
 [[package]]

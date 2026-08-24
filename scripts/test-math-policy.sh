@@ -77,7 +77,7 @@ expect_failure allowlisted-file-gains-a-call \
 expect_failure the-cleared-contract-row-cannot-come-back \
     'mkdir -p "$root/crates/miso-engine-effect-contract/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.powf(2.0) }" >"$root/crates/miso-engine-effect-contract/src/lib.rs"'
 expect_failure allowlist-entry-gone-stale \
-    'printf "%s\n" "pub fn migrated(x: f64) -> f64 { miso_engine_math::exp(x) }" >"$root/crates/miso-engine-graph-compiler/src/lib.rs"'
+    'mkdir -p "$root/crates/miso-engine-graph-compiler/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.exp() }" >"$root/crates/miso-engine-graph-compiler/src/lib.rs"'
 expect_failure allowlisted-file-deleted \
     'rm "$root/crates/miso-engine-conformance/src/compare.rs"'
 expect_failure powi-in-a-clean-crate \

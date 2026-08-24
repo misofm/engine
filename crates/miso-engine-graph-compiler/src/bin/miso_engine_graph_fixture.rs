@@ -1,6 +1,8 @@
 //! Generates, verifies, or fingerprints the checked-in issue-006 graph fixtures.
 
 use core::fmt::Write as _;
+use miso_engine_core::TargetCapabilities;
+use miso_engine_graph_compiler::KernelDispatch;
 use std::{
     env, fs,
     io::Write as _,
@@ -8,8 +10,10 @@ use std::{
 };
 
 use miso_engine_effect_compiler::EffectPreparedSession;
-use miso_engine_graph::{GraphCompileCaps, balanced_pairwise_sum};
-use miso_engine_graph_compiler::{GraphCompileReport, GraphCompileRequest, GraphCompiler};
+use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan, reduce_left_to_right};
+use miso_engine_graph_compiler::{
+    GraphCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphArtifact,
+};
 use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
 use sha2::{Digest, Sha256};
 
@@ -27,7 +31,9 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     let root = default_root();
     match arguments.as_slice() {
         [] => {
-            println!("{}", fingerprint(&compile_fixture()));
+            let artifact = compile_fixture();
+            let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
+            println!("{}", fingerprint(&artifact.graph, &evidence));
             Ok(())
         }
         [mode] if mode == "--check" => verify(&root, &generated()),
@@ -62,7 +68,7 @@ fn default_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/graph")
 }
 
-fn compile_fixture() -> GraphCompileReport {
+fn compile_fixture() -> PreparedGraphArtifact {
     let mut model = parse_session_toml(SESSION).unwrap_or_else(|diagnostics| {
         panic!("session parse diagnostics: {diagnostics:?}");
     });
@@ -81,6 +87,9 @@ fn compile_fixture() -> GraphCompileReport {
     )
     .unwrap_or_else(|diagnostics| panic!("session compile diagnostics: {diagnostics:?}"));
     GraphCompiler::compile(GraphCompileRequest {
+        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        )),
         plan_id: 0,
         effects: EffectPreparedSession {
             session,
@@ -101,13 +110,16 @@ fn compile_fixture() -> GraphCompileReport {
         },
     })
     .unwrap_or_else(|failure| panic!("graph compile diagnostics: {:?}", failure.diagnostics))
-    .report
 }
 
 fn generated() -> Vec<(String, Vec<u8>)> {
-    let report = compile_fixture();
-    let fingerprint = format!("{}\n", fingerprint(&report)).into_bytes();
-    let colored_buffers = report
+    let artifact = compile_fixture();
+    let graph = &artifact.graph;
+    let report = &artifact.report;
+    // #99 F5: evidence is produced here, off the compile path, exactly once.
+    let evidence = GraphCompiler::evidence(graph, report);
+    let fingerprint = format!("{}\n", fingerprint(graph, &evidence)).into_bytes();
+    let colored_buffers = graph
         .buffer_assignments
         .iter()
         .map(|assignment| assignment.buffer_index)
@@ -141,9 +153,9 @@ fn generated() -> Vec<(String, Vec<u8>)> {
     let mut files = vec![
         (
             "v1/direct-route.canonical.txt".to_owned(),
-            report.canonical_debug_bytes,
+            evidence.canonical_bytes,
         ),
-        ("v1/direct-route.dot".to_owned(), report.dot.into_bytes()),
+        ("v1/direct-route.dot".to_owned(), evidence.dot.into_bytes()),
         (
             "v1/invalid-scc-diagnostics.json".to_owned(),
             concat!(
@@ -209,18 +221,21 @@ fn summation_report() -> String {
     let mut maximum_absolute = 0.0_f64;
     let mut maximum_bound = 0.0_f64;
     let mut squared_residual = 0.0_f64;
-    for (name, mut values) in fixtures {
+    for (name, values) in fixtures {
         let reference = values.iter().map(|value| f64::from(*value)).sum::<f64>();
         let sum_abs = values
             .iter()
             .map(|value| f64::from(value.abs()))
             .sum::<f64>();
-        let levels = values.len().next_power_of_two().ilog2();
+        // Master plan #83 D9 is recursive left-to-right summation, so the analytic bound is
+        // `gamma_{n-1} * sum|x_i|` with `gamma_k = k u / (1 - k u)` and `u = 2^-24` (Higham,
+        // *Accuracy and Stability of Numerical Algorithms*, 2nd ed., eq. 4.4): `n - 1` additions
+        // instead of the balanced tree's `log2 n` levels.
+        let steps = (values.len() - 1) as f64;
         let unit_roundoff = 2.0_f64.powi(-24);
-        let gamma = f64::from(levels) * unit_roundoff / (1.0 - f64::from(levels) * unit_roundoff);
+        let gamma = steps * unit_roundoff / (1.0 - steps * unit_roundoff);
         let bound = gamma * sum_abs + values.len() as f64 * f64::from(f32::MIN_POSITIVE);
-        let mut sanitized = 0;
-        let actual = f64::from(balanced_pairwise_sum(&mut values, &mut sanitized));
+        let actual = f64::from(reduce_left_to_right(&values));
         let absolute = (actual - reference).abs();
         maximum_absolute = maximum_absolute.max(absolute);
         maximum_bound = maximum_bound.max(bound);
@@ -237,13 +252,13 @@ fn summation_report() -> String {
             reference,
             absolute,
             bound,
-            sanitized,
+            0,
         ));
     }
     let rms = (squared_residual / records.len() as f64).sqrt();
     format!(
         concat!(
-            "{{\"schema\":1,\"strategy\":\"fixed-balanced-pairwise-f32\",",
+            "{{\"schema\":1,\"strategy\":\"left-to-right-f32\",",
             "\"reference\":\"independent-linear-f64\",\"fixtures\":[{}],",
             "\"maximum_absolute_residual\":{:e},",
             "\"rms_residual\":{:e},\"maximum_analytic_bound\":{:e}}}\n"
@@ -255,7 +270,7 @@ fn summation_report() -> String {
     )
 }
 
-fn fingerprint(report: &GraphCompileReport) -> String {
+fn fingerprint(graph: &PreparedGraphPlan, evidence: &GraphEvidence) -> String {
     format!(
         concat!(
             "{{\"schema\":1,\"fixture\":\"direct-route\",",
@@ -264,16 +279,16 @@ fn fingerprint(report: &GraphCompileReport) -> String {
             "\"nodes\":{},\"edges\":{},\"schedule_items\":{},",
             "\"levels\":{},\"route_timings\":{},\"buffer_assignments\":{}}}"
         ),
-        report.canonical_debug_bytes.len(),
-        report.sha256,
-        report.dot.len(),
-        sha256_hex(report.dot.as_bytes()),
-        report.nodes.len(),
-        report.edges.len(),
-        report.sequential_schedule.len(),
-        report.dependency_levels.len(),
-        report.route_timings.len(),
-        report.buffer_assignments.len(),
+        evidence.canonical_bytes.len(),
+        evidence.sha256,
+        evidence.dot.len(),
+        sha256_hex(evidence.dot.as_bytes()),
+        graph.spec.nodes.len(),
+        graph.spec.edges.len(),
+        graph.sequential_schedule.len(),
+        graph.dependency_levels.len(),
+        graph.route_timings.len(),
+        graph.buffer_assignments.len(),
     )
 }
 

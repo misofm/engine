@@ -617,6 +617,10 @@ struct RetiredPlanMirror {
     plan: PreparedRenderPlan,
 }
 
+/// Mirror of `miso_engine_host_core`'s private control-source endpoint (audit #103 W4-2 moved it
+/// out of capi). The oracle restates the layout independently and never reads a runtime figure:
+/// the facade's own `control_table_bytes` is what capi's pre-flight uses, and this mirror is the
+/// second, independent witness that the pre-flight charges the right number of bytes.
 #[allow(dead_code)]
 struct ControlSourceMirror {
     id_offset: usize,
@@ -628,11 +632,18 @@ struct ControlSourceMirror {
     provider: HostChunkProvider,
 }
 
+/// Mirror of the facade's `SourceControlSet`: the ID arena and the endpoint table.
+#[allow(dead_code)]
+struct SourceControlSetMirror {
+    ids: Box<[u8]>,
+    sources: Box<[ControlSourceMirror]>,
+}
+
+/// Mirror of capi's `ProviderEpoch`: the epoch tag plus the facade's set.
 #[allow(dead_code)]
 struct ProviderEpochMirror {
     epoch: u64,
-    source_ids: Box<[u8]>,
-    sources: Box<[ControlSourceMirror]>,
+    sources: SourceControlSetMirror,
 }
 
 #[allow(dead_code)]
@@ -1033,7 +1044,7 @@ fn complete_capi_owners(
         },
     ]);
     let active_total = owner_total(&active);
-    assert_effective_owner_mutations(&active, 140_425, "active CAPI");
+    assert_effective_owner_mutations(&active, 140_441, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1600,7 +1611,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 164_814, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 164_830, "double-live CAPI");
 
     let graph_rows = graph_owners();
     let graph_largest = owner_total(&graph_rows[7..15]);
@@ -1685,7 +1696,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_ne!(
         capi_rows.iter().map(|owner| owner.bytes).max(),
-        Some(164_814),
+        Some(164_830),
         "CAPI aggregate is not max-single"
     );
 
@@ -1899,7 +1910,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 15_948);
-    assert_eq!(oracle.capi, 164_814);
+    assert_eq!(oracle.capi, 164_830);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -1930,7 +1941,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(140_425));
+            assert_eq!(resources_c(plan), frozen_scratch_report(140_441));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -1948,7 +1959,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(140_416));
+            assert_eq!(resources_c(plan), frozen_scratch_report(140_432));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }

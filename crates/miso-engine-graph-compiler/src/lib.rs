@@ -8,7 +8,7 @@ use miso_engine_builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
     PreparedBuiltinsSession,
 };
-use miso_engine_core::{realtime::RenderEnvelope, target_capabilities};
+use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
 use miso_engine_effect_contract::{
     LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
@@ -20,7 +20,12 @@ use miso_engine_graph::{
     PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
     StableGraphId, TrackStage,
 };
-use miso_engine_rack::{KernelDispatch, RackLocationV1, RackProgramV1};
+/// Re-exported so a caller can name the compile input without taking a `miso-engine-rack`
+/// dependency of its own: dispatch is this crate's input now, so this crate publishes its type
+/// (#99 F6). The host CPU is read by the caller -- `miso_engine_core::target_capabilities()` --
+/// and never inside the compiler.
+pub use miso_engine_rack::KernelDispatch;
+use miso_engine_rack::{RackLocationV1, RackProgramV1};
 use miso_engine_rack_compiler::{
     BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups,
 };
@@ -33,6 +38,18 @@ pub struct GraphCompileRequest {
     pub plan_id: u64,
     pub effects: EffectPreparedSession,
     pub caps: GraphCompileCaps,
+    /// The kernel dispatch the SIMD-rack and builtin banks are planned for.
+    ///
+    /// Compile is a pure function of its inputs (#99 F6). The host CPU is read exactly once, by
+    /// the caller that owns the render target -- `miso-engine-capi` and the web host do it at
+    /// plan-build time -- never inside the compiler. Before this, `KernelDispatch::select(
+    /// target_capabilities())` ran *inside* compile, so the same `GraphCompileRequest` produced
+    /// different banks, a different scratch allocation and a different capped resource estimate
+    /// on different machines, and the scalar fallback could not be exercised without feature
+    /// injection. The semantic graph -- schedule, levels, PDC, reductions, canonical bytes -- is
+    /// deliberately independent of this value; only the bank overlay and the bank half of the
+    /// estimate depend on it.
+    pub dispatch: KernelDispatch,
 }
 pub struct GraphCompiler;
 pub struct PreparedGraphArtifact {
@@ -49,6 +66,8 @@ pub struct GraphBuiltinsCompileRequest {
     pub effects: EffectPreparedSession,
     pub builtins: PreparedBuiltinsSession,
     pub caps: GraphCompileCaps,
+    /// See [`GraphCompileRequest::dispatch`] (#99 F6).
+    pub dispatch: KernelDispatch,
 }
 /// The one-way, sealed builtin attachment result.
 ///
@@ -97,29 +116,44 @@ pub struct GraphBuiltinsCompileFailure {
     pub builtins: PreparedBuiltinsSession,
     pub diagnostics: GraphDiagnosticSet,
 }
+/// What compile reports *in addition to* the plan it produced.
+///
+/// #99 F5: this used to carry a second copy of ten of `PreparedGraphPlan`'s vectors -- nodes,
+/// ports, edges, schedule, levels, route timings, inserted delays, reductions, route transforms
+/// and buffer assignments -- plus a multi-megabyte canonical text dump, its SHA-256 and a
+/// Graphviz string, all built unconditionally on every structural mutation. The report is `Clone`
+/// and the capi cloned it, so a compile's peak memory was roughly three times the plan.
+///
+/// Every deleted field was identical by construction to a field of the artifact's `graph`; read
+/// it there. The evidence payload is now produced on demand by [`GraphCompiler::evidence`] and
+/// [`GraphCompiler::sha256`], which are the only two things that ever wanted it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphCompileReport {
-    pub nodes: Vec<GraphNode>,
-    pub ports: Vec<GraphPortId>,
-    pub edges: Vec<GraphEdge>,
-    pub sequential_schedule: Vec<GraphNodeId>,
-    pub dependency_levels: Vec<DependencyLevel>,
-    pub route_timings: Vec<RouteTiming>,
-    pub inserted_delays: Vec<InsertedDelay>,
-    pub reductions: Vec<ReductionRecord>,
-    pub route_transforms: Vec<PreparedRoute>,
-    pub buffer_assignments: Vec<BufferAssignment>,
     /// Arrival of the sole session output after checked latency and PDC propagation.
     pub output_latency: LatencySamples,
     /// Propagated extent of the sole session output after latency and declared tails.
     pub output_tail: TailSamples,
+    /// The retained estimate, including the bank overlay and capped against the session limits.
     pub estimate: GraphResourceEstimate,
-    pub canonical_debug_bytes: Vec<u8>,
-    pub sha256: String,
-    pub dot: String,
+    /// The pre-bank estimate that participates in the semantic hash. Dispatch-independent by
+    /// construction, which is why the canonical bytes use it rather than [`Self::estimate`].
+    pub semantic_estimate: GraphResourceEstimate,
     /// Off-render SIMD-rack cohort decision. It is deliberately absent from graph identity,
     /// schedule, PDC and reductions: changing a host backend cannot change graph semantics.
     pub rack_cohorts: GraphRackBankReport,
+}
+
+/// The human- and fixture-facing view of a compiled graph, produced on demand.
+///
+/// Never built by `compile` (#99 F5). `canonical_bytes` is the deterministic text the semantic
+/// SHA-256 is taken over; `dot` is a Graphviz rendering that carries no schedule or buffer
+/// content. Producing this is `O(nodes + edges)` allocations and, at scale, tens of megabytes --
+/// which is why it is a method rather than a field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphEvidence {
+    pub canonical_bytes: Vec<u8>,
+    pub sha256: String,
+    pub dot: String,
 }
 
 /// The bound SIMD-rack bank plan.
@@ -130,1987 +164,116 @@ pub struct GraphCompileReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphRackBankReport {
     pub dispatch: KernelDispatch,
-    pub plan: BankPlan<EffectNodeId>,
-    /// `plan.groups[i]` was bound as a homogeneous bank iff `bound[i]`.
-    pub bound: Vec<bool>,
+    /// The cohort plan, over whole **rack chains** (#99 F3): one candidate per `(track, rack)`
+    /// whose slots are that track's rack program in session order.
+    pub plan: BankPlan<RackChainId>,
+    /// One entry per bound homogeneous bank, in bind order.
+    pub bound_slots: Vec<GraphRackBoundSlot>,
+    /// The effect node each chain runs at each of its own slots, in session order. Keyed the same
+    /// way the plan is, so a group member can be resolved back to graph nodes.
+    pub chains: BTreeMap<RackChainId, Vec<EffectNodeId>>,
+}
+
+/// Identifies one track's program in one bankable rack: the unit the cohort planner groups.
+///
+/// #96's planner takes one candidate per *effect*, which can only ever form single-slot banks.
+/// AGENTS.md's cohort model is a whole-rack signature -- "slot types/order, quality, and
+/// compatible routing", with absent slots as identity kernels -- so #99 passes whole chains and
+/// lets `RackProgramV1::subsequence_mask` decide which lanes run which slot.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RackChainId {
+    pub track_id: String,
+    pub rack: RackId,
+}
+
+/// One bound homogeneous bank: a slot of a cohort, and the effect node each lane runs there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphRackBoundSlot {
+    /// Index into [`BankPlan::groups`].
+    pub group: usize,
+    /// Index into that group's leader program.
+    pub slot: usize,
+    /// One node per lane, in lane order.
+    pub members: Vec<EffectNodeId>,
 }
 
 impl GraphRackBankReport {
-    pub fn groups_in(
-        &self,
-        rack: RackLocationV1,
-    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+    pub fn groups_in(&self, rack: RackLocationV1) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
             .iter()
             .filter(move |group| group.rack == rack)
     }
+    /// Groups with at least one slot actually bound as a bank.
     pub fn bound_groups_in(
         &self,
         rack: RackLocationV1,
-    ) -> impl Iterator<Item = &BankGroup<EffectNodeId>> {
+    ) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
             .iter()
-            .zip(self.bound.iter())
-            .filter(move |(group, bound)| **bound && group.rack == rack)
-            .map(|(group, _)| group)
+            .enumerate()
+            .filter(move |(index, group)| {
+                group.rack == rack && self.bound_slots.iter().any(|bound| bound.group == *index)
+            })
+            .map(|(_, group)| group)
     }
-    /// Members of unbound (padded) groups plus the never-bankable candidates, in id order: exactly
-    /// the effects that render on the per-node scalar path.
+    /// Banks bound in one rack, in bind order.
+    pub fn bound_slots_in(
+        &self,
+        rack: RackLocationV1,
+    ) -> impl Iterator<Item = &GraphRackBoundSlot> {
+        self.bound_slots
+            .iter()
+            .filter(move |bound| self.plan.groups[bound.group].rack == rack)
+    }
+    /// Effect nodes that render on the per-node scalar path in one rack, in id order: every node
+    /// of a candidate that never banked, plus every node at a slot that was not bound.
     #[must_use]
     pub fn scalar_in(&self, rack: RackLocationV1) -> Vec<EffectNodeId> {
-        let mut ids: Vec<EffectNodeId> = self
-            .plan
-            .groups
+        let banked: std::collections::BTreeSet<&EffectNodeId> = self
+            .bound_slots
             .iter()
-            .zip(self.bound.iter())
-            .filter(|(group, bound)| !**bound && group.rack == rack)
-            .flat_map(|(group, _)| group.members.iter().flatten().cloned())
-            .chain(
-                self.plan
-                    .scalar
-                    .iter()
-                    .filter(|id| rack_location(id.rack) == Some(rack))
-                    .cloned(),
-            )
+            .filter(|bound| self.plan.groups[bound.group].rack == rack)
+            .flat_map(|bound| bound.members.iter())
+            .collect();
+        let mut ids: Vec<EffectNodeId> = self
+            .chains
+            .iter()
+            .filter(|(chain, _)| rack_location(chain.rack) == Some(rack))
+            .flat_map(|(_, nodes)| nodes.iter())
+            .filter(|node| !banked.contains(node))
+            .cloned()
             .collect();
         ids.sort();
         ids
     }
 }
 
-impl GraphCompiler {
-    #[allow(clippy::result_large_err)]
-    pub fn compile_with_builtins(
-        request: GraphBuiltinsCompileRequest,
-    ) -> Result<PreparedGraphBuiltinsArtifact, GraphBuiltinsCompileFailure> {
-        let GraphBuiltinsCompileRequest {
-            plan_id,
-            effects,
-            builtins,
-            caps,
-        } = request;
-        let builtin_diagnostics = builtins.validate_for_session(&effects.session);
-        if !builtin_diagnostics.0.is_empty() {
-            return Err(GraphBuiltinsCompileFailure {
-                effects,
-                builtins,
-                diagnostics: GraphDiagnosticSet::sorted(
-                    builtin_diagnostics
-                        .0
-                        .into_iter()
-                        .map(|diagnostic| diag(diagnostic.code, &diagnostic.path))
-                        .collect(),
-                ),
-            });
-        }
-        let builtin_tails: BTreeMap<_, _> = builtins
-            .tails()
-            .map(|(track_id, tail)| {
-                (
-                    track_id.to_owned(),
-                    match tail {
-                        BuiltinTail::FiniteZero => TailSamples::Finite(0),
-                        BuiltinTail::Infinite => TailSamples::Infinite,
-                    },
-                )
-            })
-            .collect();
-        let compiled = match Self::compile_with_builtin_tails(
-            GraphCompileRequest {
-                plan_id,
-                effects,
-                caps,
-            },
-            &builtin_tails,
-            Some(&builtins),
-        ) {
-            Ok(value) => value,
-            Err(failure) => {
-                return Err(GraphBuiltinsCompileFailure {
-                    effects: failure.effects,
-                    builtins,
-                    diagnostics: failure.diagnostics,
-                });
-            }
-        };
-        let dispatch = compiled.report.rack_cohorts.dispatch;
-        let levels = compiled.report.dependency_levels.clone();
-        Ok(builtins.into_graph_artifact_with_banks(
-            compiled.graph,
-            compiled.report,
-            dispatch,
-            &levels,
-        ))
-    }
-    // The frozen transactional API returns the complete prepared-effect input by value on
-    // failure. Boxing it would change that ownership contract solely to optimize a cold path.
-    #[allow(clippy::result_large_err)]
-    pub fn compile(
-        request: GraphCompileRequest,
-    ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
-        Self::compile_with_builtin_tails(request, &BTreeMap::new(), None)
-    }
-    #[allow(clippy::result_large_err)]
-    fn compile_with_builtin_tails(
-        request: GraphCompileRequest,
-        builtin_tails: &BTreeMap<String, TailSamples>,
-        prepared_builtins: Option<&PreparedBuiltinsSession>,
-    ) -> Result<PreparedGraphArtifact, GraphCompileFailure> {
-        let GraphCompileRequest {
-            plan_id,
-            effects,
-            caps,
-        } = request;
-        let mut diagnostics = Vec::new();
-        if !caps.all_nonzero() {
-            diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
-        }
-        let session = effects.session.clone();
-        let model = session.normalized_model();
-        if model.outputs.len() != 1 {
-            diagnostics.push(diag("graph.output.cardinality", "$.outputs"));
-        }
-        if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
-        }
+mod banks;
+mod canonical;
+mod compile;
+mod estimate;
+mod ids;
+mod pdc;
+mod schedule;
 
-        let mut prepared = BTreeMap::<(String, RackId, String), usize>::new();
-        for (index, entry) in effects.entries.iter().enumerate() {
-            let key = (
-                entry.track_id.clone(),
-                rack_id(entry.rack),
-                entry.effect_id.clone(),
-            );
-            if prepared.insert(key, index).is_some() {
-                diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
-            }
-        }
-        let mut declared = BTreeSet::new();
-        for track in &model.tracks {
-            for (rack, values) in [
-                (RackId::Simd1, &track.simd1.effects),
-                (RackId::Dynamic, &track.dynamic.effects),
-                (RackId::Simd2, &track.simd2.effects),
-            ] {
-                for effect in values {
-                    let key = (
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    );
-                    declared.insert(key.clone());
-                    let Some(index) = prepared.get(&key).copied() else {
-                        diagnostics.push(diag(
-                            "graph.effect.missing_prepared",
-                            &effect_path(track.id.as_str(), rack, effect.id.as_str()),
-                        ));
-                        continue;
-                    };
-                    if !sidechain_matches(&effect.sidechain, &effects.entries[index]) {
-                        diagnostics.push(diag(
-                            "graph.effect.metadata_mismatch",
-                            &effect_path(track.id.as_str(), rack, effect.id.as_str()),
-                        ));
-                    }
-                }
-            }
-        }
-        for key in prepared.keys() {
-            if !declared.contains(key) {
-                diagnostics.push(diag("graph.effect.unexpected_prepared", "$.effects"));
-            }
-        }
-        if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
-        }
-
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let mut node_latency = BTreeMap::new();
-        let mut node_tail = BTreeMap::new();
-        let mut effect_ids = BTreeMap::new();
-        let mut route_transforms = Vec::new();
-        for track in &model.tracks {
-            for stage in stages() {
-                let id = track_node(track.id.as_str(), stage);
-                let tail = if stage == TrackStage::PostInputBuiltins {
-                    builtin_tails
-                        .get(track.id.as_str())
-                        .copied()
-                        .unwrap_or(TailSamples::Finite(0))
-                } else {
-                    TailSamples::Finite(0)
-                };
-                add_node(
-                    &mut nodes,
-                    &mut node_latency,
-                    &mut node_tail,
-                    id,
-                    LatencySamples(0),
-                    tail,
-                );
-            }
-            let mut preceding = track_node(track.id.as_str(), TrackStage::Input);
-            let builtins = track_node(track.id.as_str(), TrackStage::PostInputBuiltins);
-            add_main_edge(
-                &mut edges,
-                preceding.clone(),
-                builtins.clone(),
-                "$.tracks".to_owned(),
-            );
-            preceding = builtins;
-            for (rack, values, boundary) in [
-                (RackId::Simd1, &track.simd1.effects, TrackStage::PostSimd1),
-                (
-                    RackId::Dynamic,
-                    &track.dynamic.effects,
-                    TrackStage::PostDynamic,
-                ),
-                (
-                    RackId::Simd2,
-                    &track.simd2.effects,
-                    TrackStage::PostSimd2PreFader,
-                ),
-            ] {
-                for effect in values {
-                    let id = EffectNodeId {
-                        track_id: gid(track.id.as_str()),
-                        rack,
-                        effect_id: gid(effect.id.as_str()),
-                    };
-                    let node = GraphNodeId::Effect(id.clone());
-                    let index = prepared[&(
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    )];
-                    let metadata = effects.entries[index].metadata;
-                    add_node(
-                        &mut nodes,
-                        &mut node_latency,
-                        &mut node_tail,
-                        node.clone(),
-                        metadata.latency,
-                        metadata.tail,
-                    );
-                    add_main_edge(
-                        &mut edges,
-                        preceding.clone(),
-                        node.clone(),
-                        effect_path(track.id.as_str(), rack, effect.id.as_str()),
-                    );
-                    preceding = node.clone();
-                    effect_ids.insert(
-                        (
-                            track.id.as_str().to_owned(),
-                            rack,
-                            effect.id.as_str().to_owned(),
-                        ),
-                        id,
-                    );
-                }
-                let end = track_node(track.id.as_str(), boundary);
-                add_main_edge(
-                    &mut edges,
-                    preceding.clone(),
-                    end.clone(),
-                    "$.tracks".to_owned(),
-                );
-                preceding = end;
-            }
-            let fader = track_node(track.id.as_str(), TrackStage::PostFader);
-            let matrix = track_node(track.id.as_str(), TrackStage::PostMatrix);
-            add_main_edge(&mut edges, preceding, fader.clone(), "$.tracks".to_owned());
-            add_main_edge(&mut edges, fader, matrix, "$.tracks".to_owned());
-        }
-        for submix in &model.submixes {
-            let id = GraphNodeId::Submix {
-                submix_id: gid(submix.id.as_str()),
-            };
-            add_node(
-                &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
-                id,
-                LatencySamples(0),
-                TailSamples::Finite(0),
-            );
-        }
-        for output in &model.outputs {
-            let id = GraphNodeId::Output {
-                output_id: gid(output.id.as_str()),
-            };
-            add_node(
-                &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
-                id,
-                LatencySamples(0),
-                TailSamples::Finite(0),
-            );
-        }
-        for route in &model.routes {
-            let Some(transform) = route_transform(route.gain_db, &route.channel_matrix) else {
-                diagnostics.push(diag(
-                    "graph.gain.non_finite",
-                    &format!("$.routes[id={}].gain_db", route.id),
-                ));
-                continue;
-            };
-            let route_node = GraphNodeId::Route {
-                route_id: gid(route.id.as_str()),
-            };
-            add_node(
-                &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
-                route_node.clone(),
-                LatencySamples(0),
-                TailSamples::Finite(0),
-            );
-            let Some(source) = route_source_node(&route.source) else {
-                diagnostics.push(diag(
-                    "graph.port.unknown",
-                    &format!("$.routes[id={}].source", route.id),
-                ));
-                continue;
-            };
-            let Some(destination) = route_destination_node(&route.destination) else {
-                diagnostics.push(diag(
-                    "graph.port.unknown",
-                    &format!("$.routes[id={}].destination", route.id),
-                ));
-                continue;
-            };
-            add_route_source_edge(&mut edges, source, route_node.clone(), route.id.as_str());
-            add_route_destination_edge(&mut edges, route_node, destination, route.id.as_str());
-            route_transforms.push(PreparedRoute {
-                node: GraphNodeId::Route {
-                    route_id: gid(route.id.as_str()),
-                },
-                transform,
-            });
-        }
-        for track in &model.tracks {
-            for (rack, values) in [
-                (RackId::Simd1, &track.simd1.effects),
-                (RackId::Dynamic, &track.dynamic.effects),
-                (RackId::Simd2, &track.simd2.effects),
-            ] {
-                for effect in values {
-                    let SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
-                        continue;
-                    };
-                    let Some(source) = route_source_node(&sidechain.source) else {
-                        diagnostics.push(diag(
-                            "graph.port.unknown",
-                            &format!("$.tracks[id={}].sidechain", track.id),
-                        ));
-                        continue;
-                    };
-                    let key = (
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    );
-                    let id = effect_ids[&key].clone();
-                    let destination = GraphNodeId::Effect(id.clone());
-                    edges.push(GraphEdge {
-                        id: GraphEdgeId::EffectSidechain {
-                            effect: id,
-                            port: sidechain.port_id.as_str().to_owned(),
-                        },
-                        source: port(source, GraphPortKind::MainOutput),
-                        destination: GraphPortId {
-                            node: destination,
-                            kind: GraphPortKind::SidechainInput,
-                            effect_port: Some(sidechain.port_id.as_str().to_owned()),
-                        },
-                        path: format!("$.tracks[id={}].sidechain", track.id),
-                    });
-                }
-            }
-        }
-        route_transforms.sort_by(|left, right| left.node.cmp(&right.node));
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
-        edges.sort_by(|a, b| a.id.cmp(&b.id));
-        if nodes.len() as u64 > caps.maximum_nodes || edges.len() as u64 > caps.maximum_edges {
-            diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
-        }
-        for cycle in cycle_witnesses(&nodes, &edges) {
-            diagnostics.push(GraphDiagnostic {
-                code: "graph.cycle",
-                path: cycle.1.first().cloned().unwrap_or_else(|| "$".to_owned()),
-                cycle: cycle.0,
-                cycle_edge_paths: cycle.1,
-            });
-        }
-        if !diagnostics.is_empty() {
-            return Err(failure(effects, diagnostics));
-        }
-        let levels = topo(&nodes, &edges).expect("acyclic graph has schedule");
-        let schedule: Vec<_> = levels
-            .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
-            .collect();
-        if schedule.len() as u64 > caps.maximum_schedule_items
-            || levels.len() as u64 > caps.maximum_dependency_levels
-        {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.graph_compile_caps")],
-            ));
-        }
-        let timing = match timings(&schedule, &edges, &node_latency, &node_tail, &caps) {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
-        };
-        let buffers = buffer_assignments(&schedule, &edges);
-        let ports = ports_for(&nodes, &edges);
-        let reductions = reduction_records(&nodes, &edges);
-        let dispatch = KernelDispatch::select(target_capabilities());
-        let (banks, rack_cohorts) = match bind_rack_banks(&effects, &effect_ids, &levels, dispatch)
-        {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
-        };
-        let Some(mut estimate) = resource_estimate(
-            session.quantum().0,
-            session.resource_estimate().requested_runtime_bytes,
-            &nodes,
-            &edges,
-            &schedule,
-            &levels,
-            &buffers,
-            &timing,
-            &effects.entries,
-        ) else {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-            ));
-        };
-        // Runtime-selected banks do not change the target-neutral semantic graph hash. Preserve
-        // the pre-bank estimate for canonical bytes while publishing and capping the exact
-        // retained candidate estimate below.
-        let semantic_estimate = estimate.clone();
-        let Some(bank_resource) = effect_bank_resource(&banks, session.quantum().0) else {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_banks",
-                )],
-            ));
-        };
-        if checked_add_effect_banks(&mut estimate, bank_resource).is_none() {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.effect_banks",
-                )],
-            ));
-        }
-        let mut capped_estimate = estimate.clone();
-        if let Some(builtins) = prepared_builtins {
-            let Some(resource) =
-                builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels)
-            else {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.builtin_banks",
-                    )],
-                ));
-            };
-            if capped_estimate
-                .checked_add_builtin_banks(resource)
-                .is_none()
-            {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.builtin_banks",
-                    )],
-                ));
-            }
-        }
-        if !estimate_fits_platform(&capped_estimate) {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.arithmetic_overflow", "$.graph")],
-            ));
-        }
-        if capped_estimate.materialized_nodes > caps.maximum_nodes
-            || capped_estimate.edges > caps.maximum_edges
-            || capped_estimate.schedule_items > caps.maximum_schedule_items
-            || capped_estimate.dependency_levels > caps.maximum_dependency_levels
-            || capped_estimate.audio_buffer_samples > caps.maximum_audio_buffer_samples
-            || capped_estimate.graph_metadata_bytes > caps.maximum_graph_bytes
-            || capped_estimate.incremental_plan_bytes > caps.maximum_plan_bytes
-            || capped_estimate.largest_allocation_bytes > caps.maximum_single_allocation_bytes
-        {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.graph_compile_caps")],
-            ));
-        }
-        if capped_estimate.session_plus_plan_bytes > model.limits.memory_bytes {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.limits.memory_bytes")],
-            ));
-        }
-        let debug = canonical_bytes(CanonicalParts {
-            rate: session.sample_rate().0,
-            quantum: session.quantum().0,
-            nodes: &nodes,
-            ports: &ports,
-            edges: &edges,
-            schedule: &schedule,
-            levels: &levels,
-            routes: &timing.routes,
-            route_transforms: &route_transforms,
-            delays: &timing.delays,
-            reductions: &reductions,
-            buffers: &buffers,
-            estimate: &semantic_estimate,
-        });
-        let sha256 = hex_sha256(&debug);
-        let dot = dot(&nodes, &edges, &timing.delays);
-        let effect_nodes = into_effects(effects.entries, &effect_ids);
-        let spec = GraphSpec {
-            ports: ports.clone(),
-            nodes: nodes.clone(),
-            edges: edges.clone(),
-        };
-        let required_bindings = schedule
-            .iter()
-            .filter(|node| {
-                matches!(
-                    node,
-                    GraphNodeId::TrackStage {
-                        stage: TrackStage::Input
-                            | TrackStage::PostInputBuiltins
-                            | TrackStage::PostFader
-                            | TrackStage::PostMatrix,
-                        ..
-                    } | GraphNodeId::Output { .. }
-                )
-            })
-            .cloned()
-            .collect();
-        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
-            plan_id,
-            spec,
-            sequential_schedule: schedule.clone(),
-            dependency_levels: levels.clone(),
-            route_timings: timing.routes.clone(),
-            inserted_delays: timing.delays.clone(),
-            buffer_assignments: buffers.clone(),
-            estimate: estimate.clone(),
-            envelope: RenderEnvelope {
-                sample_rate: session.sample_rate(),
-                quantum: session.quantum(),
-                input_channels: None,
-                output_channels: core::num::NonZeroUsize::new(2).expect("constant"),
-            },
-            required_bindings,
-            routes: route_transforms.clone(),
-            effects: effect_nodes,
-            banks,
-            builtin_banks: Vec::new(),
-            observers: Vec::new(),
-        });
-        Ok(PreparedGraphArtifact {
-            graph,
-            report: GraphCompileReport {
-                nodes,
-                ports,
-                edges,
-                sequential_schedule: schedule,
-                dependency_levels: levels,
-                route_timings: timing.routes,
-                inserted_delays: timing.delays,
-                reductions,
-                route_transforms,
-                buffer_assignments: buffers,
-                output_latency: timing.output_latency,
-                output_tail: timing.output_tail,
-                estimate,
-                canonical_debug_bytes: debug,
-                sha256,
-                dot,
-                rack_cohorts,
-            },
-        })
-    }
-}
-
-/// The `RackLocationV1` a graph rack id addresses, or `None` for the dynamic rack.
-const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
-    match rack {
-        RackId::Simd1 => Some(RackLocationV1::Simd1),
-        RackId::Simd2 => Some(RackLocationV1::Simd2),
-        RackId::Dynamic => None,
-    }
-}
-
-/// Plan the SIMD-rack cohorts and bind the ones that can be bound.
-///
-/// The planner is `miso_engine_rack_compiler::plan_bank_groups` - the single cohort planner in the
-/// workspace. #96 binds only full groups: every effect factory rejects `requests.len() != lanes`
-/// and the contract has no per-lane mask yet (#96 F7), so a padded group's members stay on the
-/// per-node scalar path, exactly as they did before. #99 flips that once #95 adds the lane mask.
-fn bind_rack_banks(
-    effects: &EffectPreparedSession,
-    ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
-    levels: &[DependencyLevel],
-    dispatch: KernelDispatch,
-) -> Result<
-    (
-        Vec<miso_engine_graph::GraphPreparedEffectBank>,
-        GraphRackBankReport,
-    ),
-    GraphDiagnostic,
-> {
-    let empty = |dispatch| GraphRackBankReport {
-        dispatch,
-        plan: BankPlan {
-            groups: Vec::new(),
-            scalar: Vec::new(),
-        },
-        bound: Vec::new(),
-    };
-    let Some(width) = dispatch.bank_width() else {
-        return Ok((Vec::new(), empty(dispatch)));
-    };
-    let level_by_node: BTreeMap<_, _> = levels
-        .iter()
-        .flat_map(|level| {
-            level
-                .nodes
-                .iter()
-                .cloned()
-                .map(move |node| (node, level.level))
-        })
-        .collect();
-    let mut entry_by_id = BTreeMap::new();
-    let mut candidates_by_level: BTreeMap<u64, Vec<CohortCandidate<EffectNodeId>>> =
-        BTreeMap::new();
-    for entry in &effects.entries {
-        let rack = rack_id(entry.rack);
-        let Some(location) = rack_location(rack) else {
-            continue;
-        };
-        let id = ids[&(entry.track_id.clone(), rack, entry.effect_id.clone())].clone();
-        let Some(level) = level_by_node.get(&GraphNodeId::Effect(id.clone())).copied() else {
-            continue;
-        };
-        entry_by_id.insert(id.clone(), entry);
-        candidates_by_level
-            .entry(level)
-            .or_default()
-            .push(CohortCandidate {
-                id,
-                program: RackProgramV1::new(location, vec![entry.metadata.program_key()]),
-            });
-    }
-    let levels_in: Vec<_> = candidates_by_level
-        .into_iter()
-        .map(|(level, candidates)| CohortLevel { level, candidates })
-        .collect();
-    let plan = plan_bank_groups(&levels_in, width)
-        .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
-
-    let mut banks = Vec::new();
-    let mut bound = Vec::with_capacity(plan.groups.len());
-    for group in &plan.groups {
-        if !group.is_full() {
-            bound.push(false);
-            continue;
-        }
-        let members: Vec<_> = group
-            .members
-            .iter()
-            .map(|id| entry_by_id[id.as_ref().expect("full group")])
-            .collect();
-        let requests: Vec<_> = members
-            .iter()
-            .map(|entry| entry.bank_preparation.request())
-            .collect();
-        let request = PrepareEffectBankRequest {
-            backend: dispatch.backend(),
-            width,
-            requests: &requests,
-        };
-        // Equal program key implies the same registry factory: the registry maps one `EffectId` to
-        // one `Arc` (#96 F12), so the old per-chunk `Arc::ptr_eq` scan proved nothing.
-        let Some(processor) = members[0]
-            .factory
-            .bind_homogeneous_bank(request)
-            .map_err(|error| diag(error.code, "$.effects"))?
-        else {
-            bound.push(false);
-            continue;
-        };
-        if processor.metadata().width != width
-            || processor.metadata().program_key != group.program[0]
-        {
-            return Err(diag("graph.effect.bank_metadata", "$.effects"));
-        }
-        let scratch = miso_engine_rack::AoSoaScratch::new(width, effects.session.quantum().0)
-            .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?;
-        banks.push(miso_engine_graph::GraphPreparedEffectBank {
-            members: group
-                .members
-                .iter()
-                .map(|id| id.clone().expect("full group"))
-                .collect(),
-            active_mask: group.active_mask.clone(),
-            processor,
-            scratch,
-        });
-        bound.push(true);
-    }
-    Ok((
-        banks,
-        GraphRackBankReport {
-            dispatch,
-            plan,
-            bound,
-        },
-    ))
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct EffectBankResourceEstimate {
-    bank_count: u64,
-    scratch_samples: u64,
-    scratch_bytes: u64,
-    runtime_buffer_samples: u64,
-    runtime_buffer_bytes: u64,
-    metadata_bytes: u64,
-    largest_allocation_bytes: u64,
-}
-
-fn effect_bank_resource(
-    banks: &[miso_engine_graph::GraphPreparedEffectBank],
-    quantum: u32,
-) -> Option<EffectBankResourceEstimate> {
-    let bank_count = u64::try_from(banks.len()).ok()?;
-    let mut resource = EffectBankResourceEstimate {
-        bank_count,
-        ..EffectBankResourceEstimate::default()
-    };
-    let bank_array_bytes = u64::try_from(core::mem::size_of::<
-        miso_engine_graph::GraphPreparedEffectBank,
-    >())
-    .ok()?
-    .checked_mul(bank_count)?;
-    resource.metadata_bytes = bank_array_bytes;
-    resource.largest_allocation_bytes = bank_array_bytes;
-    for bank in banks {
-        let lanes = u64::from(bank.scratch.width().lanes());
-        if bank.scratch.quantum() != quantum
-            || u64::try_from(bank.members.len()).ok()? != lanes
-            || u64::try_from(bank.active_mask.len()).ok()? != lanes
-            || !bank.active_mask.iter().all(|lane| *lane)
-            || bank.processor.metadata().width != bank.scratch.width()
-        {
-            return None;
-        }
-        let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
-        let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
-        // L and R only: the sidechain planes were never read (#96 F9).
-        let scratch_samples = scratch_plane_samples.checked_mul(2)?;
-        let scratch_bytes = scratch_samples.checked_mul(4)?;
-        let runtime_buffer_samples = scratch_plane_samples.checked_mul(2)?;
-        let runtime_buffer_bytes = runtime_buffer_samples.checked_mul(4)?;
-        resource.scratch_samples = resource.scratch_samples.checked_add(scratch_samples)?;
-        resource.scratch_bytes = resource.scratch_bytes.checked_add(scratch_bytes)?;
-        resource.runtime_buffer_samples = resource
-            .runtime_buffer_samples
-            .checked_add(runtime_buffer_samples)?;
-        resource.runtime_buffer_bytes = resource
-            .runtime_buffer_bytes
-            .checked_add(runtime_buffer_bytes)?;
-
-        let member_array_bytes = u64::try_from(core::mem::size_of::<EffectNodeId>())
-            .ok()?
-            .checked_mul(lanes)?;
-        // One `bool` per lane for the bank's active mask, mirroring the builtin-bank accounting.
-        let active_mask_bytes = lanes;
-        resource.metadata_bytes = resource
-            .metadata_bytes
-            .checked_add(member_array_bytes)?
-            .checked_add(active_mask_bytes)?;
-        resource.largest_allocation_bytes = resource
-            .largest_allocation_bytes
-            .max(member_array_bytes)
-            .max(scratch_plane_bytes)
-            .max(u64::from(quantum).checked_mul(4)?);
-        for member in &bank.members {
-            for id in [&member.track_id, &member.effect_id] {
-                let string_bytes = u64::try_from(id.as_str().len()).ok()?;
-                resource.metadata_bytes = resource.metadata_bytes.checked_add(string_bytes)?;
-                resource.largest_allocation_bytes =
-                    resource.largest_allocation_bytes.max(string_bytes);
-            }
-        }
-    }
-    Some(resource)
-}
-
-fn checked_add_effect_banks(
-    estimate: &mut GraphResourceEstimate,
-    resource: EffectBankResourceEstimate,
-) -> Option<()> {
-    let mut next = estimate.clone();
-    next.effect_bank_count = next.effect_bank_count.checked_add(resource.bank_count)?;
-    next.effect_bank_scratch_bytes = next
-        .effect_bank_scratch_bytes
-        .checked_add(resource.scratch_bytes)?;
-    next.effect_bank_runtime_buffer_bytes = next
-        .effect_bank_runtime_buffer_bytes
-        .checked_add(resource.runtime_buffer_bytes)?;
-    next.effect_bank_metadata_bytes = next
-        .effect_bank_metadata_bytes
-        .checked_add(resource.metadata_bytes)?;
-    next.audio_buffer_samples = next
-        .audio_buffer_samples
-        .checked_add(resource.scratch_samples)?
-        .checked_add(resource.runtime_buffer_samples)?;
-    next.graph_metadata_bytes = next
-        .graph_metadata_bytes
-        .checked_add(resource.metadata_bytes)?;
-    let retained = resource
-        .scratch_bytes
-        .checked_add(resource.runtime_buffer_bytes)?
-        .checked_add(resource.metadata_bytes)?;
-    next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(retained)?;
-    next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(retained)?;
-    next.largest_allocation_bytes = next
-        .largest_allocation_bytes
-        .max(resource.largest_allocation_bytes);
-    *estimate = next;
-    Some(())
-}
-
-struct TimingResult {
-    routes: Vec<RouteTiming>,
-    delays: Vec<InsertedDelay>,
-    total_delay: u64,
-    delay_count: u64,
-    output_latency: LatencySamples,
-    output_tail: TailSamples,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resource_estimate(
-    quantum: u32,
-    session_bytes: u64,
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-    schedule: &[GraphNodeId],
-    levels: &[DependencyLevel],
-    buffers: &[BufferAssignment],
-    timing: &TimingResult,
-    effects: &[EffectPreparedEntry],
-) -> Option<GraphResourceEstimate> {
-    let count = |value: usize| u64::try_from(value).ok();
-    let logical_nodes = count(nodes.len())?;
-    let logical_edges = count(edges.len())?;
-    let materialized_nodes = logical_nodes.checked_add(timing.delay_count)?;
-    let materialized_edges = logical_edges.checked_add(timing.delay_count)?;
-    let schedule_items = count(schedule.len())?.checked_add(timing.delay_count)?;
-    let dependency_levels = count(levels.len())?;
-    let mut input_counts: BTreeMap<_, u64> =
-        nodes.iter().map(|node| (node.id.clone(), 0_u64)).collect();
-    for edge in edges {
-        let count = input_counts.get_mut(&edge.destination.node)?;
-        *count = count.checked_add(1)?;
-    }
-    let reductions = count(
-        nodes
-            .iter()
-            .filter(|node| {
-                matches!(
-                    node.id,
-                    GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-                ) && input_counts[&node.id] > 1
-            })
-            .count(),
-    )?;
-    let routes = count(
-        nodes
-            .iter()
-            .filter(|node| matches!(node.id, GraphNodeId::Route { .. }))
-            .count(),
-    )?;
-    let effect_count = count(effects.len())?;
-    let maximum_inputs = input_counts.values().copied().max().unwrap_or(0);
-    let quantum = u64::from(quantum);
-    // Node outputs use the deterministic liveness coloring recorded in `buffers`. Edge
-    // contributions remain distinct because they carry independent PDC state into reductions.
-    let colored_outputs = buffers
-        .iter()
-        .map(|assignment| assignment.buffer_index)
-        .max()
-        .map_or(Some(0), |maximum| maximum.checked_add(1))?;
-    let audio_buffer_samples = colored_outputs
-        .checked_add(logical_edges)?
-        .checked_mul(2)?
-        .checked_mul(quantum)?
-        .checked_add(maximum_inputs)?;
-    let audio_bytes = audio_buffer_samples.checked_mul(4)?;
-    let delay_bytes = timing.total_delay.checked_mul(8)?;
-    let mut declared_effect_bytes = 0_u64;
-    for effect in effects {
-        declared_effect_bytes = declared_effect_bytes
-            .checked_add(effect.metadata.state_sizes.total()?)?
-            .checked_add(effect.metadata.scratch_bytes)?;
-    }
-    let graph_metadata_bytes =
-        graph_metadata_bytes(nodes, edges, schedule, levels, buffers, timing)?;
-    let incremental_plan_bytes = audio_bytes
-        .checked_add(delay_bytes)?
-        .checked_add(declared_effect_bytes)?
-        .checked_add(graph_metadata_bytes)?;
-    let lane_bytes = quantum.checked_mul(4)?;
-    let mut delay_lane_bytes = 0_u64;
-    for delay in &timing.delays {
-        delay_lane_bytes = delay_lane_bytes.max(delay.samples.0.checked_mul(4)?);
-    }
-    let reduction_bytes = maximum_inputs.checked_mul(4)?;
-    let largest_allocation_bytes = graph_metadata_bytes
-        .max(lane_bytes)
-        .max(delay_lane_bytes)
-        .max(reduction_bytes);
-    Some(GraphResourceEstimate {
-        logical_nodes,
-        materialized_nodes,
-        edges: materialized_edges,
-        schedule_items,
-        dependency_levels,
-        reductions,
-        routes,
-        effects: effect_count,
-        audio_buffer_samples,
-        total_delay_samples: timing.total_delay,
-        delay_bytes,
-        graph_metadata_bytes,
-        declared_effect_bytes,
-        effect_bank_count: 0,
-        effect_bank_scratch_bytes: 0,
-        effect_bank_runtime_buffer_bytes: 0,
-        effect_bank_metadata_bytes: 0,
-        builtin_bank_bytes: 0,
-        builtin_bank_scratch_bytes: 0,
-        builtin_bank_count: 0,
-        largest_allocation_bytes,
-        incremental_plan_bytes,
-        session_plus_plan_bytes: session_bytes.checked_add(incremental_plan_bytes)?,
-    })
-}
-
-fn graph_metadata_bytes(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-    schedule: &[GraphNodeId],
-    levels: &[DependencyLevel],
-    buffers: &[BufferAssignment],
-    timing: &TimingResult,
-) -> Option<u64> {
-    let sized = |count: usize, bytes: usize| {
-        u64::try_from(count)
-            .ok()?
-            .checked_mul(u64::try_from(bytes).ok()?)
-    };
-    let mut total = sized(nodes.len(), core::mem::size_of::<GraphNode>())?
-        .checked_add(sized(edges.len(), core::mem::size_of::<GraphEdge>())?)?
-        .checked_add(sized(schedule.len(), core::mem::size_of::<GraphNodeId>())?)?
-        .checked_add(sized(
-            levels.len(),
-            core::mem::size_of::<DependencyLevel>(),
-        )?)?
-        .checked_add(sized(
-            buffers.len(),
-            core::mem::size_of::<BufferAssignment>(),
-        )?)?
-        .checked_add(sized(
-            timing.routes.len(),
-            core::mem::size_of::<RouteTiming>(),
-        )?)?
-        .checked_add(sized(
-            timing.delays.len(),
-            core::mem::size_of::<InsertedDelay>(),
-        )?)?;
-    for node in nodes {
-        total = total.checked_add(u64::try_from(node_text(&node.id).len()).ok()?)?;
-    }
-    for edge in edges {
-        total = total
-            .checked_add(u64::try_from(edge.path.len()).ok()?)?
-            .checked_add(u64::try_from(node_text(&edge.source.node).len()).ok()?)?
-            .checked_add(u64::try_from(node_text(&edge.destination.node).len()).ok()?)?;
-    }
-    Some(total)
-}
-
-fn estimate_fits_platform(estimate: &GraphResourceEstimate) -> bool {
-    [
-        estimate.materialized_nodes,
-        estimate.edges,
-        estimate.schedule_items,
-        estimate.audio_buffer_samples,
-        estimate.total_delay_samples,
-        estimate.delay_bytes,
-        estimate.graph_metadata_bytes,
-        estimate.declared_effect_bytes,
-        estimate.effect_bank_count,
-        estimate.effect_bank_scratch_bytes,
-        estimate.effect_bank_runtime_buffer_bytes,
-        estimate.effect_bank_metadata_bytes,
-        estimate.largest_allocation_bytes,
-        estimate.incremental_plan_bytes,
-        estimate.session_plus_plan_bytes,
-    ]
-    .into_iter()
-    .all(|value| usize::try_from(value).is_ok() && isize::try_from(value).is_ok())
-}
-
-fn timings(
-    schedule: &[GraphNodeId],
-    edges: &[GraphEdge],
-    latencies: &BTreeMap<GraphNodeId, LatencySamples>,
-    tails: &BTreeMap<GraphNodeId, TailSamples>,
-    caps: &GraphCompileCaps,
-) -> Result<TimingResult, GraphDiagnostic> {
-    let mut incoming_by_node: BTreeMap<_, Vec<_>> = schedule
-        .iter()
-        .cloned()
-        .map(|node| (node, Vec::new()))
-        .collect();
-    for edge in edges {
-        incoming_by_node
-            .get_mut(&edge.destination.node)
-            .ok_or_else(|| diag("graph.internal.invariant", &edge.path))?
-            .push(edge);
-    }
-    let mut arrivals = BTreeMap::<GraphNodeId, u64>::new();
-    let mut extents = BTreeMap::<GraphNodeId, TailSamples>::new();
-    let mut total_delay: u64 = 0;
-    let mut delay_count: u64 = 0;
-    let mut routes = Vec::new();
-    let mut delays = Vec::new();
-    for node in schedule {
-        let incoming = &incoming_by_node[node];
-        let max = incoming
-            .iter()
-            .filter_map(|edge| arrivals.get(&edge.source.node).copied())
-            .max()
-            .unwrap_or(0);
-        for edge in incoming {
-            let source = arrivals.get(&edge.source.node).copied().unwrap_or(0);
-            let delay = max
-                .checked_sub(source)
-                .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", &edge.path))?;
-            if delay > caps.maximum_delay_samples_per_edge {
-                return Err(diag("graph.pdc.edge_limit", &edge.path));
-            }
-            total_delay = total_delay
-                .checked_add(delay)
-                .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", &edge.path))?;
-            if total_delay > caps.maximum_total_delay_samples {
-                return Err(diag("graph.pdc.total_limit", &edge.path));
-            }
-            if delay > 0 {
-                delay_count += 1;
-                delays.push(InsertedDelay {
-                    node: GraphNodeId::CompensationDelay {
-                        edge_id: Box::new(edge.id.clone()),
-                    },
-                    edge_id: edge.id.clone(),
-                    samples: LatencySamples(delay),
-                });
-            }
-            if let GraphEdgeId::RouteDestination { route_id } = &edge.id {
-                routes.push(RouteTiming {
-                    route_id: route_id.clone(),
-                    source_arrival: LatencySamples(source),
-                    compensation_delay: LatencySamples(delay),
-                    destination_arrival: LatencySamples(max),
-                });
-            }
-        }
-        let latency = latencies.get(node).copied().unwrap_or(LatencySamples(0)).0;
-        arrivals.insert(
-            node.clone(),
-            max.checked_add(latency)
-                .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", "$.graph"))?,
-        );
-        let mut extent = TailSamples::Finite(0);
-        for edge in incoming {
-            let source_arrival = arrivals.get(&edge.source.node).copied().unwrap_or(0);
-            let compensation_delay = max
-                .checked_sub(source_arrival)
-                .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", &edge.path))?;
-            extent = max_tail(
-                extent,
-                shifted_tail(
-                    *extents
-                        .get(&edge.source.node)
-                        .unwrap_or(&TailSamples::Finite(0)),
-                    compensation_delay,
-                )?,
-            );
-        }
-        extent = shifted_tail(extent, latency)?;
-        extent = match (
-            extent,
-            tails.get(node).copied().unwrap_or(TailSamples::Finite(0)),
-        ) {
-            (TailSamples::Infinite, _) | (_, TailSamples::Infinite) => TailSamples::Infinite,
-            (TailSamples::Finite(value), TailSamples::Finite(declared_tail)) => value
-                .checked_add(declared_tail)
-                .map(TailSamples::Finite)
-                .ok_or_else(|| diag("graph.tail.arithmetic_overflow", "$.graph"))?,
-        };
-        if let TailSamples::Finite(value) = extent
-            && value > caps.maximum_finite_tail_samples
-        {
-            return Err(diag("graph.tail.limit", "$.graph"));
-        }
-        extents.insert(node.clone(), extent);
-    }
-    routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
-    delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
-    let output = schedule
-        .iter()
-        .find(|node| matches!(node, GraphNodeId::Output { .. }))
-        .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
-    let output_latency = LatencySamples(
-        *arrivals
-            .get(output)
-            .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?,
-    );
-    let output_tail = *extents
-        .get(output)
-        .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
-    Ok(TimingResult {
-        routes,
-        delays,
-        total_delay,
-        delay_count,
-        output_latency,
-        output_tail,
-    })
-}
-fn shifted_tail(value: TailSamples, add: u64) -> Result<TailSamples, GraphDiagnostic> {
-    match value {
-        TailSamples::Infinite => Ok(TailSamples::Infinite),
-        TailSamples::Finite(v) => v
-            .checked_add(add)
-            .map(TailSamples::Finite)
-            .ok_or_else(|| diag("graph.tail.arithmetic_overflow", "$.graph")),
-    }
-}
-fn max_tail(a: TailSamples, b: TailSamples) -> TailSamples {
-    match (a, b) {
-        (TailSamples::Infinite, _) | (_, TailSamples::Infinite) => TailSamples::Infinite,
-        (TailSamples::Finite(a), TailSamples::Finite(b)) => TailSamples::Finite(a.max(b)),
-    }
-}
-fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
-    let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
-    let mut successors: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    let mut predecessors: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    for edge in edges {
-        *degree.get_mut(&edge.destination.node)? += 1;
-        successors
-            .get_mut(&edge.source.node)?
-            .push(edge.destination.node.clone());
-        predecessors
-            .get_mut(&edge.destination.node)?
-            .push(edge.source.node.clone());
-    }
-    let mut ready: BTreeSet<_> = degree
-        .iter()
-        .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
-        .collect();
-    let mut processed = 0_usize;
-    let mut levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
-    let mut node_levels = BTreeMap::new();
-    while let Some(node) = ready.pop_first() {
-        let level = predecessors[&node]
-            .iter()
-            .filter_map(|predecessor| node_levels.get(predecessor))
-            .copied()
-            .max()
-            .map_or(0, |value| value + 1);
-        node_levels.insert(node.clone(), level);
-        levels.entry(level).or_default().push(node.clone());
-        processed += 1;
-        for successor in &successors[&node] {
-            let degree = degree.get_mut(successor)?;
-            *degree -= 1;
-            if *degree == 0 {
-                ready.insert(successor.clone());
-            }
-        }
-    }
-    if processed != nodes.len() {
-        None
-    } else {
-        for nodes in levels.values_mut() {
-            nodes.sort();
-        }
-        Some(
-            levels
-                .into_iter()
-                .map(|(level, nodes)| DependencyLevel { level, nodes })
-                .collect(),
-        )
-    }
-}
-#[cfg(test)]
-fn cycle_witness(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
-    cycle_witnesses(nodes, edges).into_iter().next()
-}
-fn cycle_witnesses(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Vec<(Vec<GraphNodeId>, Vec<String>)> {
-    let mut adjacency: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    let mut reverse: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    for edge in edges {
-        let Some(outgoing) = adjacency.get_mut(&edge.source.node) else {
-            return Vec::new();
-        };
-        outgoing.push(edge);
-        let Some(incoming) = reverse.get_mut(&edge.destination.node) else {
-            return Vec::new();
-        };
-        incoming.push(edge);
-    }
-    for outgoing in adjacency.values_mut() {
-        outgoing.sort_by(|left, right| left.id.cmp(&right.id));
-    }
-    for incoming in reverse.values_mut() {
-        incoming.sort_by(|left, right| left.id.cmp(&right.id));
-    }
-
-    let mut visited = BTreeSet::new();
-    let mut finish = Vec::with_capacity(nodes.len());
-    for start in nodes.iter().map(|node| &node.id) {
-        if !visited.insert(start.clone()) {
-            continue;
-        }
-        let mut stack = vec![(start.clone(), 0usize)];
-        while let Some((node, next_edge)) = stack.last_mut() {
-            let outgoing = &adjacency[node];
-            if *next_edge == outgoing.len() {
-                finish.push(stack.pop().expect("nonempty DFS stack").0);
-                continue;
-            }
-            let destination = outgoing[*next_edge].destination.node.clone();
-            *next_edge += 1;
-            if visited.insert(destination.clone()) {
-                stack.push((destination, 0));
-            }
-        }
-    }
-
-    let mut assigned = BTreeSet::new();
-    let mut components = Vec::new();
-    for start in finish.into_iter().rev() {
-        if !assigned.insert(start.clone()) {
-            continue;
-        }
-        let mut component = Vec::new();
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            component.push(node.clone());
-            for edge in reverse[&node].iter().rev() {
-                let predecessor = edge.source.node.clone();
-                if assigned.insert(predecessor.clone()) {
-                    stack.push(predecessor);
-                }
-            }
-        }
-        component.sort();
-        let cyclic = component.len() > 1
-            || adjacency[&component[0]]
-                .iter()
-                .any(|edge| edge.destination.node == component[0]);
-        if cyclic {
-            components.push(component);
-        }
-    }
-    components.sort_by(|left, right| left[0].cmp(&right[0]));
-    components
-        .into_iter()
-        .filter_map(|component| cycle_witness_in_component(&component, &adjacency))
-        .collect()
-}
-fn cycle_witness_in_component(
-    component: &[GraphNodeId],
-    adjacency: &BTreeMap<GraphNodeId, Vec<&GraphEdge>>,
-) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
-    let members: BTreeSet<_> = component.iter().cloned().collect();
-    let start = component.first()?;
-    {
-        let mut nodes_path = vec![start.clone()];
-        let mut edge_path = Vec::new();
-        let mut on_path = BTreeSet::from([start.clone()]);
-        let mut stack = vec![(start.clone(), 0usize)];
-        while let Some((node, next_edge)) = stack.last_mut() {
-            let outgoing = &adjacency[node];
-            while *next_edge < outgoing.len()
-                && !members.contains(&outgoing[*next_edge].destination.node)
-            {
-                *next_edge += 1;
-            }
-            if *next_edge == outgoing.len() {
-                stack.pop();
-                if let Some(removed) = nodes_path.pop() {
-                    on_path.remove(&removed);
-                }
-                if !edge_path.is_empty() {
-                    edge_path.pop();
-                }
-                continue;
-            }
-            let edge = outgoing[*next_edge];
-            *next_edge += 1;
-            if edge.destination.node == *start {
-                let mut witness = nodes_path.clone();
-                witness.push(start.clone());
-                let mut witness_edges = edge_path.clone();
-                witness_edges.push(edge.path.clone());
-                return Some((witness, witness_edges));
-            }
-            if on_path.insert(edge.destination.node.clone()) {
-                nodes_path.push(edge.destination.node.clone());
-                edge_path.push(edge.path.clone());
-                stack.push((edge.destination.node.clone(), 0));
-            }
-        }
-    }
-    None
-}
-fn buffer_assignments(schedule: &[GraphNodeId], edges: &[GraphEdge]) -> Vec<BufferAssignment> {
-    let positions: BTreeMap<_, _> = schedule
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(position, node)| (node, position))
-        .collect();
-    let mut consumer_counts = vec![0_usize; schedule.len()];
-    let mut last_consumers: Vec<_> = schedule
-        .iter()
-        .enumerate()
-        .map(|(position, node)| {
-            if matches!(node, GraphNodeId::Output { .. }) {
-                schedule.len()
-            } else {
-                position
-            }
-        })
-        .collect();
-    let mut main_input_counts = vec![0_usize; schedule.len()];
-    let mut main_input_sources = vec![None; schedule.len()];
-    for edge in edges {
-        let source = positions[&edge.source.node];
-        let destination = positions[&edge.destination.node];
-        consumer_counts[source] += 1;
-        last_consumers[source] = last_consumers[source].max(destination);
-        if edge.destination.kind == GraphPortKind::MainInput {
-            main_input_counts[destination] += 1;
-            main_input_sources[destination] = Some(source);
-        }
-    }
-
-    let mut next_buffer = 0_u64;
-    let mut free = BTreeSet::new();
-    let mut live_until = Vec::<usize>::new();
-    let mut expirations = vec![Vec::<u64>::new(); schedule.len() + 1];
-    let mut node_buffers = vec![0_u64; schedule.len()];
-    let mut assignments = Vec::with_capacity(schedule.len());
-    for (position, node) in schedule.iter().enumerate() {
-        if position != 0 {
-            for buffer in expirations[position - 1].drain(..) {
-                if live_until[buffer as usize] == position - 1 {
-                    free.insert(buffer);
-                }
-            }
-        }
-
-        let alias = is_identity_boundary(node)
-            .then_some(position)
-            .filter(|position| main_input_counts[*position] == 1)
-            .and_then(|position| main_input_sources[position])
-            .filter(|source| consumer_counts[*source] == 1)
-            .map(|source| node_buffers[source]);
-        let buffer_index = if let Some(buffer) = alias {
-            free.remove(&buffer);
-            buffer
-        } else if let Some(buffer) = free.pop_first() {
-            buffer
-        } else {
-            let buffer = next_buffer;
-            next_buffer = next_buffer.checked_add(1).expect("node count fits u64");
-            live_until.push(position);
-            buffer
-        };
-        let last_consumer = last_consumers[position];
-        live_until[buffer_index as usize] = last_consumer;
-        expirations[last_consumer].push(buffer_index);
-        node_buffers[position] = buffer_index;
-        assignments.push(BufferAssignment {
-            port: port(node.clone(), GraphPortKind::MainOutput),
-            buffer_index,
-        });
-    }
-    assignments
-}
-
-fn is_identity_boundary(node: &GraphNodeId) -> bool {
-    matches!(
-        node,
-        GraphNodeId::TrackStage {
-            stage: TrackStage::PostSimd1 | TrackStage::PostDynamic | TrackStage::PostSimd2PreFader,
-            ..
-        }
-    )
-}
-fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
-    let mut ports = Vec::new();
-    for node in nodes {
-        ports.push(port(node.id.clone(), GraphPortKind::MainInput));
-        ports.push(port(node.id.clone(), GraphPortKind::MainOutput));
-    }
-    ports.extend(
-        edges
-            .iter()
-            .filter(|edge| edge.destination.kind == GraphPortKind::SidechainInput)
-            .map(|edge| edge.destination.clone()),
-    );
-    ports.sort();
-    ports.dedup();
-    ports
-}
-fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ReductionRecord> {
-    let mut contributions_by_node: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.id,
-                GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-            )
-        })
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    for edge in edges {
-        if edge.destination.kind == GraphPortKind::MainInput
-            && let Some(contributions) = contributions_by_node.get_mut(&edge.destination.node)
-        {
-            contributions.push(edge.id.clone());
-        }
-    }
-    nodes
-        .iter()
-        .filter_map(|node| {
-            let mut contributions = contributions_by_node.remove(&node.id)?;
-            contributions.sort();
-            (contributions.len() > 1).then(|| ReductionRecord {
-                node: node.id.clone(),
-                contributions,
-            })
-        })
-        .collect()
-}
-fn add_node(
-    nodes: &mut Vec<GraphNode>,
-    latencies: &mut BTreeMap<GraphNodeId, LatencySamples>,
-    tails: &mut BTreeMap<GraphNodeId, TailSamples>,
-    id: GraphNodeId,
-    latency: LatencySamples,
-    tail: TailSamples,
-) {
-    latencies.insert(id.clone(), latency);
-    tails.insert(id.clone(), tail);
-    nodes.push(GraphNode { id, latency, tail });
-}
-fn add_main_edge(
-    edges: &mut Vec<GraphEdge>,
-    source: GraphNodeId,
-    destination: GraphNodeId,
-    path: String,
-) {
-    edges.push(GraphEdge {
-        id: GraphEdgeId::TrackMain {
-            target: destination.clone(),
-        },
-        source: port(source, GraphPortKind::MainOutput),
-        destination: port(destination, GraphPortKind::MainInput),
-        path,
-    });
-}
-fn add_route_source_edge(
-    edges: &mut Vec<GraphEdge>,
-    source: GraphNodeId,
-    destination: GraphNodeId,
-    id: &str,
-) {
-    edges.push(GraphEdge {
-        id: GraphEdgeId::RouteSource { route_id: gid(id) },
-        source: port(source, GraphPortKind::MainOutput),
-        destination: port(destination, GraphPortKind::MainInput),
-        path: format!("$.routes[id={id}].source"),
-    });
-}
-fn add_route_destination_edge(
-    edges: &mut Vec<GraphEdge>,
-    source: GraphNodeId,
-    destination: GraphNodeId,
-    id: &str,
-) {
-    edges.push(GraphEdge {
-        id: GraphEdgeId::RouteDestination { route_id: gid(id) },
-        source: port(source, GraphPortKind::MainOutput),
-        destination: port(destination, GraphPortKind::MainInput),
-        path: format!("$.routes[id={id}].destination"),
-    });
-}
-fn port(node: GraphNodeId, kind: GraphPortKind) -> GraphPortId {
-    GraphPortId {
-        node,
-        kind,
-        effect_port: None,
-    }
-}
-fn gid(value: &str) -> StableGraphId {
-    StableGraphId::parse(value).expect("accepted stable session ID")
-}
-fn track_node(track: &str, stage: TrackStage) -> GraphNodeId {
-    GraphNodeId::TrackStage {
-        track_id: gid(track),
-        stage,
-    }
-}
-fn route_source_node(source: &RouteSource) -> Option<GraphNodeId> {
-    match source {
-        RouteSource::Track { track_id, tap } => Some(track_node(track_id.as_str(), stage(*tap))),
-        RouteSource::SubmixOutput { submix_id } => Some(GraphNodeId::Submix {
-            submix_id: gid(submix_id.as_str()),
-        }),
-    }
-}
-fn route_destination_node(destination: &RouteDestination) -> Option<GraphNodeId> {
-    match destination {
-        RouteDestination::SubmixInput { submix_id } => Some(GraphNodeId::Submix {
-            submix_id: gid(submix_id.as_str()),
-        }),
-        RouteDestination::OutputInput { output_id } => Some(GraphNodeId::Output {
-            output_id: gid(output_id.as_str()),
-        }),
-    }
-}
-fn stage(tap: SendTap) -> TrackStage {
-    match tap {
-        SendTap::Input => TrackStage::Input,
-        SendTap::PostInputBuiltins => TrackStage::PostInputBuiltins,
-        SendTap::PostSimd1 => TrackStage::PostSimd1,
-        SendTap::PostDynamic => TrackStage::PostDynamic,
-        SendTap::PostSimd2PreFader => TrackStage::PostSimd2PreFader,
-        SendTap::PostFader => TrackStage::PostFader,
-        SendTap::PostMatrix => TrackStage::PostMatrix,
-    }
-}
-fn stages() -> [TrackStage; 7] {
-    [
-        TrackStage::Input,
-        TrackStage::PostInputBuiltins,
-        TrackStage::PostSimd1,
-        TrackStage::PostDynamic,
-        TrackStage::PostSimd2PreFader,
-        TrackStage::PostFader,
-        TrackStage::PostMatrix,
-    ]
-}
-fn rack_id(rack: EffectRack) -> RackId {
-    match rack {
-        EffectRack::Simd1 => RackId::Simd1,
-        EffectRack::Dynamic => RackId::Dynamic,
-        EffectRack::Simd2 => RackId::Simd2,
-    }
-}
-fn effect_path(track: &str, rack: RackId, effect: &str) -> String {
-    format!(
-        "$.tracks[id={track}].{}.effects[id={effect}]",
-        match rack {
-            RackId::Simd1 => "simd1",
-            RackId::Dynamic => "dynamic",
-            RackId::Simd2 => "simd2",
-        }
-    )
-}
-fn sidechain_matches(declaration: &SidechainDeclaration, entry: &EffectPreparedEntry) -> bool {
-    match (declaration, entry.metadata.ports.sidechain) {
-        (
-            SidechainDeclaration::None,
-            PreparedSidechainPort::None
-            | PreparedSidechainPort::Unconnected {
-                required: false, ..
-            },
-        ) => true,
-        (SidechainDeclaration::Routed(value), PreparedSidechainPort::Connected { id, .. }) => {
-            value.port_id.as_str() == id.as_str()
-        }
-        _ => false,
-    }
-}
-fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<RouteTransform> {
-    let gain = 10_f64.powf(f64::from(gain_db) / 20.0) as f32;
-    (gain_db.is_finite()
-        && gain.is_finite()
-        && !gain.is_subnormal()
-        && [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
-            .into_iter()
-            .all(|v| v.is_finite() && !v.is_subnormal()))
-    .then_some(RouteTransform {
-        gain,
-        ll: matrix.ll,
-        lr: matrix.lr,
-        rl: matrix.rl,
-        rr: matrix.rr,
-    })
-}
-fn into_effects(
-    entries: Vec<EffectPreparedEntry>,
-    ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
-) -> Vec<GraphPreparedEffect> {
-    entries
-        .into_iter()
-        .map(|entry| {
-            let key = (
-                entry.track_id.clone(),
-                rack_id(entry.rack),
-                entry.effect_id.clone(),
-            );
-            GraphPreparedEffect {
-                id: ids[&key].clone(),
-                metadata: entry.metadata,
-                processor: entry.processor,
-            }
-        })
-        .collect()
-}
-fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
-    GraphDiagnostic {
-        code,
-        path: path.to_owned(),
-        cycle: Vec::new(),
-        cycle_edge_paths: Vec::new(),
-    }
-}
-fn failure(
-    effects: EffectPreparedSession,
-    diagnostics: Vec<GraphDiagnostic>,
-) -> GraphCompileFailure {
-    GraphCompileFailure {
-        effects,
-        diagnostics: GraphDiagnosticSet::sorted(diagnostics),
-    }
-}
-fn stage_token(stage: TrackStage) -> &'static str {
-    match stage {
-        TrackStage::Input => "input",
-        TrackStage::PostInputBuiltins => "post-input-builtins",
-        TrackStage::PostSimd1 => "post-simd1",
-        TrackStage::PostDynamic => "post-dynamic",
-        TrackStage::PostSimd2PreFader => "post-simd2-pre-fader",
-        TrackStage::PostFader => "post-fader",
-        TrackStage::PostMatrix => "post-matrix",
-    }
-}
-fn rack_token(rack: RackId) -> &'static str {
-    match rack {
-        RackId::Simd1 => "simd1",
-        RackId::Dynamic => "dynamic",
-        RackId::Simd2 => "simd2",
-    }
-}
-fn node_text(node: &GraphNodeId) -> String {
-    match node {
-        GraphNodeId::TrackStage { track_id, stage } => {
-            format!("track:{}:{}", track_id.as_str(), stage_token(*stage))
-        }
-        GraphNodeId::Effect(effect) => format!(
-            "effect:{}:{}:{}",
-            effect.track_id.as_str(),
-            rack_token(effect.rack),
-            effect.effect_id.as_str()
-        ),
-        GraphNodeId::Route { route_id } => format!("route:{}", route_id.as_str()),
-        GraphNodeId::Submix { submix_id } => format!("submix:{}", submix_id.as_str()),
-        GraphNodeId::Output { output_id } => format!("output:{}", output_id.as_str()),
-        GraphNodeId::CompensationDelay { edge_id } => format!("delay:{}", edge_text(edge_id)),
-    }
-}
-fn node_kind_token(node: &GraphNodeId) -> &'static str {
-    match node {
-        GraphNodeId::TrackStage { .. } => "track-stage",
-        GraphNodeId::Effect(_) => "effect",
-        GraphNodeId::Route { .. } => "route",
-        GraphNodeId::Submix { .. } => "submix",
-        GraphNodeId::Output { .. } => "output",
-        GraphNodeId::CompensationDelay { .. } => "compensation-delay",
-    }
-}
-fn port_kind_token(kind: GraphPortKind) -> &'static str {
-    match kind {
-        GraphPortKind::MainInput => "main-input",
-        GraphPortKind::MainOutput => "main-output",
-        GraphPortKind::SidechainInput => "sidechain-input",
-    }
-}
-fn port_text(port: &GraphPortId) -> String {
-    format!(
-        "{}:{}:{}",
-        node_text(&port.node),
-        port_kind_token(port.kind),
-        port.effect_port.as_deref().unwrap_or("-")
-    )
-}
-fn edge_text(edge: &GraphEdgeId) -> String {
-    match edge {
-        GraphEdgeId::TrackMain { target } => format!("track-main:{}", node_text(target)),
-        GraphEdgeId::RouteSource { route_id } => format!("route-source:{}", route_id.as_str()),
-        GraphEdgeId::RouteDestination { route_id } => {
-            format!("route-destination:{}", route_id.as_str())
-        }
-        GraphEdgeId::EffectSidechain { effect, port } => format!(
-            "effect-sidechain:{}:{}:{}:{}",
-            effect.track_id.as_str(),
-            rack_token(effect.rack),
-            effect.effect_id.as_str(),
-            port
-        ),
-    }
-}
-fn tail_text(tail: TailSamples) -> String {
-    match tail {
-        TailSamples::Finite(samples) => format!("finite:{samples}"),
-        TailSamples::Infinite => "infinite".to_owned(),
-    }
-}
-struct CanonicalParts<'a> {
-    rate: u32,
-    quantum: u32,
-    nodes: &'a [GraphNode],
-    ports: &'a [GraphPortId],
-    edges: &'a [GraphEdge],
-    schedule: &'a [GraphNodeId],
-    levels: &'a [DependencyLevel],
-    routes: &'a [RouteTiming],
-    route_transforms: &'a [PreparedRoute],
-    delays: &'a [InsertedDelay],
-    reductions: &'a [ReductionRecord],
-    buffers: &'a [BufferAssignment],
-    estimate: &'a GraphResourceEstimate,
-}
-
-fn canonical_bytes(parts: CanonicalParts<'_>) -> Vec<u8> {
-    let mut text = format!(
-        "MISO-GRAPH-V1\nenvelope\t{}\t{}\n",
-        parts.rate, parts.quantum
-    );
-    for node in parts.nodes {
-        text.push_str(&format!(
-            "node\t{}\t{}\t{}\t{}\n",
-            node_text(&node.id),
-            node_kind_token(&node.id),
-            node.latency.0,
-            tail_text(node.tail)
-        ));
-    }
-    for port in parts.ports {
-        text.push_str(&format!("port\t{}\n", port_text(port)));
-    }
-    for edge in parts.edges {
-        text.push_str(&format!(
-            "edge\t{}\t{}\t{}\t{}\n",
-            edge_text(&edge.id),
-            port_text(&edge.source),
-            port_text(&edge.destination),
-            edge.path
-        ));
-    }
-    for delay in parts.delays {
-        text.push_str(&format!(
-            "delay\t{}\t{}\t{}\n",
-            node_text(&delay.node),
-            edge_text(&delay.edge_id),
-            delay.samples.0
-        ));
-    }
-    for (index, node) in parts.schedule.iter().enumerate() {
-        text.push_str(&format!("order\t{index}\t{}\n", node_text(node)));
-    }
-    for level in parts.levels {
-        for node in &level.nodes {
-            text.push_str(&format!("level\t{}\t{}\n", level.level, node_text(node)));
-        }
-    }
-    for reduction in parts.reductions {
-        for (rank, edge) in reduction.contributions.iter().enumerate() {
-            text.push_str(&format!(
-                "reduction\t{}\t{rank}\t{}\n",
-                node_text(&reduction.node),
-                edge_text(edge)
-            ));
-        }
-    }
-    for route in parts.route_transforms {
-        text.push_str(&format!(
-            "route-transform\t{}\t{:08x}\t{:08x}\t{:08x}\t{:08x}\t{:08x}\n",
-            node_text(&route.node),
-            route.transform.gain.to_bits(),
-            route.transform.ll.to_bits(),
-            route.transform.lr.to_bits(),
-            route.transform.rl.to_bits(),
-            route.transform.rr.to_bits()
-        ));
-    }
-    for route in parts.routes {
-        text.push_str(&format!(
-            "route-timing\t{}\t{}\t{}\t{}\n",
-            route.route_id.as_str(),
-            route.source_arrival.0,
-            route.compensation_delay.0,
-            route.destination_arrival.0
-        ));
-    }
-    for node in parts.nodes {
-        text.push_str(&format!(
-            "tail\t{}\t{}\n",
-            node_text(&node.id),
-            tail_text(node.tail)
-        ));
-    }
-    for buffer in parts.buffers {
-        text.push_str(&format!(
-            "buffer\t{}\t{}\n",
-            port_text(&buffer.port),
-            buffer.buffer_index
-        ));
-    }
-    let estimate = parts.estimate;
-    text.push_str(&format!(
-        "estimate\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-        estimate.logical_nodes,
-        estimate.materialized_nodes,
-        estimate.edges,
-        estimate.schedule_items,
-        estimate.dependency_levels,
-        estimate.reductions,
-        estimate.routes,
-        estimate.effects,
-        estimate.audio_buffer_samples,
-        estimate.total_delay_samples,
-        estimate.delay_bytes,
-        estimate.graph_metadata_bytes,
-        estimate.declared_effect_bytes,
-        estimate.effect_bank_count,
-        estimate.effect_bank_scratch_bytes,
-        estimate.effect_bank_runtime_buffer_bytes,
-        estimate.effect_bank_metadata_bytes,
-        estimate.largest_allocation_bytes,
-        estimate.incremental_plan_bytes,
-        estimate.session_plus_plan_bytes
-    ));
-    text.into_bytes()
-}
-fn dot(nodes: &[GraphNode], edges: &[GraphEdge], delays: &[InsertedDelay]) -> String {
-    let mut text = String::from("digraph miso_engine_graph_v1 {\n");
-    for node in nodes {
-        let id = dot_escape(&node_text(&node.id));
-        let label = dot_escape(&format!(
-            "{}|{}|latency={}|tail={}",
-            node_text(&node.id),
-            node_kind_token(&node.id),
-            node.latency.0,
-            tail_text(node.tail)
-        ));
-        text.push_str(&format!("  \"{id}\" [label=\"{label}\"];\n"));
-    }
-    let delay_by_edge: BTreeMap<_, _> =
-        delays.iter().map(|delay| (&delay.edge_id, delay)).collect();
-    for delay in delays {
-        let id = dot_escape(&node_text(&delay.node));
-        text.push_str(&format!(
-            "  \"{id}\" [shape=box,label=\"pdc|{} samples\"];\n",
-            delay.samples.0
-        ));
-    }
-    for edge in edges {
-        let source = dot_escape(&node_text(&edge.source.node));
-        let destination = dot_escape(&node_text(&edge.destination.node));
-        let style = if edge.destination.kind == GraphPortKind::SidechainInput {
-            " [style=dashed]"
-        } else {
-            ""
-        };
-        if let Some(delay) = delay_by_edge.get(&edge.id) {
-            let delay = dot_escape(&node_text(&delay.node));
-            text.push_str(&format!("  \"{source}\" -> \"{delay}\"{style};\n"));
-            text.push_str(&format!("  \"{delay}\" -> \"{destination}\"{style};\n"));
-        } else {
-            text.push_str(&format!("  \"{source}\" -> \"{destination}\"{style};\n"));
-        }
-    }
-    text.push_str("}\n");
-    text
-}
-fn dot_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    use core::fmt::Write;
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(&mut output, "{byte:02x}").expect("writing to String");
-    }
-    output
-}
-
+#[allow(unused_imports)]
+use crate::{banks::*, canonical::*, compile::*, estimate::*, ids::*, pdc::*, schedule::*};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dispatch every in-crate test compiles with.
+    ///
+    /// #99 F6 made dispatch an explicit compile input; these tests keep the *previous* behaviour
+    /// -- the host's detected capabilities -- so bank membership, scratch allocation and the
+    /// capped estimate are unchanged by that move on any given machine.
+    /// `scalar_dispatch_compiles_without_banks_on_any_host` is the test that exercises the other
+    /// value, which was unreachable before without feature injection.
+    fn host_dispatch() -> KernelDispatch {
+        KernelDispatch::select(target_capabilities())
+    }
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
     use miso_engine_builtins_compiler::{
@@ -2812,6 +975,204 @@ mod tests {
         }
     }
 
+    /// #99 F5: `node_text_len`/`edge_text_len` agree with the formatters they replace, on every
+    /// variant and on ids of every length.
+    ///
+    /// `graph_metadata_bytes` feeds `incremental_plan_bytes` and `session_plus_plan_bytes`, both
+    /// of which are checked against caps and against `limits.memory_bytes` -- so a wrong length is
+    /// a wrong admission decision, not a cosmetic drift. The two functions are separate code paths
+    /// by design (one allocates, one does not), so they need a gate that keeps them in step.
+    #[test]
+    fn node_text_len_matches_node_text_for_every_variant() {
+        let mut state = 0x1f2e_3d4c_5b6a_7988_u64;
+        let mut checked = 0_usize;
+        for _ in 0..1_000 {
+            let length = (state % 24) as usize + 1;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let a = "a".repeat(length);
+            let b = "b".repeat((length % 7) + 1);
+            let c = "c".repeat((length % 11) + 1);
+            let effect = EffectNodeId {
+                track_id: gid(&a),
+                rack: match state % 3 {
+                    0 => RackId::Simd1,
+                    1 => RackId::Dynamic,
+                    _ => RackId::Simd2,
+                },
+                effect_id: gid(&c),
+            };
+            let stage = stages()[(state % 7) as usize];
+            let variants = [
+                GraphNodeId::TrackStage {
+                    track_id: gid(&a),
+                    stage,
+                },
+                GraphNodeId::Effect(effect.clone()),
+                GraphNodeId::Route { route_id: gid(&b) },
+                GraphNodeId::Submix { submix_id: gid(&b) },
+                GraphNodeId::Output { output_id: gid(&c) },
+                GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(GraphEdgeId::TrackMain {
+                        target: GraphNodeId::TrackStage {
+                            track_id: gid(&a),
+                            stage,
+                        },
+                    }),
+                },
+            ];
+            for node in &variants {
+                assert_eq!(
+                    node_text_len(node),
+                    node_text(node).len(),
+                    "node_text_len disagrees for {node:?}"
+                );
+                checked += 1;
+            }
+            let edges = [
+                GraphEdgeId::TrackMain {
+                    target: variants[1].clone(),
+                },
+                GraphEdgeId::RouteSource { route_id: gid(&b) },
+                GraphEdgeId::RouteDestination { route_id: gid(&b) },
+                GraphEdgeId::EffectSidechain {
+                    effect: effect.clone(),
+                    port: b.clone(),
+                },
+            ];
+            for edge in &edges {
+                assert_eq!(
+                    edge_text_len(edge),
+                    edge_text(edge).len(),
+                    "edge_text_len disagrees for {edge:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 10_000);
+    }
+
+    /// Deterministic xorshift64: the same 500 graphs on every host, every run.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// #99 F1 (the property behind the wave-0 fix, gated here rather than assumed).
+    ///
+    /// `NativeGraphBlueprint::prepare` rejects any dependency level whose nodes are not strictly
+    /// ascending, and it runs for *both* native render modes -- so an unsorted level makes a valid
+    /// multi-submix session unbindable on the native launch path. The `direct-route` fixture
+    /// cannot see this: it is a chain with exactly one node per level. This test builds graphs
+    /// where node-ID order and topological order are deliberately unrelated, and checks the four
+    /// properties the executors actually rely on:
+    ///
+    /// 1. every level is strictly ascending by node id (the native layout contract);
+    /// 2. `level(n) == 1 + max level(predecessors)` -- the longest-path definition, recomputed in
+    ///    this test from the edge list alone, never from `topo`'s own bookkeeping;
+    /// 3. the sequential schedule is the concatenation of the levels, is a permutation of the
+    ///    nodes, and puts every edge's source before its destination;
+    /// 4. the result does not depend on edge order.
+    #[test]
+    fn random_dags_have_strictly_ascending_levels_and_level_major_schedule() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for graph in 0..500_u32 {
+            let count = (xorshift(&mut state) % 64) as usize + 1;
+            // A random topological rank per node, so a node's id says nothing about its depth.
+            let mut rank: Vec<usize> = (0..count).collect();
+            for index in (1..count).rev() {
+                let swap = (xorshift(&mut state) % (index as u64 + 1)) as usize;
+                rank.swap(index, swap);
+            }
+            let name = |index: usize| format!("n{index:02}");
+            let nodes: Vec<GraphNode> = (0..count)
+                .map(|index| graph_node(&name(index), 0, TailSamples::Finite(0)))
+                .collect();
+            let mut edges = Vec::new();
+            for source in 0..count {
+                let fanout = xorshift(&mut state) % 4;
+                for _ in 0..fanout {
+                    let destination = (xorshift(&mut state) % count as u64) as usize;
+                    if rank[source] >= rank[destination] {
+                        continue;
+                    }
+                    let id = format!("e{}-{}", name(source), name(destination));
+                    if edges.iter().any(|existing: &GraphEdge| {
+                        existing.id == GraphEdgeId::RouteDestination { route_id: gid(&id) }
+                    }) {
+                        continue;
+                    }
+                    edges.push(edge(&id, &name(source), &name(destination)));
+                }
+            }
+            let mut nodes = nodes;
+            nodes.sort_by(|a, b| a.id.cmp(&b.id));
+            edges.sort_by(|a, b| a.id.cmp(&b.id));
+
+            let levels = topo(&nodes, &edges).expect("acyclic by construction");
+            let schedule: Vec<GraphNodeId> = levels
+                .iter()
+                .flat_map(|level| level.nodes.iter().cloned())
+                .collect();
+
+            // 1. strictly ascending within every level, and contiguous level numbering.
+            for (index, level) in levels.iter().enumerate() {
+                assert_eq!(level.level, index as u64, "graph {graph}: level numbering");
+                assert!(!level.nodes.is_empty(), "graph {graph}: empty level");
+                assert!(
+                    level.nodes.windows(2).all(|pair| pair[0] < pair[1]),
+                    "graph {graph}: level {index} is not strictly ascending"
+                );
+            }
+
+            // 2. longest-path levels, recomputed here from the edges alone.
+            let mut expected: BTreeMap<GraphNodeId, u64> =
+                nodes.iter().map(|node| (node.id.clone(), 0)).collect();
+            for _ in 0..count {
+                for edge in &edges {
+                    let source = expected[&edge.source.node];
+                    let destination = expected.get_mut(&edge.destination.node).expect("node");
+                    *destination = (*destination).max(source + 1);
+                }
+            }
+            for level in &levels {
+                for id in &level.nodes {
+                    assert_eq!(expected[id], level.level, "graph {graph}: level of {id:?}");
+                }
+            }
+
+            // 3. the schedule is the levels, is a permutation, and is topological.
+            let mut sorted = schedule.clone();
+            sorted.sort();
+            let mut all: Vec<GraphNodeId> = nodes.iter().map(|node| node.id.clone()).collect();
+            all.sort();
+            assert_eq!(sorted, all, "graph {graph}: schedule is not a permutation");
+            let position: BTreeMap<&GraphNodeId, usize> = schedule
+                .iter()
+                .enumerate()
+                .map(|(at, id)| (id, at))
+                .collect();
+            for edge in &edges {
+                assert!(
+                    position[&edge.source.node] < position[&edge.destination.node],
+                    "graph {graph}: edge runs backwards in the schedule"
+                );
+            }
+
+            // 4. edge order is not an input.
+            let mut reversed = edges.clone();
+            reversed.reverse();
+            assert_eq!(
+                topo(&nodes, &reversed).expect("acyclic"),
+                levels,
+                "graph {graph}: level assignment depends on edge order"
+            );
+        }
+    }
+
     fn caps(maximum_finite_tail_samples: u64) -> GraphCompileCaps {
         GraphCompileCaps {
             maximum_nodes: 100,
@@ -2861,6 +1222,7 @@ mod tests {
         )
         .expect("compiled session");
         GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
                 session: compiled,
@@ -2918,6 +1280,7 @@ mod tests {
         )
         .expect("compiled reverse-route submix session");
         GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id,
             effects: EffectPreparedSession {
                 session,
@@ -2928,12 +1291,20 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
     }
 
+    /// The dependency-level contract, checked against an *explicitly supplied* schedule and level
+    /// list rather than against the plan's own.
+    ///
+    /// #99 F5 moved these vectors out of `GraphCompileReport` and onto `PreparedGraphPlan`, which
+    /// is deliberately not `Clone` -- so the corruption cases below inject a mutated copy here
+    /// instead of cloning a whole plan to poke one field. That is a better test anyway: it makes
+    /// the corrupted input visible at the call site.
     fn dependency_level_contract(
-        report: &GraphCompileReport,
+        graph: &PreparedGraphPlan,
+        schedule: &[GraphNodeId],
         levels: &[DependencyLevel],
     ) -> Result<(), &'static str> {
         if levels.is_empty() || levels.windows(2).any(|pair| pair[0].level >= pair[1].level) {
-            return Err("level order");
+            return Err("level ordering");
         }
         let mut level_by_node = BTreeMap::new();
         for level in levels {
@@ -2946,24 +1317,28 @@ mod tests {
                 }
             }
         }
-        let compiled_nodes: BTreeSet<_> = report.nodes.iter().map(|node| node.id.clone()).collect();
+        let compiled_nodes: BTreeSet<_> = graph
+            .spec
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect();
         if level_by_node.keys().cloned().collect::<BTreeSet<_>>() != compiled_nodes {
             return Err("level membership");
         }
-        let schedule_nodes: BTreeSet<_> = report.sequential_schedule.iter().cloned().collect();
-        if schedule_nodes != compiled_nodes
-            || schedule_nodes.len() != report.sequential_schedule.len()
-        {
+        let schedule_nodes: BTreeSet<_> = schedule.iter().cloned().collect();
+        if schedule_nodes != compiled_nodes || schedule_nodes.len() != schedule.len() {
             return Err("schedule membership");
         }
-        if report
+        if graph
+            .spec
             .edges
             .iter()
             .any(|edge| level_by_node[&edge.source.node] >= level_by_node[&edge.destination.node])
         {
             return Err("edge dependency");
         }
-        if report.sequential_schedule
+        if schedule
             != levels
                 .iter()
                 .flat_map(|level| level.nodes.iter().cloned())
@@ -2974,44 +1349,41 @@ mod tests {
         Ok(())
     }
 
-    fn canonical_with_levels(report: &GraphCompileReport, levels: &[DependencyLevel]) -> Vec<u8> {
-        canonical_bytes(CanonicalParts {
-            rate: 48_000,
-            quantum: 128,
-            nodes: &report.nodes,
-            ports: &report.ports,
-            edges: &report.edges,
-            schedule: &report.sequential_schedule,
-            levels,
-            routes: &report.route_timings,
-            route_transforms: &report.route_transforms,
-            delays: &report.inserted_delays,
-            reductions: &report.reductions,
-            buffers: &report.buffer_assignments,
-            estimate: &report.estimate,
-        })
+    /// The canonical text with an *injected* schedule and level list, so a test can prove a
+    /// permuted assignment produces different bytes.
+    fn canonical_with_levels(
+        graph: &PreparedGraphPlan,
+        report: &GraphCompileReport,
+        schedule: &[GraphNodeId],
+        levels: &[DependencyLevel],
+    ) -> Vec<u8> {
+        let reductions = GraphCompiler::reductions(graph);
+        let mut parts = canonical_parts(graph, report, &reductions);
+        parts.schedule = schedule;
+        parts.levels = levels;
+        let mut text = String::new();
+        write_canonical(&mut text, parts);
+        text.into_bytes()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reverse_fixture_identity_contract(
+        graph: &PreparedGraphPlan,
         report: &GraphCompileReport,
+        schedule: &[GraphNodeId],
         levels: &[DependencyLevel],
+        canonical: &[u8],
         expected_schedule: &[&str],
         expected_sha256: &str,
     ) -> Result<(), &'static str> {
-        dependency_level_contract(report, levels)?;
-        if report
-            .sequential_schedule
-            .iter()
-            .map(node_text)
-            .collect::<Vec<_>>()
-            != expected_schedule
-        {
+        dependency_level_contract(graph, schedule, levels)?;
+        if schedule.iter().map(node_text).collect::<Vec<_>>() != expected_schedule {
             return Err("schedule identity");
         }
-        let canonical = canonical_with_levels(report, levels);
-        if canonical != report.canonical_debug_bytes
-            || hex_sha256(&canonical) != report.sha256
-            || report.sha256 != expected_sha256
+        let rebuilt = canonical_with_levels(graph, report, schedule, levels);
+        if rebuilt != canonical
+            || hex_sha256(&rebuilt) != hex_sha256(canonical)
+            || hex_sha256(canonical) != expected_sha256
         {
             return Err("canonical identity");
         }
@@ -3109,8 +1481,9 @@ mod tests {
         let baseline = compile_reverse_route_submix_fixture(122_000);
         let existing_fixture = compile_fixture(122_001);
         dependency_level_contract(
-            &existing_fixture.report,
-            &existing_fixture.report.dependency_levels,
+            &existing_fixture.graph,
+            &existing_fixture.graph.sequential_schedule,
+            &existing_fixture.graph.dependency_levels,
         )
         .expect("existing deterministic fixture level contract");
 
@@ -3131,14 +1504,17 @@ mod tests {
             "output:main-out",
         ];
         reverse_fixture_identity_contract(
+            &baseline.graph,
             &baseline.report,
-            &baseline.report.dependency_levels,
+            &baseline.graph.sequential_schedule,
+            &baseline.graph.dependency_levels,
+            &GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes,
             &expected_schedule,
             "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
-            .report
+            .graph
             .dependency_levels
             .iter()
             .map(|level| {
@@ -3178,15 +1554,15 @@ mod tests {
         ];
         assert_eq!(level_transcript, expected_levels);
 
-        let mut legacy_report = baseline.report.clone();
-        legacy_report.sequential_schedule.swap(11, 12);
-        legacy_report.sequential_schedule.swap(10, 11);
+        // A level-major schedule with two members of level 9 swapped: the pre-#99 pop-order
+        // output. It must fail the contract, and it must hash differently.
+        let baseline_canonical =
+            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes;
+        let mut legacy_schedule = baseline.graph.sequential_schedule.clone();
+        legacy_schedule.swap(11, 12);
+        legacy_schedule.swap(10, 11);
         assert_eq!(
-            legacy_report
-                .sequential_schedule
-                .iter()
-                .map(node_text)
-                .collect::<Vec<_>>(),
+            legacy_schedule.iter().map(node_text).collect::<Vec<_>>(),
             [
                 "track:vocal:input",
                 "track:vocal:post-input-builtins",
@@ -3205,52 +1581,76 @@ mod tests {
             ]
         );
         assert_eq!(
-            dependency_level_contract(&legacy_report, &legacy_report.dependency_levels),
+            dependency_level_contract(
+                &baseline.graph,
+                &legacy_schedule,
+                &baseline.graph.dependency_levels
+            ),
             Err("schedule level order")
         );
-        let legacy_canonical =
-            canonical_with_levels(&legacy_report, &legacy_report.dependency_levels);
-        assert_ne!(legacy_canonical, baseline.report.canonical_debug_bytes);
+        let legacy_canonical = canonical_with_levels(
+            &baseline.graph,
+            &baseline.report,
+            &legacy_schedule,
+            &baseline.graph.dependency_levels,
+        );
+        assert_ne!(legacy_canonical, baseline_canonical);
         assert_eq!(
-            baseline.report.sha256,
+            GraphCompiler::sha256(&baseline.graph, &baseline.report),
             "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5"
         );
-        let mut reversed = baseline.report.dependency_levels.clone();
+        let mut reversed = baseline.graph.dependency_levels.clone();
         reversed[9].nodes.reverse();
         assert_eq!(
-            dependency_level_contract(&baseline.report, &reversed),
+            dependency_level_contract(
+                &baseline.graph,
+                &baseline.graph.sequential_schedule,
+                &reversed
+            ),
             Err("member order")
         );
-        let mut omitted = baseline.report.dependency_levels.clone();
+        let mut omitted = baseline.graph.dependency_levels.clone();
         omitted[9].nodes.pop();
         assert_eq!(
-            dependency_level_contract(&baseline.report, &omitted),
+            dependency_level_contract(
+                &baseline.graph,
+                &baseline.graph.sequential_schedule,
+                &omitted
+            ),
             Err("level membership")
         );
-        let mut duplicate = baseline.report.dependency_levels.clone();
+        let mut duplicate = baseline.graph.dependency_levels.clone();
         let duplicate_node = duplicate[9].nodes[0].clone();
         duplicate[10].nodes.insert(0, duplicate_node);
         assert_eq!(
-            dependency_level_contract(&baseline.report, &duplicate),
+            dependency_level_contract(
+                &baseline.graph,
+                &baseline.graph.sequential_schedule,
+                &duplicate
+            ),
             Err("duplicate level member")
         );
-        let mut schedule_corruption = baseline.report.clone();
-        schedule_corruption.sequential_schedule.swap(9, 11);
         assert_eq!(
             reverse_fixture_identity_contract(
-                &schedule_corruption,
-                &schedule_corruption.dependency_levels,
+                &baseline.graph,
+                &baseline.report,
+                &legacy_schedule,
+                &baseline.graph.dependency_levels,
+                &baseline_canonical,
                 &expected_schedule,
                 "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
             Err("schedule level order")
         );
-        let mut canonical_corruption = baseline.report.clone();
-        canonical_corruption.canonical_debug_bytes[0] ^= 1;
+        let mut canonical_corruption = baseline_canonical.clone();
+        canonical_corruption[0] ^= 1;
         assert_eq!(
             reverse_fixture_identity_contract(
+                &baseline.graph,
+                &baseline.report,
+                &baseline.graph.sequential_schedule,
+                &baseline.graph.dependency_levels,
                 &canonical_corruption,
-                &canonical_corruption.dependency_levels,
                 &expected_schedule,
                 "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
             ),
@@ -3259,20 +1659,23 @@ mod tests {
 
         let repeated = compile_reverse_route_submix_fixture(122_003);
         assert_eq!(
-            repeated.report.sequential_schedule,
-            baseline.report.sequential_schedule
+            repeated.graph.sequential_schedule,
+            baseline.graph.sequential_schedule
         );
         assert_eq!(
-            repeated.report.canonical_debug_bytes,
-            baseline.report.canonical_debug_bytes
+            GraphCompiler::evidence(&repeated.graph, &repeated.report).canonical_bytes,
+            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
         );
-        assert_eq!(repeated.report.sha256, baseline.report.sha256);
         assert_eq!(
-            repeated.report.buffer_assignments,
-            baseline.report.buffer_assignments
+            GraphCompiler::sha256(&repeated.graph, &repeated.report),
+            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+        );
+        assert_eq!(
+            repeated.graph.buffer_assignments,
+            baseline.graph.buffer_assignments
         );
         assert_eq!(repeated.report.output_latency, LatencySamples(0));
-        assert!(repeated.report.inserted_delays.is_empty());
+        assert!(repeated.graph.inserted_delays.is_empty());
 
         let single_artifact = compile_reverse_route_submix_fixture(122_004);
         let wave_artifact = compile_reverse_route_submix_fixture(122_005);
@@ -3282,15 +1685,18 @@ mod tests {
                 baseline.report.output_latency
             );
             assert_eq!(
-                artifact.report.inserted_delays,
-                baseline.report.inserted_delays
+                artifact.graph.inserted_delays,
+                baseline.graph.inserted_delays
             );
-            assert_eq!(artifact.report.route_timings, baseline.report.route_timings);
+            assert_eq!(artifact.graph.route_timings, baseline.graph.route_timings);
             assert_eq!(
-                artifact.report.canonical_debug_bytes,
-                baseline.report.canonical_debug_bytes
+                GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
+                GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
             );
-            assert_eq!(artifact.report.sha256, baseline.report.sha256);
+            assert_eq!(
+                GraphCompiler::sha256(&artifact.graph, &artifact.report),
+                GraphCompiler::sha256(&baseline.graph, &baseline.report)
+            );
         }
         let single =
             render_reverse_route_submix(single_artifact, NativeGraphRenderModeV1::SingleThread);
@@ -3314,15 +1720,463 @@ mod tests {
         assert_eq!(first.report.output_latency, LatencySamples(0));
         assert_eq!(first.report.output_tail, TailSamples::Finite(0));
         assert_eq!(
-            first.report.canonical_debug_bytes,
-            second.report.canonical_debug_bytes
+            GraphCompiler::evidence(&first.graph, &first.report).canonical_bytes,
+            GraphCompiler::evidence(&second.graph, &second.report).canonical_bytes
         );
-        assert_eq!(first.report.sha256, second.report.sha256);
-        assert_eq!(first.report.dot, second.report.dot);
+        assert_eq!(
+            GraphCompiler::sha256(&first.graph, &first.report),
+            GraphCompiler::sha256(&second.graph, &second.report)
+        );
+        assert_eq!(
+            GraphCompiler::evidence(&first.graph, &first.report).dot,
+            GraphCompiler::evidence(&second.graph, &second.report).dot
+        );
     }
 
+    /// #99 F6: dispatch is an input, so the scalar path is reachable on any host and the
+    /// semantic graph does not move when it is taken.
+    ///
+    /// The same twelve-track prepared session is compiled twice: once with the host's detected
+    /// dispatch (which banks on an AVX2/NEON/simd128 machine) and once with the scalar dispatch.
+    /// Scalar must produce zero banks, and every semantic output -- schedule, dependency levels,
+    /// route timings, inserted delays, reductions, route transforms, buffer assignments and the
+    /// canonical bytes/SHA -- must be byte-identical to the banked compile. That is the property
+    /// the crate documents ("changing a host backend cannot change graph semantics") and it was
+    /// previously untestable, because compile read the CPU itself.
     #[test]
-    fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
+    fn scalar_dispatch_compiles_without_banks_on_any_host() {
+        let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
+            false, false, false, false,
+        ));
+        assert!(
+            scalar.bank_width().is_none(),
+            "the scalar dispatch must not offer a bank width"
+        );
+        let (_, _, banked_effects) = twelve_track_bank_fixture();
+        let banked = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 771,
+            effects: banked_effects,
+            caps: integration_caps(),
+            dispatch: host_dispatch(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        let (_, _, scalar_effects) = twelve_track_bank_fixture();
+        let plain = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 771,
+            effects: scalar_effects,
+            caps: integration_caps(),
+            dispatch: scalar,
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+
+        assert_eq!(plain.graph.prepared_bank_count(), 0);
+        let expected_banked = host_dispatch()
+            .bank_width()
+            .map_or(0, |width| 12 / width.lanes() as usize);
+        assert_eq!(banked.graph.prepared_bank_count(), expected_banked);
+        // Non-vacuity: on a host that cannot bank at all, both compiles bind zero banks and the
+        // comparison proves nothing. Recorded rather than skipped, so a scalar CI host is visible
+        // as a gap in the evidence instead of a silent pass. The delivery host is x86-64-v3
+        // (AVX2+FMA), where this is 1 bank of 8 plus a 4-track scalar tail.
+        assert!(
+            expected_banked > 0,
+            "host cannot form banks; scalar_dispatch_compiles_without_banks_on_any_host is \
+             vacuous here and its evidence must be taken on an AVX2/NEON/simd128 host"
+        );
+
+        assert_eq!(
+            plain.graph.sequential_schedule,
+            banked.graph.sequential_schedule
+        );
+        assert_eq!(
+            plain.graph.dependency_levels,
+            banked.graph.dependency_levels
+        );
+        assert_eq!(plain.graph.route_timings, banked.graph.route_timings);
+        assert_eq!(plain.graph.inserted_delays, banked.graph.inserted_delays);
+        assert_eq!(
+            GraphCompiler::reductions(&plain.graph),
+            GraphCompiler::reductions(&banked.graph)
+        );
+        assert_eq!(plain.graph.routes(), banked.graph.routes());
+        assert_eq!(
+            plain.graph.buffer_assignments,
+            banked.graph.buffer_assignments
+        );
+        assert_eq!(plain.report.output_latency, banked.report.output_latency);
+        assert_eq!(plain.report.output_tail, banked.report.output_tail);
+        assert_eq!(
+            GraphCompiler::evidence(&plain.graph, &plain.report).canonical_bytes,
+            GraphCompiler::evidence(&banked.graph, &banked.report).canonical_bytes
+        );
+        assert_eq!(
+            GraphCompiler::sha256(&plain.graph, &plain.report),
+            GraphCompiler::sha256(&banked.graph, &banked.report)
+        );
+        assert_eq!(
+            GraphCompiler::evidence(&plain.graph, &plain.report).dot,
+            GraphCompiler::evidence(&banked.graph, &banked.report).dot
+        );
+        assert_eq!(plain.report.rack_cohorts.dispatch, scalar);
+    }
+
+    /// `slots` bankable SIMD-1 effects per track, on `tracks` tracks, plus a route per track.
+    ///
+    /// Generalises `twelve_track_bank_fixture` so #99 F3's evals can exercise a *chain*: with
+    /// `slots > 1` every track's SIMD-1 rack is a multi-slot program, which is the case #96's
+    /// per-effect candidates could not express at all.
+    fn rack_chain_fixture(
+        tracks: usize,
+        slots: usize,
+        depth_of: impl Fn(usize) -> usize,
+    ) -> (NativeEffectRegistry, EffectPreparedSession) {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..tracks)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index:02}")).expect("id");
+                track.dynamic.effects.clear();
+                let template = base_track.dynamic.effects[0].clone();
+                track.simd1.effects = (0..depth_of(index).min(slots))
+                    .map(|slot| {
+                        let mut effect = template.clone();
+                        // Reverse-alphabetical on purpose: `EffectPreparedSession::entries` is
+                        // sorted by effect id, so session slot order and entries order disagree
+                        // here. That is the trap #96's crate doc calls out for #99, and it is
+                        // only detectable with a fixture where the two orders differ.
+                        effect.id =
+                            StableId::parse(&format!("chain{}", slots - 1 - slot)).expect("id");
+                        effect.identity = EffectIdentity::Native {
+                            effect_id: StableId::parse("conformance.delay").expect("id"),
+                        };
+                        effect.params = vec![EffectParam {
+                            parameter_id: 1,
+                            channel: ParameterChannel::Both,
+                            unit: ParameterUnit::Linear,
+                            value: 1.0 + index as f32 * 0.01 + slot as f32 * 0.001,
+                        }];
+                        effect
+                    })
+                    .collect();
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("chain-route{index:02}")).expect("id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled");
+        let registry =
+            NativeEffectRegistry::new([Box::new(DualAccumulatorDelayFactory::correct())
+                as Box<dyn miso_engine_effect_contract::NativeEffectFactory>])
+            .expect("registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("effects");
+        (registry, effects)
+    }
+
+    fn compile_chain_fixture(effects: EffectPreparedSession) -> PreparedGraphArtifact {
+        GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 4242,
+            effects,
+            caps: integration_caps(),
+            dispatch: host_dispatch(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
+    }
+
+    /// #99 F2: every plan this crate compiles lowers to an executable program, and that program
+    /// is strictly smaller than the per-edge model both executors run today.
+    ///
+    /// The program is derived inside `PreparedGraphPlan::new`, so this runs over whatever the
+    /// compiler actually produced rather than over a hand-built spec. It is the gate that proves
+    /// the seam is real before either executor is rebuilt against it (#98 owns the kernels).
+    #[test]
+    fn compiled_plans_always_lower_to_a_smaller_executable_program() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        let cases: Vec<(&str, PreparedGraphArtifact)> = vec![
+            ("direct route", compile_fixture(9_100)),
+            (
+                "reverse submixes",
+                compile_reverse_route_submix_fixture(9_101),
+            ),
+            ("twelve-track banks", {
+                let (_, _, effects) = twelve_track_bank_fixture();
+                GraphCompiler::compile(GraphCompileRequest {
+                    plan_id: 9_102,
+                    effects,
+                    caps: integration_caps(),
+                    dispatch: host_dispatch(),
+                })
+                .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics))
+            }),
+            ("two-slot rack chains", {
+                let (_, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+                compile_chain_fixture(effects)
+            }),
+        ];
+        let mut measured = Vec::new();
+        for (label, artifact) in cases {
+            let graph = &artifact.graph;
+            let program = graph
+                .program()
+                .unwrap_or_else(|| panic!("{label}: compiled plan must lower"));
+
+            // Every node is an op or an alias, never both and never neither.
+            assert_eq!(
+                program.ops.len() + program.taps.len(),
+                graph.spec.nodes.len(),
+                "{label}: op/alias partition"
+            );
+            // Ops stay level-major and id-sorted within a level -- the order both executors
+            // consume, and the order the native blueprint's layout check requires.
+            assert!(
+                program
+                    .ops
+                    .windows(2)
+                    .all(|pair| (pair[0].level, pair[0].node) < (pair[1].level, pair[1].node)),
+                "{label}: ops are not level-major"
+            );
+            // The arena is smaller than what the executors allocate today.
+            //
+            // The comparison is deliberately against the *executor's* model, not against
+            // `buffer_assignments` alone: that colouring only counts node outputs, while
+            // `GraphExecutor` additionally allocates one contribution `StereoBuffer` per edge and
+            // then re-buffers every bank member on top (`audio_buffer_samples` says as much --
+            // `colored_outputs + logical_edges`). Comparing against the colouring alone would
+            // flatter the program in some graphs and defame it in others: the program keeps a
+            // dedicated buffer for each bank-eligible node where the colouring shared one and the
+            // executor un-shared it again at bind time.
+            let coloured = graph
+                .buffer_assignments
+                .iter()
+                .map(|assignment| assignment.buffer_index)
+                .max()
+                .map_or(0, |maximum| maximum + 1) as usize;
+            let bank_members: usize = graph.prepared_bank_count();
+            let executor_buffers = coloured + graph.spec.edges.len() + bank_members;
+            assert!(
+                (program.buffers as usize) < executor_buffers,
+                "{label}: arena {} is not smaller than the {executor_buffers} buffers the \
+                 executor allocates ({coloured} coloured + {} edges + {bank_members} bank members)",
+                program.buffers,
+                graph.spec.edges.len()
+            );
+            // Identity stage boundaries really do disappear from the schedule.
+            assert!(
+                program.ops.len() < graph.sequential_schedule.len(),
+                "{label}: no schedule item was elided"
+            );
+            // A bank member's output is never written again once defined: a homogeneous bank
+            // keeps every member live from the first gather to the last scatter.
+            let mut open = std::collections::BTreeSet::new();
+            for op in &program.ops {
+                assert!(
+                    !open.contains(&op.output),
+                    "{label}: an op writes open bank storage"
+                );
+                if matches!(
+                    graph.spec.nodes[op.node as usize].id,
+                    GraphNodeId::Effect(ref id) if !matches!(id.rack, RackId::Dynamic)
+                ) || matches!(
+                    graph.spec.nodes[op.node as usize].id,
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::PostInputBuiltins,
+                        ..
+                    }
+                ) {
+                    open.insert(op.output);
+                }
+            }
+            measured.push((
+                label,
+                graph.sequential_schedule.len(),
+                program.ops.len(),
+                program.taps.len(),
+                coloured + graph.spec.edges.len() + bank_members,
+                program.buffers,
+                program.reduction_count(),
+            ));
+        }
+        // Descriptive, printed under `--nocapture`: what lowering actually buys per fixture.
+        for (label, nodes, ops, taps, executor_buffers, arena, reductions) in measured {
+            println!(
+                "{label}: {nodes} schedule items -> {ops} ops + {taps} aliases; \
+                 {executor_buffers} executor buffers -> {arena} arena; {reductions} reductions"
+            );
+        }
+    }
+
+    /// #99 F3: a **multi-slot** rack chain forms one cohort and binds a bank at every slot.
+    ///
+    /// This is the case #96 could not express. Its planner takes one candidate per effect with a
+    /// one-slot program, so a two-effect SIMD-1 rack on eight tracks produced two unrelated
+    /// single-slot cohorts that happened to have the same members. #99 hands it the whole chain in
+    /// **session order**, so the cohort is the rack program and each slot binds once.
+    #[test]
+    fn multi_slot_rack_chains_form_one_cohort_and_bind_every_slot() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
+        };
+        let lanes = width.lanes() as usize;
+        let (_registry, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+        let artifact = compile_chain_fixture(effects);
+        let report = &artifact.report.rack_cohorts;
+
+        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        assert_eq!(groups.len(), 1, "one cohort for one shared rack program");
+        assert_eq!(
+            groups[0].program.len(),
+            2,
+            "the cohort is the two-slot chain"
+        );
+        assert!(groups[0].is_full());
+
+        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        assert_eq!(bound.len(), 2, "one bank per slot of the chain");
+        assert_eq!(bound[0].slot, 0);
+        assert_eq!(bound[1].slot, 1);
+        for slot in &bound {
+            assert_eq!(slot.members.len(), lanes);
+            // Session order, not `entries` order: the fixture names slot 0 `chain1` and slot 1
+            // `chain0`, so binding by entries order would swap these two banks.
+            let expected = format!("chain{}", 1 - slot.slot);
+            assert!(
+                slot.members
+                    .iter()
+                    .all(|member| member.effect_id.as_str() == expected),
+                "slot {} must bind every track's {expected}",
+                slot.slot
+            );
+        }
+        assert_eq!(artifact.graph.prepared_bank_count(), 2);
+        assert!(report.scalar_in(RackLocationV1::Simd1).is_empty());
+    }
+
+    /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
+    ///
+    /// The pre-#96 former chunked `entries` directly, so membership was an artefact of a sort by
+    /// effect id. The planner keys on `(level, id, program)` only; this shuffles the prepared
+    /// entries and requires the identical bound plan.
+    #[test]
+    fn bank_membership_is_independent_of_entry_order() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        let (_r1, effects) = rack_chain_fixture(lanes, 2, |_| 2);
+        let baseline = compile_chain_fixture(effects);
+
+        let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for index in (1..shuffled.entries.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            shuffled
+                .entries
+                .swap(index, (state % (index as u64 + 1)) as usize);
+        }
+        let candidate = compile_chain_fixture(shuffled);
+
+        assert_eq!(
+            candidate.report.rack_cohorts.plan,
+            baseline.report.rack_cohorts.plan
+        );
+        assert_eq!(
+            candidate.report.rack_cohorts.bound_slots,
+            baseline.report.rack_cohorts.bound_slots
+        );
+        assert_eq!(
+            GraphCompiler::sha256(&candidate.graph, &candidate.report),
+            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+        );
+    }
+
+    /// #99 F3: chains of different depth are bucketed by their first slot's level, and a shorter
+    /// chain joins a longer cohort through its subsequence mask rather than being dropped.
+    ///
+    /// The pre-#96 former chunked before grouping by level, so a chunk straddling two levels
+    /// discarded every member in it.
+    #[test]
+    fn chains_of_different_depths_share_a_cohort_through_identity_slots() {
+        let Some(width) = host_dispatch().bank_width() else {
+            panic!("delivery host must offer a bank width");
+        };
+        let lanes = width.lanes() as usize;
+        // Half the tracks run both slots, half run only the first.
+        let (_registry, effects) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
+        let artifact = compile_chain_fixture(effects);
+        let report = &artifact.report.rack_cohorts;
+
+        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        assert_eq!(
+            groups.len(),
+            1,
+            "the short chains are a subsequence of the long one"
+        );
+        assert_eq!(groups[0].program.len(), 2);
+        assert!(groups[0].is_full());
+        // Every lane runs slot 0; only half run slot 1.
+        assert!(groups[0].active_slots.iter().all(|lane| lane[0]));
+        assert_eq!(
+            groups[0].active_slots.iter().filter(|lane| lane[1]).count(),
+            lanes / 2
+        );
+
+        // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
+        // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
+        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].slot, 0);
+        assert_eq!(bound[0].members.len(), lanes);
+        assert_eq!(report.scalar_in(RackLocationV1::Simd1).len(), lanes / 2);
+    }
+
+    /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
+    ///
+    /// Shared by the bank-binding test and by `scalar_dispatch_compiles_without_banks_on_any_host`
+    /// (#99 F6), which needs the *same* prepared session compiled twice under two dispatches.
+    fn twelve_track_bank_fixture() -> (
+        miso_engine_session::CompiledSession,
+        NativeEffectRegistry,
+        EffectPreparedSession,
+    ) {
         let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
@@ -3387,7 +2241,14 @@ mod tests {
             },
         )
         .expect("effects");
+        (session, registry, effects)
+    }
+
+    #[test]
+    fn mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes() {
+        let (session, registry, effects) = twelve_track_bank_fixture();
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 998,
             effects,
             caps: integration_caps(),
@@ -3397,13 +2258,19 @@ mod tests {
             .bank_width()
             .map_or(0, |width| 12 / width.lanes() as usize);
         assert_eq!(artifact.graph.prepared_bank_count(), expected);
-        let canonical = artifact.report.canonical_debug_bytes.clone();
-        assert_eq!(canonical, artifact.report.canonical_debug_bytes);
-        let bank_delays = artifact.report.inserted_delays.clone();
+        let canonical = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
+        assert_eq!(
+            canonical,
+            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes
+        );
+        let bank_delays = artifact.graph.inserted_delays.clone();
         let bank_output_latency = artifact.report.output_latency;
         let bank_output_tail = artifact.report.output_tail;
         let bank_tails: Vec<_> = artifact
-            .report
+            .graph
+            .spec
             .nodes
             .iter()
             .map(|node| (node.id.clone(), node.tail))
@@ -3422,6 +2289,9 @@ mod tests {
         let observer_order = Arc::new(AtomicU64::new(0));
         let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
         let observed_stage = track_node("bank0", TrackStage::PostSimd1);
+        // `bind` consumes the plan, and #99 F5 moved the dependency levels onto it, so keep the
+        // copy this test needs afterwards.
+        let dependency_levels = artifact.graph.dependency_levels.clone();
         let mut plan = artifact
             .graph
             .bind(GraphRuntimeBindings {
@@ -3481,18 +2351,24 @@ mod tests {
         )
         .expect("scalar effects");
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 999,
             effects: scalar_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
-        assert_eq!(scalar_artifact.report.canonical_debug_bytes, canonical);
-        assert_eq!(scalar_artifact.report.inserted_delays, bank_delays);
+        assert_eq!(
+            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+                .canonical_bytes,
+            canonical
+        );
+        assert_eq!(scalar_artifact.graph.inserted_delays, bank_delays);
         assert_eq!(scalar_artifact.report.output_latency, bank_output_latency);
         assert_eq!(scalar_artifact.report.output_tail, bank_output_tail);
         assert_eq!(
             scalar_artifact
-                .report
+                .graph
+                .spec
                 .nodes
                 .iter()
                 .map(|node| (node.id.clone(), node.tail))
@@ -3583,19 +2459,21 @@ mod tests {
                 })
                 .collect();
             let lanes = dispatch.bank_width().expect("vector backend").lanes() as usize;
-            let (banks, report) =
-                bind_rack_banks(&rebound, &ids, &artifact.report.dependency_levels, dispatch)
-                    .expect("off-render factory bind");
+            let (banks, report) = bind_rack_banks(&rebound, &ids, &dependency_levels, dispatch)
+                .expect("off-render factory bind");
             assert_eq!(banks.len(), 12 / lanes);
             assert!(banks.iter().all(|bank| {
                 bank.members.len() == lanes && bank.active_mask.iter().all(|active| *active)
             }));
-            // The report is the bound plan: one `bound` flag per planned group, and the padded
+            // The report is the bound plan: one entry per bank actually bound, and the padded
             // remainder group is planned but deliberately left unbound (#96 F6/F7).
-            assert_eq!(report.bound.len(), report.plan.groups.len());
-            assert_eq!(
-                report.bound.iter().filter(|bound| **bound).count(),
-                banks.len()
+            assert_eq!(report.bound_slots.len(), banks.len());
+            assert!(
+                report
+                    .bound_slots
+                    .iter()
+                    .all(|bound| bound.slot == 0 && bound.members.len() == lanes),
+                "each track here has a one-slot rack chain"
             );
             assert_eq!(
                 report.scalar_in(RackLocationV1::Simd1).len()
@@ -3644,7 +2522,7 @@ mod tests {
         let connected_banks = bind_rack_banks(
             &connected_fallback,
             &connected_ids,
-            &artifact.report.dependency_levels,
+            &dependency_levels,
             eight,
         )
         .expect("connected sidechain is scalar fallback, not failure");
@@ -3676,7 +2554,7 @@ mod tests {
         let first_id =
             same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone();
         let first = GraphNodeId::Effect(first_id.clone());
-        let mut incompatible_levels = artifact.report.dependency_levels.clone();
+        let mut incompatible_levels = dependency_levels.clone();
         for level in &mut incompatible_levels {
             level.nodes.retain(|node| node != &first);
         }
@@ -3704,13 +2582,18 @@ mod tests {
             .collect();
         for group in &split_report.plan.groups {
             for member in group.members.iter().flatten() {
-                assert_eq!(
-                    split_levels
-                        .get(&GraphNodeId::Effect(member.clone()))
-                        .copied(),
-                    Some(group.level),
-                    "every planned group is level-uniform"
-                );
+                // A chain candidate carries its whole rack program; the group's level is the level
+                // of its *first* slot, and slot k sits at level + k (#99 F3).
+                let nodes = &split_report.chains[member];
+                for (offset, node) in nodes.iter().enumerate() {
+                    assert_eq!(
+                        split_levels
+                            .get(&GraphNodeId::Effect(node.clone()))
+                            .copied(),
+                        Some(group.level + offset as u64),
+                        "every planned group is level-uniform at each slot"
+                    );
+                }
             }
         }
 
@@ -3729,12 +2612,7 @@ mod tests {
         )
         .expect("prepare scalar ownership");
         let rejected_ids = ids_for(&rejected);
-        let error = match bind_rack_banks(
-            &rejected,
-            &rejected_ids,
-            &artifact.report.dependency_levels,
-            eight,
-        ) {
+        let error = match bind_rack_banks(&rejected, &rejected_ids, &dependency_levels, eight) {
             Ok(_) => panic!("factory failure must reject transactionally"),
             Err(error) => error,
         };
@@ -3777,6 +2655,7 @@ mod tests {
             .expect("audit builtins");
             let audit_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
                     plan_id: 1_000,
                     effects: audit_effects,
                     builtins: audit_builtins,
@@ -3834,6 +2713,199 @@ mod tests {
             expected_members.sort();
             assert_eq!(actual_members, expected_members);
             assert_eq!(12 - actual_members.len(), expected_builtin_tails);
+            // Independent oracle for the two frozen op orders this branch re-pins for (#98 F2/F4),
+            // on the production 12-track shape: every track's post-matrix output is recorded, the
+            // route's folded 2x2 is re-applied here with the exact software FMA, and the output
+            // must be exactly those contributions folded left to right in the plan's own stable
+            // edge order. It runs on its own short bind, outside the allocation-audited loop.
+            {
+                let oracle_effects = prepare_native_session_effects(
+                    &session,
+                    &registry,
+                    EffectCompileCaps {
+                        maximum_total_state_bytes: 1 << 20,
+                        maximum_scratch_bytes: 1 << 20,
+                        maximum_automation_spans_per_block: 32,
+                    },
+                )
+                .expect("oracle effects");
+                let oracle_builtins = prepare_session_builtins(
+                    &session,
+                    &[],
+                    BuiltinCompileCaps {
+                        maximum_total_state_bytes: u64::MAX,
+                        maximum_total_retained_payload_bytes: u64::MAX,
+                        maximum_total_meter_items: u64::MAX,
+                        maximum_total_meter_bytes: u64::MAX,
+                        maximum_single_allocation_bytes: u64::MAX,
+                        maximum_meter_streams: u64::MAX,
+                        maximum_period_frames: u32::MAX,
+                        maximum_peak_hold_frames: u32::MAX,
+                        maximum_smoothing_samples: u32::MAX,
+                    },
+                )
+                .expect("oracle builtins");
+                let oracle_artifact =
+                    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                        dispatch: host_dispatch(),
+                        plan_id: 1_001,
+                        effects: oracle_effects,
+                        builtins: oracle_builtins,
+                        caps: integration_caps(),
+                    })
+                    .unwrap_or_else(|_| panic!("oracle graph"));
+                let routes: BTreeMap<String, [f32; 4]> = oracle_artifact
+                    .graph()
+                    .routes()
+                    .iter()
+                    .map(|route| {
+                        let GraphNodeId::Route { route_id } = &route.node else {
+                            panic!("route node kind")
+                        };
+                        let transform = route.transform;
+                        (
+                            route_id.as_str().to_owned(),
+                            [
+                                transform.gain * transform.ll,
+                                transform.gain * transform.lr,
+                                transform.gain * transform.rl,
+                                transform.gain * transform.rr,
+                            ],
+                        )
+                    })
+                    .collect();
+                // Output inputs, in the plan's own stable edge order: `(route id, source track)`.
+                let contributions: Vec<(String, String)> = oracle_artifact
+                    .graph()
+                    .spec
+                    .edges
+                    .iter()
+                    .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                    .map(|edge| {
+                        let GraphNodeId::Route { route_id } = &edge.source.node else {
+                            panic!("output input is not a route")
+                        };
+                        let source = oracle_artifact
+                            .graph()
+                            .spec
+                            .edges
+                            .iter()
+                            .find(|candidate| candidate.destination.node == edge.source.node)
+                            .expect("route source edge");
+                        let GraphNodeId::TrackStage { track_id, stage } = &source.source.node
+                        else {
+                            panic!("route source is not a track stage")
+                        };
+                        assert_eq!(*stage, TrackStage::PostMatrix);
+                        (route_id.as_str().to_owned(), track_id.as_str().to_owned())
+                    })
+                    .collect();
+                assert!(
+                    contributions.len() >= 4,
+                    "the oracle must exercise fan-in >= 4"
+                );
+                let sinks: Vec<BitSink> = contributions
+                    .iter()
+                    .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+                    .collect();
+                let oracle_envelope = oracle_artifact.envelope();
+                let oracle_nodes = oracle_artifact
+                    .external_binding_nodes()
+                    .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+                    .collect();
+                let oracle_observers = contributions
+                    .iter()
+                    .zip(sinks.iter())
+                    .enumerate()
+                    .map(|(handle, ((_, track), sink))| {
+                        GraphNodeObserverBinding::new(
+                            GraphNodeId::TrackStage {
+                                track_id: StableGraphId::parse(track).expect("track node id"),
+                                stage: TrackStage::PostMatrix,
+                            },
+                            handle as u64,
+                            Box::new(BitRecorder(Arc::clone(sink))),
+                        )
+                    })
+                    .collect();
+                let mut oracle_plan = oracle_artifact
+                    .into_bound(GraphRuntimeBindings {
+                        envelope: oracle_envelope,
+                        nodes: oracle_nodes,
+                        observers: oracle_observers,
+                    })
+                    .unwrap_or_else(|_| panic!("oracle bind"))
+                    .plan;
+                let mut oracle_pcm = vec![0.0_f32; frames * 2];
+                for block in 0..4_u64 {
+                    for sink in &sinks {
+                        sink.lock().expect("oracle sink").clear();
+                    }
+                    oracle_plan
+                        .render(
+                            RenderIo {
+                                input: None,
+                                output: PlanarBufferMut::try_new(
+                                    &mut oracle_pcm,
+                                    2,
+                                    frames,
+                                    frames,
+                                )
+                                .expect("oracle output"),
+                            },
+                            RenderTime {
+                                absolute_sample: block * frames as u64,
+                            },
+                        )
+                        .expect("oracle render");
+                    let taps: Vec<Vec<(u32, u32)>> = sinks
+                        .iter()
+                        .map(|sink| sink.lock().expect("oracle sink").clone())
+                        .collect();
+                    for frame in 0..frames {
+                        let routed: Vec<(f32, f32)> = contributions
+                            .iter()
+                            .zip(taps.iter())
+                            .map(|((route, _), tap)| {
+                                let coefficients = routes[route];
+                                let left = f32::from_bits(tap[frame].0);
+                                let right = f32::from_bits(tap[frame].1);
+                                (
+                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                        coefficients[1],
+                                        right,
+                                        coefficients[0] * left,
+                                    ),
+                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                        coefficients[3],
+                                        right,
+                                        coefficients[2] * left,
+                                    ),
+                                )
+                            })
+                            .collect();
+                        let left = routed
+                            .iter()
+                            .map(|pair| pair.0)
+                            .reduce(|a, b| a + b)
+                            .unwrap_or(0.0);
+                        let right = routed
+                            .iter()
+                            .map(|pair| pair.1)
+                            .reduce(|a, b| a + b)
+                            .unwrap_or(0.0);
+                        assert_eq!(
+                            (
+                                oracle_pcm[frame].to_bits(),
+                                oracle_pcm[frames + frame].to_bits()
+                            ),
+                            (left.to_bits(), right.to_bits()),
+                            "block {block} frame {frame}: folded-route + D9 reduction oracle"
+                        );
+                    }
+                }
+            }
+
             let audit_envelope = audit_artifact.envelope();
             let audit_nodes = audit_artifact
                 .external_binding_nodes()
@@ -3888,22 +2960,121 @@ mod tests {
                 counters[0] * u64::from(audit_envelope.quantum.0),
                 "exact frames processed by the retained builtin banks"
             );
-            // Re-pinned on this branch. The old 0x9f30_db02_2065_6d79 was already stale on
-            // `origin/main` before this branch existed (this audit is explicit-release-only and
-            // is not run by CI, so #85's class-B kernel re-land moved it unobserved); the value
-            // below was measured at `origin/main` @ b60f9b8 *before* any #86 edit, and it is
-            // **unchanged** by the padding switch -- with 12 tracks over 100,000 blocks the PCM
-            // is bit-identical whether tracks 8..11 render as scalar tails or as lanes 0..3 of
-            // a padded second bank. That is the F2/F3 gate at scale.
+            // Re-pinned by #98 F2/F4 (master plan #83 D9/D3, section-8 policy):
+            // 0x2fd8_5286_518f_d13b -> 0x5b3e_672a_ae5d_97aa. The output's twelve route inputs
+            // are now folded left to right instead of as a balanced pairwise tree, and each
+            // route spends one multiply and one fused multiply-add with the gain folded in at
+            // bind. Neither value is pinned from production output: the oracle block above
+            // re-derives the expected PCM for this exact session from the recorded per-track
+            // post-matrix contributions, re-applying both frozen op orders with scalar
+            // `softfma::fma_f32_via_f64` and `reduce`, and asserts it bit for bit before this
+            // literal is compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
+            // stale on `origin/main` before either branch existed.)
             assert_eq!(
-                output_hash, 0x2fd8_5286_518f_d13b,
+                output_hash, 0x5b3e_672a_ae5d_97aa,
                 "deterministic mixed output hash"
+            );
+
+            // The same session through the native dependency-wave executor: bit-identical PCM
+            // over the same 100,000 blocks, and the same zero-allocation render (#98 F2/F7).
+            let native_effects = prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 20,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("native audit effects");
+            let native_builtins = prepare_session_builtins(
+                &session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("native audit builtins");
+            let native_artifact =
+                GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
+                    plan_id: 1_002,
+                    effects: native_effects,
+                    builtins: native_builtins,
+                    caps: integration_caps(),
+                })
+                .unwrap_or_else(|_| panic!("native audit graph"));
+            let native_envelope = native_artifact.envelope();
+            let native_nodes = native_artifact
+                .external_binding_nodes()
+                .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+                .collect();
+            let mut native_plan = native_artifact
+                .into_bound_native(
+                    GraphRuntimeBindings {
+                        envelope: native_envelope,
+                        nodes: native_nodes,
+                        observers: Vec::new(),
+                    },
+                    NativeGraphBindConfigV1 {
+                        render_mode: NativeGraphRenderModeV1::SingleThread,
+                        scheduler: NativeSchedulerConfigV1::new(
+                            NonZeroUsize::new(4).expect("four lanes"),
+                            true,
+                        ),
+                        maximum_retained_bytes: 1 << 28,
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("native audit bind: {}", failure.code))
+                .prepared
+                .into_plan();
+            let mut native_pcm = vec![0.0_f32; frames * 2];
+            audit::warm_up();
+            audit::reset();
+            let mut native_hash = 0xcbf2_9ce4_8422_2325_u64;
+            for block in 0..100_000_u64 {
+                native_plan
+                    .render(
+                        RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
+                                .expect("native audit output"),
+                        },
+                        RenderTime {
+                            absolute_sample: block * frames as u64,
+                        },
+                    )
+                    .expect("native audit render");
+                for sample in &native_pcm {
+                    native_hash ^= u64::from(sample.to_bits());
+                    native_hash = native_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            assert_eq!(
+                audit::snapshot().total(),
+                0,
+                "native render allocates nothing"
+            );
+            assert_eq!(
+                native_hash, output_hash,
+                "sequential and native disagree on the production twelve-track session"
             );
         }
     }
 
+    /// Where a [`BitRecorder`] writes: one `(left bits, right bits)` pair per rendered frame.
+    type BitSink = Arc<std::sync::Mutex<Vec<(u32, u32)>>>;
+
     /// Records every rendered sample of one observed node, bit for bit.
-    struct BitRecorder(Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
+    struct BitRecorder(BitSink);
     impl GraphRuntimeObserver for BitRecorder {
         fn observe(
             &mut self,
@@ -3960,6 +3131,7 @@ mod tests {
             )
             .expect("prepared cohort-boundary effects");
             let artifact = GraphCompiler::compile(GraphCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: 1_096,
                 effects,
                 caps: integration_caps(),
@@ -4092,12 +3264,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar effects");
         let bank_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_042,
             effects: bank_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_043,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4136,14 +3310,7 @@ mod tests {
             bank_artifact.report.rack_cohorts.plan.groups,
             "cohort planning is independent of the factory's legal scalar fallback"
         );
-        assert!(
-            scalar_artifact
-                .report
-                .rack_cohorts
-                .bound
-                .iter()
-                .all(|bound| !*bound)
-        );
+        assert!(scalar_artifact.report.rack_cohorts.bound_slots.is_empty());
         assert_eq!(
             scalar_artifact
                 .report
@@ -4154,19 +3321,19 @@ mod tests {
             "a declined bind puts every member on the per-node scalar path"
         );
         assert_eq!(
-            bank_artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            bank_artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            bank_artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            bank_artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            bank_artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            bank_artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
-        let expected_schedule = bank_artifact.report.sequential_schedule.clone();
-        let expected_route_timings = bank_artifact.report.route_timings.clone();
+        let expected_schedule = bank_artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = bank_artifact.graph.route_timings.clone();
 
         let PreparedGraphArtifact {
             graph: bank_graph,
@@ -4300,17 +3467,18 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_044,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass graph: {:?}", failure.diagnostics));
         assert_eq!(
-            bypass_artifact.report.sequential_schedule, expected_schedule,
+            bypass_artifact.graph.sequential_schedule, expected_schedule,
             "bypass does not change graph scheduling"
         );
         assert_eq!(
-            bypass_artifact.report.route_timings, expected_route_timings,
+            bypass_artifact.graph.route_timings, expected_route_timings,
             "bypass does not change PDC timings"
         );
         let bypass_graph = bypass_artifact.graph;
@@ -4395,12 +3563,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar compressor effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_013,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("compressor graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_014,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4456,19 +3626,19 @@ mod tests {
             );
         }
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
 
         let PreparedGraphArtifact {
             graph: bank_graph,
@@ -4576,16 +3746,14 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(960))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass compressor graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
     }
 
     #[test]
@@ -4629,12 +3797,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar gate/expander effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_014,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("gate/expander graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_015,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -4697,19 +3867,19 @@ mod tests {
             );
         }
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
         let PreparedGraphArtifact {
             graph: bank_graph,
             report: _,
@@ -4818,16 +3988,14 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(480))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_016,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass gate/expander graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
     }
 
     #[test]
@@ -4873,12 +4041,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar limiter effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_050,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_051,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5019,20 +4189,21 @@ mod tests {
                 + expected_bank_metadata_bytes
         );
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
         assert_eq!(
-            artifact.report.canonical_debug_bytes,
-            scalar_artifact.report.canonical_debug_bytes
+            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
+            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+                .canonical_bytes
         );
         assert_eq!(artifact.report.output_latency, LatencySamples(486));
         assert_eq!(
@@ -5043,15 +4214,17 @@ mod tests {
             artifact.report.output_tail,
             scalar_artifact.report.output_tail
         );
-        assert!(artifact.report.route_timings.iter().all(|route| {
+        assert!(artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(486)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(486)
         }));
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
-        let expected_delays = artifact.report.inserted_delays.clone();
-        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_delays = artifact.graph.inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
         let expected_output_latency = artifact.report.output_latency;
         let expected_output_tail = artifact.report.output_tail;
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
@@ -5173,28 +4346,27 @@ mod tests {
                 .all(|entry| entry.metadata.latency == LatencySamples(486))
         );
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_052,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass limiter graph: {:?}", failure.diagnostics));
         assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
-        assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
             bypass_artifact.report.output_latency,
             expected_output_latency
         );
         assert_eq!(bypass_artifact.report.output_tail, expected_output_tail);
         assert_eq!(
-            bypass_artifact.report.canonical_debug_bytes,
+            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+                .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(486)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(486)
@@ -5207,6 +4379,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_053,
             effects: cap_effects,
             caps: constrained_caps,
@@ -5283,12 +4456,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar multiband effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_080,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("multiband graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_081,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5411,30 +4586,33 @@ mod tests {
                 + expected_bank_metadata_bytes
         );
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
         assert_eq!(
-            artifact.report.canonical_debug_bytes,
-            scalar_artifact.report.canonical_debug_bytes
+            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
+            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+                .canonical_bytes
         );
-        assert!(artifact.report.route_timings.iter().all(|route| {
+        assert!(artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(960)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(960)
         }));
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
-        let expected_delays = artifact.report.inserted_delays.clone();
-        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_delays = artifact.graph.inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
@@ -5554,23 +4732,22 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass multiband effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_082,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass multiband graph: {:?}", failure.diagnostics));
         assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
-        assert_eq!(
-            bypass_artifact.report.canonical_debug_bytes,
+            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+                .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(960)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(960)
@@ -5583,6 +4760,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_083,
             effects: cap_effects,
             caps: constrained_caps,
@@ -5659,12 +4837,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar soft-clip effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_100,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_101,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5784,30 +4964,33 @@ mod tests {
                 + expected_bank_metadata_bytes
         );
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
         assert_eq!(
-            artifact.report.canonical_debug_bytes,
-            scalar_artifact.report.canonical_debug_bytes
+            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
+            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+                .canonical_bytes
         );
-        assert!(artifact.report.route_timings.iter().all(|route| {
+        assert!(artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(31)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(31)
         }));
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
-        let expected_delays = artifact.report.inserted_delays.clone();
-        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_delays = artifact.graph.inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
@@ -5931,23 +5114,22 @@ mod tests {
                 && entry.metadata.tail == TailSamples::Finite(29)
         }));
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_102,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass soft-clip graph: {:?}", failure.diagnostics));
         assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
-        assert_eq!(
-            bypass_artifact.report.canonical_debug_bytes,
+            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+                .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(31)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(31)
@@ -5960,6 +5142,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_103,
             effects: cap_effects,
             caps: constrained_caps,
@@ -6034,12 +5217,14 @@ mod tests {
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
                 .expect("prepared scalar transient-shaper effects");
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_120,
             effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("transient-shaper graph: {:?}", failure.diagnostics));
         let scalar_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_121,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -6158,30 +5343,33 @@ mod tests {
             scalar_artifact.report.estimate.session_plus_plan_bytes + bank_overhead
         );
         assert_eq!(
-            artifact.report.sequential_schedule,
-            scalar_artifact.report.sequential_schedule
+            artifact.graph.sequential_schedule,
+            scalar_artifact.graph.sequential_schedule
         );
         assert_eq!(
-            artifact.report.route_timings,
-            scalar_artifact.report.route_timings
+            artifact.graph.route_timings,
+            scalar_artifact.graph.route_timings
         );
         assert_eq!(
-            artifact.report.inserted_delays,
-            scalar_artifact.report.inserted_delays
+            artifact.graph.inserted_delays,
+            scalar_artifact.graph.inserted_delays
         );
         assert_eq!(
-            artifact.report.canonical_debug_bytes,
-            scalar_artifact.report.canonical_debug_bytes
+            GraphCompiler::evidence(&artifact.graph, &artifact.report).canonical_bytes,
+            GraphCompiler::evidence(&scalar_artifact.graph, &scalar_artifact.report)
+                .canonical_bytes
         );
-        assert!(artifact.report.route_timings.iter().all(|route| {
+        assert!(artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
         }));
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
-        let expected_delays = artifact.report.inserted_delays.clone();
-        let expected_canonical_bytes = artifact.report.canonical_debug_bytes.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_delays = artifact.graph.inserted_delays.clone();
+        let expected_canonical_bytes = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
@@ -6278,6 +5466,7 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass transient-shaper effects");
         let bypass_artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_122,
             effects: bypass_effects,
             caps: integration_caps(),
@@ -6286,17 +5475,15 @@ mod tests {
             panic!("bypass transient-shaper graph: {:?}", failure.diagnostics)
         });
         assert_eq!(bypass_artifact.graph.prepared_bank_count(), expected_banks);
+        assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+        assert_eq!(bypass_artifact.graph.inserted_delays, expected_delays);
         assert_eq!(
-            bypass_artifact.report.sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(bypass_artifact.report.route_timings, expected_route_timings);
-        assert_eq!(bypass_artifact.report.inserted_delays, expected_delays);
-        assert_eq!(
-            bypass_artifact.report.canonical_debug_bytes,
+            GraphCompiler::evidence(&bypass_artifact.graph, &bypass_artifact.report)
+                .canonical_bytes,
             expected_canonical_bytes
         );
-        assert!(bypass_artifact.report.route_timings.iter().all(|route| {
+        assert!(bypass_artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
@@ -6309,6 +5496,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero full graph plan estimate");
         let cap_failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_123,
             effects: cap_effects,
             caps: constrained_caps,
@@ -6381,6 +5569,7 @@ mod tests {
         }));
 
         let artifact = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_130,
             effects,
             caps: integration_caps(),
@@ -6403,7 +5592,8 @@ mod tests {
         assert_eq!(artifact.report.output_latency, LatencySamples(0));
         assert_eq!(artifact.report.output_tail, TailSamples::Infinite);
         let effect_nodes = artifact
-            .report
+            .graph
+            .spec
             .nodes
             .iter()
             .filter(|node| matches!(node.id, GraphNodeId::Effect(_)))
@@ -6414,14 +5604,14 @@ mod tests {
                 && node.tail == TailSamples::Infinite
                 && matches!(&node.id, GraphNodeId::Effect(id) if id.rack == RackId::Dynamic)
         }));
-        assert!(artifact.report.route_timings.iter().all(|route| {
+        assert!(artifact.graph.route_timings.iter().all(|route| {
             route.source_arrival == LatencySamples(0)
                 && route.compensation_delay == LatencySamples(0)
                 && route.destination_arrival == LatencySamples(0)
         }));
-        assert!(artifact.report.inserted_delays.is_empty());
+        assert!(artifact.graph.inserted_delays.is_empty());
         let dynamic_order = artifact
-            .report
+            .graph
             .sequential_schedule
             .iter()
             .filter_map(|node| match node {
@@ -6437,10 +5627,12 @@ mod tests {
                 .map(|index| format!("eq{index}"))
                 .collect::<Vec<_>>()
         );
-        let expected_schedule = artifact.report.sequential_schedule.clone();
-        let expected_route_timings = artifact.report.route_timings.clone();
-        let expected_delays = artifact.report.inserted_delays.clone();
-        let expected_canonical = artifact.report.canonical_debug_bytes.clone();
+        let expected_schedule = artifact.graph.sequential_schedule.clone();
+        let expected_route_timings = artifact.graph.route_timings.clone();
+        let expected_delays = artifact.graph.inserted_delays.clone();
+        let expected_canonical = GraphCompiler::evidence(&artifact.graph, &artifact.report)
+            .canonical_bytes
+            .clone();
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact { graph, .. } = artifact;
@@ -6513,7 +5705,6 @@ mod tests {
             }
             let mut direct_left = vec![0.0_f32; frames];
             let mut direct_right = vec![0.0_f32; frames];
-            let mut sanitized = 0;
             for frame in 0..frames {
                 let mut left = [0.0_f32; 10];
                 let mut right = [0.0_f32; 10];
@@ -6521,12 +5712,10 @@ mod tests {
                     left[track] = direct_tracks_left[track][frame];
                     right[track] = direct_tracks_right[track][frame];
                 }
-                direct_left[frame] =
-                    miso_engine_graph::balanced_pairwise_sum(&mut left, &mut sanitized);
-                direct_right[frame] =
-                    miso_engine_graph::balanced_pairwise_sum(&mut right, &mut sanitized);
+                // The independent scalar oracle for D9: stable track order, left to right.
+                direct_left[frame] = left.iter().copied().reduce(|a, b| a + b).unwrap_or(0.0);
+                direct_right[frame] = right.iter().copied().reduce(|a, b| a + b).unwrap_or(0.0);
             }
-            assert_eq!(sanitized, 0);
             assert_eq!(
                 graph_pcm[..frames]
                     .iter()
@@ -6595,16 +5784,20 @@ mod tests {
             prepare_native_session_effects(&bypass_session, &registry, effect_caps)
                 .expect("prepared bypass delays");
         let bypass = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_131,
             effects: bypass_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bypass delay graph: {:?}", failure.diagnostics));
         assert_eq!(bypass.graph.prepared_bank_count(), 0);
-        assert_eq!(bypass.report.sequential_schedule, expected_schedule);
-        assert_eq!(bypass.report.route_timings, expected_route_timings);
-        assert_eq!(bypass.report.inserted_delays, expected_delays);
-        assert_eq!(bypass.report.canonical_debug_bytes, expected_canonical);
+        assert_eq!(bypass.graph.sequential_schedule, expected_schedule);
+        assert_eq!(bypass.graph.route_timings, expected_route_timings);
+        assert_eq!(bypass.graph.inserted_delays, expected_delays);
+        assert_eq!(
+            GraphCompiler::evidence(&bypass.graph, &bypass.report).canonical_bytes,
+            expected_canonical
+        );
 
         let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
             .expect("prepared delay effects for transactional cap");
@@ -6613,6 +5806,7 @@ mod tests {
             .checked_sub(1)
             .expect("nonzero delay plan estimate");
         let failure = match GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1_132,
             effects: cap_effects,
             caps: constrained,
@@ -6661,6 +5855,7 @@ mod tests {
         )
         .expect("builtins");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 77,
             effects: EffectPreparedSession {
                 session: compiled,
@@ -6673,7 +5868,8 @@ mod tests {
         assert_eq!(artifact.external_binding_nodes().count(), 2);
         assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
         let tail = artifact
-            .report()
+            .graph()
+            .spec
             .nodes
             .iter()
             .find(|node| node.id == track_node("vocal", TrackStage::PostInputBuiltins))
@@ -6742,6 +5938,7 @@ mod tests {
             )
             .expect("builtins");
             GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id,
                 effects: EffectPreparedSession {
                     session,
@@ -6767,20 +5964,20 @@ mod tests {
             expected_banks
         );
         assert_eq!(
-            artifact.report().sequential_schedule,
+            artifact.graph().sequential_schedule,
             artifact
-                .report()
+                .graph()
                 .dependency_levels
                 .iter()
                 .flat_map(|level| level.nodes.iter().cloned())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            artifact.report().sequential_schedule,
-            native_artifact.report().sequential_schedule
+            artifact.graph().sequential_schedule,
+            native_artifact.graph().sequential_schedule
         );
         let assigned: BTreeMap<_, _> = artifact
-            .report()
+            .graph()
             .buffer_assignments
             .iter()
             .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
@@ -6977,6 +6174,7 @@ mod tests {
         )
         .expect("compiled cap session");
         let base = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 79,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7002,6 +6200,7 @@ mod tests {
         )
         .expect("baseline builtins");
         let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 80,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7035,6 +6234,7 @@ mod tests {
         )
         .expect("returned builtins");
         let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 81,
             effects: EffectPreparedSession {
                 session: session.clone(),
@@ -7147,6 +6347,7 @@ mod tests {
             )
             .expect("prepared seeded builtins");
             let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: u64::from(layout) + 50_000,
                 effects: EffectPreparedSession {
                     session: compiled.clone(),
@@ -7176,6 +6377,7 @@ mod tests {
             .expect("independently prepared native seeded builtins");
             let native_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
                     plan_id: u64::from(layout) + 60_000,
                     effects: EffectPreparedSession {
                         session: compiled,
@@ -7195,17 +6397,17 @@ mod tests {
                 expected_banks
             );
             assert_eq!(
-                artifact.report().sequential_schedule,
+                artifact.graph().sequential_schedule,
                 artifact
-                    .report()
+                    .graph()
                     .dependency_levels
                     .iter()
                     .flat_map(|level| level.nodes.iter().cloned())
                     .collect::<Vec<_>>()
             );
             assert_eq!(
-                artifact.report().sequential_schedule,
-                native_artifact.report().sequential_schedule
+                artifact.graph().sequential_schedule,
+                native_artifact.graph().sequential_schedule
             );
             let envelope = artifact.envelope();
             let nodes = artifact
@@ -7222,10 +6424,72 @@ mod tests {
                     GraphNodeBinding::new(node, processor)
                 })
                 .collect();
+            // Independent oracle for the D9 reduction (#98 F2). Every track's post-matrix output
+            // is recorded, the routes are proven bit-transparent, and the session output must be
+            // exactly those contributions folded left to right in the plan's own stable edge order
+            // -- `reduce(|a, b| a + b)`, never `fold(0.0, +)`, so `-0.0` survives.
+            let route_order: Vec<String> = artifact
+                .graph()
+                .spec
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                .map(|edge| match &edge.source.node {
+                    GraphNodeId::Route { route_id } => route_id.as_str().to_owned(),
+                    other => panic!("output input is not a route: {other:?}"),
+                })
+                .collect();
+            assert_eq!(route_order.len(), count);
+            for route in artifact.graph().routes() {
+                assert_eq!(
+                    (
+                        route.transform.gain,
+                        route.transform.ll,
+                        route.transform.lr,
+                        route.transform.rl,
+                        route.transform.rr
+                    ),
+                    (1.0, 1.0, 0.0, 0.0, 1.0),
+                    "the oracle needs a bit-transparent route"
+                );
+            }
+            let track_of_route: BTreeMap<String, String> = model
+                .routes
+                .iter()
+                .map(|route| {
+                    let RouteSource::Track { track_id, .. } = &route.source else {
+                        panic!("seeded route source")
+                    };
+                    (route.id.as_str().to_owned(), track_id.as_str().to_owned())
+                })
+                .collect();
+            let taps: Vec<(String, BitSink)> = route_order
+                .iter()
+                .map(|route| {
+                    (
+                        track_of_route[route].clone(),
+                        Arc::new(std::sync::Mutex::new(Vec::new())),
+                    )
+                })
+                .collect();
+            let tap_observers: Vec<GraphNodeObserverBinding> = taps
+                .iter()
+                .enumerate()
+                .map(|(handle, (track, sink))| {
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::TrackStage {
+                            track_id: StableGraphId::parse(track).expect("track node id"),
+                            stage: TrackStage::PostMatrix,
+                        },
+                        handle as u64,
+                        Box::new(BitRecorder(Arc::clone(sink))),
+                    )
+                })
+                .collect();
             let mut plan = match artifact.into_bound(GraphRuntimeBindings {
                 envelope,
                 nodes,
-                observers: Vec::new(),
+                observers: tap_observers,
             }) {
                 Ok(bound) => bound.plan,
                 Err(_) => panic!("seeded bind"),
@@ -7289,6 +6553,30 @@ mod tests {
                     RenderTime { absolute_sample: 0 },
                 )
                 .expect("native seeded render");
+            let contributions: Vec<Vec<(u32, u32)>> = taps
+                .iter()
+                .map(|(_, sink)| sink.lock().expect("tap sink").clone())
+                .collect();
+            for (index, contribution) in contributions.iter().enumerate() {
+                assert_eq!(contribution.len(), frames, "tap {index} block length");
+            }
+            for frame in 0..frames {
+                let left = contributions
+                    .iter()
+                    .map(|tap| f32::from_bits(tap[frame].0))
+                    .reduce(|a, b| a + b)
+                    .unwrap_or(0.0);
+                let right = contributions
+                    .iter()
+                    .map(|tap| f32::from_bits(tap[frame].1))
+                    .reduce(|a, b| a + b)
+                    .unwrap_or(0.0);
+                assert_eq!(
+                    (pcm[frame].to_bits(), pcm[frames + frame].to_bits()),
+                    (left.to_bits(), right.to_bits()),
+                    "layout {layout} frame {frame}: D9 left-to-right reduction oracle"
+                );
+            }
             let counters = plan.qualification_counters();
             let native_counters = native_plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
@@ -7320,12 +6608,16 @@ mod tests {
             completed += 1;
         }
         assert_eq!(completed, 100);
-        // Structural re-derivation only: the transcript string folds `expected_banks`,
-        // `expected_tail` and the counters, and all three moved by hand-counted formulas
-        // (`count.div_ceil(W)`, `0`, `calls * quantum`). Every one of the 100 per-layout
-        // `pcm_hash` values is byte-identical to the pre-change render.
+        // Re-pinned once by #98 F2 (master plan #83 D9 and the section-8 policy). The membership
+        // and counter halves of the transcript string are unchanged; the `pcm_hash` half moved for
+        // every layout whose output fan-in is four or more, because the session output's reduction
+        // became a left-to-right recursive sum instead of a balanced pairwise tree. It is *not*
+        // pinned from production output: the per-layout `assert_eq!` above derives the expected
+        // output from the recorded per-track post-matrix contributions folded left to right in the
+        // plan's own stable edge order, for all 100 layouts, before this literal is compared.
+        // Old value `0x0fc9_bdc8_ff12_0f6e`; layouts with `count <= 3` are bit-identical to it.
         assert_eq!(
-            transcript, 0x0fc9_bdc8_ff12_0f6e,
+            transcript, 0x9dfc_dcf2_0e37_0ef5,
             "frozen Issue-037 seeded layout transcript"
         );
     }
@@ -7487,6 +6779,7 @@ mod tests {
             .expect("builtins");
             builtins.test_only_corrupt_for_compiler_test(corruption);
             let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
                 plan_id: 78,
                 effects: EffectPreparedSession {
                     session: compiled,
@@ -7728,7 +7021,7 @@ mod tests {
     #[test]
     fn level_major_compiler_coloring_matches_independent_live_intervals() {
         let artifact = compile_reverse_route_submix_fixture(123_200);
-        let report = artifact.report;
+        let report = &artifact.graph;
         let flattened: Vec<_> = report
             .dependency_levels
             .iter()
@@ -7737,7 +7030,7 @@ mod tests {
         assert_eq!(report.sequential_schedule, flattened);
         assert_eq!(
             report.buffer_assignments,
-            buffer_assignments(&flattened, &report.edges)
+            buffer_assignments(&flattened, &report.spec.edges)
         );
 
         let mut old_kahn = flattened.clone();
@@ -7745,7 +7038,7 @@ mod tests {
         old_kahn.swap(10, 11);
         assert_ne!(old_kahn, flattened);
         assert_ne!(
-            buffer_assignments(&old_kahn, &report.edges),
+            buffer_assignments(&old_kahn, &report.spec.edges),
             report.buffer_assignments,
             "old Kahn coloring cannot be retained under level-major execution"
         );
@@ -7766,6 +7059,7 @@ mod tests {
             .map(|node| {
                 let start = positions[node];
                 let end = report
+                    .spec
                     .edges
                     .iter()
                     .filter(|edge| edge.source.node == *node)
@@ -7782,18 +7076,20 @@ mod tests {
                 }
                 let aliases_identity_boundary = is_identity_boundary(right.0)
                     && report
+                        .spec
                         .edges
                         .iter()
                         .filter(|edge| edge.destination.node == *right.0)
                         .count()
                         == 1
                     && report
+                        .spec
                         .edges
                         .iter()
                         .filter(|edge| edge.source.node == *left.0)
                         .count()
                         == 1
-                    && report.edges.iter().any(|edge| {
+                    && report.spec.edges.iter().any(|edge| {
                         edge.source.node == *left.0 && edge.destination.node == *right.0
                     });
                 assert!(
@@ -7814,7 +7110,7 @@ mod tests {
         assert!(artifact.report.estimate.graph_metadata_bytes > 0);
         assert!(artifact.report.estimate.incremental_plan_bytes > 0);
         let assigned: BTreeMap<_, _> = artifact
-            .report
+            .graph
             .buffer_assignments
             .iter()
             .map(|assignment| (assignment.port.node.clone(), assignment.buffer_index))
@@ -7884,8 +7180,10 @@ mod tests {
 
     #[test]
     fn canonical_artifacts_are_complete_and_repeatable_100_times() {
-        let baseline = compile_fixture(0).report;
-        let canonical = core::str::from_utf8(&baseline.canonical_debug_bytes).expect("UTF-8");
+        let baseline = compile_fixture(0);
+        // #99 F5: the evidence is produced here, by an explicit call, not carried by the report.
+        let baseline_evidence = GraphCompiler::evidence(&baseline.graph, &baseline.report);
+        let canonical = core::str::from_utf8(&baseline_evidence.canonical_bytes).expect("UTF-8");
         for section in [
             "envelope\t",
             "node\t",
@@ -7904,31 +7202,44 @@ mod tests {
         assert!(!canonical.contains("Simd"));
         assert!(!canonical.contains("Finite"));
         assert!(
-            baseline
+            baseline_evidence
                 .sha256
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
-        assert_eq!(baseline.sha256.len(), 64);
-        assert!(baseline.dot.ends_with("}\n"));
+        assert_eq!(baseline_evidence.sha256.len(), 64);
+        assert!(baseline_evidence.dot.ends_with("}\n"));
+        // The streaming hash and the materialised one agree: `GraphCompiler::sha256` never builds
+        // the text, so this is the gate that keeps the two writers in step.
+        assert_eq!(
+            GraphCompiler::sha256(&baseline.graph, &baseline.report),
+            baseline_evidence.sha256
+        );
         for plan_id in 1..=100 {
-            let candidate = compile_fixture(plan_id).report;
+            let candidate = compile_fixture(plan_id);
+            let evidence = GraphCompiler::evidence(&candidate.graph, &candidate.report);
+            assert_eq!(evidence.canonical_bytes, baseline_evidence.canonical_bytes);
+            assert_eq!(evidence.sha256, baseline_evidence.sha256);
             assert_eq!(
-                candidate.canonical_debug_bytes,
-                baseline.canonical_debug_bytes
+                candidate.graph.sequential_schedule,
+                baseline.graph.sequential_schedule
             );
-            assert_eq!(candidate.sha256, baseline.sha256);
-            assert_eq!(candidate.sequential_schedule, baseline.sequential_schedule);
-            assert_eq!(candidate.dependency_levels, baseline.dependency_levels);
-            assert_eq!(candidate.route_timings, baseline.route_timings);
-            assert_eq!(candidate.buffer_assignments, baseline.buffer_assignments);
-            assert_eq!(candidate.dot, baseline.dot);
+            assert_eq!(
+                candidate.graph.dependency_levels,
+                baseline.graph.dependency_levels
+            );
+            assert_eq!(candidate.graph.route_timings, baseline.graph.route_timings);
+            assert_eq!(
+                candidate.graph.buffer_assignments,
+                baseline.graph.buffer_assignments
+            );
+            assert_eq!(evidence.dot, baseline_evidence.dot);
         }
     }
 
     #[test]
     fn route_transform_bits_participate_in_semantic_hash() {
-        let baseline = compile_fixture(1).report;
+        let baseline = compile_fixture(1);
         let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
@@ -7946,6 +7257,7 @@ mod tests {
         )
         .expect("session");
         let changed = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
             plan_id: 1,
             effects: EffectPreparedSession {
                 session,
@@ -7954,10 +7266,61 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
-        assert_ne!(changed.report.sha256, baseline.sha256);
         assert_ne!(
-            changed.report.canonical_debug_bytes,
-            baseline.canonical_debug_bytes
+            GraphCompiler::sha256(&changed.graph, &changed.report),
+            GraphCompiler::sha256(&baseline.graph, &baseline.report)
+        );
+        assert_ne!(
+            GraphCompiler::evidence(&changed.graph, &changed.report).canonical_bytes,
+            GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes
+        );
+    }
+
+    /// #99 F4: the compiled route gain is `miso_engine_math::db_to_gain_f32`, bit for bit.
+    ///
+    /// -19 dB is the witness: the platform `f64::powf` form this replaced produced
+    /// `0x3de5_ca15` on this host, one ulp below the canonical `0x3de5_ca16`, and it produced
+    /// whatever the *host's* libm produced on any other. `tests/route_gain.rs` pins both
+    /// literals against a live `powf` oracle so this witness cannot go stale silently.
+    #[test]
+    fn route_transform_uses_the_canonical_db_to_gain_conversion() {
+        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        model.tracks[0].dynamic.effects.clear();
+        model.automation.clear();
+        model.routes[0].gain_db = -19.0;
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("session");
+        let compiled = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1,
+            effects: EffectPreparedSession {
+                session,
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
+        let gains: Vec<u32> = compiled
+            .graph
+            .routes()
+            .iter()
+            .map(|route| route.transform.gain.to_bits())
+            .collect();
+        assert_eq!(gains, vec![0x3de5_ca16]);
+        assert_eq!(
+            gains[0],
+            miso_engine_math::db_to_gain_f32(-19.0).to_bits(),
+            "route gain must be the canonical conversion, not a local one"
         );
     }
 

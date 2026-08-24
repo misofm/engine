@@ -20,6 +20,9 @@ CARGO_TARGET_DIR="$scratch_directory/native-target" \
     cargo test --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
         -p miso-engine-effect-package --lib --tests -- --test-threads=1
 
+CARGO_TARGET_DIR="$scratch_directory/fuzz-target" \
+    cargo check --quiet --locked --manifest-path "$workspace_root/fuzz/Cargo.toml" --bins
+
 wasm_target="$scratch_directory/wasm-target"
 RUSTFLAGS='-C target-feature=-simd128' CARGO_TARGET_DIR="$wasm_target" \
     cargo rustc --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
@@ -75,7 +78,7 @@ awk '/^#\[cfg\(test\)\]/{exit} {print}' \
     "$workspace_root/crates/miso-engine-effect-package/src/package.rs" >"$native_source"
 awk '/^#\[cfg\(test\)\]/{exit} {print}' \
     "$workspace_root/crates/miso-engine-effect-package/src/cid.rs" >"$cid_source"
-if rg -n 'Vec[<:]|String[<:]|vec!\[|\.to_vec\(|\.collect\(|\bunsafe\b' \
+if rg -n 'Vec[<:]|String[<:]|vec!\[|\.to_vec\(|\.collect\(|\bunsafe\b|\.sort\(|\.sort_by\(|\.sort_by_key\(|\.sort_by_cached_key\(' \
     "$native_source" "$cid_source"; then
     printf 'effect package V1 check failure: allocation/unsafe package-native surface\n' >&2
     exit 1
