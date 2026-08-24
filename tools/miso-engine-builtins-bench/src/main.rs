@@ -1109,7 +1109,7 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     model.automation.clear();
-    model.limits.memory_bytes = u64::MAX;
+    model.limits.memory_bytes = i64::MAX as u64;
     model.tracks.clear();
     model.tracks.reserve(track_count);
     for index in 0..track_count {

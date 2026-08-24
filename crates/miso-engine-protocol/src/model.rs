@@ -855,9 +855,12 @@ impl SessionStore {
         if edits.is_empty() {
             return Err(SessionStoreError::EmptyTransaction);
         }
+        // The session schema bounds every u64 field to `i64::MAX`, so that value -- not
+        // `u64::MAX` -- is the maximum revision a compiled session can hold.
         let next_revision = current
             .0
             .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64)
             .ok_or(SessionStoreError::RevisionExhausted)?;
         let mut candidate = self.compiled.normalized_model().clone();
         for (operation_index, edit) in edits.iter().enumerate() {
@@ -991,6 +994,9 @@ mod tests {
     };
 
     const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+
+    /// Largest revision a session may declare: the schema bounds u64 fields to `i64::MAX`.
+    const MAX_SESSION_REVISION: u64 = i64::MAX as u64;
 
     fn caps() -> CompileCaps {
         CompileCaps {
@@ -1188,7 +1194,7 @@ mod tests {
     #[test]
     fn any_and_maximum_revision_are_rejected_without_replacement() {
         let mut model = parse_session_toml(EXAMPLE).expect("fixture");
-        model.revision = u64::MAX;
+        model.revision = MAX_SESSION_REVISION;
         let mut store = SessionStore::new(model, caps()).expect("max revision compiles");
         let before = store.canonical_snapshot().to_owned();
         assert_eq!(
@@ -1196,12 +1202,15 @@ mod tests {
             Err(SessionStoreError::ExactRevisionRequired)
         );
         assert_eq!(
-            store.apply_transaction(ExpectedRevision::Exact(SessionRevision(u64::MAX)), &[]),
+            store.apply_transaction(
+                ExpectedRevision::Exact(SessionRevision(MAX_SESSION_REVISION)),
+                &[]
+            ),
             Err(SessionStoreError::EmptyTransaction)
         );
         assert_eq!(
             store.apply_transaction(
-                ExpectedRevision::Exact(SessionRevision(u64::MAX)),
+                ExpectedRevision::Exact(SessionRevision(MAX_SESSION_REVISION)),
                 &[SessionEditV1::SetSessionId {
                     session_id: id("never-committed"),
                 }],

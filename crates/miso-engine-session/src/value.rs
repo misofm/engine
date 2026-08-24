@@ -2,7 +2,25 @@
 
 use core::fmt::Write as _;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticPath, SourceSpan};
+pub(crate) enum F32Token {
+    Value(f32),
+    NonFinite,
+    NotRepresentable,
+}
+
+pub(crate) fn parse_f32_token(text: &str) -> F32Token {
+    if text.contains("inf") || text.contains("nan") {
+        return F32Token::NonFinite;
+    }
+    match text.parse::<f32>() {
+        Ok(value) if value.is_finite() => F32Token::Value(value),
+        Ok(_) | Err(_) => F32Token::NotRepresentable,
+    }
+}
+
+pub(crate) fn parse_i64_token(text: &str, radix: u32) -> Option<i64> {
+    i64::from_str_radix(text, radix).ok()
+}
 
 /// Append one canonical finite `f32` spelling and report whether exact-`f64` fallback was needed.
 pub(crate) fn write_f32(output: &mut String, value: f32) -> bool {
@@ -20,54 +38,6 @@ pub(crate) fn write_f32(output: &mut String, value: f32) -> bool {
         output.push_str(".0");
     }
     used_f64_fallback
-}
-
-pub(crate) fn f32_value(
-    value: f64,
-    path: DiagnosticPath,
-    span: Option<SourceSpan>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<f32> {
-    if !value.is_finite() {
-        diagnostics.push(Diagnostic::new(
-            DiagnosticCode::NumericNonFinite,
-            path,
-            span,
-            "value must be finite",
-        ));
-        None
-    } else if value.abs() > f64::from(f32::MAX) {
-        diagnostics.push(Diagnostic::new(
-            DiagnosticCode::NumericNotF32Representable,
-            path,
-            span,
-            "value must be representable as f32",
-        ));
-        None
-    } else {
-        Some(value as f32)
-    }
-}
-
-pub(crate) fn bounded_f32(
-    value: f32,
-    minimum: f32,
-    maximum: f32,
-    path: DiagnosticPath,
-    span: Option<SourceSpan>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<f32> {
-    if value < minimum || value > maximum {
-        diagnostics.push(Diagnostic::new(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path,
-            span,
-            format!("value must be in [{minimum}, {maximum}]"),
-        ));
-        None
-    } else {
-        Some(value)
-    }
 }
 
 #[cfg(test)]
@@ -114,19 +84,6 @@ mod tests {
         assert!(results[2..].iter().all(|(_, fallback)| !fallback));
         assert_eq!(results[2].0, "-0.0");
         assert_eq!(results[6].0, "1.0");
-
-        let mut diagnostics = Vec::new();
-        let bounded = bounded_f32(
-            -0.0,
-            -1.0,
-            1.0,
-            DiagnosticPath::root().key("signed_zero"),
-            None,
-            &mut diagnostics,
-        )
-        .expect("negative zero is in range");
-        assert!(diagnostics.is_empty());
-        assert_eq!(bounded.to_bits(), 0x8000_0000);
     }
 
     #[test]

@@ -6,7 +6,8 @@ use miso_engine_core::{QuantumFrames, SampleRateHz};
 
 use crate::{
     Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionTomlV1,
-    StableId, canonical_session_toml,
+    StableId,
+    canonical::write_canonical,
     estimate::{estimate_session, with_canonical_bytes},
     validate::validate_session,
 };
@@ -43,7 +44,6 @@ pub struct CompiledSession {
     graph_entity_indexes: BTreeMap<StableId, u64>,
     resource_estimate: ResourceEstimate,
 }
-
 #[derive(Clone, Debug)]
 struct NormalizedSession(SessionTomlV1);
 
@@ -101,7 +101,6 @@ impl CompiledSession {
         &self.normalized.0
     }
 }
-
 /// Validate and normalize a complete session into an immutable non-realtime artifact.
 ///
 /// The checked preflight and all cap comparisons occur before canonical-string allocation,
@@ -113,11 +112,9 @@ pub fn compile_session(
     let estimate = estimate_session(session)?;
     check_caps(session, estimate, caps)?;
     validate_session(session)?;
-
-    let canonical_toml = canonical_session_toml(session)?;
+    let canonical_toml = write_canonical(session);
     let estimate = with_canonical_bytes(estimate, canonical_toml.len())?;
     debug_assert!(estimate.compiled_model_bytes <= caps.max_compiled_model_bytes);
-
     let mut normalized = session.clone();
     normalized
         .sources
@@ -148,7 +145,6 @@ pub fn compile_session(
             }
         }
     }
-
     let source_indexes = indexed(
         normalized.sources.iter().map(|item| &item.id),
         "source_indexes",
@@ -162,7 +158,6 @@ pub fn compile_session(
             .chain(normalized.outputs.iter().map(|item| &item.id)),
         "graph_entity_indexes",
     )?;
-
     Ok(CompiledSession {
         normalized: NormalizedSession(normalized),
         canonical_toml,
@@ -176,7 +171,6 @@ pub fn compile_session(
         resource_estimate: estimate,
     })
 }
-
 fn check_caps(
     session: &SessionTomlV1,
     estimate: ResourceEstimate,
@@ -249,22 +243,22 @@ fn check_caps(
         Err(DiagnosticSet::from_vec(diagnostics))
     }
 }
-
 fn indexed<'a>(
     ids: impl Iterator<Item = &'a StableId>,
     path: &str,
 ) -> Result<BTreeMap<StableId, u64>, DiagnosticSet> {
-    let mut output = BTreeMap::new();
-    for (index, id) in ids.enumerate() {
-        let index = u64::try_from(index).map_err(|_| {
-            DiagnosticSet::from_vec(vec![Diagnostic::new(
-                DiagnosticCode::CapacityArithmeticOverflow,
-                DiagnosticPath::root().key(path),
-                None,
-                "index cannot convert to u64",
-            )])
-        })?;
-        output.insert(id.clone(), index);
-    }
-    Ok(output)
+    ids.enumerate()
+        .map(|(index, id)| {
+            u64::try_from(index)
+                .map(|index| (id.clone(), index))
+                .map_err(|_| {
+                    DiagnosticSet::from_vec(vec![Diagnostic::new(
+                        DiagnosticCode::CapacityArithmeticOverflow,
+                        DiagnosticPath::root().key(path),
+                        None,
+                        "index cannot convert to u64",
+                    )])
+                })
+        })
+        .collect()
 }

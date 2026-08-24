@@ -6,7 +6,7 @@ use core::fmt;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
-    /// Input was not TOML 1.0 syntax.
+    /// Input was not TOML syntax as accepted by `toml_parser`.
     TomlSyntax,
     /// The schema version key was absent.
     VersionMissing,
@@ -145,6 +145,7 @@ impl DiagnosticPath {
     }
 
     /// Convert internal dotted/index notation into structured components.
+    // F13 successor: estimate pseudo-paths are the only remaining caller.
     pub(crate) fn from_dotted(value: &str) -> Self {
         let bytes = value.as_bytes();
         let mut result = Self::root();
@@ -178,6 +179,71 @@ impl DiagnosticPath {
             }
         }
         result
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Seg<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// Borrowed validation path cursor; owned path segments are allocated only on error.
+#[derive(Clone, Copy)]
+pub(crate) struct PathRef<'a> {
+    parent: Option<&'a PathRef<'a>>,
+    seg: Option<Seg<'a>>,
+}
+
+impl<'a> PathRef<'a> {
+    pub(crate) const ROOT: PathRef<'static> = PathRef {
+        parent: None,
+        seg: None,
+    };
+
+    pub(crate) const fn root() -> PathRef<'static> {
+        Self::ROOT
+    }
+
+    pub(crate) fn key<'b>(&'b self, key: &'b str) -> PathRef<'b>
+    where
+        'a: 'b,
+    {
+        PathRef {
+            parent: Some(self),
+            seg: Some(Seg::Key(key)),
+        }
+    }
+
+    pub(crate) fn index<'b>(&'b self, index: usize) -> PathRef<'b>
+    where
+        'a: 'b,
+    {
+        PathRef {
+            parent: Some(self),
+            seg: Some(Seg::Index(index)),
+        }
+    }
+
+    pub(crate) fn materialize(&self) -> DiagnosticPath {
+        let mut borrowed = Vec::new();
+        let mut cursor = Some(self);
+        while let Some(path) = cursor {
+            if let Some(segment) = path.seg {
+                borrowed.push(segment);
+            }
+            cursor = path.parent;
+        }
+        borrowed.reverse();
+        DiagnosticPath(
+            borrowed
+                .into_iter()
+                .map(|segment| match segment {
+                    Seg::Key(key) => PathSegment::Field(key.to_owned()),
+                    Seg::Index(index) => PathSegment::Index(index),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -217,6 +283,24 @@ impl SourceSpan {
             column: 1,
         }
     }
+
+    pub(crate) fn from_range(source: &str, range: core::ops::Range<usize>) -> Self {
+        let byte_start = range.start.min(source.len());
+        let byte_end = range.end.min(source.len()).max(byte_start);
+        let prefix = &source[..byte_start];
+        let line = 1 + prefix.bytes().filter(|byte| *byte == b'\n').count();
+        let column = 1 + prefix
+            .rsplit_once('\n')
+            .map_or(prefix, |(_, tail)| tail)
+            .chars()
+            .count();
+        Self {
+            byte_start,
+            byte_end,
+            line,
+            column,
+        }
+    }
 }
 
 /// One deterministic session diagnostic.
@@ -245,6 +329,15 @@ impl Diagnostic {
             span,
             message: message.into(),
         }
+    }
+
+    pub(crate) fn at(
+        code: DiagnosticCode,
+        path: &PathRef<'_>,
+        span: Option<SourceSpan>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(code, path.materialize(), span, message)
     }
 }
 

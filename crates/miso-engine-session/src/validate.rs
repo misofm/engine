@@ -1,22 +1,34 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
-
-use std::collections::BTreeSet;
-
-use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
-
 use crate::{
-    AutomationShape, Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, Effect,
-    MatrixOrPan, ParameterUnit, Rack, RackName, RouteDestination, RouteSource,
-    SESSION_SCHEMA_VERSION_V1, SessionTomlV1, StableId,
+    AutomationShape, Diagnostic, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, ParameterUnit,
+    Rack, RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionTomlV1,
+    Source, Track, diagnostic::PathRef,
 };
-
+use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
+use std::collections::{HashMap, HashSet};
+#[derive(Clone, Copy)]
+enum GraphEntity<'a> {
+    Track(&'a Track),
+    Submix,
+    Output,
+}
+struct Index<'a> {
+    sources: HashMap<&'a str, &'a Source>,
+    graph: HashMap<&'a str, GraphEntity<'a>>,
+}
+#[derive(Default)]
+struct LocalUniqueness<'a> {
+    effect_ids: HashSet<&'a str>,
+    parameters: HashSet<(u32, u8)>,
+}
 pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), DiagnosticSet> {
     let mut diagnostics = Vec::new();
+    let root = PathRef::ROOT;
     if session.schema_version != SESSION_SCHEMA_VERSION_V1 {
         error(
             &mut diagnostics,
             DiagnosticCode::VersionUnsupported,
-            "$.schema_version",
+            &root.key("schema_version"),
             "only version 1 is accepted",
         );
     }
@@ -24,7 +36,7 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
         error(
             &mut diagnostics,
             DiagnosticCode::SampleRateUnsupportedAtLaunch,
-            "$.sample_rate_hz",
+            &root.key("sample_rate_hz"),
             "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
         );
     }
@@ -32,7 +44,7 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
         error(
             &mut diagnostics,
             DiagnosticCode::CapacityZero,
-            "$.quantum_frames",
+            &root.key("quantum_frames"),
             "quantum_frames must be nonzero",
         );
     }
@@ -40,10 +52,13 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
         error(
             &mut diagnostics,
             DiagnosticCode::NumericOutOfSchemaRange,
-            "$.output_profile.channels",
+            &root.key("output_profile").key("channels"),
             "V1 output must contain exactly two dual-mono channels",
         );
     }
+
+    validate_u64(&mut diagnostics, session.revision, &root.key("revision"));
+    let limits_path = root.key("limits");
     for (field, value) in [
         ("pcm_ring_frames", session.limits.pcm_ring_frames),
         (
@@ -52,77 +67,166 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
         ),
         ("memory_bytes", session.limits.memory_bytes),
     ] {
+        let path = limits_path.key(field);
         if value == 0 {
             error(
                 &mut diagnostics,
                 DiagnosticCode::CapacityZero,
-                &format!("$.limits.{field}"),
+                &path,
                 "declared capacity must be nonzero",
+            );
+        }
+        validate_u64(&mut diagnostics, value, &path);
+    }
+
+    // One pass establishes uniqueness and builds every global cross-reference index.
+    let sources_path = root.key("sources");
+    let mut sources = HashMap::with_capacity(session.sources.len());
+    for (position, source) in session.sources.iter().enumerate() {
+        if sources.insert(source.id.as_str(), source).is_some() {
+            duplicate(&mut diagnostics, &sources_path.index(position).key("id"));
+        }
+    }
+
+    let graph_capacity = session
+        .tracks
+        .len()
+        .saturating_add(session.submixes.len())
+        .saturating_add(session.outputs.len());
+    let mut graph = HashMap::with_capacity(graph_capacity);
+    let tracks_path = root.key("tracks");
+    for (position, track) in session.tracks.iter().enumerate() {
+        if graph
+            .insert(track.id.as_str(), GraphEntity::Track(track))
+            .is_some()
+        {
+            duplicate(&mut diagnostics, &tracks_path.index(position).key("id"));
+        }
+    }
+    let submixes_path = root.key("submixes");
+    for (position, submix) in session.submixes.iter().enumerate() {
+        if graph
+            .insert(submix.id.as_str(), GraphEntity::Submix)
+            .is_some()
+        {
+            duplicate(&mut diagnostics, &submixes_path.index(position).key("id"));
+        }
+    }
+    let outputs_path = root.key("outputs");
+    for (position, output) in session.outputs.iter().enumerate() {
+        if graph
+            .insert(output.id.as_str(), GraphEntity::Output)
+            .is_some()
+        {
+            duplicate(&mut diagnostics, &outputs_path.index(position).key("id"));
+        }
+    }
+
+    let routes_path = root.key("routes");
+    let mut route_ids = HashSet::with_capacity(session.routes.len());
+    for (position, route) in session.routes.iter().enumerate() {
+        if !route_ids.insert(route.id.as_str()) {
+            error(
+                &mut diagnostics,
+                DiagnosticCode::DuplicateId,
+                &routes_path.index(position).key("id"),
+                "route ID is repeated",
+            );
+        }
+    }
+    let automations_path = root.key("automation");
+    let mut automation_ids = HashSet::with_capacity(session.automation.len());
+    for (position, automation) in session.automation.iter().enumerate() {
+        if !automation_ids.insert(automation.id.as_str()) {
+            error(
+                &mut diagnostics,
+                DiagnosticCode::DuplicateId,
+                &automations_path.index(position).key("id"),
+                "automation ID is repeated",
             );
         }
     }
 
-    let mut source_namespace = BTreeSet::new();
-    check_unique(
-        &mut diagnostics,
-        &mut source_namespace,
-        &session.sources,
-        |item| &item.id,
-        "$.sources",
-    );
-    let mut entity_ids = BTreeSet::new();
-    check_unique(
-        &mut diagnostics,
-        &mut entity_ids,
-        &session.tracks,
-        |item| &item.id,
-        "$.tracks",
-    );
-    check_unique(
-        &mut diagnostics,
-        &mut entity_ids,
-        &session.submixes,
-        |item| &item.id,
-        "$.submixes",
-    );
-    check_unique(
-        &mut diagnostics,
-        &mut entity_ids,
-        &session.outputs,
-        |item| &item.id,
-        "$.outputs",
-    );
+    let index = Index { sources, graph };
+    let mut local = LocalUniqueness::default();
+    validate_sources(session, &root, &mut diagnostics);
+    validate_tracks(session, &index, &root, &mut diagnostics, &mut local);
+    validate_routes(session, &index, &root, &mut diagnostics);
+    validate_automation(session, &index, &root, &mut diagnostics);
 
-    let source_ids: BTreeSet<_> = session.sources.iter().map(|source| &source.id).collect();
-    for (index, source) in session.sources.iter().enumerate() {
-        let path = format!("$.sources[{index}]");
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(DiagnosticSet::from_vec(diagnostics))
+    }
+}
+
+fn duplicate(diagnostics: &mut Vec<Diagnostic>, path: &PathRef<'_>) {
+    error(
+        diagnostics,
+        DiagnosticCode::DuplicateId,
+        path,
+        "entity ID is repeated",
+    );
+}
+
+fn validate_sources(
+    session: &SessionTomlV1,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let sources_path = root.key("sources");
+    for (position, source) in session.sources.iter().enumerate() {
+        let path = sources_path.index(position);
         for (leaf, invalid) in [
-            ("content.identity", source.content.identity.is_empty()),
-            ("content.locator", source.content.locator.is_empty()),
-            ("mapping.channel_count", source.mapping.channel_count == 0),
-            (
-                "mapping.region.length_samples",
-                source.mapping.region.length_samples == 0,
-            ),
+            ("identity", source.content.identity.is_empty()),
+            ("locator", source.content.locator.is_empty()),
         ] {
-            if !invalid {
-                continue;
+            if invalid {
+                error(
+                    diagnostics,
+                    DiagnosticCode::NumericOutOfSchemaRange,
+                    &path.key("content").key(leaf),
+                    "source field must be nonempty",
+                );
             }
+        }
+        if source.mapping.channel_count == 0 {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::NumericOutOfSchemaRange,
-                &format!("{path}.{leaf}"),
-                "source field must be nonzero/nonempty",
+                &path.key("mapping").key("channel_count"),
+                "source channel_count must be nonzero",
+            );
+        }
+        if source.mapping.region.length_samples == 0 {
+            error(
+                diagnostics,
+                DiagnosticCode::NumericOutOfSchemaRange,
+                &path.key("mapping").key("region").key("length_samples"),
+                "source region length must be nonzero",
             );
         }
         if source.sample_rate_hz == 0 {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::NumericOutOfSchemaRange,
-                &format!("{path}.sample_rate_hz"),
+                &path.key("sample_rate_hz"),
                 "declared source rate must be nonzero",
             );
         }
+        let mapping_path = path.key("mapping");
+        let region_path = mapping_path.key("region");
+        validate_u64(
+            diagnostics,
+            source.mapping.region.start_sample,
+            &region_path.key("start_sample"),
+        );
+        validate_u64(
+            diagnostics,
+            source.mapping.region.length_samples,
+            &region_path.key("length_samples"),
+        );
         if source
             .mapping
             .region
@@ -131,259 +235,373 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
             .is_none()
         {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::SourceRegionOverflow,
-                &format!("{path}.mapping.region"),
+                &region_path,
                 "source region endpoint overflows u64",
             );
         }
     }
-    for (index, track) in session.tracks.iter().enumerate() {
-        let path = format!("$.tracks[{index}]");
-        if !source_ids.contains(&track.source_id) {
+}
+
+fn validate_tracks<'a>(
+    session: &'a SessionTomlV1,
+    index: &Index<'_>,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    local: &mut LocalUniqueness<'a>,
+) {
+    let tracks_path = root.key("tracks");
+    for (position, track) in session.tracks.iter().enumerate() {
+        let path = tracks_path.index(position);
+        let source = index.sources.get(track.source_id.as_str()).copied();
+        if source.is_none() {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::MissingEntityReference,
-                &format!("{path}.source_id"),
+                &path.key("source_id"),
                 "track source_id is not a declared source",
             );
         }
-        if let Some(source) = session
-            .sources
-            .iter()
-            .find(|source| source.id == track.source_id)
-        {
+        if let Some(source) = source {
             for (field, channel) in [
                 ("left_source_channel", track.left_source_channel),
                 ("right_source_channel", track.right_source_channel),
             ] {
                 if channel >= source.mapping.channel_count {
                     error(
-                        &mut diagnostics,
+                        diagnostics,
                         DiagnosticCode::SourceChannelIndexOutOfRange,
-                        &format!("{path}.{field}"),
+                        &path.key(field),
                         "track source channel index exceeds declared source channel_count",
                     );
                 }
             }
         }
-        validate_finite(
-            &mut diagnostics,
-            track.builtins.left.trim_db,
-            &format!("{path}.builtins.left.trim_db"),
-        );
-        validate_finite(
-            &mut diagnostics,
-            track.builtins.right.trim_db,
-            &format!("{path}.builtins.right.trim_db"),
-        );
+
         for (channel, values) in [
             ("left", &track.builtins.left),
             ("right", &track.builtins.right),
         ] {
-            validate_nonnegative_finite(
-                &mut diagnostics,
-                values.hpf_hz,
-                &format!("{path}.builtins.{channel}.hpf_hz"),
-            );
-            validate_nonnegative_finite(
-                &mut diagnostics,
-                values.lpf_hz,
-                &format!("{path}.builtins.{channel}.lpf_hz"),
-            );
+            let builtins_path = path.key("builtins");
+            let channel_path = builtins_path.key(channel);
+            validate_finite(diagnostics, values.trim_db, &channel_path.key("trim_db"));
+            validate_nonnegative_finite(diagnostics, values.hpf_hz, &channel_path.key("hpf_hz"));
+            validate_nonnegative_finite(diagnostics, values.lpf_hz, &channel_path.key("lpf_hz"));
         }
+        let fader_path = path.key("fader");
+        validate_finite(diagnostics, track.fader.left_db, &fader_path.key("left_db"));
         validate_finite(
-            &mut diagnostics,
-            track.fader.left_db,
-            &format!("{path}.fader.left_db"),
-        );
-        validate_finite(
-            &mut diagnostics,
+            diagnostics,
             track.fader.right_db,
-            &format!("{path}.fader.right_db"),
+            &fader_path.key("right_db"),
         );
         match track.matrix_or_pan {
             MatrixOrPan::Pan { left, right, .. } => {
-                validate_finite_range(
-                    &mut diagnostics,
-                    left,
-                    -1.0,
-                    1.0,
-                    &format!("{path}.pan.left"),
-                );
-                validate_finite_range(
-                    &mut diagnostics,
-                    right,
-                    -1.0,
-                    1.0,
-                    &format!("{path}.pan.right"),
-                );
+                let pan_path = path.key("pan");
+                validate_finite_range(diagnostics, left, -1.0, 1.0, &pan_path.key("left"));
+                validate_finite_range(diagnostics, right, -1.0, 1.0, &pan_path.key("right"));
             }
             MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
-                for (name, value) in [("ll", ll), ("lr", lr), ("rl", rl), ("rr", rr)] {
-                    validate_finite(&mut diagnostics, value, &format!("{path}.matrix.{name}"));
+                let matrix_path = path.key("matrix");
+                for (field, value) in [("ll", ll), ("lr", lr), ("rl", rl), ("rr", rr)] {
+                    validate_finite(diagnostics, value, &matrix_path.key(field));
                 }
             }
         }
-        validate_rack(
-            &mut diagnostics,
-            session,
-            &track.simd1,
-            &format!("{path}.simd1"),
-        );
-        validate_rack(
-            &mut diagnostics,
-            session,
-            &track.dynamic,
-            &format!("{path}.dynamic"),
-        );
-        validate_rack(
-            &mut diagnostics,
-            session,
-            &track.simd2,
-            &format!("{path}.simd2"),
-        );
+        for (name, rack) in [
+            ("simd1", &track.simd1),
+            ("dynamic", &track.dynamic),
+            ("simd2", &track.simd2),
+        ] {
+            validate_rack(diagnostics, index, rack, &path.key(name), local);
+        }
     }
+}
 
-    let mut route_ids = BTreeSet::new();
-    for (index, route) in session.routes.iter().enumerate() {
-        let path = format!("$.routes[{index}]");
-        if !route_ids.insert(&route.id) {
+fn validate_rack<'a>(
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &Index<'_>,
+    rack: &'a Rack,
+    path: &PathRef<'_>,
+    local: &mut LocalUniqueness<'a>,
+) {
+    let effects_path = path.key("effects");
+    local.effect_ids.clear();
+    for (position, effect) in rack.effects.iter().enumerate() {
+        let effect_path = effects_path.index(position);
+        if !local.effect_ids.insert(effect.id.as_str()) {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::DuplicateId,
-                &format!("{path}.id"),
-                "route ID is repeated",
+                &effect_path.key("id"),
+                "effect ID is repeated in a rack",
             );
         }
+        validate_effect(diagnostics, index, effect, &effect_path, local);
+    }
+}
+
+fn validate_effect(
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &Index<'_>,
+    effect: &Effect,
+    path: &PathRef<'_>,
+    local: &mut LocalUniqueness<'_>,
+) {
+    if let crate::EffectIdentity::ThirdPartyCid { cid } = &effect.identity
+        && cid.is_empty()
+    {
+        error(
+            diagnostics,
+            DiagnosticCode::NumericOutOfSchemaRange,
+            &path.key("identity").key("cid"),
+            "third-party CID must be nonempty",
+        );
+    }
+    if let crate::SidechainDeclaration::Routed(sidechain) = &effect.sidechain {
+        let sidechain_path = path.key("sidechain");
         validate_route_source(
-            &mut diagnostics,
-            session,
-            &route.source,
-            &format!("{path}.source"),
+            diagnostics,
+            index,
+            &sidechain.source,
+            &sidechain_path.key("source"),
         );
+    }
+    let params_path = path.key("params");
+    local.parameters.clear();
+    for (position, parameter) in effect.params.iter().enumerate() {
+        let parameter_path = params_path.index(position);
+        let channel = match parameter.channel {
+            crate::ParameterChannel::Left => 0_u8,
+            crate::ParameterChannel::Right => 1,
+            crate::ParameterChannel::Both => 2,
+        };
+        if !local.parameters.insert((parameter.parameter_id, channel)) {
+            error(
+                diagnostics,
+                DiagnosticCode::DuplicateId,
+                &parameter_path.key("parameter_id"),
+                "parameter ID/channel is repeated",
+            );
+        }
+        validate_unit_value(
+            diagnostics,
+            parameter.value,
+            parameter.unit,
+            &parameter_path.key("value"),
+        );
+    }
+}
+
+fn validate_routes(
+    session: &SessionTomlV1,
+    index: &Index<'_>,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let routes_path = root.key("routes");
+    for (position, route) in session.routes.iter().enumerate() {
+        let path = routes_path.index(position);
+        validate_route_source(diagnostics, index, &route.source, &path.key("source"));
         validate_route_destination(
-            &mut diagnostics,
-            session,
+            diagnostics,
+            index,
             &route.destination,
-            &format!("{path}.destination"),
+            &path.key("destination"),
         );
-        validate_finite(&mut diagnostics, route.gain_db, &format!("{path}.gain_db"));
-        for (name, value) in [
+        validate_finite(diagnostics, route.gain_db, &path.key("gain_db"));
+        let matrix_path = path.key("channel_matrix");
+        for (field, value) in [
             ("ll", route.channel_matrix.ll),
             ("lr", route.channel_matrix.lr),
             ("rl", route.channel_matrix.rl),
             ("rr", route.channel_matrix.rr),
         ] {
-            validate_finite(
-                &mut diagnostics,
-                value,
-                &format!("{path}.channel_matrix.{name}"),
-            );
+            validate_finite(diagnostics, value, &matrix_path.key(field));
         }
     }
+}
 
-    let mut automation_ids = BTreeSet::new();
-    for (index, automation) in session.automation.iter().enumerate() {
-        let path = format!("$.automation[{index}]");
-        if !automation_ids.insert(&automation.id) {
-            error(
-                &mut diagnostics,
-                DiagnosticCode::DuplicateId,
-                &format!("{path}.id"),
-                "automation ID is repeated",
-            );
-        }
+fn validate_route_source(
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &Index<'_>,
+    source: &RouteSource,
+    path: &PathRef<'_>,
+) {
+    let (valid, leaf) = match source {
+        RouteSource::Track { track_id, .. } => (
+            matches!(
+                index.graph.get(track_id.as_str()),
+                Some(GraphEntity::Track(_))
+            ),
+            "track_id",
+        ),
+        RouteSource::SubmixOutput { submix_id } => (
+            matches!(
+                index.graph.get(submix_id.as_str()),
+                Some(GraphEntity::Submix)
+            ),
+            "submix_id",
+        ),
+    };
+    if !valid {
+        error(
+            diagnostics,
+            DiagnosticCode::MissingEntityReference,
+            &path.key(leaf),
+            "route source entity is not declared with the required role",
+        );
+    }
+}
+
+fn validate_route_destination(
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &Index<'_>,
+    destination: &RouteDestination,
+    path: &PathRef<'_>,
+) {
+    let (valid, leaf) = match destination {
+        RouteDestination::SubmixInput { submix_id } => (
+            matches!(
+                index.graph.get(submix_id.as_str()),
+                Some(GraphEntity::Submix)
+            ),
+            "submix_id",
+        ),
+        RouteDestination::OutputInput { output_id } => (
+            matches!(
+                index.graph.get(output_id.as_str()),
+                Some(GraphEntity::Output)
+            ),
+            "output_id",
+        ),
+    };
+    if !valid {
+        error(
+            diagnostics,
+            DiagnosticCode::MissingEntityReference,
+            &path.key(leaf),
+            "route destination entity is not declared with the required role",
+        );
+    }
+}
+
+fn validate_automation(
+    session: &SessionTomlV1,
+    index: &Index<'_>,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let automations_path = root.key("automation");
+    for (position, automation) in session.automation.iter().enumerate() {
+        let path = automations_path.index(position);
         if automation.segments.is_empty() {
             error(
-                &mut diagnostics,
+                diagnostics,
                 DiagnosticCode::NumericOutOfSchemaRange,
-                &format!("{path}.segments"),
+                &path.key("segments"),
                 "automation must declare at least one segment",
             );
         }
-        let Some(track) = session
-            .tracks
-            .iter()
-            .find(|track| track.id == automation.target.entity_id)
-        else {
-            error(
-                &mut diagnostics,
-                DiagnosticCode::MissingEntityReference,
-                &format!("{path}.target.entity_id"),
-                "automation target must be a declared track",
-            );
-            continue;
+
+        let track = match index.graph.get(automation.target.entity_id.as_str()) {
+            Some(GraphEntity::Track(track)) => Some(*track),
+            _ => {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &path.key("target").key("entity_id"),
+                    "automation target must be a declared track",
+                );
+                None
+            }
         };
-        let rack = match automation.target.rack {
-            RackName::Simd1 => &track.simd1,
-            RackName::Dynamic => &track.dynamic,
-            RackName::Simd2 => &track.simd2,
-        };
-        let Some(effect) = rack
-            .effects
-            .iter()
-            .find(|effect| effect.id == automation.target.effect_id)
-        else {
-            error(
-                &mut diagnostics,
-                DiagnosticCode::MissingEntityReference,
-                &format!("{path}.target.effect_id"),
-                "effect ID is absent from selected rack",
-            );
-            continue;
-        };
-        if !effect.params.iter().any(|parameter| {
-            parameter.parameter_id == automation.target.parameter_id
-                && parameter.channel == automation.target.channel
-        }) {
-            error(
-                &mut diagnostics,
-                DiagnosticCode::MissingEntityReference,
-                &format!("{path}.target.parameter_id"),
-                "parameter/channel is absent from selected effect",
-            );
+        if let Some(track) = track {
+            let rack = match automation.target.rack {
+                RackName::Simd1 => &track.simd1,
+                RackName::Dynamic => &track.dynamic,
+                RackName::Simd2 => &track.simd2,
+            };
+            // Rack size is resource-bounded; this is one of two intentional local searches.
+            let effect = rack
+                .effects
+                .iter()
+                .find(|effect| effect.id == automation.target.effect_id);
+            if let Some(effect) = effect {
+                // Parameter count is resource-bounded; keep the local `(id, channel)` search.
+                if !effect.params.iter().any(|parameter| {
+                    parameter.parameter_id == automation.target.parameter_id
+                        && parameter.channel == automation.target.channel
+                }) {
+                    error(
+                        diagnostics,
+                        DiagnosticCode::MissingEntityReference,
+                        &path.key("target").key("parameter_id"),
+                        "parameter/channel is absent from selected effect",
+                    );
+                }
+            } else {
+                error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &path.key("target").key("effect_id"),
+                    "effect ID is absent from selected rack",
+                );
+            }
         }
+
+        let segments_path = path.key("segments");
         let mut previous_start = None;
         let mut previous_end = None;
-        for (segment_index, segment) in automation.segments.iter().enumerate() {
-            let segment_path = format!("{path}.segments[{segment_index}]");
+        for (segment_position, segment) in automation.segments.iter().enumerate() {
+            let segment_path = segments_path.index(segment_position);
+            validate_u64(
+                diagnostics,
+                segment.start_sample,
+                &segment_path.key("start_sample"),
+            );
+            validate_u64(
+                diagnostics,
+                segment.end_sample,
+                &segment_path.key("end_sample"),
+            );
             if segment.start_sample >= segment.end_sample {
                 error(
-                    &mut diagnostics,
+                    diagnostics,
                     DiagnosticCode::AutomationInvalidRange,
-                    &format!("{segment_path}.end_sample"),
+                    &segment_path.key("end_sample"),
                     "end_sample must be greater than start_sample",
                 );
             }
             if previous_start.is_some_and(|start| segment.start_sample < start) {
                 error(
-                    &mut diagnostics,
+                    diagnostics,
                     DiagnosticCode::AutomationOutOfOrder,
-                    &format!("{segment_path}.start_sample"),
+                    &segment_path.key("start_sample"),
                     "segment starts before its predecessor",
                 );
             } else if previous_end.is_some_and(|end| segment.start_sample < end) {
                 error(
-                    &mut diagnostics,
+                    diagnostics,
                     DiagnosticCode::AutomationSegmentOverlap,
-                    &format!("{segment_path}.start_sample"),
+                    &segment_path.key("start_sample"),
                     "segment overlaps its predecessor",
                 );
             }
             previous_start = Some(segment.start_sample);
             previous_end = Some(segment.end_sample);
             validate_unit_value(
-                &mut diagnostics,
+                diagnostics,
                 segment.start_value,
                 segment.unit,
-                &format!("{segment_path}.start_value"),
+                &segment_path.key("start_value"),
             );
             validate_unit_value(
-                &mut diagnostics,
+                diagnostics,
                 segment.end_value,
                 segment.unit,
-                &format!("{segment_path}.end_value"),
+                &segment_path.key("end_value"),
             );
             if segment.shape == AutomationShape::Exponential {
                 for (field, value) in [
@@ -392,9 +610,9 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
                 ] {
                     if value.is_finite() && value <= 0.0 {
                         error(
-                            &mut diagnostics,
+                            diagnostics,
                             DiagnosticCode::AutomationInvalidRange,
-                            &format!("{segment_path}.{field}"),
+                            &segment_path.key(field),
                             "exponential values must be positive",
                         );
                     }
@@ -402,145 +620,15 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
             }
         }
     }
-    if diagnostics.is_empty() {
-        Ok(())
-    } else {
-        Err(DiagnosticSet::from_vec(diagnostics))
-    }
 }
 
-fn check_unique<T>(
-    diagnostics: &mut Vec<Diagnostic>,
-    ids: &mut BTreeSet<StableId>,
-    values: &[T],
-    id: impl Fn(&T) -> &StableId,
-    path: &str,
-) {
-    for (index, value) in values.iter().enumerate() {
-        if !ids.insert(id(value).clone()) {
-            error(
-                diagnostics,
-                DiagnosticCode::DuplicateId,
-                &format!("{path}[{index}].id"),
-                "entity ID is repeated",
-            );
-        }
-    }
-}
-
-fn validate_rack(
-    diagnostics: &mut Vec<Diagnostic>,
-    session: &SessionTomlV1,
-    rack: &Rack,
-    path: &str,
-) {
-    let mut ids = BTreeSet::new();
-    for (index, effect) in rack.effects.iter().enumerate() {
-        let effect_path = format!("{path}.effects[{index}]");
-        if !ids.insert(&effect.id) {
-            error(
-                diagnostics,
-                DiagnosticCode::DuplicateId,
-                &format!("{effect_path}.id"),
-                "effect ID is repeated in a rack",
-            );
-        }
-        validate_effect(diagnostics, session, effect, &effect_path);
-    }
-}
-
-fn validate_effect(
-    diagnostics: &mut Vec<Diagnostic>,
-    session: &SessionTomlV1,
-    effect: &Effect,
-    path: &str,
-) {
-    if let crate::EffectIdentity::ThirdPartyCid { cid } = &effect.identity
-        && cid.is_empty()
-    {
+fn validate_u64(diagnostics: &mut Vec<Diagnostic>, value: u64, path: &PathRef<'_>) {
+    if value > i64::MAX as u64 {
         error(
             diagnostics,
             DiagnosticCode::NumericOutOfSchemaRange,
             path,
-            "third-party CID must be nonempty",
-        );
-    }
-    if let crate::SidechainDeclaration::Routed(sidechain) = &effect.sidechain {
-        validate_route_source(
-            diagnostics,
-            session,
-            &sidechain.source,
-            &format!("{path}.sidechain.source"),
-        );
-    }
-    let mut parameters = BTreeSet::new();
-    for (index, parameter) in effect.params.iter().enumerate() {
-        let parameter_path = format!("{path}.params[{index}]");
-        if !parameters.insert((&parameter.parameter_id, parameter.channel)) {
-            error(
-                diagnostics,
-                DiagnosticCode::DuplicateId,
-                &format!("{parameter_path}.parameter_id"),
-                "parameter ID/channel is repeated",
-            );
-        }
-        validate_unit_value(
-            diagnostics,
-            parameter.value,
-            parameter.unit,
-            &format!("{parameter_path}.value"),
-        );
-    }
-}
-
-fn validate_route_source(
-    diagnostics: &mut Vec<Diagnostic>,
-    session: &SessionTomlV1,
-    source: &RouteSource,
-    path: &str,
-) {
-    let (exists, leaf) = match source {
-        RouteSource::Track { track_id, .. } => (
-            session.tracks.iter().any(|item| item.id == *track_id),
-            "track_id",
-        ),
-        RouteSource::SubmixOutput { submix_id } => (
-            session.submixes.iter().any(|item| item.id == *submix_id),
-            "submix_id",
-        ),
-    };
-    if !exists {
-        error(
-            diagnostics,
-            DiagnosticCode::MissingEntityReference,
-            &format!("{path}.{leaf}"),
-            "route source entity is not declared with the required role",
-        );
-    }
-}
-
-fn validate_route_destination(
-    diagnostics: &mut Vec<Diagnostic>,
-    session: &SessionTomlV1,
-    destination: &RouteDestination,
-    path: &str,
-) {
-    let (exists, leaf) = match destination {
-        RouteDestination::SubmixInput { submix_id } => (
-            session.submixes.iter().any(|item| item.id == *submix_id),
-            "submix_id",
-        ),
-        RouteDestination::OutputInput { output_id } => (
-            session.outputs.iter().any(|item| item.id == *output_id),
-            "output_id",
-        ),
-    };
-    if !exists {
-        error(
-            diagnostics,
-            DiagnosticCode::MissingEntityReference,
-            &format!("{path}.{leaf}"),
-            "route destination entity is not declared with the required role",
+            "integer exceeds the TOML i64 range",
         );
     }
 }
@@ -549,7 +637,7 @@ fn validate_unit_value(
     diagnostics: &mut Vec<Diagnostic>,
     value: f32,
     unit: ParameterUnit,
-    path: &str,
+    path: &PathRef<'_>,
 ) {
     validate_finite(diagnostics, value, path);
     if matches!(
@@ -583,7 +671,7 @@ fn validate_finite_range(
     value: f32,
     minimum: f32,
     maximum: f32,
-    path: &str,
+    path: &PathRef<'_>,
 ) {
     if !value.is_finite() || value < minimum || value > maximum {
         error(
@@ -599,7 +687,7 @@ fn validate_finite_range(
     }
 }
 
-fn validate_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, path: &str) {
+fn validate_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, path: &PathRef<'_>) {
     if !value.is_finite() {
         error(
             diagnostics,
@@ -610,7 +698,7 @@ fn validate_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, path: &str) {
     }
 }
 
-fn validate_nonnegative_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, path: &str) {
+fn validate_nonnegative_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, path: &PathRef<'_>) {
     validate_finite(diagnostics, value, path);
     if value.is_finite() && value < 0.0 {
         error(
@@ -622,11 +710,11 @@ fn validate_nonnegative_finite(diagnostics: &mut Vec<Diagnostic>, value: f32, pa
     }
 }
 
-fn error(diagnostics: &mut Vec<Diagnostic>, code: DiagnosticCode, path: &str, message: &str) {
-    diagnostics.push(Diagnostic::new(
-        code,
-        DiagnosticPath::from_dotted(path),
-        None,
-        message,
-    ));
+fn error(
+    diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
+    path: &PathRef<'_>,
+    message: &str,
+) {
+    diagnostics.push(Diagnostic::at(code, path, None, message));
 }

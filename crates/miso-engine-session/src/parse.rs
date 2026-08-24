@@ -1,255 +1,597 @@
-//! Explicit TOML 1.0 value-walking parser. Serde is intentionally not used for schema dispatch.
-
-use std::cell::RefCell;
-
-use toml::{Table, Value};
-
+//! Explicit value-walking parser over `toml::de::DeTable` (borrowed, spanned). Serde is not used.
 use crate::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
-    ChannelMatrix, Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, DualMonoBuiltins,
-    DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
-    Output, OutputProfile, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode,
-    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SampleFormat,
-    SendTap, SessionLimits, SessionTomlV1, Sidechain, SidechainDeclaration, Source, SourceContent,
-    SourceMapping, SourceRegion, SourceSpan, StableId, Submix, Track,
-    value::{bounded_f32, f32_value},
+    Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
+    DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
+    DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
+    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
+    SessionTomlV1, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
+    SourceRegion, SourceSpan, StableId, Submix, Track,
+    diagnostic::{PathRef as DiagnosticPath, PathSegment},
+    model::ClosedToken,
+    validate::validate_session,
+    value::{F32Token, parse_f32_token, parse_i64_token},
 };
-use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
-
-struct Parser {
-    span: SourceSpan,
-    diagnostics: RefCell<Vec<Diagnostic>>,
+use core::ops::Range;
+use toml::{
+    Spanned,
+    de::{DeTable, DeValue},
+};
+type Value<'i> = Spanned<DeValue<'i>>;
+fn value_span(value: &Value<'_>) -> (usize, usize) {
+    let span = value.span();
+    (span.start, span.end)
+}
+#[derive(Clone, Copy)]
+struct TableRef<'v, 'i> {
+    table: &'v DeTable<'i>,
+    span: (usize, usize),
 }
 
-impl Parser {
-    fn new(source: &str) -> Self {
+type ValueRef<'v, 'i> = &'v Value<'i>;
+
+struct Parser<'i> {
+    source: &'i str,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'i> Parser<'i> {
+    fn new(source: &'i str) -> Self {
         Self {
-            span: SourceSpan::whole(source),
-            diagnostics: RefCell::new(Vec::new()),
+            source,
+            diagnostics: Vec::new(),
         }
     }
 
-    fn error(&self, code: DiagnosticCode, path: DiagnosticPath, message: impl Into<String>) {
-        self.diagnostics
-            .borrow_mut()
-            .push(Diagnostic::new(code, path, Some(self.span), message));
+    fn error_at(
+        &mut self,
+        code: DiagnosticCode,
+        path: DiagnosticPath<'_>,
+        span: (usize, usize),
+        message: impl Into<String>,
+    ) {
+        self.diagnostics.push(Diagnostic::at(
+            code,
+            &path,
+            Some(SourceSpan::from_range(self.source, span.0..span.1)),
+            message,
+        ));
     }
 
-    fn keys(&self, table: &Table, allowed: &[&str], path: &DiagnosticPath) {
-        for key in table.keys() {
-            if !allowed.contains(&key.as_str()) {
-                self.error(
+    fn keys(&mut self, table: TableRef<'_, '_>, allowed: &[&str], path: &DiagnosticPath<'_>) {
+        for key in table.table.keys() {
+            let name = key.get_ref().as_ref();
+            if !allowed.contains(&name) {
+                let span = key.span();
+                self.error_at(
                     DiagnosticCode::UnknownField,
-                    path.key(key),
+                    path.key(name),
+                    (span.start, span.end),
                     "key is not part of SESSION_SCHEMA_VERSION_V1",
                 );
             }
         }
     }
 
-    fn required<'a>(
-        &self,
-        table: &'a Table,
+    fn reject_key(
+        &mut self,
+        table: TableRef<'_, '_>,
         key: &str,
-        path: &DiagnosticPath,
-    ) -> Option<&'a Value> {
-        match table.get(key) {
-            Some(value) => Some(value),
-            None => {
-                self.error(
-                    DiagnosticCode::MissingField,
-                    path.key(key),
-                    "required key is absent",
-                );
-                None
-            }
+        path: DiagnosticPath<'_>,
+        message: &str,
+    ) {
+        if let Some((actual, _)) = table
+            .table
+            .iter()
+            .find(|(actual, _)| actual.get_ref().as_ref() == key)
+        {
+            let span = actual.span();
+            self.error_at(
+                DiagnosticCode::UnknownField,
+                path,
+                (span.start, span.end),
+                message,
+            );
         }
     }
 
-    fn optional<'a>(&self, table: &'a Table, key: &str) -> Option<&'a Value> {
-        table.get(key)
+    fn error_field(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &str,
+        path: &DiagnosticPath<'_>,
+        code: DiagnosticCode,
+        message: &str,
+    ) {
+        let span = table.table.get(key).map_or(table.span, |value| {
+            let span = value.span();
+            (span.start, span.end)
+        });
+        self.error_at(code, path.key(key), span, message);
     }
 
-    fn table<'a>(&self, value: Option<&'a Value>, path: DiagnosticPath) -> Option<&'a Table> {
-        match value.and_then(Value::as_table) {
-            Some(table) => Some(table),
-            None => {
-                self.error(DiagnosticCode::WrongType, path, "expected TOML table");
-                None
-            }
-        }
+    fn missing<T>(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<T> {
+        self.error_at(
+            DiagnosticCode::MissingField,
+            path.key(key),
+            table.span,
+            "required key is absent",
+        );
+        None
     }
 
-    fn array<'a>(&self, value: Option<&'a Value>, path: DiagnosticPath) -> Option<&'a Vec<Value>> {
-        match value.and_then(Value::as_array) {
-            Some(array) => Some(array),
-            None => {
-                self.error(DiagnosticCode::WrongType, path, "expected TOML array");
-                None
+    fn table_value<'v, 'd>(
+        &mut self,
+        input: ValueRef<'v, 'd>,
+        path: DiagnosticPath<'_>,
+    ) -> Option<TableRef<'v, 'd>> {
+        let value = input;
+        match value.get_ref() {
+            DeValue::Table(table) => {
+                let span = value.span();
+                Some(TableRef {
+                    table,
+                    span: (span.start, span.end),
+                })
             }
-        }
-    }
-
-    fn string(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<String> {
-        match value.and_then(Value::as_str) {
-            Some(value) => Some(value.to_owned()),
-            None => {
-                self.error(DiagnosticCode::WrongType, path, "expected TOML string");
-                None
-            }
-        }
-    }
-
-    fn bool(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<bool> {
-        match value.and_then(Value::as_bool) {
-            Some(value) => Some(value),
-            None => {
-                self.error(DiagnosticCode::WrongType, path, "expected TOML boolean");
-                None
-            }
-        }
-    }
-
-    fn u64(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<u64> {
-        match value.and_then(Value::as_integer) {
-            Some(value) if value >= 0 => Some(value as u64),
-            Some(_) => {
-                self.error(
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    path,
-                    "expected a non-negative integer",
-                );
-                None
-            }
-            None => {
-                self.error(DiagnosticCode::WrongType, path, "expected TOML integer");
-                None
-            }
-        }
-    }
-
-    fn u32(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<u32> {
-        let value = self.u64(value, path.clone())?;
-        match u32::try_from(value) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                self.error(
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    path,
-                    "integer must fit u32",
-                );
-                None
-            }
-        }
-    }
-
-    fn u8(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<u8> {
-        let value = self.u64(value, path.clone())?;
-        match u8::try_from(value) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                self.error(
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    path,
-                    "integer must fit u8",
-                );
-                None
-            }
-        }
-    }
-
-    fn f32(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<f32> {
-        let value = match value {
-            Some(Value::Float(value)) => *value,
-            Some(Value::Integer(value)) => *value as f64,
             _ => {
-                self.error(
+                let span = value.span();
+                self.error_at(
                     DiagnosticCode::WrongType,
                     path,
-                    "expected TOML integer or float",
-                );
-                return None;
-            }
-        };
-        f32_value(
-            value,
-            path,
-            Some(self.span),
-            &mut self.diagnostics.borrow_mut(),
-        )
-    }
-
-    fn id(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<StableId> {
-        let value = self.string(value, path.clone())?;
-        match StableId::parse(&value) {
-            Some(value) => Some(value),
-            None => {
-                self.error(
-                    DiagnosticCode::InvalidId,
-                    path,
-                    "stable IDs must match [a-z][a-z0-9._-]{0,126}",
+                    (span.start, span.end),
+                    "expected TOML table",
                 );
                 None
             }
         }
     }
 
-    fn token(&self, value: Option<&Value>, path: DiagnosticPath) -> Option<String> {
-        self.string(value, path)
+    fn table<'v, 'd>(
+        &mut self,
+        table: TableRef<'v, 'd>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<TableRef<'v, 'd>> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        self.table_value(value, path.key(key))
+    }
+
+    fn array<'v, 'd>(
+        &mut self,
+        table: TableRef<'v, 'd>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<&'v [Value<'d>]> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        match value.get_ref() {
+            DeValue::Array(array) => Some(array),
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    path.key(key),
+                    value_span(value),
+                    "expected TOML array",
+                );
+                None
+            }
+        }
+    }
+
+    fn string_ref<'v, 'd>(
+        &mut self,
+        table: TableRef<'v, 'd>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<&'v str> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        match value.get_ref() {
+            DeValue::String(value) => Some(value.as_ref()),
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    path.key(key),
+                    value_span(value),
+                    "expected TOML string",
+                );
+                None
+            }
+        }
+    }
+
+    fn string(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<String> {
+        self.string_ref(table, key, path).map(str::to_owned)
+    }
+
+    fn bool(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<bool> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        match value.get_ref() {
+            DeValue::Boolean(value) => Some(*value),
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    path.key(key),
+                    value_span(value),
+                    "expected TOML boolean",
+                );
+                None
+            }
+        }
+    }
+
+    fn u64(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<u64> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        let span = value_span(value);
+        match value.get_ref() {
+            DeValue::Integer(integer) => match parse_i64_token(integer.as_str(), integer.radix()) {
+                Some(value) if value >= 0 => Some(value as u64),
+                Some(_) => {
+                    self.error_at(
+                        DiagnosticCode::NumericOutOfSchemaRange,
+                        path.key(key),
+                        span,
+                        "expected a non-negative integer",
+                    );
+                    None
+                }
+                None => {
+                    self.error_at(
+                        DiagnosticCode::NumericOutOfSchemaRange,
+                        path.key(key),
+                        span,
+                        "integer exceeds the TOML i64 range",
+                    );
+                    None
+                }
+            },
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    path.key(key),
+                    span,
+                    "expected TOML integer",
+                );
+                None
+            }
+        }
+    }
+
+    fn u32(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<u32> {
+        let value = self.u64(table, key, path)?;
+        u32::try_from(value).ok().or_else(|| {
+            self.error_field(
+                table,
+                key,
+                path,
+                DiagnosticCode::NumericOutOfSchemaRange,
+                "integer must fit u32",
+            );
+            None
+        })
+    }
+
+    fn u8(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<u8> {
+        let value = self.u64(table, key, path)?;
+        u8::try_from(value).ok().or_else(|| {
+            self.error_field(
+                table,
+                key,
+                path,
+                DiagnosticCode::NumericOutOfSchemaRange,
+                "integer must fit u8",
+            );
+            None
+        })
+    }
+
+    fn f32(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<f32> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        let field_path = path.key(key);
+        let span = value_span(value);
+        match value.get_ref() {
+            DeValue::Float(float) => match parse_f32_token(float.as_str()) {
+                F32Token::Value(value) => Some(value),
+                F32Token::NonFinite => {
+                    self.error_at(
+                        DiagnosticCode::NumericNonFinite,
+                        field_path,
+                        span,
+                        "value must be finite",
+                    );
+                    None
+                }
+                F32Token::NotRepresentable => {
+                    self.error_at(
+                        DiagnosticCode::NumericNotF32Representable,
+                        field_path,
+                        span,
+                        "value must be representable as f32",
+                    );
+                    None
+                }
+            },
+            DeValue::Integer(integer) => match parse_i64_token(integer.as_str(), integer.radix()) {
+                Some(value) => Some(value as f32),
+                None => {
+                    self.error_at(
+                        DiagnosticCode::NumericOutOfSchemaRange,
+                        field_path,
+                        span,
+                        "integer exceeds the TOML i64 range",
+                    );
+                    None
+                }
+            },
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    field_path,
+                    span,
+                    "expected TOML integer or float",
+                );
+                None
+            }
+        }
+    }
+
+    fn id(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<StableId> {
+        let field_path = path.key(key);
+        let span = table.table.get(key).map(value_span).unwrap_or(table.span);
+        let value = self.string_ref(table, key, path)?;
+        StableId::parse(value).or_else(|| {
+            self.error_at(
+                DiagnosticCode::InvalidId,
+                field_path,
+                span,
+                "stable IDs must match [a-z][a-z0-9._-]{0,126}",
+            );
+            None
+        })
+    }
+
+    fn token<'v, 'd>(
+        &mut self,
+        table: TableRef<'v, 'd>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<&'v str> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        match value.get_ref() {
+            DeValue::String(value) => Some(value.as_ref()),
+            _ => {
+                self.error_at(
+                    DiagnosticCode::WrongType,
+                    path.key(key),
+                    value_span(value),
+                    "expected TOML string",
+                );
+                None
+            }
+        }
+    }
+
+    fn closed_token<T: ClosedToken>(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+        code: DiagnosticCode,
+    ) -> Option<T> {
+        let token = self.token(table, key, path)?;
+        if let Some((value, _)) = T::ALL.iter().find(|(_, candidate)| *candidate == token) {
+            return Some(*value);
+        }
+        let mut allowed = String::new();
+        for (_, token) in T::ALL {
+            if !allowed.is_empty() {
+                allowed.push_str(", ");
+            }
+            allowed.push_str(token);
+        }
+        self.error_field(
+            table,
+            key,
+            path,
+            code,
+            &format!("expected one of: {allowed}"),
+        );
+        None
     }
 
     fn bounded(
-        &self,
-        value: Option<&Value>,
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
         minimum: f32,
         maximum: f32,
-        path: DiagnosticPath,
     ) -> Option<f32> {
-        let value = self.f32(value, path.clone())?;
-        bounded_f32(
-            value,
-            minimum,
-            maximum,
-            path,
-            Some(self.span),
-            &mut self.diagnostics.borrow_mut(),
-        )
+        let value = self.f32(table, key, path)?;
+        if value < minimum || value > maximum {
+            self.error_field(
+                table,
+                key,
+                path,
+                DiagnosticCode::NumericOutOfSchemaRange,
+                &format!("value must be in [{minimum}, {maximum}]"),
+            );
+            None
+        } else {
+            Some(value)
+        }
     }
 }
 
-/// Parse strict TOML 1.0 text into the V1 typed model.
+/// Parse TOML text (`toml_parser` 1.1 grammar) into the V1 typed model and validate it.
 pub fn parse_session_toml(source: &str) -> Result<SessionTomlV1, DiagnosticSet> {
-    let root = match toml::from_str::<Value>(source) {
+    let root = match DeTable::parse(source) {
         Ok(value) => value,
         Err(error) => {
+            let range = error.span().unwrap_or(0..source.len());
             return Err(DiagnosticSet::from_vec(vec![Diagnostic::new(
                 DiagnosticCode::TomlSyntax,
-                DiagnosticPath::root(),
-                Some(SourceSpan::whole(source)),
+                OwnedDiagnosticPath::root(),
+                Some(SourceSpan::from_range(source, range)),
                 error.to_string(),
             )]));
         }
     };
     let mut parser = Parser::new(source);
     let root_path = DiagnosticPath::root();
-    let model = parse_root(&mut parser, &root, root_path);
-    if parser.diagnostics.borrow().is_empty() {
+    let root_span = root.span();
+    let root_table = TableRef {
+        table: root.get_ref(),
+        span: (root_span.start, root_span.end),
+    };
+    let model = parse_root(&mut parser, root_table, root_path);
+    if parser.diagnostics.is_empty() {
         match model {
-            Some(model) => Ok(model),
+            Some(model) => match validate_session(&model) {
+                Ok(()) => Ok(model),
+                Err(errors) => Err(DiagnosticSet::from_vec(
+                    errors
+                        .diagnostics()
+                        .iter()
+                        .map(|diagnostic| {
+                            let range = span_for_path(&root, &diagnostic.path)
+                                .unwrap_or_else(|| root.span());
+                            Diagnostic::new(
+                                diagnostic.code,
+                                diagnostic.path.clone(),
+                                Some(SourceSpan::from_range(source, range)),
+                                diagnostic.message.clone(),
+                            )
+                        })
+                        .collect(),
+                )),
+            },
             None => Err(DiagnosticSet::from_vec(vec![Diagnostic::new(
                 DiagnosticCode::WrongType,
-                DiagnosticPath::root(),
+                OwnedDiagnosticPath::root(),
                 Some(SourceSpan::whole(source)),
                 "parser could not build a typed model",
             )])),
         }
     } else {
-        Err(DiagnosticSet::from_vec(parser.diagnostics.into_inner()))
+        Err(DiagnosticSet::from_vec(parser.diagnostics))
     }
 }
 
-fn parse_root(parser: &mut Parser, value: &Value, path: DiagnosticPath) -> Option<SessionTomlV1> {
-    let table = parser.table(Some(value), path.clone())?;
+fn span_for_path(root: &Spanned<DeTable<'_>>, path: &OwnedDiagnosticPath) -> Option<Range<usize>> {
+    enum Node<'a, 'i> {
+        Table(&'a DeTable<'i>),
+        Value(&'a Value<'i>),
+    }
+
+    let mut node = Node::Table(root.get_ref());
+    let mut resolved = root.span();
+    for segment in path.segments() {
+        let next = match (segment, node) {
+            (PathSegment::Field(field), Node::Table(table)) => table.get(field.as_str()),
+            (PathSegment::Field(field), Node::Value(value)) => match value.get_ref() {
+                DeValue::Table(table) => table.get(field.as_str()),
+                _ => None,
+            },
+            (PathSegment::Index(index), Node::Value(value)) => match value.get_ref() {
+                DeValue::Array(array) => array.get(*index),
+                _ => None,
+            },
+            (PathSegment::Id(_), _) | (PathSegment::Index(_), Node::Table(_)) => None,
+        };
+        let Some(value) = next else {
+            break;
+        };
+        resolved = value.span();
+        node = Node::Value(value);
+    }
+    Some(resolved)
+}
+
+fn parse_root(
+    parser: &mut Parser<'_>,
+    table: TableRef<'_, '_>,
+    path: DiagnosticPath<'_>,
+) -> Option<SessionTomlV1> {
+    let schema_path = path.key("schema_version");
+    if !table.table.contains_key("schema_version") {
+        parser.error_at(
+            DiagnosticCode::VersionMissing,
+            schema_path,
+            table.span,
+            "required schema version is absent",
+        );
+        return None;
+    }
+    let schema_version = parser.u32(table, "schema_version", &path)?;
+    if schema_version != SESSION_SCHEMA_VERSION_V1 {
+        let span = table
+            .table
+            .get("schema_version")
+            .map_or(table.span, |value| {
+                let span = value.span();
+                (span.start, span.end)
+            });
+        parser.error_at(
+            DiagnosticCode::VersionUnsupported,
+            schema_path,
+            span,
+            "only version 1 is accepted",
+        );
+        return None;
+    }
     parser.keys(
         table,
         &[
@@ -270,105 +612,20 @@ fn parse_root(parser: &mut Parser, value: &Value, path: DiagnosticPath) -> Optio
         ],
         &path,
     );
-    let schema_version = match table.get("schema_version") {
-        Some(value) => parser.u32(Some(value), path.key("schema_version")),
-        None => {
-            parser.error(
-                DiagnosticCode::VersionMissing,
-                path.key("schema_version"),
-                "required schema version is absent",
-            );
-            None
-        }
-    };
-    if schema_version.is_some_and(|version| version != SESSION_SCHEMA_VERSION_V1) {
-        parser.error(
-            DiagnosticCode::VersionUnsupported,
-            path.key("schema_version"),
-            "only version 1 is accepted",
-        );
-    }
-    let session_id = parser.id(
-        parser.required(table, "session_id", &path),
-        path.key("session_id"),
-    );
-    let revision = parser.u64(
-        parser.required(table, "revision", &path),
-        path.key("revision"),
-    );
-    let sample_rate_hz = parser.u32(
-        parser.required(table, "sample_rate_hz", &path),
-        path.key("sample_rate_hz"),
-    );
-    if sample_rate_hz.is_some_and(|rate| !is_launch_sample_rate(SampleRateHz(rate))) {
-        parser.error(
-            DiagnosticCode::SampleRateUnsupportedAtLaunch,
-            path.key("sample_rate_hz"),
-            "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
-        );
-    }
-    let quantum_frames = parser.u32(
-        parser.required(table, "quantum_frames", &path),
-        path.key("quantum_frames"),
-    );
-    if quantum_frames.is_some_and(|quantum| quantum == 0) {
-        parser.error(
-            DiagnosticCode::CapacityZero,
-            path.key("quantum_frames"),
-            "must be nonzero",
-        );
-    }
-    let render_profile = parse_render_profile(
-        parser,
-        parser.required(table, "render_profile", &path),
-        path.key("render_profile"),
-    );
-    let output_profile = parse_output_profile(
-        parser,
-        parser.required(table, "output_profile", &path),
-        path.key("output_profile"),
-    );
-    let limits = parse_limits(
-        parser,
-        parser.required(table, "limits", &path),
-        path.key("limits"),
-    );
-    let sources = parse_list(
-        parser,
-        parser.required(table, "sources", &path),
-        path.key("sources"),
-        parse_source,
-    );
-    let tracks = parse_list(
-        parser,
-        parser.required(table, "tracks", &path),
-        path.key("tracks"),
-        parse_track,
-    );
-    let submixes = parse_list(
-        parser,
-        parser.required(table, "submixes", &path),
-        path.key("submixes"),
-        parse_submix,
-    );
-    let outputs = parse_list(
-        parser,
-        parser.required(table, "outputs", &path),
-        path.key("outputs"),
-        parse_output,
-    );
-    let routes = parse_list(
-        parser,
-        parser.required(table, "routes", &path),
-        path.key("routes"),
-        parse_route,
-    );
-    let automation = parse_list(
-        parser,
-        parser.required(table, "automation", &path),
-        path.key("automation"),
-        parse_automation,
-    );
+    let schema_version = Some(schema_version);
+    let session_id = parser.id(table, "session_id", &path);
+    let revision = parser.u64(table, "revision", &path);
+    let sample_rate_hz = parser.u32(table, "sample_rate_hz", &path);
+    let quantum_frames = parser.u32(table, "quantum_frames", &path);
+    let render_profile = parse_record(parser, table, "render_profile", &path, parse_render_profile);
+    let output_profile = parse_record(parser, table, "output_profile", &path, parse_output_profile);
+    let limits = parse_record(parser, table, "limits", &path, parse_limits);
+    let sources = parse_list(parser, table, "sources", &path, parse_source);
+    let tracks = parse_list(parser, table, "tracks", &path, parse_track);
+    let submixes = parse_list(parser, table, "submixes", &path, parse_submix);
+    let outputs = parse_list(parser, table, "outputs", &path, parse_output);
+    let routes = parse_list(parser, table, "routes", &path, parse_route);
+    let automation = parse_list(parser, table, "automation", &path, parse_automation);
     match (
         schema_version,
         session_id,
@@ -422,27 +679,12 @@ fn parse_root(parser: &mut Parser, value: &Value, path: DiagnosticPath) -> Optio
 
 fn parse_render_profile(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<RenderProfile> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["id", "mode"], &path);
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let mode = match parser
-        .token(parser.required(table, "mode", &path), path.key("mode"))?
-        .as_str()
-    {
-        "single_thread" => Some(RenderMode::SingleThread),
-        "dependency_waves" => Some(RenderMode::DependencyWaves),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path.key("mode"),
-                "expected single_thread or dependency_waves",
-            );
-            None
-        }
-    };
+    let id = parser.id(table, "id", &path);
+    let mode = parser.closed_token(table, "mode", &path, DiagnosticCode::InvalidEnum);
     Some(RenderProfile {
         id: id?,
         mode: mode?,
@@ -451,40 +693,14 @@ fn parse_render_profile(
 
 fn parse_output_profile(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<OutputProfile> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["id", "channels", "sample_format"], &path);
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let channels = parser.u8(
-        parser.required(table, "channels", &path),
-        path.key("channels"),
-    );
-    if channels.is_some_and(|value| value != 2) {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path.key("channels"),
-            "V1 output must contain exactly two dual-mono channels",
-        );
-    }
-    let sample_format = match parser
-        .token(
-            parser.required(table, "sample_format", &path),
-            path.key("sample_format"),
-        )?
-        .as_str()
-    {
-        "f32_planar" => Some(SampleFormat::F32Planar),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path.key("sample_format"),
-                "expected f32_planar",
-            );
-            None
-        }
-    };
+    let id = parser.id(table, "id", &path);
+    let channels = parser.u8(table, "channels", &path);
+    let sample_format =
+        parser.closed_token(table, "sample_format", &path, DiagnosticCode::InvalidEnum);
     Some(OutputProfile {
         id: id?,
         channels: channels?,
@@ -494,40 +710,17 @@ fn parse_output_profile(
 
 fn parse_limits(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<SessionLimits> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &["pcm_ring_frames", "control_queue_messages", "memory_bytes"],
         &path,
     );
-    let pcm_ring_frames = parser.u64(
-        parser.required(table, "pcm_ring_frames", &path),
-        path.key("pcm_ring_frames"),
-    );
-    let control_queue_messages = parser.u64(
-        parser.required(table, "control_queue_messages", &path),
-        path.key("control_queue_messages"),
-    );
-    let memory_bytes = parser.u64(
-        parser.required(table, "memory_bytes", &path),
-        path.key("memory_bytes"),
-    );
-    for (key, value) in [
-        ("pcm_ring_frames", pcm_ring_frames),
-        ("control_queue_messages", control_queue_messages),
-        ("memory_bytes", memory_bytes),
-    ] {
-        if value.is_some_and(|value| value == 0) {
-            parser.error(
-                DiagnosticCode::CapacityZero,
-                path.key(key),
-                "must be nonzero",
-            );
-        }
-    }
+    let pcm_ring_frames = parser.u64(table, "pcm_ring_frames", &path);
+    let control_queue_messages = parser.u64(table, "control_queue_messages", &path);
+    let memory_bytes = parser.u64(table, "memory_bytes", &path);
     Some(SessionLimits {
         pcm_ring_frames: pcm_ring_frames?,
         control_queue_messages: control_queue_messages?,
@@ -535,16 +728,34 @@ fn parse_limits(
     })
 }
 
+fn parse_record<T>(
+    parser: &mut Parser,
+    parent: TableRef<'_, '_>,
+    key: &'static str,
+    path: &DiagnosticPath,
+    parse: fn(&mut Parser, TableRef<'_, '_>, DiagnosticPath) -> Option<T>,
+) -> Option<T> {
+    let child_path = path.key(key);
+    let table = parser.table(parent, key, path)?;
+    parse(parser, table, child_path)
+}
+
 fn parse_list<T>(
     parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-    parse: fn(&mut Parser, Option<&Value>, DiagnosticPath) -> Option<T>,
+    parent: TableRef<'_, '_>,
+    key: &'static str,
+    path: &DiagnosticPath,
+    parse: fn(&mut Parser, TableRef<'_, '_>, DiagnosticPath) -> Option<T>,
 ) -> Option<Vec<T>> {
-    let values = parser.array(value, path.clone())?;
+    let list_path = path.key(key);
+    let values = parser.array(parent, key, path)?;
     let mut output = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
-        if let Some(item) = parse(parser, Some(value), path.index(index)) {
+        let item_path = list_path.index(index);
+        let Some(table) = parser.table_value(value, item_path) else {
+            continue;
+        };
+        if let Some(item) = parse(parser, table, item_path) {
             output.push(item);
         }
     }
@@ -553,37 +764,18 @@ fn parse_list<T>(
 
 fn parse_source(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<Source> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &["id", "sample_rate_hz", "content", "mapping"],
         &path,
     );
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let sample_rate_hz = parser.u32(
-        parser.required(table, "sample_rate_hz", &path),
-        path.key("sample_rate_hz"),
-    );
-    if sample_rate_hz.is_some_and(|rate| rate == 0) {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path.key("sample_rate_hz"),
-            "declared source sample rate must be nonzero",
-        );
-    }
-    let content = parse_source_content(
-        parser,
-        parser.required(table, "content", &path),
-        path.key("content"),
-    );
-    let mapping = parse_source_mapping(
-        parser,
-        parser.required(table, "mapping", &path),
-        path.key("mapping"),
-    );
+    let id = parser.id(table, "id", &path);
+    let sample_rate_hz = parser.u32(table, "sample_rate_hz", &path);
+    let content = parse_record(parser, table, "content", &path, parse_source_content);
+    let mapping = parse_record(parser, table, "mapping", &path, parse_source_mapping);
     Some(Source {
         id: id?,
         sample_rate_hz: sample_rate_hz?,
@@ -594,33 +786,12 @@ fn parse_source(
 
 fn parse_source_content(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<SourceContent> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["identity", "locator"], &path);
-    let identity = parser.string(
-        parser.required(table, "identity", &path),
-        path.key("identity"),
-    );
-    let locator = parser.string(
-        parser.required(table, "locator", &path),
-        path.key("locator"),
-    );
-    if identity.as_ref().is_some_and(String::is_empty) {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path.key("identity"),
-            "must be nonempty",
-        );
-    }
-    if locator.as_ref().is_some_and(String::is_empty) {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path.key("locator"),
-            "must be nonempty",
-        );
-    }
+    let identity = parser.string(table, "identity", &path);
+    let locator = parser.string(table, "locator", &path);
     Some(SourceContent {
         identity: identity?,
         locator: locator?,
@@ -629,27 +800,12 @@ fn parse_source_content(
 
 fn parse_source_mapping(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<SourceMapping> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["channel_count", "region"], &path);
-    let channel_count = parser.u8(
-        parser.required(table, "channel_count", &path),
-        path.key("channel_count"),
-    );
-    if channel_count.is_some_and(|value| value == 0) {
-        parser.error(
-            DiagnosticCode::CapacityZero,
-            path.key("channel_count"),
-            "must be nonzero",
-        );
-    }
-    let region = parse_region(
-        parser,
-        parser.required(table, "region", &path),
-        path.key("region"),
-    );
+    let channel_count = parser.u8(table, "channel_count", &path);
+    let region = parse_record(parser, table, "region", &path, parse_region);
     Some(SourceMapping {
         channel_count: channel_count?,
         region: region?,
@@ -658,43 +814,23 @@ fn parse_source_mapping(
 
 fn parse_region(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<SourceRegion> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["start_sample", "length_samples"], &path);
-    let start_sample = parser.u64(
-        parser.required(table, "start_sample", &path),
-        path.key("start_sample"),
-    );
-    let length_samples = parser.u64(
-        parser.required(table, "length_samples", &path),
-        path.key("length_samples"),
-    );
-    if length_samples.is_some_and(|value| value == 0) {
-        parser.error(
-            DiagnosticCode::CapacityZero,
-            path.key("length_samples"),
-            "must be nonzero",
-        );
-    }
-    if let (Some(start), Some(length)) = (start_sample, length_samples)
-        && start.checked_add(length).is_none()
-    {
-        parser.error(
-            DiagnosticCode::SourceRegionOverflow,
-            path,
-            "source region endpoint overflows u64",
-        );
-    }
+    let start_sample = parser.u64(table, "start_sample", &path);
+    let length_samples = parser.u64(table, "length_samples", &path);
     Some(SourceRegion {
         start_sample: start_sample?,
         length_samples: length_samples?,
     })
 }
 
-fn parse_track(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath) -> Option<Track> {
-    let table = parser.table(value, path.clone())?;
+fn parse_track(
+    parser: &mut Parser,
+    table: TableRef<'_, '_>,
+    path: DiagnosticPath,
+) -> Option<Track> {
     parser.keys(
         table,
         &[
@@ -712,44 +848,15 @@ fn parse_track(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath)
         ],
         &path,
     );
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let source_id = parser.id(
-        parser.required(table, "source_id", &path),
-        path.key("source_id"),
-    );
-    let left_source_channel = parser.u8(
-        parser.required(table, "left_source_channel", &path),
-        path.key("left_source_channel"),
-    );
-    let right_source_channel = parser.u8(
-        parser.required(table, "right_source_channel", &path),
-        path.key("right_source_channel"),
-    );
-    let builtins = parse_builtins(
-        parser,
-        parser.required(table, "builtins", &path),
-        path.key("builtins"),
-    );
-    let simd1 = parse_rack(
-        parser,
-        parser.required(table, "simd1", &path),
-        path.key("simd1"),
-    );
-    let dynamic = parse_rack(
-        parser,
-        parser.required(table, "dynamic", &path),
-        path.key("dynamic"),
-    );
-    let simd2 = parse_rack(
-        parser,
-        parser.required(table, "simd2", &path),
-        path.key("simd2"),
-    );
-    let fader = parse_fader(
-        parser,
-        parser.required(table, "fader", &path),
-        path.key("fader"),
-    );
+    let id = parser.id(table, "id", &path);
+    let source_id = parser.id(table, "source_id", &path);
+    let left_source_channel = parser.u8(table, "left_source_channel", &path);
+    let right_source_channel = parser.u8(table, "right_source_channel", &path);
+    let builtins = parse_record(parser, table, "builtins", &path, parse_builtins);
+    let simd1 = parse_record(parser, table, "simd1", &path, parse_rack);
+    let dynamic = parse_record(parser, table, "dynamic", &path, parse_rack);
+    let simd2 = parse_record(parser, table, "simd2", &path, parse_rack);
+    let fader = parse_record(parser, table, "fader", &path, parse_fader);
     let matrix_or_pan = parse_matrix_or_pan(parser, table, &path);
     Some(Track {
         id: id?,
@@ -767,21 +874,12 @@ fn parse_track(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath)
 
 fn parse_builtins(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<DualMonoBuiltins> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["left", "right"], &path);
-    let left = parse_channel_builtins(
-        parser,
-        parser.required(table, "left", &path),
-        path.key("left"),
-    );
-    let right = parse_channel_builtins(
-        parser,
-        parser.required(table, "right", &path),
-        path.key("right"),
-    );
+    let left = parse_record(parser, table, "left", &path, parse_channel_builtins);
+    let right = parse_record(parser, table, "right", &path, parse_channel_builtins);
     Some(DualMonoBuiltins {
         left: left?,
         right: right?,
@@ -790,34 +888,18 @@ fn parse_builtins(
 
 fn parse_channel_builtins(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<ChannelBuiltins> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &["polarity_invert", "trim_db", "hpf_hz", "lpf_hz"],
         &path,
     );
-    let polarity_invert = parser.bool(
-        parser.required(table, "polarity_invert", &path),
-        path.key("polarity_invert"),
-    );
-    let trim_db = parser.f32(
-        parser.required(table, "trim_db", &path),
-        path.key("trim_db"),
-    );
-    let hpf_hz = parser.f32(parser.required(table, "hpf_hz", &path), path.key("hpf_hz"));
-    let lpf_hz = parser.f32(parser.required(table, "lpf_hz", &path), path.key("lpf_hz"));
-    for (field, value) in [("hpf_hz", hpf_hz), ("lpf_hz", lpf_hz)] {
-        if value.is_some_and(|value| value < 0.0) {
-            parser.error(
-                DiagnosticCode::NumericOutOfSchemaRange,
-                path.key(field),
-                "frequency must be non-negative",
-            );
-        }
-    }
+    let polarity_invert = parser.bool(table, "polarity_invert", &path);
+    let trim_db = parser.f32(table, "trim_db", &path);
+    let hpf_hz = parser.f32(table, "hpf_hz", &path);
+    let lpf_hz = parser.f32(table, "lpf_hz", &path);
     Some(ChannelBuiltins {
         polarity_invert: polarity_invert?,
         trim_db: trim_db?,
@@ -826,24 +908,17 @@ fn parse_channel_builtins(
     })
 }
 
-fn parse_rack(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath) -> Option<Rack> {
-    let table = parser.table(value, path.clone())?;
+fn parse_rack(parser: &mut Parser, table: TableRef<'_, '_>, path: DiagnosticPath) -> Option<Rack> {
     parser.keys(table, &["effects"], &path);
-    let effects = parse_list(
-        parser,
-        parser.required(table, "effects", &path),
-        path.key("effects"),
-        parse_effect,
-    );
+    let effects = parse_list(parser, table, "effects", &path, parse_effect);
     Some(Rack { effects: effects? })
 }
 
 fn parse_effect(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<Effect> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &[
@@ -857,34 +932,13 @@ fn parse_effect(
         ],
         &path,
     );
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let identity = parse_effect_identity(
-        parser,
-        parser.required(table, "identity", &path),
-        path.key("identity"),
-    );
-    let quality = parse_quality(
-        parser,
-        parser.required(table, "quality", &path),
-        path.key("quality"),
-    );
-    let bypass = parser.bool(parser.required(table, "bypass", &path), path.key("bypass"));
-    let link_mode = parse_link_mode(
-        parser,
-        parser.required(table, "link_mode", &path),
-        path.key("link_mode"),
-    );
-    let params = parse_list(
-        parser,
-        parser.required(table, "params", &path),
-        path.key("params"),
-        parse_param,
-    );
-    let sidechain = parse_sidechain(
-        parser,
-        parser.required(table, "sidechain", &path),
-        path.key("sidechain"),
-    );
+    let id = parser.id(table, "id", &path);
+    let identity = parse_record(parser, table, "identity", &path, parse_effect_identity);
+    let quality = parser.closed_token(table, "quality", &path, DiagnosticCode::InvalidEnum);
+    let bypass = parser.bool(table, "bypass", &path);
+    let link_mode = parser.closed_token(table, "link_mode", &path, DiagnosticCode::InvalidEnum);
+    let params = parse_list(parser, table, "params", &path, parse_param);
+    let sidechain = parse_record(parser, table, "sidechain", &path, parse_sidechain);
     Some(Effect {
         id: id?,
         identity: identity?,
@@ -898,94 +952,40 @@ fn parse_effect(
 
 fn parse_effect_identity(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<EffectIdentity> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["kind", "effect_id", "cid"], &path);
-    match parser
-        .token(parser.required(table, "kind", &path), path.key("kind"))?
-        .as_str()
-    {
+    match parser.token(table, "kind", &path)? {
         "native" => {
-            if table.contains_key("cid") {
-                parser.error(
-                    DiagnosticCode::UnknownField,
-                    path.key("cid"),
-                    "native effect identity cannot contain cid",
-                );
-            }
-            let effect_id = parser.id(
-                parser.required(table, "effect_id", &path),
-                path.key("effect_id"),
+            parser.reject_key(
+                table,
+                "cid",
+                path.key("cid"),
+                "native effect identity cannot contain cid",
             );
+            let effect_id = parser.id(table, "effect_id", &path);
             Some(EffectIdentity::Native {
                 effect_id: effect_id?,
             })
         }
         "cid" => {
-            if table.contains_key("effect_id") {
-                parser.error(
-                    DiagnosticCode::UnknownField,
-                    path.key("effect_id"),
-                    "CID effect identity cannot contain effect_id",
-                );
-            }
-            let cid = parser.string(parser.required(table, "cid", &path), path.key("cid"));
-            if cid.as_ref().is_some_and(String::is_empty) {
-                parser.error(
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    path.key("cid"),
-                    "must be nonempty",
-                );
-            }
+            parser.reject_key(
+                table,
+                "effect_id",
+                path.key("effect_id"),
+                "CID effect identity cannot contain effect_id",
+            );
+            let cid = parser.string(table, "cid", &path);
             Some(EffectIdentity::ThirdPartyCid { cid: cid? })
         }
         _ => {
-            parser.error(
+            parser.error_field(
+                table,
+                "kind",
+                &path,
                 DiagnosticCode::InvalidEnum,
-                path.key("kind"),
                 "expected native or cid",
-            );
-            None
-        }
-    }
-}
-
-fn parse_quality(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<EffectQuality> {
-    match parser.token(value, path.clone())?.as_str() {
-        "draft" => Some(EffectQuality::Draft),
-        "normal" => Some(EffectQuality::Normal),
-        "high" => Some(EffectQuality::High),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path,
-                "expected draft, normal, or high",
-            );
-            None
-        }
-    }
-}
-
-fn parse_link_mode(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<LinkMode> {
-    match parser.token(value, path.clone())?.as_str() {
-        "dual_mono" => Some(LinkMode::DualMono),
-        "maximum" => Some(LinkMode::Maximum),
-        "average" => Some(LinkMode::Average),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path,
-                "expected dual_mono, maximum, or average",
             );
             None
         }
@@ -994,27 +994,14 @@ fn parse_link_mode(
 
 fn parse_param(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<EffectParam> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["parameter_id", "channel", "unit", "value"], &path);
-    let parameter_id = parser.u32(
-        parser.required(table, "parameter_id", &path),
-        path.key("parameter_id"),
-    );
-    let channel = parse_parameter_channel(
-        parser,
-        parser.required(table, "channel", &path),
-        path.key("channel"),
-    );
-    let unit = parse_unit(
-        parser,
-        parser.required(table, "unit", &path),
-        path.key("unit"),
-    );
-    let value = parser.f32(parser.required(table, "value", &path), path.key("value"));
-    let value = validate_parameter_value(parser, value, unit, path.key("value"));
+    let parameter_id = parser.u32(table, "parameter_id", &path);
+    let channel = parser.closed_token(table, "channel", &path, DiagnosticCode::InvalidEnum);
+    let unit = parser.closed_token(table, "unit", &path, DiagnosticCode::UnitInvalid);
+    let value = parser.f32(table, "value", &path);
     Some(EffectParam {
         parameter_id: parameter_id?,
         channel: channel?,
@@ -1023,122 +1010,34 @@ fn parse_param(
     })
 }
 
-fn parse_parameter_channel(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<ParameterChannel> {
-    match parser.token(value, path.clone())?.as_str() {
-        "left" => Some(ParameterChannel::Left),
-        "right" => Some(ParameterChannel::Right),
-        "both" => Some(ParameterChannel::Both),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path,
-                "expected left, right, or both",
-            );
-            None
-        }
-    }
-}
-
-fn parse_unit(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<ParameterUnit> {
-    match parser.token(value, path.clone())?.as_str() {
-        "db" => Some(ParameterUnit::Db),
-        "hz" => Some(ParameterUnit::Hz),
-        "milliseconds" => Some(ParameterUnit::Milliseconds),
-        "samples" => Some(ParameterUnit::Samples),
-        "linear" => Some(ParameterUnit::Linear),
-        "ratio" => Some(ParameterUnit::Ratio),
-        _ => {
-            parser.error(
-                DiagnosticCode::UnitInvalid,
-                path,
-                "expected db, hz, milliseconds, samples, linear, or ratio",
-            );
-            None
-        }
-    }
-}
-
-fn validate_parameter_value(
-    parser: &mut Parser,
-    value: Option<f32>,
-    unit: Option<ParameterUnit>,
-    path: DiagnosticPath,
-) -> Option<f32> {
-    let value = value?;
-    let unit = unit?;
-    if matches!(
-        unit,
-        ParameterUnit::Hz
-            | ParameterUnit::Milliseconds
-            | ParameterUnit::Samples
-            | ParameterUnit::Ratio
-    ) && value < 0.0
-    {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path.clone(),
-            "unit requires a non-negative value",
-        );
-        return None;
-    }
-    if unit == ParameterUnit::Samples && value.fract() != 0.0 {
-        parser.error(
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path,
-            "samples must be integral",
-        );
-        None
-    } else {
-        Some(value)
-    }
-}
-
 fn parse_sidechain(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<SidechainDeclaration> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["kind", "source", "port_id"], &path);
-    match parser
-        .token(parser.required(table, "kind", &path), path.key("kind"))?
-        .as_str()
-    {
+    match parser.token(table, "kind", &path)? {
         "none" => {
             for key in ["source", "port_id"] {
-                if table.contains_key(key) {
-                    parser.error(
-                        DiagnosticCode::UnknownField,
-                        path.key(key),
-                        "none sidechain cannot contain routing fields",
-                    );
-                }
+                parser.reject_key(
+                    table,
+                    key,
+                    path.key(key),
+                    "none sidechain cannot contain routing fields",
+                );
             }
             Some(SidechainDeclaration::None)
         }
         "routed" => Some(SidechainDeclaration::Routed(Sidechain {
-            source: parse_route_source(
-                parser,
-                parser.required(table, "source", &path),
-                path.key("source"),
-            )?,
-            port_id: parser.id(
-                parser.required(table, "port_id", &path),
-                path.key("port_id"),
-            )?,
+            source: parse_record(parser, table, "source", &path, parse_route_source)?,
+            port_id: parser.id(table, "port_id", &path)?,
         })),
         _ => {
-            parser.error(
+            parser.error_field(
+                table,
+                "kind",
+                &path,
                 DiagnosticCode::InvalidEnum,
-                path.key("kind"),
                 "expected none or routed",
             );
             None
@@ -1148,31 +1047,18 @@ fn parse_sidechain(
 
 fn parse_fader(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<DualMonoFader> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &["left_db", "right_db", "left_mute", "right_mute"],
         &path,
     );
-    let left_db = parser.f32(
-        parser.required(table, "left_db", &path),
-        path.key("left_db"),
-    );
-    let right_db = parser.f32(
-        parser.required(table, "right_db", &path),
-        path.key("right_db"),
-    );
-    let left_mute = parser.bool(
-        parser.required(table, "left_mute", &path),
-        path.key("left_mute"),
-    );
-    let right_mute = parser.bool(
-        parser.required(table, "right_mute", &path),
-        path.key("right_mute"),
-    );
+    let left_db = parser.f32(table, "left_db", &path);
+    let right_db = parser.f32(table, "right_db", &path);
+    let left_mute = parser.bool(table, "left_mute", &path);
+    let right_mute = parser.bool(table, "right_mute", &path);
     Some(DualMonoFader {
         left_db: left_db?,
         right_db: right_db?,
@@ -1183,49 +1069,35 @@ fn parse_fader(
 
 fn parse_matrix_or_pan(
     parser: &mut Parser,
-    table: &Table,
+    table: TableRef<'_, '_>,
     path: &DiagnosticPath,
 ) -> Option<MatrixOrPan> {
-    match (
-        parser.optional(table, "pan"),
-        parser.optional(table, "matrix"),
-    ) {
+    match (table.table.get("pan"), table.table.get("matrix")) {
         (Some(_), Some(_)) => {
-            parser.error(
+            parser.error_at(
                 DiagnosticCode::WrongType,
-                path.clone(),
+                *path,
+                table.span,
                 "exactly one of pan or matrix is required",
             );
             None
         }
         (None, None) => {
-            parser.error(
+            parser.error_at(
                 DiagnosticCode::MissingField,
-                path.clone(),
+                *path,
+                table.span,
                 "exactly one of pan or matrix is required",
             );
             None
         }
         (Some(value), None) => {
             let pan_path = path.key("pan");
-            let pan = parser.table(Some(value), pan_path.clone())?;
+            let pan = parser.table_value(value, pan_path)?;
             parser.keys(pan, &["left", "right", "smoothing_samples"], &pan_path);
-            let left = parser.bounded(
-                parser.required(pan, "left", &pan_path),
-                -1.0,
-                1.0,
-                pan_path.key("left"),
-            );
-            let right = parser.bounded(
-                parser.required(pan, "right", &pan_path),
-                -1.0,
-                1.0,
-                pan_path.key("right"),
-            );
-            let smoothing_samples = parser.u32(
-                parser.required(pan, "smoothing_samples", &pan_path),
-                pan_path.key("smoothing_samples"),
-            );
+            let left = parser.bounded(pan, "left", &pan_path, -1.0, 1.0);
+            let right = parser.bounded(pan, "right", &pan_path, -1.0, 1.0);
+            let smoothing_samples = parser.u32(pan, "smoothing_samples", &pan_path);
             Some(MatrixOrPan::Pan {
                 left: left?,
                 right: right?,
@@ -1234,32 +1106,17 @@ fn parse_matrix_or_pan(
         }
         (None, Some(value)) => {
             let matrix_path = path.key("matrix");
-            let matrix = parser.table(Some(value), matrix_path.clone())?;
+            let matrix = parser.table_value(value, matrix_path)?;
             parser.keys(
                 matrix,
                 &["ll", "lr", "rl", "rr", "smoothing_samples"],
                 &matrix_path,
             );
-            let ll = parser.f32(
-                parser.required(matrix, "ll", &matrix_path),
-                matrix_path.key("ll"),
-            );
-            let lr = parser.f32(
-                parser.required(matrix, "lr", &matrix_path),
-                matrix_path.key("lr"),
-            );
-            let rl = parser.f32(
-                parser.required(matrix, "rl", &matrix_path),
-                matrix_path.key("rl"),
-            );
-            let rr = parser.f32(
-                parser.required(matrix, "rr", &matrix_path),
-                matrix_path.key("rr"),
-            );
-            let smoothing_samples = parser.u32(
-                parser.required(matrix, "smoothing_samples", &matrix_path),
-                matrix_path.key("smoothing_samples"),
-            );
+            let ll = parser.f32(matrix, "ll", &matrix_path);
+            let lr = parser.f32(matrix, "lr", &matrix_path);
+            let rl = parser.f32(matrix, "rl", &matrix_path);
+            let rr = parser.f32(matrix, "rr", &matrix_path);
+            let smoothing_samples = parser.u32(matrix, "smoothing_samples", &matrix_path);
             Some(MatrixOrPan::Matrix {
                 ll: ll?,
                 lr: lr?,
@@ -1273,55 +1130,41 @@ fn parse_matrix_or_pan(
 
 fn parse_submix(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<Submix> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["id"], &path);
     Some(Submix {
-        id: parser.id(parser.required(table, "id", &path), path.key("id"))?,
+        id: parser.id(table, "id", &path)?,
     })
 }
 
 fn parse_output(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<Output> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["id"], &path);
     Some(Output {
-        id: parser.id(parser.required(table, "id", &path), path.key("id"))?,
+        id: parser.id(table, "id", &path)?,
     })
 }
 
-fn parse_route(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath) -> Option<Route> {
-    let table = parser.table(value, path.clone())?;
+fn parse_route(
+    parser: &mut Parser,
+    table: TableRef<'_, '_>,
+    path: DiagnosticPath,
+) -> Option<Route> {
     parser.keys(
         table,
         &["id", "source", "destination", "channel_matrix", "gain_db"],
         &path,
     );
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let source = parse_route_source(
-        parser,
-        parser.required(table, "source", &path),
-        path.key("source"),
-    );
-    let destination = parse_route_destination(
-        parser,
-        parser.required(table, "destination", &path),
-        path.key("destination"),
-    );
-    let channel_matrix = parse_channel_matrix(
-        parser,
-        parser.required(table, "channel_matrix", &path),
-        path.key("channel_matrix"),
-    );
-    let gain_db = parser.f32(
-        parser.required(table, "gain_db", &path),
-        path.key("gain_db"),
-    );
+    let id = parser.id(table, "id", &path);
+    let source = parse_record(parser, table, "source", &path, parse_route_source);
+    let destination = parse_record(parser, table, "destination", &path, parse_route_destination);
+    let channel_matrix = parse_record(parser, table, "channel_matrix", &path, parse_channel_matrix);
+    let gain_db = parser.f32(table, "gain_db", &path);
     Some(Route {
         id: id?,
         source: source?,
@@ -1333,56 +1176,42 @@ fn parse_route(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath)
 
 fn parse_route_source(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<RouteSource> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["kind", "track_id", "tap", "submix_id"], &path);
-    match parser
-        .token(parser.required(table, "kind", &path), path.key("kind"))?
-        .as_str()
-    {
+    match parser.token(table, "kind", &path)? {
         "track" => {
-            if table.contains_key("submix_id") {
-                parser.error(
-                    DiagnosticCode::UnknownField,
-                    path.key("submix_id"),
-                    "track source cannot contain submix_id",
-                );
-            }
+            parser.reject_key(
+                table,
+                "submix_id",
+                path.key("submix_id"),
+                "track source cannot contain submix_id",
+            );
             Some(RouteSource::Track {
-                track_id: parser.id(
-                    parser.required(table, "track_id", &path),
-                    path.key("track_id"),
-                )?,
-                tap: parse_tap(
-                    parser,
-                    parser.required(table, "tap", &path),
-                    path.key("tap"),
-                )?,
+                track_id: parser.id(table, "track_id", &path)?,
+                tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
         "submix_output" => {
             for key in ["track_id", "tap"] {
-                if table.contains_key(key) {
-                    parser.error(
-                        DiagnosticCode::UnknownField,
-                        path.key(key),
-                        "submix_output source cannot contain track fields",
-                    );
-                }
+                parser.reject_key(
+                    table,
+                    key,
+                    path.key(key),
+                    "submix_output source cannot contain track fields",
+                );
             }
             Some(RouteSource::SubmixOutput {
-                submix_id: parser.id(
-                    parser.required(table, "submix_id", &path),
-                    path.key("submix_id"),
-                )?,
+                submix_id: parser.id(table, "submix_id", &path)?,
             })
         }
         _ => {
-            parser.error(
+            parser.error_field(
+                table,
+                "kind",
+                &path,
                 DiagnosticCode::InvalidEnum,
-                path.key("kind"),
                 "expected track or submix_output",
             );
             None
@@ -1392,49 +1221,39 @@ fn parse_route_source(
 
 fn parse_route_destination(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<RouteDestination> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["kind", "submix_id", "output_id"], &path);
-    match parser
-        .token(parser.required(table, "kind", &path), path.key("kind"))?
-        .as_str()
-    {
+    match parser.token(table, "kind", &path)? {
         "submix_input" => {
-            if table.contains_key("output_id") {
-                parser.error(
-                    DiagnosticCode::UnknownField,
-                    path.key("output_id"),
-                    "submix_input cannot contain output_id",
-                );
-            }
+            parser.reject_key(
+                table,
+                "output_id",
+                path.key("output_id"),
+                "submix_input cannot contain output_id",
+            );
             Some(RouteDestination::SubmixInput {
-                submix_id: parser.id(
-                    parser.required(table, "submix_id", &path),
-                    path.key("submix_id"),
-                )?,
+                submix_id: parser.id(table, "submix_id", &path)?,
             })
         }
         "output_input" => {
-            if table.contains_key("submix_id") {
-                parser.error(
-                    DiagnosticCode::UnknownField,
-                    path.key("submix_id"),
-                    "output_input cannot contain submix_id",
-                );
-            }
+            parser.reject_key(
+                table,
+                "submix_id",
+                path.key("submix_id"),
+                "output_input cannot contain submix_id",
+            );
             Some(RouteDestination::OutputInput {
-                output_id: parser.id(
-                    parser.required(table, "output_id", &path),
-                    path.key("output_id"),
-                )?,
+                output_id: parser.id(table, "output_id", &path)?,
             })
         }
         _ => {
-            parser.error(
+            parser.error_field(
+                table,
+                "kind",
+                &path,
                 DiagnosticCode::InvalidEnum,
-                path.key("kind"),
                 "expected submix_input or output_input",
             );
             None
@@ -1444,15 +1263,14 @@ fn parse_route_destination(
 
 fn parse_channel_matrix(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<ChannelMatrix> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["ll", "lr", "rl", "rr"], &path);
-    let ll = parser.f32(parser.required(table, "ll", &path), path.key("ll"));
-    let lr = parser.f32(parser.required(table, "lr", &path), path.key("lr"));
-    let rl = parser.f32(parser.required(table, "rl", &path), path.key("rl"));
-    let rr = parser.f32(parser.required(table, "rr", &path), path.key("rr"));
+    let ll = parser.f32(table, "ll", &path);
+    let lr = parser.f32(table, "lr", &path);
+    let rl = parser.f32(table, "rl", &path);
+    let rr = parser.f32(table, "rr", &path);
     Some(ChannelMatrix {
         ll: ll?,
         lr: lr?,
@@ -1461,41 +1279,15 @@ fn parse_channel_matrix(
     })
 }
 
-fn parse_tap(parser: &mut Parser, value: Option<&Value>, path: DiagnosticPath) -> Option<SendTap> {
-    match parser.token(value, path.clone())?.as_str() {
-        "input" => Some(SendTap::Input),
-        "post_input_builtins" => Some(SendTap::PostInputBuiltins),
-        "post_simd1" => Some(SendTap::PostSimd1),
-        "post_dynamic" => Some(SendTap::PostDynamic),
-        "post_simd2_pre_fader" => Some(SendTap::PostSimd2PreFader),
-        "post_fader" => Some(SendTap::PostFader),
-        "post_matrix" => Some(SendTap::PostMatrix),
-        _ => {
-            parser.error(DiagnosticCode::InvalidEnum, path, "invalid send tap");
-            None
-        }
-    }
-}
-
 fn parse_automation(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<Automation> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(table, &["id", "target", "segments"], &path);
-    let id = parser.id(parser.required(table, "id", &path), path.key("id"));
-    let target = parse_target(
-        parser,
-        parser.required(table, "target", &path),
-        path.key("target"),
-    );
-    let segments = parse_list(
-        parser,
-        parser.required(table, "segments", &path),
-        path.key("segments"),
-        parse_segment,
-    );
+    let id = parser.id(table, "id", &path);
+    let target = parse_record(parser, table, "target", &path, parse_target);
+    let segments = parse_list(parser, table, "segments", &path, parse_segment);
     Some(Automation {
         id: id?,
         target: target?,
@@ -1505,37 +1297,19 @@ fn parse_automation(
 
 fn parse_target(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<AutomationTarget> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &["entity_id", "rack", "effect_id", "parameter_id", "channel"],
         &path,
     );
-    let entity_id = parser.id(
-        parser.required(table, "entity_id", &path),
-        path.key("entity_id"),
-    );
-    let rack = parse_rack_name(
-        parser,
-        parser.required(table, "rack", &path),
-        path.key("rack"),
-    );
-    let effect_id = parser.id(
-        parser.required(table, "effect_id", &path),
-        path.key("effect_id"),
-    );
-    let parameter_id = parser.u32(
-        parser.required(table, "parameter_id", &path),
-        path.key("parameter_id"),
-    );
-    let channel = parse_parameter_channel(
-        parser,
-        parser.required(table, "channel", &path),
-        path.key("channel"),
-    );
+    let entity_id = parser.id(table, "entity_id", &path);
+    let rack = parser.closed_token(table, "rack", &path, DiagnosticCode::InvalidEnum);
+    let effect_id = parser.id(table, "effect_id", &path);
+    let parameter_id = parser.u32(table, "parameter_id", &path);
+    let channel = parser.closed_token(table, "channel", &path, DiagnosticCode::InvalidEnum);
     Some(AutomationTarget {
         entity_id: entity_id?,
         rack: rack?,
@@ -1545,32 +1319,11 @@ fn parse_target(
     })
 }
 
-fn parse_rack_name(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<RackName> {
-    match parser.token(value, path.clone())?.as_str() {
-        "simd1" => Some(RackName::Simd1),
-        "dynamic" => Some(RackName::Dynamic),
-        "simd2" => Some(RackName::Simd2),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path,
-                "expected simd1, dynamic, or simd2",
-            );
-            None
-        }
-    }
-}
-
 fn parse_segment(
     parser: &mut Parser,
-    value: Option<&Value>,
+    table: TableRef<'_, '_>,
     path: DiagnosticPath,
 ) -> Option<AutomationSegment> {
-    let table = parser.table(value, path.clone())?;
     parser.keys(
         table,
         &[
@@ -1583,53 +1336,12 @@ fn parse_segment(
         ],
         &path,
     );
-    let shape = parse_shape(
-        parser,
-        parser.required(table, "shape", &path),
-        path.key("shape"),
-    );
-    let start_sample = parser.u64(
-        parser.required(table, "start_sample", &path),
-        path.key("start_sample"),
-    );
-    let end_sample = parser.u64(
-        parser.required(table, "end_sample", &path),
-        path.key("end_sample"),
-    );
-    let start_value = parser.f32(
-        parser.required(table, "start_value", &path),
-        path.key("start_value"),
-    );
-    let end_value = parser.f32(
-        parser.required(table, "end_value", &path),
-        path.key("end_value"),
-    );
-    let unit = parse_unit(
-        parser,
-        parser.required(table, "unit", &path),
-        path.key("unit"),
-    );
-    let start_value = validate_parameter_value(parser, start_value, unit, path.key("start_value"));
-    let end_value = validate_parameter_value(parser, end_value, unit, path.key("end_value"));
-    if let (Some(start), Some(end)) = (start_sample, end_sample)
-        && start >= end
-    {
-        parser.error(
-            DiagnosticCode::AutomationInvalidRange,
-            path.key("end_sample"),
-            "start_sample must precede end_sample",
-        );
-    }
-    if shape == Some(AutomationShape::Exponential)
-        && (start_value.is_some_and(|value| value <= 0.0)
-            || end_value.is_some_and(|value| value <= 0.0))
-    {
-        parser.error(
-            DiagnosticCode::AutomationInvalidRange,
-            path.clone(),
-            "exponential values must be positive",
-        );
-    }
+    let shape = parser.closed_token(table, "shape", &path, DiagnosticCode::InvalidEnum);
+    let start_sample = parser.u64(table, "start_sample", &path);
+    let end_sample = parser.u64(table, "end_sample", &path);
+    let start_value = parser.f32(table, "start_value", &path);
+    let end_value = parser.f32(table, "end_value", &path);
+    let unit = parser.closed_token(table, "unit", &path, DiagnosticCode::UnitInvalid);
     Some(AutomationSegment {
         shape: shape?,
         start_sample: start_sample?,
@@ -1638,24 +1350,4 @@ fn parse_segment(
         end_value: end_value?,
         unit: unit?,
     })
-}
-
-fn parse_shape(
-    parser: &mut Parser,
-    value: Option<&Value>,
-    path: DiagnosticPath,
-) -> Option<AutomationShape> {
-    match parser.token(value, path.clone())?.as_str() {
-        "step" => Some(AutomationShape::Step),
-        "linear" => Some(AutomationShape::Linear),
-        "exponential" => Some(AutomationShape::Exponential),
-        _ => {
-            parser.error(
-                DiagnosticCode::InvalidEnum,
-                path,
-                "expected step, linear, or exponential",
-            );
-            None
-        }
-    }
 }

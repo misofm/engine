@@ -2,7 +2,8 @@
 //!
 //! This crate deliberately does **not** prepare, publish, or otherwise own a realtime render
 //! plan.  It accepts complete declarative input, validates only the semantics owned by issue 004,
-//! and returns an immutable non-publishable compilation artifact for later compiler issues.
+//! and returns an immutable non-publishable compilation artifact for later compiler issues. The
+//! [`VisitModel`] API exposes one schema-keyed emit-side walk for canonical and wire consumers.
 
 mod canonical;
 mod compile;
@@ -13,6 +14,7 @@ mod model;
 mod parse;
 mod validate;
 mod value;
+mod visit;
 
 pub use canonical::canonical_session_toml;
 pub use compile::{CompileCaps, CompiledSession, OutputShape, compile_session};
@@ -23,6 +25,7 @@ pub use estimate::{ResourceEstimate, estimate_session_resources};
 pub use id::StableId;
 pub use model::*;
 pub use parse::parse_session_toml;
+pub use visit::{FieldKey, ModelVisitor, Token, VisitModel, WalkOrder, keys};
 
 /// The only schema version accepted by [`parse_session_toml`].
 pub const SESSION_SCHEMA_VERSION_V1: u32 = 1;

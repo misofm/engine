@@ -1,6 +1,10 @@
 # Session schema V1
 
-`miso-engine-session` accepts strict TOML 1.0 and requires the root keys, in canonical order,
+`miso-engine-session` accepts the grammar implemented by `toml_parser 1.1.3+spec-1.1.0`,
+including trailing commas/newlines in inline tables and the `\e` and `\xHH` basic-string escapes.
+Its canonical writer deliberately emits a TOML 1.0 subset: bare keys, basic strings, decimal
+integers, decimal floats without exponents, booleans, inline tables, and arrays. The schema
+requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
 `output_profile`, `limits`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`.
 Every table rejects unknown keys and every field is explicit, including empty arrays and
@@ -12,7 +16,7 @@ and `(parameter_id, channel)` pairs are unique in their corresponding scopes. Ca
 sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack effects plus
 automation segments preserve declared order. Canonical text uses LF, exactly one final newline,
 canonical string escapes, and finite `f32` spellings that preserve exact bits through both direct
-`f32` parsing and the parser's `f64`-then-`f32` conversion. Normal values use shortest `f32`
+`f32` parsing and `f64`-then-`f32` conversion by external readers. Normal values use shortest `f32`
 `Display`; the two double-rounding values use exact `f64` `Display`; integral spellings gain `.0`
 to remain TOML floats; and negative zero is preserved exactly as `-0.0`.
 
@@ -68,7 +72,15 @@ or stable-ID segments. A rejected parse or compile returns a nonempty `Diagnosti
 artifact. A successful `CompiledSession` is immutable and non-publishable; it has no graph schedule,
 DSP state, `PlanPublisher`, or `PreparedRenderPlan` capability.
 
-The manifest requests `serde = 1.0.228` and `toml = 0.9.9`; the latter resolves to package version
-`0.9.9+spec-1.0.0`. `spec-1.0.0` is not a Cargo feature. TOML defaults are disabled and only
-`parse` and `serde` are enabled. The schema-specific canonical writer intentionally does not enable
-the dependency's `display` feature.
+Every diagnostic returned from parsing has a source span, including diagnostics produced by domain
+validation after the model shape has been read. Typed canonicalization and compilation have no source
+text, so their otherwise matching code/path diagnostics have `span = None`. Every model `u64` field is
+bounded to TOML's signed 64-bit integer range: values above `i64::MAX` reject with
+`numeric.out_of_schema_range` at the corresponding leaf instead of being serialized.
+
+The current manifest retains the separate `serde = 1.0.228` dependency and requests `toml = 0.9.9`
+with both `parse` and `serde` enabled. That package resolves as `0.9.9+spec-1.0.0`, while its parser
+dependency resolves as `toml_parser 1.1.3+spec-1.1.0`; the package suffix is not a Cargo feature.
+Removing the unused serde-facing dependency surface is deferred because that indivisible cleanup also
+requires manifest and lockfile changes outside this checkpoint's boundary. The schema-specific
+canonical writer does not use the dependency's display support.

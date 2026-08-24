@@ -1794,10 +1794,13 @@ mod tests {
                 "sample_rate_hz = 44100",
                 "source.rate",
             ),
+            // A declared count above the file's, not below it: the session validator now
+            // rejects `channel_count = 1` outright (the tracks map right_source_channel = 1),
+            // which would fail in preflight and never reach the resolver check under test.
             (
                 "wrong-channels",
                 "channel_count = 2",
-                "channel_count = 1",
+                "channel_count = 4",
                 "source.channels",
             ),
             (

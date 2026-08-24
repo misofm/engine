@@ -2767,7 +2767,7 @@ mod tests {
         template.dynamic.effects.clear();
         template.simd2.effects.clear();
         model.automation.clear();
-        model.limits.memory_bytes = u64::MAX;
+        model.limits.memory_bytes = i64::MAX as u64;
         model.tracks.clear();
         for index in 0..n {
             let mut track = template.clone();
@@ -3375,7 +3375,7 @@ mod tests {
                 .expect("parse baseline mutation session");
         base_model.tracks[0].dynamic.effects.clear();
         base_model.automation.clear();
-        base_model.limits.memory_bytes = u64::MAX;
+        base_model.limits.memory_bytes = i64::MAX as u64;
         let base_config = MeterConfig {
             period_frames: NonZeroU32::new(16).expect("constant"),
             peak_hold_frames: 0,

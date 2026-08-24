@@ -17,6 +17,7 @@ create_fixture() {
         "$root/crates/miso-engine-effect-compiler/tests" \
         "$root/crates/miso-engine-effect-package/src" \
         "$root/crates/miso-engine-effect-package/tests" \
+        "$root/crates/miso-engine-session/tests" \
         "$root/hosts/miso-engine-host-web/src" \
         "$root/tools/miso-engine-capi-audit/src" \
         "$root/tools/miso-engine-native-pcm-runner/src" \
@@ -78,6 +79,11 @@ create_fixture() {
         'unsafe impl Send for MigrationAllocationAudit {}' \
         'struct MigrationAllocationAudit;' \
         >"$root/crates/miso-engine-effect-compiler/tests/migration_terminal.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe impl GlobalAlloc for CountingAllocator {}' \
+        'struct CountingAllocator;' \
+        >"$root/crates/miso-engine-session/tests/allocation_budget.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn web_boundary() {}' \
@@ -156,6 +162,8 @@ expect_failure unsafe-outside-package-allocation-audit \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-package/tests/other.rs"'
 expect_failure unsafe-outside-migration-allocation-audit \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-compiler/tests/other.rs"'
+expect_failure unsafe-outside-session-allocation-budget \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-session/tests/other.rs"'
 expect_failure unsafe-outside-web-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \

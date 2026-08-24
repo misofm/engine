@@ -53,6 +53,72 @@ fn model_case(
     *count += 1;
 }
 
+#[test]
+fn u64_model_fields_are_bounded_to_toml_i64_at_leaf_paths() {
+    type Mutation = fn(&mut SessionTomlV1);
+    let cases: &[(Mutation, &str)] = &[
+        (
+            |session| session.revision = i64::MAX as u64 + 1,
+            "$.revision",
+        ),
+        (
+            |session| session.limits.pcm_ring_frames = i64::MAX as u64 + 1,
+            "$.limits.pcm_ring_frames",
+        ),
+        (
+            |session| session.limits.control_queue_messages = i64::MAX as u64 + 1,
+            "$.limits.control_queue_messages",
+        ),
+        (
+            |session| session.limits.memory_bytes = i64::MAX as u64 + 1,
+            "$.limits.memory_bytes",
+        ),
+        (
+            |session| session.sources[0].mapping.region.start_sample = i64::MAX as u64 + 1,
+            "$.sources[0].mapping.region.start_sample",
+        ),
+        (
+            |session| session.sources[0].mapping.region.length_samples = i64::MAX as u64 + 1,
+            "$.sources[0].mapping.region.length_samples",
+        ),
+        (
+            |session| session.automation[0].segments[0].start_sample = i64::MAX as u64 + 1,
+            "$.automation[0].segments[0].start_sample",
+        ),
+        (
+            |session| session.automation[0].segments[0].end_sample = i64::MAX as u64 + 1,
+            "$.automation[0].segments[0].end_sample",
+        ),
+    ];
+
+    for (mutate, path) in cases {
+        let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+        mutate(&mut session);
+        let error = canonical_session_toml(&session).expect_err("large u64 must be rejected");
+        assert!(
+            error.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::NumericOutOfSchemaRange
+                    && diagnostic.path.to_string() == *path
+                    && diagnostic.message == "integer exceeds the TOML i64 range"
+            }),
+            "missing TOML i64 range diagnostic at {path}: {error}"
+        );
+    }
+}
+
+#[test]
+fn empty_third_party_cid_is_reported_at_the_identity_leaf() {
+    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    session.tracks[0].dynamic.effects[0].identity =
+        miso_engine_session::EffectIdentity::ThirdPartyCid { cid: String::new() };
+    let error = canonical_session_toml(&session).expect_err("empty CID must be rejected");
+    assert_diagnostic(
+        &error,
+        DiagnosticCode::NumericOutOfSchemaRange,
+        "$.tracks[0].dynamic.effects[0].identity.cid",
+    );
+}
+
 fn replaced(needle: &str, replacement: &str) -> String {
     assert!(
         EXAMPLE.contains(needle),

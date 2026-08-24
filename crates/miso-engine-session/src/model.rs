@@ -2,6 +2,51 @@
 
 use crate::StableId;
 
+pub(crate) trait ClosedToken: Copy + 'static {
+    const ALL: &'static [(Self, &'static str)];
+}
+
+#[rustfmt::skip]
+macro_rules! closed_tokens {
+    ($(#[$enum_meta:meta])* pub enum $name:ident {
+        $($(#[$variant_meta:meta])* $variant:ident => $token:literal),+ $(,)?
+    }) => {
+        $(#[$enum_meta])*
+        #[repr(u8)]
+        pub enum $name { $($(#[$variant_meta])* $variant),+ }
+
+        impl $name {
+            /// Every token value in declaration and wire-code order.
+            pub const ALL: &'static [(Self, &'static str)] = &[$((Self::$variant, $token)),+];
+            /// Return this value's canonical session token.
+            #[must_use]
+            pub const fn token(self) -> &'static str {
+                match self { $(Self::$variant => $token),+ }
+            }
+            /// Parse one canonical session token.
+            #[must_use]
+            pub fn from_token(token: &str) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .find_map(|(value, candidate)| (*candidate == token).then_some(*value))
+            }
+            /// Return the stable nonzero wire code in declaration order.
+            #[must_use]
+            pub const fn wire(self) -> u8 { self as u8 + 1 }
+            /// Parse a stable nonzero wire code.
+            #[must_use]
+            pub fn from_wire(wire: u8) -> Option<Self> {
+                wire.checked_sub(1)
+                    .and_then(|index| Self::ALL.get(usize::from(index)))
+                    .map(|(value, _)| *value)
+            }
+        }
+        impl ClosedToken for $name {
+            const ALL: &'static [(Self, &'static str)] = Self::ALL;
+        }
+    };
+}
+
 /// Strict V1 TOML input after syntax/schema parsing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionTomlV1 {
@@ -44,13 +89,15 @@ pub struct RenderProfile {
     pub mode: RenderMode,
 }
 
-/// V1 render profile tokens.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RenderMode {
-    /// Deterministic single-control-thread preparation.
-    SingleThread,
-    /// Later worker availability is declarative only in this issue.
-    DependencyWaves,
+closed_tokens! {
+    /// V1 render profile tokens.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum RenderMode {
+        /// Deterministic single-control-thread preparation.
+        SingleThread => "single_thread",
+        /// Later worker availability is declarative only in this issue.
+        DependencyWaves => "dependency_waves",
+    }
 }
 
 /// Explicit PCM output profile.
@@ -64,11 +111,13 @@ pub struct OutputProfile {
     pub sample_format: SampleFormat,
 }
 
-/// V1 output scalar token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SampleFormat {
-    /// Planar IEEE `f32` PCM.
-    F32Planar,
+closed_tokens! {
+    /// V1 output scalar token.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SampleFormat {
+        /// Planar IEEE `f32` PCM.
+        F32Planar => "f32_planar",
+    }
 }
 
 /// Explicit session resource declarations with unit-bearing field names.
@@ -210,26 +259,30 @@ pub enum EffectIdentity {
     },
 }
 
-/// Closed V1 quality token set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EffectQuality {
-    /// Lowest declared effect quality.
-    Draft,
-    /// Standard declared effect quality.
-    Normal,
-    /// Highest declared effect quality.
-    High,
+closed_tokens! {
+    /// Closed V1 quality token set.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum EffectQuality {
+        /// Lowest declared effect quality.
+        Draft => "draft",
+        /// Standard declared effect quality.
+        Normal => "normal",
+        /// Highest declared effect quality.
+        High => "high",
+    }
 }
 
-/// Explicit detector link behavior.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum LinkMode {
-    /// Fully independent dual-mono detectors.
-    DualMono,
-    /// Maximum of lane detector values.
-    Maximum,
-    /// Arithmetic average of lane detector values.
-    Average,
+closed_tokens! {
+    /// Explicit detector link behavior.
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum LinkMode {
+        /// Fully independent dual-mono detectors.
+        DualMono => "dual_mono",
+        /// Maximum of lane detector values.
+        Maximum => "maximum",
+        /// Arithmetic average of lane detector values.
+        Average => "average",
+    }
 }
 
 /// One typed effect parameter value.
@@ -245,32 +298,36 @@ pub struct EffectParam {
     pub value: f32,
 }
 
-/// Explicit lane selection for a parameter.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum ParameterChannel {
-    /// Left dual-mono lane.
-    Left,
-    /// Right dual-mono lane.
-    Right,
-    /// Both lanes by an explicit common parameter.
-    Both,
+closed_tokens! {
+    /// Explicit lane selection for a parameter.
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum ParameterChannel {
+        /// Left dual-mono lane.
+        Left => "left",
+        /// Right dual-mono lane.
+        Right => "right",
+        /// Both lanes by an explicit common parameter.
+        Both => "both",
+    }
 }
 
-/// V1 parameter units. Effect-specific ranges are future effect-contract work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ParameterUnit {
-    /// Decibels.
-    Db,
-    /// Hertz.
-    Hz,
-    /// Milliseconds.
-    Milliseconds,
-    /// Sample frames.
-    Samples,
-    /// Unitless scalar.
-    Linear,
-    /// Ratio scalar.
-    Ratio,
+closed_tokens! {
+    /// V1 parameter units. Effect-specific ranges are future effect-contract work.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ParameterUnit {
+        /// Decibels.
+        Db => "db",
+        /// Hertz.
+        Hz => "hz",
+        /// Milliseconds.
+        Milliseconds => "milliseconds",
+        /// Sample frames.
+        Samples => "samples",
+        /// Unitless scalar.
+        Linear => "linear",
+        /// Ratio scalar.
+        Ratio => "ratio",
+    }
 }
 
 /// Explicit presence or absence of a sidechain.
@@ -405,23 +462,25 @@ pub struct ChannelMatrix {
     pub rr: f32,
 }
 
-/// Stable explicit chain boundary names.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SendTap {
-    /// Input signal.
-    Input,
-    /// After input builtins.
-    PostInputBuiltins,
-    /// After SIMD rack 1.
-    PostSimd1,
-    /// After dynamic rack.
-    PostDynamic,
-    /// After SIMD rack 2 and before fader.
-    PostSimd2PreFader,
-    /// After fader.
-    PostFader,
-    /// After matrix/pan.
-    PostMatrix,
+closed_tokens! {
+    /// Stable explicit chain boundary names.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SendTap {
+        /// Input signal.
+        Input => "input",
+        /// After input builtins.
+        PostInputBuiltins => "post_input_builtins",
+        /// After SIMD rack 1.
+        PostSimd1 => "post_simd1",
+        /// After dynamic rack.
+        PostDynamic => "post_dynamic",
+        /// After SIMD rack 2 and before fader.
+        PostSimd2PreFader => "post_simd2_pre_fader",
+        /// After fader.
+        PostFader => "post_fader",
+        /// After matrix/pan.
+        PostMatrix => "post_matrix",
+    }
 }
 
 /// A target and ordered piecewise automation declaration.
@@ -438,7 +497,7 @@ pub struct Automation {
 /// An effect parameter automation target.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutomationTarget {
-    /// Owning track/submix/output identity.
+    /// Owning track identity (only tracks carry racks).
     pub entity_id: StableId,
     /// Rack containing the named local effect.
     pub rack: RackName,
@@ -450,15 +509,17 @@ pub struct AutomationTarget {
     pub channel: ParameterChannel,
 }
 
-/// One V1 rack token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RackName {
-    /// First homogeneous rack.
-    Simd1,
-    /// Dynamic rack.
-    Dynamic,
-    /// Second homogeneous rack.
-    Simd2,
+closed_tokens! {
+    /// One V1 rack token.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum RackName {
+        /// First homogeneous rack.
+        Simd1 => "simd1",
+        /// Dynamic rack.
+        Dynamic => "dynamic",
+        /// Second homogeneous rack.
+        Simd2 => "simd2",
+    }
 }
 
 /// Piecewise automation segment using absolute sample times.
@@ -478,13 +539,15 @@ pub struct AutomationSegment {
     pub unit: ParameterUnit,
 }
 
-/// Closed V1 interpolation token set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AutomationShape {
-    /// A constant step segment.
-    Step,
-    /// Linear interpolation.
-    Linear,
-    /// Exponential interpolation.
-    Exponential,
+closed_tokens! {
+    /// Closed V1 interpolation token set.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AutomationShape {
+        /// A constant step segment.
+        Step => "step",
+        /// Linear interpolation.
+        Linear => "linear",
+        /// Exponential interpolation.
+        Exponential => "exponential",
+    }
 }
