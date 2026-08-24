@@ -422,7 +422,16 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         && output[0].length === this.quantumFrames && output[1].length === this.quantumFrames
       ? this.quantumFrames
       : 0;
-    const result = this.exports.miso_engine_web_v1_render(this.handle, actualFrames);
+    // `wasm32-unknown-unknown` is `panic = abort`: a Rust panic traps the instance and surfaces
+    // here as a throw. There is no `catch_unwind` inside Rust to convert it, so the containment is
+    // this: sticky RESULT_INTERNAL and positive-zero output, never a torn or stale block. The user
+    // agent may also fire `processorerror`; both paths end with the node silent and disposable.
+    let result;
+    try {
+      result = this.exports.miso_engine_web_v1_render(this.handle, actualFrames);
+    } catch (_) {
+      result = RESULT_INTERNAL;
+    }
     if (result !== RESULT_OK) {
       this.stickyResult = result;
       this.ready = false;

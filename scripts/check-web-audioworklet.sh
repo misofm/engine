@@ -137,6 +137,23 @@ if ! check_opcode_policy "$simd_disassembly"; then
   exit 1
 fi
 
+# #106 E1/E2: the render export's direct-call closure must reach no allocator, deallocator or drop
+# glue, and must own no trap outside the one documented core site. This is the allocation gate for
+# the wasm render path: there is no native audited-allocator tool for the browser host, and the
+# shipped binary is the only thing that can witness the property.
+#
+# #106 E5: the shipped artifact must still contain the vector kernels. The floor and the kernel
+# count are ratchets, measured on this artifact. Raise them when a wave adds kernels; a count that
+# drops below them is a regression to report, never a floor to lower.
+callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
+printf '%s
+' "$simd_disassembly" |
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
+printf '%s
+' "$simd_disassembly" |
+  python3 -B "$callgraph" --simd-floor 4500 --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
+  exit 1
+
 if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval|performance\.now|Date\.now' "$main_js" "$worklet_js"; then
   echo "forbidden browser capability found" >&2
   exit 1
