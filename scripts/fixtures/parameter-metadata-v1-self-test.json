@@ -48,7 +48,7 @@
     {
       "id": "miso.compressor",
       "displayName": "Compressor",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 1,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -179,7 +179,9 @@
           "nudge": null
         }
       ],
-      "observations": []
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
+      ]
     },
     {
       "id": "miso.delay",
@@ -272,7 +274,7 @@
     {
       "id": "miso.gate-expander",
       "displayName": "Gate / Expander",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -403,12 +405,14 @@
           "nudge": null
         }
       ],
-      "observations": []
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
+      ]
     },
     {
       "id": "miso.multiband-compressor",
       "displayName": "Multiband Compressor",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -603,7 +607,9 @@
           "nudge": null
         }
       ],
-      "observations": []
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
+      ]
     },
     {
       "id": "miso.parametric-eq",
@@ -1112,7 +1118,7 @@
     {
       "id": "miso.true-peak-limiter",
       "displayName": "True-Peak Limiter",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -1163,7 +1169,9 @@
           "nudge": null
         }
       ],
-      "observations": []
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 5, "unitName": "linear", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
+      ]
     }
   ]
 }

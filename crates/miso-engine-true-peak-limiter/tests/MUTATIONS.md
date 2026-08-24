@@ -55,3 +55,9 @@ does not prove.
 * **D11 snap removed** survives the cross-target corpus, because no corpus case retargets a ramp:
   every case runs with `remaining == 0` throughout, so `RampLanes::advance` is a no-op there. The
   lane ramp got its own dedicated gate (E13, row 13) instead of widening the corpus.
+
+## Issue #143 — the resident gain-reduction tap
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 143-E6-c | `observe_resident` "freshens" the recursive reduction word by one release step (`* 0.9`) in the read | `true-peak-limiter/src/lib.rs` | `observation::the_limiter_reads_the_reduction_word_the_envelope_persists` | RED — the tap and the state envelope disagree: `1044868013` vs `1046320150`. The envelope is a second, already-gated route to the same kernel word, so agreeing with it is agreeing with the kernel |

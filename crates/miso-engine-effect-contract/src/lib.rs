@@ -1405,21 +1405,23 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
 }
-/// What one dynamics effect reduced the signal by over the block it last processed (issue #140 D).
+/// One observation reading, in the tap's declared [`unit`](ObservationDescriptorV1::unit).
 ///
-/// Decibels, and **negative for reduction**: `-6.0` means the effect took six decibels off. That is
-/// the sign convention every dynamics kernel in this workspace already smooths internally, so the
-/// observation is a read of state that exists rather than a second computation of it.
+/// Two lanes always, because a dual-mono effect has two of everything. A tap that declares
+/// [`ObservationChannelsV1::Shared`] writes the same value into both, so a consumer never has to
+/// ask which field is meaningful.
 ///
-/// The reading is the value at the *end* of the block, not an average or a peak over it. A meter
-/// window is many blocks long, so the consumer decides how to fold; the effect states one number
-/// per block per channel and nothing else.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GainReductionV1 {
-    /// Left lane, in decibels; `<= 0`.
-    pub left_db: f32,
-    /// Right lane, in decibels; `<= 0`.
-    pub right_db: f32,
+/// The **sign and unit are the effect's own**, not the consumer's: a compressor writes the
+/// negative decibels its smoother holds, a true-peak limiter writes the linear reduction word its
+/// kernel recurses on. Turning that into the non-negative magnitude a meter shows is the declared
+/// [`fold`](ObservationDescriptorV1::fold) plus one control-plane unit conversion -- neither of
+/// which happens inside an effect, and neither of which puts a `log` on a render thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ObservationSampleV1 {
+    /// Left lane.
+    pub left: f32,
+    /// Right lane.
+    pub right: f32,
 }
 
 pub trait PreparedNativeEffect: Send {
@@ -1427,24 +1429,28 @@ pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
 
-    /// Gain reduction after the last [`process`](Self::process) call, or `None` (issue #140 D).
+    /// Read one declared [`ObservationCostV1::Resident`] tap into `out` (issue #143 D2).
     ///
-    /// # Additive, and default-`None` on purpose
+    /// `tap_index` is the index into
+    /// [`EffectDescriptorV1::observations`](EffectDescriptorV1::observations), never the wire
+    /// `tap_id`: the translation is an admission-time lookup, off the render thread, exactly as
+    /// `parameter_index` is for a live parameter.
     ///
-    /// Most effects have no gain reduction to report -- an EQ, a delay, a saturator reduce nothing
-    /// -- and the ones that do keep it as private smoother state in their kernels. This is the
-    /// observation point that state needs in order to reach a console's meter frame, and it is a
-    /// defaulted method so that adding it breaks no implementation and changes no prepared byte:
-    /// an effect that does not override it costs one vtable slot and returns `None`.
+    /// Returns `false` -- and leaves `out` untouched -- for a tap this effect does not implement.
+    /// The default implementation returns `false` for every index, so adding the method breaks no
+    /// implementation and changes no prepared byte: an effect that declares no tap costs one vtable
+    /// slot.
     ///
-    /// # Not on the render path's critical section
+    /// # `&self`, and why the type says so
     ///
-    /// This is a read of already-computed state, so it is allocation-free and branch-free, but it
-    /// is not called by the graph: nothing in the runtime observes an effect instance yet. The
-    /// transport from here to `MisoMeterFrameV1.trackGrDb` -- an observer bound to an effect node
-    /// rather than a track stage -- is the remaining half of #140 D.
-    fn gain_reduction(&self) -> Option<GainReductionV1> {
-        None
+    /// Resident means *the value already exists*. The method takes `&self` so an implementation
+    /// physically cannot advance a smoother, run a release step, or otherwise make the reading a
+    /// second opinion about what the block did; calling it twice returns identical bits because
+    /// there is nothing it could have changed. That is the whole content of "resident" and it is
+    /// enforced by the signature rather than asserted in prose (#143 E6).
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+        let _ = (tap_index, out);
+        false
     }
     fn snapshot_state_payload(
         &self,
@@ -1498,6 +1504,20 @@ pub trait PreparedNativeEffectBank: Send {
     fn metadata(&self) -> PreparedBankMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+
+    /// Read one declared [`ObservationCostV1::Resident`] tap for **every lane at once**.
+    ///
+    /// One call per tap per block, not one per lane: a bank's state is vector state, so extracting
+    /// it once and scattering into `out` is a single `store`, while a per-lane accessor would be
+    /// `width` of them. `out` is exactly `PreparedBankMetadata::width.lanes()` long; an
+    /// implementation writes every entry or returns `false` and writes none.
+    ///
+    /// Same `&self` rule, for the same reason, as
+    /// [`PreparedNativeEffect::observe_resident`](PreparedNativeEffect::observe_resident).
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+        let _ = (tap_index, out);
+        false
+    }
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
