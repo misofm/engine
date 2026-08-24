@@ -59,7 +59,7 @@ fn session(track_count: u32) -> miso_engine_session::CompiledSession {
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     model.automation.clear();
-    model.limits.memory_bytes = u64::MAX;
+    model.limits.memory_bytes = i64::MAX as u64;
     model.tracks.clear();
     model
         .tracks
