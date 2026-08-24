@@ -297,6 +297,7 @@ pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &GATE_EXPANDER_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// The parameter domains, in the runtime's vocabulary.

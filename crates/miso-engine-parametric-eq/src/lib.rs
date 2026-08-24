@@ -398,6 +398,7 @@ pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 
     parameters: &EQ_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// The six retained `f32` words of one TPT state-variable section.

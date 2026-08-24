@@ -170,6 +170,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV
     parameters: &TRANSIENT_SHAPER_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// Fast-attack, fast-release, slow-attack, slow-release coefficient bits by launch-rate row.

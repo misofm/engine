@@ -124,6 +124,7 @@ static STATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &STATE_PARAMETERS,
     ports: &STATE_PORTS,
     qualities: &STATE_QUALITIES,
+    observations: &[],
 };
 static STATE_INITIAL: [InitialParameterValue; 3] = [
     InitialParameterValue {

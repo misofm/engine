@@ -75,6 +75,30 @@ pub struct EffectDescriptorEnumChoiceRecordV1 {
     pub reserved: u32,
 }
 
+/// One observation tap, projected out of the 32-byte wire record (issue #143).
+///
+/// The wire packs the six vocabularies and the two string lengths into single bytes because the
+/// record is 32 bytes; this projection widens every one of them back to a `u32`, exactly as the
+/// parameter and port projections do, so a C caller reads one uniform record shape.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct EffectDescriptorObservationRecordV1 {
+    pub id: u32,
+    pub kind: u32,
+    pub unit: u32,
+    pub cost: u32,
+    pub cadence: u32,
+    pub fold: u32,
+    pub channels: u32,
+    pub minimum_bits: u32,
+    pub maximum_bits: u32,
+    pub display_name_offset: u32,
+    pub display_name_length: u32,
+    pub display_unit_offset: u32,
+    pub display_unit_length: u32,
+    pub reserved: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct EffectDescriptorSummaryV1 {
@@ -193,6 +217,26 @@ fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecordV
         reserved1: read_u32(bytes, offset + 44),
         scratch_fixed_bytes: read_u64(bytes, offset + 48),
         scratch_bytes_per_frame: read_u64(bytes, offset + 56),
+    }
+}
+
+#[cfg(feature = "c-abi")]
+fn observation_record(bytes: &[u8], offset: usize) -> EffectDescriptorObservationRecordV1 {
+    EffectDescriptorObservationRecordV1 {
+        id: read_u32(bytes, offset),
+        kind: u32::from(bytes[offset + 4]),
+        unit: u32::from(bytes[offset + 5]),
+        cost: u32::from(bytes[offset + 6]),
+        cadence: u32::from(bytes[offset + 7]),
+        fold: u32::from(bytes[offset + 8]),
+        channels: u32::from(bytes[offset + 9]),
+        minimum_bits: read_u32(bytes, offset + 12),
+        maximum_bits: read_u32(bytes, offset + 16),
+        display_name_offset: read_u32(bytes, offset + 20),
+        display_name_length: u32::from(bytes[offset + 10]),
+        display_unit_offset: read_u32(bytes, offset + 24),
+        display_unit_length: u32::from(bytes[offset + 11]),
+        reserved: read_u32(bytes, offset + 28),
     }
 }
 
@@ -393,7 +437,119 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
     EffectDescriptorWireDiagnosticCodeV1::Ok as u32
 }
 
+/// Inspect the observation menu of one complete canonical descriptor wire value (issue #143).
+///
+/// A **second export** rather than four more arguments on
+/// [`miso_engine_effect_descriptor_v1_inspect`]: that function's signature, its summary struct and
+/// its record layouts are frozen C ABI, and #143 changes no existing field, offset or size. A
+/// caller that does not care about observations never learns this symbol exists.
+///
+/// Returns [`EffectDescriptorWireDiagnosticCodeV1::Ok`] and writes `required_observations` records;
+/// a zero-tap descriptor writes zero records and is not an error.
+///
+/// # Safety
+///
+/// Every nonnull pointer must denote readable or writable storage for its declared length or
+/// capacity for this call. All input and output regions must be mutually nonoverlapping. No pointer
+/// is retained. `observations` may be null exactly when `observation_capacity` is zero;
+/// `required_observations` and `diagnostic` are mandatory.
+#[cfg(feature = "c-abi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
+    wire: *const u8,
+    wire_len: usize,
+    maximum_wire_bytes: u32,
+    observations: *mut EffectDescriptorObservationRecordV1,
+    observation_capacity: u32,
+    required_observations: *mut u32,
+    diagnostic: *mut EffectDescriptorWireDiagnosticV1,
+) -> u32 {
+    if diagnostic.is_null() {
+        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+    }
+    if required_observations.is_null()
+        || (wire.is_null() && wire_len != 0)
+        || (observations.is_null() && observation_capacity != 0)
+    {
+        // SAFETY: `diagnostic` is nonnull; `required_observations` is written only when nonnull.
+        unsafe {
+            if !required_observations.is_null() {
+                required_observations.write(0);
+            }
+            write_diagnostic(diagnostic, null_diagnostic());
+        }
+        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+    }
+    let wire_bytes = if wire_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Nonzero input was checked nonnull and the caller promises readable storage for
+        // exactly `wire_len` bytes for this call.
+        unsafe { slice::from_raw_parts(wire, wire_len) }
+    };
+    let verified = match verify_effect_descriptor_wire_v1(wire_bytes, maximum_wire_bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            // SAFETY: Both mandatory outputs were checked nonnull.
+            unsafe {
+                required_observations.write(0);
+                write_diagnostic(diagnostic, error);
+            }
+            return error.code as u32;
+        }
+    };
+    let required = verified.observation_count();
+    if observation_capacity < required {
+        let Some(required_bytes) = required.checked_mul(32) else {
+            let error = EffectDescriptorWireDiagnosticV1::new(
+                EffectDescriptorWireDiagnosticCodeV1::Overflow,
+                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            );
+            // SAFETY: Both mandatory outputs were checked nonnull.
+            unsafe {
+                required_observations.write(0);
+                write_diagnostic(diagnostic, error);
+            }
+            return error.code as u32;
+        };
+        let error = EffectDescriptorWireDiagnosticV1::buffer_too_small(required_bytes);
+        // SAFETY: Both mandatory outputs were checked nonnull; no record has been written.
+        unsafe {
+            required_observations.write(required);
+            write_diagnostic(diagnostic, error);
+        }
+        return error.code as u32;
+    }
+    // A zero-tap descriptor keeps header byte 92 at zero, so the section offset is read from the
+    // count rather than trusted blindly: there is nothing to project when the count is zero.
+    let observation_offset = read_u32(wire_bytes, 92) as usize;
+    // SAFETY: The capacity was checked against the complete required count. The caller promises
+    // writable mutually nonoverlapping storage; every projected record is built field-by-field and
+    // no Rust wire layout is reinterpreted.
+    unsafe {
+        for index in 0..required as usize {
+            observations.add(index).write(observation_record(
+                wire_bytes,
+                observation_offset + index * 32,
+            ));
+        }
+        required_observations.write(required);
+        write_diagnostic(
+            diagnostic,
+            EffectDescriptorWireDiagnosticV1::new(
+                EffectDescriptorWireDiagnosticCodeV1::Ok,
+                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            ),
+        );
+    }
+    EffectDescriptorWireDiagnosticCodeV1::Ok as u32
+}
+
 const _: () = {
+    assert!(size_of::<EffectDescriptorObservationRecordV1>() == 56);
+    assert!(align_of::<EffectDescriptorObservationRecordV1>() == 4);
     assert!(size_of::<EffectDescriptorParameterRecordV1>() == 80);
     assert!(align_of::<EffectDescriptorParameterRecordV1>() == 4);
     assert!(size_of::<EffectDescriptorPortRecordV1>() == 24);

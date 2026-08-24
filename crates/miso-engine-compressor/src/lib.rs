@@ -284,6 +284,7 @@ pub const COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &COMPRESSOR_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// Factory entry point for the V1 compressor implementation.

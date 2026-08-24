@@ -161,6 +161,30 @@ typedef struct miso_engine_effect_enum_choice_record_v1 {
     uint32_t reserved;
 } miso_engine_effect_enum_choice_record_v1;
 
+/*
+ * One declared observation tap (issue #143), projected from the 32-byte wire record.
+ *
+ * The wire packs the six vocabularies and the two string lengths into single bytes because the
+ * record is 32 bytes; this projection widens each of them to uint32_t so a C caller reads one
+ * uniform record shape.
+ */
+typedef struct miso_engine_effect_observation_record_v1 {
+    uint32_t id;
+    uint32_t kind;
+    uint32_t unit;
+    uint32_t cost;
+    uint32_t cadence;
+    uint32_t fold;
+    uint32_t channels;
+    uint32_t minimum_bits;
+    uint32_t maximum_bits;
+    uint32_t display_name_offset;
+    uint32_t display_name_length;
+    uint32_t display_unit_offset;
+    uint32_t display_unit_length;
+    uint32_t reserved;
+} miso_engine_effect_observation_record_v1;
+
 typedef struct miso_engine_effect_descriptor_summary_v1 {
     uint32_t abi_version;
     uint32_t total_bytes;
@@ -265,6 +289,26 @@ MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_descriptor_summary
 MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_descriptor_summary_v1, supported_link_mode_bits, 28);
 MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_descriptor_summary_v1, identity, 32);
 
+MISO_ENGINE_EFFECT_DESCRIPTOR_STATIC_ASSERT(sizeof(miso_engine_effect_observation_record_v1) == 56,
+                                            "observation record size");
+MISO_ENGINE_EFFECT_DESCRIPTOR_STATIC_ASSERT(
+    MISO_ENGINE_EFFECT_DESCRIPTOR_ALIGNOF(miso_engine_effect_observation_record_v1) == 4,
+    "observation record alignment");
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, id, 0);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, kind, 4);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, unit, 8);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, cost, 12);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, cadence, 16);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, fold, 20);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, channels, 24);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, minimum_bits, 28);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, maximum_bits, 32);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, display_name_offset, 36);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, display_name_length, 40);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, display_unit_offset, 44);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, display_unit_length, 48);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_observation_record_v1, reserved, 52);
+
 MISO_ENGINE_EFFECT_DESCRIPTOR_STATIC_ASSERT(sizeof(miso_engine_effect_descriptor_diagnostic_v1) == 16,
                                             "diagnostic size");
 MISO_ENGINE_EFFECT_DESCRIPTOR_STATIC_ASSERT(
@@ -301,6 +345,23 @@ uint32_t miso_engine_effect_descriptor_v1_inspect(
     uint32_t *required_ports,
     uint32_t *required_qualities,
     uint32_t *required_enum_choices,
+    miso_engine_effect_descriptor_diagnostic_v1 *diagnostic);
+
+/*
+ * Project the observation menu of one complete canonical wire value (issue #143).
+ *
+ * A separate entry point rather than four more arguments on the frozen inspect above: #143 changes
+ * no existing field, offset, size or signature. `required_observations` and `diagnostic` are
+ * mandatory; `observations` may be null only when `observation_capacity` is zero. A zero-tap
+ * descriptor writes zero records and returns OK.
+ */
+uint32_t miso_engine_effect_descriptor_v1_inspect_observations(
+    const uint8_t *wire,
+    size_t wire_len,
+    uint32_t maximum_wire_bytes,
+    miso_engine_effect_observation_record_v1 *observations,
+    uint32_t observation_capacity,
+    uint32_t *required_observations,
     miso_engine_effect_descriptor_diagnostic_v1 *diagnostic);
 
 #undef MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD

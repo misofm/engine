@@ -47,6 +47,24 @@ EFFECT_PARAMETER_KEYS = {
     "channelPolicyName", "smoothing", "smoothingName", "smoothingSamples", "readable",
     "automatable", "liveUpdatable", "enumChoices", "nudge",
 }
+EFFECT_OBSERVATION_KEYS = {
+    "id", "name", "displayUnit", "kind", "kindName", "unit", "unitName", "cost", "costName",
+    "cadence", "cadenceName", "fold", "foldName", "channels", "channelsName", "minimum", "maximum",
+    "subscribable",
+}
+OBSERVATION_KINDS = {1: "gainReductionDb"}
+OBSERVATION_COSTS = {1: "resident", 2: "computed"}
+OBSERVATION_CADENCES = {1: "perBlock", 2: "perWindow"}
+OBSERVATION_FOLDS = {1: "latest", 2: "peakMagnitude"}
+OBSERVATION_CHANNELS = {1: "shared", 2: "perLane"}
+OBSERVATION_VOCABULARIES = {
+    "kinds": OBSERVATION_KINDS,
+    "costs": OBSERVATION_COSTS,
+    "cadences": OBSERVATION_CADENCES,
+    "folds": OBSERVATION_FOLDS,
+    "channels": OBSERVATION_CHANNELS,
+}
+
 BUILTIN_PARAMETER_KEYS = {
     "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
     "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "nudge",
@@ -71,7 +89,7 @@ def finite(value: object, message: str) -> float:
 def validate(document: dict) -> None:
     require(set(document) == {
         "schema", "abiVersion", "commandRecordBytes", "maximumCommandRecords", "commandKinds",
-        "commandReasons", "builtins", "effects",
+        "commandReasons", "observationVocabularies", "builtins", "effects",
     }, "top-level keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
@@ -88,6 +106,16 @@ def validate(document: dict) -> None:
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
     require([reason["value"] for reason in reasons] == list(range(10)), "command reason values")
+
+    vocabularies = document["observationVocabularies"]
+    require(set(vocabularies) == set(OBSERVATION_VOCABULARIES), "observation vocabulary keys")
+    for name, expected in OBSERVATION_VOCABULARIES.items():
+        rows = vocabularies[name]
+        require(
+            {row["value"]: row["name"] for row in rows} == expected,
+            f"observation vocabulary {name}",
+        )
+        require(len(rows) == len(expected), f"observation vocabulary {name} membership")
 
     builtins = document["builtins"]
     require(set(builtins) == {"parameters"}, "builtin keys")
@@ -143,7 +171,7 @@ def validate(document: dict) -> None:
     for effect in document["effects"]:
         require(set(effect) == {
             "id", "displayName", "contractMajor", "contractMinor", "stateLayoutVersion",
-            "parameters",
+            "parameters", "observations",
         }, "effect keys")
         require(isinstance(effect["id"], str) and effect["id"], "effect id")
         require(effect["contractMajor"] == 1, "effect contract major")
@@ -155,6 +183,51 @@ def validate(document: dict) -> None:
         require(all(value >= 1 for value in ids), "parameter ids are nonzero")
         for parameter in effect["parameters"]:
             validate_effect_parameter(parameter)
+        # Issue #143: never absent, and possibly empty. A tap menu is ascending and nonzero for the
+        # same reason a parameter table is: the id is the addressing authority.
+        observations = effect["observations"]
+        require(isinstance(observations, list), "effect observations is a list")
+        tap_ids = [observation["id"] for observation in observations]
+        require(tap_ids == sorted(tap_ids), "observation ids ascend")
+        require(len(set(tap_ids)) == len(tap_ids), "observation id uniqueness")
+        require(all(value >= 1 for value in tap_ids), "observation ids are nonzero")
+        for observation in observations:
+            validate_effect_observation(observation)
+
+
+def validate_effect_observation(observation: dict) -> None:
+    require(set(observation) == EFFECT_OBSERVATION_KEYS, "effect observation keys")
+    for value_key, name_key, table in (
+        ("kind", "kindName", OBSERVATION_KINDS),
+        ("unit", "unitName", UNITS),
+        ("cost", "costName", OBSERVATION_COSTS),
+        ("cadence", "cadenceName", OBSERVATION_CADENCES),
+        ("fold", "foldName", OBSERVATION_FOLDS),
+        ("channels", "channelsName", OBSERVATION_CHANNELS),
+    ):
+        require(
+            table.get(observation[value_key]) == observation[name_key],
+            f"observation {name_key} agrees with value",
+        )
+    require(isinstance(observation["name"], str) and observation["name"], "observation name")
+    require(isinstance(observation["displayUnit"], str), "observation display unit")
+    low = finite(observation["minimum"], "observation minimum")
+    high = finite(observation["maximum"], "observation maximum")
+    require(low < high, "observation range order")
+    require(isinstance(observation["subscribable"], bool), "observation subscribable")
+    # The one rule that ties the menu to the subscribe path: a `Resident` tap is a copy out of
+    # state the block already wrote, and V1 binds it; a `Computed` tap has no implementation and
+    # the subscribe path answers `unsupportedKind`. Nothing else may claim to be subscribable.
+    require(
+        observation["subscribable"] == (observation["costName"] == "resident"),
+        "observation subscribable follows cost",
+    )
+    # A `Computed` tap may not claim per-block cadence: that would put an analysis pass on the
+    # render thread, which is exactly what the cost split exists to prevent.
+    require(
+        not (observation["costName"] == "computed" and observation["cadenceName"] == "perBlock"),
+        "a computed tap is not per-block",
+    )
 
 
 def validate_effect_parameter(parameter: dict) -> None:
@@ -230,6 +303,66 @@ def self_test() -> int:
     here = pathlib.Path(__file__).resolve().parent
     sample = json.loads((here / "fixtures/parameter-metadata-v1-self-test.json").read_text())
     validate(sample)
+    # Issue #143 E9. The shipped registry declares only `Resident` taps, so the computed-tap rules
+    # are proved against a document that carries one: a synthetic menu added here, validated as a
+    # positive first, then mutated. Testing them only against the shipped document would prove the
+    # rules are never *reached*, not that they discriminate.
+    tapped = copy.deepcopy(sample)
+    tapped["effects"][0]["observations"] = [
+        {
+            "id": 1, "name": "Gain Reduction", "displayUnit": "dB",
+            "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db",
+            "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock",
+            "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane",
+            "minimum": 0.0, "maximum": 100.0, "subscribable": True,
+        },
+        {
+            "id": 7, "name": "Reduction Envelope", "displayUnit": "dB",
+            "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db",
+            "cost": 2, "costName": "computed", "cadence": 2, "cadenceName": "perWindow",
+            "fold": 1, "foldName": "latest", "channels": 1, "channelsName": "shared",
+            "minimum": 0.0, "maximum": 60.0, "subscribable": False,
+        },
+    ]
+    validate(tapped)
+    tap_mutations: list[tuple[str, object]] = [
+        ("hand-edited tap id", lambda d: d["effects"][0]["observations"][0].update(id=9)),
+        ("zero tap id", lambda d: d["effects"][0]["observations"][0].update(id=0)),
+        (
+            "a computed tap claims to be subscribable",
+            lambda d: d["effects"][0]["observations"][1].update(subscribable=True),
+        ),
+        (
+            "a resident tap denies being subscribable",
+            lambda d: d["effects"][0]["observations"][0].update(subscribable=False),
+        ),
+        (
+            "a computed tap claims per-block cadence",
+            lambda d: d["effects"][0]["observations"][1].update(
+                cadence=1, cadenceName="perBlock"
+            ),
+        ),
+        (
+            "tap fold name disagrees with value",
+            lambda d: d["effects"][0]["observations"][0].update(foldName="latest"),
+        ),
+        (
+            "tap bounds are inverted",
+            lambda d: d["effects"][0]["observations"][0].update(minimum=100.0, maximum=0.0),
+        ),
+        (
+            "observations key removed",
+            lambda d: d["effects"][0].pop("observations"),
+        ),
+        (
+            "observation vocabulary renamed",
+            lambda d: d["observationVocabularies"]["costs"][1].update(name="derived"),
+        ),
+        (
+            "observation vocabulary truncated",
+            lambda d: d["observationVocabularies"]["folds"].pop(),
+        ),
+    ]
     mutations: list[tuple[str, object]] = [
         ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v2")),
         ("abi", lambda d: d.update(abiVersion=1)),
@@ -278,8 +411,11 @@ def self_test() -> int:
         ),
     ]
     failures = 0
-    for name, mutate in mutations:
-        mutated = copy.deepcopy(sample)
+    for name, mutate in [(name, mutate) for name, mutate in mutations] + [
+        (name, mutate) for name, mutate in tap_mutations
+    ]:
+        base = tapped if any(name == row[0] for row in tap_mutations) else sample
+        mutated = copy.deepcopy(base)
         mutate(mutated)
         try:
             validate(mutated)

@@ -4,3 +4,6 @@
 7bc40dc0fcc455fb25574057377c7e8635b606685749a99d676ac2574d727593  fixtures/effect-descriptor/v1/comprehensive-b.identity.hex
 e2be295262e4614008ca21dfdec52c2f2d6b752036638a1dab50ec150f3671dc  fixtures/effect-descriptor/v1/comprehensive-b.json
 8c1c2eb0b88997bbdfdb7b9b9a5face00fbf77d6c0e553b0f0598b6c8d99ee57  fixtures/effect-descriptor/v1/comprehensive-b.wire.hex
+4d00106782ed2e5be91b1b28ace3fbc4d186b01791bf767a04188e1cd9909bfc  fixtures/effect-descriptor/v1/comprehensive-c.identity.hex
+47599e123a00c52edb9d3080b6f0b9b1e8da3fedeb5d3a730ee02a924dd2099d  fixtures/effect-descriptor/v1/comprehensive-c.json
+4360e2756eb4b2c1c089355efbf547c8c8dc8c3348f4a5572b776aeb6a1b8316  fixtures/effect-descriptor/v1/comprehensive-c.wire.hex

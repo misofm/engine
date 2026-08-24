@@ -115,6 +115,7 @@ pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptorV1 = EffectDescrip
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

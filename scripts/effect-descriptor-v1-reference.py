@@ -17,6 +17,7 @@ PARAMETER = 80
 PORT = 24
 QUALITY = 64
 CHOICE = 16
+OBSERVATION = 32
 LIMIT = 1 << 20
 UNAVAILABLE = 0xFFFFFFFF
 DOMAIN = b"miso.engine.effect-descriptor.identity.v1\0"
@@ -177,6 +178,37 @@ def validate_source(source: dict) -> None:
         by_quality.setdefault(row["quality"], set()).add(row["sample_rate"])
     fail(2 not in by_quality or any(not LAUNCH_RATES <= rates for rates in by_quality.values()), 13, quality_offset)
 
+    # Issue #143: the declared observation menu. `get` with a default keeps every pre-#143 source
+    # document valid unchanged, which is the same statement as "a zero-tap descriptor's bytes do
+    # not move".
+    observations = source.get("observations", [])
+    choice_count = sum(len(parameter["enum_choices"]) for parameter in source["parameters"])
+    observation_offset = quality_offset + len(qualities) * QUALITY + choice_count * CHOICE
+    per_lane_state = all(row["left_state_bytes"] > 0 for row in qualities)
+    prior_observation = 0
+    seen_observations: set[int] = set()
+    for index, observation in enumerate(observations):
+        record = observation_offset + index * OBSERVATION
+        identifier = observation["id"]
+        fail(identifier == 0 or identifier in seen_observations, 13, record, index)
+        fail(identifier <= prior_observation, 13, record, index)
+        seen_observations.add(identifier)
+        prior_observation = identifier
+        fail(observation["kind"] not in (1,), 7, record + 4, index)
+        fail(observation["unit"] not in range(1, 7), 7, record + 5, index)
+        fail(observation["cost"] not in range(1, 3), 7, record + 6, index)
+        fail(observation["cadence"] not in range(1, 3), 7, record + 7, index)
+        fail(observation["fold"] not in range(1, 3), 7, record + 8, index)
+        fail(observation["channels"] not in range(1, 3), 7, record + 9, index)
+        fail(not valid_text(observation["display_name"]), 13, record + 4, index)
+        fail(not valid_text(observation["display_unit"]), 13, record + 4, index)
+        minimum = int(observation["minimum_bits"], 16)
+        maximum = int(observation["maximum_bits"], 16)
+        fail(not canonical_float(minimum) or not canonical_float(maximum), 12, record + 12, index)
+        fail(float_value(minimum) >= float_value(maximum), 13, record + 4, index)
+        fail(observation["cost"] == 2 and observation["cadence"] == 1, 13, record + 4, index)
+        fail(observation["channels"] == 2 and not per_lane_state, 13, record + 4, index)
+
 
 def encode(source: dict) -> bytes:
     validate_source(source)
@@ -189,12 +221,16 @@ def encode(source: dict) -> bytes:
         strings.extend((parameter["display_name"], parameter["display_unit"]))
         strings.extend(choice["label"] for choice in parameter["enum_choices"])
     strings.extend(port["id"] for port in ports)
+    observations = source.get("observations", [])
+    for observation in observations:
+        strings.extend((observation["display_name"], observation["display_unit"]))
     string_bytes = sum(len(value.encode()) for value in strings)
     parameter_offset = HEADER
     port_offset = parameter_offset + len(parameters) * PARAMETER
     quality_offset = port_offset + len(ports) * PORT
     choice_offset = quality_offset + len(qualities) * QUALITY
-    string_offset = choice_offset + len(choices) * CHOICE
+    observation_offset = choice_offset + len(choices) * CHOICE
+    string_offset = observation_offset + len(observations) * OBSERVATION
     total = string_offset + string_bytes
     fail(total > LIMIT, 2, 16)
     output = bytearray(total)
@@ -209,7 +245,10 @@ def encode(source: dict) -> bytes:
     for offset, value in ((48, len(parameters)), (52, parameter_offset), (56, len(ports)),
                           (60, port_offset), (64, len(qualities)), (68, quality_offset),
                           (72, len(choices)), (76, choice_offset), (80, string_bytes),
-                          (84, string_offset)):
+                          (84, string_offset), (88, len(observations)),
+                          # Zero when no tap is declared: header bytes 88..96 then stay the eight
+                          # zeros a pre-#143 reader demands, so the identity does not move.
+                          (92, observation_offset if observations else 0)):
         put32(output, offset, value)
     cursor = string_offset
 
@@ -260,6 +299,23 @@ def encode(source: dict) -> bytes:
         for field, value in ((0, offset), (4, length), (8, port["role"]),
                              (12, int(port["required"])), (16, port["layout"])):
             put32(output, record + field, value)
+    for index, observation in enumerate(observations):
+        record = observation_offset + index * OBSERVATION
+        put32(output, record, observation["id"])
+        name_offset, name_length = text(observation["display_name"])
+        unit_offset, unit_length = text(observation["display_unit"])
+        output[record + 4] = observation["kind"]
+        output[record + 5] = observation["unit"]
+        output[record + 6] = observation["cost"]
+        output[record + 7] = observation["cadence"]
+        output[record + 8] = observation["fold"]
+        output[record + 9] = observation["channels"]
+        output[record + 10] = name_length
+        output[record + 11] = unit_length
+        put32(output, record + 12, int(observation["minimum_bits"], 16))
+        put32(output, record + 16, int(observation["maximum_bits"], 16))
+        put32(output, record + 20, name_offset)
+        put32(output, record + 24, unit_offset)
     for index, quality in enumerate(qualities):
         record = quality_offset + index * QUALITY
         for field, value in ((0, quality["quality"]), (4, quality["sample_rate"]),
@@ -274,7 +330,7 @@ def encode(source: dict) -> bytes:
     return bytes(output)
 
 
-def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, int]:
+def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
     fail(maximum == 0 or len(data) > maximum or len(data) > 0xFFFFFFFF, 2, 16)
     fail(len(data) < HEADER, 4, len(data))
     if data[:8] != MAGIC:
@@ -283,7 +339,7 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
     fail(u16(data, 8) != 1, 4, 8)
     fail(u16(data, 10) != HEADER, 4, 10)
     fail(u32(data, 16) != len(data), 5, 16)
-    counts = (u32(data, 48), u32(data, 56), u32(data, 64), u32(data, 72))
+    counts = (u32(data, 48), u32(data, 56), u32(data, 64), u32(data, 72), u32(data, 88))
     def add_at(left: int, right: int, offset: int) -> int:
         fail(left + right > 0xFFFFFFFF, 14, offset)
         return left + right
@@ -296,11 +352,13 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
     port_offset = add_at(parameter_offset, mul_at(counts[0], PARAMETER, 48), 48)
     quality_offset = add_at(port_offset, mul_at(counts[1], PORT, 56), 56)
     choice_offset = add_at(quality_offset, mul_at(counts[2], QUALITY, 64), 64)
-    string_offset = add_at(choice_offset, mul_at(counts[3], CHOICE, 72), 72)
+    observation_offset = add_at(choice_offset, mul_at(counts[3], CHOICE, 72), 72)
+    string_offset = add_at(observation_offset, mul_at(counts[4], OBSERVATION, 88), 88)
     fail(add_at(string_offset, u32(data, 80), 80) != len(data), 5, 80)
     fail(u32(data, 12) != 0, 6, 12)
-    for offset in range(88, 96):
-        fail(data[offset] != 0, 6, offset)
+    if counts[4] == 0:
+        for offset in range(88, 96):
+            fail(data[offset] != 0, 6, offset)
     for index in range(counts[0]):
         record = parameter_offset + index * PARAMETER
         flags = u32(data, record + 32)
@@ -317,6 +375,9 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
             fail(u32(data, record + field) != 0, 6, record + field, index)
     for index in range(counts[3]):
         fail(u32(data, choice_offset + index * CHOICE + 12) != 0, 6, choice_offset + index * CHOICE + 12, index)
+    for index in range(counts[4]):
+        record = observation_offset + index * OBSERVATION
+        fail(u32(data, record + 28) != 0, 6, record + 28, index)
     cursor = string_offset
 
     def take(field: int, index: int = UNAVAILABLE) -> bytes:
@@ -330,7 +391,8 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
 
     effect_id, display_name = take(32), take(40)
     for field, expected in ((52, parameter_offset), (60, port_offset), (68, quality_offset),
-                            (76, choice_offset), (84, string_offset)):
+                            (76, choice_offset), (84, string_offset),
+                            (92, observation_offset if counts[4] else 0)):
         fail(u32(data, field) != expected, 10, field)
     choice_cursor = 0
     prior_parameter = None
@@ -363,6 +425,19 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
         fail(prior_port is not None and prior_port >= key, 9, record + 8, index)
         prior_port = key
         port_ids.append(identifier)
+    prior_observation = None
+    observation_texts = []
+    for index in range(counts[4]):
+        record = observation_offset + index * OBSERVATION
+        identifier = u32(data, record)
+        fail(prior_observation is not None and identifier <= prior_observation, 9, record, index)
+        prior_observation = identifier
+        for field, length_field in ((20, 10), (24, 11)):
+            offset, length = u32(data, record + field), data[record + length_field]
+            fail(offset != cursor, 10, record + field, index)
+            fail(offset + length > len(data), 5, record + field, index)
+            cursor = offset + length
+            observation_texts.append((data[offset:offset + length], record + field, index))
     prior_quality = None
     for index in range(counts[2]):
         record = quality_offset + index * QUALITY
@@ -388,6 +463,11 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
         tail = u32(data, record + 16)
         fail(tail not in (1, 2), 7, record + 16, index)
         fail(tail == 2 and u64(data, record + 24) != 0, 7, record + 24, index)
+    for index in range(counts[4]):
+        record = observation_offset + index * OBSERVATION
+        for field, accepted in ((4, (1,)), (5, range(1, 7)), (6, range(1, 3)),
+                                (7, range(1, 3)), (8, range(1, 3)), (9, range(1, 3))):
+            fail(data[record + field] not in accepted, 7, record + field, index)
     texts = [(effect_id, 32, UNAVAILABLE), (display_name, 40, UNAVAILABLE)]
     for index in range(counts[0]):
         record = parameter_offset + index * PARAMETER
@@ -416,6 +496,12 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
         except UnicodeDecodeError as error:
             raise WireError(11, field, index) from error
         fail(not valid_text(value), 11, field, index)
+    for raw, field, index in observation_texts:
+        try:
+            value = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise WireError(11, field, index) from error
+        fail(not valid_text(value), 11, field, index)
     for index in range(counts[0]):
         record = parameter_offset + index * PARAMETER
         flags = u32(data, record + 32)
@@ -424,6 +510,10 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
     for index in range(counts[3]):
         record = choice_offset + index * CHOICE
         fail(not canonical_float(u32(data, record)), 12, record, index)
+    for index in range(counts[4]):
+        record = observation_offset + index * OBSERVATION
+        for field in (12, 16):
+            fail(not canonical_float(u32(data, record + field)), 12, record + field, index)
     def decoded_text(field: int) -> str:
         offset, length = u32(data, field), u32(data, field + 4)
         return data[offset:offset + length].decode("utf-8")
@@ -482,6 +572,24 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
             "scratch_fixed_bytes": u64(data, record + 48),
             "scratch_bytes_per_frame": u64(data, record + 56),
         })
+    observations = []
+    for index in range(counts[4]):
+        record = observation_offset + index * OBSERVATION
+        name_offset, name_length = u32(data, record + 20), data[record + 10]
+        unit_offset, unit_length = u32(data, record + 24), data[record + 11]
+        observations.append({
+            "id": u32(data, record),
+            "display_name": data[name_offset:name_offset + name_length].decode("utf-8"),
+            "display_unit": data[unit_offset:unit_offset + unit_length].decode("utf-8"),
+            "kind": data[record + 4],
+            "unit": data[record + 5],
+            "cost": data[record + 6],
+            "cadence": data[record + 7],
+            "fold": data[record + 8],
+            "channels": data[record + 9],
+            "minimum_bits": f"{u32(data, record + 12):08x}",
+            "maximum_bits": f"{u32(data, record + 16):08x}",
+        })
     decoded = {
         "effect_id": effect_id.decode("utf-8"),
         "display_name": display_name.decode("utf-8"),
@@ -492,6 +600,7 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, int, int, int, int, 
         "parameters": parameters,
         "ports": ports,
         "qualities": qualities,
+        "observations": observations,
     }
     validate_source(decoded)
     if encode(decoded) != data:
@@ -655,13 +764,58 @@ def mutation_matrix(data: bytes) -> None:
         raise AssertionError("port-before-choice-text: mutation accepted")
 
 
+def observation_mutation_matrix(data: bytes) -> None:
+    """Issue #143: every observation-section rule refuses, at its exact byte."""
+    observation_offset = u32(data, 92)
+    second = observation_offset + OBSERVATION
+    cases = [
+        ("observation-reserved", observation_offset + 28, struct.pack("<I", 1),
+         (6, observation_offset + 28, 0, 0)),
+        ("observation-order", second, struct.pack("<I", 1), (9, second, 1, 0)),
+        ("observation-kind", observation_offset + 4, b"\x00", (7, observation_offset + 4, 0, 0)),
+        ("observation-unit", observation_offset + 5, b"\x07", (7, observation_offset + 5, 0, 0)),
+        ("observation-cost", observation_offset + 6, b"\x03", (7, observation_offset + 6, 0, 0)),
+        ("observation-cadence", observation_offset + 7, b"\x03", (7, observation_offset + 7, 0, 0)),
+        ("observation-fold", observation_offset + 8, b"\x00", (7, observation_offset + 8, 0, 0)),
+        ("observation-channels", observation_offset + 9, b"\x00",
+         (7, observation_offset + 9, 0, 0)),
+        ("observation-float", observation_offset + 12, struct.pack("<I", 0x80000000),
+         (12, observation_offset + 12, 0, 0)),
+        ("observation-float-nan", observation_offset + 16, struct.pack("<I", 0x7fc00000),
+         (12, observation_offset + 16, 0, 0)),
+        ("observation-bounds", observation_offset + 16, struct.pack("<I", 0),
+         (13, observation_offset + 4, 0, 0)),
+        # A `Computed` tap may not claim per-block cadence: that would put an analysis pass on the
+        # render thread, which is exactly what the cost split exists to prevent.
+        ("observation-computed-per-block", second + 7, b"\x01", (13, second + 4, 1, 0)),
+        ("observation-offset", 92, struct.pack("<I", observation_offset + 1),
+         (10, 92, UNAVAILABLE, 0)),
+        ("observation-count", 88, struct.pack("<I", 3), (5, 80, UNAVAILABLE, 0)),
+    ]
+    name_offset = u32(data, observation_offset + 20)
+    cases.append(("observation-text", name_offset, b"\x0a",
+                  (11, observation_offset + 20, 0, 0)))
+    cases.append(("observation-string-gap", observation_offset + 20,
+                  struct.pack("<I", name_offset + 1), (10, observation_offset + 20, 0, 0)))
+    for name, offset, replacement, expected in cases:
+        mutated = bytearray(data)
+        mutated[offset:offset + len(replacement)] = replacement
+        try:
+            verify(bytes(mutated))
+        except WireError as error:
+            if error.diagnostic != expected:
+                raise AssertionError(f"{name}: {error.diagnostic} != {expected}") from error
+        else:
+            raise AssertionError(f"{name}: mutation accepted")
+
+
 def read_hex(path: pathlib.Path) -> bytes:
     return bytes.fromhex("".join(path.read_text(encoding="ascii").split()))
 
 
 def check(root: pathlib.Path) -> None:
     fixture = root / "fixtures/effect-descriptor/v1"
-    names = ("comprehensive-a", "comprehensive-b")
+    names = ("comprehensive-a", "comprehensive-b", "comprehensive-c")
     manifest_rows = []
     for name in names:
         source_path = fixture / f"{name}.json"
@@ -678,7 +832,22 @@ def check(root: pathlib.Path) -> None:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             relative = path.relative_to(root).as_posix()
             manifest_rows.append((relative, f"{digest}  {relative}"))
+    # Issue #143 E10: the tap-bearing total is the zero-tap total plus exactly the observation
+    # section and its strings. `comprehensive-c` is `comprehensive-a` with the menu added and
+    # nothing else changed (the id and display name are the same byte lengths), so the difference
+    # is the formula and not an approximation of it.
+    zero_tap = read_hex(fixture / "comprehensive-a.wire.hex")
+    tap_bearing = read_hex(fixture / "comprehensive-c.wire.hex")
+    source_c = json.loads((fixture / "comprehensive-c.json").read_text(encoding="utf-8"))
+    expected_delta = sum(
+        OBSERVATION + len(row["display_name"].encode()) + len(row["display_unit"].encode())
+        for row in source_c["observations"]
+    )
+    assert len(tap_bearing) - len(zero_tap) == expected_delta, "observation section formula"
+    assert u32(zero_tap, 88) == 0 and u32(zero_tap, 92) == 0, "zero-tap header stays reserved-zero"
+    assert any(byte != 0 for byte in tap_bearing[88:96]), "tap-bearing header is nonzero"
     mutation_matrix(read_hex(fixture / "comprehensive-a.wire.hex"))
+    observation_mutation_matrix(tap_bearing)
     expected_manifest = "\n".join(row for _, row in sorted(manifest_rows)) + "\n"
     actual_manifest = (fixture / "MANIFEST.sha256").read_text(encoding="ascii")
     assert actual_manifest == expected_manifest, "manifest mismatch"
@@ -687,7 +856,7 @@ def check(root: pathlib.Path) -> None:
 
 def emit(root: pathlib.Path) -> None:
     fixture = root / "fixtures/effect-descriptor/v1"
-    for name in ("comprehensive-a", "comprehensive-b"):
+    for name in ("comprehensive-a", "comprehensive-b", "comprehensive-c"):
         source = json.loads((fixture / f"{name}.json").read_text(encoding="utf-8"))
         wire = encode(source)
         verify(wire)

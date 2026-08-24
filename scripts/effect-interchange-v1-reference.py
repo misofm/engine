@@ -50,6 +50,9 @@ def run_references() -> None:
         "comprehensive-b.identity.hex": None,
         "comprehensive-b.json": None,
         "comprehensive-b.wire.hex": None,
+        "comprehensive-c.identity.hex": None,
+        "comprehensive-c.json": None,
+        "comprehensive-c.wire.hex": None,
     }
     _require_exact_files(ROOT / "fixtures/effect-descriptor/v1", descriptor_names)
     with contextlib.redirect_stdout(io.StringIO()):

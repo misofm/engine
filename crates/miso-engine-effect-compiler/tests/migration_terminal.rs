@@ -221,6 +221,7 @@ static D1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &Q1,
+    observations: &[],
 };
 static D2: EffectDescriptorV1 = EffectDescriptorV1 {
     state_layout_version: 2,

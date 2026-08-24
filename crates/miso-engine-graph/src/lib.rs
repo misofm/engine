@@ -2535,6 +2535,7 @@ mod tests {
         parameters: &[],
         ports: &SUM_PORTS,
         qualities: &[],
+        observations: &[],
     };
 
     struct SidechainSum {
@@ -5065,6 +5066,7 @@ mod tests {
         parameters: &GAIN_PARAMETERS,
         ports: &SUM_PORTS,
         qualities: &[],
+        observations: &[],
     };
 
     /// A per-channel gain with a real, declared latency, so bypass has something to preserve.

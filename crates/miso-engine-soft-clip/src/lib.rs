@@ -208,6 +208,7 @@ pub const SOFT_CLIP_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &SOFT_CLIP_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// Factory for the fixed-latency soft-clip realization.

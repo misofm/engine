@@ -47,8 +47,18 @@ export_count="$(rg -c -- '-> "miso_engine_effect_descriptor_v1_inspect"' "$metad
     printf 'effect descriptor V1 check failure: inspect export count %s\n' "$export_count" >&2
     exit 1
 }
+# Issue #143 added exactly one additive export: the observation projection. The frozen inspect
+# signature and its record layouts are untouched, so the export set grows by one name and no more.
+observation_export_count="$(rg -c -- \
+    '-> "miso_engine_effect_descriptor_v1_inspect_observations"' "$metadata" || true)"
+[[ "$observation_export_count" == 1 ]] || {
+    printf 'effect descriptor V1 check failure: observation export count %s\n' \
+        "$observation_export_count" >&2
+    exit 1
+}
 if rg -- '-> "miso_engine_' "$metadata" |
-    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect"'; then
+    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect"' |
+    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect_observations"'; then
     printf 'effect descriptor V1 check failure: unexpected miso_engine Wasm export\n' >&2
     exit 1
 fi
@@ -59,6 +69,11 @@ fi
 rg -q 'miso_engine_effect_descriptor_v1_inspect' \
     "$scratch_directory/wasm-object-metadata.txt" || {
     printf 'effect descriptor V1 check failure: inspect symbol absent from Wasm object\n' >&2
+    exit 1
+}
+rg -q 'miso_engine_effect_descriptor_v1_inspect_observations' \
+    "$scratch_directory/wasm-object-metadata.txt" || {
+    printf 'effect descriptor V1 check failure: observation symbol absent from Wasm object\n' >&2
     exit 1
 }
 if rg -n '\b(v128|f32x4|i8x16|i16x8|i32x4|i64x2|f64x2)\b' \

@@ -85,6 +85,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 struct Factory;

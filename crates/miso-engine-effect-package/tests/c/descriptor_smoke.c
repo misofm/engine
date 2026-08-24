@@ -704,8 +704,109 @@ static uint32_t inspect(
         required_choices, diagnostic);
 }
 
+typedef struct observation_canary {
+    uint64_t before;
+    miso_engine_effect_observation_record_v1 rows[2];
+    uint64_t after;
+} observation_canary;
+
+/* Issue #143: the additive observation projection, over one zero-tap and one tap-bearing wire. */
+static void observation_smoke(const char *zero_tap_path, const char *tap_bearing_path) {
+    uint8_t *zero_tap = NULL;
+    const size_t zero_tap_len = read_hex_fixture(zero_tap_path, &zero_tap);
+    uint8_t *tap_bearing = NULL;
+    const size_t tap_bearing_len = read_hex_fixture(tap_bearing_path, &tap_bearing);
+    miso_engine_effect_descriptor_diagnostic_v1 diagnostic;
+    observation_canary observations;
+    uint32_t required = UINT32_MAX;
+
+    /* A descriptor that declares no tap keeps header bytes 88..96 at zero and projects nothing. */
+    for (size_t index = 88; index < 96; ++index) {
+        require(zero_tap[index] == 0, "zero-tap header stays reserved-zero");
+    }
+    uint32_t result = miso_engine_effect_descriptor_v1_inspect_observations(
+        zero_tap, zero_tap_len, MAXIMUM_WIRE_BYTES, NULL, 0, &required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_OK_V1 && required == 0,
+            "zero-tap observation count");
+
+    memset(&observations, 0, sizeof observations);
+    observations.before = observations.after = UINT64_C(0x556677889900aabb);
+    required = UINT32_MAX;
+    result = miso_engine_effect_descriptor_v1_inspect_observations(
+        tap_bearing, tap_bearing_len, MAXIMUM_WIRE_BYTES, observations.rows, 2, &required,
+        &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_OK_V1 && required == 2,
+            "tap-bearing observation count");
+    require(observations.before == UINT64_C(0x556677889900aabb) &&
+                observations.after == UINT64_C(0x556677889900aabb),
+            "observation exact-capacity canaries");
+    const size_t observation_offset = get_u32(tap_bearing, 92);
+    for (size_t index = 0; index < 2; ++index) {
+        const size_t record = observation_offset + index * 32;
+        const miso_engine_effect_observation_record_v1 *row = &observations.rows[index];
+        require(row->id == get_u32(tap_bearing, record) &&
+                    row->kind == tap_bearing[record + 4] &&
+                    row->unit == tap_bearing[record + 5] &&
+                    row->cost == tap_bearing[record + 6] &&
+                    row->cadence == tap_bearing[record + 7] &&
+                    row->fold == tap_bearing[record + 8] &&
+                    row->channels == tap_bearing[record + 9] &&
+                    row->display_name_length == tap_bearing[record + 10] &&
+                    row->display_unit_length == tap_bearing[record + 11] &&
+                    row->minimum_bits == get_u32(tap_bearing, record + 12) &&
+                    row->maximum_bits == get_u32(tap_bearing, record + 16) &&
+                    row->display_name_offset == get_u32(tap_bearing, record + 20) &&
+                    row->display_unit_offset == get_u32(tap_bearing, record + 24) &&
+                    row->reserved == get_u32(tap_bearing, record + 28),
+                "complete observation projection");
+    }
+    require(observations.rows[0].id == 1 && observations.rows[1].id == 7,
+            "observation ids ascend");
+
+    /* A short array publishes the required count and the diagnostic, and writes no record. */
+    observation_canary before_short;
+    memset(observations.rows, 0x9e, sizeof observations.rows);
+    memcpy(&before_short, &observations, sizeof observations);
+    required = UINT32_MAX;
+    result = miso_engine_effect_descriptor_v1_inspect_observations(
+        tap_bearing, tap_bearing_len, MAXIMUM_WIRE_BYTES, observations.rows, 1, &required,
+        &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_BUFFER_TOO_SMALL_V1 && required == 2 &&
+                diagnostic.required_bytes == 64,
+            "short observation array status");
+    require(memcmp(&observations, &before_short, sizeof observations) == 0,
+            "short observation array writes nothing");
+
+    required = UINT32_MAX;
+    result = miso_engine_effect_descriptor_v1_inspect_observations(
+        tap_bearing, tap_bearing_len, MAXIMUM_WIRE_BYTES, NULL, 1, &required, &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_NULL_V1 && required == 0,
+            "nonzero capacity requires a record pointer");
+
+    required = UINT32_C(0x0badf00d);
+    result = miso_engine_effect_descriptor_v1_inspect_observations(
+        tap_bearing, tap_bearing_len, MAXIMUM_WIRE_BYTES, observations.rows, 2, &required, NULL);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_NULL_V1 && required == UINT32_C(0x0badf00d),
+            "null diagnostic performs no writes");
+
+    uint8_t *invalid = malloc(tap_bearing_len);
+    require(invalid != NULL, "allocate invalid observation wire");
+    memcpy(invalid, tap_bearing, tap_bearing_len);
+    invalid[12] = 1;
+    required = UINT32_MAX;
+    result = miso_engine_effect_descriptor_v1_inspect_observations(
+        invalid, tap_bearing_len, MAXIMUM_WIRE_BYTES, observations.rows, 2, &required,
+        &diagnostic);
+    require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1 && required == 0 &&
+                diagnostic.byte_offset == 12,
+            "invalid wire projects nothing");
+    free(invalid);
+    free(zero_tap);
+    free(tap_bearing);
+}
+
 int main(int argc, char **argv) {
-    require(argc == 2, "expected comprehensive fixture path");
+    require(argc == 3, "expected zero-tap and tap-bearing fixture paths");
     static const uint8_t expected_identity[32] = {
         0x69, 0xf8, 0x50, 0xcc, 0xd9, 0x4c, 0x0d, 0x6e,
         0xca, 0x0a, 0xf6, 0xcc, 0x6a, 0x2d, 0xa8, 0x04,
@@ -810,6 +911,7 @@ int main(int argc, char **argv) {
             "null diagnostic performs no writes");
 
     comprehensive_smoke(argv[1]);
+    observation_smoke(argv[1], argv[2]);
     puts("effect descriptor C inspection smoke: ok");
     return 0;
 }

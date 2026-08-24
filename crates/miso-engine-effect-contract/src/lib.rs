@@ -130,6 +130,41 @@ scalar_enum!(ResetKind {FullToDefaults=1,DiscontinuityKeepParameters=2});
 scalar_enum!(AutomationSpanKind {Point=1,Step=2,Linear=3,Exponential=4});
 pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
+// Issue #143 D1: the declared observation menu. Each vocabulary is a `scalar_enum!` for the same
+// reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
+// browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
+// refused rather than silently reinterpreted.
+// What an observation tap reports. One kind ships in V1.
+scalar_enum!(ObservationKindV1 {GainReductionDb=1});
+// What publishing an observation costs.
+//
+// `Resident` means the value already exists in kernel state when the block ends: publishing is a
+// copy out of state that `process` wrote anyway, and no lane kernel changes. `Computed` means an
+// analysis pass that would not otherwise run; V1 declares the class, validates it, and refuses to
+// bind one (`ObservationUnbound`/`UnsupportedKind` on the control plane).
+scalar_enum!(ObservationCostV1 {Resident=1,Computed=2});
+// How often a tap produces a value.
+scalar_enum!(ObservationCadenceV1 {PerBlock=1,PerWindow=2});
+// How a window of per-block values folds into the one number a consumer reads.
+//
+// `PeakMagnitude` is `max(|x|)` over the window, which is what makes a gain-reduction tap publish
+// a **non-negative magnitude** even though the contract's internal sign convention is
+// negative-for-reduction ([`GainReductionV1`]). The published value is non-negative *by the
+// declared fold*, not by a host convention nobody can check.
+scalar_enum!(ObservationFoldV1 {Latest=1,PeakMagnitude=2});
+// Whether a tap publishes one value per instance or one per dual-mono lane.
+scalar_enum!(ObservationChannelsV1 {Shared=1,PerLane=2});
+/// An effect-local observation tap identifier: nonzero, and ascending within a descriptor.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ObservationTapId(pub u32);
+impl ObservationTapId {
+    /// `None` for zero, which the addressing ABI reserves as "no tap".
+    #[must_use]
+    pub const fn new(v: u32) -> Option<Self> {
+        if v == 0 { None } else { Some(Self(v)) }
+    }
+}
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
@@ -258,6 +293,43 @@ pub struct PortDescriptorV1 {
     pub required: bool,
     pub layout: PortLayout,
 }
+/// One declared observation tap: what an effect will let a console watch, and what watching costs.
+///
+/// # Why a declared menu rather than a host-side table
+///
+/// The effect is the only thing that knows which of its internal values exist, what they mean and
+/// whether reading one is a copy or a second computation. A host that kept its own table would be
+/// a second source of truth that goes stale the moment a kernel changes. Every consumer -- the
+/// subscribe path, the descriptor wire, the browser metadata -- reads this and nothing else.
+///
+/// `minimum`/`maximum` are the declared bounds of the **published** value, after the declared
+/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObservationDescriptorV1 {
+    /// Effect-local tap id: nonzero, unique, and strictly ascending in declaration order.
+    pub id: ObservationTapId,
+    /// Human-facing name, e.g. `"Gain Reduction"`.
+    pub display_name: &'static str,
+    /// Human-facing unit suffix, e.g. `"dB"`.
+    pub display_unit: &'static str,
+    /// What the tap reports.
+    pub kind: ObservationKindV1,
+    /// The unit the effect publishes in. A `Linear` tap is converted once per window on the
+    /// control plane, never on the render thread (issue #143 R4).
+    pub unit: ParameterUnit,
+    /// What publishing it costs.
+    pub cost: ObservationCostV1,
+    /// How often it produces a value.
+    pub cadence: ObservationCadenceV1,
+    /// How a window of values folds into the number a consumer reads.
+    pub fold: ObservationFoldV1,
+    /// One value per instance, or one per dual-mono lane.
+    pub channels: ObservationChannelsV1,
+    /// Declared inclusive lower bound of the published value.
+    pub minimum: f32,
+    /// Declared inclusive upper bound of the published value.
+    pub maximum: f32,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualityDescriptorV1 {
     pub quality: EffectQuality,
@@ -279,6 +351,9 @@ pub struct EffectDescriptorV1 {
     pub parameters: &'static [ParameterDescriptorV1],
     pub ports: &'static [PortDescriptorV1],
     pub qualities: &'static [QualityDescriptorV1],
+    /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
+    /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
+    pub observations: &'static [ObservationDescriptorV1],
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DescriptorDiagnosticCode {
@@ -293,6 +368,9 @@ pub enum DescriptorDiagnosticCode {
     Quality,
     QualityOrder,
     StateSizes,
+    ObservationId,
+    ObservationOrder,
+    Observation,
 }
 impl DescriptorDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
@@ -308,6 +386,9 @@ impl DescriptorDiagnosticCode {
             Self::Quality => "effect.descriptor.quality",
             Self::QualityOrder => "effect.descriptor.quality_order",
             Self::StateSizes => "effect.descriptor.state_sizes",
+            Self::ObservationId => "effect.descriptor.observation_id",
+            Self::ObservationOrder => "effect.descriptor.observation_order",
+            Self::Observation => "effect.descriptor.observation",
         }
     }
 }
@@ -443,6 +524,35 @@ fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
         }
     }
 }
+/// The three rules an [`ObservationDescriptorV1`] must satisfy beyond text and bounds.
+///
+/// * **Text and bounds.** Both display strings are non-empty printable text, and the declared
+///   published range is finite, ordered, and free of `-0.0` -- the same canonicalisation rule
+///   every other descriptor float obeys, so an identity comparison never depends on a zero's sign.
+/// * **A `Computed` tap may not claim `PerBlock`.** `Computed` is the class whose value does not
+///   already exist when the block ends; claiming per-block cadence for it would put an analysis
+///   pass on the render thread, which is precisely what the cost split exists to prevent.
+/// * **A `PerLane` tap requires per-lane state to read.** The observation is a read of kernel
+///   state, so an effect whose qualities declare no per-lane state (`left_bytes == 0`) cannot
+///   produce two independent lanes and must declare `Shared`.
+///
+/// The third rule is the in-descriptor form of issue #143's "PerLane requires bank width": bank
+/// width is not a descriptor field (it is a *factory* capability, `bind_homogeneous_bank`), so the
+/// checkable statement is the one that actually catches the error -- a per-lane tap on an effect
+/// with no per-lane state.
+fn observation_valid(d: &EffectDescriptorV1, o: &ObservationDescriptorV1) -> bool {
+    valid_text(o.display_name)
+        && valid_text(o.display_unit)
+        && o.minimum.is_finite()
+        && o.maximum.is_finite()
+        && !is_negative_zero(o.minimum)
+        && !is_negative_zero(o.maximum)
+        && o.minimum < o.maximum
+        && !(matches!(o.cost, ObservationCostV1::Computed)
+            && matches!(o.cadence, ObservationCadenceV1::PerBlock))
+        && (!matches!(o.channels, ObservationChannelsV1::PerLane)
+            || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
+}
 pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
@@ -569,6 +679,28 @@ pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), Desc
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,
+            })
+        }
+    }
+    let (mut oprior, mut oids) = (0, BTreeSet::new());
+    for o in d.observations {
+        if o.id.0 == 0 || !oids.insert(o.id.0) {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::ObservationId,
+            })
+        }
+        if o.id.0 <= oprior {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::ObservationOrder,
+            })
+        }
+        oprior = o.id.0;
+        if !observation_valid(d, o) {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::Observation,
             })
         }
     }

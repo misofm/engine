@@ -222,7 +222,10 @@ fn each_lane_receives_only_its_own_commands() {
         assert_eq!(members.left[0][frame], 0.25, "lane 0 got its own command");
         assert_eq!(members.left[1][frame], 1.0, "lane 1 was never commanded");
         assert_eq!(members.left[2][frame], 4.0, "lane 2 got its own command");
-        assert_eq!(members.left[3][frame], 8.0, "the final lane got its own command");
+        assert_eq!(
+            members.left[3][frame], 8.0,
+            "the final lane got its own command"
+        );
     }
 }
 

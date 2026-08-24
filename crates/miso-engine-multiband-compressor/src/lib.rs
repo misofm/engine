@@ -387,6 +387,7 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescrip
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// The domain of one parameter, in the shared runtime's vocabulary.

@@ -259,6 +259,7 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptor
     parameters: &TRUE_PEAK_LIMITER_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// The state layout this crate reads and writes.

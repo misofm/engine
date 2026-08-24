@@ -23,6 +23,13 @@
     { "value": 8, "name": "backpressure" },
     { "value": 9, "name": "wrongState" }
   ],
+  "observationVocabularies": {
+    "kinds": [{ "value": 1, "name": "gainReductionDb" }],
+    "costs": [{ "value": 1, "name": "resident" }, { "value": 2, "name": "computed" }],
+    "cadences": [{ "value": 1, "name": "perBlock" }, { "value": 2, "name": "perWindow" }],
+    "folds": [{ "value": 1, "name": "latest" }, { "value": 2, "name": "peakMagnitude" }],
+    "channels": [{ "value": 1, "name": "shared" }, { "value": 2, "name": "perLane" }]
+  },
   "builtins": {
     "parameters": [
       { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "nudge": null },
@@ -171,7 +178,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.delay",
@@ -258,7 +266,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.gate-expander",
@@ -393,7 +402,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.multiband-compressor",
@@ -592,7 +602,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.parametric-eq",
@@ -983,7 +994,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.soft-clip",
@@ -1038,7 +1050,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.transient-shaper",
@@ -1093,7 +1106,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.true-peak-limiter",
@@ -1148,7 +1162,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     }
   ]
 }
