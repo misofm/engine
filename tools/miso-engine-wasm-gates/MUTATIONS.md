@@ -1,5 +1,14 @@
 # Red mutations for gate G5
 
+## Full-corpus FTZ/DAZ discrimination (issue #144 item 1)
+
+The intended red mutation is lowering `miso_engine_lane::FLUSH_EPS` from `1.0e-20` to `1.0e-40`,
+which should make subnormal recursive-state cases diverge between the clear and FTZ+DAZ runs.
+It cannot yet serve as a discriminating red mutation: the exact unmodified full corpus already has
+70 divergent rows, including raw math and feed-forward subnormal-input cases outside D7's
+recursive-state law. The test is retained ignored with that explicit issue-144 blocker rather than
+excluding those rows or claiming a mutation against an already-red baseline.
+
 Every mutation below was applied, run, recorded and reverted on the delivery host
 (x86-64-v3, rustc 1.97.1, wasmtime 47.0.3). Master plan #83 principle 6: a gate lands together
 with the one-line change that makes it fail.
