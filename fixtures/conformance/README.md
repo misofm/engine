@@ -15,3 +15,9 @@ launch engine, host, effect, or release support.
 
 Run `cargo run --locked -p miso-engine-conformance --example miso_engine_conformance_fixtures -- --check`.
 Only a maintainer deliberately updating the corpus may run `--write`, then review every checksum change.
+
+Regeneration is pinned to the generating platform's libm (audit #105, finding F9). The sine content
+in the corpus was produced with `f32::sin`, whose result is not specified to the last bit across
+platforms or toolchain versions, so a `--write` on a different machine can move the CRCs without any
+intended change. These bytes are frozen contract bytes: treat any CRC movement under `--write` as a
+platform difference to be investigated, never as a fixture to be re-pinned.

@@ -268,3 +268,36 @@ not issue-011 acceptance evidence. Issue 011's new `miso-engine-effect-compiler`
 only and depends on core, session and the render-reachable contract; neither compiler nor package
 crate is reachable from process. The resolved `sha2` feature tree and archive-size delta must be
 re-reviewed by issue 029; no package claim applies to the render dependency graph.
+
+## Audit #84 phase D / #105 phase 2: the render-audit instrumentation never ships
+
+`miso-engine-core`'s `realtime-audit` feature compiles the thread-local depth guard that
+`in_render_scope` arms and that the counting allocators report to. It is evidence machinery, and it
+must not reach a shippable artifact. Three independent statements enforce that, and each one is
+necessary because the other two do not imply it:
+
+1. **Manifests.** Only `tools/*` binaries and `[dev-dependencies]` may enable the feature.
+   `miso-engine-conformance` *forwards* it (`[features] realtime-audit =
+   ["miso-engine-core/realtime-audit"]`) instead of hard-enabling it, so a regular dependent never
+   receives the instrumentation unless it asks. `scripts/check-realtime-audit-leak.sh` checks both
+   the manifest sections and the resolved graph (`cargo tree -e features,no-dev --target all`) of
+   every package under `crates/` and `hosts/`.
+2. **Invocations.** Cargo unifies features across the packages selected by *one* invocation, so a
+   clean per-package graph does not make a multi-package build clean. CI builds host artifacts in
+   an invocation that lists no evidence crate; the evidence crates keep their cross-target compile
+   coverage in a separate step, and `scripts/check-artifact-evidence-leak.sh` gates both halves.
+   This is what makes the artifact independent of rule 1 continuing to hold: with the feature
+   temporarily restored under conformance's `[dependencies]`, the pre-#105 combined wasm list
+   resolves the feature and the host-only list does not.
+3. **Consumers.** A test binary that runs `miso_engine_conformance::run_effect_conformance` must
+   arm the scope *and* install the workspace's one audited `GlobalAlloc`
+   (`miso_engine_bench_support::alloc`, #104 phase B) in count-and-continue mode. The harness
+   proves both before it judges any effect and reports `harness.audit_unarmed` or
+   `harness.allocator_not_installed` rather than a vacuous pass, so the allocation gate cannot
+   silently become decorative. `scripts/check-bench-policy.sh` allows that dev edge from `crates/`
+   and nothing else.
+
+`process.allocation` is therefore a real measurement (a global allocator, on the consumer's side).
+`process.lock`, `process.log`, `process.io` and `process.feature_detection` are hook reports: an
+effect that calls a raw `Mutex::lock` or `println!` is caught by the syscall trace
+(`scripts/trace-effect-contract-audit.sh`), not by the harness.

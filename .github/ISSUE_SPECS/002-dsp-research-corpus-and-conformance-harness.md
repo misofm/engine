@@ -155,3 +155,30 @@ Gap and caveat: `ReferenceRetainedTptF32` is a bit-identity twin of production, 
 regenerated from it prove reproducibility, not correctness; the correctness oracle for that
 topology is `ReferenceSvfStateSpace`. Four stopped-issue research harnesses (031/042/044/045) are
 archived under `dsp-research/archive/` and are not compiled.
+
+### 2026-08 decision record (#105 phase 2)
+
+The effect-contract harness runs against every production `NativeEffectFactory`, not against its
+own reference mock alone. Each effect crate's `tests/conformance.rs` is one line,
+`miso_engine_conformance::effect_conformance_test!`, and `scripts/check-effect-contract.sh` derives
+the required set from `rg -l 'impl NativeEffectFactory for' crates` so a new effect is failing until
+it carries the test. `crates/miso-engine-graph-compiler` and `crates/miso-engine-conformance` are
+excluded by name: their factories are test mocks.
+
+Allocation detection is a global allocator, not a hook. The harness attributes
+`miso_engine_core::realtime::audit`'s counters to each `process` call; the counters are fed by
+#104 phase B's one audited `GlobalAlloc`, consumed as a `[dev-dependencies]` edge. The harness
+proves the consumer armed the scope and installed the allocator before it judges anything
+(`harness.audit_unarmed`, `harness.allocator_not_installed`). Lock/log/I/O/feature-detection stay
+hook reports and `docs/REALTIME_DEPENDENCY_POLICY.md` says so.
+
+Two harness predicates were wrong for real effects and are replaced rather than relaxed. The
+prepare request's hard-coded 1 MiB state limit rejected the delay's own declared 1.5 MB line at
+96 kHz; limits now come from the quality row. "First non-zero output sample == declared latency" is
+not a property of a conforming effect — a linear-phase halfband emits from sample 0 — and is
+replaced by the bypass PDC reference (`out[n] == in[n-latency]`, bit-exact, both lanes) plus master
+plan P1 partition invariance over `{1, quantum-1, quantum}` and 100-instance determinism.
+
+CI builds host artifacts in an invocation that names no evidence crate; the evidence crates keep a
+separate cross-target compile-coverage step. `scripts/check-artifact-evidence-leak.sh` gates both
+halves, because per-package graph cleanliness does not imply a clean multi-package invocation.
