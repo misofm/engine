@@ -152,14 +152,14 @@ jobs:
       # DISCRIMINATES: a sub-v3 build must fail with the pinned message, at both feature levels.
       - name: Sub-v3 builds are refused by the lane guard (scalar)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>target/ci-scalar-probe.log
-          grep -q 'requires x86-64-v3' target/ci-scalar-probe.log
+          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>/tmp/ci-scalar-probe.log
+          grep -q 'requires x86-64-v3' /tmp/ci-scalar-probe.log
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="fma"'
       - name: Sub-v3 builds are refused by the lane guard (AVX2 without FMA)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>target/ci-avx2-probe.log
-          grep -q 'requires x86-64-v3' target/ci-avx2-probe.log
+          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>/tmp/ci-avx2-probe.log
+          grep -q 'requires x86-64-v3' /tmp/ci-avx2-probe.log
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
       - name: AVX2 with FMA compile probe and cfg assertion
