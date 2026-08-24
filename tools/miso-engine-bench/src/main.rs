@@ -26,7 +26,7 @@ mod scheduler;
 mod session;
 
 #[cfg(not(target_arch = "wasm32"))]
-const INTERNAL_SUBJECT: &str = "MISO_ENGINE_INTERNAL_BENCH_SUBJECT";
+const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
 const SUBJECTS: &[&str] = &[
     "bootstrap",

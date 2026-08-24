@@ -57,7 +57,7 @@ EOF
 cat >"$template/fake-benchmark.py" <<'PY'
 #!/usr/bin/env python3
 import json, os, pathlib, sys
-if len(sys.argv) != 1:
+if sys.argv[1:] != ["effect-interchange"]:
     raise SystemExit(2)
 log = pathlib.Path(os.environ["MISO_ENGINE_TEST_LAUNCH_LOG"])
 with log.open("a", encoding="utf-8") as stream:

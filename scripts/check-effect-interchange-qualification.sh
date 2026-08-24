@@ -126,7 +126,7 @@ rg -Fq '/^Export\[/' scripts/check-effect-interchange-targets.sh ||
 rg -Fq -- '-> "' scripts/check-effect-interchange-targets.sh ||
     fail 'Wasm export parser does not select explicit export arrows'
 
-if rg -n 'miso-engine-effect-interchange|effect_interchange_qualification' \
+if rg -n 'miso-engine-effect-interchange|^miso-engine-bench([.]workspace)?[[:space:]]*=|effect_interchange_qualification' \
     crates/*/Cargo.toml hosts/*/Cargo.toml 2>/dev/null; then
     fail 'qualification dependency reached a production package'
 fi

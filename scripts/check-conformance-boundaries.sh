@@ -43,7 +43,7 @@ fi
 
 dependency_names() {
     awk '
-        /^\[dependencies\]$/ { dependencies = 1; next }
+        /^\[dependencies\]$/ || /^\[target[.].*[.]dependencies\]$/ { dependencies = 1; next }
         /^\[/ { dependencies = 0 }
         dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
             name = $0

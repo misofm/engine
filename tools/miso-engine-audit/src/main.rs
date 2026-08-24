@@ -23,7 +23,7 @@ mod source;
 mod source_duration;
 mod source_fixture;
 
-const INTERNAL_SUBJECT: &str = "MISO_ENGINE_INTERNAL_AUDIT_SUBJECT";
+const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_AUDIT_SUBJECT";
 const SUBJECTS: &[&str] = &[
     "builtins",
     "builtins-fixture",

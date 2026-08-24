@@ -12,6 +12,10 @@ path = "src/main.rs"
 [dependencies]
 flatbuffers = "=25.12.19" # Comparison tool only; no engine/runtime target dependency.
 miso-engine-bench-support.workspace = true
+miso-engine-protocol.workspace = true
+miso-engine-session.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
 miso-engine-conformance.workspace = true
@@ -22,9 +26,7 @@ miso-engine-effect-package.workspace = true
 miso-engine-graph = { workspace = true, features = ["test-support"] }
 miso-engine-graph-compiler.workspace = true
 miso-engine-lane.workspace = true
-miso-engine-protocol.workspace = true
 miso-engine-rack.workspace = true
-miso-engine-session.workspace = true
 sha2.workspace = true
 
 [features]
