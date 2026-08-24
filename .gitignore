@@ -11,3 +11,19 @@
 .vscode/
 *.swp
 *.swo
+
+# Cargo target-dir spill at the repository root. `CARGO_TARGET_DIR=.` (or a stray `--target-dir .`)
+# writes these next to `Cargo.toml` instead of under `target/`; 235 such files had been committed
+# to `main` before #104 phase D removed them. Nothing in the tree references these paths: every
+# script that reads a build artifact builds it under its own `$target_dir`.
+/.rustc_info.json
+/CACHEDIR.TAG
+/debug/
+/release/
+/aarch64-apple-darwin/
+/aarch64-apple-ios/
+/aarch64-linux-android/
+/wasm32-unknown-unknown/
+/x86_64-apple-darwin/
+/x86_64-pc-windows-gnu/
+/x86_64-unknown-linux-gnu/
