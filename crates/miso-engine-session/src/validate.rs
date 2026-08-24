@@ -1,31 +1,29 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
-
-use std::collections::{HashMap, HashSet};
-
-use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
-
 use crate::{
     AutomationShape, Diagnostic, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, ParameterUnit,
     Rack, RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionTomlV1,
     Source, Track, diagnostic::PathRef,
 };
-
+use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
+use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy)]
 enum GraphEntity<'a> {
     Track(&'a Track),
     Submix,
     Output,
 }
-
 struct Index<'a> {
     sources: HashMap<&'a str, &'a Source>,
     graph: HashMap<&'a str, GraphEntity<'a>>,
 }
-
+#[derive(Default)]
+struct LocalUniqueness<'a> {
+    effect_ids: HashSet<&'a str>,
+    parameters: HashSet<(u32, u8)>,
+}
 pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), DiagnosticSet> {
     let mut diagnostics = Vec::new();
     let root = PathRef::ROOT;
-
     if session.schema_version != SESSION_SCHEMA_VERSION_V1 {
         error(
             &mut diagnostics,
@@ -150,8 +148,9 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
     }
 
     let index = Index { sources, graph };
+    let mut local = LocalUniqueness::default();
     validate_sources(session, &root, &mut diagnostics);
-    validate_tracks(session, &index, &root, &mut diagnostics);
+    validate_tracks(session, &index, &root, &mut diagnostics, &mut local);
     validate_routes(session, &index, &root, &mut diagnostics);
     validate_automation(session, &index, &root, &mut diagnostics);
 
@@ -245,11 +244,12 @@ fn validate_sources(
     }
 }
 
-fn validate_tracks(
-    session: &SessionTomlV1,
+fn validate_tracks<'a>(
+    session: &'a SessionTomlV1,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
+    local: &mut LocalUniqueness<'a>,
 ) {
     let tracks_path = root.key("tracks");
     for (position, track) in session.tracks.iter().enumerate() {
@@ -309,23 +309,28 @@ fn validate_tracks(
                 }
             }
         }
-        validate_rack(diagnostics, index, &track.simd1, &path.key("simd1"));
-        validate_rack(diagnostics, index, &track.dynamic, &path.key("dynamic"));
-        validate_rack(diagnostics, index, &track.simd2, &path.key("simd2"));
+        for (name, rack) in [
+            ("simd1", &track.simd1),
+            ("dynamic", &track.dynamic),
+            ("simd2", &track.simd2),
+        ] {
+            validate_rack(diagnostics, index, rack, &path.key(name), local);
+        }
     }
 }
 
-fn validate_rack(
+fn validate_rack<'a>(
     diagnostics: &mut Vec<Diagnostic>,
     index: &Index<'_>,
-    rack: &Rack,
+    rack: &'a Rack,
     path: &PathRef<'_>,
+    local: &mut LocalUniqueness<'a>,
 ) {
     let effects_path = path.key("effects");
-    let mut effect_ids = HashSet::with_capacity(rack.effects.len());
+    local.effect_ids.clear();
     for (position, effect) in rack.effects.iter().enumerate() {
         let effect_path = effects_path.index(position);
-        if !effect_ids.insert(effect.id.as_str()) {
+        if !local.effect_ids.insert(effect.id.as_str()) {
             error(
                 diagnostics,
                 DiagnosticCode::DuplicateId,
@@ -333,7 +338,7 @@ fn validate_rack(
                 "effect ID is repeated in a rack",
             );
         }
-        validate_effect(diagnostics, index, effect, &effect_path);
+        validate_effect(diagnostics, index, effect, &effect_path, local);
     }
 }
 
@@ -342,6 +347,7 @@ fn validate_effect(
     index: &Index<'_>,
     effect: &Effect,
     path: &PathRef<'_>,
+    local: &mut LocalUniqueness<'_>,
 ) {
     if let crate::EffectIdentity::ThirdPartyCid { cid } = &effect.identity
         && cid.is_empty()
@@ -363,7 +369,7 @@ fn validate_effect(
         );
     }
     let params_path = path.key("params");
-    let mut parameters = HashSet::with_capacity(effect.params.len());
+    local.parameters.clear();
     for (position, parameter) in effect.params.iter().enumerate() {
         let parameter_path = params_path.index(position);
         let channel = match parameter.channel {
@@ -371,7 +377,7 @@ fn validate_effect(
             crate::ParameterChannel::Right => 1,
             crate::ParameterChannel::Both => 2,
         };
-        if !parameters.insert((parameter.parameter_id, channel)) {
+        if !local.parameters.insert((parameter.parameter_id, channel)) {
             error(
                 diagnostics,
                 DiagnosticCode::DuplicateId,

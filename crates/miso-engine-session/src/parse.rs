@@ -1,12 +1,4 @@
 //! Explicit value-walking parser over `toml::de::DeTable` (borrowed, spanned). Serde is not used.
-
-use core::ops::Range;
-
-use toml::{
-    Spanned,
-    de::{DeTable, DeValue},
-};
-
 use crate::{
     Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
     DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
@@ -19,12 +11,16 @@ use crate::{
     validate::validate_session,
     value::{F32Token, parse_f32_token, parse_i64_token},
 };
+use core::ops::Range;
+use toml::{
+    Spanned,
+    de::{DeTable, DeValue},
+};
 type Value<'i> = Spanned<DeValue<'i>>;
 fn value_span(value: &Value<'_>) -> (usize, usize) {
     let span = value.span();
     (span.start, span.end)
 }
-
 #[derive(Clone, Copy)]
 struct TableRef<'v, 'i> {
     table: &'v DeTable<'i>,
@@ -190,17 +186,17 @@ impl<'i> Parser<'i> {
         }
     }
 
-    fn string(
+    fn string_ref<'v, 'd>(
         &mut self,
-        table: TableRef<'_, '_>,
+        table: TableRef<'v, 'd>,
         key: &'static str,
         path: &DiagnosticPath<'_>,
-    ) -> Option<String> {
+    ) -> Option<&'v str> {
         let Some(value) = table.table.get(key) else {
             return self.missing(table, key, path);
         };
         match value.get_ref() {
-            DeValue::String(value) => Some(value.as_ref().to_owned()),
+            DeValue::String(value) => Some(value.as_ref()),
             _ => {
                 self.error_at(
                     DiagnosticCode::WrongType,
@@ -211,6 +207,15 @@ impl<'i> Parser<'i> {
                 None
             }
         }
+    }
+
+    fn string(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<String> {
+        self.string_ref(table, key, path).map(str::to_owned)
     }
 
     fn bool(
@@ -383,8 +388,8 @@ impl<'i> Parser<'i> {
     ) -> Option<StableId> {
         let field_path = path.key(key);
         let span = table.table.get(key).map(value_span).unwrap_or(table.span);
-        let value = self.string(table, key, path)?;
-        StableId::parse(&value).or_else(|| {
+        let value = self.string_ref(table, key, path)?;
+        StableId::parse(value).or_else(|| {
             self.error_at(
                 DiagnosticCode::InvalidId,
                 field_path,
