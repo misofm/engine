@@ -1,0 +1,64 @@
+name: browser qualification
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  artifact:
+    name: shipped AudioWorklet artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      - name: Build the exact shipped artifact
+        run: |
+          mkdir -p target/ci/browser-qualification-artifacts
+          bash scripts/build-web-audioworklet.sh target/ci/browser-qualification-artifacts
+      - name: Upload shipped artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-qualification-artifact
+          path: target/ci/browser-qualification-artifacts/
+          if-no-files-found: error
+
+  browser:
+    name: ${{ matrix.browser }} — browser qualification gates
+    needs: artifact
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hosts/miso-engine-host-web/qualification/package-lock.json
+      - name: Download shipped artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-qualification-artifact
+          path: target/ci/browser-qualification-artifacts
+      - name: Install pinned browser
+        working-directory: hosts/miso-engine-host-web/qualification
+        run: |
+          npm ci
+          npx playwright install --with-deps "${{ matrix.browser }}"
+      - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
+        working-directory: hosts/miso-engine-host-web/qualification
+        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/browser-qualification-artifacts" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
+      - name: Generated deployment matrix is current
+        working-directory: hosts/miso-engine-host-web/qualification
+        run: npm run matrix -- --check
