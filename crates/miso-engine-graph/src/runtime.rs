@@ -910,6 +910,10 @@ pub(crate) struct MutedRead {
     pub(crate) buffer: u32,
 }
 
+/// Per partition of one wave, every consumer read to mute while that partition is trapped.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type WaveMutedReads = Box<[Box<[MutedRead]>]>;
+
 /// The partitioning of one wave, chosen by the cost-weighted split at bind.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct WaveLayout {

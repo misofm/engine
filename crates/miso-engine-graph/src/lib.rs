@@ -664,6 +664,9 @@ impl PreparedGraphPlan {
             _not_sync: Cell::new(()),
         }
     }
+    /// The failure carries every input back, which is the point; boxing it would only move the
+    /// allocation onto the caller's error path.
+    #[allow(clippy::result_large_err)]
     pub fn bind(
         self,
         bindings: GraphRuntimeBindings,
@@ -1980,7 +1983,7 @@ impl NativeSchedulerJobV1 for NativeGraphPartitionJob {
 struct NativeGraphExecutor {
     waves: Box<[RenderWaveV1<NativeGraphPartitionJob>]>,
     /// Per `(wave, partition)`, the consumer reads to mute while that partition is trapped.
-    trapped_edges: Box<[Box<[Box<[runtime::MutedRead]>]>]>,
+    trapped_edges: Box<[runtime::WaveMutedReads]>,
     output: runtime::NodeLocation,
     scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
     lease: Option<Box<WorkerLeaseV1<NativeGraphPartitionJob>>>,
@@ -4385,14 +4388,6 @@ mod tests {
         );
     }
 
-    /// THE gate for #98 F2: on fifty seeded random DAGs -- stage chains, rack effects with
-    /// sidechains, submixes, sends from arbitrary taps, non-trivial 2x2 routes and PDC on a
-    /// quarter of the edges -- the sequential executor and the native dependency-wave executor
-    /// render bit-identical PCM over eight blocks, at every worker-lane count.
-    ///
-    /// Red mutation (`tests/MUTATIONS.md`): stage a native edge from the wrong producer, or make
-    /// the sequential executor read a delayed edge before staging it.
-
     /// E4. A worker that misses its bounded recovery deadline never wedges the callback: the
     /// block returns degraded audio in bounded time, the trapped parcel is left alone until the
     /// worker gives it back, and rendering is bit-exact again afterwards.
@@ -4489,6 +4484,15 @@ mod tests {
         }
     }
 
+    /// THE gate for #98 F2 and #100 F1/F8: on fifty seeded random DAGs -- stage chains, rack
+    /// effects with sidechains, submixes, sends from arbitrary taps, non-trivial 2x2 routes and
+    /// PDC on a quarter of the edges -- the sequential executor and the native dependency-wave
+    /// executor render bit-identical PCM over eight blocks, at 1, 2, 4 and 7 worker lanes, with
+    /// one pool per lane count whose lease is handed from session to session.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`): resolve a native op's inputs from the coloured
+    /// buffer instead of its producing op; issue commands in ascending worker order so a worker
+    /// can wake a child before that child's command exists.
     #[test]
     fn fifty_random_dag_sessions_render_bit_identically_in_both_executors() {
         const FRAMES: usize = 16;

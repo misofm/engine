@@ -17,7 +17,7 @@
 //! # Idle policy and the single wake
 //!
 //! Between blocks the workers park. The coordinator issues **at most one**
-//! [`std::thread::unpark`] per rendered block (`wake_root`), and workers wake their binary-tree
+//! `std::thread::Thread::unpark` per rendered block (`wake_root`), and workers wake their binary-tree
 //! children, so one wake reaches every issued worker. That wake is the only syscall any
 //! render-reachable coordinator code performs, and it is the documented exception to the
 //! render prohibitions in `docs/REALTIME_DEPENDENCY_POLICY.md`. Inside a block the workers spin
