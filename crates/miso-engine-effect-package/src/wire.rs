@@ -7,14 +7,16 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     AutomationRate, DescriptorDiagnosticCode, EffectDescriptorV1, EffectQuality, LinkMode,
-    LinkModeSet, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
-    PortDescriptorV1, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor_v1,
+    LinkModeSet, NudgeLadderV1, NudgeRatioClass, ParameterChannelPolicy, ParameterDomain,
+    ParameterMapping, ParameterUnit, PortDescriptorV1, PortLayout, PortRole, SmoothingRule,
+    TailSamples, validate_descriptor_v1,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAGIC: &[u8; 8] = b"MISOEFD1";
-const VERSION: u16 = 1;
+const VERSION_V1: u16 = 1;
+const VERSION_V2: u16 = 2;
 const HEADER_BYTES: usize = 96;
 const PARAMETER_BYTES: usize = 80;
 const PORT_BYTES: usize = 24;
@@ -85,6 +87,7 @@ impl<'a> BoundEffectDescriptorWireV1<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct VerifiedEffectDescriptorWireV1<'a> {
     bytes: &'a [u8],
+    wire_version: u16,
     parameter_count: u32,
     port_count: u32,
     quality_count: u32,
@@ -96,6 +99,25 @@ pub struct VerifiedEffectDescriptorWireV1<'a> {
 impl<'a> VerifiedEffectDescriptorWireV1<'a> {
     pub const fn as_bytes(self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Return the physical descriptor-wire version carried by these verified bytes.
+    pub const fn wire_version(self) -> u16 {
+        self.wire_version
+    }
+
+    /// Return a V2 parameter's explicit ladder, or `None` for a V1/default-derived parameter.
+    pub fn parameter_nudge_ladder(self, index: u32) -> Option<NudgeLadderV1> {
+        if self.wire_version != VERSION_V2 || index >= self.parameter_count {
+            return None;
+        }
+        let record = HEADER_BYTES + index as usize * PARAMETER_BYTES;
+        let packed = read_u32(self.bytes, record + 76);
+        (packed & 0x0000_ff00 != 0).then(|| NudgeLadderV1 {
+            xs: f32::from_bits(read_u32(self.bytes, record + 72)),
+            ratio_class: NudgeRatioClass::from_raw(packed & 0xff)
+                .expect("verified V2 nudge ratio class"),
+        })
     }
 
     pub const fn parameter_count(self) -> u32 {
@@ -306,7 +328,16 @@ pub fn encode_effect_descriptor_wire_v1(
     let output = &mut output[..layout.total as usize];
     output.fill(0);
     output[..8].copy_from_slice(MAGIC);
-    write_u16(output, 8, VERSION);
+    let wire_version = if descriptor
+        .parameters
+        .iter()
+        .any(|parameter| parameter.nudge_ladder.is_some())
+    {
+        VERSION_V2
+    } else {
+        VERSION_V1
+    };
+    write_u16(output, 8, wire_version);
     write_u16(output, 10, HEADER_BYTES as u16);
     write_u32(output, 16, layout.total);
     write_u16(output, 20, descriptor.contract_major);
@@ -367,6 +398,10 @@ pub fn encode_effect_descriptor_wire_v1(
         let (offset, length) = write_text(output, &mut string_cursor, parameter.display_unit);
         write_u32(output, record + 64, offset);
         write_u32(output, record + 68, length);
+        if let Some(ladder) = parameter.nudge_ladder {
+            write_u32(output, record + 72, ladder.xs.to_bits());
+            write_u32(output, record + 76, ladder.ratio_class as u32 | (1 << 8));
+        }
         for choice in parameter.enum_choices {
             let choice_record =
                 layout.choice_offset as usize + choice_index as usize * ENUM_CHOICE_BYTES;
@@ -425,6 +460,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 #[derive(Clone, Copy)]
 struct BorrowedEffectDescriptorViewV1<'a> {
     bytes: &'a [u8],
+    wire_version: u16,
     layout: Layout,
     effect_id: &'a str,
     display_name: &'a str,
@@ -449,6 +485,7 @@ struct BorrowedParameterV1<'a> {
     choice_count: u32,
     display_name: &'a str,
     display_unit: &'a str,
+    nudge_ladder: Option<NudgeLadderV1>,
 }
 
 #[derive(Clone, Copy)]
@@ -494,6 +531,15 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
             choice_count: read_u32(self.bytes, record + 52),
             display_name: self.text(name_offset, name_length),
             display_unit: self.text(unit_offset, unit_length),
+            nudge_ladder: (self.wire_version == VERSION_V2
+                && read_u32(self.bytes, record + 76) & 0x0000_ff00 != 0)
+                .then(|| NudgeLadderV1 {
+                    xs: f32::from_bits(read_u32(self.bytes, record + 72)),
+                    ratio_class: NudgeRatioClass::from_raw(
+                        read_u32(self.bytes, record + 76) & 0xff,
+                    )
+                    .expect("nudge enum phase checked"),
+                }),
         }
     }
 
@@ -593,7 +639,8 @@ fn parse_borrowed_wire(
             .unwrap_or(0);
         return Err(diagnostic(Code::Header, offset, None));
     }
-    if read_u16(bytes, 8) != VERSION {
+    let wire_version = read_u16(bytes, 8);
+    if !matches!(wire_version, VERSION_V1 | VERSION_V2) {
         return Err(diagnostic(Code::Header, 8, None));
     }
     if read_u16(bytes, 10) != HEADER_BYTES as u16 {
@@ -666,9 +713,27 @@ fn parse_borrowed_wire(
         if flags & 8 == 0 && read_u32(bytes, record + 40) != 0 {
             return Err(diagnostic(Code::Flags, record + 40, Some(index)));
         }
-        for field in [72, 76] {
-            if read_u32(bytes, record + field) != 0 {
-                return Err(diagnostic(Code::Reserved, record + field, Some(index)));
+        if wire_version == VERSION_V1 {
+            for field in [72, 76] {
+                if read_u32(bytes, record + field) != 0 {
+                    return Err(diagnostic(Code::Reserved, record + field, Some(index)));
+                }
+            }
+        } else {
+            let packed = read_u32(bytes, record + 76);
+            if packed & 0xffff_0000 != 0 {
+                let byte = bytes[record + 78..record + 80]
+                    .iter()
+                    .position(|value| *value != 0)
+                    .unwrap_or(0);
+                return Err(diagnostic(Code::Reserved, record + 78 + byte, Some(index)));
+            }
+            let flags = (packed >> 8) & 0xff;
+            if flags & !1 != 0 {
+                return Err(diagnostic(Code::Flags, record + 77, Some(index)));
+            }
+            if flags == 0 && (packed & 0xff != 0 || read_u32(bytes, record + 72) != 0) {
+                return Err(diagnostic(Code::Flags, record + 72, Some(index)));
             }
         }
     }
@@ -845,6 +910,12 @@ fn parse_borrowed_wire(
         if let Some((field, _)) = fields.into_iter().find(|(_, valid)| !valid) {
             return Err(diagnostic(Code::Enum, record + field, Some(index)));
         }
+        if wire_version == VERSION_V2 {
+            let packed = read_u32(bytes, record + 76);
+            if packed & 0x0000_ff00 != 0 && NudgeRatioClass::from_raw(packed & 0xff).is_none() {
+                return Err(diagnostic(Code::Enum, record + 76, Some(index)));
+            }
+        }
     }
     for index in 0..ports as usize {
         let record = port_offset as usize + index * PORT_BYTES;
@@ -933,6 +1004,12 @@ fn parse_borrowed_wire(
                 return Err(diagnostic(Code::Float, record + field, Some(index)));
             }
         }
+        if wire_version == VERSION_V2 && read_u32(bytes, record + 76) & 0x0000_ff00 != 0 {
+            let xs = f32::from_bits(read_u32(bytes, record + 72));
+            if !canonical_float(xs) || xs <= 0.0 || xs > 1.0 {
+                return Err(diagnostic(Code::Float, record + 72, Some(index)));
+            }
+        }
     }
     for index in 0..choices as usize {
         let record = choice_offset as usize + index * ENUM_CHOICE_BYTES;
@@ -943,6 +1020,7 @@ fn parse_borrowed_wire(
 
     Ok(BorrowedEffectDescriptorViewV1 {
         bytes,
+        wire_version,
         layout,
         effect_id,
         display_name,
@@ -1244,6 +1322,18 @@ fn compare_static_descriptor(
     view: BorrowedEffectDescriptorViewV1<'_>,
     descriptor: &'static EffectDescriptorV1,
 ) -> Result<(), Diagnostic> {
+    let expected_wire_version = if descriptor
+        .parameters
+        .iter()
+        .any(|parameter| parameter.nudge_ladder.is_some())
+    {
+        VERSION_V2
+    } else {
+        VERSION_V1
+    };
+    if view.wire_version != expected_wire_version {
+        return Err(semantic_mismatch(8, None));
+    }
     if read_u16(view.bytes, 20) != descriptor.contract_major {
         return Err(semantic_mismatch(20, None));
     }
@@ -1317,6 +1407,9 @@ fn compare_static_descriptor(
         }
         if borrowed.display_unit != parameter.display_unit {
             return Err(semantic_mismatch(record + 64, Some(index)));
+        }
+        if borrowed.nudge_ladder != parameter.nudge_ladder {
+            return Err(semantic_mismatch(record + 72, Some(index)));
         }
         choice_index += parameter.enum_choices.len();
     }
@@ -1453,6 +1546,7 @@ pub fn verify_effect_descriptor_wire_v1(
     }
     Ok(VerifiedEffectDescriptorWireV1 {
         bytes,
+        wire_version: view.wire_version,
         parameter_count: view.layout.parameters,
         port_count: view.layout.ports,
         quality_count: view.layout.qualities,
@@ -1584,6 +1678,14 @@ mod tests {
             nudge_ladder: None,
             enum_choices: &CHOICES,
         },
+    ];
+    static NUDGE_PARAMETERS: [ParameterDescriptorV1; 3] = [
+        ParameterDescriptorV1 {
+            nudge_ladder: Some(NudgeLadderV1::human_v1(0.125)),
+            ..PARAMETERS[0]
+        },
+        PARAMETERS[1],
+        PARAMETERS[2],
     ];
     static ZERO_ID_PARAMETERS: [ParameterDescriptorV1; 3] = [
         ParameterDescriptorV1 {
@@ -1927,6 +2029,10 @@ mod tests {
         ports: &PORTS_SORTED,
         ..DESCRIPTOR
     };
+    static NUDGE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &NUDGE_PARAMETERS,
+        ..DESCRIPTOR
+    };
     static EMPTY_PARAMETER_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
         parameters: &[],
         ..DESCRIPTOR
@@ -2127,6 +2233,7 @@ mod tests {
         let display_length = read_u32(bytes, 44) as usize;
         BorrowedEffectDescriptorViewV1 {
             bytes,
+            wire_version: read_u16(bytes, 8),
             layout,
             effect_id: core::str::from_utf8(&bytes[id_offset..id_offset + id_length]).unwrap(),
             display_name: core::str::from_utf8(
@@ -2163,6 +2270,7 @@ mod tests {
     fn representative_layout_roundtrip_and_identity_are_exact() {
         let bytes = encode(&DESCRIPTOR);
         assert_eq!(&bytes[..8], MAGIC);
+        assert_eq!(read_u16(&bytes, 8), VERSION_V1);
         assert_eq!(read_u16(&bytes, 10), 96);
         assert_eq!(read_u32(&bytes, 52), 96);
         assert_eq!(read_u32(&bytes, 60), 96 + 3 * 80);
@@ -2176,6 +2284,8 @@ mod tests {
         assert_eq!(verified.enum_choice_count(), 2);
         assert_eq!(verified.state_layout_version(), 7);
         assert_eq!(verified.supported_link_mode_bits(), 7);
+        assert_eq!(verified.wire_version(), VERSION_V1);
+        assert_eq!(verified.parameter_nudge_ladder(0), None);
         let identity = effect_descriptor_identity_v1(&bytes, 1 << 20).unwrap();
         let mut independent = Sha256::new();
         independent.update(IDENTITY_DOMAIN);
@@ -2185,6 +2295,56 @@ mod tests {
             identity.as_bytes(),
             &<[u8; 32]>::from(independent.finalize())
         );
+    }
+
+    #[test]
+    fn v2_nudge_ladder_uses_reserved_bytes_and_changes_identity() {
+        let v1 = encode(&DESCRIPTOR);
+        let v2 = encode(&NUDGE_DESCRIPTOR);
+        assert_eq!(v1.len(), v2.len());
+        assert_eq!(read_u16(&v2, 8), VERSION_V2);
+        assert_eq!(read_u32(&v2, HEADER_BYTES + 72), 0.125_f32.to_bits());
+        assert_eq!(read_u32(&v2, HEADER_BYTES + 76), 0x0000_0101);
+        for index in 1..3 {
+            let record = HEADER_BYTES + index * PARAMETER_BYTES;
+            assert_eq!(&v2[record + 72..record + 80], &[0; 8]);
+        }
+
+        let verified = verify_effect_descriptor_wire_v1(&v2, 1 << 20).unwrap();
+        assert_eq!(verified.wire_version(), VERSION_V2);
+        assert_eq!(
+            verified.parameter_nudge_ladder(0),
+            Some(NudgeLadderV1::human_v1(0.125))
+        );
+        assert_eq!(verified.parameter_nudge_ladder(1), None);
+        assert_eq!(verified.parameter_nudge_ladder(3), None);
+        assert_ne!(
+            effect_descriptor_identity_v1(&v1, 1 << 20),
+            effect_descriptor_identity_v1(&v2, 1 << 20)
+        );
+        bind_effect_descriptor_wire_v1(&NUDGE_DESCRIPTOR, &v2, 1 << 20).unwrap();
+    }
+
+    #[test]
+    fn v1_reserved_and_v2_ladder_mutations_are_red() {
+        let mut v1 = encode(&DESCRIPTOR);
+        write_u32(&mut v1, HEADER_BYTES + 72, 0.125_f32.to_bits());
+        let error = verify_effect_descriptor_wire_v1(&v1, 1 << 20).unwrap_err();
+        assert_eq!((error.code, error.byte_offset), (Code::Reserved, 168));
+
+        let original = encode(&NUDGE_DESCRIPTOR);
+        for (field, value, code, offset) in [
+            (72, 0_u32, Code::Float, 168),
+            (76, 0x0000_0102, Code::Enum, 172),
+            (76, 0x0000_0201, Code::Flags, 173),
+            (76, 0x0001_0101, Code::Reserved, 174),
+            (76, 0x0000_0001, Code::Flags, 168),
+        ] {
+            let mut mutated = original.clone();
+            write_u32(&mut mutated, HEADER_BYTES + field, value);
+            let error = verify_effect_descriptor_wire_v1(&mutated, 1 << 20).unwrap_err();
+            assert_eq!((error.code, error.byte_offset), (code, offset));
+        }
     }
 
     #[test]
@@ -2278,7 +2438,7 @@ mod tests {
         for (field, expected_offset) in [(48, 48), (56, 56), (64, 64), (72, 72), (80, 80)] {
             let mut bytes = vec![0; HEADER_BYTES];
             bytes[..8].copy_from_slice(MAGIC);
-            write_u16(&mut bytes, 8, VERSION);
+            write_u16(&mut bytes, 8, VERSION_V1);
             write_u16(&mut bytes, 10, HEADER_BYTES as u16);
             write_u32(&mut bytes, 16, HEADER_BYTES as u32);
             write_u32(&mut bytes, 52, HEADER_BYTES as u32);
