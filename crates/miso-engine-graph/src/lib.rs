@@ -18,7 +18,7 @@ use miso_engine_core::{
     },
 };
 use miso_engine_effect_contract::{
-    LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
+    EffectControlLane, LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
 use miso_engine_lane::Backend;
 #[cfg(not(target_arch = "wasm32"))]
@@ -363,6 +363,9 @@ pub struct PreparedGraphPlan {
     pub required_bindings: Vec<GraphNodeId>,
     routes: Vec<PreparedRoute>,
     effects: Vec<GraphPreparedEffect>,
+    /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
+    /// asked for no console, which is what keeps the runtime on its byte-identical path.
+    effect_controls: Vec<GraphEffectControlBindingV1>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -372,6 +375,25 @@ pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
     pub processor: Box<dyn PreparedNativeEffect>,
+}
+
+/// One prepared effect's live-console control channel, carried **beside** the prepared effects
+/// rather than inside them (issue #140 A).
+///
+/// # Why beside, and not a field of [`GraphPreparedEffect`]
+///
+/// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`, and
+/// `core::mem::size_of::<runtime::RuntimeOp>()` is a **reported byte** -- the native scheduler's
+/// `graph_job_bytes` folds it, and the audit tool's frozen preparation matrix folds that. Adding
+/// an eight-byte field to the effect would therefore have moved the retained-byte report of every
+/// session in the workspace, console or not. Keeping the channel in its own vector leaves
+/// `NodeKind`'s largest variant untouched: the new `NodeKind::ConsoleEffect(Box<ConsoleEffect>)`
+/// is one pointer, far below it, so a console-free plan reports the same bytes it always did.
+pub struct GraphEffectControlBindingV1 {
+    /// The effect node this channel drives.
+    pub node: EffectNodeId,
+    /// Consumer half of the bounded channel; the producer stays on the control plane.
+    pub control: Box<EffectControlLane>,
 }
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
@@ -659,6 +681,7 @@ impl PreparedGraphPlan {
             required_bindings: parts.required_bindings,
             routes: parts.routes,
             effects: parts.effects,
+            effect_controls: parts.effect_controls,
             banks: parts.banks,
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
@@ -1168,6 +1191,8 @@ pub struct PreparedGraphPlanParts {
     pub required_bindings: Vec<GraphNodeId>,
     pub routes: Vec<PreparedRoute>,
     pub effects: Vec<GraphPreparedEffect>,
+    /// Issue #140 A: live-console control channels, one per driven effect node.
+    pub effect_controls: Vec<GraphEffectControlBindingV1>,
     pub banks: Vec<GraphPreparedEffectBank>,
     pub builtin_banks: Vec<GraphPreparedBuiltinBank>,
     pub observers: Vec<GraphNodeObserverBinding>,
@@ -1442,11 +1467,13 @@ impl GraphExecutor {
             &plan.spec,
             plan.routes,
             plan.effects,
+            plan.effect_controls,
             plan.banks,
             plan.builtin_banks,
             observers,
             bindings,
             source_inputs,
+            frames,
         );
         let runtime = runtime::build_sequential(program, &plan.spec, parts, frames);
         Self {
@@ -2025,11 +2052,13 @@ impl NativeGraphExecutor {
             &plan.spec,
             plan.routes,
             plan.effects,
+            plan.effect_controls,
             plan.banks,
             plan.builtin_banks,
             plan.observers,
             bindings,
             source_inputs,
+            frames,
         );
         let native = runtime::build_native(program, &plan.spec, parts, frames, &blueprint.layout);
         let source_input_targets = source_set
@@ -2677,6 +2706,7 @@ mod tests {
                 required_bindings: required.clone(),
                 routes: Vec::new(),
                 effects: Vec::new(),
+                effect_controls: Vec::new(),
                 banks: Vec::new(),
                 builtin_banks: Vec::new(),
                 observers: Vec::new(),
@@ -2886,6 +2916,7 @@ mod tests {
             required_bindings: required_bindings.clone(),
             routes: Vec::new(),
             effects: Vec::new(),
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks,
             observers: Vec::new(),
@@ -3540,6 +3571,7 @@ mod tests {
             required_bindings: vec![input_a.clone(), input_b.clone(), output.clone()],
             routes: Vec::new(),
             effects: Vec::new(),
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
@@ -4085,6 +4117,7 @@ mod tests {
             required_bindings: required,
             routes,
             effects,
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
@@ -4287,6 +4320,7 @@ mod tests {
                 required_bindings: required,
                 routes: Vec::new(),
                 effects: Vec::new(),
+                effect_controls: Vec::new(),
                 banks: Vec::new(),
                 builtin_banks: Vec::new(),
                 observers,
@@ -4946,6 +4980,7 @@ mod tests {
                 },
             ],
             effects: Vec::new(),
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
@@ -4988,6 +5023,475 @@ mod tests {
         )
         .expect("render");
         assert_eq!(samples, [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 30.0, 0.0]);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Issue #140 A: the automation-span feed into the dynamic rack.
+    // ---------------------------------------------------------------------------------------
+
+    static GAIN_ID: EffectId = match EffectId::new("fixture.gain") {
+        Ok(id) => id,
+        Err(_) => panic!("static effect ID"),
+    };
+    static GAIN_PARAMETERS: [miso_engine_effect_contract::ParameterDescriptorV1; 1] =
+        [miso_engine_effect_contract::ParameterDescriptorV1 {
+            id: match miso_engine_effect_contract::ParameterId::new(1) {
+                Some(id) => id,
+                None => panic!("nonzero"),
+            },
+            display_name: "Gain",
+            display_unit: "x",
+            unit: miso_engine_effect_contract::ParameterUnit::Linear,
+            domain: miso_engine_effect_contract::ParameterDomain::Continuous,
+            minimum: Some(0.0),
+            maximum: Some(4.0),
+            default_value: 1.0,
+            mapping: miso_engine_effect_contract::ParameterMapping::Linear,
+            automation_rate: miso_engine_effect_contract::AutomationRate::Block,
+            channel_policy: miso_engine_effect_contract::ParameterChannelPolicy::PerLane,
+            smoothing: miso_engine_effect_contract::SmoothingRule::None,
+            smoothing_samples: 0,
+            readable: true,
+            automatable: true,
+            enum_choices: &[],
+        }];
+    static GAIN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        id: GAIN_ID,
+        display_name: "Live gain fixture",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &GAIN_PARAMETERS,
+        ports: &SUM_PORTS,
+        qualities: &[],
+    };
+
+    /// A per-channel gain with a real, declared latency, so bypass has something to preserve.
+    struct LiveGain {
+        metadata: PreparedEffectMetadata,
+        gain: [f32; 2],
+        line: Vec<[f32; 2]>,
+        latency: usize,
+        invalid: u64,
+    }
+    impl LiveGain {
+        fn new(metadata: PreparedEffectMetadata) -> Self {
+            let latency = metadata.latency.0 as usize;
+            Self {
+                metadata,
+                gain: [1.0, 1.0],
+                line: vec![[0.0; 2]; latency],
+                latency,
+                invalid: 0,
+            }
+        }
+    }
+    impl PreparedNativeEffect for LiveGain {
+        fn metadata(&self) -> PreparedEffectMetadata {
+            self.metadata
+        }
+        fn reset(&mut self, _kind: ResetKind) {}
+        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+            let mut report = ProcessReport::default();
+            // The same strictness every launch effect applies: a `Point` at `first_sample` with
+            // bit-identical endpoints, addressed to one lane, inside the declared capacity.
+            for (index, span) in block.automation.iter().enumerate() {
+                let lane = match span.channel {
+                    ParameterChannel::Left => 0_usize,
+                    ParameterChannel::Right => 1,
+                    ParameterChannel::Both => {
+                        report.invalid_spans += 1;
+                        continue;
+                    }
+                };
+                let valid = index < self.metadata.automation_capacity as usize
+                    && span.parameter_index == 0
+                    && span.kind == miso_engine_effect_contract::AutomationSpanKind::Point
+                    && span.start_sample == block.first_sample
+                    && span.end_sample == block.first_sample
+                    && span.start_value.to_bits() == span.end_value.to_bits();
+                if !valid {
+                    report.invalid_spans += 1;
+                    continue;
+                }
+                self.gain[lane] = span.start_value;
+            }
+            self.invalid = self.invalid.saturating_add(report.invalid_spans);
+            for frame in 0..block.left.len() {
+                let wet = [
+                    block.left[frame] * self.gain[0],
+                    block.right[frame] * self.gain[1],
+                ];
+                if self.latency == 0 {
+                    block.left[frame] = wet[0];
+                    block.right[frame] = wet[1];
+                    continue;
+                }
+                let slot = &mut self.line[frame % self.latency];
+                let held = *slot;
+                *slot = wet;
+                block.left[frame] = held[0];
+                block.right[frame] = held[1];
+            }
+            report
+        }
+        fn snapshot_state_payload(
+            &self,
+            _output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _state_layout_version: u32,
+            _input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
+    /// One track: source input -> one dynamic-rack effect -> output, at a four-frame quantum.
+    ///
+    /// `control` is the consumer half of the effect's live-console channel, or `None` for the
+    /// console-free plan the workspace has always bound.
+    fn console_effect_plan(
+        latency: u64,
+        control: Option<Box<EffectControlLane>>,
+        source: Box<dyn GraphRuntimeProcessor>,
+    ) -> PreparedRenderPlan {
+        let input = GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse("track").expect("ID"),
+            stage: TrackStage::Input,
+        };
+        let effect_id = EffectNodeId {
+            track_id: StableGraphId::parse("track").expect("ID"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse("gain").expect("ID"),
+        };
+        let effect_node = GraphNodeId::Effect(effect_id.clone());
+        let output_node = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: miso_engine_core::SampleRateHz(48_000),
+            quantum: QuantumFrames(4),
+            input_channels: None,
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let metadata = PreparedEffectMetadata {
+            descriptor: &GAIN_DESCRIPTOR,
+            sample_rate: 48_000,
+            quantum: 4,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPortsV1 {
+                sidechain: PreparedSidechainPort::None,
+            },
+            latency: LatencySamples(latency),
+            tail: TailSamples::Finite(0),
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity: 2,
+        };
+        let main_edge = GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: effect_node.clone(),
+            },
+            source: GraphPortId {
+                node: input.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: effect_node.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.console.main".to_owned(),
+        };
+        let output_edge = GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: output_node.clone(),
+            },
+            source: GraphPortId {
+                node: effect_node.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: output_node.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.console.output".to_owned(),
+        };
+        let schedule = vec![input.clone(), effect_node.clone(), output_node.clone()];
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 140,
+            spec: GraphSpec {
+                nodes: sorted_nodes(
+                    schedule
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
+                ports: Vec::new(),
+                edges: vec![main_edge, output_edge],
+            },
+            sequential_schedule: schedule,
+            dependency_levels: vec![
+                DependencyLevel {
+                    level: 0,
+                    nodes: vec![input.clone()],
+                },
+                DependencyLevel {
+                    level: 1,
+                    nodes: vec![effect_node],
+                },
+                DependencyLevel {
+                    level: 2,
+                    nodes: vec![output_node.clone()],
+                },
+            ],
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: vec![input.clone(), output_node.clone()],
+            routes: Vec::new(),
+            effects: vec![GraphPreparedEffect {
+                id: effect_id.clone(),
+                metadata,
+                processor: Box::new(LiveGain::new(metadata)),
+            }],
+            effect_controls: match control {
+                None => Vec::new(),
+                Some(control) => vec![GraphEffectControlBindingV1 {
+                    node: effect_id,
+                    control,
+                }],
+            },
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
+            envelope,
+            nodes: vec![
+                GraphNodeBinding::new(input, source),
+                GraphNodeBinding::new(output_node, Box::new(Noop)),
+            ],
+            observers: Vec::new(),
+        };
+        match graph.bind(bindings) {
+            Ok(plan) => plan,
+            Err(failure) => panic!("bindings: {}", failure.code),
+        }
+    }
+
+    struct Ramp;
+    impl GraphRuntimeProcessor for Ramp {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            for frame in 0..block.left.len() {
+                let value = (block.first_sample as usize + frame) as f32;
+                block.left[frame] = value;
+                block.right[frame] = -value;
+            }
+            Ok(())
+        }
+    }
+
+    fn render_console_blocks(
+        plan: &mut PreparedRenderPlan,
+        start_block: usize,
+        blocks: usize,
+    ) -> Vec<f32> {
+        let mut collected = Vec::new();
+        for block in start_block..start_block + blocks {
+            let mut samples = [0.0_f32; 8];
+            let output = PlanarBufferMut::try_new(&mut samples, 2, 4, 4).expect("output");
+            plan.render(
+                miso_engine_core::realtime::RenderIo {
+                    input: None,
+                    output,
+                },
+                miso_engine_core::realtime::RenderTime {
+                    absolute_sample: (block * 4) as u64,
+                },
+            )
+            .expect("render");
+            collected.extend_from_slice(&samples);
+        }
+        collected
+    }
+
+    fn control_pair(
+        depth: usize,
+    ) -> (
+        miso_engine_core::realtime::Producer<miso_engine_effect_contract::EffectControlRecordV1>,
+        Box<EffectControlLane>,
+    ) {
+        let (producer, consumer) = miso_engine_core::realtime::bounded_spsc::<
+            miso_engine_effect_contract::EffectControlRecordV1,
+        >(
+            core::num::NonZeroUsize::new(depth).expect("depth"),
+            miso_engine_core::realtime::QueueGeneration(0),
+        )
+        .expect("queue");
+        (producer, Box::new(EffectControlLane::new(consumer, false)))
+    }
+
+    /// #140 A / E1 for the dynamic rack: an admitted parameter command takes effect on the first
+    /// sample of the next rendered block, and not one sample before.
+    ///
+    /// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect`
+    /// arm to *after* `effect.processor.process(block)` -> the command lands one block late and
+    /// the `block 1` assertion below fails on its first sample.
+    #[test]
+    fn a_console_parameter_command_applies_at_the_next_block_boundary() {
+        let (mut producer, control) = control_pair(4);
+        let mut plan = console_effect_plan(0, Some(control), Box::new(Ramp));
+        let block0 = render_console_blocks(&mut plan, 0, 1);
+        assert_eq!(
+            &block0[..4],
+            &[0.0, 1.0, 2.0, 3.0],
+            "unity before any command"
+        );
+
+        producer
+            .try_push(
+                miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                    parameter_index: 0,
+                    channel: ParameterChannel::Left,
+                    value: 0.5,
+                },
+            )
+            .expect("room");
+        let block1 = render_console_blocks(&mut plan, 1, 1);
+        assert_eq!(
+            &block1[..4],
+            &[2.0, 2.5, 3.0, 3.5],
+            "every sample of the block that drains the command carries it"
+        );
+        assert_eq!(
+            &block1[4..],
+            &[-4.0, -5.0, -6.0, -7.0],
+            "the right lane is untouched by a left-only command"
+        );
+    }
+
+    /// Live bypass returns the dry signal delayed by exactly the effect's declared latency, so
+    /// every PDC route timing the compiler derived from that latency stays correct.
+    ///
+    /// Red mutation: delete the `console.shunt.capture(..)` call -> the dry buffer keeps its
+    /// initial zeros and a bypassed block renders silence instead of the delayed input.
+    #[test]
+    fn live_bypass_is_latency_preserving_and_reversible() {
+        const LATENCY: u64 = 2;
+        let (mut producer, control) = control_pair(4);
+        let mut plan = console_effect_plan(LATENCY, Some(control), Box::new(Ramp));
+        producer
+            .try_push(
+                miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                    parameter_index: 0,
+                    channel: ParameterChannel::Left,
+                    value: 0.0,
+                },
+            )
+            .expect("room");
+        let wet = render_console_blocks(&mut plan, 0, 2);
+        // Latency 2 with a zero gain: the first two samples are the line's zeros, then zeros.
+        assert!(
+            wet[..4].iter().all(|value| *value == 0.0),
+            "a zero gain silences the wet path"
+        );
+
+        producer
+            .try_push(miso_engine_effect_contract::EffectControlRecordV1::Bypass(
+                true,
+            ))
+            .expect("room");
+        let bypassed = render_console_blocks(&mut plan, 2, 1);
+        assert_eq!(
+            &bypassed[..4],
+            &[6.0, 7.0, 8.0, 9.0],
+            "a bypassed block is the input delayed by exactly the declared latency"
+        );
+        assert_eq!(&bypassed[4..], &[-6.0, -7.0, -8.0, -9.0]);
+
+        producer
+            .try_push(miso_engine_effect_contract::EffectControlRecordV1::Bypass(
+                false,
+            ))
+            .expect("room");
+        let restored = render_console_blocks(&mut plan, 3, 1);
+        assert!(
+            restored[..4].iter().all(|value| *value == 0.0),
+            "releasing bypass returns the *current* wet signal, not a stale one: {:?}",
+            &restored[..4],
+        );
+        assert_eq!(
+            &restored[4..],
+            &[-10.0, -11.0, -12.0, -13.0],
+            "the uncommanded right lane keeps its unity wet path at the declared latency"
+        );
+    }
+
+    /// A console-free plan renders exactly the bits a console-attached plan renders when no
+    /// command is ever sent: the feed is inert until something is admitted.
+    ///
+    /// This is the class-A identity claim in its smallest form -- the same claim the corpus
+    /// digests and the three wasm-gate legs make for whole sessions.
+    #[test]
+    fn an_idle_console_changes_no_rendered_bit() {
+        for latency in [0_u64, 3] {
+            let mut without = console_effect_plan(latency, None, Box::new(Ramp));
+            let (_producer, control) = control_pair(4);
+            let mut with = console_effect_plan(latency, Some(control), Box::new(Ramp));
+            let plain = render_console_blocks(&mut without, 0, 4);
+            let console = render_console_blocks(&mut with, 0, 4);
+            assert_eq!(
+                plain.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                console.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "latency={latency}: an idle console is bit-inert",
+            );
+        }
+    }
+
+    /// The staging window cannot overflow, because preparation caps the queue at the effect's
+    /// automation capacity; a violated cap would be counted here rather than written past the end.
+    #[test]
+    fn the_console_effect_drops_nothing_within_its_prepared_capacity() {
+        let (mut producer, control) = control_pair(2);
+        let mut plan = console_effect_plan(0, Some(control), Box::new(Ramp));
+        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+            producer
+                .try_push(
+                    miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                        parameter_index: 0,
+                        channel,
+                        value: 2.0,
+                    },
+                )
+                .expect("room");
+        }
+        let block = render_console_blocks(&mut plan, 0, 1);
+        assert_eq!(&block[..4], &[0.0, 2.0, 4.0, 6.0]);
+        assert_eq!(&block[4..], &[0.0, -2.0, -4.0, -6.0]);
     }
 
     fn sidechain_pdc_plan(delay_main: bool) -> PreparedRenderPlan {
@@ -5187,6 +5691,7 @@ mod tests {
                 metadata,
                 processor: Box::new(SidechainSum { metadata }),
             }],
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
@@ -5460,6 +5965,7 @@ mod tests {
                 metadata,
                 processor,
             }],
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),

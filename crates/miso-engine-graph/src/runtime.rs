@@ -48,7 +48,9 @@ use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
-use miso_engine_effect_contract::EffectProcessBlock;
+use miso_engine_effect_contract::{
+    BypassShunt, EffectControlLane, EffectProcessBlock, PreparedAutomationSpan,
+};
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
 
@@ -186,10 +188,57 @@ pub(crate) enum NodeKind {
     Bound(Box<dyn GraphRuntimeProcessor>),
     /// A track-local prepared native effect.
     Effect(GraphPreparedEffect),
+    /// A track-local prepared native effect that a live console drives (issue #140 A).
+    ///
+    /// A separate variant from [`NodeKind::Effect`] on purpose, in the shape #137 D1 fixed for
+    /// `ConsoleMatrixProcessor`: the console-free arm keeps the exact `&[]` call and the exact
+    /// storage it had before this issue, so "a session with no console renders the same bits and
+    /// holds the same bytes" is a property of the code rather than a claim about it.
+    ConsoleEffect(Box<ConsoleEffect>),
     /// A route's 2x2 matrix, with the route gain already folded in (D3).
     Route([f32; 4]),
     /// A homogeneous-bank member: the reduction gathers its input, the bank does the work.
     BankMember,
+}
+
+/// One prepared native effect plus everything its live-console channel needs (issue #140 A).
+///
+/// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
+/// `PreparedEffectMetadata::automation_capacity` spans and the shunt's delay line is exactly
+/// `PreparedEffectMetadata::latency` samples. Render allocates nothing and frees nothing.
+pub(crate) struct ConsoleEffect {
+    pub(crate) effect: GraphPreparedEffect,
+    control: Box<EffectControlLane>,
+    /// `automation_capacity` spans; only `[..staged]` is ever handed to the effect.
+    spans: Box<[PreparedAutomationSpan]>,
+    /// Latency-preserving dry path, so live bypass keeps the effect's declared latency exactly
+    /// and therefore leaves every compiled PDC route timing correct.
+    shunt: BypassShunt,
+}
+
+impl ConsoleEffect {
+    fn new(effect: GraphPreparedEffect, control: Box<EffectControlLane>, frames: usize) -> Self {
+        let capacity = effect.metadata.automation_capacity as usize;
+        let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
+        Self {
+            spans: vec![
+                PreparedAutomationSpan {
+                    kind: miso_engine_effect_contract::AutomationSpanKind::Point,
+                    channel: miso_engine_effect_contract::ParameterChannel::Both,
+                    parameter_index: 0,
+                    start_sample: 0,
+                    end_sample: 0,
+                    start_value: 0.0,
+                    end_value: 0.0,
+                };
+                capacity
+            ]
+            .into_boxed_slice(),
+            shunt: BypassShunt::new(frames, latency),
+            effect,
+            control,
+        }
+    }
 }
 
 /// One delayed input, staged into a scratch buffer on the way in.
@@ -431,6 +480,55 @@ fn execute_op(
                 }
             }
         }
+        NodeKind::ConsoleEffect(console) => {
+            // The drain runs before a single sample is touched, so an admitted record takes
+            // effect on the first sample of this block -- the exact `applied_at_sample` the
+            // control side was acknowledged with (#137 E1's rule, now for effects).
+            let staged = console.control.stage(&mut console.spans, first_sample);
+            // Preparation refuses a queue deeper than the effect's automation capacity, so a full
+            // drain can never produce more distinct spans than the window holds. This is the
+            // invariant, not a runtime policy: in release it costs nothing.
+            debug_assert_eq!(staged.dropped, 0, "console staging window overflowed");
+            let automation = &console.spans[..staged.staged];
+            let bypassed = console.control.bypassed();
+            let effect = &mut console.effect;
+            let quantum = effect.metadata.quantum;
+            match op.sidechain {
+                None => {
+                    let (out_left, out_right) = lease.write_stereo(output);
+                    console.shunt.capture(out_left, out_right);
+                    let block = EffectProcessBlock::new(
+                        out_left,
+                        out_right,
+                        None,
+                        first_sample,
+                        automation,
+                        quantum,
+                    )
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+                    let _ = effect.processor.process(block);
+                }
+                Some(sidechain) => {
+                    let ((out_left, out_right), (side_left, side_right)) =
+                        lease.write_read_stereo(output, sidechain);
+                    console.shunt.capture(out_left, out_right);
+                    let block = EffectProcessBlock::new(
+                        out_left,
+                        out_right,
+                        Some((side_left, side_right)),
+                        first_sample,
+                        automation,
+                        quantum,
+                    )
+                    .map_err(|_| RenderError::InvalidEnvelope)?;
+                    let _ = effect.processor.process(block);
+                }
+            }
+            if bypassed {
+                let (out_left, out_right) = lease.write_stereo(output);
+                console.shunt.apply(out_left, out_right);
+            }
+        }
     }
     Ok(())
 }
@@ -472,7 +570,9 @@ pub(crate) fn take_observers(
 // ---------------------------------------------------------------------------------------------
 
 use miso_engine_effect_contract::BankWidth;
-use miso_engine_rack::{AoSoaScratch, BankBlock, BankSlot, BankStage, EffectBankStage};
+use miso_engine_rack::{
+    AoSoaScratch, BankBlock, BankSlot, BankStage, ConsoleEffectBankStage, EffectBankStage,
+};
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
@@ -559,12 +659,17 @@ pub(crate) fn bank_membership(
 pub(crate) struct RuntimeParts {
     pub(crate) routes: BTreeMap<GraphNodeId, RouteTransform>,
     pub(crate) effects: BTreeMap<GraphNodeId, GraphPreparedEffect>,
+    /// Issue #140 A: live-console channels by effect node, taken by whichever owner renders that
+    /// node -- the per-node `ConsoleEffect`, or the bank slot that holds the node's lane.
+    effect_controls: BTreeMap<crate::EffectNodeId, Box<EffectControlLane>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
     banks: Vec<Option<GraphPreparedEffectBank>>,
     builtin_banks: Vec<Option<GraphPreparedBuiltinBank>>,
     membership: BankMembership,
+    /// Render quantum, so a console-driven effect's staging and shunt are sized once, at bind.
+    frames: usize,
 }
 
 impl RuntimeParts {
@@ -573,11 +678,13 @@ impl RuntimeParts {
         spec: &GraphSpec,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
+        effect_controls: Vec<crate::GraphEffectControlBindingV1>,
         banks: Vec<GraphPreparedEffectBank>,
         builtin_banks: Vec<GraphPreparedBuiltinBank>,
         observers: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         source_inputs: std::collections::BTreeSet<GraphNodeId>,
+        frames: usize,
     ) -> Self {
         let membership = bank_membership(spec, &banks, &builtin_banks);
         let mut by_node: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>> = BTreeMap::new();
@@ -596,6 +703,10 @@ impl RuntimeParts {
                 .into_iter()
                 .map(|effect| (GraphNodeId::Effect(effect.id.clone()), effect))
                 .collect(),
+            effect_controls: effect_controls
+                .into_iter()
+                .map(|binding| (binding.node, binding.control))
+                .collect(),
             bindings: bindings
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
@@ -605,6 +716,7 @@ impl RuntimeParts {
             banks: banks.into_iter().map(Some).collect(),
             builtin_banks: builtin_banks.into_iter().map(Some).collect(),
             membership,
+            frames,
         }
     }
 
@@ -621,7 +733,14 @@ impl RuntimeParts {
         } else if let Some(Some(processor)) = self.bindings.remove(node) {
             NodeKind::Bound(processor)
         } else if let Some(effect) = self.effects.remove(node) {
-            NodeKind::Effect(effect)
+            match self.effect_controls.remove(&effect.id) {
+                None => NodeKind::Effect(effect),
+                Some(control) => NodeKind::ConsoleEffect(Box::new(ConsoleEffect::new(
+                    effect,
+                    control,
+                    self.frames,
+                ))),
+            }
         } else if let Some(transform) = self.routes.remove(node) {
             NodeKind::Route([
                 transform.gain * transform.ll,
@@ -640,6 +759,30 @@ impl RuntimeParts {
                 let bank = self.banks[index].take().expect("one effect bank owner");
                 let width = bank.scratch.width();
                 let quantum = bank.scratch.quantum();
+                // Every lane's channel is moved out of its own `GraphPreparedEffect` in lane
+                // order, so the slot has exactly one drainer per lane and a lane the console does
+                // not address stays `None` -- the bank's own `&[]` for that lane's offsets.
+                let controls: Vec<Option<EffectControlLane>> = (0..width.lanes() as usize)
+                    .map(|lane| {
+                        bank.members
+                            .get(lane)
+                            .and_then(|member| self.effect_controls.remove(member))
+                            .map(|control| *control)
+                    })
+                    .collect();
+                if controls.iter().any(Option::is_some) {
+                    let latency = usize::try_from(bank.processor.metadata().program_key.latency.0)
+                        .unwrap_or(usize::MAX);
+                    let stage = ConsoleEffectBankStage::new(
+                        bank.processor,
+                        width,
+                        quantum,
+                        controls,
+                        latency,
+                    )
+                    .expect("validated width");
+                    return bank_chain(bank.scratch, bank.active_mask, Box::new(stage));
+                }
                 let stage =
                     EffectBankStage::new(bank.processor, width, quantum).expect("validated width");
                 bank_chain(bank.scratch, bank.active_mask, Box::new(stage))

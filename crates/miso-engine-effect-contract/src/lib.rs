@@ -4,6 +4,9 @@
 //! persistence envelope. Those are interchange concerns owned by issue 029.
 #![allow(missing_docs)]
 
+mod live;
+pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, Staged};
+
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
