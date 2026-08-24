@@ -76,6 +76,8 @@ async function testMainRealm() {
   };
   const events = [];
   let holdSource = false;
+  let holdAll = false;
+  const heldAll = [];
   let failSource = false;
   let held = null;
   let readyMutation = null;
@@ -121,7 +123,8 @@ async function testMainRealm() {
         const delivered = structuredClone(response, { transfer: responseTransfer });
         queueMicrotask(() => this.onmessage?.({ data: delivered }));
       };
-      if (holdSource && received.tag === "miso.source.v1") held = respond;
+      if (holdAll) heldAll.push(respond);
+      else if (holdSource && received.tag === "miso.source.v1") held = respond;
       else respond();
     }
   }
@@ -198,9 +201,13 @@ async function testMainRealm() {
       sampleRateHz: 48000, planes: [left, right], frames: 2, endOfRegion: false,
     });
     assert.equal(storage.byteLength, 0, "postMessage transfers caller ownership");
-    await errorResult(host.status(), 6);
+    // #106 F3: a held source chunk no longer blocks unrelated requests. Before the bounded
+    // pipeline this rejected with RESULT_BACKPRESSURE because the host allowed one request of any
+    // kind in flight.
+    const heldStatus = host.status();
     held();
     holdSource = false;
+    assert.equal((await heldStatus).tag, "miso.status.v1");
     const ack = await sourcePromise;
     assert.deepEqual(Object.keys(ack).sort(), ["planes", "requestId", "result", "tag"]);
     assert.equal(ack.tag, "miso.ack.v1");
@@ -210,17 +217,18 @@ async function testMainRealm() {
     assert.equal(ack.planes[0].buffer, ack.planes[1].buffer);
     assert.equal(events.find((event) => event[1] === "miso.source.v1")[3], 1);
 
+    // Request 2 was consumed by the status above, which now settles independently.
     const seek = await host.seekSource({
-      requestId: 2, sourceId: "source", generation: 2n, sourceFrame: 10n,
+      requestId: 3, sourceId: "source", generation: 2n, sourceFrame: 10n,
     });
-    assert.deepEqual(seek, { tag: "miso.ack.v1", requestId: 2, result: 0 });
+    assert.deepEqual(seek, { tag: "miso.ack.v1", requestId: 3, result: 0 });
     const status = await host.status();
     assert.equal(status.tag, "miso.status.v1");
     assert.equal(status.memoryBytes, host.memoryBytes);
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
-      requestId: 4, sourceId: "source", generation: 3n, startFrame: 2n,
+      requestId: 5, sourceId: "source", generation: 3n, startFrame: 2n,
       sampleRateHz: 48000, planes: [new Float32Array(failedStorage)], frames: 4,
       endOfRegion: true,
     });
@@ -289,6 +297,75 @@ async function testMainRealm() {
     }), 255);
     planeMutation = null;
     await planeHost.dispose();
+
+    // #106 F3: the in-flight bound is per source and equals the ring depth in quanta
+    // (sourceRingFrames 256 / quantumFrames 64 = 4). Red mutation: return `true` from
+    // `#saturated` once one source request is unsettled -> the second request rejects with 6.
+    const pipelineHost = await createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new Uint8Array(),
+      limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    failSource = false;
+    holdAll = true;
+    const chunk = (requestId, sourceId) => {
+      const buffer = new ArrayBuffer(8);
+      return {
+        request: pipelineHost.submitSource({
+          requestId,
+          sourceId,
+          generation: 1n,
+          startFrame: BigInt(requestId),
+          sampleRateHz: 48000,
+          planes: [new Float32Array(buffer)],
+          frames: 2,
+          endOfRegion: false,
+        }),
+        buffer,
+      };
+    };
+    const inFlight = [1, 2, 3, 4].map((requestId) => chunk(requestId, "source"));
+    for (const [index, entry] of inFlight.entries()) {
+      assert.equal(entry.buffer.byteLength, 0, `chunk ${index} was transferred`);
+    }
+    const overflow = chunk(5, "source");
+    await errorResult(overflow.request, 6);
+    assert.equal(
+      overflow.buffer.byteLength,
+      8,
+      "a locally refused chunk keeps its planes: nothing is transferred and the caller can retry",
+    );
+    // A different source has its own budget and is accepted while the first is saturated.
+    const other = chunk(6, "other-source");
+    assert.equal(other.buffer.byteLength, 0, "the bound is per source, not per host");
+    // One unsettled seek per source: the ring carries a single command slot.
+    const firstSeek = pipelineHost.seekSource({
+      requestId: 7, sourceId: "source", generation: 2n, sourceFrame: 0n,
+    });
+    await errorResult(pipelineHost.seekSource({
+      requestId: 8, sourceId: "source", generation: 3n, sourceFrame: 0n,
+    }), 6);
+    holdAll = false;
+    for (const respond of heldAll) respond();
+    heldAll.length = 0;
+    const settled = await Promise.all([
+      ...inFlight.map((entry) => entry.request),
+      other.request,
+      firstSeek,
+    ]);
+    assert.deepEqual(
+      settled.map((message) => message.requestId),
+      [1, 2, 3, 4, 6, 7],
+      "acknowledgements arrive in request order",
+    );
+    // With the budget released the source accepts chunks again.
+    const again = chunk(9, "source");
+    assert.equal(again.buffer.byteLength, 0);
+    await again.request;
+    await pipelineHost.dispose();
 
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
     // network request. Red mutation: delete the `WebAssembly.validate(SIMD128_PROBE)` guard in

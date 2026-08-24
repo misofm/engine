@@ -79,6 +79,34 @@ pub const BUFFER_DIAGNOSTIC: u32 = 4;
 /// Contiguous dual-mono output buffer.
 pub const BUFFER_OUTPUT_PCM: u32 = 5;
 
+/// The longest main-thread stall the default source ring hides without an underrun.
+///
+/// Chrome reports any main-thread task over 50 ms as a long task; a major garbage collection or a
+/// layout burst in a real page runs 10-100 ms. The AudioWorklet render thread keeps pulling
+/// quanta throughout, so a ring shorter than the stall underruns every source in the session. This
+/// is a JIT-streaming budget, not a latency budget: the ring is prefilled ahead of the render
+/// position and adds no output latency.
+pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
+
+/// The default per-source ring capacity in frames for one rate and quantum.
+///
+/// `ceil(tolerance * fs / quantum)` quanta to cover the stall, plus two: one quantum is held by the
+/// render consumer while it is being read, and one is in the recycle path between the consumer and
+/// the producer. The result is always a whole number of quanta, which is what `PcmSourceRing`
+/// requires of a capacity.
+///
+/// At 48 kHz / 128 that is 5 120 frames, 40 KiB for a stereo `f32` source -- 1 024 such sources fit
+/// inside the 64 MiB default `maximum_source_total_bytes`.
+///
+/// `quantum_frames` must be nonzero. Every caller inside this crate runs after `validate_config`,
+/// which rejects a zero quantum before any ring is built.
+#[must_use]
+pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
+    let stall_frames = (sample_rate_hz as u64 * SOURCE_STALL_TOLERANCE_MS as u64) / 1000;
+    let quanta = stall_frames.div_ceil(quantum_frames as u64) + 2;
+    (quanta * quantum_frames as u64) as u32
+}
+
 /// Byte size of [`WebPrepareConfigV1`].
 pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfigV1>() as u32;
 /// Byte size of [`WebStatusV1`].
@@ -157,7 +185,7 @@ impl WebPrepareConfigV1 {
             diagnostic_bytes: 1 << 14,
             source_id_bytes: 1 << 10,
             maximum_source_channels: 8,
-            source_ring_frames: quantum_frames.saturating_mul(4),
+            source_ring_frames: default_source_ring_frames(sample_rate_hz, quantum_frames),
             maximum_automation_spans_per_block: 256,
             maximum_tracks: 1_024,
             maximum_sources: 1_024,
