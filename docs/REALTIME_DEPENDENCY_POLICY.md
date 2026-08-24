@@ -29,23 +29,37 @@ each, and creates exactly one documented exception to the "no syscalls" rule abo
 * Auxiliary workers wake their own binary-tree children (`2i+1`, `2i+2`), so one coordinator wake
   reaches every issued worker. A worker may `park` and `unpark` (futex wait/wake) and nothing
   else: it allocates nothing, takes no lock, and performs no I/O or logging.
-* Between blocks a worker spins for a calibrated bounded budget (about one render quantum) before
-  parking, so a paced session pays one wake per block and a saturated session pays none.
-  `scripts/trace-scheduler-audit.sh` counts both: in steady (unpaced) mode the coordinator's armed
-  interval must contain **zero** syscalls, and in paced mode exactly one `futex` line per block,
-  equal to the executor's `coordinator_wakes` counter. Worker idle CPU is measured from
-  `/proc/<tid>/stat` and gated at 5 % between blocks.
+* A worker never parks while its block is open -- that is what makes "at most one coordinator wake
+  per rendered block" structural rather than statistical: `wake_root` can only ever find a parked
+  worker on a block's first wave. (A runaway guard of many quanta still bounds the spin if a
+  coordinator never closes its block.) After the block closes the worker spins a short linger
+  budget and then parks; the count restarts at each transition. A host
+  rendering at the real block cadence leaves nearly a whole quantum between blocks, so the worker
+  parks and the next block costs exactly one coordinator wake; an offline or saturated render
+  re-opens the next block within microseconds, so the worker never parks and the render thread
+  makes no syscall at all. `scripts/trace-scheduler-audit.sh` gates both: in steady (unpaced) mode
+  the coordinator's armed interval contains **at most one** `futex` (the pool has been parked since
+  preparation, so the first block wakes it and nothing after that does), and in paced mode at most
+  one `futex` per block, never more than the executor's own `coordinator_wakes` counter. Worker
+  idle CPU is measured from `/proc/<tid>/stat` and gated at 5 % between blocks.
 * The wake protocol is a Dekker pair: the worker stores `parked = true`, fences `SeqCst`, then
   re-checks its command queue; the coordinator publishes the command, fences `SeqCst`, then reads
   `parked`. Removing or weakening either fence is a lost-wake bug.
 * `AGENTS.md` records the same exception in one sentence next to the render prohibitions.
 
 Bounded recovery replaces the old unbounded completion spin: `recover_issued` spins for a
-calibrated budget of about half a quantum and then declares the worker dead for the life of the
-worker lease. The dead worker's parcel stays *trapped* (it is never touched again until the worker
-returns it at a later block boundary), every edge sourced from it is muted to silence, and the
-remaining units of the block render on the coordinator. The audio callback therefore has a bounded
-worst case and never wedges.
+calibrated budget -- one render quantum, never less than `MINIMUM_RECOVERY_NS` -- and then declares
+the worker dead *for that block*. The dead worker's parcel stays *trapped* (it is never touched
+again until the worker returns it at a later block boundary), every edge sourced from it is muted
+to the arena's always-zero silence buffer, and the remaining units of the block render on the
+coordinator. The audio callback therefore has a bounded worst case and never wedges.
+
+The #100 plan proposed half a quantum and a permanent death. Both were widened, in the safe
+direction, by what parking makes true: the first wave of a block also pays the operating system's
+wake latency, which the quantum does not bound, and a worker that answers late is demonstrably
+alive, so a false deadline miss must cost one degraded block rather than the life of the lease.
+`NativeSchedulerConfigV1::with_recovery_deadline_ns` lets a qualification harness that measures
+determinism rather than deadlines opt out of the derived budget entirely.
 
 ## Unsafe-code ownership
 

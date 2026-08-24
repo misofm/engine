@@ -70,8 +70,10 @@ struct PoolShared {
     /// not park, so a multi-wave block costs exactly one wake.
     block_open: AtomicBool,
     stop: AtomicBool,
-    /// Idle spin iterations, published by the lease holder at bind (about one render quantum).
+    /// Idle spin iterations while a block is open, published by the lease holder at bind.
     idle_spin: AtomicU64,
+    /// Idle spin iterations after a block closes, published by the lease holder at bind.
+    linger_spin: AtomicU64,
     /// Bounded worker-side fault, published once by the lease holder. Compiled out of production.
     #[cfg(feature = "fault-injection")]
     fault: std::sync::OnceLock<FaultInjectionV1>,
@@ -129,11 +131,16 @@ impl<J: NativeSchedulerJobV1> WorkerLeaseV1<J> {
             .map_or(0, |endpoints| endpoints.len())
     }
 
-    /// Publish the idle-spin budget the plan derived from its render quantum.
+    /// Publish the idle-spin budgets the plan derived from its render quantum.
     ///
     /// Control plane: called at bind and at hand-over, never inside a block.
-    pub fn set_idle_spin(&mut self, iterations: u64) {
-        self.shared.idle_spin.store(iterations, Ordering::Release);
+    pub fn set_idle_spin(&mut self, budget: crate::RecoveryBudgetV1) {
+        self.shared
+            .idle_spin
+            .store(budget.idle_spin_iterations, Ordering::Release);
+        self.shared
+            .linger_spin
+            .store(budget.linger_spin_iterations, Ordering::Release);
     }
 
     /// Whether a worker has been declared dead for the life of this lease.
@@ -280,6 +287,7 @@ impl<J: NativeSchedulerJobV1> NativeWorkerPoolV1<J> {
             block_open: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             idle_spin: AtomicU64::new(1 << 14),
+            linger_spin: AtomicU64::new(1 << 10),
             #[cfg(feature = "fault-injection")]
             fault: std::sync::OnceLock::new(),
         });
@@ -829,6 +837,7 @@ fn worker_loop<J: NativeSchedulerJobV1>(
     #[cfg(feature = "fault-injection")]
     let mut stalled_once = false;
     let mut spins = 0_u64;
+    let mut last_open = false;
     loop {
         let message = loop {
             if let Ok(message) = commands.try_pop() {
@@ -837,9 +846,24 @@ fn worker_loop<J: NativeSchedulerJobV1>(
             if shared.stop.load(Ordering::Acquire) {
                 return;
             }
-            if shared.block_open.load(Ordering::Acquire)
-                && spins < shared.idle_spin.load(Ordering::Relaxed)
-            {
+            // Two budgets. While the block is open the budget is a runaway guard of many quanta,
+            // so a worker never parks mid-block in practice -- that is what makes "at most one
+            // coordinator wake per rendered block" structural: `wake_root` can only find a parked
+            // worker on a block's first wave. After the block closes the budget is a short linger,
+            // so a saturated render that re-opens within microseconds never parks and the render
+            // thread makes no syscall at all, while a paced one parks and pays exactly one wake.
+            // Crossing the boundary restarts the count.
+            let open = shared.block_open.load(Ordering::Acquire);
+            if open != last_open {
+                last_open = open;
+                spins = 0;
+            }
+            let budget = if open {
+                shared.idle_spin.load(Ordering::Relaxed)
+            } else {
+                shared.linger_spin.load(Ordering::Relaxed)
+            };
+            if spins < budget {
                 spins += 1;
                 core::hint::spin_loop();
                 continue;

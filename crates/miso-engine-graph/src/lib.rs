@@ -950,7 +950,8 @@ impl PreparedGraphPlan {
                 .unwrap_or(u64::MAX)
                 .max(1 << 14)
         };
-        let idle_spin_iterations = iterations(quantum_ns);
+        let idle_spin_iterations =
+            iterations(quantum_ns.saturating_mul(miso_engine_native_scheduler::IDLE_GUARD_QUANTA));
         let recovery_ns = match config.scheduler.recovery_deadline_ns() {
             0 => quantum_ns.max(miso_engine_native_scheduler::MINIMUM_RECOVERY_NS),
             override_ns => u128::from(override_ns),
@@ -958,6 +959,12 @@ impl PreparedGraphPlan {
         let budget = RecoveryBudgetV1 {
             recovery_iterations: iterations(recovery_ns),
             idle_spin_iterations,
+            linger_spin_iterations: (quantum_ns
+                / miso_engine_native_scheduler::LINGER_QUANTUM_DIVISOR
+                / spin_ns)
+                .try_into()
+                .unwrap_or(u64::MAX)
+                .max(1 << 10),
         };
         let scheduler = match NativeSchedulerV1::prepare_with_fallback(
             config.scheduler,
@@ -1025,7 +1032,7 @@ impl PreparedGraphPlan {
             blueprint,
             scheduler,
             worker_lease.map(|lease| lease.0),
-            idle_spin_iterations,
+            budget,
             resources,
             source_set.take(),
             #[cfg(feature = "test-support")]
@@ -1988,7 +1995,7 @@ struct NativeGraphExecutor {
     scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
     lease: Option<Box<WorkerLeaseV1<NativeGraphPartitionJob>>>,
     expected_workers: usize,
-    idle_spin_iterations: u64,
+    budget: RecoveryBudgetV1,
     /// Reap slots for `begin_block`, one per worker; preallocated at bind.
     reaped: Box<[Option<(usize, usize)>]>,
     source_set: Option<GraphPreparedSourceSet>,
@@ -2006,7 +2013,7 @@ impl NativeGraphExecutor {
         blueprint: NativeGraphBlueprint,
         scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
         lease: Option<WorkerLeaseV1<NativeGraphPartitionJob>>,
-        idle_spin_iterations: u64,
+        budget: RecoveryBudgetV1,
         resources: NativeGraphResourceReportV1,
         source_set: Option<GraphPreparedSourceSet>,
         #[cfg(feature = "test-support")]
@@ -2069,7 +2076,7 @@ impl NativeGraphExecutor {
         let expected_workers = scheduler.expected_workers();
         let mut lease = lease.map(Box::new);
         if let Some(lease) = lease.as_mut() {
-            lease.set_idle_spin(idle_spin_iterations);
+            lease.set_idle_spin(budget);
         }
         (
             Self {
@@ -2087,7 +2094,7 @@ impl NativeGraphExecutor {
                 scheduler,
                 lease,
                 expected_workers,
-                idle_spin_iterations,
+                budget,
                 reaped: vec![None; expected_workers].into_boxed_slice(),
                 source_set,
                 source_input_targets,
@@ -2230,7 +2237,7 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
         match handover.downcast::<WorkerLeaseV1<NativeGraphPartitionJob>>() {
             Ok(mut lease) => {
                 if lease.worker_count() == self.expected_workers {
-                    lease.set_idle_spin(self.idle_spin_iterations);
+                    lease.set_idle_spin(self.budget);
                     self.lease = Some(lease);
                     None
                 } else {

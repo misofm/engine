@@ -58,7 +58,7 @@ impl<J: NativeSchedulerJobV1> WorkerLeaseV1<J> {
     }
 
     /// The browser lease never publishes an idle budget.
-    pub const fn set_idle_spin(&mut self, _iterations: u64) {}
+    pub const fn set_idle_spin(&mut self, _budget: crate::RecoveryBudgetV1) {}
 }
 
 pub(crate) const fn retained_queue_bytes<J: NativeSchedulerJobV1>(

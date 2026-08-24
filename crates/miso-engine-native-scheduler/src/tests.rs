@@ -63,6 +63,7 @@ fn budget() -> RecoveryBudgetV1 {
     RecoveryBudgetV1 {
         recovery_iterations: 1 << 22,
         idle_spin_iterations: 1 << 12,
+        linger_spin_iterations: 1 << 8,
     }
 }
 
@@ -318,7 +319,11 @@ fn workers_park_between_blocks_and_one_wake_brings_them_back() {
         fault: FaultInjectionV1::None,
     })
     .expect("pool");
-    lease.set_idle_spin(1 << 10);
+    lease.set_idle_spin(RecoveryBudgetV1 {
+        recovery_iterations: 1 << 22,
+        idle_spin_iterations: 1 << 10,
+        linger_spin_iterations: 1 << 6,
+    });
     let mut scheduler = NativeSchedulerV1::prepare(
         NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true, pool.shape()),
         4,
@@ -478,6 +483,7 @@ fn protocol_pool(
         RecoveryBudgetV1 {
             recovery_iterations,
             idle_spin_iterations: 1 << 12,
+            linger_spin_iterations: 1 << 8,
         },
     )
     .expect("scheduler");

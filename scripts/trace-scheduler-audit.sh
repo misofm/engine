@@ -2,8 +2,9 @@
 # Trace the q128 scheduler audit across every spawned thread without launching a benchmark.
 #
 # Issue 100 gates two modes:
-#   steady -- blocks rendered back to back, so the workers never exhaust their idle spin. The
-#             coordinator's armed interval must contain ZERO syscalls.
+#   steady -- blocks rendered back to back, so the workers never exhaust their linger budget. The
+#             coordinator's armed interval must contain at most ONE syscall: the pool has been
+#             parked since preparation, so the first block wakes it and no block after that does.
 #   paced  -- blocks rendered at the real 2.667 ms cadence, so the workers park between blocks.
 #             The coordinator may then issue at most ONE `futex` wake per block (the single
 #             documented render-thread syscall, docs/REALTIME_DEPENDENCY_POLICY.md) and nothing
@@ -116,9 +117,12 @@ run_mode() {
     coordinator_count=$(printf '%s' "$coordinator_lines" | rg -c '' || true)
     [[ -n "$coordinator_lines" ]] || coordinator_count=0
     if [[ "$pace" == 0 ]]; then
-        [[ "$coordinator_count" == 0 ]] || {
-            printf '%s: unexpected coordinator syscall(s) while armed:\n%s\n' \
-                "$mode" "$coordinator_lines" >&2
+        # At most the one wake that starts the pool, and it must be a futex.
+        local steady_other
+        steady_other=$(printf '%s\n' "$coordinator_lines" | rg -v '^[0-9.]+ futex\(' | rg -v '^$' || true)
+        [[ -z "$steady_other" && "$coordinator_count" -le 1 ]] || {
+            printf '%s: unexpected coordinator syscall(s) while armed (%s):\n%s\n' \
+                "$mode" "$coordinator_count" "$coordinator_lines" >&2
             exit 1
         }
     else
@@ -130,7 +134,7 @@ run_mode() {
             exit 1
         }
         [[ "$coordinator_count" -ge 1 && "$coordinator_count" -le "$blocks" ]] ||
-            fail "$mode: coordinator issued $coordinator_count syscalls, expected 1..$blocks"
+            fail "$mode: coordinator issued $coordinator_count syscalls, expected 1..$blocks (at most one wake per rendered block)"
         local wakes
         wakes=$(jq -r '.coordinator_wakes' "$root/audit.json")
         [[ "$coordinator_count" -le "$wakes" ]] ||
@@ -156,8 +160,9 @@ run_mode() {
         [[ "$worker_count" -le $((3 * blocks)) ]] ||
             fail "$mode: worker $tid issued $worker_count syscalls, over three per block"
         if [[ "$pace" == 0 ]]; then
-            [[ "$worker_count" == 0 ]] ||
-                fail "$mode: a steady-state worker must never park (worker $tid: $worker_count)"
+            # Only the initial wake: a park, and at most the two child wakes it propagates.
+            [[ "$worker_count" -le 3 ]] ||
+                fail "$mode: a steady-state worker re-parked (worker $tid: $worker_count)"
         fi
         worker_counts+=("$worker_count")
     done

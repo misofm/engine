@@ -67,8 +67,24 @@ pub struct RecoveryBudgetV1 {
     /// a late one. The budget is therefore one full quantum with a floor
     /// ([`MINIMUM_RECOVERY_NS`]), and a worker that answers later is not held dead.
     pub recovery_iterations: u64,
-    /// Idle-spin iterations a worker burns inside an open block before parking (about a quantum).
+    /// Runaway guard: iterations a worker will spin inside an *open* block before parking anyway.
+    ///
+    /// A worker never parks while its block is open, because that is what makes "at most one
+    /// coordinator wake per rendered block" structural rather than statistical: `wake_root` can
+    /// only ever find a parked worker on a block's first wave. The budget exists so a coordinator
+    /// that never closes its block cannot spin a core forever, and is therefore set to many
+    /// quanta, not one.
     pub idle_spin_iterations: u64,
+    /// Idle-spin iterations a worker burns *after* a block closes before parking.
+    ///
+    /// This is what separates a paced session from a saturated one. A host rendering at the real
+    /// block cadence leaves a gap of nearly a whole quantum between blocks, so the worker parks
+    /// and the next block costs exactly one coordinator wake; an offline or saturated render
+    /// re-opens the next block within microseconds, so the worker never parks and the render
+    /// thread makes no syscall at all. The budget is therefore a small fraction of a quantum:
+    /// long enough to bridge a back-to-back callback, short enough to keep idle CPU under the
+    /// 5 % gate.
+    pub linger_spin_iterations: u64,
 }
 
 impl Default for RecoveryBudgetV1 {
@@ -76,9 +92,20 @@ impl Default for RecoveryBudgetV1 {
         Self {
             recovery_iterations: 1 << 14,
             idle_spin_iterations: 1 << 14,
+            linger_spin_iterations: 1 << 10,
         }
     }
 }
+
+/// Quanta a worker will spin inside an open block before the runaway guard parks it anyway.
+///
+/// See [`RecoveryBudgetV1::idle_spin_iterations`].
+pub const IDLE_GUARD_QUANTA: u128 = 64;
+
+/// Fraction of one render quantum a worker keeps spinning after its block closes.
+///
+/// See [`RecoveryBudgetV1::linger_spin_iterations`].
+pub const LINGER_QUANTUM_DIVISOR: u128 = 64;
 
 /// Floor for the bounded recovery deadline, in nanoseconds.
 ///
