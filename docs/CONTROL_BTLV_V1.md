@@ -10,7 +10,7 @@ All integer and floating-point values are IEEE little-endian. Implementations de
 | ---: | ---: | --- |
 | 0 | 8 | ASCII magic `MISOCTL\0` |
 | 8 | 2 | major (`1`) |
-| 10 | 2 | minor (`0`) |
+| 10 | 2 | minor (`0` for the original registry, `1` for the additive named-nudge registry) |
 | 12 | 2 | header length (`48`) |
 | 14 | 1 | kind: command `1`, response `2`, event `3` |
 | 15 | 1 | flags: command bit 0 is `revision-any`; all other bits are zero |

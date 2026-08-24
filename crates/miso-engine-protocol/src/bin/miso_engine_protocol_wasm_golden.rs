@@ -5,7 +5,7 @@ use miso_engine_protocol::{
 };
 
 fn main() {
-    assert_eq!(complete_schema_hash(), 0x88a8_ee6a_6d9e_4acc);
+    assert_eq!(complete_schema_hash(), 0x15b4_f165_48b0_72c5);
 }
 
 fn complete_schema_hash() -> u64 {

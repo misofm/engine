@@ -1,16 +1,16 @@
 # MISO Control BTLV v1 registry
 
-This freezes the semantic registry referenced by [the wire specification](CONTROL_BTLV_V1.md). `R` is one mandatory field, `O` is zero or one optional field, and `R*`/`O*` are contiguous repeats with that flag. Absent optional fields are omitted, never encoded as placeholder zeroes.
+This freezes the semantic registry referenced by [the wire specification](CONTROL_BTLV_V1.md). `R` is one mandatory field, `O` is zero or one optional field, and `R*`/`O*` are contiguous repeats with that flag. Absent optional fields are omitted, never encoded as placeholder zeroes. Protocol 1.0 remains the minimum compatible version; current additive frames are 1.1.
 
 ## Registries
 
 | Commands and echoed response IDs | Events |
 | --- | --- |
-| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0004` parameter metadata get; `0005` parameter state get; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
+| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0004` parameter metadata get; `0005` parameter state get; `0006` automation enqueue; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` nudge effect parameter | `8001` session committed; `8002` automation canceled; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
 
 Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupported message, `4` unknown required field, `5` invalid field, `6` limit exceeded, `7` revision conflict, `8` revision exhausted, `9` request ID reuse, `10` replay expired, `11` backpressure, `12` validation failed, `13` not found, `14` unavailable, `15` time in past, `16` automation order, `17` PCM forbidden, `18` internal.
 
-`QueueKind` is control command `1`, automation `2`, reliable response `3`, reliable event `4`, telemetry `5`, replay cache `6`. Diagnostic severity is info `1`, warning `2`, error `3`. Transport state is stopped `1` or playing `2`. Parameter enums are: value `f32=1`; domain continuous/boolean/enumeration `1/2/3`; mapping linear/logarithmic/exponential/stepped `1..4`; automation sample/block/none `1..3`; rack SIMD1/dynamic/SIMD2 `1..3`; channel left/right/both `1..3`; unit dB/Hz/ms/samples/linear/ratio `1..6`. Meter component is left/right/aggregate `1..3`; meter flags are valid/clipped/held bits `0..2`. All unallocated bits reject.
+`QueueKind` is control command `1`, automation `2`, reliable response `3`, reliable event `4`, telemetry `5`, replay cache `6`. Diagnostic severity is info `1`, warning `2`, error `3`. Transport state is stopped `1` or playing `2`. Parameter enums are: value `f32=1`; domain continuous/boolean/enumeration `1/2/3`; mapping linear/logarithmic/exponential/stepped `1..4`; automation sample/block/none `1..3`; rack SIMD1/dynamic/SIMD2 `1..3`; channel left/right/both `1..3`; unit dB/Hz/ms/samples/linear/ratio `1..6`; named nudge size xs/sm/md/lg/xl `1..5`. Meter component is left/right/aggregate `1..3`; meter flags are valid/clipped/held bits `0..2`. All unallocated bits reject.
 
 ## Common forms
 
@@ -33,10 +33,15 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 | `0009` | meter handles `1:PACKED_U32 R`, meter period `2:U32 R`, counter IDs `3:PACKED_U32 R`, counter period `4:U32 R`, diagnostics enabled `5:BOOL R`, minimum severity `6:U8 R`; exact revision | canonical echo of those six fields |
 | `000a` | all `1:BOOL R`, IDs `2:PACKED_U32 O` only when not all | observed sample `1:U64 R`, `CounterValue MESSAGE R*` |
 | `000b` | after-sequence `1:U64 R`, limit `2:U16 R`, minimum severity `3:U8 R` | last sequence `1:U64 R`, eof `2:BOOL R`, diagnostic `3:MESSAGE R*` |
+| `000c` | parameter handle `1:U32 R`, named size `2:U8 R`, signed nonzero count `3:I64 R` restricted to `i16`; exact revision | parameter handle `1:U32 R`, resolved absolute value `2:F32 R` |
 
 Snapshot continuations, metadata pages, and diagnostic pages use an exact revision after an any-revision first page. Counter values are `1:id U32 R`, `2:value U64 R`, ascending and non-resetting. A parameter-state record is `{handle:u32, flags:u32, value:f32, reserved:u32}`; a meter record is `{handle:u32, component:u16, flags:u16, value:f32, reserved:u32}`. Both fixed arrays are validated schema fields, not opaque bytes.
 
-`ParameterDescriptor` fields are handle, track stable ID, rack, effect stable ID, stable parameter ID, channel, value kind, unit, domain, optional continuous min/max, default, mapping, automation rate, smoothing samples, flags, optional display fields, and optional enum choices. Handles are nonzero, revision-scoped, and strictly increasing. Continuous bounds are finite and include the default; boolean defaults are zero/one; enumerations have unique finite choices and a matching default. Descriptor flags are readable/automatable/per-channel bits `0..2`; state flags are valid/automation-active bits `0..1`.
+`ParameterDescriptor` fields are handle, track stable ID, rack, effect stable ID, stable parameter ID, channel, value kind, unit, domain, optional continuous min/max, default, mapping, automation rate, smoothing samples, flags, optional display fields, optional enum choices, and optional repeated named nudges at field 20. Handles are nonzero, revision-scoped, and strictly increasing. Continuous bounds are finite and include the default; boolean defaults are zero/one; enumerations have unique finite choices and a matching default. Descriptor flags are readable/automatable/per-channel bits `0..2`; state flags are valid/automation-active bits `0..1`.
+
+A named-nudge descriptor is size `1:U8 R`, normalized step `2:F32 R`, signed current-position decrement `3:F32 R`, and signed current-position increment `4:F32 R`. The list is either absent for legacy metadata or exactly five entries in xs-to-xl order. Steps are finite positive values; decrement is finite nonpositive and increment finite nonnegative. Describe computes both deltas from the authoritative current session value, including edge clamps.
+
+`000c` targets the complete track/rack/effect/parameter/channel tuple through its revision-scoped handle. The controller reads the authoritative current value, resolves `count * named-step` in normalized mapping space (or whole stepped choices), clamps there, and submits the resulting absolute value through the existing effect-parameter transaction path. The response echoes that absolute value. It has the same exact-revision, replay, structural plan-publication, session-committed event, and queued-automation cancellation semantics as the equivalent absolute edit. Count zero, an out-of-range `i16`, an unknown/stale handle, or a descriptor without a ladder rejects; clients never perform read-modify-write. A clamp edge is intentionally asymmetric under a subsequent opposite nudge.
 
 ## Events and automation
 

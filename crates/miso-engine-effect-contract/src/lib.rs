@@ -1974,6 +1974,79 @@ mod nudge_tests {
     }
 
     #[test]
+    fn default_xs_is_anchored_to_each_unit_class_jnd_at_mid_domain() {
+        let cases = [
+            (
+                parameter(ParameterUnit::Db, ParameterMapping::Linear, -20.0, 20.0),
+                0.5,
+                "dB",
+            ),
+            (
+                parameter(
+                    ParameterUnit::Milliseconds,
+                    ParameterMapping::Linear,
+                    0.0,
+                    1_000.0,
+                ),
+                0.05,
+                "milliseconds",
+            ),
+            (
+                parameter(
+                    ParameterUnit::Ratio,
+                    ParameterMapping::Logarithmic,
+                    1.0,
+                    20.0,
+                ),
+                0.05,
+                "ratio",
+            ),
+            (
+                parameter(
+                    ParameterUnit::Linear,
+                    ParameterMapping::Exponential,
+                    0.0,
+                    1.0,
+                ),
+                0.05,
+                "linear",
+            ),
+        ];
+        for (parameter, anchor, label) in cases {
+            let middle = parameter.default_value;
+            let next = resolve_parameter_nudge_value_v1(&parameter, middle, NudgeSize::Xs, 1)
+                .expect("mid-domain nudge");
+            let movement = if parameter.unit == ParameterUnit::Db {
+                next - middle
+            } else {
+                (next - middle) / middle.abs()
+            };
+            assert!(
+                (0.5 * anchor..=2.0 * anchor).contains(&movement),
+                "{label}: {movement} vs {anchor}"
+            );
+        }
+
+        let frequency = parameter(
+            ParameterUnit::Hz,
+            ParameterMapping::Logarithmic,
+            20.0,
+            20_000.0,
+        );
+        let middle = frequency.default_value;
+        let next = resolve_parameter_nudge_value_v1(&frequency, middle, NudgeSize::Xs, 1)
+            .expect("frequency nudge");
+        let cents = 1_200.0 * miso_engine_math::logf(next / middle) / miso_engine_math::logf(2.0);
+        assert!((10.0..=40.0).contains(&cents), "Hz: {cents} cents");
+
+        let samples = parameter(ParameterUnit::Samples, ParameterMapping::Linear, 0.0, 100.0);
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&samples, samples.default_value, NudgeSize::Xs, 1,),
+            Some(samples.default_value + 1.0)
+        );
+    }
+
+    #[test]
     fn stepped_domains_move_whole_choices_and_all_domains_clamp() {
         let stepped = ParameterDescriptorV1 {
             id: ParameterId(1),

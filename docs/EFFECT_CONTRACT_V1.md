@@ -52,6 +52,20 @@ mapping is `min + (max-min)x^2`; exact endpoints are assigned explicitly. Steppe
 the closest legal value and resolves ties toward the lower value. Inputs outside finite `[0,1]`
 and invalid domain values reject rather than clamp.
 
+Every controllable effect and builtin parameter declares `nudge_ladder: Option<NudgeLadderV1>`.
+The declaration stores the smallest named step `xs` in normalized mapping space and a closed ratio
+class; V1's `HumanV1` class derives `xs/sm/md/lg/xl` with multipliers `{1,3,5,10,30}`. An explicit
+per-parameter declaration wins over the shared `(mapping, unit)` default. Defaults anchor `xs` at
+mid-domain to 0.5 dB, 20 cents, one sample, or five percent for time/Q/ratio/general linear
+controls. Boolean and enumeration parameters advance whole legal choices; `xs` is one choice.
+
+`NativeEffectRegistry` resolves and memoizes all five steps while it validates each descriptor.
+Describe and nudge paths borrow that immutable result; they do not allocate or derive a ladder per
+call. For continuous parameters a nudge computes `clamp(x + count*step, 0, 1)` and maps back to the
+declared unit. Exact endpoints stay exact. Away from a clamp, `+1` then `-1` returns the starting
+bits; at an edge the clamp intentionally makes that sequence asymmetric. Nudge is control-plane
+syntax for an existing absolute parameter edit: no nudge type, branch, or state reaches render.
+
 Smoothing length is `smoothing_samples` from the parameter descriptor; it is binding, and no
 effect may substitute a literal.
 
