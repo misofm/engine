@@ -92,17 +92,17 @@ Soundness therefore does not depend on any worker being on time: a late worker c
 own unique slots, which nobody reads. `crates/miso-engine-native-scheduler` and
 `crates/miso-engine-graph` remain entirely free of unsafe code, which
 `scripts/check-scheduler-policy.sh` enforces. A second test-only exception is
-`tools/miso-engine-realtime-audit/src/main.rs`, whose audited global allocator forwards unchanged
+`tools/miso-engine-audit/src/realtime.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or
 render-reachable dependency. Issue 005 additionally permits only
-`tools/miso-engine-protocol-audit/src/main.rs` to locally allow unsafe code for its audit-only
+`tools/miso-engine-audit/src/protocol.rs` to locally allow unsafe code for its audit-only
 global allocator. That allocator forwards original pointer/layout contracts unchanged to `System`
 and counts only allocations while the audit thread is armed; its prepared corpus, queues, and
 output/scratch buffers exist before arming. It is not linked into a production crate and does not
 change protocol allocation behavior.
 
-Issue 005 also permits `tools/miso-engine-protocol-bench/src/main.rs` to locally allow unsafe
+Issue 005 also permits `tools/miso-engine-bench/src/protocol.rs` to locally allow unsafe
 code for its comparison-only allocation counter. It forwards original allocator contracts to
 `System` and records requested allocation count/bytes only while a native host-harness interval is
 armed. The preallocated BTLV output, decode scratch, and official FlatBuffers builder are prepared
@@ -111,9 +111,9 @@ engine, protocol, browser-host, or render-reachable target impact.
 
 The source-policy checker currently accepts unsafe syntax in exactly four source files:
 `crates/miso-engine-core/src/realtime/spsc.rs`,
-`tools/miso-engine-realtime-audit/src/main.rs`, and
-`tools/miso-engine-protocol-audit/src/main.rs`, and
-`tools/miso-engine-protocol-bench/src/main.rs`. The latter two are the only Issue-005
+`tools/miso-engine-audit/src/realtime.rs`, and
+`tools/miso-engine-audit/src/protocol.rs`, and
+`tools/miso-engine-bench/src/protocol.rs`. The latter two are the only Issue-005
 audit/benchmark exceptions; no sibling source file in either tool is permitted to use unsafe code.
 
 That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
@@ -171,7 +171,7 @@ names a kernel, and costs build time and artifact size, never speed.
   affected boundaries are `crates/miso-engine-capi/src/ffi.rs` (`catch_result`, `catch_destroy`,
   which map a contained panic to `RESULT_INTERNAL`), `hosts/miso-engine-host-web/src/ffi.rs`, the
   `catch_unwind` probes inside `crates/miso-engine-conformance`, and the `panic_unwinds` counter in
-  `tools/miso-engine-rack-bench`. In a release artifact each of those is a diagnostic that no longer
+  `tools/miso-engine-bench`. In a release artifact each of those is a diagnostic that no longer
   fires; none of them is load-bearing for a call that does not panic, so behaviour on a passing host
   is unchanged.
 - Embedders must read this as: **the C ABI does not convert a panic into `RESULT_INTERNAL` in a

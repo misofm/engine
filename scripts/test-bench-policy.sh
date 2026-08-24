@@ -29,27 +29,27 @@ check >/dev/null
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
-    >>"$case_root/tools/miso-engine-rack-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/rack.rs"
 expect_failure second-allocator
 
 new_case second-global-allocator-attribute
 printf '\n#[global_allocator]\nstatic A: X = X;\n' \
-    >>"$case_root/tools/miso-engine-scheduler-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/scheduler.rs"
 expect_failure second-global-allocator-attribute
 
 new_case second-escaper
 printf '\nfn json_escape(value: &str) -> String {\n    value.to_owned()\n}\n' \
-    >>"$case_root/tools/miso-engine-conformance-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/conformance.rs"
 expect_failure second-escaper
 
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
-    >>"$case_root/tools/miso-engine-graph-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/graph.rs"
 expect_failure second-percentile
 
 new_case second-digest-sink
 printf '\nstruct Sha256Sink;\n' \
-    >>"$case_root/tools/miso-engine-builtins-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/builtins.rs"
 expect_failure second-digest-sink
 
 new_case removed-escaper
@@ -58,26 +58,31 @@ expect_failure removed-escaper
 
 new_case new-unsafe-owner
 printf '#![allow(unsafe_code)]\n' \
-    >>"$case_root/tools/miso-engine-source-audit/src/main.rs"
+    >>"$case_root/tools/miso-engine-audit/src/source.rs"
 expect_failure new-unsafe-owner
 
 new_case retired-unsafe-owner
-sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/miso-engine-capi-audit/src/main.rs"
+sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/miso-engine-audit/src/capi.rs"
 expect_failure retired-unsafe-owner
 
 new_case converted-subject-loses-the-shared-timer
-sed -i 's/timing::timed/inline_timed/' "$case_root/tools/miso-engine-rack-bench/src/main.rs"
+sed -i 's/timing::timed/inline_timed/' "$case_root/tools/miso-engine-bench/src/rack.rs"
 expect_failure converted-subject-loses-the-shared-timer
 
 new_case converted-subject-regrows-a-clock
 printf '\nfn t() { let _ = Instant::now(); }\n' \
-    >>"$case_root/tools/miso-engine-rack-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/rack.rs"
 expect_failure converted-subject-regrows-a-clock
 
 new_case converted-subject-regrows-a-digest
 printf '\nfn h() { let _ = Sha256::new(); }\n' \
-    >>"$case_root/tools/miso-engine-rack-bench/src/main.rs"
+    >>"$case_root/tools/miso-engine-bench/src/rack.rs"
 expect_failure converted-subject-regrows-a-digest
+
+new_case subject-bypasses-metadata-snapshot
+printf '\nfn bypass() { let _ = std::env::var("CPU"); }\n' \
+    >>"$case_root/tools/miso-engine-bench/src/rack.rs"
+expect_failure subject-bypasses-metadata-snapshot
 
 new_case production-dependency
 mkdir -p "$case_root/crates/miso-engine-core"

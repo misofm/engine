@@ -72,8 +72,8 @@ failure_reason=candidate_identity_failed
 candidate_commit=$(git rev-parse --verify HEAD 2>>"$stderr_log")
 candidate_sha=$(printf '%s' "$candidate_commit" | sha256sum | awk '{print $1}')
 failure_reason=build_failed
-cargo build --locked --release --quiet -p miso-engine-scheduler-bench 2>>"$stderr_log"
-binary="$root/target/release/miso_engine_scheduler_bench"
+cargo build --locked --release --quiet -p miso-engine-bench 2>>"$stderr_log"
+binary="$root/target/release/miso_engine_bench"
 [[ -x "$binary" ]] || { failure_reason=missing_binary; exit 1; }
 failure_reason=binary_identity_failed
 binary_sha=$(sha256sum "$binary" | awk '{print $1}')
@@ -94,7 +94,7 @@ run_round() {
     MISO_ENGINE_BENCH_CPU_MODEL="$cpu_model" MISO_ENGINE_BENCH_OS="$os" \
     MISO_ENGINE_BENCH_KERNEL="$kernel" MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
     MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor" \
-    "$binary"
+    "$binary" scheduler
 }
 failure_reason=warmup_failed
 run_round warmup >/dev/null 2>>"$stderr_log" || exit 1

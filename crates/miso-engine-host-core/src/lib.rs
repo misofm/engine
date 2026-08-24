@@ -69,7 +69,7 @@
 //!   render export can call an allocator, a deallocator or drop glue.
 //! * `render` performs no allocation, no lock, no syscall, no logging and no structural mutation.
 //!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
-//!   `tools/miso-engine-graph-audit` and the browser call-graph gate enforce the binary half.
+//!   `tools/miso-engine-audit` and the browser call-graph gate enforce the binary half.
 
 pub mod diagnostics;
 pub mod prepare;

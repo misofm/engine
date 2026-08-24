@@ -31,7 +31,7 @@ cp "$root/fixtures/effect-state/v1/canonical.state.hex" \
 cp "$root/fixtures/effect-interchange/v1/ACCEPTED.sha256" \
     "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256"
 
-printf '\nmiso-engine-effect-interchange-bench.workspace = true\n' \
+printf '\nmiso-engine-bench.workspace = true\n' \
     >>"$temp/crates/miso-engine-core/Cargo.toml"
 expect_failure production-dependency
 cp "$root/crates/miso-engine-core/Cargo.toml" "$temp/crates/miso-engine-core/Cargo.toml"
@@ -55,6 +55,6 @@ cp "$root/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs
     "$temp/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs"
 
 sed -i 's/const OBSERVATIONS: usize = 256/const OBSERVATIONS: usize = 255/' \
-    "$temp/tools/miso-engine-effect-interchange-bench/src/main.rs"
+    "$temp/tools/miso-engine-bench/src/effect_interchange.rs"
 expect_failure benchmark-observations
 printf 'effect interchange qualification policy mutations: ok\n'

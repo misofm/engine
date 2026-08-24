@@ -41,9 +41,9 @@ umask 077
 python3 -I -B scripts/check-builtins-listening-033.py --source \
     "$inbox/source.mepcm" "$inbox/provenance.json" || fail 'source or provenance'
 
-cargo build --locked --release --bin miso_engine_builtins_fixture_listening \
-    --manifest-path tools/miso-engine-builtins-fixture/Cargo.toml >&2
-binary=target/release/miso_engine_builtins_fixture_listening
+cargo build --locked --release --bin miso_engine_audit \
+    --manifest-path tools/miso-engine-audit/Cargo.toml >&2
+binary=target/release/miso_engine_audit
 [[ -x "$binary" ]] || fail 'renderer binary'
 
 commit="$(git rev-parse --verify HEAD)"
@@ -54,7 +54,7 @@ partial="$out.partial"
 [[ ! -e "$partial" && ! -L "$partial" ]] || fail 'partial packet directory already exists'
 trap 'rm -rf -- "$partial"' EXIT
 
-"$binary" --render "$inbox/source.mepcm" \
+"$binary" fixture-builtins-listening --render "$inbox/source.mepcm" \
     fixtures/conformance/v1/prng-noise-048000-dual-mono.mepcm \
     "$inbox/provenance.json" "$inbox/seed.txt" "$partial" || fail 'render'
 

@@ -15,7 +15,7 @@ create_valid_fixture() {
         "$root/crates/miso-engine-core/src" \
         "$root/crates/miso-engine-compressor/src" \
         "$root/hosts/miso-engine-host-web/src" \
-        "$root/tools/miso-engine-realtime-audit/src"
+        "$root/tools/miso-engine-audit/src"
 
     printf '%s\n' \
         'pub use wide::f32x8 as Simd8;' \
@@ -40,7 +40,7 @@ create_valid_fixture() {
     printf 'pub fn version() {}\n' >"$root/crates/miso-engine-core/src/lib.rs"
     printf 'pub fn process() {}\n' >"$root/crates/miso-engine-compressor/src/lib.rs"
     printf 'pub fn render() {}\n' >"$root/hosts/miso-engine-host-web/src/lib.rs"
-    printf 'fn main() {}\n' >"$root/tools/miso-engine-realtime-audit/src/main.rs"
+    printf 'fn main() {}\n' >"$root/tools/miso-engine-audit/src/realtime.rs"
 
     printf '%s\n' \
         '[workspace.dependencies]' \
@@ -101,7 +101,7 @@ expect_failure fusion-outside-lane \
 expect_failure wide-outside-lane \
     'printf "%s\n" "use wide::f32x4;" >>"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure arch-outside-softfma \
-    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/miso-engine-realtime-audit/src/main.rs"'
+    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/miso-engine-audit/src/realtime.rs"'
 expect_failure arch-in-second-lane-file \
     'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/crates/miso-engine-lane/src/scalar.rs"'
 # #84 phase A: the legacy `core/arch` exemption is gone entirely, so an intrinsic there -- the

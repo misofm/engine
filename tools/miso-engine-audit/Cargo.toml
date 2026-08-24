@@ -1,0 +1,38 @@
+[package]
+name = "miso-engine-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_audit"
+path = "src/main.rs"
+
+[dependencies]
+miso-engine-bench-support.workspace = true
+miso-engine-builtins.workspace = true
+miso-engine-builtins-compiler.workspace = true
+miso-engine-capi.workspace = true
+miso-engine-compressor.workspace = true
+miso-engine-conformance.workspace = true
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-delay.workspace = true
+miso-engine-dsp-reference.workspace = true
+miso-engine-effect-compiler.workspace = true
+miso-engine-effect-contract.workspace = true
+miso-engine-gate-expander.workspace = true
+miso-engine-graph = { workspace = true, features = ["test-support"] }
+miso-engine-graph-compiler.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-parametric-eq.workspace = true
+miso-engine-protocol.workspace = true
+miso-engine-session.workspace = true
+miso-engine-source = { workspace = true, features = ["test-support"] }
+sha2.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

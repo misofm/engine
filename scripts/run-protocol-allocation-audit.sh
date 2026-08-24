@@ -4,4 +4,4 @@ set -euo pipefail
 
 workspace_root="${1:-.}"
 cd "$workspace_root"
-cargo run --locked --release -p miso-engine-protocol-audit
+cargo run --locked --release -p miso-engine-audit -- protocol

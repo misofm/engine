@@ -48,12 +48,12 @@ sole_owner 'the counted SHA-256 sink has more than one implementation' \
 #
 # The list is the conversion ratchet. It grows as the remaining benchmark subjects move onto the
 # shared harness; it never shrinks.
-timed_subjects=(tools/miso-engine-rack-bench)
+timed_subjects=(tools/miso-engine-bench/src/rack.rs)
 for subject in "${timed_subjects[@]}"; do
-    [[ -d "$subject" ]] || fail "converted subject is missing: $subject"
-    grep -rq 'timing::timed' "$subject" --include='*.rs' ||
+    [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
+    grep -q 'timing::timed' "$subject" ||
         fail "converted subject does not measure through timing::timed: $subject"
-    if grep -rnE 'Instant::now|Sha256::new|sha2::' "$subject" --include='*.rs'; then
+    if grep -nE 'Instant::now|Sha256::new|sha2::' "$subject"; then
         fail "converted subject owns a clock or a digest of its own: $subject"
     fi
 done
@@ -63,14 +63,27 @@ done
 # `hosts/`. A sixth file is a new unsafe ownership boundary and needs a decision, not a grep.
 expected_unsafe="$(printf '%s\n' \
     tools/miso-engine-bench-support/src/alloc.rs \
-    tools/miso-engine-capi-audit/src/main.rs \
+    tools/miso-engine-audit/src/capi.rs \
     tools/miso-engine-native-pcm-runner/src/lib.rs \
-    tools/miso-engine-protocol-bench/src/main.rs \
+    tools/miso-engine-bench/src/protocol.rs \
     tools/miso-engine-wasm-gate-guest/src/lib.rs | LC_ALL=C sort)"
 actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
 [[ "$actual_unsafe" == "$expected_unsafe" ]] || {
     diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
     fail 'the approved unsafe ownership set under tools/ changed'
+}
+
+# F2's metadata boundary: only the two dispatchers may inspect their private re-exec selector.
+# Every subject reads runner metadata from one memoized in-process `Metadata::gather()` snapshot.
+expected_environment_readers="$(printf '%s\n' \
+    tools/miso-engine-audit/src/main.rs \
+    tools/miso-engine-bench/src/main.rs | LC_ALL=C sort)"
+actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/miso-engine-{audit,bench,bench-support}/src \
+    --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+[[ "$actual_environment_readers" == "$expected_environment_readers" ]] || {
+    diff -u <(printf '%s\n' "$expected_environment_readers") \
+        <(printf '%s\n' "$actual_environment_readers") >&2 || true
+    fail 'a subject bypassed the shared in-process metadata snapshot'
 }
 
 # The shared harness is test scaffolding. A production package depending on it would put a
