@@ -1,9 +1,9 @@
 //! Gate 7.8: the frozen contract — descriptor, resources, latency, curve, transition, automation,
 //! the connected sidechain and bank binding.
+use miso_engine_lane::Backend;
 
 mod support;
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_dsp_reference::{
     ReferenceGateExpanderParameters, ReferenceGateLink, ReferenceGatePhase, ReferenceGateTiming,
     reference_gate_expander_gain_reduction_db, reference_gate_expander_process,
@@ -398,7 +398,7 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
         .collect::<Vec<_>>();
     let unavailable = factory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::WasmSimd128,
+            backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &requests,
         })
@@ -412,7 +412,7 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
     let _ = unavailable;
 
     let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-        backend: KernelBackendV1::Scalar,
+        backend: Backend::Scalar,
         width: BankWidth::Four,
         requests: &requests,
     }) {
@@ -428,7 +428,7 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
         .map(|value| request(value))
         .collect::<Vec<_>>();
     let error = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-        backend: KernelBackendV1::WasmSimd128,
+        backend: Backend::Simd4,
         width: BankWidth::Four,
         requests: &malformed_requests,
     }) {
@@ -450,7 +450,7 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
     assert!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: KernelBackendV1::WasmSimd128,
+                backend: Backend::Simd4,
                 width: BankWidth::Four,
                 requests: &connected_requests,
             })
@@ -467,7 +467,7 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
     assert!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: KernelBackendV1::WasmSimd128,
+                backend: Backend::Simd4,
                 width: BankWidth::Four,
                 requests: &mixed,
             })

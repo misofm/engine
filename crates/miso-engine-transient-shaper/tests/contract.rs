@@ -12,6 +12,7 @@ use miso_engine_effect_contract::{
     StatePayloadInput, TailSamples, validate_descriptor_v1,
 };
 use miso_engine_effect_runtime::envelope::retention_coefficient;
+use miso_engine_lane::Backend;
 use miso_engine_transient_shaper::{
     TRANSIENT_SHAPER_COEFFICIENT_BITS_V1, TRANSIENT_SHAPER_DESCRIPTOR_V1,
     TRANSIENT_SHAPER_TIME_CONSTANTS_MS, TransientShaperFactory,
@@ -518,7 +519,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
     // A backend and a width that do not describe the same lane count is a malformed request.
     assert_eq!(
         bank_error(factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: miso_engine_core::KernelBackendV1::X86Avx2Fma,
+            backend: Backend::Simd8,
             width: BankWidth::Four,
             requests: &requests,
         }))

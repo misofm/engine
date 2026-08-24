@@ -232,3 +232,14 @@ third-party/dynamic bank execution, missing scalar fallback, hidden compiled tra
 unaccounted synthetic identity state, benchmark before all gates, a retry, or a relaxed tolerance.
 Device/browser runtime qualification, generalized sparse-program optimization, more fixture
 matrices and performance tuning are follow-ups, not reasons to expand this attempt.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

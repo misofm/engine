@@ -9,6 +9,8 @@ publish.workspace = true
 name = "miso_engine_graph_compiler"
 
 [dependencies]
+# `Backend` is this crate's compile input and is re-exported (#84 phase A).
+miso-engine-lane.workspace = true
 miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true

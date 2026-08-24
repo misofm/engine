@@ -26,17 +26,14 @@ lane_tests='^crates/miso-engine-lane/tests/'
 # render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
 oracle_crate='^crates/miso-engine-dsp-reference/'
 lane_softfma='^crates/miso-engine-lane/src/softfma\.rs:'
-# Temporary exemptions. `crates/miso-engine-core/src/arch/` holds the hand-written per-target
-# kernels this crate replaces, and `crates/miso-engine-core/src/lib.rs` holds their runtime
-# detection; both are deleted by issue #84 once the last consumer has moved. The exemptions are
-# exact files, so a new file next to them is still a failure.
-legacy_arch='^crates/miso-engine-core/src/arch/(mod|x86|aarch64|wasm32|scalar)\.rs:'  # removed by #84
-legacy_detect='^crates/miso-engine-core/src/lib\.rs:'                                  # removed by #84
+# #84 phase A deleted `crates/miso-engine-core/src/arch/` and its runtime detection, so the two
+# temporary exemptions that stood here are gone: there is no legacy kernel file and no second
+# backend enum left to exempt.
 
 fusion_matches="$({
     rg -n 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' \
         crates hosts tools --glob '*.rs' || true
-} | rg -v "$lane_source|$lane_tests|$oracle_crate|$legacy_arch" || true)"
+} | rg -v "$lane_source|$lane_tests|$oracle_crate" || true)"
 [[ -z "$fusion_matches" ]] || {
     printf '%s\n' "$fusion_matches" >&2
     fail "fused multiply-add and the SIMD vocabulary belong to crates/miso-engine-lane (D3, D4)"
@@ -57,7 +54,7 @@ relaxed_matches="$({
 
 architecture_matches="$({
     rg -n '(core|std)::arch::' crates hosts tools --glob '*.rs' || true
-} | rg -v "$lane_softfma|$legacy_arch|$legacy_detect" || true)"
+} | rg -v "$lane_softfma" || true)"
 [[ -z "$architecture_matches" ]] || {
     printf '%s\n' "$architecture_matches" >&2
     fail "raw architecture intrinsics belong to crates/miso-engine-lane/src/softfma.rs"
@@ -67,9 +64,7 @@ architecture_matches="$({
 # once at boot. `Backend::current()` is a constant, so a new detection site is a regression.
 detection_matches="$({
     rg -n 'is_x86_feature_detected|is_aarch64_feature_detected' crates hosts tools --glob '*.rs' || true
-} | rg -v '^crates/miso-engine-lane/src/backend\.rs:|^crates/miso-engine-lane/src/lib\.rs:|'"$legacy_arch"'|'"$legacy_detect" || true)"
-# Wave-2 consumers still call the legacy detection; they are enumerated, not open-ended.
-detection_matches="$(printf '%s' "$detection_matches" | rg -v '^crates/miso-engine-parametric-eq/src/lib\.rs:' || true)"  # removed by #87
+} | rg -v '^crates/miso-engine-lane/src/backend\.rs:|^crates/miso-engine-lane/src/lib\.rs:' || true)"
 [[ -z "$detection_matches" ]] || {
     printf '%s\n' "$detection_matches" >&2
     fail "runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)"

@@ -11,8 +11,8 @@
 use std::time::Instant;
 
 use miso_engine_builtins::*;
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::BankWidth;
+use miso_engine_lane::Backend;
 
 const FRAMES: usize = 128;
 const BLOCKS: usize = 20_000;
@@ -91,8 +91,7 @@ fn bench_input_stage_ns_per_track_frame() {
                 .into_input_builtins()
         })
         .collect();
-    let mut bank = BuiltinInputBankV1::new(KernelBackendV1::X86Avx2Fma, BankWidth::Eight, inputs)
-        .expect("bank");
+    let mut bank = BuiltinInputBankV1::new(Backend::Simd8, BankWidth::Eight, inputs).expect("bank");
     let mut bank_left = signal(FRAMES * 8);
     let mut bank_right = signal(FRAMES * 8);
     for _ in 0..256 {

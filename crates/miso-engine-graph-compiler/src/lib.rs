@@ -10,6 +10,7 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
+use miso_engine_effect_contract::BankWidth;
 use miso_engine_effect_contract::{
     LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
 };
@@ -20,11 +21,11 @@ use miso_engine_graph::{
     PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
     StableGraphId, TrackStage,
 };
-/// Re-exported so a caller can name the compile input without taking a `miso-engine-rack`
-/// dependency of its own: dispatch is this crate's input now, so this crate publishes its type
-/// (#99 F6). The host CPU is read by the caller -- `miso_engine_core::target_capabilities()` --
-/// and never inside the compiler.
-pub use miso_engine_rack::KernelDispatch;
+/// Re-exported so a caller can name the compile input without taking a `miso-engine-lane`
+/// dependency of its own: the backend is this crate's input now, so this crate publishes its type
+/// (#99 F6). The build's backend is read by the caller -- `miso_engine_lane::Backend::current()`
+/// -- and never inside the compiler.
+pub use miso_engine_lane::Backend;
 use miso_engine_rack::{RackLocationV1, RackProgramV1};
 use miso_engine_rack_compiler::{
     BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups,
@@ -42,14 +43,14 @@ pub struct GraphCompileRequest {
     ///
     /// Compile is a pure function of its inputs (#99 F6). The host CPU is read exactly once, by
     /// the caller that owns the render target -- `miso-engine-capi` and the web host do it at
-    /// plan-build time -- never inside the compiler. Before this, `KernelDispatch::select(
-    /// target_capabilities())` ran *inside* compile, so the same `GraphCompileRequest` produced
+    /// plan-build time -- never inside the compiler. Before this, the host backend was selected
+    /// *inside* compile, so the same `GraphCompileRequest` produced
     /// different banks, a different scratch allocation and a different capped resource estimate
     /// on different machines, and the scalar fallback could not be exercised without feature
     /// injection. The semantic graph -- schedule, levels, PDC, reductions, canonical bytes -- is
     /// deliberately independent of this value; only the bank overlay and the bank half of the
     /// estimate depend on it.
-    pub dispatch: KernelDispatch,
+    pub dispatch: Backend,
 }
 pub struct GraphCompiler;
 pub struct PreparedGraphArtifact {
@@ -67,7 +68,7 @@ pub struct GraphBuiltinsCompileRequest {
     pub builtins: PreparedBuiltinsSession,
     pub caps: GraphCompileCaps,
     /// See [`GraphCompileRequest::dispatch`] (#99 F6).
-    pub dispatch: KernelDispatch,
+    pub dispatch: Backend,
 }
 /// The one-way, sealed builtin attachment result.
 ///
@@ -163,7 +164,7 @@ pub struct GraphEvidence {
 /// produced the banks - never a second planner's opinion (#96 F1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphRackBankReport {
-    pub dispatch: KernelDispatch,
+    pub dispatch: Backend,
     /// The cohort plan, over whole **rack chains** (#99 F3): one candidate per `(track, rack)`
     /// whose slots are that track's rack program in session order.
     pub plan: BankPlan<RackChainId>,
@@ -271,8 +272,8 @@ mod tests {
     /// capped estimate are unchanged by that move on any given machine.
     /// `scalar_dispatch_compiles_without_banks_on_any_host` is the test that exercises the other
     /// value, which was unreachable before without feature injection.
-    fn host_dispatch() -> KernelDispatch {
-        KernelDispatch::select(target_capabilities())
+    fn host_dispatch() -> Backend {
+        Backend::current()
     }
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
@@ -281,11 +282,7 @@ mod tests {
         PreparedBuiltinsCorruptionCase, prepare_session_builtins,
     };
     use miso_engine_conformance::DualAccumulatorDelayFactory;
-    use miso_engine_core::{
-        TargetCapabilities,
-        realtime::{PlanarBufferMut, RenderIo, RenderTime, audit},
-        target_capabilities,
-    };
+    use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
     use miso_engine_effect_compiler::{
         EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry_v1,
         prepare_native_session_effects,
@@ -1771,11 +1768,9 @@ mod tests {
     /// previously untestable, because compile read the CPU itself.
     #[test]
     fn scalar_dispatch_compiles_without_banks_on_any_host() {
-        let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
-            false, false, false, false,
-        ));
+        let scalar = Backend::Scalar;
         assert!(
-            scalar.bank_width().is_none(),
+            BankWidth::for_backend(scalar).is_none(),
             "the scalar dispatch must not offer a bank width"
         );
         let (_, _, banked_effects) = twelve_track_bank_fixture();
@@ -1796,9 +1791,8 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
 
         assert_eq!(plain.graph.prepared_bank_count(), 0);
-        let expected_banked = host_dispatch()
-            .bank_width()
-            .map_or(0, |width| 12 / width.lanes() as usize);
+        let expected_banked =
+            BankWidth::for_backend(host_dispatch()).map_or(0, |width| 12 / width.lanes() as usize);
         assert_eq!(banked.graph.prepared_bank_count(), expected_banked);
         // Non-vacuity: on a host that cannot bank at all, both compiles bind zero banks and the
         // comparison proves nothing. Recorded rather than skipped, so a scalar CI host is visible
@@ -1951,7 +1945,7 @@ mod tests {
     /// the seam is real before either executor is rebuilt against it (#98 owns the kernels).
     #[test]
     fn compiled_plans_always_lower_to_a_smaller_executable_program() {
-        let Some(width) = host_dispatch().bank_width() else {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width");
         };
         let lanes = width.lanes() as usize;
@@ -2076,7 +2070,7 @@ mod tests {
     /// **session order**, so the cohort is the rack program and each slot binds once.
     #[test]
     fn multi_slot_rack_chains_form_one_cohort_and_bind_every_slot() {
-        let Some(width) = host_dispatch().bank_width() else {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
         };
         let lanes = width.lanes() as usize;
@@ -2121,7 +2115,7 @@ mod tests {
     /// entries and requires the identical bound plan.
     #[test]
     fn bank_membership_is_independent_of_entry_order() {
-        let Some(width) = host_dispatch().bank_width() else {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width");
         };
         let lanes = width.lanes() as usize;
@@ -2161,7 +2155,7 @@ mod tests {
     /// discarded every member in it.
     #[test]
     fn chains_of_different_depths_share_a_cohort_through_identity_slots() {
-        let Some(width) = host_dispatch().bank_width() else {
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width");
         };
         let lanes = width.lanes() as usize;
@@ -2280,8 +2274,7 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|_| panic!("graph"));
-        let expected = KernelDispatch::select(target_capabilities())
-            .bank_width()
+        let expected = BankWidth::for_backend(Backend::current())
             .map_or(0, |width| 12 / width.lanes() as usize);
         assert_eq!(artifact.graph.prepared_bank_count(), expected);
         let canonical = GraphCompiler::evidence(&artifact.graph, &artifact.report)
@@ -2456,10 +2449,7 @@ mod tests {
         // Host dispatch is deliberately detected only while preparing the normal artifact above.
         // These two direct, off-render binding probes exercise both legal factory widths on every
         // development host without pretending that a four-lane runtime was executed on x86.
-        for dispatch in [
-            KernelDispatch::select(TargetCapabilities::from_detected(true, false, false, false)),
-            KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, false)),
-        ] {
+        for dispatch in [Backend::Simd4, Backend::Simd8] {
             let rebound = prepare_native_session_effects(
                 &session,
                 &registry,
@@ -2488,7 +2478,9 @@ mod tests {
                     )
                 })
                 .collect();
-            let lanes = dispatch.bank_width().expect("vector backend").lanes() as usize;
+            let lanes = BankWidth::for_backend(dispatch)
+                .expect("vector backend")
+                .lanes() as usize;
             let (banks, report) = bind_rack_banks(&rebound, &ids, &dependency_levels, dispatch)
                 .expect("off-render factory bind");
             assert_eq!(banks.len(), 12 / lanes);
@@ -2532,8 +2524,7 @@ mod tests {
                 })
                 .collect::<BTreeMap<_, _>>()
         };
-        let eight =
-            KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, false));
+        let eight = Backend::Simd8;
         let mut connected_fallback = prepare_native_session_effects(
             &session,
             &registry,
@@ -2692,28 +2683,24 @@ mod tests {
                     caps: integration_caps(),
                 })
                 .unwrap_or_else(|_| panic!("audit graph"));
-            let audit_backend = KernelDispatch::select(target_capabilities());
-            let expected_effect_banks = audit_backend
-                .bank_width()
+            let audit_backend = Backend::current();
+            let expected_effect_banks = BankWidth::for_backend(audit_backend)
                 .map_or(0, |width| 12 / width.lanes() as usize);
-            let expected_scalar_tails = audit_backend
-                .bank_width()
+            let expected_scalar_tails = BankWidth::for_backend(audit_backend)
                 .map_or(12, |width| 12 % width.lanes() as usize);
             // #86 F3: every post-input node is a bank member, so the count is `T.div_ceil(W)`
             // (12 tracks: 2 banks at W8, one of them padded to 8 with 4 identity lanes;
             // 3 banks at W4) and there is no scalar tail at all on a vector host.
-            let expected_builtin_banks = audit_backend
-                .bank_width()
+            let expected_builtin_banks = BankWidth::for_backend(audit_backend)
                 .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
-            let expected_builtin_tails = audit_backend.bank_width().map_or(12, |_| 0);
+            let expected_builtin_tails = BankWidth::for_backend(audit_backend).map_or(12, |_| 0);
             assert_eq!(
                 audit_artifact.prepared_builtin_bank_count(),
                 expected_builtin_banks
             );
             assert_eq!(
                 expected_effect_banks
-                    * audit_backend
-                        .bank_width()
+                    * BankWidth::for_backend(audit_backend)
                         .map_or(0, |width| width.lanes() as usize)
                     + expected_scalar_tails,
                 12
@@ -2725,8 +2712,8 @@ mod tests {
             let actual_members: Vec<_> = audit_artifact
                 .prepared_builtin_banks()
                 .flat_map(|bank| {
-                    assert_eq!(bank.backend, audit_backend.backend());
-                    assert_eq!(Some(bank.width), audit_backend.bank_width());
+                    assert_eq!(bank.backend, audit_backend);
+                    assert_eq!(Some(bank.width), BankWidth::for_backend(audit_backend));
                     assert!(!bank.members.is_empty());
                     assert!(bank.members.len() <= bank.width.lanes() as usize);
                     bank.members.iter().map(|member| match member {
@@ -3317,7 +3304,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
 
-        let width = bank_artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(bank_artifact.report.rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 9), |width| {
             let lanes = width.lanes() as usize;
             (9 / lanes, 9 % lanes)
@@ -3621,7 +3608,7 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar compressor graph: {:?}", failure.diagnostics));
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         if let Some(width) = width {
             let lanes = width.lanes() as usize;
             let expected_banks = 9 / lanes;
@@ -3859,7 +3846,7 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar gate/expander graph: {:?}", failure.diagnostics));
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         if let Some(width) = width {
             let lanes = width.lanes() as usize;
             let expected_banks = 9 / lanes;
@@ -4108,7 +4095,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar limiter graph: {:?}", failure.diagnostics));
 
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
@@ -4527,7 +4514,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar multiband graph: {:?}", failure.diagnostics));
 
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
@@ -4912,7 +4899,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("scalar soft-clip graph: {:?}", failure.diagnostics));
 
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
@@ -5298,7 +5285,7 @@ mod tests {
             panic!("scalar transient-shaper graph: {:?}", failure.diagnostics)
         });
 
-        let width = artifact.report.rack_cohorts.dispatch.bank_width();
+        let width = BankWidth::for_backend(artifact.report.rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
             let lanes = width.lanes() as usize;
             (10 / lanes, 10 % lanes)
@@ -6022,13 +6009,12 @@ mod tests {
         };
         let artifact = prepare_artifact(78, compiled.clone());
         let native_artifact = prepare_artifact(79, compiled);
-        let dispatch = KernelDispatch::select(target_capabilities());
+        let dispatch = Backend::current();
         // #86 F3: `T.div_ceil(W)` banks, the last one padded with identity lanes, and no
         // scalar post-input tail on a vector host.
-        let expected_banks = dispatch
-            .bank_width()
+        let expected_banks = BankWidth::for_backend(dispatch)
             .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
-        let expected_tail = dispatch.bank_width().map_or(12, |_| 0);
+        let expected_tail = BankWidth::for_backend(dispatch).map_or(12, |_| 0);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
         assert_eq!(
             native_artifact.prepared_builtin_bank_count(),
@@ -6064,8 +6050,8 @@ mod tests {
         let member_ids: Vec<_> = artifact
             .prepared_builtin_banks()
             .flat_map(|bank| {
-                assert_eq!(bank.backend, dispatch.backend());
-                assert_eq!(Some(bank.width), dispatch.bank_width());
+                assert_eq!(bank.backend, dispatch);
+                assert_eq!(Some(bank.width), BankWidth::for_backend(dispatch));
                 assert!(!bank.members.is_empty());
                 assert!(bank.members.len() <= bank.width.lanes() as usize);
                 bank.members.iter().map(|member| match member {
@@ -6079,7 +6065,7 @@ mod tests {
             .collect();
         let mut expected_member_ids: Vec<_> = (0..12).map(|index| format!("bank{index}")).collect();
         expected_member_ids.sort();
-        if dispatch.bank_width().is_none() {
+        if BankWidth::for_backend(dispatch).is_none() {
             expected_member_ids.clear();
         }
         assert_eq!(member_ids, expected_member_ids);
@@ -6088,7 +6074,11 @@ mod tests {
         assert_eq!(resource.builtin_bank_count, expected_banks as u64);
         if expected_banks != 0 {
             assert!(resource.builtin_bank_bytes != 0);
-            let width = u64::from(dispatch.bank_width().expect("bank width").lanes());
+            let width = u64::from(
+                BankWidth::for_backend(dispatch)
+                    .expect("bank width")
+                    .lanes(),
+            );
             // Two planes, not four: a fixed-stage bank has no sidechain surface (#86 F4).
             assert_eq!(
                 resource.builtin_bank_scratch_bytes,
@@ -6463,7 +6453,7 @@ mod tests {
                     caps: integration_caps(),
                 })
                 .unwrap_or_else(|_| panic!("native seeded graph"));
-            let width = KernelDispatch::select(target_capabilities()).bank_width();
+            let width = BankWidth::for_backend(Backend::current());
             // #86 F3: `count.div_ceil(W)` banks per level (one level here), last one padded.
             let expected_banks = width.map_or(0, |width| count.div_ceil(width.lanes() as usize));
             let expected_tail = width.map_or(count, |_| 0);

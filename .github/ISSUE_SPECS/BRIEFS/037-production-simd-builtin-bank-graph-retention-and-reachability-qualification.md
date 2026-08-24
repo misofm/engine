@@ -76,3 +76,14 @@ lane state, feature detection in render, padded tracks, unaccounted storage, moc
 place of production reachability, fewer/more than 100 seeded layouts, any benchmark launch, or an
 attempt beyond the two-attempt budget. A PASS unblocks production-SIMD consumers and Issue 038;
 it is not timing, device/browser runtime or release qualification.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

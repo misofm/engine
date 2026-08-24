@@ -10,6 +10,7 @@ name = "miso_engine_effect_contract"
 
 [dependencies]
 miso-engine-core.workspace = true
+miso-engine-lane.workspace = true
 # Decision D6: no `f32`/`f64` transcendental method outside `miso-engine-math`. The contract's
 # logarithmic parameter mapping and its `OnePole99` coefficient are the last four sites (issue #95
 # finding F5). Default features only: the lane-wide layer is not needed here and would drag the

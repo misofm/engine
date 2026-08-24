@@ -2,7 +2,7 @@
 //!
 //! Every assertion here was already true before #88 and must still be true after it (master plan
 //! section 8.2: a re-landing job does not move a contract fixture). The bank-fallback test is the
-//! one that changed shape: it named `KernelBackendV1::X86Avx2` / `Aarch64Neon` as "the backend
+//! one that changed shape: it named `Backend::Simd8` / `Aarch64Neon` as "the backend
 //! that is not available here", and D4 revision 4 removed runtime dispatch, so the unavailable
 //! backend is now simply "a bank width this build was not compiled for".
 
@@ -11,13 +11,13 @@ mod support;
 use miso_engine_compressor::{
     COMPRESSOR_DESCRIPTOR_V1, COMPRESSOR_PARAMETERS_V1, CompressorFactory,
 };
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProcessBlock, LatencySamples,
     LinkMode, NativeEffectFactory, PrepareEffectBankRequest, PreparedSidechainPort, ResetKind,
     StatePayloadOutput, expected_prepared_metadata, validate_descriptor_v1,
 };
 use miso_engine_effect_runtime::state_payload::read_f32;
+use miso_engine_lane::Backend;
 
 use support::{
     PARAMETER_COUNT, STATE_HEADER_WORDS, initial_values, prepare, render_scalar, request,
@@ -199,9 +199,9 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
     let factory = CompressorFactory;
     // A width this build cannot run, chosen so the fallback path is the one under test.
     let (backend, width) = if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-        (KernelBackendV1::Aarch64Neon, BankWidth::Four)
+        (Backend::Simd4, BankWidth::Four)
     } else {
-        (KernelBackendV1::X86Avx2, BankWidth::Eight)
+        (Backend::Simd8, BankWidth::Eight)
     };
     let lanes = width.lanes() as usize;
 
@@ -277,7 +277,7 @@ fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
     assert_eq!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: KernelBackendV1::Scalar,
+                backend: Backend::Scalar,
                 width,
                 requests: &heterogeneous,
             })

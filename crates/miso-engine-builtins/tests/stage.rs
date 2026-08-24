@@ -9,15 +9,16 @@
 //! instantiation, which is the same body at `WIDTH = 1` (D4).
 
 use miso_engine_builtins::*;
-use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, KernelBackendV1, LAUNCH_SAMPLE_RATES};
+use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES};
 use miso_engine_dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
 use miso_engine_effect_contract::BankWidth;
+use miso_engine_lane::Backend;
 
 /// Both bank widths, exercised on every host: `wide` implements four and eight lanes everywhere,
 /// so a width difference cannot hide behind a target difference.
-const BANKS: [(KernelBackendV1, BankWidth); 2] = [
-    (KernelBackendV1::WasmSimd128, BankWidth::Four),
-    (KernelBackendV1::X86Avx2Fma, BankWidth::Eight),
+const BANKS: [(Backend, BankWidth); 2] = [
+    (Backend::Simd4, BankWidth::Four),
+    (Backend::Simd8, BankWidth::Eight),
 ];
 
 fn launch_and_extended_compatibility_rates() -> impl Iterator<Item = u32> {
@@ -627,22 +628,23 @@ fn bank_construction_accepts_one_to_width_members_only() {
             assert_eq!(bank.backend(), backend);
             assert_eq!(bank.width(), width);
         }
-        // A backend without a bank width is refused whatever width is asked for.
-        assert!(BuiltinInputBankV1::new(KernelBackendV1::Scalar, width, inputs(1)).is_err());
-        assert!(BuiltinInputBankV1::new(KernelBackendV1::X86Avx2, width, inputs(1)).is_err());
+        // The scalar backend has no bank width, so it is refused whatever width is asked for.
+        assert!(BuiltinInputBankV1::new(Backend::Scalar, width, inputs(1)).is_err());
+        // So is the *other* vector backend: a bank's width must be the one its backend selects.
+        let other = match backend {
+            Backend::Simd4 => Backend::Simd8,
+            _ => Backend::Simd4,
+        };
+        assert!(BuiltinInputBankV1::new(other, width, inputs(1)).is_err());
     }
-    assert_eq!(builtin_bank_width(KernelBackendV1::Scalar), None);
-    assert_eq!(builtin_bank_width(KernelBackendV1::X86Avx2), None);
+    // #84 phase A: `BankWidth::for_backend` is the workspace's one backend-to-width law.
+    assert_eq!(BankWidth::for_backend(Backend::Scalar), None);
     assert_eq!(
-        builtin_bank_width(KernelBackendV1::X86Avx2Fma),
+        BankWidth::for_backend(Backend::Simd4),
+        Some(BankWidth::Four)
+    );
+    assert_eq!(
+        BankWidth::for_backend(Backend::Simd8),
         Some(BankWidth::Eight)
-    );
-    assert_eq!(
-        builtin_bank_width(KernelBackendV1::Aarch64Neon),
-        Some(BankWidth::Four)
-    );
-    assert_eq!(
-        builtin_bank_width(KernelBackendV1::WasmSimd128),
-        Some(BankWidth::Four)
     );
 }

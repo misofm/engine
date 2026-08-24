@@ -10,7 +10,6 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 create_fixture() {
     local root="$1"
     mkdir -p "$root/crates/miso-engine-core/src/realtime" \
-        "$root/crates/miso-engine-core/src/arch" \
         "$root/crates/miso-engine-lane/src" \
         "$root/crates/miso-engine-capi/src" \
         "$root/crates/miso-engine-capi/tests" \
@@ -48,10 +47,6 @@ create_fixture() {
         'unsafe impl Sync for DisjointArena {}' \
         'struct DisjointArena;' \
         >"$root/crates/miso-engine-core/src/realtime/disjoint.rs"
-    printf '%s\n' \
-        '#![allow(unsafe_code)]' \
-        'unsafe fn architecture_kernel() {}' \
-        >"$root/crates/miso-engine-core/src/arch/x86.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn read_mxcsr() {}' \
@@ -144,8 +139,10 @@ expect_failure unsafe-outside-capi-audit-main \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-capi-audit/src/other.rs"'
 expect_failure unsafe-outside-native-pcm-runner-lib \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-native-pcm-runner/src/other.rs"'
-expect_failure unsafe-outside-architecture-allowlist \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/other.rs"'
+# #84 phase A deleted `crates/miso-engine-core/src/arch/`; its unsafe exemption went with it, so
+# unsafe code re-appearing under that path is now rejected like any other unlisted file.
+expect_failure unsafe-in-deleted-core-arch \
+    'mkdir -p "$root/crates/miso-engine-core/src/arch"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/x86.rs"'
 expect_failure unsafe-outside-rack-benchmark-main \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-rack-bench/src/other.rs"'
 expect_failure unsafe-outside-capi-ffi \

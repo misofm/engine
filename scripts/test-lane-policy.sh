@@ -12,7 +12,7 @@ create_valid_fixture() {
     mkdir -p \
         "$root/crates/miso-engine-lane/src" \
         "$root/crates/miso-engine-lane/tests" \
-        "$root/crates/miso-engine-core/src/arch" \
+        "$root/crates/miso-engine-core/src" \
         "$root/crates/miso-engine-compressor/src" \
         "$root/hosts/miso-engine-host-web/src" \
         "$root/tools/miso-engine-realtime-audit/src"
@@ -37,13 +37,7 @@ create_valid_fixture() {
     printf '%s\n' \
         'fn oracle(a: f32, b: f32, c: f32) -> f32 { f32::mul_add(a, b, c) }' \
         >"$root/crates/miso-engine-lane/tests/g3_softfma.rs"
-    printf '%s\n' \
-        'use core::arch::x86_64::_mm256_fmadd_ps;' \
-        'pub fn legacy_kernel() {}' \
-        >"$root/crates/miso-engine-core/src/arch/x86.rs"
-    printf '%s\n' \
-        'pub fn detect() { let _ = is_x86_feature_detected!("avx2"); }' \
-        >"$root/crates/miso-engine-core/src/lib.rs"
+    printf 'pub fn version() {}\n' >"$root/crates/miso-engine-core/src/lib.rs"
     printf 'pub fn process() {}\n' >"$root/crates/miso-engine-compressor/src/lib.rs"
     printf 'pub fn render() {}\n' >"$root/hosts/miso-engine-host-web/src/lib.rs"
     printf 'fn main() {}\n' >"$root/tools/miso-engine-realtime-audit/src/main.rs"
@@ -110,8 +104,12 @@ expect_failure arch-outside-softfma \
     'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/miso-engine-realtime-audit/src/main.rs"'
 expect_failure arch-in-second-lane-file \
     'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/crates/miso-engine-lane/src/scalar.rs"'
-expect_failure legacy-arch-exemption-is-exact \
-    'printf "%s\n" "use core::arch::x86_64::_mm256_fmadd_ps;" >"$root/crates/miso-engine-core/src/arch/other.rs"'
+# #84 phase A: the legacy `core/arch` exemption is gone entirely, so an intrinsic there -- the
+# very file the exemption used to name -- is now a failure like any other.
+expect_failure deleted-core-arch-has-no-exemption \
+    'mkdir -p "$root/crates/miso-engine-core/src/arch"; printf "%s\n" "use core::arch::x86_64::_mm256_fmadd_ps;" >"$root/crates/miso-engine-core/src/arch/x86.rs"'
+expect_failure deleted-core-detection-has-no-exemption \
+    'printf "%s\n" "pub fn detect() { let _ = is_x86_feature_detected!(\"avx2\"); }" >>"$root/crates/miso-engine-core/src/lib.rs"'
 expect_failure relaxed-simd-anywhere \
     'printf "%s\n" "let y = f32x4_relaxed_madd(a, b, c);" >>"$root/crates/miso-engine-lane/src/lib.rs"'
 expect_failure unmarked-wide-max \

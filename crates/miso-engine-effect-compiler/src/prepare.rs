@@ -23,9 +23,8 @@ use miso_engine_session::{
 };
 use std::sync::Arc;
 
-use miso_engine_core::KernelBackendV1;
-
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
+use miso_engine_lane::Backend;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectCompileCaps {
@@ -215,7 +214,7 @@ impl RestoredScalarEffectStateV1<'_> {
 pub struct UnpublishedEffectBankStateV1<'wire> {
     bank: Box<dyn PreparedNativeEffectBank>,
     metadata: PreparedBankMetadata,
-    backend: KernelBackendV1,
+    backend: Backend,
     width: BankWidth,
     bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
     replays: Box<[EffectBankPreparationV1]>,
@@ -250,7 +249,7 @@ impl UnpublishedEffectBankStateV1<'_> {
     }
 
     #[must_use]
-    pub const fn backend(&self) -> KernelBackendV1 {
+    pub const fn backend(&self) -> Backend {
         self.backend
     }
 
@@ -343,7 +342,7 @@ fn admit_bank_derived_resources(
 
 fn expected_bank_program_key(
     bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
-    backend: KernelBackendV1,
+    backend: Backend,
     width: BankWidth,
     replays: &[EffectBankPreparationV1],
     admission: EffectStateRestoreAdmissionV1,
@@ -382,7 +381,7 @@ fn expected_bank_program_key(
 
 pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
     bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
-    backend: KernelBackendV1,
+    backend: Backend,
     width: BankWidth,
     replays: Box<[EffectBankPreparationV1]>,
     admission: EffectStateRestoreAdmissionV1,

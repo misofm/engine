@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_builtins_compiler"
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-graph.workspace = true

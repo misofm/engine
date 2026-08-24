@@ -420,3 +420,14 @@ that survived their first target, with what was done about each. The ceiling pro
 4 rates x 2 links x 3 ceilings x 4 lookaheads x 2 releases x 6 corpora against an independent `f64`
 4x estimator with no tolerance; the worst margin is −0.961 dB. Descriptive throughput on Zen 5 at
 `x86-64-v3`: 5.05 ns per channel lane-sample at W8, against the audit replica's 25.1 ns.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

@@ -10,12 +10,12 @@
 
 use miso_engine_compressor::{COMPRESSOR_PARAMETERS_V1, CompressorFactory};
 use miso_engine_conformance::SplitMix64;
-use miso_engine_core::{KernelBackendV1, TargetCapabilities, target_capabilities};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
 };
+use miso_engine_lane::Backend;
 
 const FRAMES: usize = 128;
 const BLOCKS: usize = 4_096;
@@ -96,12 +96,8 @@ fn scalar_nanoseconds_per_lane_sample() -> f64 {
 }
 
 fn bank_nanoseconds_per_lane_sample() -> Option<(usize, f64)> {
-    let backend = KernelBackendV1::select(target_capabilities());
-    let width = match backend.lanes() {
-        4 => BankWidth::Four,
-        8 => BankWidth::Eight,
-        _ => return None,
-    };
+    let backend = Backend::current();
+    let width = BankWidth::for_backend(backend)?;
     let lanes = width.lanes() as usize;
     let values = vec![initial_values(); lanes];
     let requests = values.iter().map(|v| request(v)).collect::<Vec<_>>();
@@ -144,7 +140,7 @@ fn bank_nanoseconds_per_lane_sample() -> Option<(usize, f64)> {
 }
 
 fn main() {
-    let _: TargetCapabilities = target_capabilities();
+    let _: Backend = Backend::current();
     let scalar = scalar_nanoseconds_per_lane_sample();
     println!("compressor scalar: {scalar:.3} ns/lane-sample");
     match bank_nanoseconds_per_lane_sample() {

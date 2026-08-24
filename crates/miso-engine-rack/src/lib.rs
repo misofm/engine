@@ -10,7 +10,6 @@
 #![allow(missing_docs)]
 
 use miso_engine_core::realtime::RenderError;
-use miso_engine_core::{KernelBackendV1, TargetCapabilities};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProgramKeyV1, PreparedNativeEffectBank,
     PreparedSidechainPort,
@@ -22,39 +21,6 @@ pub enum RackError {
     Overflow,
     Shape,
     WidthMismatch,
-}
-
-/// The retained dispatch result. `select` is control-plane-only and pure.
-///
-/// Transitional carrier of [`KernelBackendV1`]; deleted by #95 when the effect contract takes
-/// `miso_engine_lane::Backend` directly. It deliberately holds **no** backend-to-width table of
-/// its own: [`KernelBackendV1::lanes`] is the single source (#96 F5).
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct KernelDispatch {
-    backend: KernelBackendV1,
-}
-
-impl KernelDispatch {
-    #[must_use]
-    pub const fn select(capabilities: TargetCapabilities) -> Self {
-        Self {
-            backend: KernelBackendV1::select(capabilities),
-        }
-    }
-    #[must_use]
-    pub const fn backend(self) -> KernelBackendV1 {
-        self.backend
-    }
-    /// Derived from core's single lane table. `KernelBackendV1` is `#[non_exhaustive]`, so
-    /// matching on `lanes()` is the only wildcard-free route to it.
-    #[must_use]
-    pub const fn bank_width(self) -> Option<BankWidth> {
-        match self.backend.lanes() {
-            4 => Some(BankWidth::Four),
-            8 => Some(BankWidth::Eight),
-            _ => None,
-        }
-    }
 }
 
 #[repr(u8)]
@@ -416,7 +382,6 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_core::TargetCapabilities;
 
     struct PassThrough;
     impl BankStage for PassThrough {
@@ -451,65 +416,6 @@ mod tests {
             stage,
             active_lanes: active_lanes.into_boxed_slice(),
         }
-    }
-
-    #[test]
-    fn issue068_all_capability_tuples_select_exact_backend_and_width() {
-        for wasm_simd128 in [false, true] {
-            for aarch64_neon in [false, true] {
-                for x86_avx2 in [false, true] {
-                    for x86_fma in [false, true] {
-                        let capabilities = TargetCapabilities::from_detected(
-                            wasm_simd128,
-                            aarch64_neon,
-                            x86_avx2,
-                            x86_fma,
-                        );
-                        let expected = if x86_avx2 && x86_fma {
-                            KernelBackendV1::X86Avx2Fma
-                        } else if x86_avx2 {
-                            KernelBackendV1::X86Avx2
-                        } else if aarch64_neon {
-                            KernelBackendV1::Aarch64Neon
-                        } else if wasm_simd128 {
-                            KernelBackendV1::WasmSimd128
-                        } else {
-                            KernelBackendV1::Scalar
-                        };
-                        let expected_width = match expected.lanes() {
-                            4 => Some(BankWidth::Four),
-                            8 => Some(BankWidth::Eight),
-                            _ => None,
-                        };
-                        let dispatch = KernelDispatch::select(capabilities);
-                        assert_eq!(KernelBackendV1::select(capabilities), expected);
-                        assert_eq!(dispatch.backend(), expected);
-                        assert_eq!(dispatch.bank_width(), expected_width);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn dispatch_requires_avx2_for_fma() {
-        for (wasm, neon, avx2, fma) in [
-            (false, false, false, true),
-            (false, false, true, false),
-            (false, true, false, true),
-            (true, false, false, true),
-        ] {
-            let capabilities = TargetCapabilities::from_detected(wasm, neon, avx2, fma);
-            assert_eq!(
-                KernelDispatch::select(capabilities).backend(),
-                KernelBackendV1::select(capabilities)
-            );
-        }
-        assert_eq!(
-            KernelDispatch::select(TargetCapabilities::from_detected(false, false, false, true))
-                .backend(),
-            KernelBackendV1::Scalar
-        );
     }
 
     /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN

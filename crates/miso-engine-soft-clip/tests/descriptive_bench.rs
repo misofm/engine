@@ -26,6 +26,7 @@ use miso_engine_effect_contract::{
     NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
 };
+use miso_engine_lane::Backend;
 use miso_engine_soft_clip::{SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
 
 const LANES: usize = 8;
@@ -132,6 +133,6 @@ fn descriptive_bank_throughput() {
     }
 }
 
-fn bench_backend() -> miso_engine_core::KernelBackendV1 {
-    miso_engine_core::KernelBackendV1::X86Avx2
+fn bench_backend() -> Backend {
+    Backend::Simd8
 }

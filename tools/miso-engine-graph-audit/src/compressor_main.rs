@@ -14,13 +14,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 
 use miso_engine_compressor::CompressorFactory;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
-use miso_engine_core::{KernelBackendV1, target_capabilities};
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel, PortId,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
 };
+use miso_engine_lane::Backend;
 
 const BLOCKS: u64 = 100_000;
 const QUANTUM: u32 = 128;
@@ -247,13 +247,9 @@ fn span(channel: ParameterChannel, parameter_index: u32, value: f32) -> Prepared
 }
 
 /// This build's bank width, if it has one.
-fn bank_width() -> Option<(KernelBackendV1, BankWidth)> {
-    let backend = KernelBackendV1::select(target_capabilities());
-    match backend.lanes() {
-        4 => Some((backend, BankWidth::Four)),
-        8 => Some((backend, BankWidth::Eight)),
-        _ => None,
-    }
+fn bank_width() -> Option<(Backend, BankWidth)> {
+    let backend = Backend::current();
+    BankWidth::for_backend(backend).map(|width| (backend, width))
 }
 
 /// The descriptor defaults, as an initial-value list.
@@ -308,10 +304,7 @@ fn prepare_scalar() -> Box<dyn PreparedNativeEffect> {
         .expect("prepared connected-sidechain compressor")
 }
 
-fn bind_bank(
-    backend: KernelBackendV1,
-    width: BankWidth,
-) -> Option<Box<dyn PreparedNativeEffectBank>> {
+fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let values = initial_values();
     let lanes = width.lanes() as usize;
     let requests: Vec<PrepareEffectRequest<'_>> =

@@ -423,3 +423,14 @@ identities, the state payload layout and `state_layout_version = 1` are unchange
 - A bank binds only at the width the build was compiled for. D4 revision 4 removed runtime SIMD
   dispatch, so a request for any other width is an unavailable backend and takes the `Ok(None)`
   scalar fallback, exactly as an unavailable backend did before.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

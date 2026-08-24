@@ -224,3 +224,14 @@ qualification now depend on the production-retention rescope where their complet
 contracts require live prepared-graph SIMD. Individual native effects continue to consume the
 preserved generic AoSoA/effect-bank architecture slice and do not wait for builtin-specific
 retention. The benchmark rescope gates only release qualification, not Issues 009 or 010.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

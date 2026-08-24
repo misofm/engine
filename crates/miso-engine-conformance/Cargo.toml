@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_conformance"
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-dsp-reference.workspace = true
 miso-engine-effect-contract.workspace = true

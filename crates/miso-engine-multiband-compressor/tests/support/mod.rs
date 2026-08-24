@@ -5,8 +5,8 @@
 //! the lane-identity and partition gates meaningful.
 
 #![allow(dead_code, unreachable_pub)]
+use miso_engine_lane::Backend;
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
@@ -120,10 +120,10 @@ pub fn request_with(
 /// The token is the contract's, not this crate's: since D4 there is no runtime SIMD dispatch and
 /// the crate picks `Simd4` or `Simd8` from the width alone. Tests still have to fill the field in,
 /// and `BankWidth::matches_backend` decides which value is legal for which width.
-pub const fn backend_for(width: BankWidth) -> KernelBackendV1 {
+pub const fn backend_for(width: BankWidth) -> Backend {
     match width {
-        BankWidth::Four => KernelBackendV1::Aarch64Neon,
-        BankWidth::Eight => KernelBackendV1::X86Avx2,
+        BankWidth::Four => Backend::Simd4,
+        BankWidth::Eight => Backend::Simd8,
     }
 }
 

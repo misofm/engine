@@ -14,16 +14,19 @@ The session model and its semantics do not vary by Cargo feature or target capab
 
 ## Dispatch contract
 
-`miso_engine_core::target_capabilities()` runs on the control plane while a prepared plan is
-selected. It is not a realtime render operation. Scalar is always true. Wasm `simd128` reports
-the module compilation setting. AArch64 NEON reports the target setting. x86 AVX2 and FMA are
-separately runtime detected; AVX2 with FMA unavailable remains a supported selection.
+**Superseded by #83 D4 (revision 4) via #84 phase A.** There is no runtime SIMD dispatch and no
+capability struct: `miso_engine_core::target_capabilities()`, `TargetCapabilities` and
+`KernelBackendV1` were deleted together with `crates/miso-engine-core/src/arch`.
+`miso_engine_lane::Backend::current()` is a compile-time constant (`Simd8` on `x86-64-v3`, `Simd4`
+on AArch64 and on a wasm artifact built with `simd128`, `Scalar` otherwise), and
+`miso_engine_lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
+rather than degrading silently. `miso_engine_effect_contract::BankWidth::for_backend` is the
+workspace's single backend-to-width law.
 
 No Cargo feature is named `simd128`, `neon`, `avx2`, or `fma`. CPU ISA flags must never be made
-global in `.cargo/config.toml`, package manifests, or release defaults. CI's deliberately scoped
-probe flags are evidence that separate artifacts compile, not deployment defaults. Future
-per-function `target_feature` kernels live behind runtime dispatch in core and preserve scalar
-fallbacks for every track tail.
+global in `.cargo/config.toml`, package manifests, or release defaults beyond the workspace's
+`x86-64-v3` pin. CI's deliberately scoped probe flags are evidence that separate artifacts
+compile, not deployment defaults.
 
 ## Reproducible checks
 

@@ -8,9 +8,9 @@
 //! Run with `cargo test --release -p miso-engine-true-peak-limiter --test bench -- --ignored
 //! --nocapture`.
 
+use miso_engine_lane::Backend;
 use std::time::Instant;
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
@@ -82,7 +82,7 @@ fn bench_w8_ns_per_lane_sample() {
     let requests: Vec<PrepareEffectRequest<'_>> = (0..8).map(|_| request(&values)).collect();
     let mut bank = TruePeakLimiterFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::X86Avx2Fma,
+            backend: Backend::Simd8,
             width: BankWidth::Eight,
             requests: &requests,
         })

@@ -1,8 +1,7 @@
 //! Generates, verifies, or fingerprints the checked-in issue-006 graph fixtures.
 
 use core::fmt::Write as _;
-use miso_engine_core::TargetCapabilities;
-use miso_engine_graph_compiler::KernelDispatch;
+use miso_engine_graph_compiler::Backend;
 use std::{
     env, fs,
     io::Write as _,
@@ -87,9 +86,7 @@ fn compile_fixture() -> PreparedGraphArtifact {
     )
     .unwrap_or_else(|diagnostics| panic!("session compile diagnostics: {diagnostics:?}"));
     GraphCompiler::compile(GraphCompileRequest {
-        dispatch: KernelDispatch::select(TargetCapabilities::from_detected(
-            false, false, false, false,
-        )),
+        dispatch: Backend::Scalar,
         plan_id: 0,
         effects: EffectPreparedSession {
             session,

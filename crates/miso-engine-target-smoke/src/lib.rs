@@ -1,8 +1,7 @@
 //! Portable target-smoke values used by bootstrap hosts and CI.
 
-use miso_engine_core::{
-    EngineVersion, QuantumFrames, SampleRateHz, TargetCapabilities, target_capabilities,
-};
+use miso_engine_core::{EngineVersion, QuantumFrames, SampleRateHz};
+use miso_engine_lane::Backend;
 use std::num::NonZeroUsize;
 
 /// A portable bootstrap result with the canonical smoke sample rate and render quantum.
@@ -14,8 +13,8 @@ pub struct TargetSmoke {
     pub sample_rate: SampleRateHz,
     /// Bootstrap render quantum, fixed to 128 frames.
     pub quantum_frames: QuantumFrames,
-    /// Control-plane target capabilities.
-    pub capabilities: TargetCapabilities,
+    /// The lane backend this build was compiled for (#83 D4).
+    pub backend: Backend,
 }
 
 /// Return a portable target-smoke result without allocating or starting audio processing.
@@ -25,7 +24,7 @@ pub fn target_smoke() -> TargetSmoke {
         version: EngineVersion::CURRENT,
         sample_rate: SampleRateHz(48_000),
         quantum_frames: QuantumFrames(128),
-        capabilities: target_capabilities(),
+        backend: Backend::current(),
     }
 }
 
@@ -50,7 +49,7 @@ mod tests {
 
         assert_eq!(report.sample_rate.0, 48_000);
         assert_eq!(report.quantum_frames.0, 128);
-        assert!(report.capabilities.scalar);
+        assert!(report.backend.width() >= 1);
     }
 
     #[test]

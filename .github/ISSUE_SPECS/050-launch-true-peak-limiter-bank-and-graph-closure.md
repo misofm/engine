@@ -240,3 +240,14 @@ and final workspace/policy outputs; attempt count; explicit Terra/final Sol PASS
 **Final Sol verdict: PASS.** Issue 050 closes the bank/registry/graph launch-product vertical over
 the preserved Issue-016 scalar contract. Issue 049 remains the sole owner of deferred
 qualification, realtime audit, target/instruction, benchmark and listening work.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

@@ -14,7 +14,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_core::realtime::audit::{self, ForbiddenOperation, record_allocator_violation};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
@@ -23,6 +22,7 @@ use miso_engine_effect_contract::{
     PreparedPortsV1, PreparedSidechainPort,
 };
 use miso_engine_gate_expander::{GATE_EXPANDER_DESCRIPTOR_V1, GateExpanderFactory};
+use miso_engine_lane::Backend;
 
 /// Frozen block count, matching the other realtime audits.
 const BLOCKS: u64 = 100_000;
@@ -239,7 +239,7 @@ fn prepare_bank() -> Option<Box<dyn PreparedNativeEffectBank>> {
         (0..WIDTH).map(|_| request(&values, false)).collect();
     GateExpanderFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::X86Avx2Fma,
+            backend: Backend::Simd8,
             width: BankWidth::Eight,
             requests: &requests,
         })

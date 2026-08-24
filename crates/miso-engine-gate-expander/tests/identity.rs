@@ -4,6 +4,7 @@
 //! eight-lane bank runs the *same* `gate_block` body at `WIDTH = 8`, so agreement is a property of
 //! the code and any disagreement is a bug in the lane-crossing parts — which in this kernel are
 //! exactly the per-lane detector gather and the coefficient packing.
+use miso_engine_lane::Backend;
 
 mod support;
 
@@ -259,7 +260,7 @@ fn partition_invariance() {
                 values,
                 LinkMode::DualMono,
                 BankWidth::Eight,
-                miso_engine_core::KernelBackendV1::X86Avx2Fma,
+                Backend::Simd8,
                 512,
             )
         };

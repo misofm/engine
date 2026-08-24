@@ -6,13 +6,13 @@
 #![allow(dead_code)]
 #![allow(unreachable_pub)]
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
     PreparedPortsV1, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
 };
+use miso_engine_lane::Backend;
 use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR_V1, SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
 
 /// Parameters: drive, output, mix.
@@ -92,16 +92,10 @@ pub fn process(
 }
 
 /// The backend token a bank of `width` lanes is requested with on this host.
-pub fn backend(width: BankWidth) -> KernelBackendV1 {
+pub fn backend(width: BankWidth) -> Backend {
     match width {
-        BankWidth::Four => {
-            if cfg!(target_arch = "aarch64") {
-                KernelBackendV1::Aarch64Neon
-            } else {
-                KernelBackendV1::WasmSimd128
-            }
-        }
-        BankWidth::Eight => KernelBackendV1::X86Avx2Fma,
+        BankWidth::Four => Backend::Simd4,
+        BankWidth::Eight => Backend::Simd8,
     }
 }
 
