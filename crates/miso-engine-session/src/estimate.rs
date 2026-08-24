@@ -3,8 +3,8 @@
 use core::mem::size_of;
 
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, EffectIdentity, RouteDestination,
-    RouteSource, SessionTomlV1,
+    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, FieldKey, ModelVisitor,
+    SessionTomlV1, StableId, Token, VisitModel, WalkOrder,
 };
 
 /// Resource requirements of a normalized session declaration.
@@ -317,92 +317,53 @@ pub(crate) fn with_canonical_bytes(
 }
 
 fn retained_strings(session: &SessionTomlV1, errors: &mut Vec<Diagnostic>) -> (u64, u64) {
-    let mut total = 0_u64;
-    let mut largest = 0_u64;
-    let mut add = |value: &str, path: &str| {
-        let bytes = count(value.len(), path, errors);
-        total = checked_add(total, bytes, path, errors);
-        largest = largest.max(bytes);
+    let mut visitor = StringBytes {
+        total: 0,
+        largest: 0,
+        errors,
     };
-    add(session.session_id.as_str(), "$.session_id");
-    add(session.render_profile.id.as_str(), "$.render_profile.id");
-    add(session.output_profile.id.as_str(), "$.output_profile.id");
-    for source in &session.sources {
-        add(source.id.as_str(), "$.sources.id");
-        add(&source.content.identity, "$.sources.content.identity");
-        add(&source.content.locator, "$.sources.content.locator");
-    }
-    for track in &session.tracks {
-        add(track.id.as_str(), "$.tracks.id");
-        add(track.source_id.as_str(), "$.tracks.source_id");
-        for rack in [&track.simd1, &track.dynamic, &track.simd2] {
-            for effect in &rack.effects {
-                add(effect.id.as_str(), "$.tracks.racks.effects.id");
-                match &effect.identity {
-                    EffectIdentity::Native { effect_id } => add(
-                        effect_id.as_str(),
-                        "$.tracks.racks.effects.identity.effect_id",
-                    ),
-                    EffectIdentity::ThirdPartyCid { cid } => {
-                        add(cid, "$.tracks.racks.effects.identity.cid")
-                    }
-                }
-                if let crate::SidechainDeclaration::Routed(sidechain) = &effect.sidechain {
-                    add(
-                        sidechain.port_id.as_str(),
-                        "$.tracks.racks.effects.sidechain.port_id",
-                    );
-                    add_route_source_strings(
-                        &sidechain.source,
-                        "$.tracks.racks.effects.sidechain.source",
-                        &mut add,
-                    );
-                }
-            }
-        }
-    }
-    for item in &session.submixes {
-        add(item.id.as_str(), "$.submixes.id");
-    }
-    for item in &session.outputs {
-        add(item.id.as_str(), "$.outputs.id");
-    }
-    for route in &session.routes {
-        add(route.id.as_str(), "$.routes.id");
-        add_route_source_strings(&route.source, "$.routes.source", &mut add);
-        match &route.destination {
-            RouteDestination::SubmixInput { submix_id } => {
-                add(submix_id.as_str(), "$.routes.destination.submix_id")
-            }
-            RouteDestination::OutputInput { output_id } => {
-                add(output_id.as_str(), "$.routes.destination.output_id")
-            }
-        }
-    }
-    for automation in &session.automation {
-        add(automation.id.as_str(), "$.automation.id");
-        add(
-            automation.target.entity_id.as_str(),
-            "$.automation.target.entity_id",
-        );
-        add(
-            automation.target.effect_id.as_str(),
-            "$.automation.target.effect_id",
-        );
-    }
-    (total, largest)
+    let _ = session.visit(WalkOrder::Declared, &mut visitor);
+    (visitor.total, visitor.largest)
 }
 
-fn add_route_source_strings(source: &RouteSource, path: &str, add: &mut impl FnMut(&str, &str)) {
-    match source {
-        RouteSource::Track { track_id, .. } => {
-            let _ = path;
-            add(track_id.as_str(), "$.route_sources.track_id");
-        }
-        RouteSource::SubmixOutput { submix_id } => {
-            let _ = path;
-            add(submix_id.as_str(), "$.route_sources.submix_id");
-        }
+struct StringBytes<'a> {
+    total: u64,
+    largest: u64,
+    errors: &'a mut Vec<Diagnostic>,
+}
+impl StringBytes<'_> {
+    fn add(&mut self, value: &str) {
+        let path = "$.retained_strings";
+        let bytes = count(value.len(), path, self.errors);
+        self.total = checked_add(self.total, bytes, path, self.errors);
+        self.largest = self.largest.max(bytes);
+    }
+}
+macro_rules! noop_visitor_methods { ($(fn $name:ident($($arg:ident:$ty:ty),*);)+) => {$(
+    fn $name(&mut self, $($arg:$ty),*) -> Result<(), Self::Error> { Ok(()) }
+)+}; }
+impl ModelVisitor for StringBytes<'_> {
+    type Error = ();
+    noop_visitor_methods! {
+        fn record_begin(_key:Option<FieldKey>, _fields:u32);
+        fn record_end();
+        fn array_begin(_key:FieldKey, _len:usize);
+        fn array_end();
+        fn wire_tag(_tag:Token);
+        fn bool(_key:FieldKey, _value:bool);
+        fn u8(_key:FieldKey, _value:u8);
+        fn u32(_key:FieldKey, _value:u32);
+        fn u64(_key:FieldKey, _value:u64);
+        fn f32(_key:FieldKey, _value:f32);
+        fn token(_key:FieldKey, _value:Token);
+    }
+    fn id(&mut self, _: FieldKey, value: &StableId) -> Result<(), Self::Error> {
+        self.add(value.as_str());
+        Ok(())
+    }
+    fn text(&mut self, _: FieldKey, value: &str) -> Result<(), Self::Error> {
+        self.add(value);
+        Ok(())
     }
 }
 
