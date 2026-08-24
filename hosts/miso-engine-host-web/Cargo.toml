@@ -9,15 +9,16 @@ publish.workspace = true
 name = "miso_engine_host_web"
 crate-type = ["rlib", "cdylib"]
 
+# The compile pipeline lives in `miso-engine-host-core` (#103); this crate keeps only the render
+# types it names in its own ABI and the facade. `miso-engine-builtins-compiler`,
+# `-effect-compiler`, `-graph`, `-graph-compiler`, `-session`, `-source` and `-target-smoke` were
+# direct dependencies of the deleted second copy of that pipeline (#106 F1).
 [dependencies]
-miso-engine-builtins-compiler.workspace = true
 miso-engine-core.workspace = true
-miso-engine-effect-compiler.workspace = true
-miso-engine-graph.workspace = true
-miso-engine-graph-compiler.workspace = true
+miso-engine-host-core.workspace = true
+
+[dev-dependencies]
 miso-engine-session.workspace = true
-miso-engine-source.workspace = true
-miso-engine-target-smoke.workspace = true
 
 [features]
 default = []

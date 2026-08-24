@@ -968,14 +968,9 @@ dependencies = [
 name = "miso-engine-host-web"
 version = "0.1.0"
 dependencies = [
- "miso-engine-builtins-compiler",
  "miso-engine-core",
- "miso-engine-effect-compiler",
- "miso-engine-graph",
- "miso-engine-graph-compiler",
+ "miso-engine-host-core",
  "miso-engine-session",
- "miso-engine-source",
- "miso-engine-target-smoke",
 ]
 
 [[package]]

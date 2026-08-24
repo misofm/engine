@@ -1,37 +1,26 @@
 //! Safe browser-Wasm preparation and ownership shell.
 //!
 //! This module deliberately contains no raw pointer handling or JavaScript integration. It owns
-//! the complete immutable session and render plan that the later AudioWorklet boundary will drive.
+//! the complete immutable session and render plan that the AudioWorklet boundary drives.
+//!
+//! # What is here and what is not
+//!
+//! The compile pipeline is **not** here. Parsing, compiling, source rings, effect and builtin
+//! preparation, the graph compile, the identity bindings and the engine-owned resource report are
+//! `miso-engine-host-core`, shared with the C ABI host (issue #103). This crate owns exactly what is
+//! the browser's: the frozen issue-024 ABI structs and result codes, the fixed staging buffers the
+//! JavaScript side reads and writes through raw addresses, the browser bridge's own resource rows,
+//! and the render/failure state machine. Before #106 F1 it carried a second, already-diverged copy
+//! of the shared pipeline -- 288 lines of `compile_ready` alone, only one of whose two copies
+//! rejected source generation `0`.
 
-use core::{
-    alloc::Layout,
-    mem::{MaybeUninit, size_of},
-};
-use miso_engine_core::target_capabilities;
-use miso_engine_graph_compiler::KernelDispatch;
+use core::mem::{MaybeUninit, size_of};
 
-use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-use miso_engine_core::{
-    SampleRateHz,
-    realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime},
+use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use miso_engine_host_core::{
+    CompiledSession, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
+    SourceSubmission, control_table_bytes, prepare_host_session, source_id_arena_bytes,
 };
-use miso_engine_effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
-};
-use miso_engine_graph::{
-    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
-    GraphRuntimeProcessor, StableGraphId, TrackStage,
-};
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
-use miso_engine_session::{
-    CompileCaps, CompiledSession, DiagnosticSet, compile_session, parse_session_toml,
-};
-use miso_engine_source::{
-    HostChunkError, HostChunkProvider, HostPlanarChunk, PcmSourceRing, PcmSourceRingConfig,
-    SourceCommand, SourceFrame, SourceGeneration, SourceGraphSource, SourceGraphTrackMapping,
-    SourceSeekError, prepare_graph_source_set,
-};
-use miso_engine_target_smoke::TargetSmoke;
 
 /// Frozen browser host ABI version 1.0.
 pub const ABI_VERSION: u32 = 0x0001_0000;
@@ -293,48 +282,16 @@ type FfiSourceStaging<'a> = (
     &'a mut [u8],
 );
 
-struct ControlSource {
-    id_offset: usize,
-    id_bytes: usize,
-    sample_rate_hz: u32,
-    channel_count: u32,
-    region_start: u64,
-    region_end: u64,
-    provider: HostChunkProvider,
-}
-
-// Field order is intentional: the plan and its source consumers drop before control producers.
+/// Everything one compiled session owns on the browser side.
+///
+/// Field order is the drop order and is load-bearing: [`PreparedHost`] drops its plan (which owns
+/// the source consumers) before its control-side producers, and the compiled session model outlives
+/// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
-    plan: PreparedRenderPlan,
+    host: PreparedHost,
+    /// Retained so the browser bridge keeps charging itself for the compiled model it holds; the
+    /// V1 browser ABI has no session query, so nothing reads it.
     _session: CompiledSession,
-    source_ids: Box<[u8]>,
-    sources: Box<[ControlSource]>,
-}
-
-struct IdentityProcessor;
-
-impl GraphRuntimeProcessor for IdentityProcessor {
-    fn process(
-        &mut self,
-        _block: GraphBindingBlock<'_>,
-    ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct PrepareFailure {
-    code: u32,
-    diagnostic: Vec<u8>,
-}
-
-impl PrepareFailure {
-    fn fixed(code: u32, diagnostic: &str) -> Self {
-        Self {
-            code,
-            diagnostic: diagnostic.as_bytes().to_vec(),
-        }
-    }
 }
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
@@ -481,11 +438,19 @@ impl AudioWorkletEngineHost {
                 self.status.state = STATE_READY;
                 self.record(RESULT_OK)
             }
-            Err(failure) => self.fail(failure.code, &failure.diagnostic),
+            Err(failure) => self.fail(RESULT_PREPARE_REJECTED, &failure),
         }
     }
 
     /// Submit one generation-tagged, exact-rate borrowed planar source chunk.
+    ///
+    /// The host owns two rules: the `STATE_READY` gate, and the staging-shaped bound
+    /// `frames <= quantum_frames` (the JavaScript side copies into a one-quantum staging plane, so
+    /// a longer chunk could not have been staged). Everything else -- rate, channel count, region
+    /// bounds, end-of-region symmetry, generation `0`, ring backpressure -- is the facade's, in the
+    /// facade's fixed order, so the browser host and the C ABI host can no longer disagree about
+    /// what a rejection is. Generation `0` is now rejected here too; before #106 F1 only the C ABI
+    /// copy caught it.
     #[allow(clippy::too_many_arguments)]
     pub fn submit_source(
         &mut self,
@@ -506,31 +471,20 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Some(source) = find_source_mut(ready, source_id) else {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        };
-        if sample_rate_hz != source.sample_rate_hz
-            || u32::try_from(planes.len()).ok() != Some(source.channel_count)
-            || start_frame < source.region_start
-            || start_frame > source.region_end
-            || start_frame.saturating_add(u64::from(frames)) > source.region_end
-            || end_of_region != (start_frame + u64::from(frames) == source.region_end)
-        {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        }
-        let result = source.provider.submit(HostPlanarChunk {
-            sample_rate_hz: SampleRateHz(sample_rate_hz),
-            generation: SourceGeneration(generation),
-            start_frame: SourceFrame(start_frame),
-            planes,
-            frames,
-            end_of_region,
-        });
+        let result = ready.host.sources.submit(
+            source_id,
+            SourceSubmission {
+                generation,
+                start_frame,
+                sample_rate_hz,
+                planes,
+                frames,
+                end_of_region,
+            },
+        );
         let code = match result {
             Ok(_) => RESULT_OK,
-            Err(HostChunkError::Full { .. }) => RESULT_BACKPRESSURE,
-            Err(HostChunkError::InternalInvariant) => RESULT_INTERNAL,
-            Err(_) => RESULT_INVALID_ARGUMENT,
+            Err(error) => source_result(error),
         };
         self.record(code)
     }
@@ -543,19 +497,9 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Some(source) = find_source_mut(ready, source_id) else {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        };
-        if source_frame < source.region_start || source_frame > source.region_end {
-            return self.record(RESULT_INVALID_ARGUMENT);
-        }
-        let code = match source.provider.try_seek(SourceCommand::Seek {
-            generation: SourceGeneration(generation),
-            frame: SourceFrame(source_frame),
-        }) {
+        let code = match ready.host.sources.seek(source_id, generation, source_frame) {
             Ok(()) => RESULT_OK,
-            Err(SourceSeekError::Backpressure { .. }) => RESULT_BACKPRESSURE,
-            Err(_) => RESULT_INVALID_ARGUMENT,
+            Err(error) => source_result(error),
         };
         self.record(code)
     }
@@ -578,7 +522,7 @@ impl AudioWorkletEngineHost {
             Ok(value) => value,
             Err(_) => return self.fail(RESULT_INTERNAL, b"web.internal.output\t$\n"),
         };
-        let result = ready.plan.render(
+        let result = ready.host.plan.render(
             RenderIo {
                 input: None,
                 output,
@@ -824,388 +768,126 @@ fn validate_config(config: WebPrepareConfigV1) -> Result<(), u32> {
     Ok(())
 }
 
+/// Map the facade's one typed source rejection onto the frozen browser result codes.
+///
+/// The facade owns the vocabulary and the diagnostic strings; the browser ABI owns the numbers.
+/// Backpressure is bounded and retryable, an internal invariant failure is not the caller's fault,
+/// and everything else is a malformed submission.
+fn source_result(error: SourceControlError) -> u32 {
+    if error.is_backpressure() {
+        RESULT_BACKPRESSURE
+    } else if error.is_internal() {
+        RESULT_INTERNAL
+    } else {
+        RESULT_INVALID_ARGUMENT
+    }
+}
+
+/// Translate the frozen browser configuration into the facade's caps, field for field.
+///
+/// This is the only place the mapping is spelled. `HostShapePolicy::Exact`: unlike the C ABI host,
+/// the browser host is handed its `AudioContext` rate and the caller's quantum and must refuse any
+/// session that declares anything else -- there is no resampler and no requantiser.
+const fn prepare_caps(config: WebPrepareConfigV1) -> HostPrepareCaps {
+    HostPrepareCaps {
+        shape: HostShapePolicy::Exact {
+            sample_rate_hz: config.sample_rate_hz,
+            quantum_frames: config.quantum_frames,
+        },
+        source_ring_frames: config.source_ring_frames,
+        maximum_source_channels: Some(config.maximum_source_channels),
+        maximum_automation_spans_per_block: config.maximum_automation_spans_per_block,
+        maximum_tracks: config.maximum_tracks,
+        maximum_sources: config.maximum_sources,
+        maximum_routes: config.maximum_routes,
+        maximum_effects: config.maximum_effects,
+        maximum_graph_session_plus_plan_bytes: config.maximum_graph_session_plus_plan_bytes,
+        maximum_source_total_bytes: config.maximum_source_total_bytes,
+        maximum_source_overhead_bytes: config.maximum_source_overhead_bytes,
+        maximum_effect_state_bytes: config.maximum_effect_state_bytes,
+        maximum_effect_scratch_bytes: config.maximum_effect_scratch_bytes,
+        maximum_builtin_retained_bytes: config.maximum_builtin_retained_bytes,
+        maximum_named_allocation_bytes: config.maximum_named_allocation_bytes,
+        maximum_meter_streams: config.maximum_meter_streams,
+        maximum_meter_items: config.maximum_meter_items,
+        maximum_meter_bytes: config.maximum_meter_bytes,
+    }
+}
+
+/// Run the shared pipeline, then fold its engine-owned report into the frozen browser report.
+///
+/// The split is the one the facade documents: engine-owned rows come from
+/// `miso_engine_host_core::HostPrepareReport`, the browser bridge's own rows (staging buffers, the
+/// host shell, the plane-reference table) were already computed by `prepare_buffers`, and the three
+/// browser caps are applied here because they are the *browser's* caps on the shared report.
 fn compile_ready(
     toml: &str,
     config: WebPrepareConfigV1,
     mut report: WebResourceReportV1,
-) -> Result<(ReadyOwnership, WebResourceReportV1), PrepareFailure> {
-    let model = parse_session_toml(toml).map_err(|value| session_diagnostics(&value))?;
-    let counts = [
-        u64::try_from(model.tracks.len()).map_err(|_| fixed("web.resource.count"))?,
-        u64::try_from(model.sources.len()).map_err(|_| fixed("web.resource.count"))?,
-        u64::try_from(model.routes.len()).map_err(|_| fixed("web.resource.count"))?,
-        count_effects(&model)?,
-    ];
-    if counts[0] > config.maximum_tracks
-        || counts[1] > config.maximum_sources
-        || counts[2] > config.maximum_routes
-        || counts[3] > config.maximum_effects
-    {
-        return Err(fixed("web.resource.count"));
-    }
-    let aggregate_ring_frames = counts[1]
-        .checked_mul(u64::from(config.source_ring_frames))
-        .ok_or_else(|| fixed("web.resource.arithmetic"))?;
-    let compiled = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: config.maximum_graph_session_plus_plan_bytes,
-            max_requested_runtime_bytes: config.maximum_graph_session_plus_plan_bytes,
-            max_single_allocation_bytes: config.maximum_named_allocation_bytes,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: aggregate_ring_frames,
-            max_source_ring_bytes: config.maximum_source_total_bytes,
-        },
-    )
-    .map_err(|value| session_diagnostics(&value))?;
-    if compiled.sample_rate().0 != config.sample_rate_hz
-        || compiled.quantum().0 != config.quantum_frames
-    {
-        return Err(fixed("web.session.shape"));
+) -> Result<(ReadyOwnership, WebResourceReportV1), Vec<u8>> {
+    let caps = prepare_caps(config);
+    let (session, host) = prepare_host_session(toml, &caps).map_err(|value| value.into_bytes())?;
+    let engine = host.report;
+
+    // Browser-only: every source ID must fit the fixed staging buffer JavaScript writes it into.
+    // The facade has no such buffer, so this rule stays the host's.
+    if host.sources.longest_id_bytes() > config.source_id_bytes as usize {
+        return Err(fixed_diagnostic("web.source.id.capacity"));
     }
 
-    let source_id_bytes =
-        compiled
-            .normalized_model()
-            .sources
-            .iter()
-            .try_fold(0_usize, |total, source| {
-                total
-                    .checked_add(source.id.as_str().len())
-                    .ok_or_else(|| fixed("web.resource.arithmetic"))
-            })?;
-    if compiled
-        .normalized_model()
-        .sources
-        .iter()
-        .any(|source| source.id.as_str().len() > config.source_id_bytes as usize)
-    {
-        return Err(fixed("web.source.id.capacity"));
-    }
-    let mut ids = Vec::new();
-    ids.try_reserve_exact(source_id_bytes)
-        .map_err(|_| fixed("web.resource.allocation"))?;
-    let mut controls = Vec::new();
-    controls
-        .try_reserve_exact(compiled.source_count())
-        .map_err(|_| fixed("web.resource.allocation"))?;
-    let mut graph_sources = Vec::new();
-    graph_sources
-        .try_reserve_exact(compiled.source_count())
-        .map_err(|_| fixed("web.resource.allocation"))?;
-    for source in &compiled.normalized_model().sources {
-        if source.sample_rate_hz != compiled.sample_rate().0
-            || u32::from(source.mapping.channel_count) > config.maximum_source_channels
-        {
-            return Err(fixed("web.source.shape"));
-        }
-        let region_end = source
-            .mapping
-            .region
-            .start_sample
-            .checked_add(source.mapping.region.length_samples)
-            .ok_or_else(|| fixed("web.source.region"))?;
-        let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
-            PcmSourceRingConfig {
-                channel_count: u32::from(source.mapping.channel_count),
-                quantum_frames: compiled.quantum(),
-                frame_capacity: u64::from(config.source_ring_frames),
-                initial_generation: SourceGeneration(1),
-            },
-            SourceFrame(source.mapping.region.start_sample),
-        )
-        .map_err(|_| fixed("web.source.prepare"))?;
-        let id_offset = ids.len();
-        ids.extend_from_slice(source.id.as_str().as_bytes());
-        controls.push(ControlSource {
-            id_offset,
-            id_bytes: source.id.as_str().len(),
-            sample_rate_hz: source.sample_rate_hz,
-            channel_count: u32::from(source.mapping.channel_count),
-            region_start: source.mapping.region.start_sample,
-            region_end,
-            provider: producer.into_host_chunk_provider(SampleRateHz(source.sample_rate_hz)),
-        });
-        graph_sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
-    }
-    controls.sort_unstable_by(|left, right| {
-        ids[left.id_offset..left.id_offset + left.id_bytes]
-            .cmp(&ids[right.id_offset..right.id_offset + right.id_bytes])
-    });
-    let mappings = compiled
-        .normalized_model()
-        .tracks
-        .iter()
-        .map(|track| {
-            let source_index = compiled
-                .source_index(&track.source_id)
-                .and_then(|value| usize::try_from(value).ok())
-                .ok_or_else(|| fixed("web.source.mapping"))?;
-            Ok(SourceGraphTrackMapping {
-                node: GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(track.id.as_str())
-                        .ok_or_else(|| fixed("web.source.mapping"))?,
-                    stage: TrackStage::Input,
-                },
-                source_index,
-                left_channel: u32::from(track.left_source_channel),
-                right_channel: u32::from(track.right_source_channel),
-            })
-        })
-        .collect::<Result<Vec<_>, PrepareFailure>>()?;
-
-    let registry = launch_native_effect_registry_v1().map_err(|_| fixed("web.effect.registry"))?;
-    let effects = prepare_native_session_effects(
-        &compiled,
-        &registry,
-        EffectCompileCaps {
-            maximum_total_state_bytes: config.maximum_effect_state_bytes,
-            maximum_scratch_bytes: config.maximum_effect_scratch_bytes,
-            maximum_automation_spans_per_block: config.maximum_automation_spans_per_block,
-        },
-    )
-    .map_err(|value| effect_diagnostics(&value.0))?;
-    let (effect_state, effect_scratch) =
-        effects
-            .entries
-            .iter()
-            .try_fold((0_u64, 0_u64), |(state, scratch), entry| {
-                Ok::<_, PrepareFailure>((
-                    state
-                        .checked_add(
-                            entry
-                                .metadata
-                                .state_sizes
-                                .total()
-                                .ok_or_else(|| fixed("web.effect.resource"))?,
-                        )
-                        .ok_or_else(|| fixed("web.effect.resource"))?,
-                    scratch
-                        .checked_add(entry.metadata.scratch_bytes)
-                        .ok_or_else(|| fixed("web.effect.resource"))?,
-                ))
-            })?;
-    let builtins = prepare_session_builtins(
-        &compiled,
-        &[],
-        BuiltinCompileCaps {
-            maximum_total_state_bytes: config.maximum_builtin_retained_bytes,
-            maximum_total_retained_payload_bytes: config.maximum_builtin_retained_bytes,
-            maximum_total_meter_items: config.maximum_meter_items,
-            maximum_total_meter_bytes: config.maximum_meter_bytes,
-            maximum_single_allocation_bytes: config.maximum_named_allocation_bytes,
-            maximum_meter_streams: config.maximum_meter_streams,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        },
-    )
-    .map_err(|value| builtin_diagnostics(&value.0))?;
-    let builtin_resources = builtins.resource_report();
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch: KernelDispatch::select(target_capabilities()),
-        plan_id: 1,
-        effects,
-        builtins,
-        caps: GraphCompileCaps {
-            maximum_nodes: u64::MAX,
-            maximum_edges: u64::MAX,
-            maximum_schedule_items: u64::MAX,
-            maximum_dependency_levels: u64::MAX,
-            maximum_audio_buffer_samples: u64::MAX,
-            maximum_delay_samples_per_edge: u64::MAX,
-            maximum_total_delay_samples: u64::MAX,
-            maximum_graph_bytes: config.maximum_graph_session_plus_plan_bytes,
-            maximum_plan_bytes: config.maximum_graph_session_plus_plan_bytes,
-            maximum_single_allocation_bytes: config.maximum_named_allocation_bytes,
-            maximum_finite_tail_samples: u64::MAX,
-        },
-    })
-    .map_err(|value| graph_diagnostics(value.diagnostics.diagnostics()))?;
-    let graph_resources = artifact.graph_resource_estimate().clone();
-    let source_set = prepare_graph_source_set(artifact.envelope(), graph_sources, mappings)
-        .map_err(|_| fixed("web.source.graph"))?;
-    let source_resources = source_set.resource_report();
-    if source_resources.total_engine_owned_bytes > config.maximum_source_total_bytes
-        || source_resources.overhead_bytes > config.maximum_source_overhead_bytes
-    {
-        return Err(fixed("web.source.resource"));
-    }
-    let external_nodes = artifact
-        .external_binding_nodes()
-        .filter(|node| {
-            !matches!(
-                node,
-                GraphNodeId::TrackStage {
-                    stage: TrackStage::Input,
-                    ..
-                }
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let bindings = GraphRuntimeBindings {
-        #[cfg(not(target_arch = "wasm32"))]
-        worker_lease: None,
-        envelope: artifact.envelope(),
-        nodes: external_nodes
-            .into_iter()
-            .map(|node| GraphNodeBinding::new(node, Box::new(IdentityProcessor)))
-            .collect(),
-        observers: Vec::new(),
-    };
-    let bound = artifact
-        .into_bound_with_source_set(bindings, source_set)
-        .map_err(|value| fixed(value.code))?;
-    if !bound.meter_consumers.is_empty() {
-        return Err(fixed("web.meter.unexpected"));
-    }
-
-    let session_resources = compiled.resource_estimate();
-    let ready_metadata = checked_sum_prepare([
-        layout_bytes::<ControlSource>(controls.len())?,
-        u64::try_from(source_id_bytes).map_err(|_| fixed("web.resource.platform"))?,
-        session_resources.compiled_model_bytes,
-    ])?;
+    let control_table = control_table_bytes(engine.source_count as usize)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let id_arena = source_id_arena_bytes(engine.source_id_bytes as usize)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    // Charged because the browser bridge retains them: the facade's control table and ID arena
+    // (`control_retained_bytes` is exactly those two) and the compiled session model.
+    let ready_metadata =
+        checked_sum_prepare([engine.control_retained_bytes, engine.session_model_bytes])?;
     let bridge_metadata = report
         .bridge_metadata_bytes
         .checked_add(ready_metadata)
-        .ok_or_else(|| fixed("web.resource.arithmetic"))?;
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let bridge_retained = report
         .bridge_retained_bytes
         .checked_add(ready_metadata)
-        .ok_or_else(|| fixed("web.resource.arithmetic"))?;
-    let ready_largest = [
-        layout_bytes::<ControlSource>(controls.len())?,
-        u64::try_from(source_id_bytes).map_err(|_| fixed("web.resource.platform"))?,
-        session_resources.single_allocation_bytes,
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(0);
-    let bridge_largest = report.largest_bridge_allocation_bytes.max(ready_largest);
-    let largest_named = bridge_largest
-        .max(graph_resources.largest_allocation_bytes)
-        .max(source_resources.largest_allocation_bytes)
-        .max(builtin_resources.maximum_single_allocation_bytes);
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let bridge_largest = report
+        .largest_bridge_allocation_bytes
+        .max(control_table)
+        .max(id_arena)
+        .max(engine.session_largest_allocation_bytes);
+    let largest_named = bridge_largest.max(engine.largest_engine_allocation_bytes);
     if bridge_retained > config.maximum_host_retained_bytes
         || largest_named > config.maximum_named_allocation_bytes
-        || builtin_resources.engine_owned_retained_payload_bytes
-            > config.maximum_builtin_retained_bytes
     {
-        return Err(fixed("web.resource.limit"));
+        return Err(fixed_diagnostic("web.resource.limit"));
     }
+
     report.bridge_metadata_bytes = bridge_metadata;
     report.bridge_retained_bytes = bridge_retained;
     report.largest_bridge_allocation_bytes = bridge_largest;
-    report.source_total_bytes = source_resources.total_engine_owned_bytes;
-    report.source_overhead_bytes = source_resources.overhead_bytes;
-    report.effect_scalar_state_bytes = effect_state;
-    report.effect_scalar_scratch_bytes = effect_scratch;
-    report.builtin_retained_bytes = builtin_resources.engine_owned_retained_payload_bytes;
-    report.graph_session_plus_plan_bytes = graph_resources.session_plus_plan_bytes;
-    report.graph_incremental_plan_bytes = graph_resources.incremental_plan_bytes;
-    report.graph_metadata_bytes = graph_resources.graph_metadata_bytes;
-    report.graph_delay_bytes = graph_resources.delay_bytes;
+    report.source_total_bytes = engine.source_total_bytes;
+    report.source_overhead_bytes = engine.source_overhead_bytes;
+    report.effect_scalar_state_bytes = engine.effect_scalar_state_bytes;
+    report.effect_scalar_scratch_bytes = engine.effect_scalar_scratch_bytes;
+    report.builtin_retained_bytes = engine.builtin_retained_payload_bytes;
+    report.graph_session_plus_plan_bytes = engine.graph_session_plus_plan_bytes;
+    report.graph_incremental_plan_bytes = engine.graph_incremental_plan_bytes;
+    report.graph_metadata_bytes = engine.graph_metadata_bytes;
+    report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
     Ok((
         ReadyOwnership {
-            plan: bound.plan,
-            _session: compiled,
-            source_ids: ids.into_boxed_slice(),
-            sources: controls.into_boxed_slice(),
+            host,
+            _session: session,
         },
         report,
     ))
 }
 
-fn find_source_mut<'a>(
-    ready: &'a mut ReadyOwnership,
-    source_id: &[u8],
-) -> Option<&'a mut ControlSource> {
-    let ids = &ready.source_ids;
-    ready.sources.iter_mut().find(|source| {
-        ids.get(source.id_offset..source.id_offset + source.id_bytes) == Some(source_id)
-    })
-}
-
-fn count_effects(model: &miso_engine_session::SessionTomlV1) -> Result<u64, PrepareFailure> {
-    model.tracks.iter().try_fold(0_u64, |total, track| {
-        let count = track
-            .simd1
-            .effects
-            .len()
-            .checked_add(track.dynamic.effects.len())
-            .and_then(|value| value.checked_add(track.simd2.effects.len()))
-            .ok_or_else(|| fixed("web.resource.arithmetic"))?;
-        total
-            .checked_add(u64::try_from(count).map_err(|_| fixed("web.resource.platform"))?)
-            .ok_or_else(|| fixed("web.resource.arithmetic"))
-    })
-}
-
-fn fixed(code: &str) -> PrepareFailure {
-    PrepareFailure::fixed(RESULT_PREPARE_REJECTED, &format!("{code}\t$\n"))
-}
-
-fn session_diagnostics(value: &DiagnosticSet) -> PrepareFailure {
-    let mut bytes = Vec::new();
-    for diagnostic in value.diagnostics() {
-        bytes.extend_from_slice(diagnostic.code.as_str().as_bytes());
-        bytes.push(b'\t');
-        bytes.extend_from_slice(diagnostic.path.to_string().as_bytes());
-        bytes.push(b'\n');
-    }
-    PrepareFailure {
-        code: RESULT_PREPARE_REJECTED,
-        diagnostic: bytes,
-    }
-}
-
-fn effect_diagnostics(values: &[miso_engine_effect_compiler::EffectDiagnostic]) -> PrepareFailure {
-    let mut bytes = Vec::new();
-    for value in values {
-        bytes.extend_from_slice(value.code.as_bytes());
-        bytes.push(b'\t');
-        bytes.extend_from_slice(value.path.as_bytes());
-        bytes.push(b'\n');
-    }
-    PrepareFailure {
-        code: RESULT_PREPARE_REJECTED,
-        diagnostic: bytes,
-    }
-}
-
-fn builtin_diagnostics(
-    values: &[miso_engine_builtins_compiler::BuiltinDiagnostic],
-) -> PrepareFailure {
-    let mut bytes = Vec::new();
-    for value in values {
-        bytes.extend_from_slice(value.code.as_bytes());
-        bytes.push(b'\t');
-        bytes.extend_from_slice(value.path.as_bytes());
-        bytes.push(b'\n');
-    }
-    PrepareFailure {
-        code: RESULT_PREPARE_REJECTED,
-        diagnostic: bytes,
-    }
-}
-
-fn graph_diagnostics<'a>(
-    values: impl IntoIterator<Item = &'a miso_engine_graph::GraphDiagnostic>,
-) -> PrepareFailure {
-    let mut bytes = Vec::new();
-    for value in values {
-        bytes.extend_from_slice(value.code.as_bytes());
-        bytes.push(b'\t');
-        bytes.extend_from_slice(value.path.as_bytes());
-        bytes.push(b'\n');
-    }
-    PrepareFailure {
-        code: RESULT_PREPARE_REJECTED,
-        diagnostic: bytes,
-    }
+/// One `code\t$\n` diagnostic line for a rule that names no session path.
+fn fixed_diagnostic(code: &str) -> Vec<u8> {
+    miso_engine_host_core::fixed_diagnostic_line(code)
 }
 
 fn checked_sum(values: impl IntoIterator<Item = u64>) -> Result<u64, u32> {
@@ -1214,11 +896,11 @@ fn checked_sum(values: impl IntoIterator<Item = u64>) -> Result<u64, u32> {
     })
 }
 
-fn checked_sum_prepare(values: impl IntoIterator<Item = u64>) -> Result<u64, PrepareFailure> {
+fn checked_sum_prepare(values: impl IntoIterator<Item = u64>) -> Result<u64, Vec<u8>> {
     values.into_iter().try_fold(0_u64, |total, value| {
         total
             .checked_add(value)
-            .ok_or_else(|| fixed("web.resource.arithmetic"))
+            .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))
     })
 }
 
@@ -1226,11 +908,6 @@ fn checked_product<const N: usize>(values: [u64; N]) -> Result<u64, u32> {
     values.into_iter().try_fold(1_u64, |total, value| {
         total.checked_mul(value).ok_or(RESULT_PREPARE_REJECTED)
     })
-}
-
-fn layout_bytes<T>(count: usize) -> Result<u64, PrepareFailure> {
-    let layout = Layout::array::<T>(count).map_err(|_| fixed("web.resource.arithmetic"))?;
-    u64::try_from(layout.size()).map_err(|_| fixed("web.resource.platform"))
 }
 
 fn boxed_zero_u8(bytes: u32) -> Result<Box<[u8]>, u32> {
@@ -1261,12 +938,6 @@ fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>
         .map_err(|_| RESULT_PREPARE_REJECTED)?;
     value.resize_with(count, MaybeUninit::uninit);
     Ok(value.into_boxed_slice())
-}
-
-/// Return portable bootstrap values for a Web embedding host.
-#[must_use]
-pub fn web_target_smoke() -> TargetSmoke {
-    miso_engine_target_smoke::target_smoke()
 }
 
 mod ffi;
