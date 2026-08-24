@@ -383,7 +383,7 @@ impl BankStage for ConsoleEffectBankStage {
         self.offsets[0] = 0;
         for lane in 0..lane_count {
             if let Some(channel) = self.lanes[lane].as_mut() {
-                let staged = channel.stage(&mut self.staging, block.first_sample);
+                let staged = channel.stage(&mut self.staging, block.first_sample, None);
                 self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
                 // Packed at this lane's own offset, immediately: that offset is what makes the
                 // window reusable and what gives the lane its private partition of `packed`.

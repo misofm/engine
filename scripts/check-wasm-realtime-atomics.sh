@@ -38,6 +38,16 @@ for archive in \
     )
 done
 
+# Issue #143 D4/R8: the conflating observation cell is a browser-local realtime primitive, so it
+# is named here rather than left to the glob. A refactor that moves it out of the inspected crate
+# fails this check instead of silently losing its coverage.
+if ! find "$scratch" -type f -name '*.o' -print0 |
+    xargs -0 -r rg -l --binary 'observe' >/dev/null 2>&1 &&
+    ! rg -q 'ObservationSlotV1' crates/miso-engine-core/src/realtime/observe.rs; then
+    printf 'the observation transport is not in the inspected browser-local set\n' >&2
+    exit 1
+fi
+
 object_count=0
 while IFS= read -r object; do
     object_count=$((object_count + 1))

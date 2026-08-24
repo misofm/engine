@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 mod live;
-pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, Staged};
+pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, ObservationLaneV1, Staged};
 
 use core::{fmt, hash::Hash};
 use miso_engine_core::{

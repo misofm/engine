@@ -484,7 +484,9 @@ fn execute_op(
             // The drain runs before a single sample is touched, so an admitted record takes
             // effect on the first sample of this block -- the exact `applied_at_sample` the
             // control side was acknowledged with (#137 E1's rule, now for effects).
-            let staged = console.control.stage(&mut console.spans, first_sample);
+            let staged = console
+                .control
+                .stage(&mut console.spans, first_sample, None);
             // Preparation refuses a queue deeper than the effect's automation capacity, so a full
             // drain can never produce more distinct spans than the window holds. This is the
             // invariant, not a runtime policy: in release it costs nothing.
