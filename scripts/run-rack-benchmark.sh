@@ -112,25 +112,25 @@ fi
 run_round() {
     local round=$1
     workload_process_launches=$((workload_process_launches + 1))
-    MISO_ENGINE_RACK_BENCH_ROUND="$round" \
-    MISO_ENGINE_RACK_BENCH_CANDIDATE_SHA256="$candidate_commit_sha256" \
-    MISO_ENGINE_RACK_BENCH_BINARY_SHA256="$binary_sha256" \
+    MISO_ENGINE_BENCH_ROUND="$round" \
+    MISO_ENGINE_BENCH_CANDIDATE_SHA256="$candidate_commit_sha256" \
+    MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha256" \
     MISO_ENGINE_BENCH_CPU_MODEL="$cpu_model" \
-    MISO_ENGINE_BENCH_ARCHITECTURE="$architecture" \
-    MISO_ENGINE_BENCH_LOGICAL_CORES="$logical_cores" \
-    MISO_ENGINE_BENCH_PHYSICAL_CORES="$physical_cores" \
+    MISO_ENGINE_BENCH_CPU_ARCHITECTURE="$architecture" \
+    MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT="$logical_cores" \
+    MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT="$physical_cores" \
     MISO_ENGINE_BENCH_OS="$os" \
     MISO_ENGINE_BENCH_KERNEL="$kernel" \
     MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
     MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" \
-    MISO_ENGINE_BENCH_TARGET="$target_triple" \
+    MISO_ENGINE_BENCH_TARGET_TRIPLE="$target_triple" \
     MISO_ENGINE_BENCH_TARGET_FEATURES="$target_features" \
     MISO_ENGINE_BENCH_PROFILE=release \
     MISO_ENGINE_BENCH_OPT_LEVEL=3 \
     MISO_ENGINE_BENCH_LTO=false \
     MISO_ENGINE_BENCH_CODEGEN_UNITS=16 \
-    MISO_ENGINE_BENCH_BACKGROUND_LOAD="$background_load_note" \
-    MISO_ENGINE_BENCH_GOVERNOR="$governor_or_power_mode" \
+    MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="$background_load_note" \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
     "$binary"
 }
 

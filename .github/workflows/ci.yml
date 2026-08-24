@@ -41,6 +41,13 @@ jobs:
         run: bash scripts/check-session-policy.sh
       - name: Workspace policy mutation tests
         run: bash scripts/test-workspace-policy.sh
+      # #104 phase C: one MISO_ENGINE_ prefix, one name per fact, documented in
+      # docs/ENGINE_ENV_VOCABULARY.md. The checker is bidirectional -- an undocumented name and an
+      # unused row both fail -- because #104 F2 was a runner and its binary agreeing on nothing.
+      - name: Environment and marker vocabulary policy and mutation tests
+        run: |
+          bash scripts/check-env-vocabulary.sh
+          bash scripts/test-env-vocabulary.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh

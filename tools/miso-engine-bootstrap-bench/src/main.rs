@@ -42,10 +42,10 @@ fn main() {
             "\"statistical_method\":\"median of per-round ns/call; descriptive only\",",
             "\"capabilities\":{{\"backend\":\"{:?}\",\"width\":{}}}}}"
         ),
-        metadata("MISO_ENGINE_BENCH_CPU"),
+        metadata("MISO_ENGINE_BENCH_CPU_MODEL"),
         env::consts::OS,
-        metadata("MISO_ENGINE_BENCH_POWER_MODE"),
-        metadata("MISO_ENGINE_BENCH_COMPILER"),
+        metadata("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"),
+        metadata("MISO_ENGINE_BENCH_RUST_VERSION"),
         metadata("MISO_ENGINE_BENCH_LLVM_VERSION"),
         metadata("MISO_ENGINE_BENCH_TARGET_TRIPLE"),
         metadata("MISO_ENGINE_BENCH_TARGET_FEATURES"),

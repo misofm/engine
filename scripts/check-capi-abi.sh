@@ -17,14 +17,14 @@ command -v "$cc_tool" >/dev/null 2>&1 || fail "missing C compiler: $cc_tool"
 command -v "$cxx_tool" >/dev/null 2>&1 || fail "missing C++ compiler: $cxx_tool"
 command -v "$nm_tool" >/dev/null 2>&1 || fail "missing symbol tool: $nm_tool"
 
-header="${MISO_CAPI_HEADER:-crates/miso-engine-capi/include/miso_engine_v2.h}"
-c_fixture="${MISO_CAPI_C_FIXTURE:-crates/miso-engine-capi/tests/c/abi_smoke.c}"
-cpp_fixture="${MISO_CAPI_CPP_FIXTURE:-crates/miso-engine-capi/tests/c/header_smoke.cpp}"
+header="${MISO_ENGINE_CAPI_HEADER:-crates/miso-engine-capi/include/miso_engine_v2.h}"
+c_fixture="${MISO_ENGINE_CAPI_C_FIXTURE:-crates/miso-engine-capi/tests/c/abi_smoke.c}"
+cpp_fixture="${MISO_ENGINE_CAPI_CPP_FIXTURE:-crates/miso-engine-capi/tests/c/header_smoke.cpp}"
 [[ -f "$header" ]] || fail "missing header: $header"
 [[ -f "$c_fixture" ]] || fail "missing C11 fixture: $c_fixture"
 [[ -f "$cpp_fixture" ]] || fail "missing C++17 fixture: $cpp_fixture"
 
-if [[ "${MISO_CAPI_SKIP_BUILD:-0}" != 1 ]]; then
+if [[ "${MISO_ENGINE_CAPI_SKIP_BUILD:-0}" != 1 ]]; then
     cargo build --locked -p miso-engine-capi
 fi
 
@@ -34,7 +34,7 @@ case "$host_triple" in
     *-apple-*) default_library="target/debug/libmiso_engine_capi.dylib" ;;
     *) fail "unsupported pinned native host for ABI seal: $host_triple" ;;
 esac
-library="${MISO_CAPI_LIBRARY:-$default_library}"
+library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 [[ -f "$library" ]] || fail "missing native library: $library"
 
 scratch_root="$(mktemp -d)"

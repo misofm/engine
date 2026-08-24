@@ -32,7 +32,7 @@ cat >"$template/bin/git" <<'EOF'
 set -euo pipefail
 case "${1:-}" in
     status)
-        [[ "${MISO_TEST_GIT_DIRTY:-0}" != 1 ]] || printf '%s\n' ' M synthetic-dirty'
+        [[ "${MISO_ENGINE_TEST_GIT_DIRTY:-0}" != 1 ]] || printf '%s\n' ' M synthetic-dirty'
         exit 0
         ;;
     branch) printf '%s\n' codex/batch-qualification-081 ;;
@@ -49,9 +49,9 @@ EOF
 cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${MISO_TEST_CARGO_FAIL:-0}" != 1 ]] || exit 73
+[[ "${MISO_ENGINE_TEST_CARGO_FAIL:-0}" != 1 ]] || exit 73
 mkdir -p "$CARGO_TARGET_DIR/release"
-cp "$MISO_TEST_FAKE_BENCH" "$CARGO_TARGET_DIR/release/miso_engine_effect_interchange_bench"
+cp "$MISO_ENGINE_TEST_FAKE_BENCH" "$CARGO_TARGET_DIR/release/miso_engine_effect_interchange_bench"
 chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_effect_interchange_bench"
 EOF
 cat >"$template/fake-benchmark.py" <<'PY'
@@ -59,12 +59,12 @@ cat >"$template/fake-benchmark.py" <<'PY'
 import json, os, pathlib, sys
 if len(sys.argv) != 1:
     raise SystemExit(2)
-log = pathlib.Path(os.environ["MISO_TEST_LAUNCH_LOG"])
+log = pathlib.Path(os.environ["MISO_ENGINE_TEST_LAUNCH_LOG"])
 with log.open("a", encoding="utf-8") as stream:
     stream.write("launch\n")
-mode = os.environ.get("MISO_TEST_BENCH_MODE", "success")
+mode = os.environ.get("MISO_ENGINE_TEST_BENCH_MODE", "success")
 def phase(value):
-    print("MISO_INTERCHANGE_BENCH_PHASE " + value, file=sys.stderr, flush=True)
+    print("MISO_ENGINE_BENCH_PHASE " + value, file=sys.stderr, flush=True)
 phase("workload_started")
 if mode in ("nonzero", "panic_before_warmup"):
     print('{"partial":true}')
@@ -97,17 +97,17 @@ for round_ in (1, 2):
         records.append({
             "schema_version": 1, "issue": 81, "workload_id": workload, "round": round_,
             "observation_count": 256, "unit": "ns_per_operation",
-            "candidate_commit": os.environ["MISO_INTERCHANGE_CANDIDATE_COMMIT"],
-            "candidate_tree": os.environ["MISO_INTERCHANGE_CANDIDATE_TREE"],
-            "binary_sha256": os.environ["MISO_INTERCHANGE_BINARY_SHA256"],
-            "tool_manifest_sha256": os.environ["MISO_INTERCHANGE_TOOL_MANIFEST_SHA256"],
-            "tool_source_sha256": os.environ["MISO_INTERCHANGE_TOOL_SOURCE_SHA256"],
-            "fixture_manifest_sha256": os.environ["MISO_INTERCHANGE_FIXTURE_MANIFEST_SHA256"],
+            "candidate_commit": os.environ["MISO_ENGINE_BENCH_CANDIDATE_COMMIT"],
+            "candidate_tree": os.environ["MISO_ENGINE_BENCH_CANDIDATE_TREE"],
+            "binary_sha256": os.environ["MISO_ENGINE_BENCH_BINARY_SHA256"],
+            "tool_manifest_sha256": os.environ["MISO_ENGINE_BENCH_TOOL_MANIFEST_SHA256"],
+            "tool_source_sha256": os.environ["MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256"],
+            "fixture_manifest_sha256": os.environ["MISO_ENGINE_BENCH_FIXTURE_MANIFEST_SHA256"],
             "output_sha256": outputs[workload],
-            "rust_version": os.environ["MISO_INTERCHANGE_RUST_VERSION"],
-            "llvm_version": os.environ["MISO_INTERCHANGE_LLVM_VERSION"],
-            "target_triple": os.environ["MISO_INTERCHANGE_TARGET_TRIPLE"],
-            "profile": os.environ["MISO_INTERCHANGE_PROFILE"],
+            "rust_version": os.environ["MISO_ENGINE_BENCH_RUST_VERSION"],
+            "llvm_version": os.environ["MISO_ENGINE_BENCH_LLVM_VERSION"],
+            "target_triple": os.environ["MISO_ENGINE_BENCH_TARGET_TRIPLE"],
+            "profile": os.environ["MISO_ENGINE_BENCH_PROFILE"],
             "cpu_model": os.environ.get("CPU_MODEL", ""),
             "logical_cores": os.environ.get("LOGICAL_CORES", ""),
             "physical_cores": os.environ.get("PHYSICAL_CORES", ""),
@@ -163,12 +163,12 @@ new_case() {
 }
 run_preflight() {
     local benchmark=${1:-"$case_root/fake-benchmark.py"}
-    MISO_INTERCHANGE_HERMETIC_CHILD=1 MISO_TEST_FAKE_BENCH="$benchmark" \
+    MISO_ENGINE_BENCH_HERMETIC_CHILD=1 MISO_ENGINE_TEST_FAKE_BENCH="$benchmark" \
         PATH="$case_root/bin:$PATH" bash "$case_root/scripts/preflight-effect-interchange-benchmark.sh"
 }
 run_runner() {
     local mode=$1
-    MISO_TEST_BENCH_MODE="$mode" MISO_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_ENGINE_TEST_BENCH_MODE="$mode" MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
         PATH="$case_root/bin:$PATH" bash "$case_root/scripts/run-effect-interchange-benchmark.sh"
 }
 assert_disposition() {
@@ -241,7 +241,7 @@ for tool in awk bash ln mkdir mktemp python3 rm rustc sha256sum wc; do
     ln -s "$(command -v "$tool")" "$runner_bin/$tool"
 done
 ln -s "$case_root/bin/git" "$runner_bin/git"
-MISO_TEST_BENCH_MODE=success MISO_TEST_LAUNCH_LOG="$launch_log" \
+MISO_ENGINE_TEST_BENCH_MODE=success MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
     PATH="$runner_bin" /bin/bash "$case_root/scripts/run-effect-interchange-benchmark.sh" >/dev/null
 [[ "$(wc -l <"$launch_log")" == 1 ]]
 assert_final PASS complete 1 1 1 2
@@ -266,7 +266,7 @@ for kind in regular symlink hardlink; do
 done
 
 new_case cargo-failure
-if MISO_TEST_CARGO_FAIL=1 run_preflight >/dev/null 2>&1; then
+if MISO_ENGINE_TEST_CARGO_FAIL=1 run_preflight >/dev/null 2>&1; then
     printf 'effect interchange benchmark lifecycle: preflight swallowed cargo failure\n' >&2
     exit 1
 fi
@@ -311,7 +311,7 @@ fi
 
 new_case prelaunch-correction
 run_preflight >/dev/null
-if MISO_TEST_GIT_DIRTY=1 run_runner success >/dev/null 2>&1; then
+if MISO_ENGINE_TEST_GIT_DIRTY=1 run_runner success >/dev/null 2>&1; then
     printf 'effect interchange benchmark lifecycle: dirty runner candidate passed\n' >&2
     exit 1
 fi

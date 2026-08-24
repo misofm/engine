@@ -112,7 +112,7 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
     audit::reset();
     let started = Instant::now();
     if trace_markers {
-        eprintln!("MISO_RT_BEGIN");
+        eprintln!("MISO_ENGINE_RT_BEGIN");
     }
     for block in 0..blocks {
         if block == 1 {
@@ -147,7 +147,7 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
         assert_eq!(output.as_ptr() as usize, output_address);
     }
     if trace_markers {
-        eprintln!("MISO_RT_END");
+        eprintln!("MISO_ENGINE_RT_END");
     }
     let elapsed = started.elapsed();
     let audit = audit::snapshot();
@@ -233,10 +233,10 @@ fn main() {
                     "\"round_duration_ns\":{},\"ns_per_block\":{},",
                     "\"statistical_method\":\"per-round ns/block; descriptive only; no threshold\"}}"
                 ),
-                metadata("MISO_ENGINE_BENCH_CPU"),
+                metadata("MISO_ENGINE_BENCH_CPU_MODEL"),
                 env::consts::OS,
-                metadata("MISO_ENGINE_BENCH_POWER_MODE"),
-                metadata("MISO_ENGINE_BENCH_COMPILER"),
+                metadata("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"),
+                metadata("MISO_ENGINE_BENCH_RUST_VERSION"),
                 metadata("MISO_ENGINE_BENCH_LLVM_VERSION"),
                 metadata("MISO_ENGINE_BENCH_TARGET_TRIPLE"),
                 metadata("MISO_ENGINE_BENCH_TARGET_FEATURES"),

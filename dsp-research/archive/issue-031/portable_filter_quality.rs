@@ -19,7 +19,7 @@ const NOISE_SEED: u64 = 0x0000_0000_0000_0310;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const EQUATION_VERSION: u64 = 0x4930_3331_5f46_3634; // I031_F64
-const TRANSCRIPT_ENV: &str = "MISO_ISSUE_031_TRANSCRIPT";
+const TRANSCRIPT_ENV: &str = "MISO_ENGINE_TRANSCRIPT_031";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FilterKind {
@@ -1180,7 +1180,7 @@ impl Transcript {
     fn create() -> Self {
         let path = std::env::var_os(TRANSCRIPT_ENV)
             .map(PathBuf::from)
-            .expect("the Issue-031 matrix requires MISO_ISSUE_031_TRANSCRIPT");
+            .expect("the Issue-031 matrix requires MISO_ENGINE_TRANSCRIPT_031");
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)

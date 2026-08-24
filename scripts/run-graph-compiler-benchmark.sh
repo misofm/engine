@@ -59,13 +59,13 @@ mkdir -p "$artifact_directory"
 
 status_file="$(mktemp "$artifact_directory/.graph-compiler-benchmark-status.XXXXXX")"
 if ! (
-    MISO_ENGINE_BENCH_POWER_MODE="${MISO_ENGINE_BENCH_POWER_MODE:-unknown}" \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="${MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE:-unknown}" \
     MISO_ENGINE_BENCH_POWER_SOURCE="${MISO_ENGINE_BENCH_POWER_SOURCE:-unknown}" \
     MISO_ENGINE_BENCH_TARGET_FEATURES="${MISO_ENGINE_BENCH_TARGET_FEATURES:-${RUSTFLAGS:-target-default}}" \
     MISO_ENGINE_BENCH_OPT_LEVEL="${MISO_ENGINE_BENCH_OPT_LEVEL:-3}" \
     MISO_ENGINE_BENCH_LTO="${MISO_ENGINE_BENCH_LTO:-off}" \
     MISO_ENGINE_BENCH_CODEGEN_UNITS="${MISO_ENGINE_BENCH_CODEGEN_UNITS:-default}" \
-    MISO_ENGINE_BENCH_BACKGROUND_LOAD="${MISO_ENGINE_BENCH_BACKGROUND_LOAD:-not measured}" \
+    MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="${MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE:-not measured}" \
     cargo run --locked --release --quiet -p miso-engine-graph-bench >"$raw_output"
     status=$?
     printf '%s\n' "$status" >"$status_file"

@@ -121,7 +121,7 @@ fn main() {
 
     audit::warm_up();
     audit::reset();
-    eprintln!("MISO_COMPRESSOR_RT_BEGIN");
+    eprintln!("MISO_ENGINE_COMPRESSOR_RT_BEGIN");
     audit::in_render_scope(|| {
         for block in 0..BLOCKS {
             let first_sample = block
@@ -201,7 +201,7 @@ fn main() {
             }
         }
     });
-    eprintln!("MISO_COMPRESSOR_RT_END");
+    eprintln!("MISO_ENGINE_COMPRESSOR_RT_END");
 
     let snapshot = audit::snapshot();
     assert_eq!(left.as_ptr() as usize, left_address);

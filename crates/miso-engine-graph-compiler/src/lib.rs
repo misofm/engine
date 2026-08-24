@@ -2647,7 +2647,7 @@ mod tests {
         // The Issue-037 production audit is explicit-release-only. It intentionally binds the
         // sealed builtin artifact, rather than the old scalar fixture effect bank, and proves
         // that real TPT builtin-bank callbacks reached the prepared render plan.
-        if std::env::var_os("MISO_ENGINE_ISSUE37_AUDIT").is_some() {
+        if std::env::var_os("MISO_ENGINE_AUDIT_037").is_some() {
             let audit_effects = prepare_native_session_effects(
                 &session,
                 &registry,

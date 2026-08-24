@@ -948,16 +948,16 @@ impl Metadata {
     fn from_env() -> Self {
         let mut missing_metadata = Vec::new();
         let mut value = Self {
-            candidate_commit: required_env("MISO_INTERCHANGE_CANDIDATE_COMMIT"),
-            candidate_tree: required_env("MISO_INTERCHANGE_CANDIDATE_TREE"),
-            binary_sha256: required_env("MISO_INTERCHANGE_BINARY_SHA256"),
-            tool_manifest_sha256: required_env("MISO_INTERCHANGE_TOOL_MANIFEST_SHA256"),
-            tool_source_sha256: required_env("MISO_INTERCHANGE_TOOL_SOURCE_SHA256"),
-            fixture_manifest_sha256: required_env("MISO_INTERCHANGE_FIXTURE_MANIFEST_SHA256"),
-            rust_version: required_env("MISO_INTERCHANGE_RUST_VERSION"),
-            llvm_version: required_env("MISO_INTERCHANGE_LLVM_VERSION"),
-            target_triple: required_env("MISO_INTERCHANGE_TARGET_TRIPLE"),
-            profile: required_env("MISO_INTERCHANGE_PROFILE"),
+            candidate_commit: required_env("MISO_ENGINE_BENCH_CANDIDATE_COMMIT"),
+            candidate_tree: required_env("MISO_ENGINE_BENCH_CANDIDATE_TREE"),
+            binary_sha256: required_env("MISO_ENGINE_BENCH_BINARY_SHA256"),
+            tool_manifest_sha256: required_env("MISO_ENGINE_BENCH_TOOL_MANIFEST_SHA256"),
+            tool_source_sha256: required_env("MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256"),
+            fixture_manifest_sha256: required_env("MISO_ENGINE_BENCH_FIXTURE_MANIFEST_SHA256"),
+            rust_version: required_env("MISO_ENGINE_BENCH_RUST_VERSION"),
+            llvm_version: required_env("MISO_ENGINE_BENCH_LLVM_VERSION"),
+            target_triple: required_env("MISO_ENGINE_BENCH_TARGET_TRIPLE"),
+            profile: required_env("MISO_ENGINE_BENCH_PROFILE"),
             cpu_model: optional_env("CPU_MODEL", &mut missing_metadata),
             logical_cores: optional_env("LOGICAL_CORES", &mut missing_metadata),
             physical_cores: optional_env("PHYSICAL_CORES", &mut missing_metadata),
@@ -1045,7 +1045,7 @@ fn main() {
     assert_eq!(env::args_os().count(), 1, "benchmark takes no arguments");
     let metadata = Metadata::from_env();
     let inputs = WorkloadInputs::load(&metadata.fixture_manifest_sha256);
-    eprintln!("MISO_INTERCHANGE_BENCH_PHASE workload_started");
+    eprintln!("MISO_ENGINE_BENCH_PHASE workload_started");
     let mut frozen = Vec::new();
     for (index, workload) in WORKLOADS.into_iter().enumerate() {
         let (_, output) = run_workload(workload, &inputs);
@@ -1057,8 +1057,8 @@ fn main() {
         let (_, output) = run_workload(workload, &inputs);
         assert_eq!(digest_hex(&output), *expected);
     }
-    eprintln!("MISO_INTERCHANGE_BENCH_PHASE warmup_complete");
-    eprintln!("MISO_INTERCHANGE_BENCH_PHASE timed_started");
+    eprintln!("MISO_ENGINE_BENCH_PHASE warmup_complete");
+    eprintln!("MISO_ENGINE_BENCH_PHASE timed_started");
     let mut records = Vec::with_capacity(8);
     for round in 1..=2 {
         for (workload, expected) in &frozen {
@@ -1070,7 +1070,7 @@ fn main() {
             }
             records.push(record(&metadata, workload, round, expected, observations));
         }
-        eprintln!("MISO_INTERCHANGE_BENCH_PHASE round_{round}_complete");
+        eprintln!("MISO_ENGINE_BENCH_PHASE round_{round}_complete");
     }
     assert_eq!(records.len(), 8);
     for record in records {

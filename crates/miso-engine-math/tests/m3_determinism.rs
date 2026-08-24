@@ -136,11 +136,11 @@ fn m3_no_unsafe_or_force_eval_in_vendored_source() {
 
 /// The numerical half of M3: every corpus case hashes to its pinned digest.
 ///
-/// Set `MISO_MATH_PIN=1` to print the digests instead of asserting them; that is how
+/// Set `MISO_ENGINE_MATH_PIN=1` to print the digests instead of asserting them; that is how
 /// `corpus::M3_DIGESTS` is generated after a deliberate re-vendor (VENDORED.md, "Re-vendoring").
 #[test]
 fn m3_corpus_digests_match_pins() {
-    let pinning = std::env::var_os("MISO_MATH_PIN").is_some();
+    let pinning = std::env::var_os("MISO_ENGINE_MATH_PIN").is_some();
     let mut mismatches = Vec::new();
 
     for case in 0..CASE_COUNT {
@@ -162,7 +162,7 @@ fn m3_corpus_digests_match_pins() {
 
     assert!(
         !pinning,
-        "MISO_MATH_PIN was set: digests printed, nothing asserted. Unset it to run the gate."
+        "MISO_ENGINE_MATH_PIN was set: digests printed, nothing asserted. Unset it to run the gate."
     );
     assert!(
         mismatches.is_empty(),

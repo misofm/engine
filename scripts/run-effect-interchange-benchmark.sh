@@ -57,10 +57,10 @@ refresh_phases() {
     warmup_passes=0
     measured_rounds=0
     if [[ -f "$stderr_log" && ! -L "$stderr_log" ]]; then
-        workload_invocations="$(awk '$0 == "MISO_INTERCHANGE_BENCH_PHASE workload_started" {count++} END {print count + 0}' "$stderr_log")"
-        timed_invocations="$(awk '$0 == "MISO_INTERCHANGE_BENCH_PHASE timed_started" {count++} END {print count + 0}' "$stderr_log")"
-        warmup_passes="$(awk '$0 == "MISO_INTERCHANGE_BENCH_PHASE warmup_complete" {count++} END {print count + 0}' "$stderr_log")"
-        measured_rounds="$(awk '$0 == "MISO_INTERCHANGE_BENCH_PHASE round_1_complete" || $0 == "MISO_INTERCHANGE_BENCH_PHASE round_2_complete" {count++} END {print count + 0}' "$stderr_log")"
+        workload_invocations="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE workload_started" {count++} END {print count + 0}' "$stderr_log")"
+        timed_invocations="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE timed_started" {count++} END {print count + 0}' "$stderr_log")"
+        warmup_passes="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE warmup_complete" {count++} END {print count + 0}' "$stderr_log")"
+        measured_rounds="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE round_1_complete" || $0 == "MISO_ENGINE_BENCH_PHASE round_2_complete" {count++} END {print count + 0}' "$stderr_log")"
     fi
 }
 
@@ -204,16 +204,16 @@ set -o noclobber
 : >"$stderr_log"
 failure_reason=workload_failed
 launch_attempted=1
-MISO_INTERCHANGE_CANDIDATE_COMMIT="$commit" \
-MISO_INTERCHANGE_CANDIDATE_TREE="$tree" \
-MISO_INTERCHANGE_BINARY_SHA256="$binary_sha" \
-MISO_INTERCHANGE_TOOL_MANIFEST_SHA256="$tool_manifest_sha" \
-MISO_INTERCHANGE_TOOL_SOURCE_SHA256="$source_sha" \
-MISO_INTERCHANGE_FIXTURE_MANIFEST_SHA256="$fixture_sha" \
-MISO_INTERCHANGE_RUST_VERSION="$rust_version" \
-MISO_INTERCHANGE_LLVM_VERSION="$llvm_version" \
-MISO_INTERCHANGE_TARGET_TRIPLE="$target_triple" \
-MISO_INTERCHANGE_PROFILE=release \
+MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$commit" \
+MISO_ENGINE_BENCH_CANDIDATE_TREE="$tree" \
+MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha" \
+MISO_ENGINE_BENCH_TOOL_MANIFEST_SHA256="$tool_manifest_sha" \
+MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256="$source_sha" \
+MISO_ENGINE_BENCH_FIXTURE_MANIFEST_SHA256="$fixture_sha" \
+MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
+MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" \
+MISO_ENGINE_BENCH_TARGET_TRIPLE="$target_triple" \
+MISO_ENGINE_BENCH_PROFILE=release \
 CPU_MODEL="$cpu_model" LOGICAL_CORES="$logical_cores" PHYSICAL_CORES="$physical_cores" \
 OS="$os" KERNEL="$kernel" POWER_MODE="$power_mode" GOVERNOR="$governor" \
 BACKGROUND_LOAD="$background_load" \
@@ -223,11 +223,11 @@ failure_reason=phase_handshake_failed
 python3 -I -B - "$stderr_log" <<'PY'
 import pathlib, sys
 expected = [
-    "MISO_INTERCHANGE_BENCH_PHASE workload_started",
-    "MISO_INTERCHANGE_BENCH_PHASE warmup_complete",
-    "MISO_INTERCHANGE_BENCH_PHASE timed_started",
-    "MISO_INTERCHANGE_BENCH_PHASE round_1_complete",
-    "MISO_INTERCHANGE_BENCH_PHASE round_2_complete",
+    "MISO_ENGINE_BENCH_PHASE workload_started",
+    "MISO_ENGINE_BENCH_PHASE warmup_complete",
+    "MISO_ENGINE_BENCH_PHASE timed_started",
+    "MISO_ENGINE_BENCH_PHASE round_1_complete",
+    "MISO_ENGINE_BENCH_PHASE round_2_complete",
 ]
 if pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() != expected:
     raise SystemExit("benchmark phase handshake mismatch")

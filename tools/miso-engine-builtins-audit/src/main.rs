@@ -131,7 +131,7 @@ fn run_audit() {
         fold_pcm(&mut digest, &left, &right);
     }
 
-    eprintln!("MISO_ISSUE069_DIRECT_RT_BEGIN");
+    eprintln!("MISO_ENGINE_BUILTINS_RT_BEGIN");
     audit::in_render_scope(|| {
         for block in 6..BLOCKS {
             prepare_input(&mut left, &mut right, block);
@@ -145,7 +145,7 @@ fn run_audit() {
             fold_pcm(&mut digest, &left, &right);
         }
     });
-    eprintln!("MISO_ISSUE069_DIRECT_RT_END");
+    eprintln!("MISO_ENGINE_BUILTINS_RT_END");
     let snapshot = audit::snapshot();
     assert_eq!(left.as_ptr() as usize, left_address);
     assert_eq!(right.as_ptr() as usize, right_address);
@@ -221,13 +221,13 @@ fn traced_process(
     right: &mut [f32; QUANTUM],
     block: u64,
 ) -> BuiltinProcessReport {
-    eprintln!("MISO_ISSUE069_DIRECT_RT_BEGIN");
+    eprintln!("MISO_ENGINE_BUILTINS_RT_BEGIN");
     let report = audit::in_render_scope(|| {
         chain.process_dual_mono(
             DualMonoBlock::new(left, right, block * QUANTUM as u64).expect("fixed block"),
         )
     });
-    eprintln!("MISO_ISSUE069_DIRECT_RT_END");
+    eprintln!("MISO_ENGINE_BUILTINS_RT_END");
     report
 }
 

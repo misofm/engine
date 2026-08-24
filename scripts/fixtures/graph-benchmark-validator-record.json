@@ -30,7 +30,7 @@
   "codegen_units": "16",
   "background_load": "unknown",
   "metadata_incomplete": true,
-  "missing_metadata": ["MISO_ENGINE_BENCH_POWER_MODE"],
+  "missing_metadata": ["MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"],
   "errors": 0,
   "descriptive_only": true,
   "threshold": null

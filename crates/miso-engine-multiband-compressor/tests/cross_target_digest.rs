@@ -19,7 +19,7 @@ fn digest<L: Lane>(case: usize) -> ([u8; 32], Vec<u32>) {
     (hasher.finalize().into(), words)
 }
 
-/// Set `MISO_REPIN_MULTIBAND_CORPUS=1` to print the scalar pins in `corpus_digests.in` form.
+/// Set `MISO_ENGINE_REPIN_MULTIBAND_CORPUS=1` to print the scalar pins in `corpus_digests.in` form.
 ///
 /// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
 /// vector widths and the wasm legs *confirm* them.
@@ -61,7 +61,7 @@ fn the_corpus_digests_are_pinned_and_width_independent() {
             "{} differs between W=1 and W=8",
             CASE_NAMES[case]
         );
-        if std::env::var_os("MISO_REPIN_MULTIBAND_CORPUS").is_none() {
+        if std::env::var_os("MISO_ENGINE_REPIN_MULTIBAND_CORPUS").is_none() {
             assert_eq!(
                 scalar, DIGESTS[case],
                 "{} moved: re-pin only from an oracle, never from a run",
@@ -70,7 +70,7 @@ fn the_corpus_digests_are_pinned_and_width_independent() {
         }
     }
     repin.push(']');
-    if std::env::var_os("MISO_REPIN_MULTIBAND_CORPUS").is_some() {
+    if std::env::var_os("MISO_ENGINE_REPIN_MULTIBAND_CORPUS").is_some() {
         println!("{repin}");
         panic!("re-pin mode: copy the block above into src/corpus_digests.in");
     }

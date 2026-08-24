@@ -88,12 +88,12 @@ governor=not-reported
 run_round() {
     local round=$1
     workload_process_launches=$((workload_process_launches + 1))
-    MISO_ENGINE_SCHEDULER_BENCH_ROUND="$round" \
-    MISO_ENGINE_SCHEDULER_BENCH_CANDIDATE_SHA256="$candidate_sha" \
-    MISO_ENGINE_SCHEDULER_BENCH_BINARY_SHA256="$binary_sha" \
+    MISO_ENGINE_BENCH_ROUND="$round" \
+    MISO_ENGINE_BENCH_CANDIDATE_SHA256="$candidate_sha" \
+    MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha" \
     MISO_ENGINE_BENCH_CPU_MODEL="$cpu_model" MISO_ENGINE_BENCH_OS="$os" \
     MISO_ENGINE_BENCH_KERNEL="$kernel" MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
-    MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" MISO_ENGINE_BENCH_GOVERNOR="$governor" \
+    MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor" \
     "$binary"
 }
 failure_reason=warmup_failed

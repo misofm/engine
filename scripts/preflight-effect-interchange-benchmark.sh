@@ -83,7 +83,7 @@ if actual != expected:
 PY
 
 python3 -I -B scripts/effect-interchange-benchmark-validator.py --self-test
-if [[ "${MISO_INTERCHANGE_HERMETIC_CHILD:-0}" != 1 ]]; then
+if [[ "${MISO_ENGINE_BENCH_HERMETIC_CHILD:-0}" != 1 ]]; then
     bash scripts/test-effect-interchange-benchmark.sh
 fi
 

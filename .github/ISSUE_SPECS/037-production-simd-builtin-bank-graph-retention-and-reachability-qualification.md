@@ -151,7 +151,7 @@ Implemented and verified locally:
   arithmetic. The focused production test asserts the populated resource record.
 - The deterministic count set `1,2,3,4,5,7,8,9,17` is exercised inside exactly 100 layouts from
   seed `0x000000008a050a08`. Frozen transcript hash: `c85b220980077824`.
-- The release-only `MISO_ENGINE_ISSUE37_AUDIT=1` graph test passed: exactly 100,000
+- The release-only `MISO_ENGINE_AUDIT_037=1` graph test passed: exactly 100,000
   48-kHz/128-frame production callbacks asserted real retained-bank/TPT counters, stable output
   address, zero forbidden-operation snapshot, and PCM hash `9f30db0220656d79`. This was a fixed
   functional audit; no timing value, tuning, or benchmark artifact was produced.
@@ -240,7 +240,7 @@ superseded by the audit workstream and are restated here.
 Consequently two constants in the historical text no longer hold and their current values live in
 the tests: the seeded transcript is `0fc9bdc8ff120f6e` (it folds the bank/tail counts, and all 100
 per-layout PCM hashes are byte-identical to the pre-padding render), and the release-only
-`MISO_ENGINE_ISSUE37_AUDIT=1` PCM hash is `2fd85286518fd13b` — measured on `main` **before** the
+`MISO_ENGINE_AUDIT_037=1` PCM hash is `2fd85286518fd13b` — measured on `main` **before** the
 #86 change and unchanged by it, which is the proof that a track's bits do not depend on whether it
 sits in a bank, in a padded bank, or in a scalar tail. The old `9f30db0220656d79` had already
 drifted on `main` because that audit is release-and-env-gated and is not run by CI.

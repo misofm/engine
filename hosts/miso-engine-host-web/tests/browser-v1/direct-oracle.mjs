@@ -220,7 +220,7 @@ async function main() {
   // `tests::native_identity_session_digest_pins_the_wasm_parity`, which renders this same session
   // and transcript through `AudioWorkletEngineHost` on the host CPU. Equality is `to_bits`
   // (SHA-256 over little-endian f32 words), never a tolerance, and it is asserted *before* any
-  // print so `MISO_WEB_ORACLE_PRINT=1` can never mint a pin from a non-identical pair.
+  // print so `MISO_ENGINE_WEB_ORACLE_PRINT=1` can never mint a pin from a non-identical pair.
   const native = expected.directOracle?.nativePcmF32leSha256;
   assert.equal(typeof native, "string", "expected.json must carry the native digest pin");
   actual.nativePcmF32leSha256 = native;
@@ -229,7 +229,7 @@ async function main() {
     native,
     "native and simd128 must render this session to identical bits",
   );
-  if (process.env.MISO_WEB_ORACLE_PRINT === "1") {
+  if (process.env.MISO_ENGINE_WEB_ORACLE_PRINT === "1") {
     process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);
     return;
   }

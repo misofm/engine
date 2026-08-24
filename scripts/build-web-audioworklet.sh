@@ -38,8 +38,8 @@ trap cleanup EXIT
 #
 # Stripped here, in the delivery script, and deliberately not in `[profile.release]`: the native
 # artifacts keep their line tables. To build a debuggable browser module, override this with
-# `MISO_WEB_STRIP=none`.
-strip_flag="-C strip=${MISO_WEB_STRIP:-debuginfo}"
+# `MISO_ENGINE_WEB_STRIP=none`.
+strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 
 (
   cd "$repo_root"

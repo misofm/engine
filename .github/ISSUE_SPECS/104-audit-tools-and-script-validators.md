@@ -92,3 +92,60 @@ an ignored spill still poisons every `find`/`rg` gate that walks the tree from t
 That spill was also the reason `check-capi-qualification-v1.sh` and
 `check-effect-interchange-qualification.sh` failed their "no generated artifact under a source path"
 scan once their seals were converted: `release/deps/libserde_derive-*.so`.
+
+### Phase C -- one environment and marker vocabulary (2026-08-24)
+
+Before: 91 distinct `MISO_*` identifiers across eight prefixes (`MISO_ENGINE_`, `MISO_RT_`,
+`MISO_GRAPH_`, `MISO_ISSUE069_`, `MISO_039_`, `MISO_INTERCHANGE_`, `MISO_CAPI_`, `MISO_TEST_`,
+plus one-offs `MISO_MATH_PIN`, `MISO_WEB_STRIP`, `MISO_REPIN_MULTIBAND_CORPUS`,
+`MISO_PRINT_HELPER_MANIFEST`, `MISO_CHROMIUM_BINARY`, `MISO_CHROMEDRIVER_BINARY`,
+`MISO_WEB_ORACLE_PRINT`, `MISO_ISSUE_031_TRANSCRIPT`, `MISO_ISSUE_045_TRANSCRIPT`), with eight
+facts carrying two or three names each. Finding F2 is the realised cost of that: the "sole
+authorized" builtins runner exported two of the sixteen names its binary read, so every accepted
+record carried all-null environment metadata *and passed validation*, because the runner said
+`MISO_ENGINE_BENCH_GOVERNOR` where the binary read `MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE`.
+
+After: 86 names, all `MISO_ENGINE_*`, one per fact, listed in `docs/ENGINE_ENV_VOCABULARY.md`.
+
+Synonyms collapsed (the surviving name is on the right; every reader and every writer moved in the
+same commit):
+
+| retired | survivor |
+|---|---|
+| `MISO_ENGINE_BENCH_CPU` | `MISO_ENGINE_BENCH_CPU_MODEL` |
+| `MISO_ENGINE_BENCH_ARCHITECTURE` | `MISO_ENGINE_BENCH_CPU_ARCHITECTURE` |
+| `MISO_ENGINE_BENCH_LOGICAL_CORES` | `MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT` |
+| `MISO_ENGINE_BENCH_PHYSICAL_CORES` | `MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT` |
+| `MISO_ENGINE_BENCH_COMPILER`, `MISO_INTERCHANGE_RUST_VERSION` | `MISO_ENGINE_BENCH_RUST_VERSION` |
+| `MISO_ENGINE_BENCH_GOVERNOR`, `MISO_ENGINE_BENCH_POWER_MODE` | `MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE` |
+| `MISO_ENGINE_BENCH_TARGET`, `MISO_INTERCHANGE_TARGET_TRIPLE` | `MISO_ENGINE_BENCH_TARGET_TRIPLE` |
+| `MISO_ENGINE_BENCH_BACKGROUND_LOAD` | `MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE` |
+| `MISO_INTERCHANGE_LLVM_VERSION` | `MISO_ENGINE_BENCH_LLVM_VERSION` |
+| `MISO_INTERCHANGE_PROFILE` | `MISO_ENGINE_BENCH_PROFILE` |
+| `MISO_ENGINE_{BUILTINS,RACK,SCHEDULER}_BENCH_BINARY_SHA256`, `MISO_INTERCHANGE_BINARY_SHA256` | `MISO_ENGINE_BENCH_BINARY_SHA256` |
+| `MISO_ENGINE_BUILTINS_BENCH_CANDIDATE_COMMIT`, `MISO_INTERCHANGE_CANDIDATE_COMMIT` | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` |
+| `MISO_ENGINE_{RACK,SCHEDULER}_BENCH_CANDIDATE_SHA256` | `MISO_ENGINE_BENCH_CANDIDATE_SHA256` |
+| `MISO_ENGINE_{RACK,SCHEDULER}_BENCH_ROUND` | `MISO_ENGINE_BENCH_ROUND` |
+| `MISO_BUILTINS_BENCH_PHASE`, `MISO_INTERCHANGE_BENCH_PHASE` | `MISO_ENGINE_BENCH_PHASE` |
+
+Issue numbers left the names: `MISO_ISSUE069_DIRECT_RT_*` -> `MISO_ENGINE_BUILTINS_RT_*`,
+`MISO_ISSUE069_GRAPH_RT_*` -> `MISO_ENGINE_BUILTINS_GRAPH_RT_*`, `MISO_039_PHASE_*` ->
+`MISO_ENGINE_SCHEDULER_PHASE_*`, `MISO_ENGINE_ISSUE{8,37}_AUDIT` -> `MISO_ENGINE_AUDIT_{008,037}`,
+`MISO_ISSUE_0{31,45}_TRANSCRIPT` -> `MISO_ENGINE_TRANSCRIPT_0{31,45}`. 59 files changed; every
+emitter and every reader of a renamed marker moved together, which is why the trace gates and the
+runner lifecycle tests still pass.
+
+The gate is `scripts/check-env-vocabulary.sh`, wired into CI beside the workspace policy. It is
+bidirectional: an undocumented name fails, and so does a documented row nothing uses. An unused row
+is the same defect as an undocumented name seen from the other side -- a name nobody agreed to stop
+using. `scripts/test-env-vocabulary.sh` carries seven mutations; deleting each of the checker's
+three `fail` calls in turn makes `stray-prefix`, `undocumented-name` and `unused-row` escape, so
+each rule is proven red. Rule 1 exempts exactly two paths -- `docs/ENGINE_ENV_VOCABULARY.md`, which
+has to be able to name a retired prefix in order to say it is retired, and
+`.github/ISSUE_SPECS/`, whose job is to record what a name used to be. The `stray-prefix-in-doc`
+case pins that the exemption is that narrow: the same stray name in a script fails.
+
+Not done in phase C: metadata is still gathered from the environment rather than in-process, so a
+runner that forgets to export a name still produces a `missing_metadata` entry rather than a
+correct value. Making `Metadata::gather()` read `/proc/cpuinfo`, `rustc -vV` and `scaling_governor`
+itself -- which is what actually closes F2 -- belongs with the shared support library of phase B.

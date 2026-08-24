@@ -191,7 +191,7 @@ test ! -e /tmp/engine-v2-issue-045-sol2-transcript.txt
 test ! -e /tmp/engine-v2-issue-045-sol2-stdout.txt
 set -o pipefail
 # archived by #105: the module is no longer compiled; see dsp-research/archive/issue-045/
-MISO_ISSUE_045_TRANSCRIPT=/tmp/engine-v2-issue-045-sol2-transcript.txt cargo test --locked -p miso-engine-dsp-reference parametric_eq_recurrence_proof::issue_045_complete_recurrence_comparison_requires_sol_freeze -- --ignored --exact --nocapture 2>&1 | tee /tmp/engine-v2-issue-045-sol2-stdout.txt
+MISO_ENGINE_TRANSCRIPT_045=/tmp/engine-v2-issue-045-sol2-transcript.txt cargo test --locked -p miso-engine-dsp-reference parametric_eq_recurrence_proof::issue_045_complete_recurrence_comparison_requires_sol_freeze -- --ignored --exact --nocapture 2>&1 | tee /tmp/engine-v2-issue-045-sol2-stdout.txt
 rg -n '^issue-045 complete=true$' /tmp/engine-v2-issue-045-sol2-transcript.txt
 sha256sum /tmp/engine-v2-issue-045-sol2-transcript.txt /tmp/engine-v2-issue-045-sol2-stdout.txt
 ```
