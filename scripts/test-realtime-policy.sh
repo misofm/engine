@@ -19,10 +19,9 @@ create_fixture() {
         "$root/crates/miso-engine-session/tests" \
         "$root/hosts/miso-engine-host-web/src" \
         "$root/tools/miso-engine-bench-support/src" \
-        "$root/tools/miso-engine-capi-audit/src" \
+        "$root/tools/miso-engine-audit/src" \
         "$root/tools/miso-engine-native-pcm-runner/src" \
-        "$root/tools/miso-engine-protocol-bench/src" \
-        "$root/tools/miso-engine-rack-bench/src"
+        "$root/tools/miso-engine-bench/src"
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn render() {}' \
@@ -87,7 +86,7 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for CapiAudit {}' \
         'struct CapiAudit;' \
-        >"$root/tools/miso-engine-capi-audit/src/main.rs"
+        >"$root/tools/miso-engine-audit/src/capi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn frozen_c_abi_adapter() {}' \
@@ -103,10 +102,10 @@ create_fixture() {
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn follow() {}' \
-        >"$root/tools/miso-engine-protocol-bench/src/main.rs"
+        >"$root/tools/miso-engine-bench/src/protocol.rs"
     printf '%s\n' \
         'fn measure() {}' \
-        >"$root/tools/miso-engine-rack-bench/src/main.rs"
+        >"$root/tools/miso-engine-bench/src/rack.rs"
 }
 
 expect_failure() {
@@ -141,9 +140,9 @@ expect_failure panic-path-macro \
 expect_failure unsafe-scope \
     'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure unsafe-outside-exact-allowlist \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-protocol-bench/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-bench/src/other.rs"'
 expect_failure unsafe-outside-capi-audit-main \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-capi-audit/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-audit/src/other.rs"'
 expect_failure unsafe-outside-native-pcm-runner-lib \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-native-pcm-runner/src/other.rs"'
 # #84 phase A deleted `crates/miso-engine-core/src/arch/`; its unsafe exemption went with it, so
@@ -151,7 +150,7 @@ expect_failure unsafe-outside-native-pcm-runner-lib \
 expect_failure unsafe-in-deleted-core-arch \
     'mkdir -p "$root/crates/miso-engine-core/src/arch"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/x86.rs"'
 expect_failure unsafe-outside-rack-benchmark-main \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-rack-bench/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-bench/src/other.rs"'
 expect_failure unsafe-outside-capi-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-capi/src/lib.rs"'
 expect_failure unsafe-in-second-capi-ffi-path \

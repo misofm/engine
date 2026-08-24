@@ -31,7 +31,7 @@ output="$(
     MISO_ENGINE_BENCH_TARGET_TRIPLE="$(rustc -vV | awk '/host/ { print $2; exit }')" \
     MISO_ENGINE_BENCH_TARGET_FEATURES="runtime-dispatch-baseline" \
     MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER="native-cli" \
-    cargo run --locked --release -q -p miso-engine-bootstrap-bench -- --rounds "$rounds"
+    cargo run --locked --release -q -p miso-engine-bench -- bootstrap --rounds "$rounds"
 )"
 
 [[ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" == "1" ]] || {

@@ -11,11 +11,11 @@ bash -n "$runner" "$promotion" "$0"
     printf 'graph benchmark public scripts must be executable\n' >&2
     exit 1
 }
-[[ "$(rg -c 'cargo run --locked --release --quiet -p miso-engine-graph-bench' "$runner")" == 1 ]] || {
+[[ "$(rg -c 'cargo run --locked --release --quiet -p miso-engine-bench' "$runner")" == 1 ]] || {
     printf 'runner must contain exactly one future workload launch\n' >&2
     exit 1
 }
-! rg -n 'cargo run|miso-engine-graph-bench' "$promotion" >/dev/null || {
+! rg -n 'cargo run|miso-engine-bench' "$promotion" >/dev/null || {
     printf 'promotion command contains a workload launch token\n' >&2
     exit 1
 }

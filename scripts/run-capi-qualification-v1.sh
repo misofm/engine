@@ -90,17 +90,17 @@ CARGO_TARGET_DIR="$build" cargo test --locked -p miso-engine-capi -p miso-engine
 # The frozen runner corpus is executed once by its accepted test matrix. Do not rerun this command.
 CARGO_TARGET_DIR="$build" cargo test --locked -p miso-engine-native-pcm-runner \
     >"$logs/runner-corpus.log" 2>&1
-CARGO_TARGET_DIR="$build" cargo run --locked --release -p miso-engine-capi-audit \
+CARGO_TARGET_DIR="$build" cargo run --locked --release -p miso-engine-audit -- capi \
     >"$stage/capi-audit.json" 2>"$logs/capi-audit.stderr"
 jq -e '.kind == "issue022_capi_render_audit" and .calls == 100000 and
     .render_errors == 0 and .stable_output_address == true and .total_violations == 0' \
     "$stage/capi-audit.json" >/dev/null
 
-CARGO_TARGET_DIR="$build" cargo build --locked --release -p miso-engine-realtime-audit \
+CARGO_TARGET_DIR="$build" cargo build --locked --release -p miso-engine-audit \
     >"$logs/realtime-build.log" 2>&1
 trace_prefix="$stage/realtime-trace"
-strace -ff -qq -o "$trace_prefix" "$build/release/miso_engine_realtime_audit" \
-    --blocks 1000000 --audit --trace-markers >"$stage/realtime-audit.json"
+strace -ff -qq -o "$trace_prefix" "$build/release/miso_engine_audit" \
+    realtime --blocks 1000000 --audit --trace-markers >"$stage/realtime-audit.json"
 marker_file=""
 while IFS= read -r candidate; do
     if rg -q 'MISO_ENGINE_RT_BEGIN' "$candidate" && rg -q 'MISO_ENGINE_RT_END' "$candidate"; then

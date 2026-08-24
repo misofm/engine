@@ -14,5 +14,6 @@
 pub mod alloc;
 pub mod digest;
 pub mod json;
+pub mod metadata;
 pub mod stats;
 pub mod timing;

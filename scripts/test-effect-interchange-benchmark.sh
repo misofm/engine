@@ -11,7 +11,7 @@ python3 -I -B scripts/effect-interchange-benchmark-validator.py --self-test
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 template="$scratch/template"
-mkdir -p "$template/scripts" "$template/tools/miso-engine-effect-interchange-bench/src" \
+mkdir -p "$template/scripts" "$template/tools/miso-engine-bench/src" \
     "$template/fixtures/effect-interchange/v1" "$template/target/issue081" "$template/bin"
 cp scripts/effect-interchange-benchmark-validator.py \
     scripts/preflight-effect-interchange-benchmark.sh \
@@ -19,10 +19,10 @@ cp scripts/effect-interchange-benchmark-validator.py \
     scripts/test-effect-interchange-benchmark.sh \
     scripts/check-effect-interchange-qualification.sh \
     scripts/check-effect-interchange-targets.sh "$template/scripts/"
-cp tools/miso-engine-effect-interchange-bench/src/main.rs \
-    "$template/tools/miso-engine-effect-interchange-bench/src/main.rs"
-cp tools/miso-engine-effect-interchange-bench/Cargo.toml \
-    "$template/tools/miso-engine-effect-interchange-bench/Cargo.toml"
+cp tools/miso-engine-bench/src/effect_interchange.rs \
+    "$template/tools/miso-engine-bench/src/effect_interchange.rs"
+cp tools/miso-engine-bench/Cargo.toml \
+    "$template/tools/miso-engine-bench/Cargo.toml"
 cp fixtures/effect-interchange/v1/ACCEPTED.sha256 \
     "$template/fixtures/effect-interchange/v1/ACCEPTED.sha256"
 cp Cargo.lock "$template/Cargo.lock"
@@ -51,8 +51,8 @@ cat >"$template/bin/cargo" <<'EOF'
 set -euo pipefail
 [[ "${MISO_ENGINE_TEST_CARGO_FAIL:-0}" != 1 ]] || exit 73
 mkdir -p "$CARGO_TARGET_DIR/release"
-cp "$MISO_ENGINE_TEST_FAKE_BENCH" "$CARGO_TARGET_DIR/release/miso_engine_effect_interchange_bench"
-chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_effect_interchange_bench"
+cp "$MISO_ENGINE_TEST_FAKE_BENCH" "$CARGO_TARGET_DIR/release/miso_engine_bench"
+chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_bench"
 EOF
 cat >"$template/fake-benchmark.py" <<'PY'
 #!/usr/bin/env python3
@@ -276,11 +276,11 @@ fi
 for kind in regular symlink hardlink; do
     new_case "preflight-overwrite-$kind"
     case "$kind" in
-        regular) printf protected >"$case_root/target/issue081/miso_engine_effect_interchange_bench" ;;
-        symlink) ln -s protected "$case_root/target/issue081/miso_engine_effect_interchange_bench" ;;
+        regular) printf protected >"$case_root/target/issue081/miso_engine_bench" ;;
+        symlink) ln -s protected "$case_root/target/issue081/miso_engine_bench" ;;
         hardlink)
             printf protected >"$case_root/protected"
-            ln "$case_root/protected" "$case_root/target/issue081/miso_engine_effect_interchange_bench"
+            ln "$case_root/protected" "$case_root/target/issue081/miso_engine_bench"
             ;;
     esac
     if run_preflight >/dev/null 2>&1; then

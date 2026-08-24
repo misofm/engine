@@ -13,7 +13,7 @@ normalize() {
     local input=$1 output=$2
     local filter='def norm:
       if type == "object" then with_entries(
-        .value = if (.key | test("(^|_)(duration|elapsed|timestamp|binary_sha256|tool_.*sha256|min_ns|max_ns|p[0-9].*_ns|ns_per|samples_per_second|frames_per_second)"))
+        .value = if (.key | test("(_ns$)|(_address$)|(_rss_bytes$)|(^|_)(duration|elapsed|timestamp|ns_per|samples_per_second|frames_per_second)|(^|_)(binary_sha256|tool_.*sha256|git_commit|git_tree|workspace_dirty|worker_cpu_fraction|peak_resident_bytes)$|^(min|max|p50|p95|p99|p99_9)$"))
                  then "<volatile>" else (.value | norm) end)
       elif type == "array" then map(norm)
       else . end;
@@ -26,7 +26,9 @@ normalize() {
 
 normalize_stderr() {
     local input=$1 output=$2 old_root=$3 new_root=$4
-    sed -e "s|$old_root|<source-root>|g" -e "s|$new_root|<source-root>|g" \
+    sed -E -e "s|$old_root|<source-root>|g" -e "s|$new_root|<source-root>|g" \
+        -e 's/\([0-9]+\)/(pid)/g' \
+        -e 's#tools/miso-engine-[^: ]+/src/[A-Za-z0-9_./-]+[.]rs#<tool-source>#g' \
         "$input" >"$output"
 }
 
@@ -61,16 +63,20 @@ command -v cargo >/dev/null || fail 'cargo is required'
 command -v jq >/dev/null || fail 'jq is required'
 
 scratch=$(mktemp -d)
-base_tree="$scratch/base"
+base_tree="$root/target/issue136-tools-golden-base"
 cleanup() {
-    git -C "$root" worktree remove --force "$base_tree" >/dev/null 2>&1 || true
     rm -rf -- "$scratch"
 }
 trap cleanup EXIT
-git -C "$root" worktree add --detach "$base_tree" "$base" >/dev/null
+if [[ -e "$base_tree/.git" ]]; then
+    [[ $(git -C "$base_tree" rev-parse HEAD) == $(git -C "$root" rev-parse "$base") ]] ||
+        fail "cached base worktree does not match $base"
+else
+    git -C "$root" worktree add --detach "$base_tree" "$base" >/dev/null
+fi
 
-old_target="$scratch/old-target"
-new_target="$scratch/new-target"
+old_target="$root/target/issue136-tools-golden-build/old"
+new_target="$root/target/issue136-tools-golden-build/new"
 old_packages=(
     miso-engine-bootstrap-bench miso-engine-conformance-bench miso-engine-realtime-audit
     miso-engine-protocol-audit miso-engine-capi-audit miso-engine-protocol-bench
@@ -80,10 +86,14 @@ old_packages=(
     miso-engine-builtins-bench miso-engine-builtins-fixture miso-engine-rack-bench
     miso-engine-source-fixture miso-engine-source-audit
 )
+old_build_args=()
 for package in "${old_packages[@]}"; do
-    CARGO_TARGET_DIR="$old_target" cargo build --quiet --locked --release \
-        --manifest-path "$base_tree/Cargo.toml" -p "$package"
+    old_build_args+=(-p "$package")
 done
+# Build every baseline package in one invocation so Cargo resolves the same union of dependency
+# features that the two consolidated packages necessarily share.
+CARGO_TARGET_DIR="$old_target" cargo build --quiet --locked --release --all-features \
+    --manifest-path "$base_tree/Cargo.toml" "${old_build_args[@]}"
 # This is deliberately the union build: feature leakage introduced by package consolidation is
 # part of the comparison, not an exemption from it.
 CARGO_TARGET_DIR="$new_target" cargo build --quiet --locked --release \
@@ -127,7 +137,7 @@ case_command() {
     case "$case_name" in
         bootstrap) old_bin=miso_engine_bootstrap_bench; old_args=(--rounds 1); new_tool=bench; new_args=(bootstrap --rounds 1) ;;
         conformance) old_bin=miso_engine_conformance_bench; old_args=(--rounds 1); new_tool=bench; new_args=(conformance --rounds 1) ;;
-        realtime-audit) old_bin=miso_engine_realtime_audit; old_args=(--audit --blocks 1); new_tool=audit; new_args=(realtime --audit --blocks 1) ;;
+        realtime-audit) old_bin=miso_engine_realtime_audit; old_args=(--audit --blocks 3); new_tool=audit; new_args=(realtime --audit --blocks 3) ;;
         realtime-bench) old_bin=miso_engine_realtime_audit; old_args=(--blocks 1 --benchmark-rounds 1); new_tool=audit; new_args=(realtime --blocks 1 --benchmark-rounds 1) ;;
         protocol-audit) old_bin=miso_engine_protocol_audit; old_args=(); new_tool=audit; new_args=(protocol) ;;
         capi-audit) old_bin=miso_engine_capi_audit; old_args=(); new_tool=audit; new_args=(capi) ;;
@@ -137,11 +147,11 @@ case_command() {
         effect-contract-audit) old_bin=miso_engine_effect_contract_bench; old_args=(--audit 1); new_tool=bench; new_args=(effect-contract --audit 1) ;;
         effect-contract-bench) old_bin=miso_engine_effect_contract_bench; old_args=(--benchmark-two-rounds); new_tool=bench; new_args=(effect-contract --benchmark-two-rounds) ;;
         effect-interchange) old_bin=miso_engine_effect_interchange_bench; old_args=(); new_tool=bench; new_args=(effect-interchange) ;;
-        graph-audit) old_bin=miso_engine_graph_audit; old_args=(--blocks 1); new_tool=audit; new_args=(graph --blocks 1) ;;
-        parametric-eq-audit) old_bin=miso_engine_graph_audit_parametric_eq; old_args=(--blocks 1); new_tool=audit; new_args=(parametric-eq --blocks 1) ;;
-        delay-audit) old_bin=miso_engine_graph_audit_delay; old_args=(--blocks 1); new_tool=audit; new_args=(delay --blocks 1) ;;
-        gate-expander-audit) old_bin=miso_engine_graph_audit_gate_expander; old_args=(--blocks 1); new_tool=audit; new_args=(gate-expander --blocks 1) ;;
-        compressor-audit) old_bin=miso_engine_graph_audit_compressor; old_args=(--blocks 1); new_tool=audit; new_args=(compressor --blocks 1) ;;
+        graph-audit) old_bin=miso_engine_graph_audit; old_args=(--blocks 3); new_tool=audit; new_args=(graph --blocks 3) ;;
+        parametric-eq-audit) old_bin=miso_engine_graph_audit_parametric_eq; old_args=(--blocks 100000); new_tool=audit; new_args=(parametric-eq --blocks 100000) ;;
+        delay-audit) old_bin=miso_engine_graph_audit_delay; old_args=(--blocks 100000); new_tool=audit; new_args=(delay --blocks 100000) ;;
+        gate-expander-audit) old_bin=miso_engine_graph_audit_gate_expander; old_args=(--blocks 100000); new_tool=audit; new_args=(gate-expander --blocks 100000) ;;
+        compressor-audit) old_bin=miso_engine_graph_audit_compressor; old_args=(--blocks 100000); new_tool=audit; new_args=(compressor --blocks 100000) ;;
         scheduler-audit) old_bin=miso_engine_scheduler_audit; old_args=(); new_tool=audit; new_args=(scheduler) ;;
         scheduler-bench) old_bin=miso_engine_scheduler_bench; old_args=(); new_tool=bench; new_args=(scheduler) ;;
         graph-bench) old_bin=miso_engine_graph_bench; old_args=(); new_tool=bench; new_args=(graph) ;;

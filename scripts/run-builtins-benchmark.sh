@@ -9,7 +9,7 @@ repository_root="$(cd "$script_directory/.." && pwd)"
 artifact_directory="$repository_root/target/issue72"
 nonbenchmark_seal="$artifact_directory/nonbenchmark.seal.json"
 seal="$artifact_directory/builtins-benchmark.preflight.json"
-binary="$artifact_directory/miso_engine_builtins_bench"
+binary="$artifact_directory/miso_engine_bench"
 raw_output="$artifact_directory/builtins-benchmark.raw.jsonl"
 accepted_output="$artifact_directory/builtins-benchmark.jsonl"
 stderr_output="$artifact_directory/builtins-benchmark.validator.stderr"
@@ -19,7 +19,7 @@ record_validator="$script_directory/builtins-benchmark-record-validator.jq"
 aggregate_validator="$script_directory/builtins-benchmark-validator.jq"
 lifecycle="$script_directory/test-builtins-benchmark.sh"
 preflight_script="$script_directory/preflight-builtins-benchmark.sh"
-tool_source="$repository_root/tools/miso-engine-builtins-bench/src/main.rs"
+tool_source="$repository_root/tools/miso-engine-bench/src/builtins.rs"
 cargo_lock="$repository_root/Cargo.lock"
 fixture_manifest="$repository_root/fixtures/builtins/v1/MANIFEST.tsv"
 graph_pcm="$repository_root/fixtures/builtins/v1/pcm/graph-taps.f32le"
@@ -58,7 +58,7 @@ verify_issue035() {
            "$(wc -c <"$path" | tr -d ' ')" == "$bytes" &&
            "$(hash_file "$path")" == "$digest" ]] || return 1
     done <<'EOF'
-miso_engine_builtins_bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
+miso_engine_bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
 builtins-benchmark.preflight.json 2211 85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d
 builtins-benchmark.raw.jsonl 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 builtins-benchmark.validator.stderr 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -216,7 +216,7 @@ jq -e \
      .fixture_manifest_sha256 == $manifest and .graph_pcm_sha256 == $pcm and
      .graph_meter_sha256 == $meter and .accepted_issue068_source_sha256 == $issue068 and
      .issue035_artifacts == {
-       "miso_engine_builtins_bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
+       "miso_engine_bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
        "builtins-benchmark.preflight.json":"85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d",
        "builtins-benchmark.raw.jsonl":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
        "builtins-benchmark.validator.stderr":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -263,7 +263,7 @@ launch_attempted=1
 set +e
 MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
 MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha256" \
-"$binary" >&"$raw_fd" 2>&"$stderr_fd"
+"$binary" builtins >&"$raw_fd" 2>&"$stderr_fd"
 workload_status=$?
 set -e
 exec {raw_fd}>&-

@@ -45,6 +45,6 @@ for crate_dir in "${conformance_crates[@]}"; do
     packages+=(-p "${crate_dir#crates/}")
 done
 cargo test --locked "${packages[@]}" --test conformance
-cargo run --locked --release -q -p miso-engine-effect-contract-bench -- --conformance
+cargo run --locked --release -q -p miso-engine-bench -- effect-contract --conformance
 printf 'effect runtime contract/conformance: ok (%s production factories on the harness)\n' \
     "${#conformance_crates[@]}"

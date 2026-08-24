@@ -15,7 +15,7 @@ for tool in awk git ln mkdir mktemp python3 rm rustc sha256sum wc; do
 done
 artifact_dir="$root/target/issue081"
 seal="$artifact_dir/benchmark-preflight.seal.json"
-binary="$artifact_dir/miso_engine_effect_interchange_bench"
+binary="$artifact_dir/miso_engine_bench"
 raw="$artifact_dir/benchmark.raw.jsonl"
 accepted="$artifact_dir/benchmark.accepted.jsonl"
 disposition="$artifact_dir/benchmark.disposition.json"
@@ -128,8 +128,8 @@ commit="$(git rev-parse --verify HEAD)"
 tree="$(git rev-parse HEAD^{tree})"
 binary_sha="$(sha256sum "$binary" | awk '{print $1}')"
 seal_sha="$(sha256sum "$seal" | awk '{print $1}')"
-source_sha="$(sha256sum tools/miso-engine-effect-interchange-bench/src/main.rs | awk '{print $1}')"
-tool_manifest_sha="$(sha256sum tools/miso-engine-effect-interchange-bench/Cargo.toml | awk '{print $1}')"
+source_sha="$(sha256sum tools/miso-engine-bench/src/effect_interchange.rs | awk '{print $1}')"
+tool_manifest_sha="$(sha256sum tools/miso-engine-bench/Cargo.toml | awk '{print $1}')"
 fixture_sha="$(sha256sum fixtures/effect-interchange/v1/ACCEPTED.sha256 | awk '{print $1}')"
 [[ "$fixture_sha" == 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 ]] || {
     failure_reason=fixture_manifest_changed
@@ -217,7 +217,7 @@ MISO_ENGINE_BENCH_PROFILE=release \
 CPU_MODEL="$cpu_model" LOGICAL_CORES="$logical_cores" PHYSICAL_CORES="$physical_cores" \
 OS="$os" KERNEL="$kernel" POWER_MODE="$power_mode" GOVERNOR="$governor" \
 BACKGROUND_LOAD="$background_load" \
-    "$binary" >>"$raw" 2>>"$stderr_log" || exit 1
+    "$binary" effect-interchange >>"$raw" 2>>"$stderr_log" || exit 1
 refresh_phases
 failure_reason=phase_handshake_failed
 python3 -I -B - "$stderr_log" <<'PY'

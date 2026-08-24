@@ -189,7 +189,7 @@ What *is* gated is that nothing else moved a rendered bit:
 ### M-16 — the class-A digest oracle reacts to a rendered bit
 * Mutation: in `runtime::reduce_plane`, `sum2_block::<FrameLane>(output, a, b)` ->
   `sum2_block::<FrameLane>(output, a, a)`.
-* Command: `cargo run --release -p miso-engine-capi-audit`
+* Command: `cargo run --release -p miso-engine-audit -- capi`
 * Red: `pcm_digest d412e33bcc063aef` instead of `774f0722585e918b`.
 
 *M-16a, recorded green:* two weaker mutations left the digest unchanged and are recorded because

@@ -2,12 +2,12 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/miso_engine_graph_audit"
+binary="$workspace_dir/target/release/miso_engine_audit"
 blocks="${1:-1000000}"
 trace_root="$workspace_dir/target/issue6/strace"
 
 cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p miso-engine-graph-audit
+  -p miso-engine-audit
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the graph realtime syscall gate\n' >&2
   exit 1
@@ -16,7 +16,7 @@ mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
 
-strace -ff -qq -s 200 -o "$trace_prefix" "$binary" --blocks "$blocks" \
+strace -ff -qq -s 200 -o "$trace_prefix" "$binary" graph --blocks "$blocks" \
   > "$trace_root/audit.json"
 
 marker_file=""

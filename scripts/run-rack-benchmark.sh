@@ -86,8 +86,8 @@ export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 failure_reason=build_failed
-cargo build --locked --release --quiet -p miso-engine-rack-bench 2>>"$stderr_log"
-binary="$root/target/release/miso_engine_rack_bench"
+cargo build --locked --release --quiet -p miso-engine-bench 2>>"$stderr_log"
+binary="$root/target/release/miso_engine_bench"
 [[ -x "$binary" ]] || { failure_reason=missing_binary; exit 1; }
 failure_reason=binary_identity_failed
 binary_sha256=$(sha256sum "$binary" | awk '{print $1}')
@@ -131,7 +131,7 @@ run_round() {
     MISO_ENGINE_BENCH_CODEGEN_UNITS=16 \
     MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="$background_load_note" \
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
-    "$binary"
+    "$binary" rack
 }
 
 # One untimed warmup, then exactly the two frozen measured rounds. Raw stdout is append-only after
