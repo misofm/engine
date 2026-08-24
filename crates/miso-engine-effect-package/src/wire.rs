@@ -121,6 +121,11 @@ impl<'a> VerifiedEffectDescriptorWireV1<'a> {
     pub const fn supported_link_mode_bits(self) -> u32 {
         self.supported_link_mode_bits
     }
+
+    /// Identity of bytes this value already proved canonical; performs no second validation pass.
+    pub fn identity(self) -> EffectDescriptorIdentityV1 {
+        descriptor_identity(self.bytes)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1461,8 +1466,7 @@ pub fn effect_descriptor_identity_v1(
     bytes: &[u8],
     maximum_descriptor_bytes: u32,
 ) -> Result<EffectDescriptorIdentityV1, Diagnostic> {
-    let verified = verify_effect_descriptor_wire_v1(bytes, maximum_descriptor_bytes)?;
-    Ok(descriptor_identity(verified.bytes))
+    Ok(verify_effect_descriptor_wire_v1(bytes, maximum_descriptor_bytes)?.identity())
 }
 
 #[cfg(test)]

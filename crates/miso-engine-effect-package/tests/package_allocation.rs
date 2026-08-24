@@ -8,13 +8,17 @@ use std::alloc::{GlobalAlloc, System};
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::{
     ArtifactSelectionRequestV1, EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectCid,
+    EffectDescriptorEnumChoiceRecordV1, EffectDescriptorParameterRecordV1,
+    EffectDescriptorPortRecordV1, EffectDescriptorQualityRecordV1, EffectDescriptorSummaryV1,
+    EffectDescriptorWireDiagnosticCodeV1, EffectDescriptorWireDiagnosticV1,
     EffectPackageAuthoringV1, EffectPackageDiagnosticCodeV1, EffectPackageLimitsV1,
     EffectStateLimitsV1, EffectStateReplayViewV1, bind_effect_descriptor_wire_v1,
     effect_descriptor_identity_v1, effect_package_cid_v1, effect_package_v1_required_size,
     effect_state_v1_requirements, encode_effect_package_v1, encode_effect_state_v1,
-    inspect_effect_state_selector_v1, select_effect_package_artifact_v1,
-    validate_effect_state_current_layout_v1, validate_effect_state_replay_v1,
-    verify_effect_descriptor_wire_v1, verify_effect_package_v1, verify_effect_state_v1,
+    inspect_effect_state_selector_v1, miso_engine_effect_descriptor_v1_inspect,
+    select_effect_package_artifact_v1, validate_effect_state_current_layout_v1,
+    validate_effect_state_replay_v1, verify_effect_descriptor_wire_v1, verify_effect_package_v1,
+    verify_effect_state_v1,
 };
 
 const fn effect_id(value: &'static str) -> EffectId {
@@ -513,6 +517,139 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
         "issue097_package_cap artifacts={count} bytes={required} elapsed={elapsed:?} \
          allocations={encode_snapshot:?}"
     );
+}
+
+/// Issue 078 forbids the package layer validating one descriptor twice; the C `inspect` entry has
+/// to obey it too. The oracle is the allocation count of exactly one nested Issue-082 pass.
+#[test]
+fn c_inspect_performs_exactly_one_nested_descriptor_pass() {
+    let bytes = fixture();
+    let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+    let descriptor = &bytes[96..96 + descriptor_len];
+    let (identity, descriptor_pass) =
+        measure(|| effect_descriptor_identity_v1(descriptor, 4_194_304));
+    let identity = identity.unwrap();
+    assert!(descriptor_pass.allocations > 0);
+
+    let verified = verify_effect_descriptor_wire_v1(descriptor, 4_194_304).unwrap();
+    let (parameter_capacity, port_capacity, quality_capacity, choice_capacity) = (
+        verified.parameter_count(),
+        verified.port_count(),
+        verified.quality_count(),
+        verified.enum_choice_count(),
+    );
+    let mut summary = EffectDescriptorSummaryV1::default();
+    let mut parameters =
+        vec![EffectDescriptorParameterRecordV1::default(); parameter_capacity as usize];
+    let mut ports = vec![EffectDescriptorPortRecordV1::default(); port_capacity as usize];
+    let mut qualities = vec![EffectDescriptorQualityRecordV1::default(); quality_capacity as usize];
+    let mut choices = vec![EffectDescriptorEnumChoiceRecordV1::default(); choice_capacity as usize];
+    let (mut required_parameters, mut required_ports) = (0u32, 0u32);
+    let (mut required_qualities, mut required_choices) = (0u32, 0u32);
+    let mut diagnostic = EffectDescriptorWireDiagnosticV1::new(
+        EffectDescriptorWireDiagnosticCodeV1::Ok,
+        u32::MAX,
+        u32::MAX,
+    );
+    let (code, snapshot) = measure(|| {
+        // SAFETY: every pointer denotes live, correctly typed, mutually nonoverlapping storage of
+        // the stated capacity for this call, and none is retained.
+        unsafe {
+            miso_engine_effect_descriptor_v1_inspect(
+                descriptor.as_ptr(),
+                descriptor.len(),
+                4_194_304,
+                &mut summary,
+                parameters.as_mut_ptr(),
+                parameter_capacity,
+                ports.as_mut_ptr(),
+                port_capacity,
+                qualities.as_mut_ptr(),
+                quality_capacity,
+                choices.as_mut_ptr(),
+                choice_capacity,
+                &mut required_parameters,
+                &mut required_ports,
+                &mut required_qualities,
+                &mut required_choices,
+                &mut diagnostic,
+            )
+        }
+    });
+    assert_eq!(code, EffectDescriptorWireDiagnosticCodeV1::Ok as u32);
+    assert_eq!(snapshot, descriptor_pass);
+    assert_eq!(summary.identity, *identity.as_bytes());
+    assert_eq!(
+        (
+            required_parameters,
+            required_ports,
+            required_qualities,
+            required_choices
+        ),
+        (
+            parameter_capacity,
+            port_capacity,
+            quality_capacity,
+            choice_capacity
+        )
+    );
+    println!("issue097_ffi_single_pass inspect={snapshot:?} descriptor_pass={descriptor_pass:?}");
+}
+
+/// A null wire with `wire_len == 0` is a legal argument tuple, so the boundary must report the
+/// wire diagnostic the verifier gives for empty input, not `Null`, and must zero the counts.
+#[test]
+fn c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire() {
+    let expected = verify_effect_descriptor_wire_v1(&[], 4_194_304).unwrap_err();
+    assert_ne!(expected.code, EffectDescriptorWireDiagnosticCodeV1::Null);
+    let mut summary = EffectDescriptorSummaryV1 {
+        abi_version: 0xdead_beef,
+        ..EffectDescriptorSummaryV1::default()
+    };
+    let untouched = summary;
+    let (mut required_parameters, mut required_ports) = (0xa5a5_a5a5u32, 0xa5a5_a5a5u32);
+    let (mut required_qualities, mut required_choices) = (0xa5a5_a5a5u32, 0xa5a5_a5a5u32);
+    let mut diagnostic = EffectDescriptorWireDiagnosticV1::new(
+        EffectDescriptorWireDiagnosticCodeV1::Ok,
+        u32::MAX,
+        u32::MAX,
+    );
+    // SAFETY: the wire pointer is null exactly with length zero, which the ABI permits; every
+    // mandatory output denotes live writable storage and the optional record arrays are null with
+    // zero capacity.
+    let code = unsafe {
+        miso_engine_effect_descriptor_v1_inspect(
+            core::ptr::null(),
+            0,
+            4_194_304,
+            &mut summary,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            0,
+            &mut required_parameters,
+            &mut required_ports,
+            &mut required_qualities,
+            &mut required_choices,
+            &mut diagnostic,
+        )
+    };
+    assert_eq!(code, expected.code as u32);
+    assert_eq!(diagnostic, expected);
+    assert_eq!(
+        (
+            required_parameters,
+            required_ports,
+            required_qualities,
+            required_choices
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(summary, untouched);
 }
 
 #[test]

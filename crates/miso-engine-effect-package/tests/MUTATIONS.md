@@ -61,3 +61,25 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
   `scripts/check-effect-package-v1.sh`
 * Red: `error[E0432]: unresolved import
   miso_engine_effect_package::verify_canonical_package_v1`.
+
+## F5 — one descriptor pass in the C inspect entry
+
+### M-07 — restore the second full verification pass
+* Mutation: in `ffi.rs::miso_engine_effect_descriptor_v1_inspect`,
+  `let identity = *verified.identity().as_bytes();` →
+  `let identity = *effect_descriptor_identity_v1(wire_bytes, maximum_wire_bytes)...as_bytes();`
+  (the shape the audit found).
+* Command: `cargo test --locked -p miso-engine-effect-package --test package_allocation`
+* Red: `c_inspect_performs_exactly_one_nested_descriptor_pass` —
+  `left: Snapshot { allocations: 16, allocated_bytes: 2000, ... }` vs
+  `right: Snapshot { allocations: 8, allocated_bytes: 1000, ... }`, exactly double.
+* Oracle caveat (from the #97 plan, for whoever closes F7): this gate's oracle is the descriptor
+  semantic pass's heap use. If `wire.rs` is ever made allocation-free the assertion becomes
+  `0 == 0` and that job must replace the oracle with a `#[cfg(test)]` verify counter.
+
+### M-08 — treat a null wire pointer as `Null` regardless of length
+* Mutation: in the `mandatory_null` predicate, `|| (wire.is_null() && wire_len != 0)` →
+  `|| wire.is_null()`.
+* Command: `cargo test --locked -p miso-engine-effect-package --test package_allocation`
+* Red: `c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire` — `left: 1` (`Null`) vs
+  `right: 4` (`Header`, what the verifier returns for empty input).

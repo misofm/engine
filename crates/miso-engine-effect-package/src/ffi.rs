@@ -4,8 +4,7 @@
 
 use crate::{
     EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectDescriptorWireDiagnosticCodeV1,
-    EffectDescriptorWireDiagnosticV1, effect_descriptor_identity_v1,
-    verify_effect_descriptor_wire_v1,
+    EffectDescriptorWireDiagnosticV1, verify_effect_descriptor_wire_v1,
 };
 use core::slice;
 
@@ -318,24 +317,9 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
         }
         return error.code as u32;
     }
-    let identity = match effect_descriptor_identity_v1(wire_bytes, maximum_wire_bytes) {
-        Ok(value) => *value.as_bytes(),
-        Err(error) => {
-            // Verification already succeeded, but retain deterministic all-or-none failure if the
-            // identity verification path is ever changed independently.
-            // SAFETY: Every required-count pointer and the diagnostic were checked nonnull above.
-            unsafe {
-                zero_required_counts(
-                    required_parameters,
-                    required_ports,
-                    required_qualities,
-                    required_enum_choices,
-                );
-                write_diagnostic(diagnostic, error);
-            }
-            return error.code as u32;
-        }
-    };
+    // Issue 078 forbids validating the same descriptor twice: the identity comes from the value
+    // the single verification pass above already proved canonical.
+    let identity = *verified.identity().as_bytes();
     let summary_value = EffectDescriptorSummaryV1 {
         abi_version: EFFECT_DESCRIPTOR_INSPECTION_ABI_VERSION_V1,
         total_bytes: wire_bytes.len() as u32,
