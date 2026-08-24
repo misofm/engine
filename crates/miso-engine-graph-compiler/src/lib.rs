@@ -2713,6 +2713,191 @@ mod tests {
             expected_members.sort();
             assert_eq!(actual_members, expected_members);
             assert_eq!(12 - actual_members.len(), expected_builtin_tails);
+            // Independent oracle for the two frozen op orders this branch re-pins for (#98 F2/F4),
+            // on the production 12-track shape: every track's post-matrix output is recorded, the
+            // route's folded 2x2 is re-applied here with scalar `mul_add`, and the session output
+            // must be exactly those contributions folded left to right in the plan's own stable
+            // edge order. It runs on its own short bind, outside the allocation-audited loop.
+            {
+                let oracle_effects = prepare_native_session_effects(
+                    &session,
+                    &registry,
+                    EffectCompileCaps {
+                        maximum_total_state_bytes: 1 << 20,
+                        maximum_scratch_bytes: 1 << 20,
+                        maximum_automation_spans_per_block: 32,
+                    },
+                )
+                .expect("oracle effects");
+                let oracle_builtins = prepare_session_builtins(
+                    &session,
+                    &[],
+                    BuiltinCompileCaps {
+                        maximum_total_state_bytes: u64::MAX,
+                        maximum_total_retained_payload_bytes: u64::MAX,
+                        maximum_total_meter_items: u64::MAX,
+                        maximum_total_meter_bytes: u64::MAX,
+                        maximum_single_allocation_bytes: u64::MAX,
+                        maximum_meter_streams: u64::MAX,
+                        maximum_period_frames: u32::MAX,
+                        maximum_peak_hold_frames: u32::MAX,
+                        maximum_smoothing_samples: u32::MAX,
+                    },
+                )
+                .expect("oracle builtins");
+                let oracle_artifact =
+                    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                        dispatch: host_dispatch(),
+                        plan_id: 1_001,
+                        effects: oracle_effects,
+                        builtins: oracle_builtins,
+                        caps: integration_caps(),
+                    })
+                    .unwrap_or_else(|_| panic!("oracle graph"));
+                let routes: BTreeMap<String, [f32; 4]> = oracle_artifact
+                    .graph()
+                    .routes()
+                    .iter()
+                    .map(|route| {
+                        let GraphNodeId::Route { route_id } = &route.node else {
+                            panic!("route node kind")
+                        };
+                        let transform = route.transform;
+                        (
+                            route_id.as_str().to_owned(),
+                            [
+                                transform.gain * transform.ll,
+                                transform.gain * transform.lr,
+                                transform.gain * transform.rl,
+                                transform.gain * transform.rr,
+                            ],
+                        )
+                    })
+                    .collect();
+                // Output inputs, in the plan's own stable edge order: `(route id, source track)`.
+                let contributions: Vec<(String, String)> = oracle_artifact
+                    .graph()
+                    .spec
+                    .edges
+                    .iter()
+                    .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                    .map(|edge| {
+                        let GraphNodeId::Route { route_id } = &edge.source.node else {
+                            panic!("output input is not a route")
+                        };
+                        let source = oracle_artifact
+                            .graph()
+                            .spec
+                            .edges
+                            .iter()
+                            .find(|candidate| candidate.destination.node == edge.source.node)
+                            .expect("route source edge");
+                        let GraphNodeId::TrackStage { track_id, stage } = &source.source.node
+                        else {
+                            panic!("route source is not a track stage")
+                        };
+                        assert_eq!(*stage, TrackStage::PostMatrix);
+                        (route_id.as_str().to_owned(), track_id.as_str().to_owned())
+                    })
+                    .collect();
+                assert!(
+                    contributions.len() >= 4,
+                    "the oracle must exercise fan-in >= 4"
+                );
+                let sinks: Vec<BitSink> = contributions
+                    .iter()
+                    .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+                    .collect();
+                let oracle_envelope = oracle_artifact.envelope();
+                let oracle_nodes = oracle_artifact
+                    .external_binding_nodes()
+                    .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+                    .collect();
+                let oracle_observers = contributions
+                    .iter()
+                    .zip(sinks.iter())
+                    .enumerate()
+                    .map(|(handle, ((_, track), sink))| {
+                        GraphNodeObserverBinding::new(
+                            GraphNodeId::TrackStage {
+                                track_id: StableGraphId::parse(track).expect("track node id"),
+                                stage: TrackStage::PostMatrix,
+                            },
+                            handle as u64,
+                            Box::new(BitRecorder(Arc::clone(sink))),
+                        )
+                    })
+                    .collect();
+                let mut oracle_plan = oracle_artifact
+                    .into_bound(GraphRuntimeBindings {
+                        envelope: oracle_envelope,
+                        nodes: oracle_nodes,
+                        observers: oracle_observers,
+                    })
+                    .unwrap_or_else(|_| panic!("oracle bind"))
+                    .plan;
+                let mut oracle_pcm = vec![0.0_f32; frames * 2];
+                for block in 0..4_u64 {
+                    for sink in &sinks {
+                        sink.lock().expect("oracle sink").clear();
+                    }
+                    oracle_plan
+                        .render(
+                            RenderIo {
+                                input: None,
+                                output: PlanarBufferMut::try_new(
+                                    &mut oracle_pcm,
+                                    2,
+                                    frames,
+                                    frames,
+                                )
+                                .expect("oracle output"),
+                            },
+                            RenderTime {
+                                absolute_sample: block * frames as u64,
+                            },
+                        )
+                        .expect("oracle render");
+                    let taps: Vec<Vec<(u32, u32)>> = sinks
+                        .iter()
+                        .map(|sink| sink.lock().expect("oracle sink").clone())
+                        .collect();
+                    for frame in 0..frames {
+                        let routed: Vec<(f32, f32)> = contributions
+                            .iter()
+                            .zip(taps.iter())
+                            .map(|((route, _), tap)| {
+                                let coefficients = routes[route];
+                                let left = f32::from_bits(tap[frame].0);
+                                let right = f32::from_bits(tap[frame].1);
+                                (
+                                    coefficients[1].mul_add(right, coefficients[0] * left),
+                                    coefficients[3].mul_add(right, coefficients[2] * left),
+                                )
+                            })
+                            .collect();
+                        let left = routed
+                            .iter()
+                            .map(|pair| pair.0)
+                            .reduce(|a, b| a + b)
+                            .unwrap_or(0.0);
+                        let right = routed
+                            .iter()
+                            .map(|pair| pair.1)
+                            .reduce(|a, b| a + b)
+                            .unwrap_or(0.0);
+                        assert_eq!(
+                            (
+                                oracle_pcm[frame].to_bits(),
+                                oracle_pcm[frames + frame].to_bits()
+                            ),
+                            (left.to_bits(), right.to_bits()),
+                            "block {block} frame {frame}: folded-route + D9 reduction oracle"
+                        );
+                    }
+                }
+            }
+
             let audit_envelope = audit_artifact.envelope();
             let audit_nodes = audit_artifact
                 .external_binding_nodes()
@@ -2767,15 +2952,18 @@ mod tests {
                 counters[0] * u64::from(audit_envelope.quantum.0),
                 "exact frames processed by the retained builtin banks"
             );
-            // Re-pinned on this branch. The old 0x9f30_db02_2065_6d79 was already stale on
-            // `origin/main` before this branch existed (this audit is explicit-release-only and
-            // is not run by CI, so #85's class-B kernel re-land moved it unobserved); the value
-            // below was measured at `origin/main` @ b60f9b8 *before* any #86 edit, and it is
-            // **unchanged** by the padding switch -- with 12 tracks over 100,000 blocks the PCM
-            // is bit-identical whether tracks 8..11 render as scalar tails or as lanes 0..3 of
-            // a padded second bank. That is the F2/F3 gate at scale.
+            // Re-pinned by #98 F2/F4 (master plan #83 D9/D3, section-8 policy):
+            // 0x2fd8_5286_518f_d13b -> 0x5b3e_672a_ae5d_97aa. The output's twelve route inputs
+            // are now folded left to right instead of as a balanced pairwise tree, and each
+            // route spends one multiply and one fused multiply-add with the gain folded in at
+            // bind. Neither value is pinned from production output: the oracle block above
+            // re-derives the expected PCM for this exact session from the recorded per-track
+            // post-matrix contributions, re-applying both frozen op orders with scalar
+            // `mul_add` and `reduce`, and asserts it bit for bit before this literal is
+            // compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
+            // stale on `origin/main` before either branch existed.)
             assert_eq!(
-                output_hash, 0x2fd8_5286_518f_d13b,
+                output_hash, 0x5b3e_672a_ae5d_97aa,
                 "deterministic mixed output hash"
             );
         }
