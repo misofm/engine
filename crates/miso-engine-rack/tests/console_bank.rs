@@ -209,15 +209,20 @@ fn gain(value: f32) -> EffectControlRecordV1 {
 fn each_lane_receives_only_its_own_commands() {
     let (mut chain, mut producers) = console_chain(0, [true, true, true, true]);
     let mut members = planes(1.0);
-    // Only lanes 0 and 2 are commanded, with different values.
+    // Lanes 0 and 2 are commanded with different values; lane 1 stays silent so isolation is
+    // observable in both directions.
     producers[0].try_push(gain(0.25)).expect("room");
     producers[2].try_push(gain(4.0)).expect("room");
+    // The FINAL lane is commanded too: the drain loop's boundary lane is exactly where a
+    // truncated iteration or off-by-one offset silently drops spans (verifier-added coverage,
+    // #140 review — a mutation skipping the last lane's drain survived the original pair).
+    producers[3].try_push(gain(8.0)).expect("room");
     chain.run(&mut members, 8, 0).expect("run");
     for frame in 0..8 {
         assert_eq!(members.left[0][frame], 0.25, "lane 0 got its own command");
         assert_eq!(members.left[1][frame], 1.0, "lane 1 was never commanded");
         assert_eq!(members.left[2][frame], 4.0, "lane 2 got its own command");
-        assert_eq!(members.left[3][frame], 1.0, "lane 3 was never commanded");
+        assert_eq!(members.left[3][frame], 8.0, "the final lane got its own command");
     }
 }
 
