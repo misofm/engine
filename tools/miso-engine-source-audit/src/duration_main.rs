@@ -324,9 +324,11 @@ mod tests {
         remove_file(&path).expect("remove bounded unit WAVE");
 
         assert_eq!(capture.layout.len(), 17);
-        assert_eq!(layout_total(&capture.layout).expect("layout total"), 5_248);
+        // #84 phases B/C re-pin (+1,168 = six ring headers at +184, eight endpoints at +8).
+        assert_eq!(layout_total(&capture.layout).expect("layout total"), 6_416);
         let canonical = canonical_accounting(&capture);
-        assert_eq!(fnv1a64(canonical.as_bytes()), 0x9fb3_5467_02f4_ff41);
+        // #84 phases B/C: the canonical accounting text embeds the re-derived byte counts.
+        assert_eq!(fnv1a64(canonical.as_bytes()), 0xfc47_9666_aec5_0448);
         println!(
             "issue041 accounting fnv1a64={:016x} bytes={} minute_identity=wave-f32le-mono-48000-2880000-11520044-materialized multi_hour_identity=wave-f32le-mono-48000-518400000-2073600044-sparse accounting={canonical}",
             fnv1a64(canonical.as_bytes()),

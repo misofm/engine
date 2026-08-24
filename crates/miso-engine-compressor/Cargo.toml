@@ -18,7 +18,7 @@ miso-engine-math.workspace = true
 # The independent f64 oracle is test-only and never reachable from production code.
 miso-engine-dsp-reference.workspace = true
 # Frozen SplitMix64 fixture generator for the timing example and the eval corpora.
-miso-engine-conformance.workspace = true
+miso-engine-conformance = { workspace = true, features = ["realtime-audit"] }
 # Cross-target digest gate (E4). Never a production dependency.
 sha2.workspace = true
 

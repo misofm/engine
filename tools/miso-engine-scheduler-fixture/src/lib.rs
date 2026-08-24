@@ -1050,8 +1050,15 @@ mod tests {
         // PCM gate in this crate is unchanged and green.
         //
         //   aggregate: 0x386f_8720_9810_7e32 -> 0x1ba7_2d17_1383_6e52
+        //
+        // Re-derived structurally for #84 phases B/C: the matrix folds
+        // `resources.total_retained_bytes`, the ring header grew 72 -> 256 with one cache line
+        // per cursor, each endpoint carries a cached peer cursor (+8), and the plan dropped its
+        // unused parameter/event store (-96). The q128 transcript above is again unaffected.
+        //
+        //   aggregate: 0xff58_81b9_d2b5_42d9 -> 0x9f68_63fb_bffe_3301
         assert_eq!(
-            aggregate_hash, 0xff58_81b9_d2b5_42d9,
+            aggregate_hash, 0x9f68_63fb_bffe_3301,
             "frozen exact-100 preparation matrix transcript after the cost-weighted split"
         );
         let reference = reference.expect("one twelve-track preparation");

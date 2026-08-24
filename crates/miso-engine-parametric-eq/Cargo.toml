@@ -19,7 +19,7 @@ miso-engine-math.workspace = true
 # Test-only independent f64 oracle; production code has no dependency on this crate.
 miso-engine-dsp-reference.workspace = true
 # Issue #95 eval E6: the shared effect-contract conformance harness, run against a real effect.
-miso-engine-conformance.workspace = true
+miso-engine-conformance = { workspace = true, features = ["realtime-audit"] }
 miso-engine-lane.workspace = true
 sha2.workspace = true
 

@@ -3854,9 +3854,11 @@ mod tests {
     fn replay_layout_stays_within_the_capi_resource_oracle() {
         assert_eq!(core::mem::size_of::<ReplayEntry>(), 56);
         assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
+        // #84 phase B re-pin (+96): the controller embeds twelve spsc endpoints across its
+        // queues, each +8 for the cached peer cursor.
         assert_eq!(
             core::mem::size_of::<ProtocolController<MockProvider>>(),
-            5_992
+            6_088
         );
         assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
     }
