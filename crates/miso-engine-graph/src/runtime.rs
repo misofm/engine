@@ -343,6 +343,7 @@ impl Runtime {
 
     /// Copies one buffer into another and applies a delay line to the copy. This is the native
     /// coordinator's cross-partition staging step and the sequential executor's delayed-edge step.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn stage_into(&mut self, staging: u32, line: Option<u32>, source: (&[f32], &[f32])) {
         let frames = self.frames;
         let staging = staging as usize;
@@ -616,9 +617,11 @@ pub(crate) type BankMembership = BTreeMap<u32, (Membership, usize)>;
 pub(crate) type PlannedUnit = (Option<Membership>, Vec<usize>);
 
 /// One dependency wave before it is built: its level and its units, in stable key order.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type PlannedWave = (u64, Vec<PlannedUnit>);
 
 /// A unit to observe: `(partition, unit within that parcel)`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type ObservedUnit = (usize, usize);
 
 /// The one bank-membership map, built from the plan before either executor exists.
@@ -807,6 +810,7 @@ pub(crate) fn units_of(
     units
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The op that produces node `index`'s audio: its own op, or -- for an elided stage boundary --
 /// the op whose output buffer it aliases.
 fn producing_op(program: &ExecutionProgram, index: u32) -> Option<u32> {
@@ -825,11 +829,13 @@ fn producing_op(program: &ExecutionProgram, index: u32) -> Option<u32> {
 /// stages every edge between partitions -- recovers the producer from the semantic graph instead:
 /// `spec.edges` is sorted by `GraphEdgeId` and `lower` fills `Op::inputs` by walking it, so the
 /// i-th main edge into a node is the i-th input of its op.
+#[cfg(not(target_arch = "wasm32"))]
 struct EdgeSources {
     main: Vec<Vec<u32>>,
     sidechain: Vec<Option<u32>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn edge_sources(spec: &GraphSpec, program: &ExecutionProgram) -> EdgeSources {
     let count = spec.nodes.len();
     let mut main = vec![Vec::new(); count];
@@ -959,6 +965,7 @@ fn finish_unit(
 }
 
 /// Where one op's output lives in the native executor: which wave, which parcel, which slot.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NodeLocation {
     pub(crate) wave: usize,
@@ -967,6 +974,7 @@ pub(crate) struct NodeLocation {
 }
 
 /// One cross-partition edge the coordinator stages between waves (F8's pull model is #100's).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy)]
 pub(crate) struct StageOperation {
     pub(crate) source: NodeLocation,
@@ -976,6 +984,7 @@ pub(crate) struct StageOperation {
 }
 
 /// The native executor's layout: one arena per parcel, every edge staged.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct NativeRuntime {
     pub(crate) levels: Vec<u64>,
     pub(crate) parcels: Vec<Vec<Runtime>>,
@@ -990,6 +999,7 @@ pub(crate) struct NativeRuntime {
 /// A level whose nodes are all elided stage boundaries produces no op and therefore no wave; the
 /// remaining levels keep their order, so `source.wave < destination.wave` still holds for every
 /// edge.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn waves_of(
     program: &ExecutionProgram,
     membership_of: &BankMembership,
@@ -1008,6 +1018,7 @@ pub(crate) fn waves_of(
 /// Builds the native executor's runtime, one arena per parcel.
 ///
 /// `ranges` is, per wave, the `(first_unit, end_unit, partition_id)` split the scheduler chose.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn build_native(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1289,8 +1300,10 @@ mod tests {
     }
 
     /// E10. The route is one multiply plus one fused multiply-add per output word, with the gain
-    /// folded into the coefficients at bind (D3). The oracle is scalar `f32::mul_add`, which is
-    /// correctly rounded on every target.
+    /// folded into the coefficients at bind (D3). The oracle is `softfma::fma_f32_via_f64`, the
+    /// lane crate's exact software FMA -- one `f64` product and one correctly rounded narrowing,
+    /// with no dependence on `mix2x2_block`'s vector body, and proven bit-identical to hardware
+    /// FMA on every backend by master plan gate G3.
     ///
     /// Red mutation (`tests/MUTATIONS.md`): compute `gain * (ll * l + lr * r)` instead.
     #[test]
@@ -1311,8 +1324,10 @@ mod tests {
         mix2x2_block::<FrameLane>(&mut left, &mut right, folded);
         for frame in 0..FRAMES {
             let (l, r) = (left_in[frame], right_in[frame]);
-            let expected_left = folded[1].mul_add(r, folded[0] * l);
-            let expected_right = folded[3].mul_add(r, folded[2] * l);
+            let expected_left =
+                miso_engine_lane::softfma::fma_f32_via_f64(folded[1], r, folded[0] * l);
+            let expected_right =
+                miso_engine_lane::softfma::fma_f32_via_f64(folded[3], r, folded[2] * l);
             assert_eq!(
                 left[frame].to_bits(),
                 expected_left.to_bits(),

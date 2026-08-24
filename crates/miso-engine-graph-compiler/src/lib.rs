@@ -2715,7 +2715,7 @@ mod tests {
             assert_eq!(12 - actual_members.len(), expected_builtin_tails);
             // Independent oracle for the two frozen op orders this branch re-pins for (#98 F2/F4),
             // on the production 12-track shape: every track's post-matrix output is recorded, the
-            // route's folded 2x2 is re-applied here with scalar `mul_add`, and the session output
+            // route's folded 2x2 is re-applied here with the exact software FMA, and the output
             // must be exactly those contributions folded left to right in the plan's own stable
             // edge order. It runs on its own short bind, outside the allocation-audited loop.
             {
@@ -2871,8 +2871,16 @@ mod tests {
                                 let left = f32::from_bits(tap[frame].0);
                                 let right = f32::from_bits(tap[frame].1);
                                 (
-                                    coefficients[1].mul_add(right, coefficients[0] * left),
-                                    coefficients[3].mul_add(right, coefficients[2] * left),
+                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                        coefficients[1],
+                                        right,
+                                        coefficients[0] * left,
+                                    ),
+                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                        coefficients[3],
+                                        right,
+                                        coefficients[2] * left,
+                                    ),
                                 )
                             })
                             .collect();
@@ -2959,12 +2967,105 @@ mod tests {
             // bind. Neither value is pinned from production output: the oracle block above
             // re-derives the expected PCM for this exact session from the recorded per-track
             // post-matrix contributions, re-applying both frozen op orders with scalar
-            // `mul_add` and `reduce`, and asserts it bit for bit before this literal is
-            // compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
+            // `softfma::fma_f32_via_f64` and `reduce`, and asserts it bit for bit before this
+            // literal is compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
             // stale on `origin/main` before either branch existed.)
             assert_eq!(
                 output_hash, 0x5b3e_672a_ae5d_97aa,
                 "deterministic mixed output hash"
+            );
+
+            // The same session through the native dependency-wave executor: bit-identical PCM
+            // over the same 100,000 blocks, and the same zero-allocation render (#98 F2/F7).
+            let native_effects = prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 20,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("native audit effects");
+            let native_builtins = prepare_session_builtins(
+                &session,
+                &[],
+                BuiltinCompileCaps {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_total_retained_payload_bytes: u64::MAX,
+                    maximum_total_meter_items: u64::MAX,
+                    maximum_total_meter_bytes: u64::MAX,
+                    maximum_single_allocation_bytes: u64::MAX,
+                    maximum_meter_streams: u64::MAX,
+                    maximum_period_frames: u32::MAX,
+                    maximum_peak_hold_frames: u32::MAX,
+                    maximum_smoothing_samples: u32::MAX,
+                },
+            )
+            .expect("native audit builtins");
+            let native_artifact =
+                GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    dispatch: host_dispatch(),
+                    plan_id: 1_002,
+                    effects: native_effects,
+                    builtins: native_builtins,
+                    caps: integration_caps(),
+                })
+                .unwrap_or_else(|_| panic!("native audit graph"));
+            let native_envelope = native_artifact.envelope();
+            let native_nodes = native_artifact
+                .external_binding_nodes()
+                .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
+                .collect();
+            let mut native_plan = native_artifact
+                .into_bound_native(
+                    GraphRuntimeBindings {
+                        envelope: native_envelope,
+                        nodes: native_nodes,
+                        observers: Vec::new(),
+                    },
+                    NativeGraphBindConfigV1 {
+                        render_mode: NativeGraphRenderModeV1::SingleThread,
+                        scheduler: NativeSchedulerConfigV1::new(
+                            NonZeroUsize::new(4).expect("four lanes"),
+                            true,
+                        ),
+                        maximum_retained_bytes: 1 << 28,
+                    },
+                )
+                .unwrap_or_else(|failure| panic!("native audit bind: {}", failure.code))
+                .prepared
+                .into_plan();
+            let mut native_pcm = vec![0.0_f32; frames * 2];
+            audit::warm_up();
+            audit::reset();
+            let mut native_hash = 0xcbf2_9ce4_8422_2325_u64;
+            for block in 0..100_000_u64 {
+                native_plan
+                    .render(
+                        RenderIo {
+                            input: None,
+                            output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
+                                .expect("native audit output"),
+                        },
+                        RenderTime {
+                            absolute_sample: block * frames as u64,
+                        },
+                    )
+                    .expect("native audit render");
+                for sample in &native_pcm {
+                    native_hash ^= u64::from(sample.to_bits());
+                    native_hash = native_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            assert_eq!(
+                audit::snapshot().total(),
+                0,
+                "native render allocates nothing"
+            );
+            assert_eq!(
+                native_hash, output_hash,
+                "sequential and native disagree on the production twelve-track session"
             );
         }
     }
