@@ -856,7 +856,16 @@ mod tests {
             } else {
                 Q128RenderMode::DependencyWaves
             };
-            let mut prepared = fixture(48_000, lanes, mode, 41_000 + lanes as u64);
+            // The transcript is preallocated for every observation this run makes, so no render
+            // inside a timed interval can fail on capacity.
+            let mut prepared = prepare_q128_fixture(
+                48_000,
+                lanes,
+                mode,
+                41_000 + lanes as u64,
+                (WARMUP + MEASURED) as usize * OBSERVERS_PER_BLOCK,
+            )
+            .unwrap_or_else(|error| panic!("speed-up fixture: {error}"));
             let mut pcm = vec![0.0_f32; Q128_QUANTUM_FRAMES * 2];
             for block in 0..WARMUP {
                 prepared
