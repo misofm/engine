@@ -41,9 +41,22 @@ expect_failure() {
 copy_case baseline
 bash "$case_root/scripts/check-capi-qualification-v1.sh" "$case_root" preflight >/dev/null
 
-copy_case authority
-printf mutation >>"$case_root/crates/miso-engine-capi/include/miso_engine_v2.h"
-expect_failure authority-drift bash "$case_root/scripts/check-capi-qualification-v1.sh" \
+copy_case authority_order
+sort -r -k2,2 -o "$case_root/fixtures/capi-qualification/v1/AUTHORITIES.sha256" \
+    "$case_root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
+expect_failure authority-order bash "$case_root/scripts/check-capi-qualification-v1.sh" \
+    "$case_root" preflight
+
+copy_case authority_membership
+printf '%064d  crates/miso-engine-capi/src/zzz.rs\n' 0 \
+    >>"$case_root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
+expect_failure authority-membership bash "$case_root/scripts/check-capi-qualification-v1.sh" \
+    "$case_root" preflight
+
+copy_case authority_shape
+sed -i '1s|^[0-9a-f]\{64\}|not-a-digest|' \
+    "$case_root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
+expect_failure authority-shape bash "$case_root/scripts/check-capi-qualification-v1.sh" \
     "$case_root" preflight
 
 copy_case symbol

@@ -28,6 +28,11 @@ COUNTERS_PRE = {
     "reveal_invocations": 0,
     "valid_human_responses": 0,
 }
+# #104 phase A: this table is only read by `--seal`/`--write-seal`, which are now unreachable --
+# the Issue-033 and Issue-111 preflight/prepare/lifecycle wrappers that produced and consumed the
+# seals were retired (#83 wave-4 decision W4-D2), so ten of the paths below no longer exist.
+# Dropping the seal modes from both listening validators is a bounded follow-up recorded in
+# `.github/ISSUE_SPECS/104-audit-tools-and-script-validators.md`.
 AUTHORITY_PATHS = {
     "cargo_lock": "Cargo.lock",
     "facilitator": "dsp-research/listening/issue033/FACILITATOR.md",

@@ -82,3 +82,14 @@ Linux/cloud native, iOS, Android, browser scalar and SIMD where supported; optio
 ## Required evidence
 
 Checksummed report artifact; raw benchmark/soak logs; allocator traces; fixture hashes; target results; anonymized blinded-listening records; residual issue links; and CPU, OS, power/governor mode, compiler, target features, runtime/browser, sample rate, quantum, fixture, warm-up, run duration and statistical method for every performance claim.
+
+## Superseded C-ABI V1 qualification (#104 phase A, 2026-08-24)
+
+The accepted `fixtures/capi-qualification/v1` result no longer describes the working tree: eleven of
+the twenty-six paths its `AUTHORITIES.sha256` sealed were rewritten by #102, #103 and the lane
+waves. #104 phase A retired the seal rather than re-computing it, because re-sealing would claim
+evidence for sources that never produced it. The corpus, the runner
+(`scripts/run-capi-qualification-v1.sh`), the two Python checkers and the recorded matrix all
+survive; what this issue owes is one re-run of that matrix against the post-audit tree, re-sealed at
+that commit. See `.github/ISSUE_SPECS/114-qualify-native-c-abi-and-reference-runner-target-matrix.md`
+for the list of drifted paths.

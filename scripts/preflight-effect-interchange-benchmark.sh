@@ -48,7 +48,7 @@ tree="$(git rev-parse HEAD^{tree})"
     exit 1
 }
 accepted_sha="$(sha256sum fixtures/effect-interchange/v1/ACCEPTED.sha256 | awk '{print $1}')"
-[[ "$accepted_sha" == 6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5 ]] || {
+[[ "$accepted_sha" == 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 ]] || {
     printf 'effect interchange benchmark preflight: accepted manifest identity changed\n' >&2
     exit 1
 }

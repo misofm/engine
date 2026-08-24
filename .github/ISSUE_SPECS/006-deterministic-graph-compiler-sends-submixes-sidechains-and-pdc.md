@@ -271,3 +271,7 @@ deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
 `miso_engine_lane::Backend::current()`, and
 `miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
 The historical text above is kept as the decision record of its time and is not rewritten.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+The Issue-006 graph-benchmark promotion pins (`expected_bytes=10364`, raw sha256 `c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5`, six records, `target/issue6/graph-compiler-benchmark.raw.jsonl`) are recorded here and retired from `scripts/promote-issue006-graph-benchmark.sh` and `scripts/test-graph-benchmark.sh` by #104 phase A (#83 W4-D2): the artifact they pin has not existed in a fresh checkout since this issue closed, so every hermetic case in the lifecycle test was unreachable. The promotion contract is now the run-independent property (six records, LF terminated, aggregate validator, byte-identical to raw, no-clobber).

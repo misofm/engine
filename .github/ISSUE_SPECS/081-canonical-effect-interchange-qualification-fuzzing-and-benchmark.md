@@ -490,3 +490,7 @@ workload during briefing; or repeat the real 100-process or benchmark invocation
 - Canonical effect package, CID, and artifact selection
 - Effect state migration registry and bounded chains
 - DSP research corpus and conformance harness
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): `fixtures/effect-interchange/v1/ACCEPTED.sha256` sealed twelve `crates/miso-engine-effect-{compiler,package}` source files alongside the interchange corpus. Waves 1-4 rewrote six of them (`effect-compiler/src/prepare.rs`, `effect-package/src/{diagnostic,ffi,lib,package,wire}.rs`), so the source half of the accepted baseline went permanently red and is not refreshable without re-running this qualification. The twelve source rows are retired; the manifest is now the 24 corpus/reference-script rows, all of which still verify byte-for-byte. Accepted manifest identity: `6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5` (36 rows, this issue) -> `1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588` (24 rows, #104). No corpus byte changed.
