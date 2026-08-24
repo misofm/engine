@@ -8,7 +8,7 @@ use std::sync::{
 
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanPublisher, PlanReplacementReservation, PlanReplacementReservationError,
-    PlanRetirer, PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner, RenderIo, RenderTime,
+    PlanRetirer, PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner, RenderError, RenderIo,
     plan_exchange, plan_exchange_resource_report,
 };
 use miso_engine_effect_contract::TailSamples;
@@ -278,8 +278,6 @@ pub(crate) struct SessionState {
 pub(crate) struct PlanState {
     pub(crate) owner: RealtimePlanOwner,
     shared: Arc<SharedPlanState>,
-    quantum_frames: u32,
-    next_absolute_sample: u64,
 }
 
 struct ObservedController {
@@ -316,15 +314,10 @@ impl Drop for ObservedController {
 }
 
 impl PlanState {
-    fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState>, quantum_frames: u32) -> Self {
+    fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState>) -> Self {
         #[cfg(test)]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
-        Self {
-            owner,
-            shared,
-            quantum_frames,
-            next_absolute_sample: 0,
-        }
+        Self { owner, shared }
     }
 }
 
@@ -343,29 +336,35 @@ pub(crate) struct CompiledChildren {
 pub(crate) mod plan_error {
     /// The most recent render call succeeded.
     pub(crate) const NONE: u32 = 0;
-    /// The requested plane stride plus frame count overflows `u64`.
-    pub(crate) const OUTPUT_OVERFLOW: u32 = 1;
-    /// The output descriptor does not match the plan's exact-time render contract.
-    pub(crate) const CONTRACT_REJECTED: u32 = 2;
-    /// The required sample extent is not addressable as one slice on this platform.
-    pub(crate) const OUTPUT_PLATFORM: u32 = 3;
-    /// The validated extent was rejected by the core planar-buffer layout check.
-    pub(crate) const OUTPUT_LAYOUT: u32 = 4;
-    /// The prepared plan itself rejected the render call.
-    pub(crate) const PLAN_REJECTED: u32 = 5;
     /// `output.samples` is not aligned for `f32`.
-    pub(crate) const OUTPUT_UNALIGNED: u32 = 6;
+    pub(crate) const OUTPUT_UNALIGNED: u32 = 1;
+    /// The declared sample capacity is not addressable as one slice on this platform.
+    pub(crate) const OUTPUT_PLATFORM: u32 = 2;
+    /// The two-plane layout does not fit the declared capacity, or the stride is short.
+    pub(crate) const OUTPUT_LAYOUT: u32 = 3;
+    /// The frame count is not the prepared quantum.
+    pub(crate) const OUTPUT_SHAPE: u32 = 4;
+    /// The requested absolute sample is not the one the plan is waiting for.
+    pub(crate) const TIME_DISCONTINUITY: u32 = 5;
+    /// Advancing the absolute sample clock would overflow `u64`.
+    pub(crate) const TIME_OVERFLOW: u32 = 6;
+    /// The prepared plan itself rejected the render call.
+    pub(crate) const PLAN_REJECTED: u32 = 7;
 
     /// Returns the frozen diagnostic text for `code`.
+    ///
+    /// One code per rule, so a rejected render names the single check it failed. Before W4-5 five
+    /// distinct rules were folded into one `render.contract.rejected` string.
     pub(crate) const fn text(code: u32) -> &'static [u8] {
         match code {
             NONE => b"",
-            OUTPUT_OVERFLOW => b"render.output.overflow",
-            CONTRACT_REJECTED => b"render.contract.rejected",
-            OUTPUT_PLATFORM => b"render.output.platform",
-            OUTPUT_LAYOUT => b"render.output.rejected",
-            PLAN_REJECTED => b"render.plan.rejected",
             OUTPUT_UNALIGNED => b"render.output.unaligned",
+            OUTPUT_PLATFORM => b"render.output.platform",
+            OUTPUT_LAYOUT => b"render.output.layout",
+            OUTPUT_SHAPE => b"render.output.shape",
+            TIME_DISCONTINUITY => b"render.time.discontinuity",
+            TIME_OVERFLOW => b"render.time.overflow",
+            PLAN_REJECTED => b"render.plan.rejected",
             _ => b"render.internal",
         }
     }
@@ -1167,15 +1166,11 @@ pub(crate) fn compile_children(
             protocol_reliable_pending: false,
         },
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
-        plan: PlanState::new(owner, shared, resources.quantum_frames),
+        plan: PlanState::new(owner, shared),
     })
 }
 
 impl PlanState {
-    pub(crate) const fn quantum_frames(&self) -> u32 {
-        self.quantum_frames
-    }
-
     #[cfg(test)]
     pub(crate) fn resources(&self) -> PlanResourceReport {
         active_resources(&self.shared)
@@ -1188,39 +1183,40 @@ impl PlanState {
         }
     }
 
-    pub(crate) const fn next_absolute_sample(&self) -> u64 {
-        self.next_absolute_sample
-    }
-
+    /// Render the block that must start at the plan's own next absolute sample.
+    ///
+    /// Continuity, output shape and clock overflow are core's rules now, reported as typed
+    /// [`RenderError`] variants; capi maps each one to its own diagnostic code and adds nothing.
     pub(crate) fn render(
         &mut self,
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
-    ) -> Result<(), ()> {
-        if absolute_sample != self.next_absolute_sample {
-            return Err(());
-        }
+    ) -> Result<(), u32> {
         let report = self
             .owner
-            .render(
+            .render_contiguous(
                 RenderIo {
                     input: None,
                     output,
                 },
-                RenderTime { absolute_sample },
+                absolute_sample,
             )
-            .map_err(|_| ())?;
+            .map_err(|error| match error {
+                RenderError::OutputShape => plan_error::OUTPUT_SHAPE,
+                RenderError::TimeDiscontinuity { .. } => plan_error::TIME_DISCONTINUITY,
+                RenderError::TimeOverflow => plan_error::TIME_OVERFLOW,
+                _ => plan_error::PLAN_REJECTED,
+            })?;
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
-        self.next_absolute_sample = report.render.next_absolute_sample;
         Ok(())
     }
 
     pub(crate) fn publish_render_observation(&self, peak: f32) {
         self.shared
             .render_sample
-            .store(self.next_absolute_sample, Ordering::Release);
+            .store(self.owner.next_absolute_sample(), Ordering::Release);
         self.shared
             .render_peak_bits
             .store(peak.to_bits(), Ordering::Release);
