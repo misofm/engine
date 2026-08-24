@@ -1,14 +1,12 @@
-//! Canonical native-effect package, CID, state-envelope, and preparation helpers.
+//! Canonical native-effect package, CID, and prepared-state envelope wire formats.
 #![allow(missing_docs)]
 mod cid;
-mod compile;
 mod diagnostic;
 mod ffi;
 mod package;
 mod state;
 mod wire;
 pub use cid::*;
-pub use compile::*;
 pub use diagnostic::*;
 pub use ffi::*;
 pub use package::*;

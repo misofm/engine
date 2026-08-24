@@ -1,15 +1,3 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PackageError {
-    Header,
-    Length,
-    Limit,
-    Canonical,
-    Text,
-    Hash,
-    Unavailable,
-    State,
-}
-
 pub const EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
 pub const EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET: u64 = u64::MAX;
 
@@ -213,6 +201,97 @@ impl EffectDescriptorWireDiagnosticV1 {
             byte_offset: EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
             record_index: EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
             required_bytes,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 029 freezes the descriptor-wire diagnostic numbering and the matching
+    /// `effect.descriptor.wire.<name>` strings; `as_str` is their only executable form.
+    #[test]
+    fn descriptor_wire_diagnostic_codes_and_strings_are_frozen() {
+        for (code, value, text) in [
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Ok,
+                0,
+                "effect.descriptor.wire.ok",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Null,
+                1,
+                "effect.descriptor.wire.null",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Limit,
+                2,
+                "effect.descriptor.wire.limit",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::BufferTooSmall,
+                3,
+                "effect.descriptor.wire.buffer_too_small",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Header,
+                4,
+                "effect.descriptor.wire.header",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Length,
+                5,
+                "effect.descriptor.wire.length",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Reserved,
+                6,
+                "effect.descriptor.wire.reserved",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Enum,
+                7,
+                "effect.descriptor.wire.enum",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Flags,
+                8,
+                "effect.descriptor.wire.flags",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Order,
+                9,
+                "effect.descriptor.wire.order",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Offset,
+                10,
+                "effect.descriptor.wire.offset",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Text,
+                11,
+                "effect.descriptor.wire.text",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Float,
+                12,
+                "effect.descriptor.wire.float",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Semantic,
+                13,
+                "effect.descriptor.wire.semantic",
+            ),
+            (
+                EffectDescriptorWireDiagnosticCodeV1::Overflow,
+                14,
+                "effect.descriptor.wire.overflow",
+            ),
+        ] {
+            assert_eq!(code as u32, value, "{text}");
+            assert_eq!(code.as_str(), text);
         }
     }
 }

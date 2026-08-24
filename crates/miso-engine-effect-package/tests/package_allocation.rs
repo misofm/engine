@@ -9,10 +9,10 @@ use miso_engine_effect_contract::*;
 use miso_engine_effect_package::{
     ArtifactSelectionRequestV1, EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectCid,
     EffectPackageAuthoringV1, EffectPackageDiagnosticCodeV1, EffectPackageLimitsV1,
-    EffectStateLimitsV1, EffectStateReplayViewV1,
-    bind_effect_descriptor_wire_v1, effect_descriptor_identity_v1, effect_package_cid_v1,
-    effect_package_v1_required_size, effect_state_v1_requirements, encode_effect_package_v1,
-    encode_effect_state_v1, inspect_effect_state_selector_v1, select_effect_package_artifact_v1,
+    EffectStateLimitsV1, EffectStateReplayViewV1, bind_effect_descriptor_wire_v1,
+    effect_descriptor_identity_v1, effect_package_cid_v1, effect_package_v1_required_size,
+    effect_state_v1_requirements, encode_effect_package_v1, encode_effect_state_v1,
+    inspect_effect_state_selector_v1, select_effect_package_artifact_v1,
     validate_effect_state_current_layout_v1, validate_effect_state_replay_v1,
     verify_effect_descriptor_wire_v1, verify_effect_package_v1, verify_effect_state_v1,
 };
@@ -484,7 +484,12 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
 
     let verified = verify_effect_package_v1(&output, EffectPackageLimitsV1::default()).unwrap();
     assert_eq!(verified.artifact_count(), count as u32);
-    assert!(verified.artifacts().map(|artifact| artifact.path()).is_sorted());
+    assert!(
+        verified
+            .artifacts()
+            .map(|artifact| artifact.path())
+            .is_sorted()
+    );
 
     let extra = [EffectArtifactAuthoringV1 {
         path: "src/zzz.rs",
