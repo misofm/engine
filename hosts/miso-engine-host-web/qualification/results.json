@@ -1,0 +1,43 @@
+{
+  "schema": "miso.web.qualification.matrix.v1",
+  "playwrightVersion": "1.62.1",
+  "platform": "linux-headless",
+  "artifact": "single shipped simd128 AudioWorklet artifact",
+  "defaultRingFrames": 5120,
+  "minimumStallMs": 100,
+  "browsers": [
+    {
+      "browser": "chromium",
+      "versionFloor": "151.0.7922.34",
+      "outcome": "simd128 supported",
+      "gates": {
+        "attestation": "pass",
+        "audioWorkletBoot": "pass",
+        "nativeCorpusDigest": "pass",
+        "mainThreadStall": "pass"
+      }
+    },
+    {
+      "browser": "firefox",
+      "versionFloor": "153.0",
+      "outcome": "simd128 supported",
+      "gates": {
+        "attestation": "pass",
+        "audioWorkletBoot": "pass",
+        "nativeCorpusDigest": "pass",
+        "mainThreadStall": "pass"
+      }
+    },
+    {
+      "browser": "webkit",
+      "versionFloor": "26.5",
+      "outcome": "simd128 supported",
+      "gates": {
+        "attestation": "pass",
+        "audioWorkletBoot": "pass",
+        "nativeCorpusDigest": "pass",
+        "mainThreadStall": "pass"
+      }
+    }
+  ]
+}
