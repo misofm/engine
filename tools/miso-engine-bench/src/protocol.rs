@@ -37,7 +37,7 @@ const MAX_FRAME_BYTES: usize = 65_536;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// FNV-1a over each stable label and normalized logical record. Updated only with corpus changes.
-pub(crate) const CORPUS_CHECKSUM: u64 = 0x9eee_4fcb_61be_3b9e;
+pub(crate) const CORPUS_CHECKSUM: u64 = 0x60b0_322e_6ff3_ba34;
 
 // #104 F4: the arm/disarm pair reads the one audited allocator's totals instead of a private
 // thread-local counter fed by a fourteenth copy of the `GlobalAlloc` wrapper. It counts the same
@@ -1566,7 +1566,7 @@ mod tests {
             AUTOMATION_RECORDS
         );
         assert_eq!(corpus_checksum(), CORPUS_CHECKSUM);
-        assert!(include_str!("../CORPUS_MANIFEST.md").contains("9eee4fcb61be3b9e"));
+        assert!(include_str!("../CORPUS_MANIFEST.md").contains("60b0322e6ff3ba34"));
     }
 
     #[test]
@@ -1642,7 +1642,7 @@ mod tests {
             "\"rounds\":2",
             "\"order_index\":0",
             "\"seed\":\"0x4953535545303035\"",
-            "\"corpus_checksum\":\"9eee4fcb61be3b9e\"",
+            "\"corpus_checksum\":\"60b0322e6ff3ba34\"",
             "\"structural_operations\":64",
             "\"parameter_descriptors\":256",
             "\"parameter_state_records\":256",

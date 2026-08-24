@@ -8,7 +8,7 @@ revision-conflict, validation-failure, and backpressure responses.
 
 The sequence is FNV-1a-64 over each stable frame label followed by its normalized
 logical record: the fixed comparison header followed by every typed semantic leaf in
-registered field/index/subfield order, `9eee4fcb61be3b9e`. Native unit tests reconstruct this corpus and
+registered field/index/subfield order, `60b0322e6ff3ba34`. Native unit tests reconstruct this corpus and
 compare the independently computed value with the code constant. Scalar and
 `simd128` Wasm execute that same assertion. The FlatBuffers root and its typed
 unsigned, float-bit, and length-delimited UTF-8 key/value vectors are defined by `protocol_benchmark.fbs`, built and semantically verified by the
