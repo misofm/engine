@@ -182,3 +182,30 @@ plan P1 partition invariance over `{1, quantum-1, quantum}` and 100-instance det
 CI builds host artifacts in an invocation that names no evidence crate; the evidence crates keep a
 separate cross-target compile-coverage step. `scripts/check-artifact-evidence-leak.sh` gates both
 halves, because per-package graph cleanliness does not imply a clean multi-package invocation.
+
+Line-count outcome, stated against the projection rather than around it. The #105 plan projected
+about −4,800 lines across `dsp-reference` + `conformance`. Measured `src/` totals: `dsp-reference`
+7,103 -> 4,085 (all of it phase 1's research archive; phase 2 changed none of it),
+`conformance` 1,967 -> 2,401. Net −2,584, not −4,800. Two reasons, both real: the wave-2 effect
+jobs added f64 oracle modules to `dsp-reference` after the projection was written
+(`gate_expander.rs`, `true_peak_limiter.rs`, `delay.rs`, `svf.rs`), and the phase-2 harness got
+*bigger* rather than smaller — real allocation attribution, the bypass/partition/determinism gates
+and their reasoning are +314 lines against the 41 lines the deleted first-non-zero heuristic and
+`impulse_sequence` gave back.
+
+The projection also assumed per-effect scaffolding that `run_effect_conformance` would supersede.
+It does not supersede it. `crates/miso-engine-*/tests/{allocation,partition*,determinism}.rs` were
+read and kept: the per-effect allocation tests cover `process_bank`, `reset`, `snapshot_*`,
+`restore_*` and a bounded `prepare` budget that the harness does not touch; the per-effect
+partition tests use `{1, 7, 64, 128, 512}` *with automation events and state comparison*, which is
+strictly stronger than the harness's `{1, quantum-1, quantum}`; and the `determinism.rs` files are
+cross-target digest pins, not repeat renders. Nothing was deleted on the strength of coverage that
+does not exist.
+
+Plan step B7 (delete the `ReferenceRetainedTptF32` f32 twin) is skipped: its precondition fails,
+`tools/miso-engine-builtins-fixture/src/main.rs` still consumes `ReferenceRetainedTptF32` and
+`ReferenceTptOutput`. Step B6's `ReferenceTptStateSpace` alias is dead public API by the plan's own
+`rg` test, but its only remaining consumer is phase 1's eval E5
+(`cast_coefficient_transfer_is_bit_identical_to_the_replaced_model`), and deleting it would also
+force deleting `ReferenceSvfStateSpace::from_words`. About 115 lines against a standing bit-identity
+proof: kept, and recorded here rather than done quietly.
