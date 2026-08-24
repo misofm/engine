@@ -23,6 +23,7 @@ members = [
     "crates/miso-engine-builtins-compiler",
     "crates/miso-engine-graph",
     "crates/miso-engine-graph-compiler",
+    "crates/miso-engine-host-core",
     "crates/miso-engine-native-scheduler",
     "crates/miso-engine-protocol",
     "crates/miso-engine-capi",
@@ -94,6 +95,7 @@ miso-engine-builtins = { path = "crates/miso-engine-builtins", version = "0.1.0"
 miso-engine-builtins-compiler = { path = "crates/miso-engine-builtins-compiler", version = "0.1.0" }
 miso-engine-graph = { path = "crates/miso-engine-graph", version = "0.1.0" }
 miso-engine-graph-compiler = { path = "crates/miso-engine-graph-compiler", version = "0.1.0" }
+miso-engine-host-core = { path = "crates/miso-engine-host-core", version = "0.1.0" }
 miso-engine-native-scheduler = { path = "crates/miso-engine-native-scheduler", version = "0.1.0" }
 miso-engine-scheduler-fixture = { path = "tools/miso-engine-scheduler-fixture", version = "0.1.0" }
 miso-engine-wasm-gate-corpus = { path = "tools/miso-engine-wasm-gate-corpus", version = "0.1.0" }
