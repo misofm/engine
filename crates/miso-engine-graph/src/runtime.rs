@@ -140,6 +140,8 @@ fn reduce_plane(plane: &mut [f32], frames: usize, out: usize, inputs: &[u32]) {
     }
 }
 
+// REALTIME_POLICY_END
+
 /// Integer-sample plugin-delay compensation for one stereo edge.
 ///
 /// The line is `samples` words per channel and the block is exchanged with it in at most two
@@ -171,7 +173,10 @@ impl CompensationDelay {
         self.right.fill(0.0);
         self.cursor = 0;
     }
+}
 
+// REALTIME_POLICY_BEGIN
+impl CompensationDelay {
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let samples = self.left.len();
         if samples == 0 {
@@ -199,6 +204,7 @@ impl CompensationDelay {
         }
     }
 }
+// REALTIME_POLICY_END
 
 /// What an op does to its reduced output.
 pub(crate) enum NodeKind {
@@ -268,6 +274,7 @@ impl RuntimeUnit {
     }
 }
 
+// REALTIME_POLICY_BEGIN
 /// Planar per-lane view over the arena slots a bank's members own.
 struct ArenaMembers<'a> {
     left: &'a mut [f32],
@@ -292,6 +299,8 @@ impl BankMembers for ArenaMembers<'_> {
         )
     }
 }
+
+// REALTIME_POLICY_END
 
 /// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
 pub(crate) struct Runtime {
@@ -329,6 +338,7 @@ impl Runtime {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// The audio of one buffer, for the source set to fill and for the host copy-out.
     pub(crate) fn buffer_mut(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
         let range = buffer as usize * self.frames..(buffer as usize + 1) * self.frames;
@@ -419,8 +429,10 @@ impl Runtime {
             }
         }
     }
+    // REALTIME_POLICY_END
 }
 
+// REALTIME_POLICY_BEGIN
 /// The two planes of one buffer, mutable together (they are separate arrays, so this is safe).
 #[inline]
 fn split_planes<'a>(
