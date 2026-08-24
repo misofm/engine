@@ -28,11 +28,26 @@ rg -Fq 'UNDEFINED_TYPES' "$object_checker" || fail 'object parser lacks import c
     fail "unknown checker mode $mode"
 
 LC_ALL=C sort -c -k2,2 "$authorities" || fail 'authority manifest is not path-sorted'
-# 26, not 21: audit #103 split `crates/miso-engine-capi/src/runtime.rs` into six modules. Only the
-# membership count moved; no hash of an unchanged file was re-sealed, and this check still fails on
-# the accepted-authority drift that predates that split. Re-running the qualification is issue #26.
+# 26, not 21: audit #103 split `crates/miso-engine-capi/src/runtime.rs` into six modules.
+#
+# #104 phase A / #83 wave-4 decision W4-D2. `sha256sum --check --strict "$authorities"` used to run
+# here and asserted that the working tree still is the tree the accepted V1 qualification was taken
+# from. Waves 1-4 rewrote eleven of the twenty-six sealed paths, so it went permanently red, and it
+# is not refreshable: re-sealing it without re-running the matrix would claim evidence for sources
+# that never produced it. The seal is retired, `AUTHORITIES.sha256` stays as the record of the
+# subject tree, and the accepted V1 result is superseded until issue #26 re-runs the qualification.
+# The eleven drifted paths are listed in `.github/ISSUE_SPECS/114-*.md`.
+#
+# The `EVIDENCE.sha256` self-seal went with it for the same reason: its one drifted row is
+# `AUTHORITIES.sha256` itself, which #103 edited when it split the runtime module.
+#
+# What still gates: the manifest shape below, the symbol/consumer/toolchain surface, and -- in
+# `final`/`preserved` mode -- `check-capi-qualification-evidence-v1.py` and the MATRIX row/evidence
+# digests, all of which verify on the current tree.
 [[ $(wc -l <"$authorities" | tr -d ' ') -eq 26 ]] || fail 'authority membership changed'
-sha256sum --check --strict "$authorities" >/dev/null || fail 'accepted authority drifted'
+if rg -v '^[0-9a-f]{64}  [^[:space:]]+$' "$authorities"; then
+    fail 'authority manifest row shape'
+fi
 
 LC_ALL=C sort -c "$symbols" || fail 'expected symbols are not sorted'
 [[ $(wc -l <"$symbols" | tr -d ' ') -eq 14 ]] || fail 'expected symbol count is not 14'
@@ -96,7 +111,6 @@ matrix="$fixture/MATRIX.tsv"
 evidence="$fixture/EVIDENCE.sha256"
 [[ -f "$matrix" && -f "$evidence" ]] || fail 'final matrix or evidence manifest missing'
 LC_ALL=C sort -c -k2,2 "$evidence" || fail 'evidence manifest is not path-sorted'
-sha256sum --check --strict "$evidence" >/dev/null || fail 'qualification evidence drifted'
 semantic_mode=committed
 [[ "$mode" == preserved ]] && semantic_mode=preserved
 python3 -I -B "$evidence_checker" "$root" "$semantic_mode" ||

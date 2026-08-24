@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# Static Issue 108 benchmark-repair boundary and inherited-evidence checker.
+# Issue 108 benchmark source-authority checker.
+#
+# #104 phase A / #83 wave-4 decision W4-D2. This file used to open with an unrefreshable seal: the
+# sha256 of `Cargo.lock`, the sha256 of the benchmark package manifest, the identity and payload of
+# `fixtures/effect-interchange/v1/ACCEPTED.sha256` (which `check-effect-interchange-qualification.sh`
+# already owns), and the byte identity of seven `target/issue081/` build artifacts that only ever
+# existed in the branch that produced them. Every one of those went permanently red once waves 1-4
+# touched the workspace lock and the effect-package sources, and none can be refreshed without
+# re-running the sealed Issue-081 run. They are retired; the hashes stay in
+# `.github/ISSUE_SPECS/108-*.md`.
+#
+# What survives is the live half: the benchmark source must still declare the four-rate migration
+# envelope, the four workloads with their expected output digests, and the focused regression
+# tokens. `scripts/test-effect-interchange-benchmark-108-policy.sh` proves each of those red.
 set -euo pipefail
 
 fail() { printf 'effect interchange benchmark 108 policy failure: %s\n' "$1" >&2; return 1; }
-
-validate_manifest_identity() {
-    local manifest=$1
-    [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'missing accepted manifest'
-    [[ "$(sha256sum "$manifest" | awk '{print $1}')" == \
-        6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5 ]] ||
-        fail 'accepted manifest changed or was refreshed'
-}
-
-validate_manifest_payload() {
-    local root=$1 manifest=$2
-    (cd "$root" && sha256sum --check --strict "$manifest" >/dev/null) ||
-        fail 'accepted product/reference/fixture bytes changed'
-}
 
 validate_benchmark_source() {
     local benchmark=$1
@@ -65,54 +64,20 @@ fi
 [[ $# -le 1 ]] || { printf 'usage: check-effect-interchange-benchmark-108.sh [root]\n' >&2; exit 2; }
 root="$(cd "${1:-.}" && pwd)"
 cd "$root"
-manifest=fixtures/effect-interchange/v1/ACCEPTED.sha256
-validate_manifest_identity "$manifest"
-validate_manifest_payload "$root" "$manifest"
-[[ "$(sha256sum Cargo.lock | awk '{print $1}')" == \
-    4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a ]] ||
-    fail 'Cargo.lock changed'
-[[ "$(sha256sum tools/miso-engine-effect-interchange-bench/Cargo.toml | awk '{print $1}')" == \
-    a2b691b19fe2088611882ac632aa0c2e03948925cf189c79c184a51c30675d81 ]] ||
-    fail 'benchmark manifest changed'
-
-while read -r name bytes digest; do
-    path="target/issue081/$name"
-    [[ -f "$path" && ! -L "$path" ]] || fail "missing inherited Issue-081 artifact: $name"
-    [[ "$(stat -c %h "$path")" == 1 ]] || fail "linked inherited Issue-081 artifact: $name"
-    [[ "$(wc -c <"$path")" == "$bytes" ]] || fail "Issue-081 artifact size: $name"
-    [[ "$(sha256sum "$path" | awk '{print $1}')" == "$digest" ]] ||
-        fail "Issue-081 artifact identity: $name"
-done <<'EOF'
-nonbenchmark.seal.json 833 6d08e2089e806dc366f5c1171398c241f8dfdc520f97808c4e2f6c7f6b83363c
-miso_engine_effect_interchange_bench 827232 fad8e39ecd9efa6908b51e7e98c25984f9d97f88b32971581c9a880228758b4c
-benchmark-preflight.seal.json 1577 da3c537c16d55b1e71b8aa9f8e4d011796b243e4c6c7969020097098a75035a3
-benchmark.raw.jsonl 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-benchmark.stderr.log 361 442f071fb23e57a9cb4616c6df7683bee669d8114eacce43b16af812e86d1a93
-benchmark.disposition.json 817 8c833293bb3e9f2e981e0be1d379819786d92706627b3fa3fbc64e93b188a5de
-EOF
-for name in benchmark.accepted.jsonl benchmark.prelaunch.disposition.json; do
-    [[ ! -e "target/issue081/$name" && ! -L "target/issue081/$name" ]] ||
-        fail "forbidden inherited Issue-081 artifact appeared: $name"
-done
 
 benchmark=tools/miso-engine-effect-interchange-bench/src/main.rs
+[[ -f "$benchmark" && ! -L "$benchmark" ]] || fail "missing benchmark source: $benchmark"
 validate_benchmark_source "$benchmark"
 for path in \
     scripts/effect-interchange-benchmark-108-validator.py \
     scripts/check-effect-interchange-benchmark-108.sh \
-    scripts/test-effect-interchange-benchmark-108-policy.sh \
-    scripts/test-effect-interchange-benchmark-108.sh \
-    scripts/preflight-effect-interchange-benchmark-108.sh \
-    scripts/run-effect-interchange-benchmark-108.sh; do
+    scripts/test-effect-interchange-benchmark-108-policy.sh; do
     [[ -f "$path" && ! -L "$path" ]] || fail "missing Issue-108 authority: $path"
 done
 
 python3 -I -B - "$benchmark" \
     scripts/effect-interchange-benchmark-108-validator.py \
-    scripts/check-effect-interchange-benchmark-108.sh \
-    scripts/preflight-effect-interchange-benchmark-108.sh \
-    scripts/run-effect-interchange-benchmark-108.sh \
-    scripts/test-effect-interchange-benchmark-108.sh <<'PY'
+    scripts/check-effect-interchange-benchmark-108.sh <<'PY'
 import pathlib, re, sys
 expected = [
     ("descriptor_verify_identity_a", "865a0a5a01ba157bea7f3279ad68cc17db0296655998a9b5307cf759c38656f1"),
@@ -135,10 +100,7 @@ for path_text in sys.argv[2:]:
             raise SystemExit(f"output authority missing: {path_text}: {workload}")
 PY
 
-validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py \
-    scripts/preflight-effect-interchange-benchmark-108.sh \
-    scripts/run-effect-interchange-benchmark-108.sh \
-    scripts/test-effect-interchange-benchmark-108.sh
+validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
 if find target/issue108 -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
     fail 'Issue-108 persistent artifact appeared before authorization'
 fi

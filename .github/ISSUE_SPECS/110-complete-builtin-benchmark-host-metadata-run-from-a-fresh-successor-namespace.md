@@ -272,3 +272,7 @@ capacity, quality, listening or release claim.
 Issue-072 artifacts/inode separation and exact sole-member Issue-109 namespace were preserved after
 the run. All acceptance conditions are met. Issue 110 is `COMPLETE / SOL XHIGH PASS / READY TO
 CLOSE`; no further preflight, runner, benchmark-main, workload or timing execution is authorized.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): the whole Issue-110 script family (`{check,preflight,run,test}-builtins-benchmark-110.sh`, `test-builtins-benchmark-110-policy.sh`) is retired, for the same reason as the Issue-109 family it inherits from -- it additionally pins the five Issue-109 scripts and the `target/issue109/` repair seal. The pins are recorded here.

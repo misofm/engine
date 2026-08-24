@@ -5,8 +5,6 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runner="$root/scripts/run-graph-compiler-benchmark.sh"
 promotion="$root/scripts/promote-issue006-graph-benchmark.sh"
-raw_source="$root/target/issue6/graph-compiler-benchmark.raw.jsonl"
-expected_sha256=c03f1bc0399f0b9dea3a5c94c13a468512d2fcb2a2805c450c83110b56d623b5
 
 bash -n "$runner" "$promotion" "$0"
 [[ -x "$runner" && -x "$promotion" ]] || {
@@ -21,15 +19,6 @@ bash -n "$runner" "$promotion" "$0"
     printf 'promotion command contains a workload launch token\n' >&2
     exit 1
 }
-[[ -f "$raw_source" && ! -L "$raw_source" ]] || {
-    printf 'frozen raw source is unavailable for hermetic copies\n' >&2
-    exit 1
-}
-[[ "$(wc -c <"$raw_source" | tr -d ' ')" == 10364 ]] || exit 1
-[[ "$(sha256sum "$raw_source" | awk '{print $1}')" == "$expected_sha256" ]] || exit 1
-[[ "$(awk 'END { print NR }' "$raw_source")" == 6 ]] || exit 1
-[[ "$(tail -c 1 "$raw_source" | od -An -t x1 | tr -d '[:space:]')" == 0a ]] || exit 1
-
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 template="$scratch/template"
@@ -38,7 +27,32 @@ cp "$runner" "$promotion" "$template/scripts/"
 cp "$root/scripts/graph-benchmark-record-validator.jq" \
     "$root/scripts/graph-benchmark-validator.jq" "$template/scripts/"
 cp "$root/scripts/fixtures/graph-benchmark-validator-record.json" "$template/scripts/fixtures/"
-cp "$raw_source" "$template/frozen.raw.jsonl"
+jq -c -n --slurpfile record "$root/scripts/fixtures/graph-benchmark-validator-record.json" '
+    $record[0] as $base
+    | ($base + {
+        benchmark_id: "graph_validate_65537_tracks",
+        fixture_counts: {tracks: 65537, routes: 1, submixes: 0, effects: 0, sidechains: 0},
+        warmup_iterations: 0,
+        measured_iterations: 1,
+        output_counts: ($base.output_counts + {effects: 0})
+      }) as $validate
+    | [$base + {benchmark_id: "graph_compile_256t_1024r_32s"},
+       $base + {benchmark_id: "graph_debug_sha_dot_256t_1024r_32s"},
+       $validate] as $subjects
+    | [$subjects[] as $subject | [1, 2][] as $round | $subject + {round: $round}]
+    | .[]
+' >"$template/frozen.raw.jsonl"
+[[ "$(awk 'END { print NR }' "$template/frozen.raw.jsonl")" == 6 ]] || {
+    printf 'synthesized raw payload is not six records\n' >&2
+    exit 1
+}
+jq -s -e -L "$root/scripts" -f "$root/scripts/graph-benchmark-validator.jq" \
+    "$template/frozen.raw.jsonl" >/dev/null || {
+    printf 'synthesized raw payload is rejected by the aggregate validator\n' >&2
+    exit 1
+}
+expected_sha256="$(sha256sum "$template/frozen.raw.jsonl" | awk '{print $1}')"
+expected_bytes="$(wc -c <"$template/frozen.raw.jsonl" | tr -d ' ')"
 cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -165,7 +179,7 @@ raw="$case_root/target/issue6/graph-compiler-benchmark.raw.jsonl"
 [[ "$accepted" == "$case_root/target/issue6/graph-compiler-benchmark.jsonl" ]]
 cmp -s "$raw" "$accepted"
 [[ "$(sha256sum "$raw" | awk '{print $1}')" == "$expected_sha256" ]]
-[[ "$(wc -c <"$accepted" | tr -d ' ')" == 10364 ]]
+[[ "$(wc -c <"$accepted" | tr -d ' ')" == "$expected_bytes" ]]
 [[ "$(awk 'END { print NR }' "$accepted")" == 6 ]]
 [[ "$(tail -c 1 "$accepted" | od -An -t x1 | tr -d '[:space:]')" == 0a ]]
 

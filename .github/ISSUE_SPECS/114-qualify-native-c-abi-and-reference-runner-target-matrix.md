@@ -236,3 +236,7 @@ allowed qualification-only fence and candid tool identities are exact. Issue 114
 complete and ready to close after this evidence is upstream, required CI is green and the GitHub
 issue is synchronized. At that point it unblocks **End-to-end release, performance, and listening
 qualification** (Issue 026).
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): the accepted-authority seal in `scripts/check-capi-qualification-v1.sh` (`sha256sum --check --strict fixtures/capi-qualification/v1/AUTHORITIES.sha256`, and the `EVIDENCE.sha256` self-seal over it) is retired. Eleven of the twenty-six sealed paths were rewritten after this qualification ran: `Cargo.lock`, `crates/miso-engine-capi/{Cargo.toml,include/miso_engine_v2.h,src/abi.rs,src/ffi.rs,tests/resource_lifecycle.rs}`, `crates/miso-engine-protocol/src/{controller.rs,lib.rs}`, `fixtures/native-pcm-runner/v1/{MANIFEST.tsv,generate.py}` and `tools/miso-engine-native-pcm-runner/src/lib.rs`. Re-sealing without re-running the matrix would claim evidence for sources that never produced it, so the **accepted V1 result is superseded and the re-run belongs to #26**. `AUTHORITIES.sha256` and `EVIDENCE.sha256` stay as the record of the subject tree; the checker keeps its manifest-shape gates, the symbol/consumer/toolchain surface, the semantic evidence checker and the MATRIX row/evidence digests, all of which verify on the current tree.

@@ -49,8 +49,18 @@ if (($# == 1)) && [[ $1 == --source-policy=* ]]; then
   exit 0
 fi
 
+# With no argument the gate builds the artifact it checks, so `bash scripts/check-web-audioworklet.sh`
+# is runnable the same way every other `scripts/check-*.sh` is. CI keeps passing the directory it
+# already built (#104 phase A: the no-argument form used to exit 2 and read as a red gate).
+if (($# == 0)); then
+  self_built_artifacts=$(mktemp -d)
+  trap 'rm -rf -- "$self_built_artifacts"' EXIT
+  bash "$(dirname "${BASH_SOURCE[0]}")/build-web-audioworklet.sh" "$self_built_artifacts" >&2
+  set -- "$self_built_artifacts"
+fi
+
 if (($# != 1)); then
-  echo "usage: $0 ARTIFACT_DIRECTORY" >&2
+  echo "usage: $0 [ARTIFACT_DIRECTORY]" >&2
   exit 2
 fi
 

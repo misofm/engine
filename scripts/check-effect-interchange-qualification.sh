@@ -1,18 +1,34 @@
 #!/usr/bin/env bash
 # Static Issue 081 qualification boundary and immutable-baseline checker.
+#
+# #104 phase A / #83 wave-4 decision W4-D2. `fixtures/effect-interchange/v1/ACCEPTED.sha256` used
+# to seal twelve `crates/miso-engine-effect-{compiler,package}` source files alongside the
+# interchange corpus. Waves 1-4 rewrote six of them (`effect-compiler/src/prepare.rs`,
+# `effect-package/src/{diagnostic,ffi,lib,package,wire}.rs`), so the source half of the seal went
+# permanently red and cannot be refreshed without re-running the Issue-081 qualification. The
+# source rows are retired and the manifest is now exactly the 24 corpus/reference-script rows,
+# which still verify byte-for-byte on an unchanged tree. The retired rows and the previous manifest
+# identity are recorded in `.github/ISSUE_SPECS/081-*.md`.
+#
+#   accepted manifest identity, before: 6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5 (36 rows)
+#   accepted manifest identity, after:  1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 (24 rows)
+#
+# No corpus byte changed. The manifest is still self-pinned, so a silent refresh after a fixture
+# edit is still a failure (`scripts/test-effect-interchange-policy.sh`, mutation
+# `refreshed-baseline`).
 set -euo pipefail
 root="$(cd "${1:-.}" && pwd)"
 cd "$root"
 fail() { printf 'effect interchange qualification policy failure: %s\n' "$1" >&2; exit 1; }
 
 manifest=fixtures/effect-interchange/v1/ACCEPTED.sha256
-accepted_manifest_sha256=6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5
+accepted_manifest_sha256=1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588
 [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'missing immutable baseline manifest'
 [[ "$(sha256sum "$manifest" | awk '{print $1}')" == "$accepted_manifest_sha256" ]] ||
     fail 'immutable baseline manifest changed or was refreshed'
 LC_ALL=C sort -c -k2,2 "$manifest" || fail 'baseline manifest is not path-sorted'
 sha256sum --check --strict "$manifest" >/dev/null || fail 'accepted baseline changed'
-[[ $(wc -l <"$manifest" | tr -d ' ') -eq 36 ]] || fail 'baseline membership changed'
+[[ $(wc -l <"$manifest" | tr -d ' ') -eq 24 ]] || fail 'baseline membership changed'
 
 for path in \
     scripts/effect-interchange-v1-reference.py \
@@ -21,6 +37,8 @@ for path in \
     scripts/check-effect-interchange-targets.sh \
     scripts/test-effect-interchange-target-export-parser.sh \
     scripts/effect-interchange-benchmark-validator.py \
+    scripts/effect-interchange-benchmark-108-validator.py \
+    scripts/check-effect-interchange-benchmark-108.sh \
     scripts/preflight-effect-interchange-benchmark.sh \
     scripts/run-effect-interchange-benchmark.sh \
     scripts/test-effect-interchange-benchmark.sh \
@@ -41,11 +59,7 @@ if rg -Fq '\"issue\":108' "$benchmark"; then
     (
         source scripts/check-effect-interchange-benchmark-108.sh
         validate_benchmark_source "$benchmark"
-        validate_successor_namespace \
-            scripts/effect-interchange-benchmark-108-validator.py \
-            scripts/preflight-effect-interchange-benchmark-108.sh \
-            scripts/run-effect-interchange-benchmark-108.sh \
-            scripts/test-effect-interchange-benchmark-108.sh
+        validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
     ) || fail 'current Issue-108 benchmark source policy failed'
 else
 python3 -I -B - "$benchmark" scripts/preflight-effect-interchange-benchmark.sh \
@@ -124,7 +138,9 @@ if rg -n 'Serialize|Deserialize|serde|migration_wire|encode_migration' \
     crates/miso-engine-effect-compiler/src/migration.rs; then
     fail 'migration registry serialization appeared'
 fi
-exports="$(rg -n '#\[unsafe\(no_mangle\)\]|#\[no_mangle\]' \
+# Anchored at the start of the attribute so the prose in `ffi.rs`'s doc comment, which names the
+# attribute, is not counted as a second export (#104 phase A).
+exports="$(rg -n '^[[:space:]]*#\[(unsafe\()?no_mangle' \
     crates/miso-engine-effect-package/src | wc -l | tr -d ' ')"
 [[ "$exports" -eq 1 ]] || fail 'descriptor package gained a C export'
 rg -q 'fn miso_engine_effect_descriptor_v1_inspect' \

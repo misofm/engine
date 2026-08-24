@@ -180,3 +180,7 @@ Issue 111 therefore remains **OPEN / WAITING FOR EXTERNAL FACILITATOR INPUT**. N
 preflight, render, playback, listening authorization or persistent artifact exists. Root must not
 advance the later authority sequence until those external inputs are supplied and independently
 reviewed.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): the whole Issue-111 script family (`{check,preflight,prepare,test}-builtins-listening-111.sh`, `test-builtins-listening-111-policy.sh`) is retired. It pinned `Cargo.lock`, sixteen frozen paths and seven `target/issue110/` artifacts, and `prepare-builtins-listening-111.sh` additionally refused to run off the branch `codex/listening-111`. `scripts/check-builtins-listening-111.py` survives (its `--packet`/`--linked` modes are the live validator); `scripts/prepare-builtins-listening.sh` replaces the retired wrapper. The pins are recorded here.

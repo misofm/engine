@@ -131,7 +131,7 @@ seal_sha="$(sha256sum "$seal" | awk '{print $1}')"
 source_sha="$(sha256sum tools/miso-engine-effect-interchange-bench/src/main.rs | awk '{print $1}')"
 tool_manifest_sha="$(sha256sum tools/miso-engine-effect-interchange-bench/Cargo.toml | awk '{print $1}')"
 fixture_sha="$(sha256sum fixtures/effect-interchange/v1/ACCEPTED.sha256 | awk '{print $1}')"
-[[ "$fixture_sha" == 6403ae6205dbc86a57483f44723cfc107f7f49654532fc648516b7cfed7ae3a5 ]] || {
+[[ "$fixture_sha" == 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 ]] || {
     failure_reason=fixture_manifest_changed
     exit 1
 }

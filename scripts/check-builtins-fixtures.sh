@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The manifest is byte-sorted (C collation). `[[ a > b ]]` and `sort` both follow the caller's
+# collation, so a UTF-8 locale reordered `pcm/matrix-ramp-1.f32le` against
+# `pcm/matrix-ramp-127.f32le` and this gate failed on an unchanged tree (#104 phase A).
+export LC_ALL=C
+
 cd "${1:-.}"
 root="fixtures/builtins/v1"
 manifest="$root/MANIFEST.tsv"
@@ -28,7 +33,8 @@ done <"$manifest"
 find "$root" -type f ! -name MANIFEST.tsv -printf '%P\n' | sort >"$actual"
 cmp -s "$listed" "$actual" || { printf 'builtins fixture missing/unlisted file\n' >&2; exit 1; }
 if [[ -d "$workspace_root/tools/miso-engine-builtins-fixture" ]]; then
-    cargo run --quiet --manifest-path "$workspace_root/tools/miso-engine-builtins-fixture/Cargo.toml" \
+    cargo run --quiet --bin miso_engine_builtins_fixture \
+        --manifest-path "$workspace_root/tools/miso-engine-builtins-fixture/Cargo.toml" \
         -- --check "$(pwd)/$root" || {
         printf 'builtins fixture expected-output check failed\n' >&2
         exit 1

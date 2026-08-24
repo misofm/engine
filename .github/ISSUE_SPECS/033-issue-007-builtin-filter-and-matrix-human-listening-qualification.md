@@ -349,3 +349,7 @@ Stateless Issue 111, **Close builtin listening assignment-key authority and prep
 facilitator packet**, owns only the missing commitment link, fresh successor authority and eventual
 machine-only packet preparation. It must preserve this failed tranche and use `target/issue111`;
 Issue 033 is never retried and `target/issue33` is never created.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+`scripts/{check,preflight,prepare,test}-builtins-listening-033.sh` and `scripts/test-builtins-listening-033-policy.sh` are retired by #104 phase A (#83 W4-D2). They sealed `Cargo.lock`, `crates/miso-engine-builtins{,-compiler}/src/lib.rs` and seven `target/issue110/` build artifacts; the lane waves rewrote the sources and the artifacts have never existed in a fresh checkout, so the checker could not pass again and could not be honestly re-sealed. The sealed hashes stay in this file. The live half -- the two packet validators' `--self-test` and the public-packet canonicality/answer-free assertions -- moved into `scripts/check-builtins-listening.sh`, and `scripts/prepare-builtins-listening.sh` renders a packet without the seal machinery.

@@ -251,3 +251,7 @@ an explicit descriptive-only/no-threshold statement.
 Those PASS conditions were not reached and cannot be reached within Issue 109. Its final status is
 `TERMINAL STOP / NO OVERALL PASS`; Issue 110 owns completion without weakening any gate. Root owns
 commit and GitHub synchronization. Issue 109 does not close human listening or release readiness.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): the whole Issue-109 script family (`{check,preflight,run,test}-builtins-benchmark-109.sh`, `test-builtins-benchmark-109-policy.sh`) is retired. `check-builtins-benchmark-109.sh` pinned the sha256 of `Cargo.lock`, of the builtins-bench sources and of seven `target/issue72/` build artifacts, none of which exist in a fresh checkout; the metadata-export repair it guarded is superseded by the single `MISO_ENGINE_BENCH_*` vocabulary of #104 phase C. The pins are recorded here.

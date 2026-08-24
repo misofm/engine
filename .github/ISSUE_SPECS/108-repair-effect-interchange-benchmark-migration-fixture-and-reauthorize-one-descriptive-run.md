@@ -264,3 +264,7 @@ No product/ref/accepted-fixture/C ABI edit; no existing real qualification matri
 no fuzz, cross-target, audit, browser, reference process, mutation campaign, migration matrix,
 benchmark preflight/runner/main/workload/timing during implementation; no performance claim;
 no Issue-081 artifact mutation; no Issue-109 or unrelated scope.
+
+## Retirement note (#104 phase A, 2026-08-24)
+
+#104 phase A (#83 W4-D2): `scripts/{preflight,run,test}-effect-interchange-benchmark-108.sh` are retired -- they are the sealed lifecycle of one authorized run and pin `target/issue081/` artifacts and `Cargo.lock`. `scripts/check-effect-interchange-benchmark-108.sh` is converted: its seal half is gone, its source-authority half (the four-rate migration envelope, the four workloads and their expected output digests, the focused regression tokens) stays and `scripts/test-effect-interchange-benchmark-108-policy.sh` still proves each one red. The retired pins are recorded here.

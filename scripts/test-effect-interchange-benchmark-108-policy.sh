@@ -41,26 +41,14 @@ mutate_source old-digest \
     '350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441'
 mutate_source issue-81 '\"issue\":108' '\"issue\":81'
 
-namespace="$scratch/run-effect-interchange-benchmark-108.sh"
-cp "$root/scripts/run-effect-interchange-benchmark-108.sh" "$namespace"
-python3 -I -B - "$namespace" <<'PY'
-import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-path.write_text(path.read_text(encoding="utf-8").replace("target/issue108", "target/issue081"), encoding="utf-8")
-PY
+namespace="$scratch/effect-interchange-benchmark-108-validator.py"
+cp "$root/scripts/effect-interchange-benchmark-108-validator.py" "$namespace"
+printf '\n# artifact_dir=target/issue081\n' >>"$namespace"
 expect_failure issue081-namespace validate_successor_namespace "$namespace"
 
-refreshed="$scratch/ACCEPTED.sha256"
-cp "$root/fixtures/effect-interchange/v1/ACCEPTED.sha256" "$refreshed"
-printf '%s\n' '# refreshed' >>"$refreshed"
-expect_failure accepted-manifest-refresh validate_manifest_identity "$refreshed"
-
-product_root="$scratch/product"
-mkdir -p "$product_root/crates/example"
-printf 'accepted product\n' >"$product_root/crates/example/lib.rs"
-(cd "$product_root" && sha256sum crates/example/lib.rs >ACCEPTED.sha256)
-validate_manifest_payload "$product_root" ACCEPTED.sha256
-printf 'mutated product\n' >"$product_root/crates/example/lib.rs"
-expect_failure production-edit validate_manifest_payload "$product_root" ACCEPTED.sha256
+# The accepted-manifest identity and payload mutations moved to
+# `scripts/test-effect-interchange-policy.sh` together with the manifest itself (#104 phase A):
+# `check-effect-interchange-qualification.sh` owns that seal and this checker no longer duplicates
+# it.
 
 printf 'effect interchange benchmark 108 policy mutations: ok synthetic_only=1\n'
