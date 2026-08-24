@@ -26,6 +26,10 @@ function limits() {
     maximumMeterStreams: 1024n,
     maximumMeterItems: 1n << 20n,
     maximumMeterBytes: 16n << 20n,
+    // Issue #137: zero in both console words is the frozen pre-console shape -- no control
+    // channel, no meter observers -- which is what this fixture's digest was pinned against.
+    consoleCommandQueueRecords: 0n,
+    consoleMeterBlocks: 0n,
   };
 }
 

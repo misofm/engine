@@ -68,6 +68,16 @@
 // private smoother state in each dynamics kernel, and the graph binds observers only to track
 // stages. `MisoMeterFrameV1` will gain `trackGrDb` additively once that observation point exists.
 //
+// ## What a frame costs the render callback
+//
+// One `postMessage` per window, not per block. The body is a frozen object allocated at
+// construction whose only array is a `Float32Array` of `2 * trackCount + 2` elements, also
+// allocated at construction and overwritten in place; nothing is transferred, so the caller keeps
+// no ownership obligation. The single allocation left is the structured clone `postMessage`
+// performs, which is `4 * (2 * trackCount + 2)` bytes plus four small numbers -- 264 bytes for a
+// 32-track console. That cost has not been separately benchmarked in a browser; the telemetry
+// lease measures the render export, not the post around it.
+//
 // # Exactly one artifact
 //
 // Owner decision W4-D1: the shipped module is built with `+simd128`. There is no scalar artifact
@@ -255,12 +265,6 @@ export interface MisoTelemetryFrameV1 {
   readonly resolutionMs: number;
   /// `true` when the window measured exactly zero -- the clock could not see the work.
   readonly belowResolution: boolean;
-}
-
-export interface MisoLeaseRequestV1 {
-  requestId: number;
-  enabled: boolean;
-  onFrame: ((frame: never) => void) | null;
 }
 
 export interface MisoWebPrepareLimitsV1 {
