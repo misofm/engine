@@ -49,6 +49,45 @@ do
   fi
 done
 echo "web AudioWorklet transitive process-policy mutations passed"
+
+# Issue #137 D2/D3: the two amended policy rules each get their own red mutation. The generic
+# `this.port.postMessage({});` mutation above already covers "a third post appears"; these cover
+# "a pinned post disappears" and "the clock leaves its one pinned site".
+console_mutations=(
+  # A pinned post is renamed: the occurrence count still matches, the pinned line does not.
+  's/this\.port\.postMessage(this\.meterMessage);/this.port.postMessage(this.telemetryMessage);/'
+  # The telemetry post is dropped from the window: the count no longer matches.
+  's/this\.port\.postMessage(frame);/frame.sequence += 0;/'
+  # The lease guard is removed from the meter call site: the frame is posted unconditionally.
+  's/if (this\.meterLease) this\.postMeterFrame();/this.postMeterFrame();/'
+  # The clock is read inside the frozen render-callback body.
+  's/const started = this\.telemetryLease ? this\.clock\.read() : 0;/const started = Date.now();/'
+)
+for mutation in "${console_mutations[@]}"; do
+  mutated="$mutation_dir/worklet-console.js"
+  sed "$mutation" "$worklet" >"$mutated"
+  if diff -q "$worklet" "$mutated" >/dev/null; then
+    echo "console policy mutation matched nothing: $mutation" >&2
+    exit 1
+  fi
+  if "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$mutated" >/dev/null 2>&1; then
+    echo "console process-policy mutation escaped: $mutation" >&2
+    exit 1
+  fi
+done
+# A clock read anywhere outside `renderClock()` fails the pinned-site rule even when it is not in
+# the render-callback body.
+mutated="$mutation_dir/worklet-clock.js"
+sed 's/^  bindConsole(init) {/  bindConsole(init) {\n    this.boot = Date.now();/' "$worklet" >"$mutated"
+if diff -q "$worklet" "$mutated" >/dev/null; then
+  echo "clock-site mutation matched nothing" >&2
+  exit 1
+fi
+if "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$mutated" >/dev/null 2>&1; then
+  echo "clock read outside renderClock() escaped the pinned-site rule" >&2
+  exit 1
+fi
+echo "web AudioWorklet console policy mutations passed"
 mutated_utf8="$mutation_dir/worklet-utf8.js"
 sed 's/(codePoint >>> 18) | 0xf0/(codePoint >>> 18) | 0xe0/' "$worklet" >"$mutated_utf8"
 if MISO_ENGINE_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \

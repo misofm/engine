@@ -28,6 +28,10 @@ const limits = Object.freeze({
   maximumMeterStreams: 8n,
   maximumMeterItems: 16n,
   maximumMeterBytes: 4096n,
+  // Issue #137 D1/D2: the two console words. Zero in both is "default command-queue depth, no
+  // meter observers"; the console tests below override them.
+  consoleCommandQueueRecords: 4n,
+  consoleMeterBlocks: 2n,
 });
 
 function resourceReport(backend, quantumFrames) {
@@ -86,6 +90,8 @@ async function testMainRealm() {
   let readyMutation = null;
   let statusMutation = null;
   let planeMutation = null;
+  let commandResult = 0;
+  let commandMutation = null;
 
   class FakePort {
     onmessage = null;
@@ -117,6 +123,27 @@ async function testMainRealm() {
             nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
           };
           if (statusMutation !== null) response = statusMutation(response);
+        } else if (received.tag === "miso.command.v1") {
+          response = {
+            tag: "miso.ack.v1",
+            requestId: received.requestId,
+            result: commandResult,
+            reason: commandResult === 0 ? 0 : 8,
+            rejectedIndex: 0,
+            admitted: commandResult === 0 ? received.count : 0,
+            appliedAtSample: 512n,
+            records: received.records,
+          };
+          if (commandMutation !== null) response = commandMutation(response);
+          responseTransfer = [received.records.buffer];
+        } else if (received.tag === "miso.sessionmap.v1") {
+          response = {
+            tag: "miso.sessionmap.v1",
+            requestId: received.requestId,
+            result: 0,
+            tracks: ["kick", "snare"],
+            metersAttached: true,
+          };
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
@@ -398,6 +425,129 @@ async function testMainRealm() {
       compileCount,
       "the probe refuses before any artifact is fetched",
     );
+
+    // Issue #137 D1/D2/D3: the live console's main-realm half.
+    const consoleHost = await createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new TextEncoder().encode("format_version = 2"),
+      limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    const map = await consoleHost.sessionMap();
+    assert.deepEqual(map.tracks, ["kick", "snare"], "the canonical track order is the ABI");
+    assert.equal(map.metersAttached, true);
+
+    const pan = {
+      kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
+      smoothingSamples: 64, values: [-0.5, 0.5, 0, 0],
+    };
+    const commandAck = await consoleHost.command({ requestId: 200, commands: [pan] });
+    assert.equal(commandAck.tag, "miso.ack.v1");
+    assert.equal(commandAck.result, 0);
+    assert.equal(commandAck.admitted, 1);
+    assert.equal(commandAck.appliedAtSample, 512n, "the ack names the exact application sample");
+    const staged = events.findLast((event) => event[1] === "miso.command.v1");
+    assert.equal(staged[3], 1, "the record block is transferred, never copied");
+    assert.equal(commandAck.records.byteLength, 48, "the block comes straight back to the caller");
+    const decoded = new DataView(
+      commandAck.records.buffer,
+      commandAck.records.byteOffset,
+      commandAck.records.byteLength,
+    );
+    assert.equal(decoded.getUint8(0), 1, "kind");
+    assert.equal(decoded.getUint8(1), 255, "rack is not applicable to a pan");
+    assert.equal(decoded.getUint32(4, true), 1, "track index");
+    assert.equal(decoded.getUint32(16, true), 64, "smoothing samples");
+    assert.equal(decoded.getFloat32(24, true), -0.5, "value0");
+    assert.equal(decoded.getFloat32(28, true), 0.5, "value1");
+
+    // A malformed command never reaches the port.
+    const beforeMalformed = events.length;
+    await errorResult(
+      consoleHost.command({ requestId: 201, commands: [{ ...pan, kind: 99 }] }),
+      1,
+    );
+    await errorResult(
+      consoleHost.command({ requestId: 202, commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
+      1,
+    );
+    await errorResult(consoleHost.command({ requestId: 203, commands: [] }), 1);
+    assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
+
+    // Engine backpressure is a resolved acknowledgement that admits nothing.
+    commandResult = 6;
+    const refused = await consoleHost.command({ requestId: 204, commands: [pan] });
+    assert.equal(refused.result, 6);
+    assert.equal(refused.admitted, 0);
+    assert.equal(refused.reason, 8);
+    commandResult = 0;
+
+    // Local backpressure: the worklet-side queue depth is 4, so a fifth unsettled batch is
+    // refused here, before any transfer, and the caller keeps its records.
+    holdAll = true;
+    const held4 = [205, 206, 207, 208].map((requestId) =>
+      consoleHost.command({ requestId, commands: [pan] }));
+    await errorResult(consoleHost.command({ requestId: 209, commands: [pan] }), 6);
+    holdAll = false;
+    for (const respond of heldAll) respond();
+    heldAll.length = 0;
+    await Promise.all(held4);
+
+    // Leases and their unsolicited frames.
+    const meterFrames = [];
+    const telemetryFrames = [];
+    assert.equal(
+      (await consoleHost.meters({ requestId: 210, enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
+      0,
+    );
+    assert.equal(
+      (await consoleHost.telemetry({ requestId: 211, enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
+      0,
+    );
+    const node = FakeNode.latest;
+    node.port.onmessage({
+      data: {
+        tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+        peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
+      },
+    });
+    node.port.onmessage({
+      data: {
+        tag: "miso.telemetry.v1", sequence: 1, blocks: 128, cpuPercent: 4.5, peakBlockMs: 0.2,
+        meanBlockMs: 0.1, budgetMs: 1.3, deadlineMisses: 0, resolutionMs: 0.005,
+        belowResolution: false,
+      },
+    });
+    assert.equal(meterFrames.length, 1);
+    assert.deepEqual([...meterFrames[0].peaks], [0.125, 0.25, 0.375, 0.5, 0.625, 0.75]);
+    assert.equal(Object.isFrozen(meterFrames[0]), true);
+    assert.equal(telemetryFrames.length, 1);
+    assert.equal(telemetryFrames[0].cpuPercent, 4.5);
+
+    // A released lease detaches the callback: a late frame is delivered nowhere.
+    await consoleHost.meters({ requestId: 212, enabled: false, onFrame: null });
+    node.port.onmessage({
+      data: {
+        tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
+        peaks: new Float32Array(6),
+      },
+    });
+    assert.equal(meterFrames.length, 1, "a released lease receives nothing");
+
+    // A malformed frame is a hard failure, not a silent skip: a console that ignores a broken
+    // frame is a console that lies to its user. Red mutation: replace the `#fail` in the
+    // `miso.meter.v1` branch of `#receive` with `return` -> this status stays pending forever.
+    const doomed = consoleHost.status();
+    node.port.onmessage({
+      data: {
+        tag: "miso.meter.v1", sequence: 3, windows: 1, trackCount: 2,
+        peaks: new Float32Array(4),
+      },
+    });
+    await errorResult(doomed, 255);
+    await consoleHost.dispose();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;
@@ -428,8 +578,26 @@ function createFakeExports(quantum, backend = 0) {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sourceResult: 0,
   };
-  const pointers = { 1: 2048, 2: 4096, 3: 5000, 5: 8192 };
-  const capacities = { 1: 4096, 2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4 };
+  // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
+  const commandPointer = 24000;
+  const meterFramePointer = 40000;
+  const reportPointer = 41000;
+  const trackIds = ["kick", "snare"];
+  const meterFrameFloats = trackIds.length * 2 + 2;
+  const report = new DataView(memory.buffer, reportPointer, 48);
+  report.setUint32(0, 48, true);
+  report.setUint32(4, 0x00010000, true);
+  const pointers = {
+    1: 2048, 2: 4096, 3: 5000, 5: 8192, 6: commandPointer, 7: meterFramePointer,
+  };
+  const capacities = {
+    1: 4096, 2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4, 6: 256 * 48,
+    7: meterFrameFloats * 4,
+  };
+  calls.commands = [];
+  calls.commandResult = 0;
+  calls.meterLease = [];
+  calls.meterWindows = 0;
   const exports = {
     memory,
     miso_engine_web_v1_abi_version: () => 0x00010000,
@@ -462,12 +630,39 @@ function createFakeExports(quantum, backend = 0) {
       calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
     },
+    miso_engine_web_v1_command_report_ptr: () => reportPointer,
+    miso_engine_web_v1_command_submit: (_handle, count) => {
+      calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 48).slice());
+      report.setUint32(8, calls.commandResult, true);
+      report.setUint32(12, calls.commandResult === 0 ? 0 : 8, true);
+      report.setUint32(16, 0, true);
+      report.setUint32(20, calls.commandResult === 0 ? count : 0, true);
+      report.setBigUint64(24, status.getBigUint64(32, true), true);
+      return calls.commandResult;
+    },
+    miso_engine_web_v1_meter_lease: (_handle, enabled) => {
+      calls.meterLease.push(enabled);
+      return 0;
+    },
+    miso_engine_web_v1_meter_poll: () => {
+      if (calls.meterWindows === 0) return 0;
+      calls.meterWindows -= 1;
+      new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats).fill(0.5);
+      return 1;
+    },
+    miso_engine_web_v1_console_track_count: () => trackIds.length,
+    miso_engine_web_v1_console_track_id: (_handle, index) => {
+      const id = trackIds[index];
+      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
+      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
+      return id.length;
+    },
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
     },
   };
-  return { exports, calls };
+  return { exports, calls, trackIds, meterFrameFloats };
 }
 
 async function testProcessor() {
@@ -738,6 +933,121 @@ async function testProcessor() {
       assert.equal(response.message.result, 1);
       assert.equal(response.transferCount, 1);
       assert.equal(response.message.planes[0].byteLength, 16);
+    }
+
+    {
+      // Issue #137 D1: the worklet copies a staged batch into Wasm, admits it, and hands the
+      // record block straight back with the typed report.
+      const { processor, fake } = makeProcessor();
+      assert.deepEqual(processor.trackIds, fake.trackIds ?? ["kick", "snare"]);
+      const records = new Uint8Array(2 * 48);
+      const view = new DataView(records.buffer);
+      records[0] = 2; // matrix
+      records[1] = 255;
+      records[2] = 255;
+      view.setUint32(4, 1, true);
+      view.setFloat32(24, 0.5, true);
+      records[48] = 1; // pan
+      records[49] = 255;
+      records[50] = 255;
+      view.setUint32(52, 0, true);
+      view.setFloat32(72, -1, true);
+      view.setFloat32(76, 1, true);
+      processor.receive(structuredClone(
+        { tag: "miso.command.v1", requestId: 1, count: 2, records },
+        { transfer: [records.buffer] },
+      ));
+      const ack = processor.port.posts.at(-1);
+      assert.equal(ack.message.tag, "miso.ack.v1");
+      assert.equal(ack.message.result, 0);
+      assert.equal(ack.message.admitted, 2);
+      assert.equal(ack.message.reason, 0);
+      assert.equal(ack.transferCount, 1, "the record block goes back to the caller");
+      assert.equal(fake.calls.commands.length, 1);
+      assert.equal(fake.calls.commands[0].length, 96, "exactly the staged bytes are submitted");
+      assert.equal(fake.calls.commands[0][0], 2);
+      assert.equal(fake.calls.commands[0][48], 1);
+
+      // A record block whose length disagrees with `count` is sticky-invalid, never truncated.
+      const short = new Uint8Array(48);
+      processor.receive({ tag: "miso.command.v1", requestId: 2, count: 2, records: short });
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+      assert.equal(processor.port.posts.at(-1).message.result, 1);
+    }
+
+    {
+      // Issue #137 D2/D3: both leases start released, and a released lease costs the render
+      // callback one boolean test and no message.
+      const { processor, fake } = makeProcessor();
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      fake.calls.meterWindows = 3;
+      const before = processor.port.posts.length;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.length, before, "no lease, no frame");
+      assert.equal(fake.calls.meterLease.length, 0, "no lease, no engine call");
+
+      processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      assert.deepEqual(fake.calls.meterLease, [1]);
+      assert.deepEqual(processor.port.posts.at(-1).message, {
+        tag: "miso.ack.v1", requestId: 1, result: 0,
+      });
+      assert.equal(processor.process([], [[left, right]]), true);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.tag, "miso.meter.v1");
+      assert.equal(frame.sequence, 1);
+      assert.equal(frame.windows, 1);
+      assert.equal(frame.trackCount, 2);
+      assert.equal(frame.peaks.length, 6);
+      assert(frame.peaks.every((value) => value === 0.5));
+
+      // Releasing the lease stops the frames immediately.
+      processor.receive({ tag: "miso.meters.v1", requestId: 2, enabled: false });
+      assert.deepEqual(fake.calls.meterLease, [1, 0]);
+      const quiet = processor.port.posts.length;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.length, quiet, "a released lease posts nothing");
+    }
+
+    {
+      // Issue #137 D3: a full telemetry window posts exactly one frame, and the frame is honest
+      // about the resolution of the clock it actually found.
+      const { processor } = makeProcessor();
+      processor.receive({ tag: "miso.telemetry.v1", requestId: 1, enabled: true });
+      assert.deepEqual(processor.port.posts.at(-1).message, {
+        tag: "miso.ack.v1", requestId: 1, result: 0,
+      });
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      let frames = 0;
+      for (let block = 0; block < 128; block += 1) {
+        assert.equal(processor.process([], [[left, right]]), true);
+        const last = processor.port.posts.at(-1).message;
+        if (last.tag === "miso.telemetry.v1") frames += 1;
+      }
+      assert.equal(frames, 1, "one frame per 128-block window and no more");
+      const telemetry = processor.port.posts.at(-1).message;
+      assert.equal(telemetry.blocks, 128);
+      assert.equal(telemetry.sequence, 1);
+      assert.equal(telemetry.deadlineMisses, 0);
+      assert(telemetry.budgetMs > 1.3 && telemetry.budgetMs < 1.4, telemetry.budgetMs);
+      assert(telemetry.resolutionMs > 0);
+      assert.equal(typeof telemetry.belowResolution, "boolean");
+      assert(telemetry.cpuPercent >= 0);
+      processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: false });
+      const quiet = processor.port.posts.length;
+      for (let block = 0; block < 200; block += 1) processor.process([], [[left, right]]);
+      assert.equal(processor.port.posts.length, quiet, "a released lease reads no clock");
+    }
+
+    {
+      // The session map answers from the identities read once at construction.
+      const { processor } = makeProcessor();
+      processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
+      const map = processor.port.posts.at(-1).message;
+      assert.equal(map.tag, "miso.sessionmap.v1");
+      assert.deepEqual(map.tracks, ["kick", "snare"]);
+      assert.equal(map.metersAttached, true);
     }
   } finally {
     globalThis.AudioWorkletProcessor = originalProcessor;

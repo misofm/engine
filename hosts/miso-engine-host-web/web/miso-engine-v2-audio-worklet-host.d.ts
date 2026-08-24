@@ -1,4 +1,72 @@
-// Browser AudioWorklet host, ABI version 1 (issue 024, amended by issues 106 and 083 W4-D1).
+// Browser AudioWorklet host, ABI version 1 (issue 024, amended by issues 106, 083 W4-D1 and 137).
+//
+// # The live console (issue 137)
+//
+// V1 as issue 024 froze it was a deterministic *renderer*: create, stream, render, dispose. Issue
+// 137 adds the three things a live mixing console needs on top, additively -- no existing message,
+// field or result code changed meaning, and the 192-byte configuration and 224-byte resource
+// report kept their exact layouts.
+//
+//   1. `miso.command.v1`, a control path from the main realm into the engine, acknowledged with
+//      the exact absolute sample the batch took effect at.
+//   2. `miso.meters.v1` / `miso.meter.v1`, a decimated peak stream on a lease.
+//   3. `miso.telemetry.v1`, windowed render-time telemetry on a lease, measured in JavaScript
+//      around the render export.
+//
+// ## What the control path can and cannot move, and why
+//
+// **This is the most important thing to know before writing an app against it.** The engine has no
+// general post-preparation parameter write path. `BUILTIN_PARAMETER_DESCRIPTORS_V1` -- the builtin
+// parameter ABI -- says which builtin parameters may move after preparation, and the answer is
+// four of them: `matrix_ll`, `matrix_lr`, `matrix_rl` and `matrix_rr`, which declare
+// `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing policy. `polarity_invert`,
+// `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db` and `mute` all declare `PreparedOnly`. Effect
+// parameters have no write path at all: the graph passes an empty automation slice to every
+// prepared effect and its runtime module is private and positionally addressed.
+//
+// So `MisoCommandKindV1.Pan` and `.Matrix` are applied, and `.FaderDb`, `.Mute`, `.EffectParam`
+// and `.EffectBypass` are **declared, addressed, domain-checked and then refused** with
+// `result: 7` and `reason: MisoCommandReasonV1.UnsupportedKind`. That refusal is deliberately
+// distinguishable from `Malformed` and from the `Unknown*` reasons: the parameter exists and the
+// value is legal, and the engine cannot move it yet. The build-time parameter-metadata JSON marks
+// every such parameter, so an app never has to discover this at runtime.
+//
+// ## Addressing is session-stable and string-free
+//
+// A command names a track by its index in the compiled session's canonical normalized track order,
+// which `sessionMap()` returns, plus a rack, an effect index and a numeric parameter ID. No string
+// crosses the command path. The identity mapping is `sessionMap()` for the session and the
+// build-time metadata JSON for the effect vocabulary.
+//
+// ## One batch is one transaction
+//
+// The worklet validates a whole submission -- shape, addressing, domain, and free queue room --
+// before it pushes a single record. A refused batch admits nothing, so a half-applied fader move
+// cannot exist, and a flood is refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is
+// returned by the main-realm host locally when its own in-flight bound is reached, and by the
+// engine when a bounded per-track control queue has no room.
+//
+// ## Application timing is exact
+//
+// A track's matrix stage drains its control queue at the top of the block, before it touches a
+// sample. `appliedAtSample` on the acknowledgement is therefore the first sample of the next
+// rendered block, and every sample of that block carries the change. It is an exact statement, not
+// an estimate.
+//
+// ## What metering costs
+//
+// `consoleMeterBlocks === 0n` binds no meter observer at all: the render path folds nothing, and
+// `meters({ enabled: true })` is refused with `RESULT_UNSUPPORTED` rather than reporting zeros. A
+// nonzero value binds one post-matrix meter per track with a `blocks * quantumFrames` window and
+// makes the port lease a second, finer switch over the master fold and every drain and post. The
+// honest summary: *not attaching* meters costs nothing at all; attaching them and releasing the
+// lease costs one branch per block plus the per-track observation fold, which runs whenever the
+// observers exist.
+//
+// Gain reduction is **not** in the meter frame. No effect in the engine exposes a per-block gain
+// reduction observation point -- `PreparedNativeEffect` has no observation method, GR lives as
+// private smoother state in each dynamics kernel, and the graph binds observers only to track
+// stages. `MisoMeterFrameV1` will gain `trackGrDb` additively once that observation point exists.
 //
 // # Exactly one artifact
 //
@@ -70,6 +138,131 @@ export interface MisoUnsupportedBrowserV1 {
   readonly capability: "simd128";
 }
 
+/// Frozen live-console command kinds (issue 137 D1).
+export const enum MisoCommandKindV1 {
+  /// Retarget the track's pan pair over an explicit ramp window. Applied.
+  Pan = 1,
+  /// Retarget the track's full 2x2 matrix over an explicit ramp window. Applied.
+  Matrix = 2,
+  /// Set a lane fader in decibels. Refused: `fader_db` declares `PreparedOnly`.
+  FaderDb = 3,
+  /// Set a lane mute. Refused: `mute` declares `PreparedOnly`.
+  Mute = 4,
+  /// Set an effect parameter. Refused: no post-preparation effect write path exists.
+  EffectParam = 5,
+  /// Set an effect bypass. Refused: no post-preparation effect write path exists.
+  EffectBypass = 6,
+}
+
+/// Frozen typed reasons a live-console submission was refused (issue 137 D1).
+export const enum MisoCommandReasonV1 {
+  /// The submission was admitted whole.
+  None = 0,
+  /// Unknown kind, nonzero reserved word, non-finite value, or a field set for the wrong kind.
+  Malformed = 1,
+  /// `trackIndex` is not a track of the compiled session.
+  UnknownTrack = 2,
+  /// `rack` is not one of the three declared racks.
+  UnknownRack = 3,
+  /// `effectIndex` is not an effect of the addressed rack.
+  UnknownEffect = 4,
+  /// `parameterId` is not a parameter of the addressed effect.
+  UnknownParameter = 5,
+  /// A value is outside the addressed parameter's declared domain.
+  Domain = 6,
+  /// Well formed and correctly addressed; this ABI version cannot apply that kind.
+  UnsupportedKind = 7,
+  /// A bounded control queue had no room; nothing was admitted.
+  Backpressure = 8,
+  /// The engine is not `STATE_READY`.
+  WrongState = 9,
+}
+
+/// One live-console command. `255` means "not applicable to this kind".
+export interface MisoCommandV1 {
+  kind: MisoCommandKindV1;
+  /// `0` simd1, `1` dynamic, `2` simd2, `255` for a builtin-addressed kind.
+  rack: number;
+  /// `0` left, `1` right, `2` both, `255` for a kind with no lane.
+  channel: number;
+  /// Index into the canonical track order `sessionMap()` returns.
+  trackIndex: number;
+  effectIndex: number;
+  parameterId: number;
+  /// Ramp window in sample updates for `Pan` and `Matrix`; ignored by every other kind.
+  smoothingSamples: number;
+  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. Everything else: `[value, 0, 0, 0]`.
+  values: [number, number, number, number];
+}
+
+export interface MisoCommandRequestV1 {
+  requestId: number;
+  commands: MisoCommandV1[];
+}
+
+/// One live-console acknowledgement. `result` is `0` only when the whole batch was admitted.
+export interface MisoCommandAckV1 {
+  readonly tag: "miso.ack.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly reason: MisoCommandReasonV1;
+  /// Index of the first refused record; `0` on success.
+  readonly rejectedIndex: number;
+  /// The whole batch, or zero.
+  readonly admitted: number;
+  /// The exact absolute sample the admitted records take effect at.
+  readonly appliedAtSample: bigint;
+  /// The caller's record block, handed straight back.
+  readonly records: Uint8Array;
+}
+
+/// The compiled session's addressing authority (issue 137 D1).
+export interface MisoSessionMapV1 {
+  readonly tag: "miso.sessionmap.v1";
+  readonly requestId: number;
+  readonly result: number;
+  /// Canonical normalized track order. `trackIndex` indexes this.
+  readonly tracks: string[];
+  /// Whether preparation bound meter observers at all.
+  readonly metersAttached: boolean;
+}
+
+/// One decimated meter window (issue 137 D2).
+export interface MisoMeterFrameV1 {
+  readonly tag: "miso.meter.v1";
+  readonly sequence: number;
+  /// Complete windows folded into this frame; normally `1`.
+  readonly windows: number;
+  readonly trackCount: number;
+  /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
+  readonly peaks: Float32Array;
+}
+
+/// One windowed render-telemetry frame (issue 137 D3). JavaScript only; Wasm never sees the lease.
+export interface MisoTelemetryFrameV1 {
+  readonly tag: "miso.telemetry.v1";
+  readonly sequence: number;
+  /// Blocks in the window.
+  readonly blocks: number;
+  /// Render time as a percentage of the block budget over the window.
+  readonly cpuPercent: number;
+  readonly peakBlockMs: number;
+  readonly meanBlockMs: number;
+  readonly budgetMs: number;
+  /// Blocks whose measured render time exceeded the block budget.
+  readonly deadlineMisses: number;
+  /// Resolution of the clock the worklet actually found.
+  readonly resolutionMs: number;
+  /// `true` when the window measured exactly zero -- the clock could not see the work.
+  readonly belowResolution: boolean;
+}
+
+export interface MisoLeaseRequestV1 {
+  requestId: number;
+  enabled: boolean;
+  onFrame: ((frame: never) => void) | null;
+}
+
 export interface MisoWebPrepareLimitsV1 {
   sessionTomlBytes: number;
   diagnosticBytes: number;
@@ -92,6 +285,10 @@ export interface MisoWebPrepareLimitsV1 {
   maximumMeterStreams: bigint;
   maximumMeterItems: bigint;
   maximumMeterBytes: bigint;
+  /// Per-track control-queue depth in records, or `0n` for the engine default of 64 (issue 137).
+  consoleCommandQueueRecords: bigint;
+  /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
+  consoleMeterBlocks: bigint;
 }
 
 export interface MisoWebResourceReportV1 {
@@ -174,6 +371,18 @@ export interface MisoAudioWorkletHost {
   submitSource(request: MisoSourceRequestV1): Promise<MisoAckV1>;
   seekSource(request: MisoSeekRequestV1): Promise<MisoAckV1>;
   status(): Promise<MisoStatusV1>;
+  /// Submit one live-console batch as a single transaction (issue 137 D1).
+  command(request: MisoCommandRequestV1): Promise<MisoCommandAckV1>;
+  /// Read the canonical track order that `trackIndex` addresses (issue 137 D1).
+  sessionMap(): Promise<MisoSessionMapV1>;
+  /// Take or release the decimated meter lease (issue 137 D2).
+  meters(
+    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoMeterFrameV1) => void) | null },
+  ): Promise<MisoAckV1>;
+  /// Take or release the render-telemetry lease (issue 137 D3).
+  telemetry(
+    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoTelemetryFrameV1) => void) | null },
+  ): Promise<MisoAckV1>;
   dispose(): Promise<void>;
 }
 

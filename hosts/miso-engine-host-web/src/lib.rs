@@ -797,18 +797,24 @@ impl AudioWorkletEngineHost {
                 // nothing to observe and nothing to expose -- one branch and one pass over a
                 // buffer already in cache, and only while the lease is held.
                 if self.meter_lease {
-                    let (left, right) = buffers.output_pcm.split_at(quantum);
+                    // Indexed with `get`, never with a range: a slice index would put
+                    // `slice_index_fail` in the render export's call graph, and the shipped
+                    // artifact's gate would -- correctly -- refuse the build.
                     let mut peaks = ready.master_peak;
-                    for sample in left {
-                        let magnitude = sample.abs();
-                        if magnitude > peaks[0] {
-                            peaks[0] = magnitude;
-                        }
-                    }
-                    for sample in &right[..quantum] {
-                        let magnitude = sample.abs();
-                        if magnitude > peaks[1] {
-                            peaks[1] = magnitude;
+                    for (plane, peak) in peaks.iter_mut().enumerate() {
+                        let start = plane * quantum;
+                        let Some(samples) = buffers
+                            .output_pcm
+                            .get(start..)
+                            .and_then(|tail| tail.get(..quantum))
+                        else {
+                            break;
+                        };
+                        for sample in samples {
+                            let magnitude = sample.abs();
+                            if magnitude > *peak {
+                                *peak = magnitude;
+                            }
                         }
                     }
                     ready.master_peak = peaks;
@@ -885,13 +891,21 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return 0;
         };
+        // Every index below is a `get_mut`, never a `[]`: a bounds check would put
+        // `panic_bounds_check` in this export's call graph, and this export is called from
+        // `process()`, so the shipped artifact's gate covers it exactly as it covers the render
+        // export.
         let mut windows = 0_u32;
         for (index, meter) in ready.meters.iter_mut().enumerate() {
             let mut popped = 0_u32;
             while let Ok(snapshot) = meter.consumer.try_pop() {
                 let MeterSnapshot { left, right, .. } = snapshot;
-                ready.meter_frame[index * 2] = left.sample_peak;
-                ready.meter_frame[index * 2 + 1] = right.sample_peak;
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
+                    *slot = left.sample_peak;
+                }
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
+                    *slot = right.sample_peak;
+                }
                 popped = popped.saturating_add(1);
             }
             // Every track's meter shares one window length and one start sample, so they finish
@@ -903,8 +917,11 @@ impl AudioWorkletEngineHost {
             };
         }
         let master = ready.meter_frame.len().saturating_sub(2);
-        ready.meter_frame[master] = ready.master_peak[0];
-        ready.meter_frame[master + 1] = ready.master_peak[1];
+        for (plane, peak) in ready.master_peak.iter().enumerate() {
+            if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
+                *slot = *peak;
+            }
+        }
         ready.master_peak = [0.0, 0.0];
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows

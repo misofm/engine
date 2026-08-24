@@ -51,7 +51,53 @@ const LIMIT_FIELDS = [
   "maximumSourceTotalBytes", "maximumSourceOverheadBytes", "maximumEffectStateBytes",
   "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
   "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
+  "consoleCommandQueueRecords", "consoleMeterBlocks",
 ];
+
+// Issue #137 D1: the frozen 48-byte little-endian command record.
+const COMMAND_RECORD_BYTES = 48;
+const MAXIMUM_COMMAND_RECORDS = 256;
+const COMMAND_FIELDS = [
+  "kind", "rack", "channel", "trackIndex", "effectIndex", "parameterId", "smoothingSamples",
+  "values",
+];
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);
+const NOT_APPLICABLE = 255;
+
+/// Encode one live-console submission into a single transferable byte block.
+///
+/// One message per gesture, not one per parameter: the whole batch is admitted or refused as one
+/// transaction on the worklet side, so a partially applied fader move cannot exist.
+function encodeCommands(commands) {
+  const records = new Uint8Array(commands.length * COMMAND_RECORD_BYTES);
+  const view = new DataView(records.buffer);
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index];
+    const offset = index * COMMAND_RECORD_BYTES;
+    records[offset] = command.kind;
+    records[offset + 1] = command.rack;
+    records[offset + 2] = command.channel;
+    view.setUint32(offset + 4, command.trackIndex, true);
+    view.setUint32(offset + 8, command.effectIndex, true);
+    view.setUint32(offset + 12, command.parameterId, true);
+    view.setUint32(offset + 16, command.smoothingSamples, true);
+    for (let slot = 0; slot < 4; slot += 1) {
+      view.setFloat32(offset + 24 + slot * 4, command.values[slot], true);
+    }
+  }
+  return records;
+}
+
+function validCommand(command) {
+  return hasExactFields(command, COMMAND_FIELDS)
+    && COMMAND_KINDS.has(command.kind)
+    && (validU32(command.rack) && (command.rack <= 2 || command.rack === NOT_APPLICABLE))
+    && (validU32(command.channel) && (command.channel <= 2 || command.channel === NOT_APPLICABLE))
+    && validU32(command.trackIndex) && validU32(command.effectIndex)
+    && validU32(command.parameterId) && validU32(command.smoothingSamples)
+    && Array.isArray(command.values) && command.values.length === 4
+    && command.values.every((value) => typeof value === "number" && Number.isFinite(value));
+}
 const RESOURCE_FIELDS = [
   "sampleRateHz", "quantumFrames", "backend", "configBytes", "statusBytes", "sessionTomlBytes",
   "diagnosticBytes", "sourceIdBytes", "sourcePcmStagingBytes", "outputPcmBytes",
@@ -98,10 +144,15 @@ function numericBackend(backend) {
 
 function validLimits(limits) {
   if (!hasExactFields(limits, LIMIT_FIELDS)) return false;
+  // The two console words are the only u64 limits that may legally be zero: zero means "default
+  // command-queue depth" and "attach no meter observers at all".
   return LIMIT_FIELDS.slice(0, 6).every((field) => validU32(limits[field]))
     && limits.sessionTomlBytes > 0 && limits.diagnosticBytes > 0 && limits.sourceIdBytes > 0
     && limits.maximumSourceChannels > 0 && limits.sourceRingFrames > 0
-    && LIMIT_FIELDS.slice(6).every((field) => validU64(limits[field], true));
+    && LIMIT_FIELDS.slice(6, 21).every((field) => validU64(limits[field], true))
+    && validU64(limits.consoleCommandQueueRecords)
+    && limits.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
+    && validU64(limits.consoleMeterBlocks);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -200,7 +251,12 @@ class MisoAudioWorkletHostV1 {
   #inFlightSources = new Map();
   #inFlightSeeks = new Map();
   #inFlightStatus = 0;
+  #inFlightCommands = 0;
+  #inFlightLease = new Set();
+  #commandQueueRecords;
   #ringBlocks;
+  #onMeterFrame = null;
+  #onTelemetryFrame = null;
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
@@ -208,7 +264,16 @@ class MisoAudioWorkletHostV1 {
   #sampleRateHz;
   #quantumFrames;
 
-  constructor(node, backend, sampleRateHz, quantumFrames, resources, memoryBytes, ringBlocks) {
+  constructor(
+    node,
+    backend,
+    sampleRateHz,
+    quantumFrames,
+    resources,
+    memoryBytes,
+    ringBlocks,
+    commandQueueRecords,
+  ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
       backend: { value: backend, enumerable: true },
@@ -219,6 +284,7 @@ class MisoAudioWorkletHostV1 {
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
+    this.#commandQueueRecords = commandQueueRecords;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
@@ -243,10 +309,49 @@ class MisoAudioWorkletHostV1 {
       this.#inFlightSeeks.delete(pending.sourceId);
     } else if (pending.response === "status") {
       this.#inFlightStatus -= 1;
+    } else if (pending.response === "command") {
+      this.#inFlightCommands -= 1;
+    } else if (pending.response === "lease" || pending.response === "sessionMap") {
+      this.#inFlightLease.delete(pending.leaseKind);
     }
   }
 
   #receive(message) {
+    // Issue #137 D2/D3: meter and telemetry frames are unsolicited -- they answer a lease, not a
+    // request -- so they are dispatched before the correlation lookup and never reach it. A frame
+    // whose shape is wrong is a hard failure exactly like a malformed acknowledgement: a console
+    // that silently ignores a broken frame is a console that lies to its user.
+    if (message?.tag === "miso.meter.v1") {
+      if (!hasExactFields(message, ["tag", "sequence", "windows", "trackCount", "peaks"])
+          || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
+          || !Number.isSafeInteger(message.windows) || message.windows <= 0
+          || !Number.isSafeInteger(message.trackCount) || message.trackCount < 0
+          || !(message.peaks instanceof Float32Array)
+          || message.peaks.length !== message.trackCount * 2 + 2) {
+        this.#fail(webError(255, this.#oldestRequestId()));
+        return;
+      }
+      this.#onMeterFrame?.(Object.freeze(message));
+      return;
+    }
+    if (message?.tag === "miso.telemetry.v1") {
+      if (!hasExactFields(message, [
+        "tag", "sequence", "blocks", "cpuPercent", "peakBlockMs", "meanBlockMs", "budgetMs",
+        "deadlineMisses", "resolutionMs", "belowResolution",
+      ])
+          || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
+          || !Number.isSafeInteger(message.blocks) || message.blocks <= 0
+          || !Number.isSafeInteger(message.deadlineMisses) || message.deadlineMisses < 0
+          || typeof message.belowResolution !== "boolean"
+          || ["cpuPercent", "peakBlockMs", "meanBlockMs", "budgetMs", "resolutionMs"]
+            .some((field) => typeof message[field] !== "number"
+              || !Number.isFinite(message[field]) || message[field] < 0)) {
+        this.#fail(webError(255, this.#oldestRequestId()));
+        return;
+      }
+      this.#onTelemetryFrame?.(Object.freeze(message));
+      return;
+    }
     const pending = this.#pending.get(message?.requestId) ?? null;
     const errorFields = message?.planes === undefined
       ? ["tag", "requestId", "result"]
@@ -269,15 +374,40 @@ class MisoAudioWorkletHostV1 {
     }
     const expectedFields = pending.response === "source"
       ? ["tag", "requestId", "result", "planes"]
-      : pending.response === "status"
+      : pending.response === "command"
+        ? [
+          "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
+          "records",
+        ]
+        : pending.response === "sessionMap"
+          ? ["tag", "requestId", "result", "tracks", "metersAttached"]
+          : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "memoryBytes",
         ]
         : ["tag", "requestId", "result"];
-    const expectedTag = pending.response === "status" ? "miso.status.v1" : "miso.ack.v1";
+    const expectedTag = pending.response === "status"
+      ? "miso.status.v1"
+      : pending.response === "sessionMap"
+        ? "miso.sessionmap.v1"
+        : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
+    const validCommandAck = pending.response !== "command" || (
+      validU32(message.reason) && message.reason <= 9
+      && validU32(message.rejectedIndex) && message.rejectedIndex < MAXIMUM_COMMAND_RECORDS
+      && validU32(message.admitted) && message.admitted <= pending.commandCount
+      && (message.result === RESULT_OK) === (message.admitted === pending.commandCount)
+      && validU64(message.appliedAtSample)
+      && message.records instanceof Uint8Array
+      && message.records.byteLength === pending.commandCount * COMMAND_RECORD_BYTES
+    );
+    const validSessionMap = pending.response !== "sessionMap" || (
+      message.result === RESULT_OK && Array.isArray(message.tracks)
+      && message.tracks.every((value) => typeof value === "string" && value.length > 0)
+      && typeof message.metersAttached === "boolean"
+    );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
       && validResult(message.lastResult) && message.backend === this.#numericBackend
@@ -288,7 +418,7 @@ class MisoAudioWorkletHostV1 {
     );
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus) {
+        || !validSourcePlanes || !validStatus || !validCommandAck || !validSessionMap) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -320,6 +450,13 @@ class MisoAudioWorkletHostV1 {
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
     if (response === "status") return this.#inFlightStatus >= 1;
+    // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
+    // before any transfer, and the caller keeps its record block. The engine-side bound is the
+    // authority; this one only avoids paying a message round trip to be told so.
+    if (response === "command") return this.#inFlightCommands >= this.#commandQueueRecords;
+    if (response === "lease" || response === "sessionMap") {
+      return this.#inFlightLease.has(sourceId);
+    }
     return false; // dispose is terminal and waits for nothing
   }
 
@@ -330,6 +467,10 @@ class MisoAudioWorkletHostV1 {
       this.#inFlightSeeks.set(sourceId, true);
     } else if (response === "status") {
       this.#inFlightStatus += 1;
+    } else if (response === "command") {
+      this.#inFlightCommands += 1;
+    } else if (response === "lease" || response === "sessionMap") {
+      this.#inFlightLease.add(sourceId);
     }
   }
 
@@ -354,6 +495,8 @@ class MisoAudioWorkletHostV1 {
       const pending = {
         requestId: message.requestId,
         sourceId,
+        leaseKind: sourceId,
+        commandCount: message.count ?? 0,
         resolve,
         reject,
         response,
@@ -423,11 +566,93 @@ class MisoAudioWorkletHostV1 {
     );
   }
 
+  /// Submit one live-console command batch (issue #137 D1).
+  ///
+  /// The whole batch is one transaction: the acknowledgement's `result` is `RESULT_OK` only when
+  /// every record was admitted, and `appliedAtSample` is the exact absolute sample the batch takes
+  /// effect at. A refusal names `reason` and `rejectedIndex` and admits nothing.
+  command(request) {
+    if (!hasExactFields(request, ["requestId", "commands"])
+        || !Array.isArray(request.commands)
+        || request.commands.length === 0
+        || request.commands.length > MAXIMUM_COMMAND_RECORDS
+        || !request.commands.every(validCommand)) {
+      return Promise.reject(webError(1, request?.requestId ?? 0));
+    }
+    const records = encodeCommands(request.commands);
+    return this.#request(
+      {
+        tag: "miso.command.v1",
+        requestId: request.requestId,
+        count: request.commands.length,
+        records,
+      },
+      [records.buffer],
+      "command",
+    );
+  }
+
+  /// Read the compiled session's canonical track order (issue #137 D1).
+  ///
+  /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
+  /// sends a string on the command path.
+  sessionMap() {
+    return this.#request(
+      { tag: "miso.sessionmap.v1", requestId: this.#lastRequestId + 1 },
+      [],
+      "sessionMap",
+      false,
+      undefined,
+      "sessionMap",
+    );
+  }
+
+  /// Take or release the decimated meter lease (issue #137 D2).
+  ///
+  /// `onFrame` receives every `miso.meter.v1` frame while the lease is held. Passing
+  /// `enabled: false` releases it and detaches the callback.
+  meters(request) {
+    if (!hasExactFields(request, ["requestId", "enabled", "onFrame"])
+        || typeof request.enabled !== "boolean"
+        || (request.onFrame !== null && typeof request.onFrame !== "function")) {
+      return Promise.reject(webError(1, request?.requestId ?? 0));
+    }
+    this.#onMeterFrame = request.enabled ? request.onFrame : null;
+    return this.#request(
+      { tag: "miso.meters.v1", requestId: request.requestId, enabled: request.enabled },
+      [],
+      "lease",
+      false,
+      undefined,
+      "meters",
+    );
+  }
+
+  /// Take or release the render-telemetry lease (issue #137 D3).
+  telemetry(request) {
+    if (!hasExactFields(request, ["requestId", "enabled", "onFrame"])
+        || typeof request.enabled !== "boolean"
+        || (request.onFrame !== null && typeof request.onFrame !== "function")) {
+      return Promise.reject(webError(1, request?.requestId ?? 0));
+    }
+    this.#onTelemetryFrame = request.enabled ? request.onFrame : null;
+    return this.#request(
+      { tag: "miso.telemetry.v1", requestId: request.requestId, enabled: request.enabled },
+      [],
+      "lease",
+      false,
+      undefined,
+      "telemetry",
+    );
+  }
+
   async dispose() {
     if (this.#disposed) return;
     const requestId = this.#lastRequestId + 1;
     await this.#request({ tag: "miso.dispose.v1", requestId }, [], "dispose", true);
     this.#disposed = true;
+    this.#onMeterFrame = null;
+    this.#onTelemetryFrame = null;
     this.#port.onmessage = null;
     this.#port.onmessageerror = null;
     this.node.onprocessorerror = null;
@@ -528,6 +753,8 @@ export async function createMisoAudioWorkletHost(options) {
       // established that both are nonzero u32s, and `validate_config` in Rust rejects a ring that
       // is not a whole number of quanta, so this division is exact for any session that prepares.
       Math.floor(options.limits.sourceRingFrames / options.quantumFrames) || 1,
+      // Issue #137 D1: zero means the engine's own default command-queue depth.
+      Number(options.limits.consoleCommandQueueRecords) || 64,
     );
   } catch (error) {
     cleanupNode(node);

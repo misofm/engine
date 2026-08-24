@@ -1,13 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-process_policy_re='postMessage|BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.'
+process_policy_re='BigInt|new[[:space:]]|subarray|memory\.grow|WebAssembly|fetch\(|Promise|console\.|JSON\.|performance\.now|Date\.now'
+# Issue #137 D2/D3 amend this gate deliberately.
+#
+# Before #137 the render callback posted nothing, so a blanket `postMessage` ban was exactly right.
+# Meter frames and telemetry frames are posted from inside the callback by design -- one flat
+# numeric payload per decimated window, which is the whole point of decimating -- so a blanket ban
+# would now forbid the feature rather than a mistake.
+#
+# The ban is therefore replaced by a *pinned-occurrence* rule, which is strictly stronger than
+# "postMessage is allowed here": the policy body must contain exactly these two calls, spelled
+# exactly this way, each posting a body preallocated at construction, and nothing else. A third
+# post, a post of a freshly built object, or a post that is not one of these two lines fails the
+# gate. `new ` remains banned in the body, so the frames cannot be allocated here either.
+process_policy_posts=(
+  'this.port.postMessage(this.meterMessage);'
+  'this.port.postMessage(frame);'
+)
 check_process_policy() {
   local source=$1
-  local body
+  local body code post count
   body=$(sed -n '/PROCESS_POLICY_BEGIN/,/PROCESS_POLICY_END/p' "$source")
   grep -q 'silence(outputs)' <<<"$body" || return 1
-  ! grep -Eq "$process_policy_re" <<<"$body"
+  grep -Eq "$process_policy_re" <<<"$body" && return 1
+  # Comment lines are dropped before the occurrence count so prose about `postMessage` is not
+  # mistaken for a call, and so a call cannot hide behind a comment marker either.
+  code=$(grep -vE '^[[:space:]]*(//|/\*|\*)' <<<"$body")
+  count=$(grep -c '\.postMessage(' <<<"$code" || true)
+  [[ "$count" == "${#process_policy_posts[@]}" ]] || return 1
+  for post in "${process_policy_posts[@]}"; do
+    grep -qF "$post" <<<"$code" || return 1
+  done
+  # Both posts are lease-guarded at their one call site in `process()`.
+  grep -qF 'if (this.meterLease) this.postMeterFrame();' <<<"$body" || return 1
+  grep -qF 'if (this.telemetryLease) this.recordRenderTime(' <<<"$body" || return 1
+  return 0
+}
+
+# #137 D3: the wall clock the render telemetry needs may be read at exactly one site.
+#
+# `WorkletGlobalScope` does not include `Performance` in the specification and user agents
+# disagree, so the worklet probes once in `renderClock()` and falls back to `Date.now`, reporting
+# the resolution it actually got. `currentTime` cannot substitute: it advances by exactly one
+# quantum per block no matter how long the render took. Everywhere else in the worklet, and
+# everywhere in the main-realm host, both names stay banned -- and `process_policy_re` keeps them
+# banned inside the frozen render-callback body as well.
+check_clock_policy() {
+  local source=$1
+  local body sites pinned
+  body=$(sed -n '/^function renderClock() {/,/^}/p' "$source")
+  [[ -n "$body" ]] || return 1
+  sites=$(grep -Ec 'performance\.now|Date\.now' "$source" || true)
+  pinned=$(grep -Ec 'performance\.now|Date\.now' <<<"$body" || true)
+  [[ "$sites" == "$pinned" ]]
 }
 
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
@@ -44,6 +90,10 @@ fi
 if (($# == 1)) && [[ $1 == --source-policy=* ]]; then
   check_process_policy "${1#--source-policy=}" || {
     echo "render callback or transitive helper violates the frozen static policy" >&2
+    exit 1
+  }
+  check_clock_policy "${1#--source-policy=}" || {
+    echo "a clock is read outside the pinned renderClock() helper" >&2
     exit 1
   }
   exit 0
@@ -95,11 +145,17 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_abi_version \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
+  miso_engine_web_v1_command_report_ptr \
+  miso_engine_web_v1_command_submit \
   miso_engine_web_v1_compile \
   miso_engine_web_v1_config_bytes \
   miso_engine_web_v1_config_new \
   miso_engine_web_v1_config_ptr \
+  miso_engine_web_v1_console_track_count \
+  miso_engine_web_v1_console_track_id \
   miso_engine_web_v1_dispose \
+  miso_engine_web_v1_meter_lease \
+  miso_engine_web_v1_meter_poll \
   miso_engine_web_v1_prepare \
   miso_engine_web_v1_render \
   miso_engine_web_v1_resource_ptr \
@@ -164,10 +220,49 @@ printf '%s
   python3 -B "$callgraph" --simd-floor 4500 --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
   exit 1
 
-if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval|performance\.now|Date\.now' "$main_js" "$worklet_js"; then
-  echo "forbidden browser capability found" >&2
+# #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation
+# gate. `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block, and
+# `miso_engine_web_v1_command_submit` runs in `port.onmessage`, which the user agent dispatches
+# between quanta on that same thread; neither may reach an allocator or drop glue.
+# Each export's own symbol is the only admitted trap owner: the bounded SPSC endpoints inline
+# their checked slot indexing into the caller, and that index is unreachable by the queue's own
+# cursor invariant. The allocation half of the gate is not relaxed at all -- an allocator, a
+# deallocator or drop glue in either closure still fails.
+printf '%s
+' "$simd_disassembly" |
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
+    --trap-owner 22AudioWorkletEngineHost11poll_meters || exit 1
+# `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
+# reaches `miso-engine-math`'s vendored argument reduction, which is full of checked indices. The
+# engine's rule for the control path is "never allocate on the render thread", so the allocation
+# half is what this export is held to -- and it is held to it absolutely.
+printf '%s
+' "$simd_disassembly" |
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only || exit 1
+
+# #137 D3 amends the browser-capability ban deliberately.
+#
+# Render telemetry needs a wall clock, and `WorkletGlobalScope` does not include `Performance` in
+# the specification -- user agents disagree -- so the worklet probes once and falls back to
+# `Date.now`, reporting the resolution it actually got. `currentTime` cannot substitute: it
+# advances by exactly one quantum per block no matter how long the render took.
+#
+# The ban therefore becomes a pinned-site rule for the worklet's `renderClock()` helper, and stays
+# a blanket ban for the main-realm host, for `setTimeout`/`setInterval`/`Worker`/`Atomics`
+# everywhere, and for every other line of the worklet. The clock is never read inside the frozen
+# `process()` policy body -- `process_policy_re` still bans both names there.
+if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval|performance\.now|Date\.now' "$main_js"; then
+  echo "forbidden browser capability found in the main-realm host" >&2
   exit 1
 fi
+if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|setTimeout|setInterval' "$worklet_js"; then
+  echo "forbidden browser capability found in the worklet" >&2
+  exit 1
+fi
+check_clock_policy "$worklet_js" || {
+  echo "a clock is read outside the pinned renderClock() helper" >&2
+  exit 1
+}
 if rg -n 'quantumFrames[[:space:]]*[:=][[:space:]]*128' "$main_js" "$worklet_js"; then
   echo "hardcoded 128-frame quantum found" >&2
   exit 1

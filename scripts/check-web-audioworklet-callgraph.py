@@ -7,10 +7,23 @@ never frees" is a property of the emitted code and nothing else can witness it.
 
 Modes
 -----
-`--callgraph EXPORT`
+`--callgraph EXPORT [--trap-owner SUBSTRING ...]`
     Walk the direct-call closure of `EXPORT` and fail if any member's name matches `FORBIDDEN`
     (allocator, deallocator or drop glue). Then list the closure members that contain an
-    `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST`.
+    `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
+    `--trap-owner` substrings the caller named.
+
+    `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
+    control path (`port.onmessage`), where the engine's rule is "never allocate on the render
+    thread" and a checked index inside a pure-math helper is not an allocation. It is refused
+    together with `--trap-owner`, so a caller states one intent or the other.
+
+    `--trap-owner` never relaxes the allocation half of the gate, which is the half that matters:
+    an allocator, a deallocator or drop glue in the closure is a failure no matter what. It exists
+    because issue #137 put two more exports on the render thread -- `miso_engine_web_v1_meter_poll`
+    and `miso_engine_web_v1_command_submit` -- whose bodies inline the bounded SPSC endpoints'
+    own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
+    this export *calls* may trap" while admitting the one checked index the queue primitive emits.
 
 `--simd-floor N --kernel-pattern REGEX --kernel-min K`
     Assert the artifact still contains the vector kernels: at least `N` `f32x4.{mul,add,sub}`
@@ -131,7 +144,13 @@ def closure(functions: dict[int, Function], export: str) -> list[Function]:
     return sorted(seen.values(), key=lambda function: function.index)
 
 
-def check_callgraph(functions: dict[int, Function], export: str) -> int:
+def check_callgraph(
+    functions: dict[int, Function],
+    export: str,
+    trap_owners: tuple[str, ...] = (),
+    allocation_only: bool = False,
+) -> int:
+    allowed_owners = frozenset(TRAP_ALLOW_LIST | set(trap_owners))
     members = closure(functions, export)
     failures = 0
     forbidden = [function.name for function in members if FORBIDDEN.search(function.name)]
@@ -150,9 +169,9 @@ def check_callgraph(functions: dict[int, Function], export: str) -> int:
     unexpected = [
         function.name
         for function in trap_owners
-        if not any(allowed in function.name for allowed in TRAP_ALLOW_LIST)
+        if not any(allowed in function.name for allowed in allowed_owners)
     ]
-    if unexpected:
+    if unexpected and not allocation_only:
         failures += 1
         print(f"FAIL {export}: unexpected trap owner in the render closure:", file=sys.stderr)
         for name in sorted(unexpected):
@@ -258,6 +277,31 @@ def self_test() -> int:
     )
     expect("(b) trap owner", check_callgraph(parse(trapping), "miso_engine_web_v1_render") == 1)
 
+    # (b1) issue #137: `--trap-owner` admits the named owner and nothing else, and it never
+    # relaxes the allocation half of the gate.
+    expect(
+        "(b1) trap-owner admits the named owner",
+        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("render_next",)) == 0,
+    )
+    expect(
+        "(b1) trap-owner does not admit a different owner",
+        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("some_other_name",)) == 1,
+    )
+    expect(
+        "(b1) trap-owner never admits a free",
+        check_callgraph(parse(freeing), "miso_engine_web_v1_render", ("render_next",)) == 1,
+    )
+
+    # (b1b) `--allocation-only` drops the trap half and keeps the allocation half.
+    expect(
+        "(b1b) allocation-only ignores a trap owner",
+        check_callgraph(parse(trapping), "miso_engine_web_v1_render", (), True) == 0,
+    )
+    expect(
+        "(b1b) allocation-only still fails a free",
+        check_callgraph(parse(freeing), "miso_engine_web_v1_render", (), True) == 1,
+    )
+
     # (b2) the same `unreachable` inside the allow-listed core function passes.
     allowed = trapping.replace("<render_next>", "<_ZN18PreparedRenderPlan12render_innerE>").replace(
         "call 1 <render_next>", "call 1 <_ZN18PreparedRenderPlan12render_innerE>"
@@ -327,6 +371,8 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--callgraph", metavar="EXPORT")
+    parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING")
+    parser.add_argument("--allocation-only", action="store_true")
     parser.add_argument("--simd-floor", type=int)
     parser.add_argument("--kernel-pattern")
     parser.add_argument("--kernel-min", type=int)
@@ -341,7 +387,11 @@ def main() -> int:
     functions = parse(sys.stdin.read())
     failures = 0
     if args.callgraph is not None:
-        failures += check_callgraph(functions, args.callgraph)
+        if args.allocation_only and args.trap_owner:
+            parser.error("--allocation-only and --trap-owner state opposite intents")
+        failures += check_callgraph(
+            functions, args.callgraph, tuple(args.trap_owner), args.allocation_only
+        )
     if args.simd_floor is not None:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--simd-floor requires --kernel-pattern and --kernel-min")
