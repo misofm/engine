@@ -1039,7 +1039,8 @@ mod tests {
         // every launch rate, and `miso-engine-graph`'s 50 generated DAGs run 1/2/4/7.
         //
         //   q128 transcript: 0x1364_823e_5403_eca7 -> 0x645b_3eb0_778d_96dd -> 0x49ff_221a_5d9f_385e
-        //   aggregate:       0xebbc_a7d9_be93_d1ca -> 0x386f_8720_9810_7e32 -> 0x6e2c_19ea_9945_fc56
+        //   aggregate:       0xebbc_a7d9_be93_d1ca -> 0x386f_8720_9810_7e32
+        //                    -> 0x1ba7_2d17_1383_6e52 (#103's plan clock) -> 0xff58_81b9_d2b5_42d9
         assert_eq!(
             q128_transcript.hash, 0x49ff_221a_5d9f_385e,
             "frozen q128 native wave/unit/partition transcript"
@@ -1051,7 +1052,7 @@ mod tests {
         //
         //   aggregate: 0x386f_8720_9810_7e32 -> 0x1ba7_2d17_1383_6e52
         assert_eq!(
-            aggregate_hash, 0x6e2c_19ea_9945_fc56,
+            aggregate_hash, 0xff58_81b9_d2b5_42d9,
             "frozen exact-100 preparation matrix transcript after the cost-weighted split"
         );
         let reference = reference.expect("one twelve-track preparation");

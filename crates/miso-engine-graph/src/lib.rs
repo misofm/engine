@@ -3379,6 +3379,8 @@ mod tests {
         let render = |identity: bool| {
             let (plan, bindings, input) = binding_plan();
             let bindings = GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope: bindings.envelope,
                 nodes: bindings
                     .nodes
@@ -3427,6 +3429,8 @@ mod tests {
         let mut nodes = bindings.nodes;
         nodes.pop();
         let short = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope: bindings.envelope,
             nodes,
             observers: bindings.observers,
@@ -4794,10 +4798,11 @@ mod tests {
         let bindings = core::mem::replace(
             &mut failure.bindings,
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope: failure.plan.envelope,
                 nodes: Vec::new(),
                 observers: Vec::new(),
-                worker_lease: None,
             },
         );
         let recovered = failure
