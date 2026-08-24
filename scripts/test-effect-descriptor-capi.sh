@@ -8,7 +8,7 @@ scratch_directory="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_directory"' EXIT
 
 cargo build --locked --manifest-path "$workspace_root/Cargo.toml" \
-    -p miso-engine-effect-package --lib
+    -p miso-engine-effect-package --features c-abi --lib
 
 case "$(uname -s)" in
     Darwin)

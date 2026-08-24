@@ -202,6 +202,11 @@ fn enum_choice_record(bytes: &[u8], offset: usize) -> EffectDescriptorEnumChoice
 /// capacity for this call. All input and output regions must be mutually nonoverlapping. No pointer
 /// is retained. Output record pointers may be null exactly when their capacity is zero; all other
 /// output pointers are mandatory.
+/// Only compiled under the `c-abi` feature: a `#[unsafe(no_mangle)]` symbol in an rlib is
+/// re-exported by every `cdylib` that links it, which put this symbol in the browser AudioWorklet
+/// artifact and broke its frozen export set (#106 E7). The scripts that build this crate's own
+/// `cdylib` enable the feature; nothing else needs the C name.
+#[cfg(feature = "c-abi")]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
