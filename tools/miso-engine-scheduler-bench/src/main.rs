@@ -19,7 +19,8 @@ use miso_engine_effect_compiler::EffectPreparedSession;
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     NativeGraphBindConfigV1, NativeGraphPreparedMetadataV1, NativeGraphRenderModeV1,
-    NativeSchedulerConfigV1, SchedulerSelectionV1, TrackStage,
+    NativeGraphWorkerPoolV1, NativeSchedulerConfigV1, NativeWorkerPoolConfigV1,
+    SchedulerSelectionV1, TrackStage,
 };
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_session::{
@@ -142,7 +143,7 @@ fn main() {
         _ => panic!("runner supplied invalid round"),
     };
     for mode in MODES {
-        let (mut plan, metadata) = prepared_graph(mode);
+        let (mut plan, metadata, _pool) = prepared_graph(mode);
         let mut output = vec![0.0_f32; QUANTUM * 2];
         let mut samples = vec![0_u64; OBSERVATIONS];
         let mut output_hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -268,6 +269,7 @@ fn prepared_graph(
 ) -> (
     miso_engine_core::realtime::PreparedRenderPlan,
     NativeGraphPreparedMetadataV1,
+    Option<NativeGraphWorkerPoolV1>,
 ) {
     let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
         .expect("canonical session");
@@ -370,9 +372,27 @@ fn prepared_graph(
             GraphNodeBinding::new(node, processor)
         })
         .collect();
+    // One pool per mode; it is control-plane state and outlives the plan it leases to.
+    let (pool, lease) = match NonZeroUsize::new(mode.lanes().saturating_sub(1)) {
+        None => (None, None),
+        Some(workers) => {
+            let (pool, lease) = NativeGraphWorkerPoolV1::start(NativeWorkerPoolConfigV1 {
+                requested_workers: Some(workers),
+                ..NativeWorkerPoolConfigV1::default()
+            })
+            .unwrap_or_else(|_| panic!("native benchmark worker pool"));
+            (Some(pool), Some(lease))
+        }
+    };
+    let pool_shape = pool
+        .as_ref()
+        .map(NativeGraphWorkerPoolV1::shape)
+        .unwrap_or_default();
     let bound = artifact
         .into_bound_native(
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: lease,
                 envelope,
                 nodes,
                 observers: Vec::new(),
@@ -382,6 +402,7 @@ fn prepared_graph(
                 scheduler: NativeSchedulerConfigV1::new(
                     NonZeroUsize::new(mode.lanes()).expect("nonzero lanes"),
                     true,
+                    pool_shape,
                 ),
                 maximum_retained_bytes: 1 << 29,
             },
@@ -400,7 +421,8 @@ fn prepared_graph(
         }
     }
     let metadata = bound.prepared.metadata;
-    (bound.prepared.into_plan(), metadata)
+    // The pool is returned so it outlives the plan that leases it.
+    (bound.prepared.into_plan(), metadata, pool)
 }
 
 #[cfg(test)]
@@ -410,7 +432,7 @@ mod tests {
     #[test]
     fn production_workload_prepares_every_mode_without_rendering_audio() {
         for mode in MODES {
-            let (plan, metadata) = prepared_graph(mode);
+            let (plan, metadata, pool) = prepared_graph(mode);
             assert_eq!(plan.envelope().sample_rate.0, 48_000);
             assert_eq!(plan.envelope().quantum.0, QUANTUM as u32);
             assert!(metadata.resources.scheduler.wave_count > 1);
@@ -418,6 +440,7 @@ mod tests {
             assert!(metadata.resources.scheduler.partition_count > 1);
             assert!(metadata.resources.total_retained_bytes > 0);
             drop(plan);
+            drop(pool);
         }
     }
 }

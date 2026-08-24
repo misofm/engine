@@ -40,7 +40,18 @@ if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
   crates/miso-engine-graph crates/miso-engine-graph-compiler; then
   fail 'compiled track ceiling is forbidden'
 fi
-implementations=$(rg -l 'impl PreparedPlanExecutor for' crates --glob '*.rs' | sort)
+# Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (issue 100
+# tests the block-boundary hand-over inside `miso-engine-core`), but nothing that ships may.
+implementations=$(
+  while IFS= read -r source; do
+    # No pipeline here: `rg -q` exits on its first match, and under `pipefail` sed's SIGPIPE
+    # would make the whole condition read as false.
+    stripped=$(sed '/^#\[cfg(test)\]/,$d' "$source")
+    if rg -q 'impl PreparedPlanExecutor for' <<<"$stripped"; then
+      printf '%s\n' "$source"
+    fi
+  done < <(find crates -name '*.rs' -type f | sort) | sort
+)
 [[ "$implementations" == 'crates/miso-engine-graph/src/lib.rs' ]] ||
   fail 'production prepared-plan executor must remain graph-owned'
 

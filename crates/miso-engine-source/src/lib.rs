@@ -2521,6 +2521,8 @@ mod tests {
             .expect("source set")
         };
         let bindings = || GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![miso_engine_graph::GraphNodeBinding::new(
                 output.clone(),
@@ -2565,6 +2567,8 @@ mod tests {
         assert_transactional_rejection(
             make_source_set(normal_mappings()),
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: vec![
                     miso_engine_graph::GraphNodeBinding::new(output.clone(), Box::new(Noop)),
@@ -2583,7 +2587,11 @@ mod tests {
             bindings(),
             NativeGraphBindConfigV1 {
                 render_mode: NativeGraphRenderModeV1::SingleThread,
-                scheduler: NativeSchedulerConfigV1::new(NonZeroUsize::new(1).expect("lane"), false),
+                scheduler: NativeSchedulerConfigV1::new(
+                    NonZeroUsize::new(1).expect("lane"),
+                    false,
+                    miso_engine_graph::NativeWorkerPoolShapeV1::default(),
+                ),
                 maximum_retained_bytes: 1 << 20,
             },
             make_source_set(normal_mappings()),

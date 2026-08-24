@@ -104,7 +104,38 @@ pub trait PreparedPlanExecutor: Send {
     fn copy_worker_audit_snapshots(&self, _output: &mut [super::audit::AuditSnapshot]) -> usize {
         0
     }
+    /// Give up an executor-owned resource at the block-boundary swap.
+    ///
+    /// This exists so a persistent auxiliary worker pool outlives the plan that used it: the
+    /// retiring executor hands its worker lease to the replacement instead of stopping and
+    /// respawning threads on every structural change. It runs on the render thread, so it is a
+    /// move and nothing else: no allocation, no drop, no wait.
+    #[doc(hidden)]
+    fn take_handover(&mut self) -> Option<ExecutorHandover> {
+        None
+    }
+    /// Accept a hand-over, or refuse it by returning it unchanged.
+    ///
+    /// A refused hand-over is given back to the retiring executor by
+    /// [`RealtimePlanOwner::enter_block`], so it is dropped only when the retired plan is
+    /// reclaimed off the render thread. Implementations never drop the value here.
+    #[doc(hidden)]
+    fn accept_handover(&mut self, handover: ExecutorHandover) -> Option<ExecutorHandover> {
+        Some(handover)
+    }
+    /// Bounded implementation-owned dispatch counters, read only after rendering is disarmed.
+    #[doc(hidden)]
+    fn dispatch_counters(&self) -> [u64; 4] {
+        [0; 4]
+    }
 }
+
+/// One executor-owned resource moved between prepared plans at a block boundary.
+///
+/// The box is allocated at bind and only ever *moved* on the render thread. `Box<dyn Any>` moves
+/// and `downcast` are pointer operations; neither allocates nor frees.
+#[doc(hidden)]
+pub type ExecutorHandover = Box<dyn core::any::Any + Send>;
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderTime {
@@ -258,6 +289,22 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::qualification_counters)
+    }
+    /// Read bounded executor dispatch counters outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dispatch_counters(&self) -> [u64; 4] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "dispatch counters are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0; 4], PreparedPlanExecutor::dispatch_counters)
+    }
+    /// The plan's internal executor, for the block-boundary hand-over in `plan_exchange`.
+    pub(crate) fn executor_mut(&mut self) -> Option<&mut (dyn PreparedPlanExecutor + 'static)> {
+        self.executor.as_deref_mut()
     }
     /// Read the cumulative bank transpose count outside the render scope.
     #[doc(hidden)]

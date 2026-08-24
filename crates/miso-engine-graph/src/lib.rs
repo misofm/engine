@@ -23,12 +23,13 @@ use miso_engine_effect_contract::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use miso_engine_native_scheduler::{
     FallbackReasonV1, NativeSchedulerConfigV1, NativeSchedulerResourceReportV1,
-    SchedulerSelectionV1,
+    NativeWorkerPoolConfigV1, NativeWorkerPoolShapeV1, RecoveryBudgetV1, SchedulerSelectionV1,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use miso_engine_native_scheduler::{
-    NativeSchedulerJobV1, NativeSchedulerV1, RenderPartitionV1, RenderWaveV1,
-    SchedulerDispatchErrorV1, SchedulerPrepareErrorV1, partition_stable_units_v1,
+    NativeSchedulerJobV1, NativeSchedulerV1, NativeWorkerPoolV1, RenderPartitionRangeV1,
+    RenderPartitionV1, RenderWaveV1, SchedulerDispatchErrorV1, SchedulerPrepareErrorV1,
+    WorkerLeaseV1, partition_weighted_units_v1,
 };
 use miso_engine_rack::AoSoaScratch;
 
@@ -663,6 +664,9 @@ impl PreparedGraphPlan {
             _not_sync: Cell::new(()),
         }
     }
+    /// The failure carries every input back, which is the point; boxing it would only move the
+    /// allocation onto the caller's error path.
+    #[allow(clippy::result_large_err)]
     pub fn bind(
         self,
         bindings: GraphRuntimeBindings,
@@ -932,10 +936,41 @@ impl PreparedGraphPlan {
         };
         let explicit_fallback = (config.render_mode == NativeGraphRenderModeV1::SingleThread)
             .then_some(FallbackReasonV1::SingleThread);
+        // Turn one render quantum into spin-iteration budgets, on the control plane. A worker
+        // idles for about a quantum before parking, and the coordinator waits one quantum (never
+        // less than `MINIMUM_RECOVERY_NS`) for a completion before declaring its worker dead for
+        // this block. The iteration floors guard against a zero or garbage `spin_ns` measurement.
+        let quantum_ns = u128::from(self.envelope.quantum.0)
+            .saturating_mul(1_000_000_000)
+            .checked_div(u128::from(self.envelope.sample_rate.0.max(1)))
+            .unwrap_or(0);
+        let spin_ns = u128::from(config.scheduler.pool.spin_ns.max(1));
+        let iterations = |budget_ns: u128| -> u64 {
+            u64::try_from(budget_ns / spin_ns)
+                .unwrap_or(u64::MAX)
+                .max(1 << 14)
+        };
+        let idle_spin_iterations =
+            iterations(quantum_ns.saturating_mul(miso_engine_native_scheduler::IDLE_GUARD_QUANTA));
+        let recovery_ns = match config.scheduler.recovery_deadline_ns() {
+            0 => quantum_ns.max(miso_engine_native_scheduler::MINIMUM_RECOVERY_NS),
+            override_ns => u128::from(override_ns),
+        };
+        let budget = RecoveryBudgetV1 {
+            recovery_iterations: iterations(recovery_ns),
+            idle_spin_iterations,
+            linger_spin_iterations: (quantum_ns
+                / miso_engine_native_scheduler::LINGER_QUANTUM_DIVISOR
+                / spin_ns)
+                .try_into()
+                .unwrap_or(u64::MAX)
+                .max(1 << 10),
+        };
         let scheduler = match NativeSchedulerV1::prepare_with_fallback(
             config.scheduler,
             blueprint.largest_wave_width,
             self.plan_id,
+            budget,
             explicit_fallback,
         ) {
             Ok(scheduler) => scheduler,
@@ -969,6 +1004,16 @@ impl PreparedGraphPlan {
         if total_retained_bytes > config.maximum_retained_bytes {
             return Err((self, bindings, source_set, config, "graph.scheduler.cap"));
         }
+        // A lease of the wrong shape is a control-plane mistake, not a render-time surprise.
+        if let Some(lease) = &bindings.worker_lease
+            && lease.worker_count() != scheduler.expected_workers()
+            && scheduler.selection() == SchedulerSelectionV1::Parallel
+        {
+            return Err((self, bindings, source_set, config, "graph.scheduler.lease"));
+        }
+        let worker_lease = (scheduler.selection() == SchedulerSelectionV1::Parallel)
+            .then(|| bindings.worker_lease.take())
+            .flatten();
         let envelope = self.envelope;
         let plan_id = self.plan_id;
         let mut graph = self;
@@ -986,6 +1031,8 @@ impl PreparedGraphPlan {
             bindings.nodes,
             blueprint,
             scheduler,
+            worker_lease.map(|lease| lease.0),
+            budget,
             resources,
             source_set.take(),
             #[cfg(feature = "test-support")]
@@ -1067,6 +1114,15 @@ pub struct NativeGraphPreparationTranscriptV1 {
     pub retained_builtin_bank_members: usize,
     /// `true` only when every prepared partition is contiguous, nonempty, and unpadded.
     pub partitions_are_canonical: bool,
+    /// `true` only when every wave's partitions are cost-balanced (issue 100 F2).
+    ///
+    /// The checkable invariant of the greedy longest-processing-time-first split: a unit is only
+    /// ever placed on the least-loaded bin, whose load before that placement is at most the mean,
+    /// so no bin ends heavier than `ceil(total / bins) + heaviest unit`. A count split fails this
+    /// as soon as one wave mixes a wide bank with scalar tails.
+    pub weighted_partitions_are_balanced: bool,
+    /// Sum of every unit weight the layout balanced, folded across all waves.
+    pub total_unit_weight: u64,
 }
 
 /// A native graph preparation result; the contained plan remains the ordinary publication unit.
@@ -1125,6 +1181,12 @@ pub struct GraphRuntimeBindings {
     /// Ordinary graph observation bindings. Compiler-owned builtins are appended only by their
     /// sealed artifact wrapper, never by a generic internal-attachment capability.
     pub observers: Vec<GraphNodeObserverBinding>,
+    /// The persistent worker pool's lease, when this plan is the one that should hold it.
+    ///
+    /// Binding takes it; a rejected binding returns it with everything else. A plan bound without
+    /// a lease renders sequentially until the block-boundary hand-over gives it one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub worker_lease: Option<NativeGraphWorkerLeaseV1>,
 }
 
 /// One immutable source-owned claim for a track input node.
@@ -1369,12 +1431,16 @@ impl GraphExecutor {
                     .map(|(claim, entry)| {
                         let node = program::node_index(&plan.spec, &entry.node)
                             .expect("validated source claim");
-                        (claim, program.node_buffer[node as usize].0)
+                        (
+                            claim,
+                            program.node_buffer[node as usize].0 + runtime::ARENA_BASE,
+                        )
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let output = program.output.0;
+        // The shared arena reserves buffer zero for silence, so every coloured buffer is offset.
+        let output = program.output.0 + runtime::ARENA_BASE;
         let parts = runtime::RuntimeParts::new(
             &plan.spec,
             plan.routes,
@@ -1454,22 +1520,38 @@ enum NativeUnitBlueprintKind {
 }
 
 /// One scheduling unit of the native layout, kept for the preparation transcript and the
-/// scheduler's stable partitioning: a plain op, or a whole homogeneous bank.
+/// scheduler's cost-weighted partitioning: a plain op, or a whole homogeneous bank.
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 struct NativeUnitBlueprint {
     key: GraphNodeId,
     members: Box<[GraphNodeId]>,
     kind: NativeUnitBlueprintKind,
+    /// Prepared cost weight, the quantity the partitioner balances (issue 100 F2).
+    weight: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 struct NativeWaveBlueprint {
     level: u64,
+    /// Units in the order the partitions cover them, after the weighted split.
     units: Box<[NativeUnitBlueprint]>,
-    partitions: Box<[miso_engine_native_scheduler::RenderPartitionRangeV1]>,
+    partitions: Box<[RenderPartitionRangeV1]>,
 }
+
+/// Processing stages a post-input builtin bank runs per member, for the cost weight only.
+///
+/// The chain is polarity/trim, high-pass, low-pass and the trim/mute application (AGENTS.md,
+/// "Approved audio architecture"). The bank exposes no stage count, so this is a documented
+/// estimate; it never affects rendered bits, only how a wave is split across lanes.
+#[cfg(not(target_arch = "wasm32"))]
+const BUILTIN_BANK_SLOTS_ESTIMATE: u64 = 4;
+
+/// Processing stages an effect bank runs per member. `runtime::bank_chain` builds exactly one
+/// [`miso_engine_rack::BankSlot`] per bank today; #96 owns the chain shape.
+#[cfg(not(target_arch = "wasm32"))]
+const EFFECT_BANK_SLOTS: u64 = 1;
 
 /// The native executor's layout, derived from the lowered program (#99 F2, #98 F2).
 ///
@@ -1478,7 +1560,7 @@ struct NativeWaveBlueprint {
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphBlueprint {
     waves: Box<[NativeWaveBlueprint]>,
-    ranges: Vec<Vec<(usize, usize, usize)>>,
+    layout: Vec<runtime::WaveLayout>,
     largest_wave_width: usize,
     unit_count: usize,
     partition_count: usize,
@@ -1501,8 +1583,15 @@ impl NativeGraphBlueprint {
         if grouped.is_empty() {
             return Err("graph.scheduler.layout");
         }
+        let output_node = plan
+            .spec
+            .nodes
+            .iter()
+            .find(|node| matches!(node.id, GraphNodeId::Output { .. }))
+            .map(|node| node.id.clone())
+            .ok_or("graph.scheduler.layout")?;
         let mut waves = Vec::with_capacity(grouped.len());
-        let mut ranges = Vec::with_capacity(grouped.len());
+        let mut layout = Vec::with_capacity(grouped.len());
         let mut largest_wave_width = 0_usize;
         let mut unit_count = 0_usize;
         let mut partition_count = 0_usize;
@@ -1516,18 +1605,36 @@ impl NativeGraphBlueprint {
                         .map(|op| plan.spec.nodes[program.ops[*op].node as usize].id.clone())
                         .collect();
                     let key = members.iter().min().cloned().expect("unit has a member");
+                    let kind = match bank {
+                        None => NativeUnitBlueprintKind::Node,
+                        Some(runtime::Membership::Effect(_)) => NativeUnitBlueprintKind::EffectBank,
+                        Some(runtime::Membership::Builtin(_)) => {
+                            NativeUnitBlueprintKind::BuiltinBank
+                        }
+                    };
+                    // The prepared cost of one unit: how much DSP it runs, plus what its
+                    // reductions have to fold in. A count split makes an eight-track bank weigh
+                    // the same as a scalar tail, which is what caps the production session.
+                    let width = u64::try_from(members.len()).unwrap_or(u64::MAX);
+                    let slots = match kind {
+                        NativeUnitBlueprintKind::EffectBank => EFFECT_BANK_SLOTS,
+                        NativeUnitBlueprintKind::BuiltinBank => BUILTIN_BANK_SLOTS_ESTIMATE,
+                        NativeUnitBlueprintKind::Node => u64::from(
+                            members
+                                .first()
+                                .is_some_and(|id| matches!(id, GraphNodeId::Effect(_))),
+                        ),
+                    };
+                    let incoming = ops
+                        .iter()
+                        .map(|op| u64::from(program.ops[*op].input_count()))
+                        .sum::<u64>();
+                    let weight = width.saturating_mul(slots).max(1).saturating_add(incoming);
                     NativeUnitBlueprint {
                         key,
                         members,
-                        kind: match bank {
-                            None => NativeUnitBlueprintKind::Node,
-                            Some(runtime::Membership::Effect(_)) => {
-                                NativeUnitBlueprintKind::EffectBank
-                            }
-                            Some(runtime::Membership::Builtin(_)) => {
-                                NativeUnitBlueprintKind::BuiltinBank
-                            }
-                        },
+                        kind,
+                        weight,
                     }
                 })
                 .collect();
@@ -1541,42 +1648,51 @@ impl NativeGraphBlueprint {
                         .ok_or("graph.scheduler.resource")?;
                 }
             }
-            let partitions = partition_stable_units_v1(
-                core::num::NonZeroUsize::new(described.len()).ok_or("graph.scheduler.layout")?,
-                config.scheduler.render_lanes,
-            );
-            ranges.push(
-                partitions
+            if described.is_empty() {
+                return Err("graph.scheduler.layout");
+            }
+            // The session output's unit stays in partition zero: the coordinator always owns that
+            // parcel, so the host copy-out can never read a trapped worker's buffers.
+            let pinned = described
+                .iter()
+                .position(|unit| unit.members.contains(&output_node));
+            let weights: Vec<u64> = described.iter().map(|unit| unit.weight).collect();
+            let split =
+                partition_weighted_units_v1(&weights, config.scheduler.render_lanes, pinned);
+            let mut ordered: Vec<Option<NativeUnitBlueprint>> =
+                described.into_iter().map(Some).collect();
+            let units_in_order: Vec<NativeUnitBlueprint> = split
+                .unit_order
+                .iter()
+                .map(|unit| ordered[*unit].take().expect("each unit placed once"))
+                .collect();
+            largest_wave_width = largest_wave_width.max(units_in_order.len());
+            unit_count = unit_count
+                .checked_add(units_in_order.len())
+                .ok_or("graph.scheduler.resource")?;
+            partition_count = partition_count
+                .checked_add(split.ranges.len())
+                .ok_or("graph.scheduler.resource")?;
+            layout.push(runtime::WaveLayout {
+                unit_order: split.unit_order.to_vec(),
+                ranges: split
+                    .ranges
                     .iter()
                     .map(|range| (range.first_unit, range.end_unit, range.partition_id))
                     .collect(),
-            );
-            largest_wave_width = largest_wave_width.max(described.len());
-            unit_count = unit_count
-                .checked_add(described.len())
-                .ok_or("graph.scheduler.resource")?;
-            partition_count = partition_count
-                .checked_add(partitions.len())
-                .ok_or("graph.scheduler.resource")?;
+            });
             waves.push(NativeWaveBlueprint {
                 level: *level,
-                units: described.into_boxed_slice(),
-                partitions,
+                units: units_in_order.into_boxed_slice(),
+                partitions: split.ranges,
             });
         }
-        let staged_edges = program.inputs.len()
-            + program
-                .ops
-                .iter()
-                .filter(|op| op.sidechain.is_some())
-                .count();
         let graph_job_bytes = native_graph_job_bytes(
             plan,
             program,
             unit_count,
             partition_count,
             bank_member_count,
-            staged_edges,
             waves.len(),
             runtime_observer_count,
         )?;
@@ -1585,7 +1701,7 @@ impl NativeGraphBlueprint {
         }
         Ok(Self {
             waves: waves.into_boxed_slice(),
-            ranges,
+            layout,
             largest_wave_width,
             unit_count,
             partition_count,
@@ -1601,6 +1717,22 @@ impl NativeGraphBlueprint {
         let mut retained_builtin_bank_units = 0_usize;
         let mut retained_builtin_bank_members = 0_usize;
         let mut partitions_are_canonical = true;
+        let mut weighted_partitions_are_balanced = true;
+        let mut total_unit_weight = 0_u64;
+        for wave in &self.waves {
+            let bins = wave.partitions.len().max(1) as u64;
+            let wave_total: u64 = wave.units.iter().map(|unit| unit.weight).sum();
+            let heaviest = wave.units.iter().map(|unit| unit.weight).max().unwrap_or(0);
+            let bound = wave_total.div_ceil(bins).saturating_add(heaviest);
+            for partition in wave.partitions.iter() {
+                let load: u64 = wave.units[partition.first_unit..partition.end_unit]
+                    .iter()
+                    .map(|unit| unit.weight)
+                    .sum();
+                weighted_partitions_are_balanced &= load <= bound;
+            }
+            total_unit_weight = total_unit_weight.saturating_add(wave_total);
+        }
         for wave in &self.waves {
             hash = test_transcript_u64(hash, wave.level);
             hash = test_transcript_usize(hash, wave.units.len());
@@ -1612,6 +1744,7 @@ impl NativeGraphBlueprint {
                 };
                 hash = test_transcript_byte(hash, tag);
                 hash = test_transcript_node(hash, &unit.key);
+                hash = test_transcript_u64(hash, unit.weight);
                 hash = test_transcript_usize(hash, unit.members.len());
                 for member in &unit.members {
                     hash = test_transcript_node(hash, member);
@@ -1647,6 +1780,8 @@ impl NativeGraphBlueprint {
             retained_builtin_bank_units,
             retained_builtin_bank_members,
             partitions_are_canonical,
+            weighted_partitions_are_balanced,
+            total_unit_weight,
         }
     }
 }
@@ -1737,7 +1872,6 @@ fn native_graph_job_bytes(
     unit_count: usize,
     partition_count: usize,
     bank_member_count: usize,
-    staged_edges: usize,
     wave_count: usize,
     runtime_observer_count: usize,
 ) -> Result<usize, &'static str> {
@@ -1753,20 +1887,39 @@ fn native_graph_job_bytes(
         .and_then(|samples| samples.checked_mul(core::mem::size_of::<f32>()))
         .ok_or("graph.scheduler.resource")?;
     let mut total = 0_usize;
-    // Every parcel gives each of its ops an output buffer and each incoming edge a staging buffer:
-    // the native executor stages across partitions rather than colouring one shared arena (F8's
-    // pull model is #100's).
+    // One plan-wide disjoint arena: the silence buffer, one unique output buffer per op, and one
+    // staging buffer per delayed edge (issue 100's pull model -- an ordinary edge is read in
+    // place and costs nothing).
+    add(&mut total, 1, stereo_block)?;
     add(&mut total, program.ops.len(), stereo_block)?;
-    add(&mut total, staged_edges, stereo_block)?;
+    add(&mut total, program.delayed_input_count(), stereo_block)?;
     let delay_samples = program.delays.iter().try_fold(0_usize, |sum, line| {
         sum.checked_add(line.samples as usize)
             .ok_or("graph.scheduler.resource")
     })?;
     add(&mut total, delay_samples, 2 * core::mem::size_of::<f32>())?;
+    // The lease access map is one byte per arena buffer per parcel.
+    let arena_buffers = program
+        .ops
+        .len()
+        .checked_add(program.delayed_input_count())
+        .and_then(|count| count.checked_add(1))
+        .ok_or("graph.scheduler.resource")?;
+    add(&mut total, partition_count, arena_buffers)?;
     add(
         &mut total,
-        staged_edges,
-        core::mem::size_of::<u32>() + core::mem::size_of::<runtime::StageOperation>(),
+        program.inputs.len(),
+        core::mem::size_of::<u32>(),
+    )?;
+    add(
+        &mut total,
+        program.delayed_input_count(),
+        core::mem::size_of::<runtime::StagedInput>(),
+    )?;
+    add(
+        &mut total,
+        program.inputs.len(),
+        core::mem::size_of::<runtime::MutedRead>(),
     )?;
     add(
         &mut total,
@@ -1782,7 +1935,7 @@ fn native_graph_job_bytes(
         &mut total,
         partition_count,
         core::mem::size_of::<RenderPartitionV1<NativeGraphPartitionJob>>()
-            + core::mem::size_of::<miso_engine_native_scheduler::RenderPartitionRangeV1>()
+            + core::mem::size_of::<RenderPartitionRangeV1>()
             + core::mem::size_of::<runtime::Runtime>(),
     )?;
     add(
@@ -1806,7 +1959,11 @@ fn native_graph_job_bytes(
     Ok(total)
 }
 
-/// One partition's work: the ops of one parcel over that parcel's own arena.
+/// One partition's work: its units over its lease on the plan's shared arena.
+///
+/// Observers run here too, on the worker that rendered the unit (issue 100 F1): an observer is
+/// invoked exactly once per block per node, and the order across nodes in different parcels is
+/// unspecified. A host observer that shares state across nodes needs its own synchronisation.
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphPartitionJob {
     runtime: runtime::Runtime,
@@ -1821,24 +1978,29 @@ impl NativeSchedulerJobV1 for NativeGraphPartitionJob {
     fn execute(&mut self) -> Result<(), Self::Error> {
         for unit in 0..self.runtime.units.len() {
             self.runtime.execute(unit, self.first_sample)?;
+            self.runtime.observe_unit(unit, self.first_sample)?;
         }
         Ok(())
     }
     // REALTIME_POLICY_END
 }
 
-/// The native dependency-wave executor: the same [`runtime`] model, one arena per parcel.
+/// The native dependency-wave executor: the same [`runtime`] model, one shared disjoint arena.
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeGraphExecutor {
     waves: Box<[RenderWaveV1<NativeGraphPartitionJob>]>,
-    stage_operations: Box<[Box<[runtime::StageOperation]>]>,
-    /// Per wave, the `(partition, unit)` pairs to observe, in the same stable unit order the
-    /// sequential executor walks.
-    observation: Box<[Box<[runtime::ObservedUnit]>]>,
+    /// Per `(wave, partition)`, the consumer reads to mute while that partition is trapped.
+    trapped_edges: Box<[runtime::WaveMutedReads]>,
     output: runtime::NodeLocation,
     scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
+    lease: Option<Box<WorkerLeaseV1<NativeGraphPartitionJob>>>,
+    expected_workers: usize,
+    budget: RecoveryBudgetV1,
+    /// Reap slots for `begin_block`, one per worker; preallocated at bind.
+    reaped: Box<[Option<(usize, usize)>]>,
     source_set: Option<GraphPreparedSourceSet>,
     source_input_targets: Box<[(usize, runtime::NodeLocation)]>,
+    counters: [u64; 4],
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1850,6 +2012,8 @@ impl NativeGraphExecutor {
         bindings: Vec<GraphNodeBinding>,
         blueprint: NativeGraphBlueprint,
         scheduler: NativeSchedulerV1<NativeGraphPartitionJob>,
+        lease: Option<WorkerLeaseV1<NativeGraphPartitionJob>>,
+        budget: RecoveryBudgetV1,
         resources: NativeGraphResourceReportV1,
         source_set: Option<GraphPreparedSourceSet>,
         #[cfg(feature = "test-support")]
@@ -1870,7 +2034,7 @@ impl NativeGraphExecutor {
             bindings,
             source_inputs,
         );
-        let native = runtime::build_native(program, &plan.spec, parts, frames, &blueprint.ranges);
+        let native = runtime::build_native(program, &plan.spec, parts, frames, &blueprint.layout);
         let source_input_targets = source_set
             .as_ref()
             .map(|set| {
@@ -1909,62 +2073,57 @@ impl NativeGraphExecutor {
             #[cfg(feature = "test-support")]
             test_preparation_transcript,
         };
+        let expected_workers = scheduler.expected_workers();
+        let mut lease = lease.map(Box::new);
+        if let Some(lease) = lease.as_mut() {
+            lease.set_idle_spin(budget);
+        }
         (
             Self {
                 waves: waves.into_boxed_slice(),
-                stage_operations: native
-                    .stage_operations
+                trapped_edges: native
+                    .trapped_edges
                     .into_iter()
-                    .map(Vec::into_boxed_slice)
-                    .collect(),
-                observation: native
-                    .observation
-                    .into_iter()
-                    .map(Vec::into_boxed_slice)
+                    .map(|wave| {
+                        wave.into_iter()
+                            .map(Vec::into_boxed_slice)
+                            .collect::<Box<[_]>>()
+                    })
                     .collect(),
                 output: native.output,
                 scheduler,
+                lease,
+                expected_workers,
+                budget,
+                reaped: vec![None; expected_workers].into_boxed_slice(),
                 source_set,
                 source_input_targets,
+                counters: [0; 4],
             },
             metadata,
         )
     }
 
     // REALTIME_POLICY_BEGIN
-    fn stage_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
-        let (previous, current_and_later) = self.waves.split_at_mut(wave_index);
-        let current = current_and_later
-            .first_mut()
-            .ok_or(RenderError::InvalidEnvelope)?;
-        for parcel in current.recovered_parcels_mut() {
-            parcel.first_sample = first_sample;
+    /// Redirect (or restore) every consumer read sourced from one partition.
+    ///
+    /// A trapped partition's buffers are radioactive: its worker may still be writing them, and
+    /// nobody owns them. Muting turns those reads into the arena's always-zero silence buffer
+    /// (invariant I4) so the rest of the block renders correct, defined audio.
+    fn set_partition_muted(&mut self, wave: usize, partition: usize, muted: bool) {
+        let Some(edges) = self
+            .trapped_edges
+            .get(wave)
+            .and_then(|wave| wave.get(partition))
+        else {
+            return;
+        };
+        for index in 0..edges.len() {
+            let edge = self.trapped_edges[wave][partition][index];
+            if let Some(parcel) = self.waves[edge.wave].recovered_parcel_mut(edge.partition) {
+                parcel.runtime.lease.set_muted(edge.buffer, muted);
+            }
         }
-        for operation in self.stage_operations[wave_index].iter().copied() {
-            let source = previous
-                .get(operation.source.wave)
-                .and_then(|wave| wave.recovered_parcel(operation.source.partition))
-                .ok_or(RenderError::InvalidEnvelope)?
-                .runtime
-                .buffer(operation.source.buffer);
-            current
-                .recovered_parcel_mut(operation.destination_partition)
-                .ok_or(RenderError::InvalidEnvelope)?
-                .runtime
-                .stage_into(operation.destination_buffer, operation.line, source);
-        }
-        Ok(())
-    }
-
-    fn observe_wave(&mut self, wave_index: usize, first_sample: u64) -> Result<(), RenderError> {
-        for (partition, unit) in self.observation[wave_index].iter().copied() {
-            self.waves[wave_index]
-                .recovered_parcel_mut(partition)
-                .ok_or(RenderError::InvalidEnvelope)?
-                .runtime
-                .observe_unit(unit, first_sample)?;
-        }
-        Ok(())
     }
     // REALTIME_POLICY_END
 }
@@ -1979,6 +2138,24 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
         mut output: PlanarBufferMut<'_>,
         time: miso_engine_core::realtime::RenderTime,
     ) -> Result<(), RenderError> {
+        if self.scheduler.selection() == SchedulerSelectionV1::Parallel && self.lease.is_none() {
+            self.counters[3] = self.counters[3].saturating_add(1);
+        }
+        let reaped_count = self.scheduler.begin_block(
+            self.lease.as_deref_mut(),
+            &mut self.waves,
+            &mut self.reaped,
+        );
+        for index in 0..reaped_count {
+            if let Some((wave, partition)) = self.reaped[index] {
+                self.set_partition_muted(wave, partition, false);
+            }
+        }
+        for wave in self.waves.iter_mut() {
+            for parcel in wave.recovered_parcels_mut() {
+                parcel.first_sample = time.absolute_sample;
+            }
+        }
         if let Some(source_set) = &mut self.source_set {
             source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)?;
             for &(claim, location) in &self.source_input_targets {
@@ -1990,18 +2167,48 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
                 source_set.copy_track_input(claim, left, right)?;
             }
         }
+        let mut degraded = false;
+        let mut job_error = None;
         for wave_index in 0..self.waves.len() {
-            self.stage_wave(wave_index, time.absolute_sample)?;
-            match self.scheduler.render_wave(&mut self.waves[wave_index]) {
-                Ok(_) => {}
-                Err(SchedulerDispatchErrorV1::Job(error)) => return Err(error.error),
+            let lease = if degraded {
+                None
+            } else {
+                self.lease.as_deref_mut()
+            };
+            match self
+                .scheduler
+                .render_wave(lease, &mut self.waves[wave_index])
+            {
+                Ok(report) => {
+                    self.counters[0] = self.counters[0].saturating_add(report.coordinator_wakes);
+                    self.counters[2] =
+                        self.counters[2].saturating_add(report.dead_partitions_executed);
+                }
+                Err(SchedulerDispatchErrorV1::WorkerLost { partition_id, .. }) => {
+                    // The worker keeps the parcel; mute everything sourced from it and finish the
+                    // block on the coordinator.
+                    self.counters[1] = self.counters[1].saturating_add(1);
+                    self.set_partition_muted(wave_index, partition_id, true);
+                    degraded = true;
+                }
+                Err(SchedulerDispatchErrorV1::Job(error)) => {
+                    job_error = Some(error.error);
+                    break;
+                }
                 Err(
                     SchedulerDispatchErrorV1::MissingParcel { .. }
                     | SchedulerDispatchErrorV1::CommandQueueFull { .. }
-                    | SchedulerDispatchErrorV1::CompletionMismatch { .. },
-                ) => return Err(RenderError::InvalidEnvelope),
+                    | SchedulerDispatchErrorV1::CompletionMismatch { .. }
+                    | SchedulerDispatchErrorV1::JobPanicked { .. },
+                ) => {
+                    job_error = Some(RenderError::InvalidEnvelope);
+                    break;
+                }
             }
-            self.observe_wave(wave_index, time.absolute_sample)?;
+        }
+        self.scheduler.end_block(self.lease.as_deref_mut());
+        if let Some(error) = job_error {
+            return Err(error);
         }
         let (left, right) = self.waves[self.output.wave]
             .recovered_parcel(self.output.partition)
@@ -2013,6 +2220,37 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
         Ok(())
     }
     // REALTIME_POLICY_END
+
+    fn take_handover(&mut self) -> Option<miso_engine_core::realtime::ExecutorHandover> {
+        self.lease
+            .take()
+            .map(|lease| lease as miso_engine_core::realtime::ExecutorHandover)
+    }
+
+    fn accept_handover(
+        &mut self,
+        handover: miso_engine_core::realtime::ExecutorHandover,
+    ) -> Option<miso_engine_core::realtime::ExecutorHandover> {
+        if self.lease.is_some() || self.scheduler.selection() != SchedulerSelectionV1::Parallel {
+            return Some(handover);
+        }
+        match handover.downcast::<WorkerLeaseV1<NativeGraphPartitionJob>>() {
+            Ok(mut lease) => {
+                if lease.worker_count() == self.expected_workers {
+                    lease.set_idle_spin(self.budget);
+                    self.lease = Some(lease);
+                    None
+                } else {
+                    Some(lease as miso_engine_core::realtime::ExecutorHandover)
+                }
+            }
+            Err(handover) => Some(handover),
+        }
+    }
+
+    fn dispatch_counters(&self) -> [u64; 4] {
+        self.counters
+    }
 
     fn qualification_counters(&self) -> [u64; 2] {
         self.waves.iter().fold([0_u64, 0_u64], |mut total, wave| {
@@ -2042,7 +2280,58 @@ impl PreparedPlanExecutor for NativeGraphExecutor {
         &self,
         output: &mut [miso_engine_core::realtime::audit::AuditSnapshot],
     ) -> usize {
-        self.scheduler.copy_worker_audit_snapshots(output)
+        self.scheduler
+            .copy_worker_audit_snapshots(self.lease.as_deref(), output)
+    }
+}
+
+/// Control-plane owner of the native render workers, independent of any plan.
+///
+/// Hosts start one pool and keep it: a structural change publishes a replacement plan and the
+/// lease is handed over at the block-boundary swap, so no thread is spawned or joined for it.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativeGraphWorkerPoolV1(NativeWorkerPoolV1<NativeGraphPartitionJob>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphWorkerPoolV1 {
+    /// Start the pool and take its first lease.
+    ///
+    /// # Errors
+    /// Returns the scheduler's preparation error; nothing is left running on the failure path.
+    pub fn start(
+        config: NativeWorkerPoolConfigV1,
+    ) -> Result<(Self, NativeGraphWorkerLeaseV1), SchedulerPrepareErrorV1> {
+        let (pool, lease) = NativeWorkerPoolV1::start(config)?;
+        Ok((Self(pool), NativeGraphWorkerLeaseV1(lease)))
+    }
+
+    /// Address-free description of this pool.
+    #[must_use]
+    pub const fn shape(&self) -> NativeWorkerPoolShapeV1 {
+        self.0.shape()
+    }
+
+    /// Take back a lease a retired plan released.
+    pub fn recover_lease(&mut self) -> Option<NativeGraphWorkerLeaseV1> {
+        self.0.recover_lease().map(NativeGraphWorkerLeaseV1)
+    }
+
+    /// Stop and join every worker.
+    pub fn stop_and_join(self) {
+        self.0.stop_and_join();
+    }
+}
+
+/// The coordinator half of a [`NativeGraphWorkerPoolV1`], owned by one prepared plan at a time.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativeGraphWorkerLeaseV1(WorkerLeaseV1<NativeGraphPartitionJob>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeGraphWorkerLeaseV1 {
+    /// Auxiliary workers this lease drives.
+    #[must_use]
+    pub fn worker_count(&self) -> usize {
+        self.0.worker_count()
     }
 }
 
@@ -2396,6 +2685,8 @@ mod tests {
                 observers: Vec::new(),
             }),
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: required
                     .into_iter()
@@ -2642,6 +2933,8 @@ mod tests {
         (
             graph,
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes,
                 observers,
@@ -2683,14 +2976,48 @@ mod tests {
         )
     }
 
+    /// A recovery deadline long enough that no descheduled worker is ever mistaken for a dead
+    /// one. The determinism harnesses measure bits, not deadlines; the bounded deadline itself is
+    /// proved by the dead-worker injection test in `tests/scheduler_recovery.rs`.
+    #[cfg(not(target_arch = "wasm32"))]
+    const DETERMINISM_DEADLINE_NS: u64 = 5_000_000_000;
+
     fn single_thread_config() -> NativeGraphBindConfigV1 {
         NativeGraphBindConfigV1 {
             render_mode: NativeGraphRenderModeV1::SingleThread,
             scheduler: NativeSchedulerConfigV1::new(
                 core::num::NonZeroUsize::new(4).expect("four lanes"),
                 true,
+                NativeWorkerPoolShapeV1::default(),
             ),
             maximum_retained_bytes: 1 << 20,
+        }
+    }
+
+    /// Start a pool for `lanes` render lanes and hand back its shape and first lease.
+    ///
+    /// The pool is control-plane state that outlives the plan: every caller keeps it alive for as
+    /// long as it renders.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_pool(
+        lanes: usize,
+    ) -> (
+        Option<NativeGraphWorkerPoolV1>,
+        Option<NativeGraphWorkerLeaseV1>,
+        NativeWorkerPoolShapeV1,
+    ) {
+        #![allow(clippy::type_complexity)]
+        match core::num::NonZeroUsize::new(lanes.saturating_sub(1)) {
+            None => (None, None, NativeWorkerPoolShapeV1::default()),
+            Some(workers) => {
+                let (pool, lease) = NativeGraphWorkerPoolV1::start(NativeWorkerPoolConfigV1 {
+                    requested_workers: Some(workers),
+                    ..NativeWorkerPoolConfigV1::default()
+                })
+                .expect("test worker pool");
+                let shape = pool.shape();
+                (Some(pool), Some(lease), shape)
+            }
         }
     }
 
@@ -3052,6 +3379,8 @@ mod tests {
         let render = |identity: bool| {
             let (plan, bindings, input) = binding_plan();
             let bindings = GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope: bindings.envelope,
                 nodes: bindings
                     .nodes
@@ -3100,6 +3429,8 @@ mod tests {
         let mut nodes = bindings.nodes;
         nodes.pop();
         let short = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope: bindings.envelope,
             nodes,
             observers: bindings.observers,
@@ -3217,6 +3548,8 @@ mod tests {
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![
                 GraphNodeBinding::new(
@@ -3762,11 +4095,30 @@ mod tests {
         (
             plan,
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bindings,
                 observers: Vec::new(),
             },
         )
+    }
+
+    /// One block at its own absolute sample time, so a caller can keep the per-block bits.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_block_at(plan: &mut PreparedRenderPlan, frames: usize, block: u64) -> Vec<u32> {
+        let mut samples = vec![0.0_f32; frames * 2];
+        plan.render(
+            miso_engine_core::realtime::RenderIo {
+                input: None,
+                output: PlanarBufferMut::try_new(&mut samples, 2, frames, frames).expect("output"),
+            },
+            miso_engine_core::realtime::RenderTime {
+                absolute_sample: block * frames as u64,
+            },
+        )
+        .expect("render");
+        samples.iter().map(|sample| sample.to_bits()).collect()
     }
 
     fn render_blocks(plan: &mut PreparedRenderPlan, frames: usize, blocks: u64) -> Vec<u32> {
@@ -3945,6 +4297,8 @@ mod tests {
             (
                 plan,
                 GraphRuntimeBindings {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    worker_lease: None,
                     envelope,
                     nodes: bindings,
                     observers: Vec::new(),
@@ -4045,18 +4399,133 @@ mod tests {
         );
     }
 
-    /// THE gate for #98 F2: on fifty seeded random DAGs -- stage chains, rack effects with
-    /// sidechains, submixes, sends from arbitrary taps, non-trivial 2x2 routes and PDC on a
-    /// quarter of the edges -- the sequential executor and the native dependency-wave executor
-    /// render bit-identical PCM over eight blocks, at every worker-lane count.
+    /// E4. A worker that misses its bounded recovery deadline never wedges the callback: the
+    /// block returns degraded audio in bounded time, the trapped parcel is left alone until the
+    /// worker gives it back, and rendering is bit-exact again afterwards.
     ///
-    /// Red mutation (`tests/MUTATIONS.md`): stage a native edge from the wrong producer, or make
-    /// the sequential executor read a delayed edge before staging it.
+    /// Red mutations (`tests/MUTATIONS.md`): make `recovery_iterations` unbounded -- the render
+    /// call never returns and the wall-clock guard fires; skip `set_partition_muted` -- the
+    /// degraded block reads a buffer a live worker is still writing.
+    /// The scheduler's `fault-injection` feature is enabled unconditionally from this crate's
+    /// `[dev-dependencies]`, so it is always available in a test build and never in a production,
+    /// host or C-ABI one (`scripts/check-scheduler-policy.sh`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_late_worker_degrades_one_block_and_never_wedges_the_callback() {
+        use miso_engine_native_scheduler::FaultInjectionV1;
+        const FRAMES: usize = 4;
+        const BLOCKS: u64 = 24;
+
+        let (sequential_graph, sequential_bindings) = native_parallel_sum_plan(48_000);
+        let mut sequential = sequential_graph
+            .bind(sequential_bindings)
+            .unwrap_or_else(|failure| panic!("sequential bind: {}", failure.code));
+        let reference: Vec<Vec<u32>> = (0..BLOCKS)
+            .map(|block| render_block_at(&mut sequential, FRAMES, block))
+            .collect();
+
+        let (native_graph, mut native_bindings) = native_parallel_sum_plan(48_000);
+        let (pool, lease, pool_shape) = test_pool(2);
+        native_bindings.worker_lease = lease;
+        // A stall far longer than the quantum-derived deadline, applied to the first parcel the
+        // worker ever takes. The default deadline is used here on purpose: this is the gate.
+        let bound = native_graph
+            .bind_native(
+                native_bindings,
+                NativeGraphBindConfigV1 {
+                    render_mode: NativeGraphRenderModeV1::DependencyWaves,
+                    scheduler: NativeSchedulerConfigV1::new(
+                        core::num::NonZeroUsize::new(2).expect("two lanes"),
+                        true,
+                        pool_shape,
+                    )
+                    .with_fault(FaultInjectionV1::StallWorker {
+                        worker_id: 0,
+                        wave_id: u64::MAX,
+                        iterations: 40_000_000,
+                    }),
+                    maximum_retained_bytes: 1 << 20,
+                },
+            )
+            .unwrap_or_else(|failure| panic!("native bind: {}", failure.code));
+        assert_eq!(bound.metadata.selection, SchedulerSelectionV1::Parallel);
+        let mut native = bound.into_plan();
+
+        let mut rendered: Vec<Vec<u32>> = Vec::with_capacity(BLOCKS as usize);
+        for block in 0..BLOCKS {
+            let started = std::time::Instant::now();
+            let bits = render_block_at(&mut native, FRAMES, block);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "block {block} took {elapsed:?}: the callback must be bounded, never wedged"
+            );
+            assert!(
+                bits.iter().all(|word| f32::from_bits(*word).is_finite()),
+                "block {block}: even a degraded block renders defined audio"
+            );
+            rendered.push(bits);
+        }
+        assert_eq!(
+            native.dispatch_counters()[1],
+            1,
+            "exactly one deadline miss, and the worker is issued to again afterwards"
+        );
+        let degraded: Vec<usize> = (0..BLOCKS as usize)
+            .filter(|block| rendered[*block] != reference[*block])
+            .collect();
+        assert!(
+            !degraded.is_empty(),
+            "a trapped partition must not contribute its audio"
+        );
+        let last_degraded = *degraded.last().expect("one degraded block");
+        assert!(
+            last_degraded + 1 < BLOCKS as usize,
+            "the trapped parcel must come back inside the observation window"
+        );
+        for block in last_degraded + 1..BLOCKS as usize {
+            assert_eq!(
+                rendered[block], reference[block],
+                "block {block} is bit-exact once the parcel is reaped"
+            );
+        }
+        drop(native);
+        if let Some(pool) = pool {
+            pool.stop_and_join();
+        }
+    }
+
+    /// THE gate for #98 F2 and #100 F1/F8: on fifty seeded random DAGs -- stage chains, rack
+    /// effects with sidechains, submixes, sends from arbitrary taps, non-trivial 2x2 routes and
+    /// PDC on a quarter of the edges -- the sequential executor and the native dependency-wave
+    /// executor render bit-identical PCM over eight blocks, at 1, 2, 4 and 7 worker lanes, with
+    /// one pool per lane count whose lease is handed from session to session.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`): resolve a native op's inputs from the coloured
+    /// buffer instead of its producing op; issue commands in ascending worker order so a worker
+    /// can wake a child before that child's command exists.
     #[test]
     fn fifty_random_dag_sessions_render_bit_identically_in_both_executors() {
         const FRAMES: usize = 16;
         const BLOCKS: u64 = 8;
+        // One pool per lane count, reused for every session: the pool is control-plane state that
+        // outlives its plans, and starting 300 of them would only measure thread churn.
+        let lane_counts: Vec<usize> = [1_usize, 2, 4, 7]
+            .into_iter()
+            .filter(|lanes| {
+                *lanes == 1
+                    || std::thread::available_parallelism()
+                        .map(core::num::NonZeroUsize::get)
+                        .unwrap_or(1)
+                        >= *lanes
+            })
+            .collect();
+        assert!(
+            lane_counts.len() >= 3,
+            "the determinism matrix needs at least 1/2/4 worker lanes"
+        );
         let mut nontrivial = 0_usize;
+        let mut sequential_by_seed: Vec<Vec<u32>> = Vec::with_capacity(50);
         for seed in 0..50_u64 {
             let (sequential_plan, sequential_bindings) = random_dag_plan(seed);
             let fan_in = sequential_plan
@@ -4071,18 +4540,23 @@ mod tests {
             let mut sequential = sequential_plan
                 .bind(sequential_bindings)
                 .unwrap_or_else(|failure| panic!("seed {seed} sequential bind: {}", failure.code));
-            let sequential_bits = render_blocks(&mut sequential, FRAMES, BLOCKS);
+            let bits = render_blocks(&mut sequential, FRAMES, BLOCKS);
             assert!(
-                sequential_bits.iter().any(|bits| *bits != 0),
+                bits.iter().any(|value| *value != 0),
                 "seed {seed}: the corpus must not be silent"
             );
-
-            for lanes in [1_usize, 2, 4] {
+            sequential_by_seed.push(bits);
+        }
+        for lanes in lane_counts {
+            let (mut pool, mut lease, pool_shape) = test_pool(lanes);
+            for (seed, sequential_bits) in sequential_by_seed.iter().enumerate() {
+                let seed = seed as u64;
                 for mode in [
                     NativeGraphRenderModeV1::SingleThread,
                     NativeGraphRenderModeV1::DependencyWaves,
                 ] {
-                    let (native_plan, native_bindings) = random_dag_plan(seed);
+                    let (native_plan, mut native_bindings) = random_dag_plan(seed);
+                    native_bindings.worker_lease = lease.take();
                     let bound = native_plan
                         .bind_native(
                             native_bindings,
@@ -4091,7 +4565,9 @@ mod tests {
                                 scheduler: NativeSchedulerConfigV1::new(
                                     core::num::NonZeroUsize::new(lanes).expect("lanes"),
                                     true,
-                                ),
+                                    pool_shape,
+                                )
+                                .with_recovery_deadline_ns(DETERMINISM_DEADLINE_NS),
                                 maximum_retained_bytes: 1 << 28,
                             },
                         )
@@ -4099,12 +4575,32 @@ mod tests {
                             panic!("seed {seed} native bind: {}", failure.code)
                         });
                     let mut native = bound.into_plan();
+                    let native_bits = render_blocks(&mut native, FRAMES, BLOCKS);
+                    let counters = native.dispatch_counters();
                     assert_eq!(
-                        render_blocks(&mut native, FRAMES, BLOCKS),
-                        sequential_bits,
+                        counters[1], 0,
+                        "seed {seed}, {lanes} lanes, {mode:?}: a worker missed its deadline, so \
+                         this comparison would be measuring a degraded block"
+                    );
+                    assert_eq!(
+                        &native_bits, sequential_bits,
                         "seed {seed}, {lanes} lanes, {mode:?}: executors disagree"
                     );
+                    // Releasing the plan returns the lease to the pool for the next session.
+                    drop(native);
+                    lease = pool
+                        .as_mut()
+                        .and_then(NativeGraphWorkerPoolV1::recover_lease);
+                    assert_eq!(
+                        lease.is_some(),
+                        lanes > 1,
+                        "seed {seed}, {lanes} lanes: the lease must come back"
+                    );
                 }
+            }
+            drop(lease);
+            if let Some(pool) = pool {
+                pool.stop_and_join();
             }
         }
         assert!(
@@ -4117,11 +4613,13 @@ mod tests {
     fn native_dependency_waves_match_sequential_state_and_pcm_at_launch_rates() {
         for rate in [44_100_u32, 48_000, 88_200, 96_000] {
             let (sequential_graph, sequential_bindings) = native_parallel_sum_plan(rate);
-            let (native_graph, native_bindings) = native_parallel_sum_plan(rate);
+            let (native_graph, mut native_bindings) = native_parallel_sum_plan(rate);
             let mut sequential = match sequential_graph.bind(sequential_bindings) {
                 Ok(plan) => plan,
                 Err(_) => panic!("sequential binding failed"),
             };
+            let (_pool, lease, pool_shape) = test_pool(2);
+            native_bindings.worker_lease = lease;
             let prepared = match native_graph.bind_native(
                 native_bindings,
                 NativeGraphBindConfigV1 {
@@ -4129,7 +4627,9 @@ mod tests {
                     scheduler: NativeSchedulerConfigV1::new(
                         core::num::NonZeroUsize::new(2).expect("two lanes"),
                         true,
-                    ),
+                        pool_shape,
+                    )
+                    .with_recovery_deadline_ns(DETERMINISM_DEADLINE_NS),
                     maximum_retained_bytes: 1 << 20,
                 },
             ) {
@@ -4187,6 +4687,7 @@ mod tests {
                 scheduler: NativeSchedulerConfigV1::new(
                     core::num::NonZeroUsize::new(4).expect("four lanes"),
                     true,
+                    NativeWorkerPoolShapeV1::default(),
                 ),
                 maximum_retained_bytes: 1 << 20,
             },
@@ -4209,6 +4710,7 @@ mod tests {
                 scheduler: NativeSchedulerConfigV1::new(
                     core::num::NonZeroUsize::new(2).expect("two lanes"),
                     true,
+                    NativeWorkerPoolShapeV1::default(),
                 ),
                 maximum_retained_bytes: 1,
             },
@@ -4221,37 +4723,54 @@ mod tests {
         assert_eq!(failure.bindings.nodes.len(), 3);
     }
 
-    #[cfg(feature = "test-support")]
+    /// Binding is transactional at the worker-lease boundary too: a lease whose worker count
+    /// does not match the plan's is refused, and every input -- plan, bindings, lease, config --
+    /// comes back unchanged and is reusable.
+    ///
+    /// Red mutation: drop the `graph.scheduler.lease` check in `bind_native_optional_source_set`
+    /// -- a mismatched lease is accepted and the executor issues to workers that do not exist.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_startup_handshake_failure_returns_every_bind_input_transactionally() {
-        use miso_engine_native_scheduler::SchedulerTestProtocolInjectionV1;
-
-        let (graph, bindings) = native_parallel_sum_plan(48_000);
+    fn a_mismatched_worker_lease_is_refused_and_every_bind_input_returns() {
+        let (graph, mut bindings) = native_parallel_sum_plan(48_000);
         let expected_nodes: Vec<_> = bindings
             .nodes
             .iter()
             .map(|binding| binding.node.clone())
             .collect();
+        // A pool of two workers offered to a plan prepared for three.
+        let (pool, lease, _shape) = test_pool(3);
+        bindings.worker_lease = lease;
         let config = NativeGraphBindConfigV1 {
             render_mode: NativeGraphRenderModeV1::DependencyWaves,
             scheduler: NativeSchedulerConfigV1::new(
                 core::num::NonZeroUsize::new(4).expect("four lanes"),
                 true,
-            )
-            .with_test_protocol_injection(
-                SchedulerTestProtocolInjectionV1::StartupHandshakeFailure,
+                NativeWorkerPoolShapeV1 {
+                    worker_count: 3,
+                    spin_ns: 2,
+                },
             ),
             maximum_retained_bytes: 1 << 20,
         };
-        let failure = match graph.bind_native(bindings, config) {
-            Ok(_) => panic!("injected startup handshake failure unexpectedly published a plan"),
+        let mut failure = match graph.bind_native(bindings, config) {
+            Ok(_) => panic!("a mismatched worker lease was accepted"),
             Err(failure) => failure,
         };
-        assert_eq!(failure.code, "graph.scheduler.worker_start");
+        assert_eq!(failure.code, "graph.scheduler.lease");
         assert_eq!(failure.plan.plan_id, 48_000);
         assert_eq!(failure.config, config);
         assert_eq!(failure.bindings.envelope, failure.plan.envelope);
         assert!(failure.bindings.observers.is_empty());
+        assert_eq!(
+            failure
+                .bindings
+                .worker_lease
+                .as_ref()
+                .map(NativeGraphWorkerLeaseV1::worker_count),
+            Some(2),
+            "the lease comes back with everything else"
+        );
         assert_eq!(
             failure
                 .bindings
@@ -4262,20 +4781,38 @@ mod tests {
             expected_nodes
         );
 
+        // The returned inputs are reusable against the pool the lease actually came from.
+        let pool_shape = pool
+            .as_ref()
+            .map(NativeGraphWorkerPoolV1::shape)
+            .expect("pool");
         let recovered_config = NativeGraphBindConfigV1 {
             render_mode: NativeGraphRenderModeV1::DependencyWaves,
             scheduler: NativeSchedulerConfigV1::new(
-                core::num::NonZeroUsize::new(4).expect("four lanes"),
+                core::num::NonZeroUsize::new(3).expect("three lanes"),
                 true,
+                pool_shape,
             ),
             maximum_retained_bytes: 1 << 20,
         };
+        let bindings = core::mem::replace(
+            &mut failure.bindings,
+            GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
+                envelope: failure.plan.envelope,
+                nodes: Vec::new(),
+                observers: Vec::new(),
+            },
+        );
         let recovered = failure
             .plan
-            .bind_native(failure.bindings, recovered_config)
+            .bind_native(bindings, recovered_config)
             .unwrap_or_else(|retry| panic!("returned inputs were not reusable: {}", retry.code));
         assert_eq!(recovered.metadata.selection, SchedulerSelectionV1::Parallel);
-        assert_eq!(recovered.metadata.resources.scheduler.worker_count, 3);
+        assert_eq!(recovered.metadata.resources.scheduler.worker_count, 2);
+        drop(recovered);
+        drop(pool);
     }
 
     #[test]
@@ -4417,6 +4954,8 @@ mod tests {
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![
                 GraphNodeBinding::new(
@@ -4671,6 +5210,8 @@ mod tests {
             )
         };
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![
                 GraphNodeBinding::new(
@@ -4927,6 +5468,8 @@ mod tests {
             observers: Vec::new(),
         });
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![
                 GraphNodeBinding::new(

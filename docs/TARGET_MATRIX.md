@@ -53,3 +53,20 @@ CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
 `cargo check` verifies Rust compilation only. iOS linking/device execution needs Xcode and an iOS
 SDK; Android linking/device execution needs a suitable NDK; browser execution needs a browser
 test harness. Those are explicitly deferred to the platform adapter issues.
+
+## Native dependency-wave scheduler (issue 100)
+
+The parallel render path has no target gate: it compiles and is unit-tested on **every** native
+target, and `SchedulerSelectionV1::Sequential(FallbackReasonV1::UnsupportedTarget)` is now reached
+only on `wasm32`, which deliberately has no worker, no shared memory claim and no atomics in its
+artifact. `x86_64-unknown-linux-gnu` carries the evidence that needs Linux facilities:
+
+| evidence | how it is produced | targets |
+|---|---|---|
+| coordinator/worker syscall counts (steady and paced) | `scripts/trace-scheduler-audit.sh` (strace, `/proc`) | `x86_64-unknown-linux-gnu` only |
+| worker idle CPU between blocks | `/proc/<tid>/stat` in `miso_engine_scheduler_audit` | `x86_64-unknown-linux-gnu` only |
+| determinism, pool lifetime, wake protocol, bounded recovery, weighted split | `cargo test -p miso-engine-native-scheduler -p miso-engine-graph` | every native target |
+| compilation of the parallel path | `cargo check --target x86_64-apple-darwin -p miso-engine-graph`, and `aarch64-unknown-linux-gnu` where its std is installed | macOS/aarch64 |
+
+macOS and aarch64 hosts therefore carry the unit-test evidence, not the strace/`/proc` evidence.
+Platform thread priority and workgroup adoption stay with the host issues.

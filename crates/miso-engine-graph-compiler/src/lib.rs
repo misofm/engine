@@ -1418,7 +1418,27 @@ mod tests {
         let observer_order = Arc::new(AtomicU64::new(0));
         let observed_audio = Arc::new(AtomicBool::new(false));
         let observed_node = track_node("vocal", TrackStage::PostMatrix);
+        // The dependency-wave mode needs a real pool; the pool outlives the plan it leases to.
+        let (pool, lease) = match render_mode {
+            NativeGraphRenderModeV1::DependencyWaves => {
+                let (pool, lease) = miso_engine_graph::NativeGraphWorkerPoolV1::start(
+                    miso_engine_graph::NativeWorkerPoolConfigV1 {
+                        requested_workers: NonZeroUsize::new(3),
+                        ..miso_engine_graph::NativeWorkerPoolConfigV1::default()
+                    },
+                )
+                .unwrap_or_else(|_| panic!("reverse-route worker pool"));
+                (Some(pool), Some(lease))
+            }
+            _ => (None, None),
+        };
+        let pool_shape = pool
+            .as_ref()
+            .map(miso_engine_graph::NativeGraphWorkerPoolV1::shape)
+            .unwrap_or_default();
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: lease,
             envelope,
             nodes,
             observers: vec![
@@ -1451,7 +1471,9 @@ mod tests {
                     scheduler: NativeSchedulerConfigV1::new(
                         NonZeroUsize::new(4).expect("four lanes"),
                         true,
-                    ),
+                        pool_shape,
+                    )
+                    .with_recovery_deadline_ns(5_000_000_000),
                     maximum_retained_bytes: 1 << 20,
                 },
             )
@@ -1468,6 +1490,10 @@ mod tests {
             RenderTime { absolute_sample: 0 },
         )
         .expect("reverse-route submix render");
+        drop(plan);
+        if let Some(pool) = pool {
+            pool.stop_and_join();
+        }
         (
             pcm.into_iter().map(f32::to_bits).collect(),
             selection,
@@ -2295,6 +2321,8 @@ mod tests {
         let mut plan = artifact
             .graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes,
                 // Reverse input order proves executor sorting by stable handle. The stage is only
@@ -2389,6 +2417,8 @@ mod tests {
         let mut scalar_plan = scalar_artifact
             .graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope: scalar_envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -2830,6 +2860,8 @@ mod tests {
                     .collect();
                 let mut oracle_plan = oracle_artifact
                     .into_bound(GraphRuntimeBindings {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        worker_lease: None,
                         envelope: oracle_envelope,
                         nodes: oracle_nodes,
                         observers: oracle_observers,
@@ -2913,6 +2945,8 @@ mod tests {
                 .collect();
             let bound = audit_artifact
                 .into_bound(GraphRuntimeBindings {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    worker_lease: None,
                     envelope: audit_envelope,
                     nodes: audit_nodes,
                     observers: Vec::new(),
@@ -3020,6 +3054,8 @@ mod tests {
             let mut native_plan = native_artifact
                 .into_bound_native(
                     GraphRuntimeBindings {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        worker_lease: None,
                         envelope: native_envelope,
                         nodes: native_nodes,
                         observers: Vec::new(),
@@ -3029,6 +3065,7 @@ mod tests {
                         scheduler: NativeSchedulerConfigV1::new(
                             NonZeroUsize::new(4).expect("four lanes"),
                             true,
+                            miso_engine_graph::NativeWorkerPoolShapeV1::default(),
                         ),
                         maximum_retained_bytes: 1 << 28,
                     },
@@ -3167,6 +3204,8 @@ mod tests {
                 .collect();
             let mut plan = graph
                 .bind(GraphRuntimeBindings {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    worker_lease: None,
                     envelope,
                     nodes,
                     observers,
@@ -3354,6 +3393,8 @@ mod tests {
         let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 // Deliberately reverse insertion order: binding handles, not insertion order,
@@ -3395,6 +3436,8 @@ mod tests {
             .collect();
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -3493,6 +3536,8 @@ mod tests {
             .collect();
         let mut bypass_plan = bypass_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bypass_nodes,
                 observers: Vec::new(),
@@ -3661,6 +3706,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -3668,6 +3715,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("compressor bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -3901,6 +3950,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -3908,6 +3959,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("gate/expander bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -4251,6 +4304,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -4258,6 +4313,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("limiter bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -4640,6 +4697,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -4647,6 +4706,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("multiband bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -5014,6 +5075,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -5021,6 +5084,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("soft-clip bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -5393,6 +5458,8 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -5400,6 +5467,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("transient bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -5645,6 +5714,8 @@ mod tests {
             .collect();
         let mut plan = graph
             .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),
@@ -6040,6 +6111,8 @@ mod tests {
             })
             .collect();
         let bound = match artifact.into_bound(GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),
@@ -6064,6 +6137,8 @@ mod tests {
             .collect();
         let native_bound = match native_artifact.into_bound_native(
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope: native_envelope,
                 nodes: native_nodes,
                 observers: Vec::new(),
@@ -6073,6 +6148,7 @@ mod tests {
                 scheduler: NativeSchedulerConfigV1::new(
                     NonZeroUsize::new(4).expect("four lanes"),
                     true,
+                    miso_engine_graph::NativeWorkerPoolShapeV1::default(),
                 ),
                 maximum_retained_bytes: 1 << 28,
             },
@@ -6487,6 +6563,8 @@ mod tests {
                 })
                 .collect();
             let mut plan = match artifact.into_bound(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes,
                 observers: tap_observers,
@@ -6512,6 +6590,8 @@ mod tests {
             let native_bound = native_artifact
                 .into_bound_native(
                     GraphRuntimeBindings {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        worker_lease: None,
                         envelope: native_envelope,
                         nodes: native_nodes,
                         observers: Vec::new(),
@@ -6521,6 +6601,7 @@ mod tests {
                         scheduler: NativeSchedulerConfigV1::new(
                             NonZeroUsize::new(4).expect("four lanes"),
                             true,
+                            miso_engine_graph::NativeWorkerPoolShapeV1::default(),
                         ),
                         maximum_retained_bytes: 1 << 28,
                     },
@@ -7154,6 +7235,8 @@ mod tests {
             })
             .collect();
         let mut plan = match artifact.graph.bind(GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),

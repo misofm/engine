@@ -1313,6 +1313,8 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                         meter_consumers: self.meter_consumers,
                     },
                     bindings: GraphRuntimeBindings {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        worker_lease: None,
                         envelope: failure.bindings.envelope,
                         nodes: external_processors,
                         observers: external_observers,
@@ -1421,6 +1423,8 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                         meter_consumers: self.meter_consumers,
                     },
                     bindings: GraphRuntimeBindings {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        worker_lease: None,
                         envelope: failure.bindings.envelope,
                         nodes: external_processors,
                         observers: external_observers,
@@ -2337,6 +2341,8 @@ mod tests {
             meter_consumers: Vec::new(),
         };
         let bindings = GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![GraphNodeBinding::new(
                 output.clone(),
@@ -3011,6 +3017,8 @@ mod tests {
             Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
         ));
         let mut plan = match artifact.into_bound(GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),

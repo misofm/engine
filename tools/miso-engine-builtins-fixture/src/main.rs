@@ -498,6 +498,8 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
         .collect();
     let bound = artifact
         .into_bound(GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: bindings,
             observers: Vec::new(),

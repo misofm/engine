@@ -9,7 +9,7 @@ publish.workspace = true
 name = "miso_engine_native_scheduler"
 
 [features]
-test-support = []
+fault-injection = []
 
 [dependencies]
 miso-engine-core.workspace = true

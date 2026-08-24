@@ -9,7 +9,7 @@ publish.workspace = true
 name = "miso_engine_graph"
 
 [features]
-test-support = ["miso-engine-native-scheduler/test-support"]
+test-support = []
 
 [dependencies]
 miso-engine-core.workspace = true
@@ -22,6 +22,11 @@ miso-engine-native-scheduler.workspace = true
 
 [dev-dependencies]
 miso-engine-conformance.workspace = true
+
+# Bounded scheduler fault injection is enabled from dev-dependencies only, so it can never reach
+# a host, C-ABI or Wasm artifact; `scripts/check-scheduler-policy.sh` enforces that.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+miso-engine-native-scheduler = { workspace = true, features = ["fault-injection"] }
 
 [lints]
 workspace = true

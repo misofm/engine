@@ -1020,6 +1020,8 @@ fn compile_ready(
         .cloned()
         .collect::<Vec<_>>();
     let bindings = GraphRuntimeBindings {
+        #[cfg(not(target_arch = "wasm32"))]
+        worker_lease: None,
         envelope: artifact.envelope(),
         nodes: external_nodes
             .into_iter()

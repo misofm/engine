@@ -2,7 +2,9 @@
 
 use super::spsc::{bounded_spsc_internal, bounded_spsc_retained_payload};
 use super::{Consumer, PlanEpoch, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError};
-use super::{PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime};
+use super::{
+    PreparedPlanExecutor, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
+};
 use core::{
     alloc::Layout,
     cell::Cell,
@@ -370,10 +372,28 @@ impl RealtimePlanOwner {
             return SwapOutcome::None;
         };
         let continuing = self.active.1.next_absolute_sample();
-        let old = core::mem::replace(&mut self.active, (candidate.epoch, candidate.plan));
+        let mut old = core::mem::replace(&mut self.active, (candidate.epoch, candidate.plan));
         // The timeline belongs to the host, not to any one plan: a plan that takes over mid-stream
         // continues the outgoing plan's clock instead of restarting at zero.
         self.active.1.adopt_absolute_sample(continuing);
+        // Hand any executor-owned resource (the persistent worker lease) to the replacement, and
+        // give it back to the retiring plan if the replacement refuses it, so it is dropped only
+        // at reclaim on the control thread. Every step here is a move.
+        if let Some(handover) = old
+            .1
+            .executor_mut()
+            .and_then(PreparedPlanExecutor::take_handover)
+        {
+            let refused = match self.active.1.executor_mut() {
+                Some(replacement) => replacement.accept_handover(handover),
+                None => Some(handover),
+            };
+            if let Some(refused) = refused
+                && let Some(retiring) = old.1.executor_mut()
+            {
+                let _ = retiring.accept_handover(refused);
+            }
+        }
         placeholder.commit(RetiredPlan {
             epoch: old_epoch,
             plan: old.1,
@@ -438,6 +458,13 @@ impl RealtimePlanOwner {
     /// Copy cumulative auxiliary-worker audit snapshots after callback rendering is disarmed.
     pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
         self.active.1.copy_worker_audit_snapshots(output)
+    }
+
+    /// Read the active plan's bounded dispatch counters after callback rendering is disarmed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dispatch_counters(&self) -> [u64; 4] {
+        self.active.1.dispatch_counters()
     }
 }
 impl Drop for RealtimePlanOwner {
