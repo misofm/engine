@@ -400,6 +400,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: Some(0.0),
     },
+    // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
+    // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltinsV1`,
+    // bound by `ConsoleFaderProcessor` for a track a live console drives. This row states the
+    // parameter's *capability*, exactly as `matrix_ll..rr` do: a session with no console has
+    // nothing that writes either surface, and the prepared `FaderMuteBuiltins` it binds instead
+    // is unchanged. `mute` is smoothed for the same reason it is a block target: a mute is a
+    // retarget of the same gain to zero, over the same ramp window, not a discontinuity.
     BuiltinParameterDescriptorV1 {
         id: 5,
         name: "fader_db",
@@ -410,8 +417,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
             maximum: 24.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -422,8 +429,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         mapping: BuiltinParameterMapping::Boolean,
         domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -1584,14 +1591,20 @@ impl FaderMuteRampBuiltinsV1 {
         if self.remaining[lane] == 0 {
             self.current[lane] = self.target[lane];
             self.step[lane] = 0.0;
+            // A settled muted lane is *cleared*, never multiplied, so its bits are exactly the
+            // `+0.0` the prepared `gain_mute_block` produces for a mute declared in the session --
+            // for a negative input too, where a multiply by `+0.0` would keep the sign.
+            //
+            // The clear starts one sample early on purpose. The final ramp update assigns the
+            // target exactly (D11), so that sample was multiplied by exactly `+0.0` and already
+            // has magnitude zero; including it is what makes "a completed mute is exactly `+0.0`"
+            // true of every sample rather than all but one.
+            if self.muted[lane] {
+                plane[ramp_frames.saturating_sub(1)..frames].fill(0.0);
+                return;
+            }
         }
         if ramp_frames == frames {
-            return;
-        }
-        // Settled tail. A muted lane is cleared, never multiplied, so its bits are exactly the
-        // `+0.0` the prepared `gain_mute_block` produces for a mute declared in the session.
-        if self.muted[lane] && self.remaining[lane] == 0 {
-            plane[ramp_frames..frames].fill(0.0);
             return;
         }
         let gain = self.current[lane];

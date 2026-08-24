@@ -59,8 +59,8 @@
         "sourceIdBytes": "1024",
         "sourcePcmStagingBytes": "4096",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3625",
-        "bridgeRetainedBytes": "1075001",
+        "bridgeMetadataBytes": "3641",
+        "bridgeRetainedBytes": "1075017",
         "largestBridgeAllocationBytes": "1048576",
         "sourceTotalBytes": "2206",
         "sourceOverheadBytes": "1182",
@@ -107,9 +107,9 @@
           "admitted": 0,
           "appliedAtSample": "256"
         },
-        "unsupported": {
-          "result": 7,
-          "reason": 7,
+        "unknownParameter": {
+          "result": 1,
+          "reason": 5,
           "rejectedIndex": 0,
           "admitted": 0,
           "appliedAtSample": "256"
@@ -120,6 +120,41 @@
           "rejectedIndex": 0,
           "admitted": 1,
           "appliedAtSample": "384"
+        },
+        "fader": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "512"
+        },
+        "mute": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "640"
+        },
+        "effectParam": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "768"
+        },
+        "effectBypass": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 1,
+          "appliedAtSample": "896"
+        },
+        "mixedBatch": {
+          "result": 0,
+          "reason": 0,
+          "rejectedIndex": 0,
+          "admitted": 2,
+          "appliedAtSample": "1024"
         }
       },
       "beforeDisposeStatus": {
@@ -128,12 +163,12 @@
         "backend": 1,
         "sampleRateHz": 48000,
         "quantumFrames": 128,
-        "nextAbsoluteSample": "768",
-        "renderedQuanta": "6",
+        "nextAbsoluteSample": "1280",
+        "renderedQuanta": "10",
         "memoryBytes": 2359296
       },
-      "pcmF32leSha256": "9b60e90f3415690ed5a285169dd5b1770780c99172afacea97955fb52c8f3da7"
+      "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
     },
-    "nativeCommandTimelinePcmF32leSha256": "9b60e90f3415690ed5a285169dd5b1770780c99172afacea97955fb52c8f3da7"
+    "nativeCommandTimelinePcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
   }
 }

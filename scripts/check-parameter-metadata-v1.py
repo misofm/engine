@@ -82,7 +82,9 @@ def validate(document: dict) -> None:
     require([kind["name"] for kind in kinds] == COMMAND_KINDS, "command kinds")
     require([kind["value"] for kind in kinds] == list(range(1, 7)), "command kind values")
     applied = {kind["name"] for kind in kinds if kind["applied"]}
-    require(applied == {"pan", "matrix"}, "applied command kinds")
+    # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
+    # more, so a kind that reports `applied: false` is a regression, not a documented gap.
+    require(applied == set(COMMAND_KINDS), "applied command kinds")
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
     require([reason["value"] for reason in reasons] == list(range(10)), "command reason values")
@@ -130,8 +132,8 @@ def validate(document: dict) -> None:
             finite(parameter["disabledValue"], "builtin disabled value")
         require(parameter["nudge"] is None, "builtin nudge slot")
     require(
-        live_names == {"matrix_ll", "matrix_lr", "matrix_rl", "matrix_rr"},
-        "exactly the matrix parameters are live",
+        live_names == {"fader_db", "mute", "matrix_ll", "matrix_lr", "matrix_rl", "matrix_rr"},
+        "exactly the fader, mute and matrix parameters are live",
     )
 
     require(document["effects"], "at least one effect")
@@ -189,8 +191,13 @@ def validate_effect_parameter(parameter: dict) -> None:
         parameter["smoothingSamples"] == 0 or parameter["smoothingName"] != "none",
         "an unsmoothed parameter declares zero smoothing samples",
     )
-    # No effect parameter is live: the engine has no post-preparation effect write path.
-    require(parameter["liveUpdatable"] is False, "effect parameters are not live")
+    # Issue #140 A: an effect parameter is live exactly when it is automatable, because the live
+    # path delivers it as a `PreparedAutomationSpan` and an unautomatable parameter has no span an
+    # effect would accept.
+    require(
+        parameter["liveUpdatable"] == parameter["automatable"],
+        "effect liveUpdatable follows automatable",
+    )
     require(parameter["nudge"] is None, "effect nudge slot")
     default = finite(parameter["default"], "parameter default")
     if parameter["domainName"] == "continuous":
@@ -227,7 +234,7 @@ def self_test() -> int:
         ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v2")),
         ("abi", lambda d: d.update(abiVersion=1)),
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
-        ("kind applied", lambda d: d["commandKinds"][2].update(applied=True)),
+        ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
         ("reason order", lambda d: d["commandReasons"].reverse()),
         (
             "builtin live disagrees with update rate",
@@ -235,7 +242,7 @@ def self_test() -> int:
         ),
         (
             "a prepared-only builtin claims to be live",
-            lambda d: d["builtins"]["parameters"][4].update(liveUpdatable=True),
+            lambda d: d["builtins"]["parameters"][1].update(liveUpdatable=True),
         ),
         ("builtin nudge is an object", lambda d: d["builtins"]["parameters"][0].update(nudge={})),
         ("effect order", lambda d: d["effects"].reverse()),
@@ -244,8 +251,18 @@ def self_test() -> int:
             lambda d: d["effects"][0]["parameters"].reverse(),
         ),
         (
-            "an effect parameter claims to be live",
-            lambda d: d["effects"][0]["parameters"][0].update(liveUpdatable=True),
+            "an automatable effect parameter denies being live",
+            lambda d: d["effects"][0]["parameters"][0].update(liveUpdatable=False),
+        ),
+        (
+            "an unautomatable effect parameter claims to be live",
+            lambda d: d["effects"][0]["parameters"][0].update(
+                automatable=False, automationRate=3, automationRateName="none"
+            ),
+        ),
+        (
+            "a block-target builtin denies being live",
+            lambda d: d["builtins"]["parameters"][4].update(liveUpdatable=False),
         ),
         (
             "unit name disagrees with unit value",

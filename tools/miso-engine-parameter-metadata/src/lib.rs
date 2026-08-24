@@ -20,10 +20,11 @@
 //!
 //! # `liveUpdatable`
 //!
-//! Every parameter carries whether the live-console command path can actually move it. That is not
-//! a convenience: the engine has no general post-preparation write path, so most parameters are
-//! `false`, and a caller that reads this file never has to discover that at runtime. See the
-//! browser ABI's `.d.ts` header for the full statement of which surfaces move and why.
+//! Every parameter carries whether the live-console command path can actually move it. Issue #140
+//! made that true of every builtin block target and every automatable effect parameter: a builtin
+//! row is live exactly when its declared update rate is `blockTarget`, and an effect row is live
+//! exactly when its descriptor declares it automatable. A caller that reads this file never has to
+//! discover either at runtime. See the browser ABI's `.d.ts` header for the full statement.
 //!
 //! # Issue #127 (named nudge sizes)
 //!
@@ -94,10 +95,10 @@ pub fn render() -> String {
     let kinds = [
         (COMMAND_PAN, "pan", true),
         (COMMAND_MATRIX, "matrix", true),
-        (COMMAND_FADER_DB, "faderDb", false),
-        (COMMAND_MUTE, "mute", false),
-        (COMMAND_EFFECT_PARAM, "effectParam", false),
-        (COMMAND_EFFECT_BYPASS, "effectBypass", false),
+        (COMMAND_FADER_DB, "faderDb", true),
+        (COMMAND_MUTE, "mute", true),
+        (COMMAND_EFFECT_PARAM, "effectParam", true),
+        (COMMAND_EFFECT_BYPASS, "effectBypass", true),
     ];
     for (index, (value, name, applied)) in kinds.iter().enumerate() {
         out.push_str(&format!(
@@ -245,10 +246,15 @@ fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {
         "          \"readable\": {}, \"automatable\": {},\n",
         parameter.readable, parameter.automatable
     ));
-    // The live-console command path has no post-preparation effect write path at all; every
-    // effect parameter is refused with COMMAND_REASON_UNSUPPORTED_KIND after its address and
-    // domain have been checked. Stating that here is what keeps an app from discovering it live.
-    out.push_str("          \"liveUpdatable\": false,\n");
+    // Issue #140 A: the live-console command path now feeds an admitted parameter into the
+    // running plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own
+    // descriptor says it can be automated. The two statements are the same statement, which is
+    // why this is derived from `automatable` rather than written down. A parameter that declares
+    // `AutomationRate::None` has no span the effect would accept and stays `false`.
+    out.push_str(&format!(
+        "          \"liveUpdatable\": {},\n",
+        parameter.automatable
+    ));
     out.push_str("          \"enumChoices\": [");
     for (index, choice) in parameter.enum_choices.iter().enumerate() {
         out.push_str(&format!(

@@ -18,6 +18,11 @@ const COMMAND_RECORD_BYTES = 48;
 const COMMAND_QUEUE_RECORDS = 4;
 const COMMAND_PAN = 1;
 const COMMAND_MATRIX = 2;
+// Issue #140: every declared kind is live now.
+const COMMAND_FADER_DB = 3;
+const COMMAND_MUTE = 4;
+const COMMAND_EFFECT_PARAM = 5;
+const COMMAND_EFFECT_BYPASS = 6;
 const RESOURCE_NAMES = [
   "configBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
   "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
@@ -102,6 +107,8 @@ function submitCommands(exports, handle, records) {
     staging.setUint8(offset + 1, record.rack ?? 255);
     staging.setUint8(offset + 2, record.channel ?? 255);
     staging.setUint32(offset + 4, record.trackIndex, true);
+    staging.setUint32(offset + 8, record.effectIndex ?? 0, true);
+    staging.setUint32(offset + 12, record.parameterId ?? 0, true);
     staging.setUint32(offset + 16, record.smoothingSamples ?? 0, true);
     for (let slot = 0; slot < 4; slot += 1) {
       staging.setFloat32(offset + 24 + slot * 4, record.values[slot], true);
@@ -238,13 +245,18 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   };
 }
 
-/// #137 E2: the same session, source feed and command timeline, rendered through the shipped
-/// artifact. Its digest is asserted equal to the native twin's before anything is printed.
+/// #137 E2, extended by #140 C: the same session, source feed and command timeline the native
+/// twin runs, rendered through the shipped artifact.
 ///
-/// The fixture is identity end to end, so a constant input renders to that same constant and the
-/// only thing that can move a sample is a command. Six blocks, one matrix retarget, one refused
-/// unknown-track record, one refused flood, and one smoothed pan retarget: the digest is a
-/// statement about *when* each of those took effect, not merely that they did.
+/// Its digest is asserted equal to the native twin's before anything is printed, so the pin can
+/// only ever be the value two independent implementations already agree on.
+///
+/// The fixture is identity apart from one dynamic-rack parametric EQ whose band 1 is a low shelf,
+/// so a constant input renders to that same constant until a command moves it. Ten blocks; one
+/// matrix retarget, three refusals, a smoothed pan, a windowed fader move, a windowed mute, an
+/// effect parameter on both lanes, a live bypass, and one batch that releases the mute and the
+/// bypass together across two different destination queues. The digest is a statement about
+/// *when* each of those took effect, not merely that they did.
 async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
@@ -258,7 +270,6 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
 
   const memoryBuffer = exports.memory.buffer;
-  const constant = { leftBase: 0.25, leftStep: 0, frames: QUANTUM, final: false };
   const feed = (block) => {
     const id = new TextEncoder().encode(sourceId);
     const idPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
@@ -272,6 +283,27 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   };
   const matrix = { kind: COMMAND_MATRIX, trackIndex: 0, values: [0.5, 0, 0, 1] };
   const pan = { kind: COMMAND_PAN, trackIndex: 0, smoothingSamples: QUANTUM, values: [-1, 1, 0, 0] };
+  const fader = {
+    kind: COMMAND_FADER_DB, rack: 255, channel: 2, trackIndex: 0,
+    smoothingSamples: QUANTUM, values: [-6, 0, 0, 0],
+  };
+  const muteOn = {
+    kind: COMMAND_MUTE, rack: 255, channel: 2, trackIndex: 0,
+    smoothingSamples: QUANTUM, values: [1, 0, 0, 0],
+  };
+  const muteOff = {
+    kind: COMMAND_MUTE, rack: 255, channel: 2, trackIndex: 0, values: [0, 0, 0, 0],
+  };
+  const bandGain = {
+    kind: COMMAND_EFFECT_PARAM, rack: 1, channel: 2, trackIndex: 0,
+    effectIndex: 0, parameterId: 4, values: [-12, 0, 0, 0],
+  };
+  const unknownParameter = { ...bandGain, parameterId: 4242, values: [0, 0, 0, 0] };
+  const bypassOn = {
+    kind: COMMAND_EFFECT_BYPASS, rack: 1, channel: 255, trackIndex: 0,
+    effectIndex: 0, values: [1, 0, 0, 0],
+  };
+  const bypassOff = { ...bypassOn, values: [0, 0, 0, 0] };
   const reports = {};
   const blocks = [];
   const step = (block) => {
@@ -288,14 +320,21 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   reports.flood = submitCommands(
     exports, handle, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => matrix),
   );
-  reports.unsupported = submitCommands(
-    exports, handle, [{ kind: 3, rack: 255, channel: 0, trackIndex: 0, values: [-6, 0, 0, 0] }],
-  );
+  reports.unknownParameter = submitCommands(exports, handle, [unknownParameter]);
   step(2);
   reports.pan = submitCommands(exports, handle, [pan]);
   step(3);
+  reports.fader = submitCommands(exports, handle, [fader]);
   step(4);
+  reports.mute = submitCommands(exports, handle, [muteOn]);
   step(5);
+  reports.effectParam = submitCommands(exports, handle, [bandGain]);
+  step(6);
+  reports.effectBypass = submitCommands(exports, handle, [bypassOn]);
+  step(7);
+  reports.mixedBatch = submitCommands(exports, handle, [muteOff, bypassOff]);
+  step(8);
+  step(9);
   const beforeDisposeStatus = status(exports, handle);
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
   assert.equal(exports.memory.buffer, memoryBuffer, "a command timeline never grows memory");
