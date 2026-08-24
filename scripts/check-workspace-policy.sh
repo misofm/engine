@@ -105,4 +105,18 @@ if [[ -d .cargo ]]; then
     fi
 fi
 
+
+# #104 phase D. `CARGO_TARGET_DIR=.` (or a stray `--target-dir .`) writes a cargo target tree next
+# to `Cargo.toml`: `.rustc_info.json`, `CACHEDIR.TAG`, and one directory per profile/target, each
+# holding `.fingerprint/`. 235 such files were committed to `main`. `.gitignore` stops them being
+# added again; this gate stops them existing at all, because an ignored spill still poisons every
+# `find`/`rg` gate that walks the tree from the workspace root.
+for marker in .rustc_info.json CACHEDIR.TAG; do
+    [[ ! -e "$marker" ]] || fail "cargo target-dir spill at the workspace root: $marker"
+done
+while IFS= read -r fingerprint; do
+    [[ -z "$fingerprint" ]] && continue
+    fail "cargo target-dir spill at the workspace root: ${fingerprint%/.fingerprint}"
+done < <(find . -mindepth 2 -maxdepth 2 -type d -name .fingerprint -not -path './target/*' -printf '%P\n')
+
 printf 'workspace policy: ok\n'

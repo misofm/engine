@@ -128,6 +128,23 @@ valid_root="$scratch_root/valid root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 
+# #104 phase D: a cargo target-dir spill at the workspace root.
+mutate_root_target_spill() {
+    local root="$1"
+    mkdir -p "$root/release/.fingerprint"
+    printf '{}\n' >"$root/release/.fingerprint/lib-example.json"
+}
+
+mutate_root_rustc_info() {
+    local root="$1"
+    printf '{}\n' >"$root/.rustc_info.json"
+}
+
+mutate_root_cachedir_tag() {
+    local root="$1"
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n' >"$root/CACHEDIR.TAG"
+}
+
 expect_failure package-prefix mutate_package_prefix
 expect_failure lib-identifier mutate_lib_identifier
 expect_failure bin-identifier mutate_bin_identifier
@@ -136,6 +153,9 @@ expect_failure track-limit mutate_track_limit
 expect_failure global-isa mutate_global_isa
 expect_failure unscoped-isa-pin mutate_unscoped_isa_pin
 expect_failure extra-isa-feature mutate_extra_isa_feature
+expect_failure root-target-spill mutate_root_target_spill
+expect_failure root-rustc-info mutate_root_rustc_info
+expect_failure root-cachedir-tag mutate_root_cachedir_tag
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 
