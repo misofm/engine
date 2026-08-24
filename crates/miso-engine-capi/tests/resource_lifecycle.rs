@@ -617,6 +617,10 @@ struct RetiredPlanMirror {
     plan: PreparedRenderPlan,
 }
 
+/// Mirror of `miso_engine_host_core`'s private control-source endpoint (audit #103 W4-2 moved it
+/// out of capi). The oracle restates the layout independently and never reads a runtime figure:
+/// the facade's own `control_table_bytes` is what capi's pre-flight uses, and this mirror is the
+/// second, independent witness that the pre-flight charges the right number of bytes.
 #[allow(dead_code)]
 struct ControlSourceMirror {
     id_offset: usize,
@@ -628,11 +632,18 @@ struct ControlSourceMirror {
     provider: HostChunkProvider,
 }
 
+/// Mirror of the facade's `SourceControlSet`: the ID arena and the endpoint table.
+#[allow(dead_code)]
+struct SourceControlSetMirror {
+    ids: Box<[u8]>,
+    sources: Box<[ControlSourceMirror]>,
+}
+
+/// Mirror of capi's `ProviderEpoch`: the epoch tag plus the facade's set.
 #[allow(dead_code)]
 struct ProviderEpochMirror {
     epoch: u64,
-    source_ids: Box<[u8]>,
-    sources: Box<[ControlSourceMirror]>,
+    sources: SourceControlSetMirror,
 }
 
 #[allow(dead_code)]
