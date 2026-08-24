@@ -794,8 +794,6 @@ impl PreparedGraphPlan {
                 plan_id,
                 envelope,
                 scratch: &[],
-                parameter_defaults: &[],
-                event_capacity: 0,
             },
             Box::new(executor),
         )
@@ -1044,8 +1042,6 @@ impl PreparedGraphPlan {
                 plan_id,
                 envelope,
                 scratch: &[],
-                parameter_defaults: &[],
-                event_capacity: 0,
             },
             Box::new(executor),
         )

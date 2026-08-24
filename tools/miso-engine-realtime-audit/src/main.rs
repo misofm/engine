@@ -83,8 +83,6 @@ fn prepared_plan(id: u64) -> PreparedRenderPlan {
             output_channels: NonZeroUsize::new(1).expect("one output channel"),
         },
         scratch: &[],
-        parameter_defaults: &[],
-        event_capacity: 0,
     })
     .expect("valid prepared audit plan")
 }

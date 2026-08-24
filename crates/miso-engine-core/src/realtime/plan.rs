@@ -3,7 +3,7 @@
 #![allow(dead_code)] // State fields are intentionally prepared now for later issue-owned kernels.
 
 use super::{
-    BufferArena, BufferArenaError, ParameterEventBuffer, ParameterValues, PlanarBufferMut,
+    BufferArena, BufferArenaError, PlanarBufferMut,
     PlanarBufferRef,
 };
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
@@ -41,10 +41,6 @@ pub struct PrepareRenderPlan<'a> {
     pub envelope: RenderEnvelope,
     /// Internal planar scratch buffers allocated during preparation.
     pub scratch: &'a [super::PlanarBufferSpec],
-    /// Initial values for pre-resolved parameter slots.
-    pub parameter_defaults: &'a [f32],
-    /// Fixed event capacity for this plan.
-    pub event_capacity: usize,
 }
 /// Immutable topology/schema placeholder; future graph compilation owns its contents.
 #[derive(Debug)]
@@ -189,8 +185,6 @@ pub struct RenderReport {
 pub struct PreparedRenderPlan {
     program: PreparedProgram,
     arena: BufferArena,
-    values: ParameterValues,
-    events: ParameterEventBuffer,
     rendered_blocks: u64,
     next_absolute_sample: u64,
     executor: Option<Box<dyn PreparedPlanExecutor>>,
@@ -224,8 +218,6 @@ impl PreparedRenderPlan {
                 envelope,
             },
             arena: BufferArena::try_new(request.scratch)?,
-            values: ParameterValues::new(request.parameter_defaults),
-            events: ParameterEventBuffer::with_capacity(request.event_capacity),
             rendered_blocks: 0,
             next_absolute_sample: 0,
             executor: None,

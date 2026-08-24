@@ -10,13 +10,12 @@ channel/frame multiplication and accumulated offset. Borrowed `PlanarBufferRef` 
 `PlanarBufferMut` contain slices and scalar shape metadata only. Issue 003 promises contiguous
 planar `f32`; SIMD alignment and AoSoA layout belong to issue 008.
 
-Parameter defaults use a fixed boxed slice addressed by pre-resolved `ParameterSlot`. Events use a
-fixed boxed slice, logical length, absolute sample time, and plan epoch. Render never maps strings,
-sorts events, or grows either store. Full and out-of-order insertions return the rejected `Copy`
-event. Full counts saturate instead of wrapping.
+Parameter and event delivery is owned by the protocol crate's accepted-automation queue (#102);
+the plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
+store; `PlanEpoch` now lives with the plan exchange, whose publication epochs it names.)
 
 `PreparedRenderPlan` privately separates immutable `PreparedProgram`/`RenderEnvelope` from mutable
-arena, parameter, event, and render-counter state. It is `Send`, deliberately not `Sync`, not
+arena and render-counter state. It is `Send`, deliberately not `Sync`, not
 cloneable, and renders only through exclusive `&mut self`. The issue-003 reference renderer checks
 the complete fixed I/O shape and writes silence; graph execution replaces that inner implementation
 in issue 006 without changing the lifetime contract.
@@ -36,6 +35,26 @@ slot.
 3. Consumer acquire-loads the producer cursor before reading the slot.
 4. Consumer moves the value and release-stores its advanced cursor.
 
+Two refinements from #84 phase B (finding F6), neither of which changes an `Ordering`:
+
+* Each cursor is `#[repr(align(64))]`-padded, after the read-mostly header (slot pointer, slot
+  count, capacity, generation). A `Release` store by one endpoint therefore cannot invalidate the
+  line the other endpoint reads on its fast path. The ring header is consequently `Arc`'s two
+  counts plus three cache lines -- 256 bytes at align 64 on a 64-bit target -- which
+  `ring_header_is_arc_counts_plus_three_cache_lines` pins from `core::alloc::Layout`.
+* Each endpoint caches the peer cursor it last observed and reloads the shared line only when the
+  queue *looks* full (producer) or empty (consumer). This is sound because a peer cursor only
+  advances and never passes its partner: the true consumer cursor lies on the arc
+  `[cached_consumer, local]`, and `next = local + 1` is on that arc only when
+  `cached_consumer == next`, so "not full by the cached value" implies "not full by the true
+  value". The consumer's case is the mirror image. Publication is unaffected -- every slot in
+  `[local, cached_producer)` was released before the `Acquire` load that produced
+  `cached_producer`.
+
+Cursor wrap is a compare (`if next == slot_count { 0 }`), not `%`: `slot_count` is `capacity + 1`
+and so never a power of two, which made the remainder an integer division on the hottest line of
+the queue.
+
 There is no CAS, spin, retry, lock, wait, or atomic counter. Owner-local successes/full/empty
 counters use saturating `u64`. Queue generation is immutable; reset or seek creates a new lifetime
 or adds a generation to the payload.
@@ -44,8 +63,11 @@ The only production unsafe code is slot initialization/read/drop inside `realtim
 final Arc owner drops any still-initialized slots only after both endpoints have ceased access.
 Endpoint drop order is safe and covered by a move-only drop test.
 
-Browser launch uses `LocalRing`: the same bounded semantics with `Option<T>` slots and plain
-cursors. It is host-mediated on one render agent and does not claim SharedArrayBuffer or Wasm-thread
+Browser launch uses `LocalRing`: the same bounded semantics with `MaybeUninit<T>` slots (for
+`T: Copy`) and plain cursors. #84 phase B replaced the `Option<T>` slots: the discriminant
+duplicated occupancy the head/tail cursors already carry, and `Option::take().expect(..)` put a
+panic path inside a `REALTIME_POLICY` region, which `scripts/check-realtime-policy.sh` now
+rejects. It is host-mediated on one render agent and does not claim SharedArrayBuffer or Wasm-thread
 support.
 
 ## Plan publication
@@ -65,7 +87,7 @@ candidate becomes active, the whole displaced plan is published to retirement, a
 the block render. Publication is never observed mid-block.
 
 Actual reclamation is ownership transfer, not hazard-pointer or epoch garbage collection. Epochs
-identify revisions and stale parameter slots. `PlanRetirer::try_reclaim` returns ownership to the
+identify plan revisions. `PlanRetirer::try_reclaim` returns ownership to the
 control/retirement caller; only that caller destroys or reuses a displaced plan. Engine teardown
 must likewise move the render owner off the host callback before dropping it.
 

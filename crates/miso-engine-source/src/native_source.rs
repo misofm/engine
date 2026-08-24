@@ -3712,8 +3712,6 @@ mod tests {
                 plan_id: 41,
                 envelope,
                 scratch: &[],
-                parameter_defaults: &[],
-                event_capacity: 0,
             })
             .expect("replacement");
         let (mut publisher, mut owner, mut retirer) = plan_exchange(
