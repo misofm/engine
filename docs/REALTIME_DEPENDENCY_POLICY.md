@@ -64,9 +64,11 @@ determinism rather than deadlines opt out of the derived budget entirely.
 ## Unsafe-code ownership
 
 The workspace denies unsafe code. If a later approved issue needs a narrow exception, it is limited
-to `crates/miso-engine-core/src/realtime/spsc.rs` for the issue-003 SPSC slot protocol,
-`crates/miso-engine-core/src/arch` for auditable architecture intrinsics or
-`crates/miso-engine-capi/src/ffi` for ABI boundaries. Issue 083 adds
+to `crates/miso-engine-core/src/realtime/spsc.rs` for the issue-003 SPSC slot protocol or
+`crates/miso-engine-capi/src/ffi` for ABI boundaries. (`crates/miso-engine-core/src/arch` was a
+third such owner until #84 phase A deleted it: the per-target kernels moved to
+`crates/miso-engine-lane`, and the exemption was removed from
+`scripts/check-realtime-policy.sh` in the same change.) Issue 083 adds
 `crates/miso-engine-lane/src/softfma.rs`, the one file of the lane crate that carries unsafe: the
 wasm `simd128` promote/demote intrinsics of the software FMA, and the `x86` MXCSR read/write that
 gate G6 uses to prove hardware flush-to-zero is inert under the D7 flush law (the workspace forbids

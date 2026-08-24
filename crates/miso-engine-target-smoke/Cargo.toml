@@ -10,6 +10,7 @@ name = "miso_engine_target_smoke"
 
 [dependencies]
 miso-engine-core.workspace = true
+miso-engine-lane.workspace = true
 
 [features]
 default = []

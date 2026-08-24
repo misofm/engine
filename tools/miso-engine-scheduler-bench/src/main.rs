@@ -3,8 +3,7 @@
 #![allow(unsafe_code)]
 
 use core::num::NonZeroUsize;
-use miso_engine_core::target_capabilities;
-use miso_engine_graph_compiler::KernelDispatch;
+use miso_engine_graph_compiler::Backend;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     time::Instant,
@@ -330,7 +329,7 @@ fn prepared_graph(
     )
     .expect("prepared benchmark builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch: KernelDispatch::select(target_capabilities()),
+        dispatch: Backend::current(),
         plan_id: 9_100 + mode.lanes() as u64,
         effects: EffectPreparedSession {
             session,

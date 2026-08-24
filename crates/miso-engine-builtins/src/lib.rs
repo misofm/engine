@@ -22,14 +22,14 @@
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use miso_engine_core::{
-    KernelBackendV1, SampleRateHz, is_extended_compatibility_sample_rate,
+    SampleRateHz, is_extended_compatibility_sample_rate,
     realtime::{Consumer, Producer, QueueGeneration, bounded_spsc},
 };
 pub mod corpus;
 
 use miso_engine_effect_contract::BankWidth;
 use miso_engine_lane::{
-    Lane, Simd4, Simd8,
+    Backend, Lane, Simd4, Simd8,
     kernels::{
         SvfCoef,
         builtins::{
@@ -1255,21 +1255,6 @@ impl InputBuiltins {
     }
 }
 
-/// The bank width the builtins accept for a selected core backend.
-///
-/// D4: there is one arithmetic graph everywhere and fusion is written, not inferred, so a backend
-/// without FMA has no eight-lane bank — those tracks render through the scalar `Lane`, which is
-/// bit-identical to every other width.
-#[must_use]
-pub const fn builtin_bank_width(backend: KernelBackendV1) -> Option<BankWidth> {
-    match backend {
-        KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon => Some(BankWidth::Four),
-        KernelBackendV1::X86Avx2Fma => Some(BankWidth::Eight),
-        KernelBackendV1::Scalar | KernelBackendV1::X86Avx2 => None,
-        _ => None,
-    }
-}
-
 /// The input stage of a bank at the width its backend selected.
 ///
 /// The two variants differ in size because their lane words do: an eight-lane coefficient set is
@@ -1296,7 +1281,7 @@ enum InputStageKernel {
 /// caller assigns lanes in sorted member order and is responsible for never gathering into or
 /// scattering from a padding lane; there is no `&[bool]` argument and no stored mask copy.
 pub struct BuiltinInputBankV1 {
-    backend: KernelBackendV1,
+    backend: Backend,
     width: BankWidth,
     members: usize,
     stage: InputStageKernel,
@@ -1310,11 +1295,11 @@ impl BuiltinInputBankV1 {
     /// [`BuiltinParameterError::LaneLength`] if `backend` has no bank width, if `width` is not the
     /// width that backend selects, or if `inputs.len()` is outside `1..=width.lanes()`.
     pub fn new(
-        backend: KernelBackendV1,
+        backend: Backend,
         width: BankWidth,
         inputs: Vec<InputBuiltins>,
     ) -> Result<Self, BuiltinParameterError> {
-        if builtin_bank_width(backend) != Some(width)
+        if BankWidth::for_backend(backend) != Some(width)
             || inputs.is_empty()
             || inputs.len() > width.lanes() as usize
         {
@@ -1338,7 +1323,7 @@ impl BuiltinInputBankV1 {
     }
 
     #[must_use]
-    pub const fn backend(&self) -> KernelBackendV1 {
+    pub const fn backend(&self) -> Backend {
         self.backend
     }
     #[must_use]

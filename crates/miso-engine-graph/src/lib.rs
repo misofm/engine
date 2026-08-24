@@ -11,7 +11,7 @@ use core::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use miso_engine_core::{
-    KernelBackendV1, QuantumFrames,
+    QuantumFrames,
     realtime::{
         BufferArena, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan, PreparedPlanExecutor,
         PreparedRenderPlan, RenderEnvelope, RenderError,
@@ -20,6 +20,7 @@ use miso_engine_core::{
 use miso_engine_effect_contract::{
     LatencySamples, PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
+use miso_engine_lane::Backend;
 #[cfg(not(target_arch = "wasm32"))]
 pub use miso_engine_native_scheduler::{
     FallbackReasonV1, NativeSchedulerConfigV1, NativeSchedulerResourceReportV1,
@@ -389,7 +390,7 @@ pub struct GraphPreparedEffectBank {
 /// stored here: `members.len()` is in `1..=width.lanes()` and the executor gathers into and
 /// scatters from exactly those lanes.
 pub struct GraphPreparedBuiltinBank {
-    pub backend: KernelBackendV1,
+    pub backend: Backend,
     pub members: Box<[GraphNodeId]>,
     pub processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
     pub scratch: AoSoaScratch,
@@ -400,7 +401,7 @@ pub struct GraphPreparedBuiltinBank {
 /// Lane `l` is active if and only if `l < members.len()`; lanes `members.len()..width.lanes()`
 /// are identity lanes.
 pub struct GraphPreparedBuiltinBankInfo<'a> {
-    pub backend: KernelBackendV1,
+    pub backend: Backend,
     pub width: miso_engine_effect_contract::BankWidth,
     pub members: &'a [GraphNodeId],
 }
@@ -2733,7 +2734,7 @@ mod tests {
                 .collect();
             plan.with_builtin_banks(
                 vec![GraphPreparedBuiltinBank {
-                    backend: KernelBackendV1::Aarch64Neon,
+                    backend: Backend::Simd4,
                     members: members.into_boxed_slice(),
                     processor: Box::<CountingIdentityBuiltin>::default(),
                     scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1)
@@ -2844,7 +2845,7 @@ mod tests {
         }
         let builtin_banks = if banked {
             vec![GraphPreparedBuiltinBank {
-                backend: KernelBackendV1::Aarch64Neon,
+                backend: Backend::Simd4,
                 members: members.clone().into_boxed_slice(),
                 processor: Box::<CountingIdentityBuiltin>::default(),
                 scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1)

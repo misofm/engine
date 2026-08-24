@@ -1,7 +1,7 @@
 //! Shared fixtures for the gate/expander's integration tests.
 #![allow(dead_code, unreachable_pub)]
+use miso_engine_lane::Backend;
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
@@ -30,13 +30,7 @@ pub fn prepare_bank_w8(
     values: &[Values; 8],
     link_mode: LinkMode,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
-    prepare_bank(
-        values,
-        link_mode,
-        BankWidth::Eight,
-        KernelBackendV1::X86Avx2Fma,
-        128,
-    )
+    prepare_bank(values, link_mode, BankWidth::Eight, Backend::Simd8, 128)
 }
 
 /// Prepares a bank of `width` lanes from the first `width` parameter sets.
@@ -44,7 +38,7 @@ pub fn prepare_bank(
     values: &[Values; 8],
     link_mode: LinkMode,
     width: BankWidth,
-    backend: KernelBackendV1,
+    backend: Backend,
     quantum: u32,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let requests: Vec<PrepareEffectRequest<'_>> = values[..width.lanes() as usize]

@@ -2,14 +2,13 @@
 //!
 //! Its results are descriptive harness evidence only; this is not a render-performance claim.
 
+use miso_engine_lane::Backend;
 use std::{
     env,
     fmt::Write as _,
     hint::black_box,
     time::{Duration, Instant},
 };
-
-use miso_engine_core::target_capabilities;
 
 const WARMUP_ITERATIONS: u64 = 10_000;
 const ITERATIONS_PER_ROUND: u64 = 1_000_000;
@@ -18,7 +17,7 @@ fn main() {
     let rounds = parse_rounds();
 
     for _ in 0..WARMUP_ITERATIONS {
-        black_box(target_capabilities());
+        black_box(Backend::current());
     }
 
     let durations = (0..rounds)
@@ -28,7 +27,7 @@ fn main() {
         .iter()
         .map(|duration| duration.as_nanos() as f64 / ITERATIONS_PER_ROUND as f64)
         .collect::<Vec<f64>>();
-    let capabilities = target_capabilities();
+    let backend = Backend::current();
 
     println!(
         concat!(
@@ -41,8 +40,7 @@ fn main() {
             "\"warmup_iterations\":{},\"iterations_per_round\":{},\"rounds\":{},",
             "\"round_duration_ns\":{},\"ns_per_call\":{},",
             "\"statistical_method\":\"median of per-round ns/call; descriptive only\",",
-            "\"capabilities\":{{\"scalar\":{},\"wasm_simd128\":{},\"aarch64_neon\":{},",
-            "\"x86_avx2\":{},\"x86_fma\":{}}}}}"
+            "\"capabilities\":{{\"backend\":\"{:?}\",\"width\":{}}}}}"
         ),
         metadata("MISO_ENGINE_BENCH_CPU"),
         env::consts::OS,
@@ -57,11 +55,8 @@ fn main() {
         rounds,
         json_u128_array(durations.iter().map(Duration::as_nanos)),
         json_f64_array(ns_per_call.iter().copied()),
-        capabilities.scalar,
-        capabilities.wasm_simd128,
-        capabilities.aarch64_neon,
-        capabilities.x86_avx2,
-        capabilities.x86_fma,
+        backend,
+        backend.width(),
     );
 }
 
@@ -69,7 +64,7 @@ fn benchmark_round() -> Duration {
     let started = Instant::now();
 
     for _ in 0..ITERATIONS_PER_ROUND {
-        black_box(target_capabilities());
+        black_box(Backend::current());
     }
 
     started.elapsed()

@@ -8,10 +8,10 @@ use std::{
     time::Instant,
 };
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_compiler::*;
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::*;
+use miso_engine_lane::Backend;
 use sha2::{Digest, Sha256};
 
 const OBSERVATIONS: usize = 256;
@@ -675,7 +675,7 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     let mut scratch = vec![0; requirements.migration_scratch_bytes as usize];
     let bank = prepare_unpublished_effect_bank_state_v1(
         destination_factory,
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         (0..4)
             .map(|_| replay.clone())

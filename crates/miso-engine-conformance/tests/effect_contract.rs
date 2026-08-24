@@ -1,10 +1,10 @@
 //! Semantic runtime and adversarial detector regression coverage.
+use miso_engine_lane::Backend;
 
 use miso_engine_conformance::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory, FaultKind,
     run_effect_conformance,
 };
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectDescriptorV1, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, ParameterId, ParameterMapping,
@@ -57,7 +57,7 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
         .collect();
     let mut bank = DualAccumulatorDelayFactory::correct()
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::Aarch64Neon,
+            backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &requests,
         })

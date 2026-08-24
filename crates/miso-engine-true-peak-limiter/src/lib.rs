@@ -1709,7 +1709,6 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::reference_annex2_phases;
     use miso_engine_effect_contract::{
         PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort, validate_descriptor_v1,
@@ -1849,7 +1848,7 @@ mod tests {
         values: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
         link_mode: LinkMode,
         width: BankWidth,
-        backend: KernelBackendV1,
+        backend: Backend,
     ) -> Box<dyn PreparedNativeEffectBank> {
         let requests: Vec<PrepareEffectRequest<'_>> = values
             .iter()
@@ -2248,8 +2247,8 @@ mod tests {
             }
 
             for (width, backend, lanes) in [
-                (BankWidth::Four, KernelBackendV1::Aarch64Neon, 4_usize),
-                (BankWidth::Eight, KernelBackendV1::X86Avx2Fma, 8),
+                (BankWidth::Four, Backend::Simd4, 4_usize),
+                (BankWidth::Eight, Backend::Simd8, 8),
             ] {
                 for group in 0..8 / lanes {
                     let members: Vec<_> = (0..lanes)
@@ -2526,7 +2525,7 @@ mod tests {
             &members,
             LinkMode::DualMono,
             BankWidth::Eight,
-            KernelBackendV1::X86Avx2Fma,
+            Backend::Simd8,
         );
         let key = bank.metadata().program_key;
         assert_eq!(key.state_layout_version, 2);
@@ -2538,7 +2537,7 @@ mod tests {
         // Mismatched backend and width are rejected before anything is prepared.
         let requests: Vec<_> = members.iter().map(|values| request(values)).collect();
         let mismatched = TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::Aarch64Neon,
+            backend: Backend::Simd4,
             width: BankWidth::Eight,
             requests: &requests,
         });
@@ -2556,7 +2555,7 @@ mod tests {
         heterogeneous[3].link_mode = LinkMode::Maximum;
         let heterogeneous =
             TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: KernelBackendV1::X86Avx2Fma,
+                backend: Backend::Simd8,
                 width: BankWidth::Eight,
                 requests: &heterogeneous,
             });
@@ -2573,7 +2572,7 @@ mod tests {
         assert_eq!(
             TruePeakLimiterFactory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend: KernelBackendV1::X86Avx2Fma,
+                    backend: Backend::Simd8,
                     width: BankWidth::Eight,
                     requests: &malformed,
                 })

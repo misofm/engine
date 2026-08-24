@@ -6,7 +6,6 @@
 #![allow(dead_code, unreachable_pub)]
 
 use miso_engine_compressor::{COMPRESSOR_PARAMETERS_V1, CompressorFactory};
-use miso_engine_core::{KernelBackendV1, target_capabilities};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
@@ -14,6 +13,7 @@ use miso_engine_effect_contract::{
     PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, ProcessReport,
     StatePayloadInput, StatePayloadOutput,
 };
+use miso_engine_lane::Backend;
 
 /// Parameters in the descriptor table.
 pub const PARAMETER_COUNT: usize = 8;
@@ -86,13 +86,9 @@ pub fn prepare(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffec
 }
 
 /// The backend this build was compiled for, as the plan selector sees it, and its bank width.
-pub fn native_bank_width() -> Option<(KernelBackendV1, BankWidth)> {
-    let backend = KernelBackendV1::select(target_capabilities());
-    match backend.lanes() {
-        4 => Some((backend, BankWidth::Four)),
-        8 => Some((backend, BankWidth::Eight)),
-        _ => None,
-    }
+pub fn native_bank_width() -> Option<(Backend, BankWidth)> {
+    let backend = Backend::current();
+    BankWidth::for_backend(backend).map(|width| (backend, width))
 }
 
 /// Binds a bank of `requests` at this build's width, or `None` if there is no bank width here.

@@ -633,7 +633,7 @@ dependencies = [
 name = "miso-engine-bootstrap-bench"
 version = "0.1.0"
 dependencies = [
- "miso-engine-core",
+ "miso-engine-lane",
 ]
 
 [[package]]
@@ -689,6 +689,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-graph",
+ "miso-engine-lane",
  "miso-engine-rack",
  "miso-engine-rack-compiler",
  "miso-engine-session",
@@ -739,7 +740,6 @@ name = "miso-engine-compressor"
 version = "0.1.0"
 dependencies = [
  "miso-engine-conformance",
- "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -755,6 +755,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
+ "miso-engine-lane",
 ]
 
 [[package]]
@@ -798,6 +799,7 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-effect-package",
  "miso-engine-gate-expander",
+ "miso-engine-lane",
  "miso-engine-multiband-compressor",
  "miso-engine-parametric-eq",
  "miso-engine-session",
@@ -812,6 +814,7 @@ name = "miso-engine-effect-contract"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-lane",
  "miso-engine-math",
 ]
 
@@ -832,6 +835,7 @@ dependencies = [
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-effect-package",
+ "miso-engine-lane",
  "sha2 0.11.0",
 ]
 
@@ -898,6 +902,7 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-gate-expander",
  "miso-engine-graph",
+ "miso-engine-lane",
  "miso-engine-parametric-eq",
 ]
 
@@ -993,7 +998,6 @@ dependencies = [
 name = "miso-engine-multiband-compressor"
 version = "0.1.0"
 dependencies = [
- "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -1078,6 +1082,7 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-graph",
  "miso-engine-graph-compiler",
+ "miso-engine-lane",
  "miso-engine-rack",
  "miso-engine-session",
  "sha2 0.11.0",
@@ -1154,7 +1159,6 @@ dependencies = [
 name = "miso-engine-soft-clip"
 version = "0.1.0"
 dependencies = [
- "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",
@@ -1197,13 +1201,13 @@ name = "miso-engine-target-smoke"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-lane",
 ]
 
 [[package]]
 name = "miso-engine-transient-shaper"
 version = "0.1.0"
 dependencies = [
- "miso-engine-core",
  "miso-engine-dsp-reference",
  "miso-engine-effect-contract",
  "miso-engine-effect-runtime",

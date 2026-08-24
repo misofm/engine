@@ -1,15 +1,7 @@
-//! Core engine value types and target capability detection.
+//! Core engine value types and the allocation-free realtime plumbing.
 //!
-//! Detection in this crate is control-plane work. It is never required from a realtime render
-//! callback.
-
-mod arch;
-
-pub use arch::{
-    CompressorGainMixKernelError, DeltaBankKernelError, GateGainKernelError,
-    PreparedCompressorGainMixKernelV1, PreparedDeltaBankKernelV1, PreparedGateGainKernelV1,
-    PreparedTptBankKernelV1, TptBankKernelError,
-};
+//! SIMD kernels, lane widths and backend selection are `miso-engine-lane`'s (#83 D4/D10); this
+//! crate carries no architecture code and no backend enum.
 
 /// The version of the engine API represented by this build.
 #[repr(C)]
@@ -87,134 +79,11 @@ pub struct QuantumFrames(pub u32);
 /// Allocation-free rendering primitives and plan hand-off ownership.
 pub mod realtime;
 
-/// Target capabilities selected before preparing a render plan.
-///
-/// The struct is non-exhaustive because later target capabilities may be added without changing
-/// session semantics. `x86_avx2` and `x86_fma` are independently detected.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TargetCapabilities {
-    /// Scalar processing is always available.
-    pub scalar: bool,
-    /// The Wasm module was compiled with `simd128` enabled.
-    pub wasm_simd128: bool,
-    /// The AArch64 target exposes NEON.
-    pub aarch64_neon: bool,
-    /// The current x86 CPU supports AVX2.
-    pub x86_avx2: bool,
-    /// The current x86 CPU supports FMA.
-    pub x86_fma: bool,
-}
-
-impl TargetCapabilities {
-    /// Assemble a previously detected capability set for plan preparation or deterministic tests.
-    #[must_use]
-    pub const fn from_detected(
-        wasm_simd128: bool,
-        aarch64_neon: bool,
-        x86_avx2: bool,
-        x86_fma: bool,
-    ) -> Self {
-        Self {
-            scalar: true,
-            wasm_simd128,
-            aarch64_neon,
-            x86_avx2,
-            x86_fma,
-        }
-    }
-}
-
-/// The kernel family selected while a render plan is prepared.
-///
-/// This is a semantic value rather than a native register type, so it can be retained in
-/// immutable plan data without exposing architecture intrinsics on the render API.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum KernelBackendV1 {
-    /// Portable one-lane fallback.
-    Scalar,
-    /// A wasm32 artifact built with `simd128`.
-    WasmSimd128,
-    /// The mandatory four-lane AArch64 NEON target facility.
-    Aarch64Neon,
-    /// Eight-lane AVX2 arithmetic without FMA contraction.
-    X86Avx2,
-    /// Eight-lane AVX2 arithmetic with the separately selected FMA graph.
-    X86Avx2Fma,
-}
-
-impl KernelBackendV1 {
-    /// Number of logical audio lanes handled by this backend.
-    #[must_use]
-    pub const fn lanes(self) -> u32 {
-        match self {
-            Self::Scalar => 1,
-            Self::WasmSimd128 | Self::Aarch64Neon => 4,
-            Self::X86Avx2 | Self::X86Avx2Fma => 8,
-        }
-    }
-
-    /// Select the best legal backend from capabilities detected off the render thread.
-    #[must_use]
-    pub const fn select(capabilities: TargetCapabilities) -> Self {
-        if capabilities.x86_avx2 && capabilities.x86_fma {
-            Self::X86Avx2Fma
-        } else if capabilities.x86_avx2 {
-            Self::X86Avx2
-        } else if capabilities.aarch64_neon {
-            Self::Aarch64Neon
-        } else if capabilities.wasm_simd128 {
-            Self::WasmSimd128
-        } else {
-            Self::Scalar
-        }
-    }
-}
-
-/// Detect the target capabilities for control-plane plan selection.
-///
-/// The result may be queried while a plan is compiled. It must be stored with the prepared plan
-/// rather than detected from a render callback.
-#[must_use]
-pub fn target_capabilities() -> TargetCapabilities {
-    let (x86_avx2, x86_fma) = detect_x86_capabilities();
-    assemble_capabilities(
-        cfg!(all(target_arch = "wasm32", target_feature = "simd128")),
-        cfg!(all(target_arch = "aarch64", target_feature = "neon")),
-        x86_avx2,
-        x86_fma,
-    )
-}
-
-fn assemble_capabilities(
-    wasm_simd128: bool,
-    aarch64_neon: bool,
-    x86_avx2: bool,
-    x86_fma: bool,
-) -> TargetCapabilities {
-    TargetCapabilities::from_detected(wasm_simd128, aarch64_neon, x86_avx2, x86_fma)
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn detect_x86_capabilities() -> (bool, bool) {
-    (
-        std::is_x86_feature_detected!("avx2"),
-        std::is_x86_feature_detected!("fma"),
-    )
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-const fn detect_x86_capabilities() -> (bool, bool) {
-    (false, false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         EXTENDED_COMPATIBILITY_SAMPLE_RATES, EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames,
-        SampleRateHz, assemble_capabilities, is_extended_compatibility_sample_rate,
-        is_launch_sample_rate,
+        SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
     };
 
     #[test]
@@ -256,14 +125,5 @@ mod tests {
                 patch: 0
             }
         );
-    }
-
-    #[test]
-    fn avx2_without_fma_is_a_distinct_capability() {
-        let capabilities = assemble_capabilities(false, false, true, false);
-
-        assert!(capabilities.scalar);
-        assert!(capabilities.x86_avx2);
-        assert!(!capabilities.x86_fma);
     }
 }

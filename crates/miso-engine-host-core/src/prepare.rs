@@ -5,7 +5,7 @@
 //! else was identical, down to the order of the checks.
 
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan, target_capabilities};
+use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
 };
@@ -14,7 +14,7 @@ use miso_engine_graph::{
     GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
     TrackStage,
 };
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler, KernelDispatch};
+use miso_engine_graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_session::{
     CompileCaps, CompiledSession, SessionTomlV1, compile_session, parse_session_toml,
 };
@@ -479,7 +479,7 @@ pub fn prepare_host_runtime(
     })?;
     let builtin_resources = builtins.resource_report();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch: KernelDispatch::select(target_capabilities()),
+        dispatch: Backend::current(),
         plan_id: 1,
         effects,
         builtins,

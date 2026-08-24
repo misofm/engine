@@ -9,6 +9,7 @@ publish.workspace = true
 name = "miso_engine_effect_compiler"
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-core.workspace = true
 miso-engine-session.workspace = true
 miso-engine-effect-contract.workspace = true

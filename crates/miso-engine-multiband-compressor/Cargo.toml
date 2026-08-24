@@ -17,10 +17,6 @@ miso-engine-math = { workspace = true, features = ["lane"] }
 [dev-dependencies]
 # Test-only independent f64 crossover oracle; production never links or calls it.
 miso-engine-dsp-reference.workspace = true
-# `PrepareEffectBankRequest` still carries a `KernelBackendV1` field, which the contract does not
-# re-export; #95 removes it (D4: there is no runtime SIMD dispatch and this crate never reads it).
-# Production has no dependency on `miso-engine-core`.
-miso-engine-core.workspace = true
 sha2.workspace = true
 
 [lints]

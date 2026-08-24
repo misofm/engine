@@ -10,9 +10,9 @@
 
 use core::alloc::Layout;
 use core::cell::Cell;
+use miso_engine_lane::Backend;
 use std::alloc::{GlobalAlloc, System};
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
@@ -191,7 +191,7 @@ fn the_render_path_allocates_nothing() {
     let requests: Vec<PrepareEffectRequest<'_>> = (0..8).map(|_| request(&values)).collect();
     let mut bank = TruePeakLimiterFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::X86Avx2Fma,
+            backend: Backend::Simd8,
             width: BankWidth::Eight,
             requests: &requests,
         })

@@ -7,38 +7,26 @@
 
 mod support;
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, NativeEffectFactory, ParameterChannel,
     PrepareEffectBankRequest, PreparedAutomationSpan, PreparedNativeEffectBank, StatePayloadInput,
     StatePayloadOutput, TailSamples,
 };
+use miso_engine_lane::Backend;
 use miso_engine_parametric_eq::ParametricEqFactory;
 use support::{COMMON_BYTES, LANE_BYTES, Payload, point, request, set_initial, snapshot, values};
 
 /// The bank width and backend this build actually executes, or `None` on a scalar-only target.
-fn native_bank() -> Option<(BankWidth, KernelBackendV1)> {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        return Some((BankWidth::Eight, KernelBackendV1::X86Avx2Fma));
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        return Some((BankWidth::Four, KernelBackendV1::Aarch64Neon));
-    }
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    {
-        return Some((BankWidth::Four, KernelBackendV1::WasmSimd128));
-    }
-    #[allow(unreachable_code)]
-    None
+fn native_bank() -> Option<(BankWidth, Backend)> {
+    let backend = Backend::current();
+    BankWidth::for_backend(backend).map(|width| (width, backend))
 }
 
 /// A backend this build cannot execute, for the declining path.
-fn foreign_bank() -> (BankWidth, KernelBackendV1) {
+fn foreign_bank() -> (BankWidth, Backend) {
     match native_bank() {
-        Some((BankWidth::Eight, _)) => (BankWidth::Four, KernelBackendV1::WasmSimd128),
-        _ => (BankWidth::Eight, KernelBackendV1::X86Avx2Fma),
+        Some((BankWidth::Eight, _)) => (BankWidth::Four, Backend::Simd4),
+        _ => (BankWidth::Eight, Backend::Simd8),
     }
 }
 
@@ -370,8 +358,8 @@ fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
     // A backend and a width that disagree about the lane count, and a member count that does not
     // match the declared width: both contradict the request's own fields.
     for (width, backend, count) in [
-        (BankWidth::Four, KernelBackendV1::X86Avx2Fma, 4),
-        (BankWidth::Eight, KernelBackendV1::X86Avx2Fma, 4),
+        (BankWidth::Four, Backend::Simd8, 4),
+        (BankWidth::Eight, Backend::Simd8, 4),
     ] {
         let requests = vec![request; count];
         assert_eq!(

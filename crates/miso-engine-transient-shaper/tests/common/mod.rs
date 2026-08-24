@@ -5,7 +5,6 @@
 
 #![allow(dead_code)]
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
@@ -198,32 +197,21 @@ pub(crate) fn point(
     }
 }
 
-/// The bank width this build renders, and the kernel backend that names it.
+/// The bank width this build renders, and the backend that names it.
 ///
 /// There is no runtime SIMD dispatch (D4): the build has exactly one production width, and a plan
-/// asking for another one is refused as unavailable. `KernelBackendV1` is `miso-engine-core`'s and
-/// is not re-exported by the contract, which is why the *tests* carry a `miso-engine-core`
-/// dev-dependency the production crate no longer has.
-pub(crate) fn native_bank() -> Option<(KernelBackendV1, BankWidth)> {
-    match Backend::current() {
-        Backend::Scalar => None,
-        Backend::Simd4 => Some((
-            if cfg!(target_arch = "wasm32") {
-                KernelBackendV1::WasmSimd128
-            } else {
-                KernelBackendV1::Aarch64Neon
-            },
-            BankWidth::Four,
-        )),
-        Backend::Simd8 => Some((KernelBackendV1::X86Avx2Fma, BankWidth::Eight)),
-    }
+/// asking for another one is refused as unavailable. `BankWidth::for_backend` is the workspace's
+/// one backend-to-width law (#84 phase A).
+pub(crate) fn native_bank() -> Option<(Backend, BankWidth)> {
+    let backend = Backend::current();
+    BankWidth::for_backend(backend).map(|width| (backend, width))
 }
 
 /// A kernel backend and width this build does **not** render, for the unavailable-fallback gate.
-pub(crate) fn foreign_bank() -> (KernelBackendV1, BankWidth) {
+pub(crate) fn foreign_bank() -> (Backend, BankWidth) {
     match Backend::current() {
-        Backend::Simd8 => (KernelBackendV1::Aarch64Neon, BankWidth::Four),
-        _ => (KernelBackendV1::X86Avx2Fma, BankWidth::Eight),
+        Backend::Simd8 => (Backend::Simd4, BankWidth::Four),
+        _ => (Backend::Simd8, BankWidth::Eight),
     }
 }
 

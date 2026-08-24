@@ -19,7 +19,6 @@ use miso_engine_core::realtime::{
     PlanarBufferMut, RenderIo, RenderTime,
     audit::{self, ForbiddenOperation, record_allocator_violation},
 };
-use miso_engine_core::{KernelBackendV1, target_capabilities};
 use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use miso_engine_graph::{
@@ -27,7 +26,8 @@ use miso_engine_graph::{
     TrackStage,
 };
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
-use miso_engine_rack::{KernelDispatch, RackLocationV1};
+use miso_engine_lane::Backend;
+use miso_engine_rack::RackLocationV1;
 use miso_engine_session::{
     CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
     SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
@@ -155,19 +155,17 @@ fn round_from_runner() -> u32 {
         _ => panic!("the rack benchmark must be launched by its fixed runner"),
     }
 }
-fn host_backend() -> KernelBackendV1 {
-    let backend = KernelDispatch::select(target_capabilities()).backend();
-    assert!(
-        matches!(
-            backend,
-            KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma
-        ),
-        "Issue-038 qualification requires x86 AVX2"
+fn host_backend() -> Backend {
+    let backend = Backend::current();
+    assert_eq!(
+        backend,
+        Backend::Simd8,
+        "Issue-038 qualification requires the eight-lane backend"
     );
     backend
 }
 
-fn measure(workload: Workload, backend: KernelBackendV1) -> (Measurement, Shape) {
+fn measure(workload: Workload, backend: Backend) -> (Measurement, Shape) {
     let mut runtime = Runtime::prepare(workload, backend);
     let mut durations = Vec::with_capacity(OBSERVATIONS);
     let mut input_hash = Sha256::new();
@@ -216,7 +214,7 @@ enum Runtime {
     Mixed(Box<MixedRuntime>),
 }
 impl Runtime {
-    fn prepare(workload: Workload, backend: KernelBackendV1) -> Self {
+    fn prepare(workload: Workload, backend: Backend) -> Self {
         match workload {
             Workload::ScalarEightTracks => Self::Scalar(Box::new(ScalarRuntime::new(8))),
             Workload::HostSelectedEightTrackBank => Self::Bank(Box::new(BankRuntime::new(backend))),
@@ -321,7 +319,7 @@ struct BankRuntime {
     right: Vec<f32>,
 }
 impl BankRuntime {
-    fn new(backend: KernelBackendV1) -> Self {
+    fn new(backend: Backend) -> Self {
         let inputs = (0..8)
             .map(chain_for_track)
             .map(BuiltinChain::into_input_builtins)
@@ -370,7 +368,7 @@ struct MixedRuntime {
     backend_name: &'static str,
 }
 impl MixedRuntime {
-    fn new(backend: KernelBackendV1) -> Self {
+    fn new(backend: Backend) -> Self {
         let mut model =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("canonical session");
@@ -489,7 +487,7 @@ impl MixedRuntime {
         )
         .expect("mixed effect preparation");
         let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: KernelDispatch::select(target_capabilities()),
+            dispatch: Backend::current(),
             plan_id: 38,
             effects,
             builtins,
@@ -520,7 +518,7 @@ impl MixedRuntime {
             vec![8, 4]
         );
         let cohorts = &artifact.report().rack_cohorts;
-        assert_eq!(cohorts.dispatch.backend(), backend);
+        assert_eq!(cohorts.dispatch, backend);
         // #96: the report is the *bound* plan, from the same planner that produced the banks.
         let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocationV1::Simd1).collect();
         // #99 F3: the cohort is now the whole rack *chain*, not one effect. Eight tracks carry
@@ -752,11 +750,10 @@ fn hash_semantic_input(tracks: usize, observation: u64, hash: &mut Sha256) {
         }
     }
 }
-fn backend_name(backend: KernelBackendV1) -> &'static str {
+fn backend_name(backend: Backend) -> &'static str {
     match backend {
-        KernelBackendV1::X86Avx2 => "X86Avx2",
-        KernelBackendV1::X86Avx2Fma => "X86Avx2Fma",
-        _ => panic!("frozen host workload requires x86 AVX2"),
+        Backend::Simd8 => "Simd8",
+        _ => panic!("the frozen host workload requires the eight-lane backend"),
     }
 }
 fn hash_f32_into<'a>(hash: &mut Sha256, values: impl Iterator<Item = &'a f32>) {

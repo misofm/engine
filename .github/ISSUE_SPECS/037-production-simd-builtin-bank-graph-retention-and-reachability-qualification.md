@@ -244,3 +244,14 @@ per-layout PCM hashes are byte-identical to the pre-padding render), and the rel
 #86 change and unchanged by it, which is the proof that a track's bits do not depend on whether it
 sits in a bank, in a padded bank, or in a scalar tail. The old `9f30db0220656d79` had already
 drifted on `main` because that audit is release-and-env-gated and is not run by CI.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

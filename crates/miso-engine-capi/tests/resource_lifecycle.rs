@@ -15,6 +15,7 @@ use std::{sync::Mutex, thread::JoinHandle};
 
 use miso_engine_capi::*;
 use miso_engine_core::realtime::{PlanEpoch, PreparedRenderPlan, Producer, QueueGeneration};
+use miso_engine_lane::Backend;
 use miso_engine_protocol::{
     AUTOMATION_BATCH_RECORDS, AutomationBatchSlot, AutomationRecord, CommandPayload,
     ControlCommandSlot, CounterId, CounterTelemetryRecord, CounterValue, ExpectedRevision,
@@ -809,7 +810,7 @@ enum InputStageKernelMirror {
 
 #[allow(dead_code)]
 struct BuiltinInputBankMirror {
-    backend: miso_engine_core::KernelBackendV1,
+    backend: Backend,
     width: miso_engine_effect_contract::BankWidth,
     members: usize,
     stage: InputStageKernelMirror,

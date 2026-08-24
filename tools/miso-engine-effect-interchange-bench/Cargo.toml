@@ -10,6 +10,7 @@ name = "miso_engine_effect_interchange_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-lane.workspace = true
 miso-engine-core.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true

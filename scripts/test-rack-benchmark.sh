@@ -68,7 +68,7 @@ done <<'MUTATIONS'
 .sample_rate_hz=96000
 .quantum_frames=64
 .tracks=7
-.bank_backend="X86Avx2"
+.bank_backend="Simd8"
 .bank_width=8
 .bank_count=1
 .scalar_tail_count=7
@@ -114,10 +114,10 @@ jq -n --slurpfile scalar "$record" '
   $scalar[0] as $r |
   [$r,
    ($r|.round=2),
-   ($r|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"),
-   ($r|.round=2|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"),
-   ($r|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777"),
-   ($r|.round=2|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777")]
+   ($r|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"),
+   ($r|.round=2|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"),
+   ($r|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777"),
+   ($r|.round=2|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777")]
 ' >"$scratch/aggregate.json"
 jq -e -L scripts -f "$aggregate_validator" "$scratch/aggregate.json" >/dev/null
 
@@ -140,7 +140,7 @@ del(.[5])
 .[0].fixture_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 .[0].input_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 .[0].output_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-.[2].bank_backend="X86Avx2Fma"
+.[2].bank_backend="Simd4"
 .[0].architecture="x86_64"|.[0].missing_metadata -= ["architecture"]
 AGGREGATE_MUTATIONS
 
@@ -220,8 +220,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 base="$root/scripts/fixtures/rack-benchmark-validator-record.json"
 common=(--argjson round "$round" --arg candidate "$MISO_ENGINE_RACK_BENCH_CANDIDATE_SHA256" --arg binary "$MISO_ENGINE_RACK_BENCH_BINARY_SHA256")
 jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary' "$base"
-jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"' "$base"
-jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="X86Avx2"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777"' "$base"
+jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"' "$base"
+jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777"' "$base"
 EOF
 chmod 755 "$template/bin/git" "$template/bin/cargo" "$template/bin/rustc" \
     "$template/scripts/fixtures/fake-bench.sh"

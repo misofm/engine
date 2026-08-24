@@ -1,9 +1,9 @@
 //! Transactional unpublished-bank current-layout state coverage.
 
-use miso_engine_core::{KernelBackendV1, target_capabilities};
 use miso_engine_effect_compiler::*;
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::*;
+use miso_engine_lane::Backend;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -383,7 +383,7 @@ fn mock_bank<'a>(
 ) -> UnpublishedEffectBankStateV1<'a> {
     prepare_unpublished_effect_bank_state_v1(
         mock_bound(controls, descriptor_wire),
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         (1..=4).map(replay).collect::<Vec<_>>().into_boxed_slice(),
         admission(&replay(1)),
@@ -488,7 +488,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
         }
         let error = prepare_unpublished_effect_bank_state_v1(
             mock_bound(&controls, &descriptor_wire),
-            KernelBackendV1::WasmSimd128,
+            Backend::Simd4,
             BankWidth::Four,
             replays.into_boxed_slice(),
             admission(&replay(1)),
@@ -507,7 +507,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
     derived_admission.maximum_total_state_bytes = 4;
     let error = prepare_unpublished_effect_bank_state_v1(
         mock_bound(&controls, &descriptor_wire),
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         replays.into_boxed_slice(),
         derived_admission,
@@ -528,7 +528,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
     controls.return_none.store(true, Ordering::SeqCst);
     let error = prepare_unpublished_effect_bank_state_v1(
         mock_bound(&controls, &descriptor_wire),
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         (1..=4).map(replay).collect::<Vec<_>>().into_boxed_slice(),
         admission(&replay(1)),
@@ -908,11 +908,8 @@ fn production_replay(descriptor: &'static EffectDescriptorV1) -> EffectBankPrepa
 
 #[test]
 fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
-    let backend = KernelBackendV1::select(target_capabilities());
-    if !matches!(
-        backend,
-        KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma
-    ) {
+    let backend = Backend::current();
+    if backend != Backend::Simd8 {
         return;
     }
     let descriptor = &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR_V1;

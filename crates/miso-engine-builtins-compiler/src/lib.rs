@@ -18,11 +18,12 @@ use miso_engine_builtins::{
     BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, BuiltinParameters, BuiltinTail,
     ChannelParameters, DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
     MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, builtin_bank_width, pan_matrix, validate_builtin_filter_cutoff_v1,
+    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
 };
+use miso_engine_effect_contract::BankWidth;
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
     GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
@@ -30,7 +31,8 @@ use miso_engine_graph::{
     GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
     StableGraphId, TrackStage,
 };
-use miso_engine_rack::{AoSoaScratch, BankSlotKey, KernelDispatch, RackLocationV1, RackProgramV1};
+use miso_engine_lane::Backend;
+use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocationV1, RackProgramV1};
 use miso_engine_rack_compiler::{CohortCandidate, CohortLevel, plan_bank_groups};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
@@ -95,7 +97,7 @@ pub struct PreparedBuiltinsSession {
 ///
 /// It owns the real TPT adapter and is only materialized by the builtin/graph preparation seam.
 pub struct PreparedBuiltinInputBankV1 {
-    backend: miso_engine_core::KernelBackendV1,
+    backend: Backend,
     members: Box<[GraphNodeId]>,
     processor: BuiltinBankProcessor,
     scratch: AoSoaScratch,
@@ -164,10 +166,10 @@ impl BankSlotKey for BuiltinStageKeyV1 {}
 /// this function only turns each planned group back into the member list the graph attaches.
 fn planned_builtin_bank_members(
     inputs: &[(Box<str>, InputBuiltins)],
-    dispatch: KernelDispatch,
+    dispatch: Backend,
     levels: &[DependencyLevel],
 ) -> Vec<Box<[GraphNodeId]>> {
-    let Some(width) = builtin_bank_width(dispatch.backend()) else {
+    let Some(width) = BankWidth::for_backend(dispatch) else {
         return Vec::new();
     };
     let level_by_node: BTreeMap<_, _> = levels
@@ -214,11 +216,11 @@ fn planned_builtin_bank_members(
 /// that contract (`BuiltinInputBankV1::new` accepts `1..=W` inputs and pads the rest), and this
 /// is the single call site, so the compiler never builds a mask of its own.
 fn build_input_bank(
-    dispatch: KernelDispatch,
+    dispatch: Backend,
     width: miso_engine_effect_contract::BankWidth,
     inputs: Vec<InputBuiltins>,
 ) -> BuiltinInputBankV1 {
-    BuiltinInputBankV1::new(dispatch.backend(), width, inputs)
+    BuiltinInputBankV1::new(dispatch, width, inputs)
         .expect("planner emits 1..=W members at the width the selected backend chose")
 }
 
@@ -879,10 +881,10 @@ impl PreparedBuiltinsSession {
     /// artifact while both prepared inputs are still owned by their caller.
     pub fn graph_builtin_bank_resource(
         &self,
-        dispatch: KernelDispatch,
+        dispatch: Backend,
         levels: &[DependencyLevel],
     ) -> Option<GraphBuiltinBankResourceEstimate> {
-        let Some(width) = builtin_bank_width(dispatch.backend()) else {
+        let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
         let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
@@ -893,7 +895,7 @@ impl PreparedBuiltinsSession {
     ///
     /// Every post-input node in a level with a vector backend is banked; the last bank of a
     /// level is padded with identity lanes.  Scalar `InputProcessor` bindings remain only when
-    /// `dispatch.bank_width()` is `None`.
+    /// `BankWidth::for_backend(dispatch)` is `None`.
     ///
     /// Lowering is infallible after `graph_builtin_bank_resource`: `with_builtin_banks` consumes
     /// the plan on error, so the read-only preflight is what makes the attach transactional and
@@ -902,10 +904,10 @@ impl PreparedBuiltinsSession {
         mut self,
         graph: PreparedGraphPlan,
         report: R,
-        dispatch: KernelDispatch,
+        dispatch: Backend,
         levels: &[DependencyLevel],
     ) -> PreparedBuiltinsGraphArtifact<R> {
-        let Some(width) = builtin_bank_width(dispatch.backend()) else {
+        let Some(width) = BankWidth::for_backend(dispatch) else {
             return self.into_graph_artifact(graph, report);
         };
         let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
@@ -933,7 +935,7 @@ impl PreparedBuiltinsSession {
             let bank = build_input_bank(dispatch, width, inputs);
             selected.extend(members.iter().cloned());
             banks.push(PreparedBuiltinInputBankV1 {
-                backend: dispatch.backend(),
+                backend: dispatch,
                 members,
                 processor: BuiltinBankProcessor {
                     bank,
@@ -2075,7 +2077,7 @@ mod tests {
     use super::*;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use miso_engine_core::{QuantumFrames, SampleRateHz, TargetCapabilities};
+    use miso_engine_core::{QuantumFrames, SampleRateHz};
     use miso_engine_graph::{
         GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId, GraphPortKind,
         GraphPreparedSourceSetDriver, GraphResourceEstimate, GraphSourceInputClaim,
@@ -2591,34 +2593,15 @@ mod tests {
         // W4 -> 1 | 4 4 1 | 4 3 and W8 -> 1 | 8 1 | 7.  Hand counts of `n.div_ceil(W)` banks per
         // level; every post-input node is a member, so no level contributes a scalar tail.
         for (dispatch, expected_sizes) in [
-            (
-                KernelDispatch::select(TargetCapabilities::from_detected(
-                    true, false, false, false,
-                )),
-                &[1, 4, 4, 1, 4, 3][..],
-            ),
-            (
-                KernelDispatch::select(TargetCapabilities::from_detected(
-                    false, true, false, false,
-                )),
-                &[1, 4, 4, 1, 4, 3][..],
-            ),
-            (
-                KernelDispatch::select(TargetCapabilities::from_detected(false, false, true, true)),
-                &[1, 8, 1, 7][..],
-            ),
-            // D4: AVX2 without FMA has no bank width at all -- one arithmetic graph everywhere
+            (Backend::Simd4, &[1, 4, 4, 1, 4, 3][..]),
+            (Backend::Simd8, &[1, 8, 1, 7][..]),
+            // D4: the scalar backend has no bank width at all -- one arithmetic graph everywhere
             // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
-            (
-                KernelDispatch::select(TargetCapabilities::from_detected(
-                    false, false, true, false,
-                )),
-                &[][..],
-            ),
+            (Backend::Scalar, &[][..]),
         ] {
             let groups = planned_builtin_bank_members(&inputs, dispatch, &levels);
             let sizes: Vec<_> = groups.iter().map(|members| members.len()).collect();
-            assert_eq!(sizes, expected_sizes, "{:?}", dispatch.backend());
+            assert_eq!(sizes, expected_sizes, "{:?}", dispatch);
             assert_eq!(
                 sizes.iter().sum::<usize>(),
                 if expected_sizes.is_empty() { 0 } else { 17 },
@@ -2644,9 +2627,7 @@ mod tests {
                 "banks are emitted in dependency-level order"
             );
         }
-        let scalar = KernelDispatch::select(TargetCapabilities::from_detected(
-            false, false, false, false,
-        ));
+        let scalar = Backend::Scalar;
         assert!(planned_builtin_bank_members(&inputs, scalar, &levels).is_empty());
     }
     /// F4/F11: a bank is charged for the two main planes it actually owns and for the member ids
@@ -2975,7 +2956,7 @@ mod tests {
     }
 
     /// Renders `HARNESS_BLOCKS` blocks and returns the post-input-builtins output bits per track.
-    fn render_post_input_bits(n: usize, dispatch: KernelDispatch) -> (Vec<Vec<u32>>, usize) {
+    fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
         let compiled = n_track_session(n);
         let builtins = prepare_session_builtins(&compiled, &[], caps()).expect("harness builtins");
         let (graph, levels) = track_graph(n);
@@ -3062,14 +3043,12 @@ mod tests {
         }
     }
 
-    fn host_dispatch() -> KernelDispatch {
-        KernelDispatch::select(miso_engine_core::target_capabilities())
+    fn host_dispatch() -> Backend {
+        Backend::current()
     }
 
-    fn scalar_dispatch() -> KernelDispatch {
-        KernelDispatch::select(TargetCapabilities::from_detected(
-            false, false, false, false,
-        ))
+    fn scalar_dispatch() -> Backend {
+        Backend::Scalar
     }
 
     /// E2 (#86 F2 proof, F3): a track's bits do not depend on whether it renders in a bank.
@@ -3083,7 +3062,7 @@ mod tests {
             let (banked, bank_count) = render_post_input_bits(n, host);
             let (scalar, scalar_banks) = render_post_input_bits(n, scalar_dispatch());
             assert_eq!(scalar_banks, 0, "the scalar oracle banks nothing");
-            match host.bank_width() {
+            match BankWidth::for_backend(host) {
                 Some(width) => assert_eq!(
                     bank_count,
                     n.div_ceil(width.lanes() as usize),

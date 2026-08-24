@@ -364,3 +364,14 @@ through the public factory; ns per lane-frame counting both channels.
 The W8 bank was *slower per lane-frame than the scalar product* before this change, which is what
 finding F2 predicted: the pre-audit "bank" did over 95% of its work in a scalar per-track loop and
 called into the SIMD kernel per sample for four operations.
+
+## 2026-08-24 amendment (#84 phase A)
+
+Superseded by #83 D4/D10 via #84 phase A: the per-sample kernel tokens
+(`Prepared*KernelV1`), `KernelBackendV1`, `TargetCapabilities`,
+`miso_engine_core::target_capabilities()` and `miso_engine_rack::KernelDispatch` were
+deleted along with `crates/miso-engine-core/src/arch`. Kernels live in
+`crates/miso-engine-lane`; the backend is the compile-time constant
+`miso_engine_lane::Backend::current()`, and
+`miso_engine_effect_contract::BankWidth::for_backend` is the one backend-to-width law.
+The historical text above is kept as the decision record of its time and is not rewritten.

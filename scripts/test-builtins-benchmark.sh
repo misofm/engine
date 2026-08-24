@@ -553,8 +553,7 @@ for script in run-builtins-benchmark.sh builtins-benchmark-record-validator.jq \
 done
 for script in test-builtins-benchmark.sh check-builtins-fixtures.sh \
   check-workspace-policy.sh check-realtime-policy.sh check-builtins-policy.sh \
-  check-graph-policy.sh check-rack-policy.sh check-builtins-targets.sh \
-  check-rack-instructions.sh check-builtins-target-instructions.sh; do
+  check-graph-policy.sh check-rack-policy.sh check-builtins-targets.sh; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$preflight_template/scripts/$script"
 done
 printf '[workspace]\n' >"$preflight_template/Cargo.toml"

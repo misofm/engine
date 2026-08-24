@@ -9,10 +9,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use miso_engine_core::KernelBackendV1;
 use miso_engine_effect_compiler::*;
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::*;
+use miso_engine_lane::Backend;
 use sha2::{Digest, Sha256};
 
 struct QualificationAllocator;
@@ -661,7 +661,7 @@ fn bank_cap_with_replays(
 ) -> UnpublishedEffectBankStateV1<'static> {
     prepare_unpublished_effect_bank_state_v1(
         capability,
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         replays.into_boxed_slice(),
         admission(),
@@ -843,7 +843,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
 
     let old_bank = prepare_unpublished_effect_bank_state_v1(
         capability(&D1, &controls),
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         (0..4)
             .map(|_| replay())
@@ -1705,7 +1705,7 @@ fn qualification_bank_cap(
 ) -> UnpublishedEffectBankStateV1<'static> {
     prepare_unpublished_effect_bank_state_v1(
         capability,
-        KernelBackendV1::WasmSimd128,
+        Backend::Simd4,
         BankWidth::Four,
         (0..4)
             .map(|_| replay.clone())

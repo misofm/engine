@@ -1572,12 +1572,12 @@ const fn state_error(code: &'static str) -> StatePayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_core::KernelBackendV1;
     use miso_engine_dsp_reference::{ReferenceDelayPair, ReferenceDelayParameters};
     use miso_engine_effect_contract::{
         BankWidth, EffectProcessBlock, InitialParameterValue, LinkMode, PrepareEffectBankRequest,
         PreparedNativeEffect, StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
     };
+    use miso_engine_lane::Backend;
 
     fn initial_values() -> [InitialParameterValue; 9] {
         let mut values = core::array::from_fn(|index| InitialParameterValue {
@@ -2484,7 +2484,7 @@ mod tests {
         assert!(
             factory
                 .bind_homogeneous_bank(PrepareEffectBankRequest {
-                    backend: KernelBackendV1::Aarch64Neon,
+                    backend: Backend::Simd4,
                     width: BankWidth::Four,
                     requests: &requests,
                 })
@@ -2497,7 +2497,7 @@ mod tests {
         let malformed_requests: [PrepareEffectRequest<'_>; 4] =
             core::array::from_fn(|index| request(&malformed_values[index], 48_000));
         let malformed = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::Aarch64Neon,
+            backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &malformed_requests,
         }) {
@@ -2508,7 +2508,7 @@ mod tests {
         let mut below_cap = requests;
         below_cap[3].limits.maximum_total_state_bytes -= 1;
         let under_cap = match factory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: KernelBackendV1::Aarch64Neon,
+            backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &below_cap,
         }) {

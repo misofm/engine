@@ -45,7 +45,7 @@ pub(crate) fn bind_rack_banks(
     effects: &EffectPreparedSession,
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
     levels: &[DependencyLevel],
-    dispatch: KernelDispatch,
+    dispatch: Backend,
 ) -> Result<
     (
         Vec<miso_engine_graph::GraphPreparedEffectBank>,
@@ -118,7 +118,7 @@ pub(crate) fn bind_rack_banks(
         bound_slots: Vec::new(),
         chains,
     };
-    let Some(width) = dispatch.bank_width() else {
+    let Some(width) = BankWidth::for_backend(dispatch) else {
         return Ok((Vec::new(), empty(dispatch, chains)));
     };
 
@@ -211,7 +211,7 @@ pub(crate) fn bind_rack_banks(
                 .map(|entry| entry.bank_preparation.request())
                 .collect();
             let request = PrepareEffectBankRequest {
-                backend: dispatch.backend(),
+                backend: dispatch,
                 width,
                 requests: &requests,
             };

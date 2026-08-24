@@ -6,9 +6,9 @@
 
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
-    KernelBackendV1, LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate,
-    is_launch_sample_rate,
+    LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
 };
+use miso_engine_lane::Backend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -143,18 +143,25 @@ impl BankWidth {
             Self::Eight => 8,
         }
     }
+    /// The bank width a backend executes, or `None` for the one-lane scalar path.
+    ///
+    /// This is the workspace's single backend-to-width law (#84 phase A): every crate that needs
+    /// the width of a [`Backend`] calls this rather than re-deriving a table of its own.
+    #[must_use]
+    pub const fn for_backend(backend: Backend) -> Option<Self> {
+        match backend {
+            Backend::Scalar => None,
+            Backend::Simd4 => Some(Self::Four),
+            Backend::Simd8 => Some(Self::Eight),
+        }
+    }
+
     /// Whether this non-scalar bank width is legal for a selected backend.
     #[must_use]
-    pub const fn matches_backend(self, backend: KernelBackendV1) -> bool {
+    pub const fn matches_backend(self, backend: Backend) -> bool {
         matches!(
-            (self, backend),
-            (
-                Self::Four,
-                KernelBackendV1::WasmSimd128 | KernelBackendV1::Aarch64Neon
-            ) | (
-                Self::Eight,
-                KernelBackendV1::X86Avx2 | KernelBackendV1::X86Avx2Fma
-            )
+            (self, Self::for_backend(backend)),
+            (Self::Four, Some(Self::Four)) | (Self::Eight, Some(Self::Eight))
         )
     }
 }
@@ -672,8 +679,8 @@ pub struct PrepareEffectRequest<'a> {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareEffectBankRequest<'a> {
-    /// Backend selected before plan preparation. Factories validate it against `width`.
-    pub backend: KernelBackendV1,
+    /// Backend this build executes on. Factories validate it against `width`.
+    pub backend: Backend,
     pub width: BankWidth,
     pub requests: &'a [PrepareEffectRequest<'a>],
 }
@@ -1612,4 +1619,40 @@ pub fn expected_prepared_metadata(
         scratch_bytes,
         automation_capacity: request.limits.maximum_automation_spans_per_block,
     })
+}
+
+#[cfg(test)]
+mod bank_width_tests {
+    use super::{Backend, BankWidth};
+
+    /// #84 phase A, eval A-2: `for_backend` is the workspace's one backend-to-width law, it is
+    /// total over `Backend`, and `matches_backend` agrees with it on every `(width, backend)` pair.
+    #[test]
+    fn bank_width_for_backend_is_total() {
+        assert_eq!(BankWidth::for_backend(Backend::Scalar), None);
+        assert_eq!(
+            BankWidth::for_backend(Backend::Simd4),
+            Some(BankWidth::Four)
+        );
+        assert_eq!(
+            BankWidth::for_backend(Backend::Simd8),
+            Some(BankWidth::Eight)
+        );
+
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+                assert_eq!(
+                    width.matches_backend(backend),
+                    BankWidth::for_backend(backend) == Some(width),
+                    "{width:?} vs {backend:?}"
+                );
+                if width.matches_backend(backend) {
+                    assert_eq!(
+                        u32::try_from(backend.width()).expect("width"),
+                        width.lanes()
+                    );
+                }
+            }
+        }
+    }
 }
