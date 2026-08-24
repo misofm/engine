@@ -1,7 +1,15 @@
 //! Bounded block-boundary publication and off-render retirement.
 
 use super::spsc::{bounded_spsc_internal, bounded_spsc_retained_payload};
-use super::{Consumer, PlanEpoch, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError};
+use super::{Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError};
+
+/// Epoch assigned to a successfully published render plan.
+///
+/// #84 phase C: this moved here from the deleted parameter-event store; publication epochs are
+/// plan-exchange vocabulary, not parameter vocabulary.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PlanEpoch(pub u64);
 use super::{
     PreparedPlanExecutor, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
 };

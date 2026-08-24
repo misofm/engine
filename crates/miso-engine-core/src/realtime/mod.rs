@@ -7,7 +7,6 @@
 pub mod audit;
 mod buffer;
 mod disjoint;
-mod parameter;
 mod plan;
 mod plan_exchange;
 mod spsc;
@@ -19,16 +18,12 @@ pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaLeaseSetBuilder, ArenaLeaseV1, ArenaStereoPair, DisjointArena,
     DisjointArenaError,
 };
-pub use parameter::{
-    ParameterEvent, ParameterEventBuffer, ParameterEventError, ParameterSlot, ParameterValues,
-    PlanEpoch,
-};
 pub use plan::{
     ExecutorHandover, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram, PreparedRenderPlan,
     RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
 };
 pub use plan_exchange::{
-    PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher, PlanReplacementReservation,
+    PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher, PlanReplacementReservation,
     PlanReplacementReservationError, PlanRetirer, PublishError, RealtimePlanOwner,
     RealtimeRenderReport, SwapOutcome, plan_exchange, plan_exchange_resource_report,
 };
@@ -58,8 +53,6 @@ mod tests {
             plan_id: 7,
             envelope,
             scratch: &[],
-            parameter_defaults: &[],
-            event_capacity: 0,
         })
         .expect("plan");
         assert_eq!(plan.next_absolute_sample(), 0);
@@ -103,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn arena_and_events_are_fixed_and_disjoint() {
+    fn arena_is_fixed_and_disjoint() {
         let spec = PlanarBufferSpec {
             channels: NonZeroUsize::new(2).expect("two"),
             frame_capacity: QuantumFrames(4),
@@ -118,19 +111,6 @@ mod tests {
             }]),
             Err(BufferArenaError::ZeroFrames)
         ));
-        let event = ParameterEvent {
-            plan_epoch: PlanEpoch(1),
-            absolute_sample: 4,
-            slot: ParameterSlot(0),
-            value: 0.5,
-        };
-        let mut events = ParameterEventBuffer::with_capacity(1);
-        assert!(events.try_push_ordered(event).is_ok());
-        assert!(
-            matches!(events.try_push_ordered(event), Err(ParameterEventError::Full(returned)) if returned == event)
-        );
-        assert_eq!(events.overflow_count(), 1);
-        assert_eq!(events.capacity(), 1);
     }
 
     #[test]
@@ -224,8 +204,6 @@ mod tests {
                 output_channels: NonZeroUsize::new(1).expect("one"),
             },
             scratch: &[],
-            parameter_defaults: &[],
-            event_capacity: 0,
         })
         .expect("plan")
     }
@@ -276,8 +254,6 @@ mod tests {
                     output_channels: NonZeroUsize::new(1).expect("one"),
                 },
                 scratch: &[],
-                parameter_defaults: &[],
-                event_capacity: 0,
             },
             Box::new(HandoverExecutor {
                 token: token.map(|value| Box::new(value) as ExecutorHandover),
@@ -438,8 +414,6 @@ mod tests {
                 output_channels: NonZeroUsize::new(1).expect("one"),
             },
             scratch: &[],
-            parameter_defaults: &[],
-            event_capacity: 0,
         })
         .expect("other envelope");
         assert!(matches!(
@@ -565,8 +539,6 @@ mod tests {
                     output_channels: NonZeroUsize::new(1).expect("one"),
                 },
                 scratch: &[],
-                parameter_defaults: &[],
-                event_capacity: 0,
             })
             .expect("launch rate");
             let mut output = [1.0];
@@ -598,8 +570,6 @@ mod tests {
                         output_channels: NonZeroUsize::new(1).expect("one"),
                     },
                     scratch: &[],
-                    parameter_defaults: &[],
-                    event_capacity: 0,
                 }),
                 Err(RenderError::UnsupportedRate)
             ));

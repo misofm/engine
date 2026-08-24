@@ -452,8 +452,8 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         builtin_bank_bytes: 3_027,
         builtin_bank_scratch_bytes: 16_384,
         source_pcm_payload_bytes: 8_192,
-        source_overhead_bytes: 2_286,
-        source_total_bytes: 10_478,
+        source_overhead_bytes: 2_862,
+        source_total_bytes: 11_054,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
         builtin_processor_payload_bytes: 7_974,
@@ -477,14 +477,18 @@ struct PrimitiveReplacementOracle {
     largest: u64,
 }
 
+/// #84 phase B: each ring cursor sits alone on a 64-byte line, mirroring core's `CachePadded`.
+#[repr(C, align(64))]
+struct RingCursorMirror(AtomicUsize);
+
 #[repr(C)]
 struct RingMirror<T> {
     slots: Box<[UnsafeCell<MaybeUninit<T>>]>,
     slots_len: usize,
     logical_capacity: usize,
     generation: QueueGeneration,
-    producer: AtomicUsize,
-    consumer: AtomicUsize,
+    producer: RingCursorMirror,
+    consumer: RingCursorMirror,
 }
 
 #[repr(C)]
@@ -1045,7 +1049,11 @@ fn complete_capi_owners(
         },
     ]);
     let active_total = owner_total(&active);
-    assert_effective_owner_mutations(&active, 140_441, "active CAPI");
+    // #84 re-pin (+1,336 net): phase B grew every ring header 72 -> 256 (one cache line for the
+    // read-mostly header plus one per cursor) and each endpoint by 8 (cached peer cursor); phase C
+    // deleted the plan's unused parameter/event store (-96 per live plan row). The rows above are
+    // sized from the live layouts, and `resources_c` at the frozen-scratch comparison must agree.
+    assert_effective_owner_mutations(&active, 141_777, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1081,7 +1089,9 @@ fn complete_capi_owners(
         },
     ];
     let prepared = owner_total(&prepared_rows);
-    assert_effective_owner_mutations(&candidate_epoch_rows, 10_429, "candidate CAPI epoch");
+    // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
+    // its cached peer cursor.
+    assert_effective_owner_mutations(&candidate_epoch_rows, 10_453, "candidate CAPI epoch");
     assert_effective_owner_mutations(&prepared_rows, 13_960, "prepared protocol");
     let largest = active
         .iter()
@@ -1536,17 +1546,17 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     assert_effective_owner_mutations(&graph, 431_336, "double-live graph/model");
 
     let source = source_owners();
-    assert_eq!(owner_total(&source), 10_478, "primitive source total");
+    assert_eq!(owner_total(&source), 11_054, "primitive source total");
     let source_overhead_rows = source[1..].to_vec();
-    assert_effective_owner_mutations(&source_overhead_rows, 2_286, "source overhead");
+    assert_effective_owner_mutations(&source_overhead_rows, 2_862, "source overhead");
     let mut source_total_rows = source.clone();
     source_total_rows.extend(source.clone());
-    assert_effective_owner_mutations(&source_total_rows, 20_956, "double-live source total");
+    assert_effective_owner_mutations(&source_total_rows, 22_108, "double-live source total");
     let mut double_source_overhead = source_overhead_rows.clone();
     double_source_overhead.extend(source_overhead_rows);
     assert_effective_owner_mutations(
         &double_source_overhead,
-        4_572,
+        5_724,
         "double-live source overhead",
     );
 
@@ -1612,7 +1622,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 164_830, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 166_190, "double-live CAPI");
 
     let graph_rows = graph_owners();
     let graph_largest = owner_total(&graph_rows[7..15]);
@@ -1697,7 +1707,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_ne!(
         capi_rows.iter().map(|owner| owner.bytes).max(),
-        Some(164_830),
+        Some(166_190),
         "CAPI aggregate is not max-single"
     );
 
@@ -1906,12 +1916,12 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
     assert_eq!(oracle.graph, 431_336);
-    assert_eq!(oracle.source_total, 20_956);
-    assert_eq!(oracle.source_overhead, 4_572);
+    assert_eq!(oracle.source_total, 22_108);
+    assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 15_948);
-    assert_eq!(oracle.capi, 164_830);
+    assert_eq!(oracle.capi, 166_190);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -1942,7 +1952,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(140_441));
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_777));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -1960,7 +1970,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(140_432));
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_768));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }
