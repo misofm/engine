@@ -187,6 +187,17 @@ host-binary size claims or acceptance thresholds. Android and iOS `cargo check` 
 were 302,440 and 302,436 bytes respectively. Dependency feature-tree evidence confirms TOML
 `parse`/`serde` only and no `display` feature.
 
+## Audit #103 shared host preparation
+
+`miso-engine-host-core` is control-plane only, like `miso-engine-session`: it parses, compiles,
+allocates the prepared plan and the source rings, and is never reachable from render. It contains
+no `unsafe` code and exports no C symbol -- it is a plain `rlib`, because a `cdylib` re-exports
+every `no_mangle` symbol it links, and a facade carrying them would push the C ABI's fifteen
+exports into the browser artifact. It deliberately does not depend on `miso-engine-protocol`: the
+control protocol is a host-specific transport, and a host that does not speak it does not pay for
+it. `scripts/check-host-core-policy.sh` enforces all of this, with mutation coverage in
+`scripts/test-host-core-policy.sh`.
+
 ## Issue 011 runtime boundary and issue 029 package hashing dependency
 
 `miso-engine-effect-contract` is render-reachable and depends only on `miso-engine-core`; it has no

@@ -300,3 +300,54 @@ The 13 exported symbols, 8 structs, and result-code values are unchanged; no ren
 Open question 1 (plan exchange and retirement under the frozen ABI, finding F9) is unchanged and
 stands as recorded: V1 is an immutable session, a new session means new handles, and the host
 crossfades.
+
+## Host-facade, render-path and responsibility decision record — 2026-08-24 (#103 wave 4)
+
+**One host preparation pipeline.** The ~300 lines of compile orchestration behind
+`miso_engine_v2_compile_session` were a verbatim second copy of the browser host's, and had already
+diverged (only capi rejected source generation 0; only the browser host capped source channels).
+They now live once, in `crates/miso-engine-host-core`, which every embedding uses: a host supplies
+`HostPrepareCaps` and gets back a prepared plan, a `SourceControlSet` and an address-free resource
+report. The facade defines no result codes — the C ABI and the browser ABI number them differently
+— and never depends on `miso-engine-protocol`, which is host-specific transport. It is an `rlib`
+with no `no_mangle` item, so linking it into a `cdylib` cannot add symbols to that artifact's frozen
+export set. `scripts/check-host-core-policy.sh` and its mutation suite enforce this; the browser
+host is listed there as pending conversion under issue #106.
+
+**Source failures are typed.** `miso_engine_v2_source_submit_planar_f32` and
+`miso_engine_v2_source_seek` used to collapse seventeen distinct rejections onto
+`MISO_ENGINE_V2_INVALID_ARGUMENT` with one of two diagnostic strings. They now report the facade's
+`SourceControlError`, one diagnostic per rule (`source.region.outside`, `source.generation.stale`,
+`source.channels.mismatch`, …). Result-code values are unchanged: only backpressure and internal
+invariant failures map anywhere other than `INVALID_ARGUMENT`.
+
+**Render validates once.** The render entry checked the output descriptor four times and ended in
+`PlanarBufferMut::try_new` recomputing what it had just computed. It now checks what is ABI (the
+descriptor is well formed, `PlanarOutput` is stereo by contract, the declared capacity is one
+addressable slice) and delegates the rest to the component that owns each rule: `PlanarBufferMut`
+owns the plane layout, the core plan owns the quantum and the sample clock. `plan_error` is
+re-tabled one code per rule; `render.contract.rejected`, which stood for five different mistakes,
+and `render.output.overflow`, which is now unreachable, are gone.
+
+**Direct output binding is deferred, not done.** The plan's other half of F4 -- the sequential
+executor reducing its output node straight into the caller's planes instead of copying its arena
+buffer out (1 KiB per block at stereo/128) -- was written against the executor as it stood before
+#98. #98 replaced that executor with a driver over a lowered op program and a flat coloured arena
+indexed by buffer id, where the only way to redirect the output colour to caller storage is to
+thread an external destination through `runtime::execute_op` for every node kind. That is a change
+to #98's layer, not this job's, so the copy stays and the work is reported for a successor: give
+`runtime::Runtime` one external destination slot, validated at bind against the program's output
+colour, and have the sequential driver pass the caller's planes for the final unit. The aliasing
+precondition a successor needs -- exactly one `GraphNodeId::Output` and no edge reading from it --
+is unenforced today and must be added to plan validation first.
+
+**Responsibilities are separated.** `runtime.rs` became `runtime/{error,compile,plan,control}.rs`,
+and the one dead retained allocation (`_decode_tail`, a one-byte box read by nothing) is gone.
+
+The 13 exported symbols, 8 structs and result-code values are unchanged, and no rendered bit moves:
+the capi audit's `pcm_digest` is identical before and after. `capi_retained_bytes` on the pinned
+nine-track fixture moves from 140425 to 140441 — the prepared plan gained the 8-byte sample clock,
+the `Session` lost the 16-byte dead allocation — and every pinned figure is re-derived from the
+resource oracle's own mirror, never copied from runtime output. `MISO_ENGINE_V2_UNSUPPORTED` stays
+reserved and is still never returned. Open question 1 (finding F9) is unchanged: V1 is an immutable
+session, a new session means new handles, and the host crossfades.
