@@ -1,0 +1,7 @@
+# backend	kernel_family	probe_symbol	required_groups	forbidden_scalar_families
+x86_64-avx2	feedforward-gain	probe_gain_simd8	vmulps,%ymm	mulss,addss,subss,divss
+x86_64-avx2	feedforward-sum	probe_sum2_simd8	vaddps,%ymm	mulss,addss,subss,divss
+x86_64-avx2	recursive-svf	probe_svf_simd8	vfmadd|vfnmadd,%ymm	mulss,addss,subss,divss
+aarch64-neon	feedforward-gain	probe_gain_simd4	fmul,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s
+aarch64-neon	feedforward-sum	probe_sum2_simd4	fadd,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s
+aarch64-neon	recursive-svf	probe_svf_simd4	fmla|fmls,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s

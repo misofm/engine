@@ -184,6 +184,31 @@ jobs:
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
+  native-vectorization-report:
+    name: native production-kernel release-probe report (non-blocking)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and disassembler
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y llvm
+      # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
+      # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
+      - name: Generate report and run red mutations
+        continue-on-error: true
+        run: |
+          bash scripts/run-native-vectorization-report.sh
+          bash scripts/test-native-vectorization-report.sh \
+            target/release/miso_engine_audit
+      - name: Upload native vectorization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-vectorization-report
+          path: target/ci/native-vectorization/report.json
+
   wasm:
     name: browser Wasm artifact probes
     runs-on: blacksmith-8vcpu-ubuntu-2404
