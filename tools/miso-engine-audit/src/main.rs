@@ -22,6 +22,7 @@ mod scheduler_fixture;
 mod source;
 mod source_duration;
 mod source_fixture;
+mod vectorization;
 
 const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_AUDIT_SUBJECT";
 const SUBJECTS: &[&str] = &[
@@ -42,6 +43,7 @@ const SUBJECTS: &[&str] = &[
     "scheduler",
     "source",
     "source-duration",
+    "vectorization",
 ];
 
 fn run_subject(subject: &str) {
@@ -63,6 +65,7 @@ fn run_subject(subject: &str) {
         "scheduler" => scheduler::main(),
         "source" => source::main(),
         "source-duration" => source_duration::main(),
+        "vectorization" => vectorization::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }
 }
