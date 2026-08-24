@@ -12,12 +12,19 @@ struct Job {
     id: usize,
     transcript: Arc<Mutex<Vec<usize>>>,
     fail: bool,
+    /// Spin iterations this parcel burns, so a test can give one partition real work.
+    spin: u64,
 }
 
 impl NativeSchedulerJobV1 for Job {
     type Error = usize;
 
     fn execute(&mut self) -> Result<(), Self::Error> {
+        let mut spun = 0_u64;
+        while spun < self.spin {
+            core::hint::spin_loop();
+            spun += 1;
+        }
         self.transcript
             .lock()
             .expect("test transcript")
@@ -36,6 +43,17 @@ fn even_ranges(count: usize, lanes: usize) -> Box<[RenderPartitionRangeV1]> {
 }
 
 fn wave(transcript: Arc<Mutex<Vec<usize>>>, count: usize, lanes: usize) -> RenderWaveV1<Job> {
+    wave_with_coordinator_work(transcript, count, lanes, 0)
+}
+
+/// A wave whose partition zero -- the coordinator's own lane -- burns `spin` iterations, so the
+/// auxiliary workers spend a realistic amount of the block idle-spinning.
+fn wave_with_coordinator_work(
+    transcript: Arc<Mutex<Vec<usize>>>,
+    count: usize,
+    lanes: usize,
+    spin: u64,
+) -> RenderWaveV1<Job> {
     let partitions = even_ranges(count, lanes)
         .iter()
         .map(|range| {
@@ -45,6 +63,7 @@ fn wave(transcript: Arc<Mutex<Vec<usize>>>, count: usize, lanes: usize) -> Rende
                     id: range.partition_id,
                     transcript: Arc::clone(&transcript),
                     fail: false,
+                    spin: if range.partition_id == 0 { spin } else { 0 },
                 },
             )
         })
@@ -229,6 +248,7 @@ fn native_workers_recover_move_only_parcels_and_select_errors_stably() {
                     id: range.partition_id,
                     transcript: Arc::clone(&transcript),
                     fail: range.partition_id == 2,
+                    spin: 0,
                 },
             )
         })
@@ -366,6 +386,69 @@ fn workers_park_between_blocks_and_one_wake_brings_them_back() {
         "a parked pool needs a wake per block, saw {wakes}"
     );
     assert_eq!(transcript.lock().expect("transcript").len(), 8 * 4);
+    drop(lease);
+    pool.stop_and_join();
+}
+
+/// E3's steady half, at unit scale: a host that re-opens the next block immediately never parks a
+/// worker, so the render thread makes no syscall at all. This is what separates a saturated or
+/// offline render from a paced one.
+///
+/// Red mutation (`MUTATIONS.md`): delete the `spins = 0` reset at the `block_open` transition --
+/// a worker that spent the block spinning is instantly over its linger budget when the block
+/// closes, parks on every block, and the coordinator pays a wake for every one of them.
+#[test]
+fn back_to_back_blocks_never_park_a_worker() {
+    const BLOCKS: u64 = 64;
+    // Partition zero does enough work that the workers accumulate far more idle spins during the
+    // block than their linger budget: the count has to restart when the block closes, or they
+    // park on every single block.
+    const COORDINATOR_SPINS: u64 = 400_000;
+    let transcript = Arc::new(Mutex::new(Vec::new()));
+    let (pool, mut lease) = NativeWorkerPoolV1::<Job>::start(NativeWorkerPoolConfigV1 {
+        requested_workers: NonZeroUsize::new(3),
+        #[cfg(feature = "fault-injection")]
+        fault: FaultInjectionV1::None,
+    })
+    .expect("pool");
+    lease.set_idle_spin(RecoveryBudgetV1 {
+        recovery_iterations: 1 << 22,
+        // The production shape: a runaway guard while the block is open, a short linger after.
+        idle_spin_iterations: 1 << 26,
+        linger_spin_iterations: 1 << 12,
+    });
+    let mut scheduler = NativeSchedulerV1::prepare(
+        NativeSchedulerConfigV1::new(NonZeroUsize::new(4).expect("lanes"), true, pool.shape()),
+        4,
+        12,
+        budget(),
+    )
+    .expect("scheduler");
+    let mut wakes = 0_u64;
+    for _ in 0..BLOCKS {
+        let mut rendered =
+            wave_with_coordinator_work(Arc::clone(&transcript), 4, 4, COORDINATOR_SPINS);
+        let mut reaped = [None; 3];
+        scheduler.begin_block(
+            Some(&mut lease),
+            core::slice::from_mut(&mut rendered),
+            &mut reaped,
+        );
+        wakes += scheduler
+            .render_wave(Some(&mut lease), &mut rendered)
+            .expect("parallel render")
+            .coordinator_wakes;
+        scheduler.end_block(Some(&mut lease));
+        assert!(rendered.all_recovered());
+    }
+    assert!(
+        wakes <= 1,
+        "a back-to-back render must wake at most the pool's initial park, saw {wakes} over {BLOCKS} blocks"
+    );
+    assert_eq!(
+        transcript.lock().expect("transcript").len(),
+        BLOCKS as usize * 4
+    );
     drop(lease);
     pool.stop_and_join();
 }
