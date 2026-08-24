@@ -110,35 +110,65 @@ fn a_zero_window_move_takes_effect_on_the_first_sample() {
 
 /// Red mutation: drop the `index + 1 == self.remaining[lane]` exact-assignment leg so the ramp
 /// only accumulates -> the window's last sample is the accumulated approximation rather than the
-/// target, and the exact `0.5` assertion below fails.
+/// target, and the exact assertion below fails.
+///
+/// The window/target pairs are chosen so that accumulation demonstrably *cannot* land on the
+/// target: for each of them, `n` `f32` additions of `(target - 1) / n` differ from `target` in the
+/// last place. A single convenient pair would not gate D11 at all -- eight steps toward `0.5`
+/// happen to accumulate exactly, which is precisely how a weak version of this test passes with
+/// the law deleted.
 #[test]
 fn a_windowed_move_is_monotone_and_lands_exactly_on_its_target() {
-    const WINDOW: u32 = 8;
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
-    live.set_fader_db(BuiltinLaneSelector::Both, -6.020_6, WINDOW)
-        .expect("domain");
-    let target = live.target_gain(0);
-    let mut left = [1.0_f32; 8];
-    let mut right = [1.0_f32; 8];
-    live.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
-    for index in 1..8 {
-        assert!(
-            left[index] < left[index - 1],
-            "a fade down is monotone: {left:?}"
+    for (db, window) in [
+        (-6.020_6_f32, 3_u32),
+        (-20.0, 2),
+        (24.0, 8),
+        (-3.0, 2),
+        (-1.0, 2),
+    ] {
+        let mut live =
+            FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+        live.set_fader_db(BuiltinLaneSelector::Both, db, window)
+            .expect("domain");
+        let target = live.target_gain(0);
+        let frames = window as usize + 2;
+        let mut left = vec![1.0_f32; frames];
+        let mut right = vec![1.0_f32; frames];
+        live.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+        let last = window as usize - 1;
+        for index in 1..=last {
+            let monotone = if db < 0.0 {
+                left[index] < left[index - 1]
+            } else {
+                left[index] > left[index - 1]
+            };
+            assert!(
+                monotone,
+                "db={db} window={window}: the fade is monotone: {left:?}"
+            );
+        }
+        assert_eq!(
+            left[last].to_bits(),
+            target.to_bits(),
+            "db={db} window={window}: the last update assigns the target exactly (D11)"
         );
+        assert_eq!(
+            left.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            right.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+        // The settled tail of the same block, and the next block, are the target itself.
+        for (index, sample) in left.iter().enumerate().skip(window as usize) {
+            assert_eq!(
+                sample.to_bits(),
+                target.to_bits(),
+                "db={db} window={window}: sample {index} is settled"
+            );
+        }
+        let mut left = [1.0_f32; 4];
+        let mut right = [1.0_f32; 4];
+        live.process(DualMonoBlock::new(&mut left, &mut right, frames as u64).expect("block"));
+        assert_eq!(left.map(f32::to_bits), [target.to_bits(); 4]);
     }
-    assert_eq!(
-        left[7].to_bits(),
-        target.to_bits(),
-        "the last update assigns the target exactly (D11)"
-    );
-    assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
-
-    // The next block is settled at the target, with no further ramp.
-    let mut left = [1.0_f32; 4];
-    let mut right = [1.0_f32; 4];
-    live.process(DualMonoBlock::new(&mut left, &mut right, 8).expect("block"));
-    assert_eq!(left.map(f32::to_bits), [target.to_bits(); 4]);
 }
 
 /// Mute is a fader endpoint: with a window it fades to zero; the settled state is the exact

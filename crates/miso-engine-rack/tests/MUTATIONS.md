@@ -117,3 +117,15 @@ graph-compile diagnostic (`id_ordered_bank_plan_rejects_transactionally_and_retu
 `fixture.bank.bind_failure`), `Ok(None)` marks the group unbound and its members render on the
 per-node scalar path (`launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks`
 asserts every planned group is reported unbound and all nine members appear in `scalar_in`).
+
+## Issue #140 — the automation-span feed, the live fader, and GR observation
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at a time,
+`cargo test -p <pkg> <test>`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-3 | `ConsoleEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset, so a later lane's spans overwrite an earlier lane's while the offsets still partition the array | `rack/src/lib.rs` | `console_bank::each_lane_receives_only_its_own_commands` | RED (`lane 0 got its own command`) |
+| 140-4 | the per-lane bypass restore walks the AoSoA block with `index += 1` instead of `index += lane_count`, so a bypassed lane's dry samples land in every lane | `rack/src/lib.rs` | `console_bank::bypass_is_per_lane_and_preserves_the_declared_latency` | RED (`lane 1 keeps the wet, gained signal`) |

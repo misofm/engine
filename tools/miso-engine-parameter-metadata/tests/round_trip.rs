@@ -86,7 +86,7 @@ fn stage(
     record[24..28].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Red mutation: delete the `effect_index >= rack_effects[rack]` leg in `CommandRecord::into_matrix`
+/// Red mutation: delete the `command.effect_index >= counts[rack]` leg in `admit_commands`
 /// -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the completeness assertion
 /// below stops distinguishing "resolved" from "did not resolve", and the negative case fails.
 #[test]
@@ -119,8 +119,10 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         core::str::from_utf8(host.diagnostic())
     );
 
-    // Every declared effect parameter resolves: refused for want of a write path, never for want
-    // of a target.
+    // Issue #140 A: every declared effect parameter resolves *and applies*, except the ones whose
+    // own descriptor says they cannot be automated -- which are exactly the ones the metadata
+    // marks `liveUpdatable: false`. The two statements are checked against each other here, so a
+    // metadata flag and the ABI cannot drift apart.
     for (effect_index, descriptor) in registry.descriptors().enumerate() {
         let index = u32::try_from(effect_index).expect("effect index");
         for parameter in descriptor.parameters {
@@ -133,27 +135,45 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
                 parameter.id.0,
                 parameter.default_value,
             );
-            assert_eq!(
-                host.submit_commands(1),
-                RESULT_UNSUPPORTED,
-                "{}#{}",
-                descriptor.id.as_str(),
-                parameter.id.0
-            );
-            assert_eq!(
-                host.command_report().reason,
-                COMMAND_REASON_UNSUPPORTED_KIND,
-                "{}#{} resolved to a real target",
-                descriptor.id.as_str(),
-                parameter.id.0
-            );
+            let result = host.submit_commands(1);
+            let reason = host.command_report().reason;
+            if parameter.automatable {
+                assert_eq!(
+                    result,
+                    RESULT_OK,
+                    "{}#{} is automatable and must apply (reason {reason})",
+                    descriptor.id.as_str(),
+                    parameter.id.0
+                );
+                assert_eq!(reason, COMMAND_REASON_NONE);
+                assert_eq!(host.command_report().admitted, 1);
+            } else {
+                assert_eq!(
+                    result,
+                    RESULT_UNSUPPORTED,
+                    "{}#{} is not automatable and must be refused",
+                    descriptor.id.as_str(),
+                    parameter.id.0
+                );
+                assert_eq!(
+                    reason,
+                    COMMAND_REASON_UNSUPPORTED_KIND,
+                    "{}#{} resolved to a real target",
+                    descriptor.id.as_str(),
+                    parameter.id.0
+                );
+            }
         }
         stage(&mut host, COMMAND_EFFECT_BYPASS, 1, 255, index, 0, 1.0);
-        assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
         assert_eq!(
-            host.command_report().reason,
-            COMMAND_REASON_UNSUPPORTED_KIND
+            host.submit_commands(1),
+            RESULT_OK,
+            "{} bypass",
+            descriptor.id.as_str()
         );
+        assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+        // Drain every queue this effect just filled, so the next effect starts with full room.
+        assert_eq!(host.render_next(), RESULT_OK);
     }
 
     // The negative case: one past the last effect does not resolve, and says so differently.

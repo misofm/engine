@@ -202,9 +202,9 @@ fn gain(value: f32) -> EffectControlRecordV1 {
     }
 }
 
-/// Red mutation: make `ConsoleEffectBankStage::process` write `self.offsets[lane + 1] = packed`
-/// *before* it stages lane `lane` -> every lane reads the previous lane's window and lane 0's
-/// command reaches lane 1.
+/// Red mutation: pack every lane's staged prefix at a fixed `packed[..staged]` instead of at that
+/// lane's own running offset -> the last commanded lane's spans overwrite the earlier lanes' while
+/// the offsets still partition the array, and lane 0 renders lane 2's command.
 #[test]
 fn each_lane_receives_only_its_own_commands() {
     let (mut chain, mut producers) = console_chain(0, [true, true, true, true]);

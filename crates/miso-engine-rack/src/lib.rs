@@ -288,12 +288,14 @@ pub struct ConsoleEffectBankStage {
     offsets: Box<[u32]>,
     /// One control channel per lane; `None` for a lane no console addresses.
     lanes: Box<[Option<EffectControlLane>]>,
-    /// Per-lane staging window length: the bank's own `automation_capacity`.
-    capacity: usize,
-    /// `lanes * capacity` spans. Lane `l` stages into `[l * capacity, ..)` and the packed view
-    /// handed to the bank is built by copying each lane's staged prefix down to `offsets[l]`.
-    spans: Box<[PreparedAutomationSpan]>,
-    /// Packed spans actually handed to the bank.
+    /// One lane's staging window: the bank's own `automation_capacity` spans.
+    ///
+    /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
+    /// the moment it is drained, before the next lane touches the window. The bank never sees this
+    /// array; it sees `packed[..offsets[lanes]]`.
+    staging: Box<[PreparedAutomationSpan]>,
+    /// The packed, per-lane-partitioned span array the bank is handed. Lane `l` owns
+    /// `[offsets[l], offsets[l + 1])`, which is the partition the effect contract already defines.
     packed: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
     /// slot can be bypassed live.
@@ -332,6 +334,7 @@ impl ConsoleEffectBankStage {
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
+
         let words = (quantum as usize)
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
@@ -346,8 +349,7 @@ impl ConsoleEffectBankStage {
             quantum,
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
             lanes: lanes.into_boxed_slice(),
-            capacity,
-            spans: vec![IDLE_SPAN; total].into_boxed_slice(),
+            staging: vec![IDLE_SPAN; capacity].into_boxed_slice(),
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
             dropped: 0,
@@ -381,14 +383,12 @@ impl BankStage for ConsoleEffectBankStage {
         self.offsets[0] = 0;
         for lane in 0..lane_count {
             if let Some(channel) = self.lanes[lane].as_mut() {
-                let base = lane * self.capacity;
-                let staged = channel.stage(
-                    &mut self.spans[base..base + self.capacity],
-                    block.first_sample,
-                );
+                let staged = channel.stage(&mut self.staging, block.first_sample);
                 self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
+                // Packed at this lane's own offset, immediately: that offset is what makes the
+                // window reusable and what gives the lane its private partition of `packed`.
                 self.packed[packed..packed + staged.staged]
-                    .copy_from_slice(&self.spans[base..base + staged.staged]);
+                    .copy_from_slice(&self.staging[..staged.staged]);
                 packed += staged.staged;
             }
             self.offsets[lane + 1] = packed as u32;
