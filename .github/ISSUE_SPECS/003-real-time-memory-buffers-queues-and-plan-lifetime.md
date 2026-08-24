@@ -120,3 +120,29 @@ The checked-in CI now carries all repeatable gates. GitHub-hosted execution, iOS
 execution, Android NDK linking/device execution, and browser runtime execution are not claimed in
 this non-Git local environment and remain owned by their platform issues. No V1, legacy, old
 repository, Git, or GitHub state was inspected.
+
+## 2026-08-24 amendment (#84 phase B)
+
+Three refinements to the SPSC contract, none of which changes an `Ordering`, the
+reserve-before-swap protocol, or the `slot_count = capacity + 1` rule (power-of-two rounding was
+considered and rejected: it would change this issue's capacity contract and buy nothing over a
+compare the branch predictor gets right `capacity` times out of `capacity + 1`).
+
+1. The producer and consumer cursors are each `#[repr(align(64))]`-padded and sit after the
+   read-mostly header, so neither endpoint's `Release` store invalidates the line the other reads.
+   The ring header grows from 72 to 256 bytes at align 64 on a 64-bit target; the oracle is
+   `core::alloc::Layout`, pinned by `ring_header_is_arc_counts_plus_three_cache_lines`.
+2. Each endpoint caches the peer cursor and reloads the shared line only on apparent full/empty.
+   The monotonicity argument is in `docs/REALTIME_MEMORY.md` and on the two `cached_*` fields.
+3. Cursor wrap is a compare rather than `%`, and `LocalRing` stores `MaybeUninit<T>` rather than
+   `Option<T>` so the browser ring has no per-slot discriminant and no `expect` panic path inside
+   a marked realtime region.
+
+`scripts/check-realtime-policy.sh` now rejects `.expect(`, `.unwrap(`, `panic!(`, `unreachable!(`,
+`todo!(` and `unimplemented!(` inside a marked region, with `panic-path-expect` and
+`panic-path-macro` mutations proving it.
+
+Fixture re-pin (master plan §8, class "implementation bits", oracle `core::alloc::Layout`): the
+builtins resource fixture moves by exactly +200 bytes per meter stream -- +184 for the queue
+header, +8 for `Consumer::cached_producer`, +8 for `Producer::cached_consumer` -- with every
+diagnostic in the 10,000-case mutation matrix unchanged.

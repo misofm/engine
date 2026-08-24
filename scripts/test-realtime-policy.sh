@@ -131,6 +131,13 @@ expect_failure lock \
     'sed -i "s/fn queue() {}/fn queue() { let _ = Mutex::new(0); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure log \
     'sed -i "s/fn buffer() {}/fn buffer() { println!(\"bad\"); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+# #84 phase B (F12): a panic path is a realtime violation like an allocation is. `LocalRing`'s
+# `.take().expect("prepared local ring slot")` was the only hit inside a marked region; it is gone,
+# and the regex now keeps it gone.
+expect_failure panic-path-expect \
+    'sed -i "s/fn exchange() {}/fn exchange() { None::<u8>.expect(\"x\"); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+expect_failure panic-path-macro \
+    'sed -i "s/fn exchange() {}/fn exchange() { unreachable!(); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure unsafe-scope \
     'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/miso-engine-core/src/realtime/mod.rs"'
 expect_failure unsafe-outside-exact-allowlist \
