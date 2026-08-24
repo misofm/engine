@@ -6,7 +6,8 @@ use miso_engine_core::{QuantumFrames, SampleRateHz};
 
 use crate::{
     Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionTomlV1,
-    StableId, canonical_session_toml,
+    StableId,
+    canonical::write_canonical,
     estimate::{estimate_session, with_canonical_bytes},
     validate::validate_session,
 };
@@ -114,7 +115,7 @@ pub fn compile_session(
     check_caps(session, estimate, caps)?;
     validate_session(session)?;
 
-    let canonical_toml = canonical_session_toml(session)?;
+    let canonical_toml = write_canonical(session);
     let estimate = with_canonical_bytes(estimate, canonical_toml.len())?;
     debug_assert!(estimate.compiled_model_bytes <= caps.max_compiled_model_bytes);
 

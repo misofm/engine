@@ -14,6 +14,10 @@ use crate::{
 /// their declared meaning. Parameters sort by `(parameter_id, channel)`.
 pub fn canonical_session_toml(session: &SessionTomlV1) -> Result<String, crate::DiagnosticSet> {
     validate_session(session)?;
+    Ok(write_canonical(session))
+}
+
+pub(crate) fn write_canonical(session: &SessionTomlV1) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "schema_version = {}", session.schema_version);
     line_string(&mut output, "session_id", session.session_id.as_str());
@@ -104,7 +108,7 @@ pub fn canonical_session_toml(session: &SessionTomlV1) -> Result<String, crate::
         sorted_by_id(&session.automation),
         write_automation,
     );
-    Ok(output)
+    output
 }
 
 fn line_string(output: &mut String, key: &str, value: &str) {

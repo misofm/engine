@@ -438,7 +438,7 @@ pub struct Automation {
 /// An effect parameter automation target.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutomationTarget {
-    /// Owning track/submix/output identity.
+    /// Owning track identity (only tracks carry racks).
     pub entity_id: StableId,
     /// Rack containing the named local effect.
     pub rack: RackName,
