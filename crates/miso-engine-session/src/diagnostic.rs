@@ -6,7 +6,7 @@ use core::fmt;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
-    /// Input was not TOML 1.0 syntax.
+    /// Input was not TOML syntax as accepted by `toml_parser`.
     TomlSyntax,
     /// The schema version key was absent.
     VersionMissing,
@@ -201,6 +201,10 @@ impl<'a> PathRef<'a> {
         seg: None,
     };
 
+    pub(crate) const fn root() -> PathRef<'static> {
+        Self::ROOT
+    }
+
     pub(crate) fn key<'b>(&'b self, key: &'b str) -> PathRef<'b>
     where
         'a: 'b,
@@ -277,6 +281,24 @@ impl SourceSpan {
             byte_end: source.len(),
             line: 1,
             column: 1,
+        }
+    }
+
+    pub(crate) fn from_range(source: &str, range: core::ops::Range<usize>) -> Self {
+        let byte_start = range.start.min(source.len());
+        let byte_end = range.end.min(source.len()).max(byte_start);
+        let prefix = &source[..byte_start];
+        let line = 1 + prefix.bytes().filter(|byte| *byte == b'\n').count();
+        let column = 1 + prefix
+            .rsplit_once('\n')
+            .map_or(prefix, |(_, tail)| tail)
+            .chars()
+            .count();
+        Self {
+            byte_start,
+            byte_end,
+            line,
+            column,
         }
     }
 }
