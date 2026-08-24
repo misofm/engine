@@ -30,7 +30,7 @@ compile_source="$session_source/compile.rs"
 estimate_line="$(rg -n 'let estimate = estimate_session\(session\)' "$compile_source" | head -1 | cut -d: -f1)"
 caps_line="$(rg -n 'check_caps\(session, estimate, caps\)' "$compile_source" | head -1 | cut -d: -f1)"
 validate_line="$(rg -n 'validate_session\(session\)' "$compile_source" | head -1 | cut -d: -f1)"
-canonical_line="$(rg -n 'let canonical_toml = canonical_session_toml' "$compile_source" | head -1 | cut -d: -f1)"
+canonical_line="$(rg -n 'let canonical_toml = write_canonical\(session\)' "$compile_source" | head -1 | cut -d: -f1)"
 clone_line="$(rg -n 'let mut normalized = session\.clone\(\)' "$compile_source" | head -1 | cut -d: -f1)"
 (( estimate_line < caps_line && caps_line < validate_line && validate_line < canonical_line && canonical_line < clone_line )) || {
     printf 'resource preflight/cap ordering changed\n' >&2
