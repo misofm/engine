@@ -10,6 +10,8 @@ This log covers the whole wave-4 job, not only this crate: the job spans
 `miso-engine-host-core` (new), `miso-engine-graph`, `miso-engine-core` and `miso-engine-capi`, and
 one log is easier to check than four. Numbering is the plan's step order, so gaps (M-09, M-14,
 M-15) mark work that was implemented, proven, and then dropped when #98 merged -- see W4-6.
+M-27..M-31 close a gap the verifier found after the first pass, and are recorded here in full,
+including the mutation that was green before them.
 
 Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1.
 
@@ -37,6 +39,9 @@ node, so a mutation that ignores supplied processors shows up as `[0, 0]`.
 * Command: `cargo test -p miso-engine-host-core --test prepare`
 * Red: `source_control_errors_are_typed` — `left: "source.rejected"` vs
   `right: "source.region.outside"`.
+* **Not sufficient on its own.** This gate only ever asserted one arm's string, so it caught a
+  whole-table collapse and missed a single-arm one. The verifier proved that; M-27..M-31 below are
+  the gate that actually pins the table.
 
 ### M-03 — drop the end-of-region symmetry rule
 * Mutation: delete the `submission.end_of_region != (end == source.region_end)` check in
@@ -72,6 +77,60 @@ the two sides are independent witnesses. M-04 is the same mutation against the f
 * Command: `cargo test -p miso-engine-host-core --test prepare`
 * Red: `every_byte_cap_admits_its_reported_row_and_rejects_one_byte_below` —
   `largest_named: the reported value must be admitted`.
+
+## F6 — the typed source-diagnostic table (verifier gap, closed)
+
+The verifier found the F6 table itself unpinned: rewriting one arm of
+`SourceControlError::diagnostic` to `"engine.invalid_argument"` survived the whole host-core suite
+*and* the whole capi suite, because every gate asserted the error **value** and never the string a
+C host actually reads. That is the exact collapse F6 removed, so it is now pinned three ways in
+`tests/source_diagnostics.rs` (string, classification, reverse map) plus a compile-time
+exhaustiveness guard, and once more end to end through the C entry points in
+`capi/src/ffi.rs::source_rejections_reach_the_c_host_as_their_own_diagnostic`.
+
+### M-27 — the verifier's mutation: collapse one arm to a generic code
+* Mutation: `Self::UnknownSource => "source.id.unknown"` -> `"engine.invalid_argument"`.
+* Commands: `cargo test -p miso-engine-host-core` and
+  `cargo test -p miso-engine-capi source_rejections`
+* Red twice:
+  * `every_source_rejection_reports_its_own_pinned_diagnostic` — `row 0 (UnknownSource) must
+    report its recorded code`, `left: "engine.invalid_argument"` vs `right: "source.id.unknown"`.
+  * `source_rejections_reach_the_c_host_as_their_own_diagnostic` — `no source carries this ID`,
+    `engine.invalid_argument` vs `source.id.unknown` as read back through `last_error`.
+  (Before this commit the same mutation was green in both suites.)
+
+### M-28 — merge one arm into a neighbour's code
+* Mutation: `Self::UnknownSource => "source.region.outside"`.
+* Command: `cargo test -p miso-engine-host-core --test source_diagnostics`
+* Red: `every_source_rejection_reports_its_own_pinned_diagnostic` —
+  `left: "source.region.outside"` vs `right: "source.id.unknown"`.
+
+### M-29 — split a documented multi-variant arm
+* Mutation: give `Seek(GenerationZero)` its own `"source.seek.generation.zero"` instead of sharing
+  `"source.generation.zero"` with `GenerationZero`.
+* Command: `cargo test -p miso-engine-host-core --test source_diagnostics`
+* Red: `every_source_rejection_reports_its_own_pinned_diagnostic` — `row 5 (Seek(GenerationZero))`,
+  `left: "source.seek.generation.zero"` vs `right: "source.generation.zero"`.
+
+### M-30 — a variant joins the backpressure class
+* Mutation: add `Self::OutsideRegion` to the `is_backpressure` pattern.
+* Command: `cargo test -p miso-engine-host-core --test source_diagnostics`
+* Red twice: `every_source_rejection_reports_its_own_pinned_diagnostic` —
+  `row 2 (OutsideRegion) backpressure classification`, `left: true` vs `right: false`; and
+  `classification_partitions_the_table` — `["source.region.outside", "source.backpressure",
+  "source.seek.backpressure"]` vs `["source.backpressure", "source.seek.backpressure"]`.
+
+*First attempt recorded green:* the same mutation written against reformatted source text never
+matched and appeared green. The applied edit is now read back before the run — the same lesson as
+M-16a.
+
+### M-31 — collapse an arm *and* update the table to match
+* Mutation: `Self::UnknownSource => "source.region.outside"` in `source.rs`, plus the matching row
+  edit in `TABLE` — the careless "fix the test" regression the string pin alone cannot catch.
+* Command: `cargo test -p miso-engine-host-core --test source_diagnostics`
+* Red: `only_the_documented_pairs_share_a_code` — `source.region.outside is reported by rows
+  [0, 2], but exactly 1 variant(s) may report it`. The other two tests stay green, which is
+  precisely why the reverse map is a separate pin.
 
 ## W4-4 — the plan owns the sample clock
 

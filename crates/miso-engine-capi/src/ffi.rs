@@ -1843,6 +1843,139 @@ mod tests {
         destroy(engine);
     }
 
+    /// F6, end to end: a rejected source submission or seek reaches a C host as the diagnostic for
+    /// the rule it broke, through the real entry point and the real `last_error` path. Every one of
+    /// these used to be `RESULT_INVALID_ARGUMENT` with `source.submit.rejected` or
+    /// `source.seek.rejected`, which told a host nothing about what to fix.
+    #[test]
+    fn source_rejections_reach_the_c_host_as_their_own_diagnostic() {
+        let (engine, session, plan) = compiled_fixture();
+        let left = [0.25_f32; 128];
+        let right = [-0.5_f32; 128];
+        let stereo = [left.as_ptr(), right.as_ptr()];
+        let three = [left.as_ptr(), right.as_ptr(), left.as_ptr()];
+        let base = || SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 1,
+            start_frame: 0,
+            planes: stereo.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+
+        /// `(why, source ID, the one rule this row breaks, the diagnostic a C host must read)`.
+        type Row<'a> = (&'a str, &'a [u8], &'a dyn Fn(&mut SourceChunk), &'a [u8]);
+        // Each row breaks exactly one rule, in the order the facade checks them.
+        let rows: [Row<'_>; 7] = [
+            (
+                "no source carries this ID",
+                b"absent-source",
+                &|_| {},
+                b"source.id.unknown",
+            ),
+            (
+                "start + frames does not fit in u64",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = u64::MAX,
+                b"source.region.overflow",
+            ),
+            (
+                "the chunk rate is not the source's",
+                b"fixture-source",
+                &|chunk| chunk.sample_rate_hz = 44_100,
+                b"source.rate.mismatch",
+            ),
+            (
+                "three planes for a stereo source",
+                b"fixture-source",
+                &|chunk| {
+                    chunk.planes = three.as_ptr();
+                    chunk.plane_count = 3;
+                },
+                b"source.channels.mismatch",
+            ),
+            (
+                "the chunk runs past the mapped region",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = 47_999,
+                b"source.region.outside",
+            ),
+            (
+                "a chunk ending at the region end must say so",
+                b"fixture-source",
+                &|chunk| chunk.start_frame = 47_872,
+                b"source.region.end_mismatch",
+            ),
+            (
+                "generation zero is reserved",
+                b"fixture-source",
+                &|chunk| chunk.generation = 0,
+                b"source.generation.zero",
+            ),
+        ];
+        for (why, id, mutate, diagnostic) in rows {
+            let mut chunk = base();
+            mutate(&mut chunk);
+            assert_eq!(
+                // SAFETY: The session is live and every borrowed plane and ABI struct outlives the
+                // call; the submission is rejected before any plane is read.
+                unsafe {
+                    miso_engine_v2_source_submit_planar_f32(
+                        session,
+                        id.as_ptr(),
+                        id.len() as u64,
+                        &chunk,
+                        &mut report,
+                    )
+                },
+                RESULT_INVALID_ARGUMENT,
+                "{why}"
+            );
+            assert_eq!(read_last_error(session.cast()), diagnostic, "{why}");
+        }
+
+        // The seek path reports through the same table.
+        assert_eq!(
+            seek(session, b"fixture-source".as_ptr(), 14, 1, 48_001),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.region.outside");
+        assert_eq!(
+            seek(session, b"absent-source".as_ptr(), 13, 1, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.id.unknown");
+
+        // An accepted submission clears the diagnostic, so a stale string can never be mistaken
+        // for a fresh rejection.
+        assert_eq!(
+            // SAFETY: As above; this chunk satisfies every rule.
+            unsafe {
+                miso_engine_v2_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &base(),
+                    &mut report,
+                )
+            },
+            RESULT_OK
+        );
+        assert_eq!(report.accepted_frames, 128);
+        assert_eq!(read_last_error(session.cast()), b"");
+        destroy_fixture(engine, session, plan);
+    }
+
     /// F4: one validation pass, one diagnostic per rule. Each rejection names the single check it
     /// failed -- five of these used to share the string `render.contract.rejected` -- and none of
     /// them writes a sample, so the host buffer still holds its pre-call NaN fill.
