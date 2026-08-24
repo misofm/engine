@@ -341,6 +341,14 @@ impl<T: Send + 'static> Consumer<T> {
     pub const fn underrun_count(&self) -> u64 {
         self.empty
     }
+    /// Whether the queue currently holds nothing for this consumer.
+    ///
+    /// This is the bounded, counter-free observation the scheduler uses to decide whether a
+    /// worker is idle; it never pops and never touches the empty/underrun counters.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.local == self.ring().producer.load(Ordering::Acquire)
+    }
     /// Try one bounded pop; it never retries or blocks.
     pub fn try_pop(&mut self) -> Result<T, QueueEmpty> {
         let local = self.local;

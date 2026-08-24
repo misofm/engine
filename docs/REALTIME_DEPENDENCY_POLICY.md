@@ -17,6 +17,36 @@ control or worker threads.
 The policy applies transitively. A dependency that hides one of these operations behind a benign
 API is still forbidden in the render-reachable graph.
 
+## Issue 100 worker idle policy and the single wake
+
+Issue 100 makes the native dependency-wave workers park between blocks instead of burning a core
+each, and creates exactly one documented exception to the "no syscalls" rule above.
+
+* The coordinator (the audio callback thread) may issue **at most one** `std::thread::unpark` per
+  rendered block, from `NativeSchedulerV1::wake_root`, and only when worker 0 is observed parked.
+  On Linux/glibc that is one `futex(FUTEX_WAKE)`. It is the only syscall any render-reachable
+  coordinator code is permitted to make; everything else in the prohibitions above still holds.
+* Auxiliary workers wake their own binary-tree children (`2i+1`, `2i+2`), so one coordinator wake
+  reaches every issued worker. A worker may `park` and `unpark` (futex wait/wake) and nothing
+  else: it allocates nothing, takes no lock, and performs no I/O or logging.
+* Between blocks a worker spins for a calibrated bounded budget (about one render quantum) before
+  parking, so a paced session pays one wake per block and a saturated session pays none.
+  `scripts/trace-scheduler-audit.sh` counts both: in steady (unpaced) mode the coordinator's armed
+  interval must contain **zero** syscalls, and in paced mode exactly one `futex` line per block,
+  equal to the executor's `coordinator_wakes` counter. Worker idle CPU is measured from
+  `/proc/<tid>/stat` and gated at 5 % between blocks.
+* The wake protocol is a Dekker pair: the worker stores `parked = true`, fences `SeqCst`, then
+  re-checks its command queue; the coordinator publishes the command, fences `SeqCst`, then reads
+  `parked`. Removing or weakening either fence is a lost-wake bug.
+* `AGENTS.md` records the same exception in one sentence next to the render prohibitions.
+
+Bounded recovery replaces the old unbounded completion spin: `recover_issued` spins for a
+calibrated budget of about half a quantum and then declares the worker dead for the life of the
+worker lease. The dead worker's parcel stays *trapped* (it is never touched again until the worker
+returns it at a later block boundary), every edge sourced from it is muted to silence, and the
+remaining units of the block render on the coordinator. The audio callback therefore has a bounded
+worst case and never wedges.
+
 ## Unsafe-code ownership
 
 The workspace denies unsafe code. If a later approved issue needs a narrow exception, it is limited
@@ -33,7 +63,19 @@ add tests; and obtain explicit review. Unsafe code must not leak through a publi
 exception owns fixed `UnsafeCell<MaybeUninit<T>>` storage and its local `SAFETY` assertions
 require one producer, one consumer, release publication after writes, acquire before reads, and
 shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
-outside push, pop, and render. A second test-only exception is
+outside push, pop, and render. Issue 100 adds `crates/miso-engine-core/src/realtime/disjoint.rs`, the plan-owned disjoint audio
+arena that lets each consuming parcel read its producers' buffers in place on the worker that
+needs them instead of having the coordinator copy every inter-parcel edge. Its `unsafe impl Sync`
+and its raw slice construction are justified by four invariants stated in the module
+documentation and proved once at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is
+writable by at most one lease for the life of the plan (buffers are never recycled), **I2** a
+lease reads only buffers produced by a strictly earlier wave or by itself, **I3** the scheduler
+runs one wave at a time with an SPSC release/acquire edge between waves, and **I4** a parcel the
+coordinator does not own is never read (its buffers are muted to the always-zero silence buffer).
+Soundness therefore does not depend on any worker being on time: a late worker can only write its
+own unique slots, which nobody reads. `crates/miso-engine-native-scheduler` and
+`crates/miso-engine-graph` remain entirely free of unsafe code, which
+`scripts/check-scheduler-policy.sh` enforces. A second test-only exception is
 `tools/miso-engine-realtime-audit/src/main.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or

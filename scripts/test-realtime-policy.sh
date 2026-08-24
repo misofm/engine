@@ -44,6 +44,11 @@ create_fixture() {
         >"$root/crates/miso-engine-core/src/realtime/spsc.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
+        'unsafe impl Sync for DisjointArena {}' \
+        'struct DisjointArena;' \
+        >"$root/crates/miso-engine-core/src/realtime/disjoint.rs"
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
         'unsafe fn architecture_kernel() {}' \
         >"$root/crates/miso-engine-core/src/arch/x86.rs"
     printf '%s\n' \
@@ -155,6 +160,8 @@ expect_failure unsafe-outside-web-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \
     'mkdir -p "$root/hosts/miso-engine-host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/src/ffi/other.rs"'
+expect_failure unsafe-outside-disjoint-arena \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/realtime/disjoint_extra.rs"'
 expect_failure unsafe-outside-lane-softfma \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/kernels.rs"'
 
