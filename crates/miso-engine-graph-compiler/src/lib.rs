@@ -2781,8 +2781,11 @@ mod tests {
         }
     }
 
+    /// Where a [`BitRecorder`] writes: one `(left bits, right bits)` pair per rendered frame.
+    type BitSink = Arc<std::sync::Mutex<Vec<(u32, u32)>>>;
+
     /// Records every rendered sample of one observed node, bit for bit.
-    struct BitRecorder(Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
+    struct BitRecorder(BitSink);
     impl GraphRuntimeObserver for BitRecorder {
         fn observe(
             &mut self,
@@ -5413,7 +5416,6 @@ mod tests {
             }
             let mut direct_left = vec![0.0_f32; frames];
             let mut direct_right = vec![0.0_f32; frames];
-            let mut sanitized = 0;
             for frame in 0..frames {
                 let mut left = [0.0_f32; 10];
                 let mut right = [0.0_f32; 10];
@@ -5421,12 +5423,10 @@ mod tests {
                     left[track] = direct_tracks_left[track][frame];
                     right[track] = direct_tracks_right[track][frame];
                 }
-                direct_left[frame] =
-                    miso_engine_graph::balanced_pairwise_sum(&mut left, &mut sanitized);
-                direct_right[frame] =
-                    miso_engine_graph::balanced_pairwise_sum(&mut right, &mut sanitized);
+                // The independent scalar oracle for D9: stable track order, left to right.
+                direct_left[frame] = left.iter().copied().reduce(|a, b| a + b).unwrap_or(0.0);
+                direct_right[frame] = right.iter().copied().reduce(|a, b| a + b).unwrap_or(0.0);
             }
-            assert_eq!(sanitized, 0);
             assert_eq!(
                 graph_pcm[..frames]
                     .iter()
@@ -6135,10 +6135,72 @@ mod tests {
                     GraphNodeBinding::new(node, processor)
                 })
                 .collect();
+            // Independent oracle for the D9 reduction (#98 F2). Every track's post-matrix output
+            // is recorded, the routes are proven bit-transparent, and the session output must be
+            // exactly those contributions folded left to right in the plan's own stable edge order
+            // -- `reduce(|a, b| a + b)`, never `fold(0.0, +)`, so `-0.0` survives.
+            let route_order: Vec<String> = artifact
+                .graph()
+                .spec
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                .map(|edge| match &edge.source.node {
+                    GraphNodeId::Route { route_id } => route_id.as_str().to_owned(),
+                    other => panic!("output input is not a route: {other:?}"),
+                })
+                .collect();
+            assert_eq!(route_order.len(), count);
+            for route in artifact.graph().routes() {
+                assert_eq!(
+                    (
+                        route.transform.gain,
+                        route.transform.ll,
+                        route.transform.lr,
+                        route.transform.rl,
+                        route.transform.rr
+                    ),
+                    (1.0, 1.0, 0.0, 0.0, 1.0),
+                    "the oracle needs a bit-transparent route"
+                );
+            }
+            let track_of_route: BTreeMap<String, String> = model
+                .routes
+                .iter()
+                .map(|route| {
+                    let RouteSource::Track { track_id, .. } = &route.source else {
+                        panic!("seeded route source")
+                    };
+                    (route.id.as_str().to_owned(), track_id.as_str().to_owned())
+                })
+                .collect();
+            let taps: Vec<(String, BitSink)> = route_order
+                .iter()
+                .map(|route| {
+                    (
+                        track_of_route[route].clone(),
+                        Arc::new(std::sync::Mutex::new(Vec::new())),
+                    )
+                })
+                .collect();
+            let tap_observers: Vec<GraphNodeObserverBinding> = taps
+                .iter()
+                .enumerate()
+                .map(|(handle, (track, sink))| {
+                    GraphNodeObserverBinding::new(
+                        GraphNodeId::TrackStage {
+                            track_id: StableGraphId::parse(track).expect("track node id"),
+                            stage: TrackStage::PostMatrix,
+                        },
+                        handle as u64,
+                        Box::new(BitRecorder(Arc::clone(sink))),
+                    )
+                })
+                .collect();
             let mut plan = match artifact.into_bound(GraphRuntimeBindings {
                 envelope,
                 nodes,
-                observers: Vec::new(),
+                observers: tap_observers,
             }) {
                 Ok(bound) => bound.plan,
                 Err(_) => panic!("seeded bind"),
@@ -6202,6 +6264,30 @@ mod tests {
                     RenderTime { absolute_sample: 0 },
                 )
                 .expect("native seeded render");
+            let contributions: Vec<Vec<(u32, u32)>> = taps
+                .iter()
+                .map(|(_, sink)| sink.lock().expect("tap sink").clone())
+                .collect();
+            for (index, contribution) in contributions.iter().enumerate() {
+                assert_eq!(contribution.len(), frames, "tap {index} block length");
+            }
+            for frame in 0..frames {
+                let left = contributions
+                    .iter()
+                    .map(|tap| f32::from_bits(tap[frame].0))
+                    .reduce(|a, b| a + b)
+                    .unwrap_or(0.0);
+                let right = contributions
+                    .iter()
+                    .map(|tap| f32::from_bits(tap[frame].1))
+                    .reduce(|a, b| a + b)
+                    .unwrap_or(0.0);
+                assert_eq!(
+                    (pcm[frame].to_bits(), pcm[frames + frame].to_bits()),
+                    (left.to_bits(), right.to_bits()),
+                    "layout {layout} frame {frame}: D9 left-to-right reduction oracle"
+                );
+            }
             let counters = plan.qualification_counters();
             let native_counters = native_plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
@@ -6233,12 +6319,16 @@ mod tests {
             completed += 1;
         }
         assert_eq!(completed, 100);
-        // Structural re-derivation only: the transcript string folds `expected_banks`,
-        // `expected_tail` and the counters, and all three moved by hand-counted formulas
-        // (`count.div_ceil(W)`, `0`, `calls * quantum`). Every one of the 100 per-layout
-        // `pcm_hash` values is byte-identical to the pre-change render.
+        // Re-pinned once by #98 F2 (master plan #83 D9 and the section-8 policy). The membership
+        // and counter halves of the transcript string are unchanged; the `pcm_hash` half moved for
+        // every layout whose output fan-in is four or more, because the session output's reduction
+        // became a left-to-right recursive sum instead of a balanced pairwise tree. It is *not*
+        // pinned from production output: the per-layout `assert_eq!` above derives the expected
+        // output from the recorded per-track post-matrix contributions folded left to right in the
+        // plan's own stable edge order, for all 100 layouts, before this literal is compared.
+        // Old value `0x0fc9_bdc8_ff12_0f6e`; layouts with `count <= 3` are bit-identical to it.
         assert_eq!(
-            transcript, 0x0fc9_bdc8_ff12_0f6e,
+            transcript, 0x9dfc_dcf2_0e37_0ef5,
             "frozen Issue-037 seeded layout transcript"
         );
     }

@@ -2077,6 +2077,13 @@ mod tests {
         GraphPreparedSourceSetDriver, GraphResourceEstimate, GraphSourceInputClaim,
         GraphSourceSetResourceReport, PreparedGraphPlanParts,
     };
+
+    /// The compiler always emits `spec.nodes` sorted by id; hand-built fixtures list them in
+    /// reading order, so they sort here (`program::lower` interns ids by binary search).
+    fn sorted_nodes(mut nodes: Vec<GraphNode>) -> Vec<GraphNode> {
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        nodes
+    }
     use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
     use std::sync::Arc;
 
@@ -2269,14 +2276,16 @@ mod tests {
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: 22,
             spec: miso_engine_graph::GraphSpec {
-                nodes: [input.clone(), builtin.clone(), output.clone()]
-                    .into_iter()
-                    .map(|id| GraphNode {
-                        id,
-                        latency: miso_engine_effect_contract::LatencySamples(0),
-                        tail: miso_engine_effect_contract::TailSamples::Finite(0),
-                    })
-                    .collect(),
+                nodes: sorted_nodes(
+                    [input.clone(), builtin.clone(), output.clone()]
+                        .into_iter()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: miso_engine_effect_contract::LatencySamples(0),
+                            tail: miso_engine_effect_contract::TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
                 ports: Vec::new(),
                 edges: vec![
                     edge(input.clone(), builtin.clone()),
@@ -2928,15 +2937,17 @@ mod tests {
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
             plan_id: 8_600 + n as u64,
             spec: miso_engine_graph::GraphSpec {
-                nodes: nodes
-                    .iter()
-                    .cloned()
-                    .map(|id| GraphNode {
-                        id,
-                        latency: miso_engine_effect_contract::LatencySamples(0),
-                        tail: miso_engine_effect_contract::TailSamples::Finite(0),
-                    })
-                    .collect(),
+                nodes: sorted_nodes(
+                    nodes
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: miso_engine_effect_contract::LatencySamples(0),
+                            tail: miso_engine_effect_contract::TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
                 ports: Vec::new(),
                 edges,
             },

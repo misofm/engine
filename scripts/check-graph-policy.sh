@@ -18,7 +18,7 @@ production_graph_dependencies=$(awk '
   /^\[/ { in_dependencies = 0 }
   in_dependencies && /^[a-zA-Z0-9_-]+[.]workspace/ { print $1 }
 ' "$graph_manifest" | sort)
-[[ "$production_graph_dependencies" == $'miso-engine-core.workspace\nmiso-engine-effect-contract.workspace\nmiso-engine-rack.workspace' ]] ||
+[[ "$production_graph_dependencies" == $'miso-engine-core.workspace\nmiso-engine-effect-contract.workspace\nmiso-engine-lane.workspace\nmiso-engine-rack.workspace' ]] ||
   fail 'render graph dependency boundary changed'
 
 rg -q '^sha2[.]workspace = true$' "$compiler_manifest" ||

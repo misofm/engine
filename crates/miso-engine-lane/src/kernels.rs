@@ -461,3 +461,49 @@ pub fn pdc_delay_block(ring: &mut [f32], cursor: &mut usize, io: &mut [f32]) {
         advanced
     };
 }
+
+/// The 2x2 route/pan matrix over one planar stereo block, in place (D3).
+///
+/// `c` is `[ll, lr, rl, rr]`, already carrying the route's linear gain: the compiler hands the
+/// graph a separate `gain`, and the graph folds it into each coefficient **once, at bind**
+/// (`ll' = gain * ll`, ...), so render never multiplies by the gain again. The op order is frozen:
+///
+/// ```text
+/// l' = fma(lr', r, ll' * l)
+/// r' = fma(rr', r, rl' * l)
+/// ```
+///
+/// one multiply and one fused multiply-add per output word, three roundings per frame instead of
+/// the five the unfolded `gain * (ll * l + lr * r)` form spends. Both outputs are computed from
+/// the frame's *original* `l` and `r`, so the in-place write is safe.
+///
+/// Frames are independent: the block is vectorised over frames and finished by the same body at
+/// `L = f32`, so the result does not depend on the width.
+#[inline(always)]
+pub fn mix2x2_block<L: Lane>(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
+    debug_assert_eq!(left.len(), right.len());
+    let count = left.len();
+    let vectored = count - count % L::WIDTH;
+    let (ll, lr, rl, rr) = (
+        L::splat(c[0]),
+        L::splat(c[1]),
+        L::splat(c[2]),
+        L::splat(c[3]),
+    );
+    let mut index = 0;
+    while index < vectored {
+        let l = L::load(&left[index..]);
+        let r = L::load(&right[index..]);
+        lr.fma(r, ll.mul(l)).store(&mut left[index..]);
+        rr.fma(r, rl.mul(l)).store(&mut right[index..]);
+        index += L::WIDTH;
+    }
+    let (ll, lr, rl, rr) = (c[0], c[1], c[2], c[3]);
+    while index < count {
+        let l = <f32 as Lane>::load(&left[index..]);
+        let r = <f32 as Lane>::load(&right[index..]);
+        lr.fma(r, ll.mul(l)).store(&mut left[index..]);
+        rr.fma(r, rl.mul(l)).store(&mut right[index..]);
+        index += 1;
+    }
+}

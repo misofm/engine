@@ -10,7 +10,7 @@ use std::{
 };
 
 use miso_engine_effect_compiler::EffectPreparedSession;
-use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan, balanced_pairwise_sum};
+use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan, reduce_left_to_right};
 use miso_engine_graph_compiler::{
     GraphCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphArtifact,
 };
@@ -221,18 +221,21 @@ fn summation_report() -> String {
     let mut maximum_absolute = 0.0_f64;
     let mut maximum_bound = 0.0_f64;
     let mut squared_residual = 0.0_f64;
-    for (name, mut values) in fixtures {
+    for (name, values) in fixtures {
         let reference = values.iter().map(|value| f64::from(*value)).sum::<f64>();
         let sum_abs = values
             .iter()
             .map(|value| f64::from(value.abs()))
             .sum::<f64>();
-        let levels = values.len().next_power_of_two().ilog2();
+        // Master plan #83 D9 is recursive left-to-right summation, so the analytic bound is
+        // `gamma_{n-1} * sum|x_i|` with `gamma_k = k u / (1 - k u)` and `u = 2^-24` (Higham,
+        // *Accuracy and Stability of Numerical Algorithms*, 2nd ed., eq. 4.4): `n - 1` additions
+        // instead of the balanced tree's `log2 n` levels.
+        let steps = (values.len() - 1) as f64;
         let unit_roundoff = 2.0_f64.powi(-24);
-        let gamma = f64::from(levels) * unit_roundoff / (1.0 - f64::from(levels) * unit_roundoff);
+        let gamma = steps * unit_roundoff / (1.0 - steps * unit_roundoff);
         let bound = gamma * sum_abs + values.len() as f64 * f64::from(f32::MIN_POSITIVE);
-        let mut sanitized = 0;
-        let actual = f64::from(balanced_pairwise_sum(&mut values, &mut sanitized));
+        let actual = f64::from(reduce_left_to_right(&values));
         let absolute = (actual - reference).abs();
         maximum_absolute = maximum_absolute.max(absolute);
         maximum_bound = maximum_bound.max(bound);
@@ -249,13 +252,13 @@ fn summation_report() -> String {
             reference,
             absolute,
             bound,
-            sanitized,
+            0,
         ));
     }
     let rms = (squared_residual / records.len() as f64).sqrt();
     format!(
         concat!(
-            "{{\"schema\":1,\"strategy\":\"fixed-balanced-pairwise-f32\",",
+            "{{\"schema\":1,\"strategy\":\"left-to-right-f32\",",
             "\"reference\":\"independent-linear-f64\",\"fixtures\":[{}],",
             "\"maximum_absolute_residual\":{:e},",
             "\"rms_residual\":{:e},\"maximum_analytic_bound\":{:e}}}\n"
