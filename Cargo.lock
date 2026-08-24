@@ -717,6 +717,7 @@ name = "miso-engine-capi"
 version = "0.1.0"
 dependencies = [
  "miso-engine-core",
+ "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
  "miso-engine-graph",
  "miso-engine-host-core",

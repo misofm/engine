@@ -895,6 +895,33 @@ fn assert_effective_owner_mutations(rows: &[PrimitiveOwner], production: u64, gr
     }
 }
 
+fn soft_clip_parameter_catalog_owners() -> Vec<PrimitiveOwner> {
+    // The frozen scratch fixture has nine soft-clip instances. Each contract has three PerLane
+    // parameters, hence 9 * 3 * 2 = 54 revision-scoped descriptors/state records. Every
+    // descriptor owns one five-entry named ladder. The string payload is independently derived:
+    // track IDs 54*3 + local effect IDs 54*9 + display names 18*(5+6+3) + units
+    // 18*(2+2+6) = 1,080 bytes. Soft clip declares no enumeration choices.
+    let descriptors = 54;
+    vec![
+        PrimitiveOwner {
+            name: "parameter descriptor catalog",
+            bytes: bytes::<miso_engine_protocol::ParameterDescriptor>(descriptors),
+        },
+        PrimitiveOwner {
+            name: "parameter state catalog",
+            bytes: bytes::<miso_engine_protocol::ParameterStateRecord>(descriptors),
+        },
+        PrimitiveOwner {
+            name: "parameter named nudge ladders",
+            bytes: bytes::<miso_engine_protocol::NamedNudge>(descriptors * 5),
+        },
+        PrimitiveOwner {
+            name: "parameter catalog string payloads",
+            bytes: 54 * 3 + 54 * 9 + 18 * (5 + 6 + 3) + 18 * (2 + 2 + 6),
+        },
+    ]
+}
+
 fn complete_capi_owners(
     current_canonical: usize,
     candidate_canonical: usize,
@@ -1004,14 +1031,6 @@ fn complete_capi_owners(
             bytes: bytes::<CounterValue>(configuration_items),
         },
         PrimitiveOwner {
-            name: "automation track ID",
-            bytes: 4,
-        },
-        PrimitiveOwner {
-            name: "automation effect ID",
-            bytes: 7,
-        },
-        PrimitiveOwner {
             name: "controller meter config",
             bytes: bytes::<u32>(configuration_items),
         },
@@ -1048,14 +1067,15 @@ fn complete_capi_owners(
             bytes: 14,
         },
     ]);
+    active.extend(soft_clip_parameter_catalog_owners());
     let active_total = owner_total(&active);
-    // #84 re-pin (+1,336 net): phase B grew every ring header 72 -> 256 (one cache line for the
-    // read-mostly header plus one per cursor) and each endpoint by 8 (cached peer cursor); phase C
-    // deleted the plan's unused parameter/event store (-96 per live plan row). The rows above are
-    // sized from the live layouts, and `resources_c` at the frozen-scratch comparison must agree.
-    assert_effective_owner_mutations(&active, 141_777, "active CAPI");
+    // #127 re-pin (+16,429 net): the complete 16,416-byte session-derived catalog replaces the
+    // fake descriptor's 11 string bytes, while Session's inline ProtocolController grows by one
+    // Vec<NamedNudge> (ptr/len/cap = 24 bytes). Every catalog byte is derived immediately above;
+    // `resources_c` at the frozen-scratch comparison independently agrees with this total.
+    assert_effective_owner_mutations(&active, 158_206, "active CAPI");
 
-    let candidate_epoch_rows = [
+    let mut candidate_epoch_rows = vec![
         PrimitiveOwner {
             name: "candidate canonical TOML",
             bytes: candidate_canonical as u64,
@@ -1069,6 +1089,7 @@ fn complete_capi_owners(
             bytes: 14,
         },
     ];
+    candidate_epoch_rows.extend(soft_clip_parameter_catalog_owners());
     let candidate_epoch = owner_total(&candidate_epoch_rows);
     let prepared_rows = [
         PrimitiveOwner {
@@ -1091,7 +1112,9 @@ fn complete_capi_owners(
     let prepared = owner_total(&prepared_rows);
     // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
     // its cached peer cursor.
-    assert_effective_owner_mutations(&candidate_epoch_rows, 10_453, "candidate CAPI epoch");
+    // #127 candidate preparation owns the prospective 16,416-byte catalog alongside its source
+    // epoch until the affine commit atomically replaces the controller's current catalog.
+    assert_effective_owner_mutations(&candidate_epoch_rows, 26_869, "candidate CAPI epoch");
     assert_effective_owner_mutations(&prepared_rows, 13_960, "prepared protocol");
     let largest = active
         .iter()
@@ -1622,7 +1645,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 166_190, "double-live CAPI");
+    // 158,206 current + 26,869 candidate epoch/catalog + 13,960 prepared response/replay.
+    assert_effective_owner_mutations(&capi_rows, 199_035, "double-live CAPI");
 
     let graph_rows = graph_owners();
     let graph_largest = owner_total(&graph_rows[7..15]);
@@ -1707,7 +1731,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_ne!(
         capi_rows.iter().map(|owner| owner.bytes).max(),
-        Some(166_190),
+        Some(199_035),
         "CAPI aggregate is not max-single"
     );
 
@@ -1921,7 +1945,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 15_948);
-    assert_eq!(oracle.capi, 166_190);
+    assert_eq!(oracle.capi, 199_035);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -1952,7 +1976,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_777));
+            assert_eq!(resources_c(plan), frozen_scratch_report(158_206));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -1970,7 +1994,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_768));
+            assert_eq!(resources_c(plan), frozen_scratch_report(158_197));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }

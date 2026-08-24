@@ -32,9 +32,9 @@ pub(crate) use miso_engine_host_core::{
 };
 pub(crate) use miso_engine_protocol::{
     CommandFrameProcessError, ControllerRetainedCapacity, DecodeScratch, EncodeError,
-    EventEgressError, MockProvider, PreparedCommandFrame, ProtocolCodec, ProtocolController,
-    ProtocolControllerConfig, ProtocolLimits, ProtocolQueueConfig, ProtocolQueues,
-    ProviderFeatures, ReplayCache, ReplayCacheConfig, SessionStore,
+    EventEgressError, MockParameterCatalog, MockProvider, PreparedCommandFrame, ProtocolCodec,
+    ProtocolController, ProtocolControllerConfig, ProtocolLimits, ProtocolQueueConfig,
+    ProtocolQueues, ProviderFeatures, ReplayCache, ReplayCacheConfig, SessionStore,
 };
 pub(crate) use miso_engine_session::{CompiledSession, DiagnosticSet};
 

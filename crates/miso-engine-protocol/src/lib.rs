@@ -76,8 +76,8 @@ pub use conformance::{ConformanceDecoder, ConformanceFrame, complete_schema_corp
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
-    ControllerRetainedCapacity, EventEgressError, MockProvider, MockProviderConfig,
-    ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
+    ControllerRetainedCapacity, EventEgressError, MockParameterCatalog, MockProvider,
+    MockProviderConfig, ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
     PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
     ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
     ReplayCacheResourceReport, ReplayDecision, ReplayHit,

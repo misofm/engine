@@ -41,6 +41,298 @@ pub(crate) struct CompiledModelAdmission {
     pub(crate) largest_allocation_bytes: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParameterCatalogResources {
+    pub(crate) retained: u64,
+    pub(crate) largest: u64,
+}
+
+impl ParameterCatalogResources {
+    fn add(&mut self, bytes: u64) -> Result<(), CompileFailure> {
+        self.retained = self
+            .retained
+            .checked_add(bytes)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        self.largest = self.largest.max(bytes);
+        Ok(())
+    }
+}
+
+fn visit_effect_parameters(
+    compiled: &CompiledSession,
+    registry: &miso_engine_effect_contract::NativeEffectRegistry,
+    mut visit: impl FnMut(
+        &miso_engine_session::Track,
+        miso_engine_protocol::ParameterRack,
+        &miso_engine_session::Effect,
+        &'static miso_engine_effect_contract::EffectDescriptorV1,
+        &'static miso_engine_effect_contract::ParameterDescriptorV1,
+        miso_engine_protocol::ParameterChannel,
+    ) -> Result<(), CompileFailure>,
+) -> Result<(), CompileFailure> {
+    use miso_engine_effect_contract::ParameterChannelPolicy;
+    for track in &compiled.normalized_model().tracks {
+        for (rack, effects) in [
+            (
+                miso_engine_protocol::ParameterRack::Simd1,
+                &track.simd1.effects,
+            ),
+            (
+                miso_engine_protocol::ParameterRack::Dynamic,
+                &track.dynamic.effects,
+            ),
+            (
+                miso_engine_protocol::ParameterRack::Simd2,
+                &track.simd2.effects,
+            ),
+        ] {
+            for effect in effects {
+                let miso_engine_session::EffectIdentity::Native { effect_id } = &effect.identity
+                else {
+                    return Err(failure("capi.parameter.catalog"));
+                };
+                let factory = registry
+                    .get_ascii(effect_id.as_str())
+                    .ok_or_else(|| failure("capi.parameter.catalog"))?;
+                let descriptor = factory.descriptor();
+                for parameter in descriptor.parameters {
+                    match parameter.channel_policy {
+                        ParameterChannelPolicy::Shared => visit(
+                            track,
+                            rack,
+                            effect,
+                            descriptor,
+                            parameter,
+                            miso_engine_protocol::ParameterChannel::Both,
+                        )?,
+                        ParameterChannelPolicy::PerLane => {
+                            visit(
+                                track,
+                                rack,
+                                effect,
+                                descriptor,
+                                parameter,
+                                miso_engine_protocol::ParameterChannel::Left,
+                            )?;
+                            visit(
+                                track,
+                                rack,
+                                effect,
+                                descriptor,
+                                parameter,
+                                miso_engine_protocol::ParameterChannel::Right,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parameter_catalog_resources(
+    compiled: &CompiledSession,
+) -> Result<ParameterCatalogResources, CompileFailure> {
+    let registry = miso_engine_effect_compiler::launch_native_effect_registry_v1()
+        .map_err(|_| failure("capi.parameter.catalog"))?;
+    let mut resources = ParameterCatalogResources::default();
+    let mut descriptors = 0_usize;
+    visit_effect_parameters(
+        compiled,
+        &registry,
+        |track, _rack, effect, _effect_descriptor, parameter, _channel| {
+            descriptors = descriptors
+                .checked_add(1)
+                .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+            resources.add(checked_layout::<miso_engine_protocol::NamedNudge>(5)?)?;
+            resources.add(checked_layout::<miso_engine_protocol::EnumChoice>(
+                parameter.enum_choices.len(),
+            )?)?;
+            for bytes in [
+                track.id.as_str().len(),
+                effect.id.as_str().len(),
+                parameter.display_name.len(),
+                parameter.display_unit.len(),
+            ] {
+                resources.add(checked_layout::<u8>(bytes)?)?;
+            }
+            for choice in parameter.enum_choices {
+                resources.add(checked_layout::<u8>(choice.label.len())?)?;
+            }
+            Ok(())
+        },
+    )?;
+    resources.add(checked_layout::<miso_engine_protocol::ParameterDescriptor>(
+        descriptors,
+    )?)?;
+    resources.add(checked_layout::<miso_engine_protocol::ParameterStateRecord>(descriptors)?)?;
+    Ok(resources)
+}
+
+fn protocol_parameter_unit(
+    value: miso_engine_effect_contract::ParameterUnit,
+) -> miso_engine_protocol::ParameterUnit {
+    use miso_engine_effect_contract::ParameterUnit as Contract;
+    match value {
+        Contract::Db => miso_engine_protocol::ParameterUnit::Db,
+        Contract::Hz => miso_engine_protocol::ParameterUnit::Hz,
+        Contract::Milliseconds => miso_engine_protocol::ParameterUnit::Milliseconds,
+        Contract::Samples => miso_engine_protocol::ParameterUnit::Samples,
+        Contract::Linear => miso_engine_protocol::ParameterUnit::Linear,
+        Contract::Ratio => miso_engine_protocol::ParameterUnit::Ratio,
+    }
+}
+
+fn protocol_parameter_domain(
+    value: miso_engine_effect_contract::ParameterDomain,
+) -> miso_engine_protocol::ParameterDomain {
+    use miso_engine_effect_contract::ParameterDomain as Contract;
+    match value {
+        Contract::Continuous => miso_engine_protocol::ParameterDomain::Continuous,
+        Contract::Boolean => miso_engine_protocol::ParameterDomain::Boolean,
+        Contract::Enumeration => miso_engine_protocol::ParameterDomain::Enumeration,
+    }
+}
+
+fn protocol_parameter_mapping(
+    value: miso_engine_effect_contract::ParameterMapping,
+) -> miso_engine_protocol::ParameterMapping {
+    use miso_engine_effect_contract::ParameterMapping as Contract;
+    match value {
+        Contract::Linear => miso_engine_protocol::ParameterMapping::Linear,
+        Contract::Logarithmic => miso_engine_protocol::ParameterMapping::Logarithmic,
+        Contract::Exponential => miso_engine_protocol::ParameterMapping::Exponential,
+        Contract::Stepped => miso_engine_protocol::ParameterMapping::Stepped,
+    }
+}
+
+fn protocol_automation_rate(
+    value: miso_engine_effect_contract::AutomationRate,
+) -> miso_engine_protocol::ParameterAutomationRate {
+    use miso_engine_effect_contract::AutomationRate as Contract;
+    match value {
+        Contract::Sample => miso_engine_protocol::ParameterAutomationRate::Sample,
+        Contract::Block => miso_engine_protocol::ParameterAutomationRate::Block,
+        Contract::None => miso_engine_protocol::ParameterAutomationRate::None,
+    }
+}
+
+pub(crate) fn build_parameter_catalog(
+    compiled: &CompiledSession,
+) -> Result<MockParameterCatalog, CompileFailure> {
+    let registry = miso_engine_effect_compiler::launch_native_effect_registry_v1()
+        .map_err(|_| failure("capi.parameter.catalog"))?;
+    let mut descriptor_count = 0_usize;
+    visit_effect_parameters(compiled, &registry, |_, _, _, _, _, _| {
+        descriptor_count = descriptor_count
+            .checked_add(1)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        Ok(())
+    })?;
+    let mut metadata = Vec::new();
+    metadata
+        .try_reserve_exact(descriptor_count)
+        .map_err(|_| failure("capi.resource.allocation"))?;
+    let mut state = Vec::new();
+    state
+        .try_reserve_exact(descriptor_count)
+        .map_err(|_| failure("capi.resource.allocation"))?;
+    visit_effect_parameters(
+        compiled,
+        &registry,
+        |track, rack, effect, effect_descriptor, parameter, channel| {
+            let handle = u32::try_from(metadata.len().saturating_add(1))
+                .map_err(|_| failure("capi.parameter.catalog"))?;
+            let session_channel = match channel {
+                miso_engine_protocol::ParameterChannel::Left => {
+                    miso_engine_session::ParameterChannel::Left
+                }
+                miso_engine_protocol::ParameterChannel::Right => {
+                    miso_engine_session::ParameterChannel::Right
+                }
+                miso_engine_protocol::ParameterChannel::Both => {
+                    miso_engine_session::ParameterChannel::Both
+                }
+            };
+            let current = effect
+                .params
+                .iter()
+                .find(|value| {
+                    value.parameter_id == parameter.id.0 && value.channel == session_channel
+                })
+                .map_or(parameter.default_value, |value| value.value);
+            let ladder = registry
+                .nudge_ladder(effect_descriptor.id, parameter.id)
+                .ok_or_else(|| failure("capi.parameter.catalog"))?;
+            let mut named_nudges = Vec::new();
+            named_nudges
+                .try_reserve_exact(5)
+                .map_err(|_| failure("capi.resource.allocation"))?;
+            for size in [
+                miso_engine_protocol::NudgeSize::Xs,
+                miso_engine_protocol::NudgeSize::Sm,
+                miso_engine_protocol::NudgeSize::Md,
+                miso_engine_protocol::NudgeSize::Lg,
+                miso_engine_protocol::NudgeSize::Xl,
+            ] {
+                named_nudges.push(miso_engine_protocol::NamedNudge {
+                    size,
+                    normalized_step: ladder.step(size),
+                    decrement: 0.0,
+                    increment: 0.0,
+                });
+            }
+            let mut enum_choices = Vec::new();
+            enum_choices
+                .try_reserve_exact(parameter.enum_choices.len())
+                .map_err(|_| failure("capi.resource.allocation"))?;
+            enum_choices.extend(parameter.enum_choices.iter().map(|choice| {
+                miso_engine_protocol::EnumChoice {
+                    value: choice.value,
+                    label: choice.label.to_owned(),
+                }
+            }));
+            metadata.push(miso_engine_protocol::ParameterDescriptor {
+                handle,
+                track_id: track.id.as_str().to_owned(),
+                rack,
+                effect_id: effect.id.as_str().to_owned(),
+                parameter_id: parameter.id.0,
+                channel,
+                value_kind: miso_engine_protocol::ParameterValueKind::F32,
+                unit: protocol_parameter_unit(parameter.unit),
+                domain: protocol_parameter_domain(parameter.domain),
+                minimum: parameter.minimum,
+                maximum: parameter.maximum,
+                default: parameter.default_value,
+                mapping: protocol_parameter_mapping(parameter.mapping),
+                automation_rate: protocol_automation_rate(parameter.automation_rate),
+                smoothing_samples: parameter.smoothing_samples,
+                flags: u32::from(parameter.readable) | (u32::from(parameter.automatable) << 1),
+                display_name: Some(parameter.display_name.to_owned()),
+                display_unit: Some(parameter.display_unit.to_owned()),
+                enum_choices,
+                named_nudges,
+            });
+            state.push(miso_engine_protocol::ParameterStateRecord {
+                handle,
+                flags: 1,
+                value: current,
+            });
+            Ok(())
+        },
+    )?;
+    MockParameterCatalog::try_new(
+        metadata,
+        miso_engine_protocol::ParameterStatePage {
+            observed_sample: 0,
+            records: state,
+        },
+    )
+    .map_err(|_| failure("capi.parameter.catalog"))
+}
+
 pub(crate) fn compiled_model_admission(
     current: &CompiledSession,
     prospective: &CompiledSession,
@@ -110,6 +402,7 @@ pub(crate) fn capi_resources(
     source_count: usize,
     source_id_bytes: usize,
     quantum_frames: usize,
+    parameter_catalog: ParameterCatalogResources,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -161,9 +454,6 @@ pub(crate) fn capi_resources(
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterValue>(maximum_configuration_items)?,
-        // The automation-only descriptor is inline in the provider; charge its two strings.
-        checked_layout::<u8>(4)?,
-        checked_layout::<u8>(7)?,
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<miso_engine_protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<ProviderEpoch>(2)?,
@@ -181,7 +471,9 @@ pub(crate) fn capi_resources(
         checked_layout::<miso_engine_protocol::PreparedStructuralCommand>(1)?,
     ];
     let prepared_protocol_aggregate_rows = [replay.retained_payload_bytes];
-    let epoch_retained = checked_sum(&epoch_rows)?;
+    let epoch_retained = checked_sum(&epoch_rows)?
+        .checked_add(parameter_catalog.retained)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let active_retained = checked_sum(&fixed_allocation_rows)?
         .checked_add(checked_sum(&fixed_aggregate_rows)?)
         .and_then(|value| value.checked_add(epoch_retained))
@@ -197,6 +489,7 @@ pub(crate) fn capi_resources(
             queue.largest_allocation_bytes,
             replay.largest_allocation_bytes,
             exchange.largest_allocation_bytes,
+            parameter_catalog.largest,
         ])
         .max()
         .unwrap_or(0);
@@ -222,6 +515,7 @@ pub(crate) fn compiled_capi_resources(
                     .checked_add(source.id.as_str().len())
                     .ok_or_else(|| failure("capi.resource.arithmetic"))
             })?;
+    let parameter_catalog = parameter_catalog_resources(compiled)?;
     Ok((
         capi_resources(
             limits,
@@ -229,6 +523,7 @@ pub(crate) fn compiled_capi_resources(
             compiled.source_count(),
             source_id_bytes,
             compiled.quantum().0 as usize,
+            parameter_catalog,
         )?,
         source_id_bytes,
     ))
@@ -476,30 +771,10 @@ pub(crate) fn compile_children(
         meter_handles: maximum_tlvs as usize,
         counter_ids: maximum_tlvs as usize,
     };
-    let provider = MockProvider::try_with_retained_capacity_and_automation(
+    let parameter_catalog = build_parameter_catalog(store.compiled())?;
+    let provider = MockProvider::try_with_retained_capacity_and_parameters(
         retained_capacity,
-        miso_engine_protocol::ParameterDescriptor {
-            handle: u32::MAX,
-            track_id: "capi".to_owned(),
-            rack: miso_engine_protocol::ParameterRack::Dynamic,
-            effect_id: "control".to_owned(),
-            parameter_id: 1,
-            channel: miso_engine_protocol::ParameterChannel::Left,
-            value_kind: miso_engine_protocol::ParameterValueKind::F32,
-            unit: miso_engine_protocol::ParameterUnit::Linear,
-            domain: miso_engine_protocol::ParameterDomain::Continuous,
-            minimum: Some(-1.0),
-            maximum: Some(1.0),
-            default: 0.0,
-            mapping: miso_engine_protocol::ParameterMapping::Linear,
-            automation_rate: miso_engine_protocol::ParameterAutomationRate::Sample,
-            smoothing_samples: 0,
-            flags: 3,
-            display_name: None,
-            display_unit: None,
-            enum_choices: Vec::new(),
-            named_nudges: Vec::new(),
-        },
+        parameter_catalog,
     )
     .map_err(|_| failure("capi.resource.allocation"))?;
     let controller = ProtocolController::try_with_config_and_retained_capacity(

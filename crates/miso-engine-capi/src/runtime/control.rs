@@ -717,6 +717,9 @@ impl SessionState {
                     self.limits,
                 )
                 .map_err(CommandError::CompileRejected)?;
+                let candidate_parameter_catalog =
+                    build_parameter_catalog(prepared.get().prospective_session().compiled())
+                        .map_err(CommandError::CompileRejected)?;
                 #[cfg(test)]
                 if self.take_test_fault(TestStructuralFaultPhase::AfterAdmission) {
                     drop(candidate_plan);
@@ -775,6 +778,8 @@ impl SessionState {
                 let committed = prepared
                     .commit(&mut self.controller)
                     .map_err(|_| CommandError::Internal)?;
+                self.controller
+                    .replace_parameter_catalog(candidate_parameter_catalog);
                 self.pending_providers.push(candidate_provider);
                 reports.push((epoch, resources));
                 reservation.commit();

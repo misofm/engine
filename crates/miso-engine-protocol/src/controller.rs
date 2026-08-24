@@ -634,6 +634,62 @@ pub struct MockProviderConfig {
     pub transport_position: SampleTime,
 }
 
+/// Eagerly validated parameter catalog that can replace a mock/host provider catalog atomically.
+///
+/// Construction performs every fallible allocation and wire-shape check. Consuming the catalog
+/// after a structural session commit is therefore an infallible ownership swap.
+#[derive(Clone, Debug)]
+pub struct MockParameterCatalog {
+    parameter_metadata: Vec<crate::ParameterDescriptor>,
+    parameter_state: ParameterStatePage,
+}
+
+impl MockParameterCatalog {
+    /// Validate a complete revision-scoped descriptor/state catalog.
+    pub fn try_new(
+        parameter_metadata: Vec<crate::ParameterDescriptor>,
+        parameter_state: ParameterStatePage,
+    ) -> Result<Self, ControllerResourceAllocationError> {
+        let codec = ProtocolCodec::default();
+        if parameter_metadata
+            .windows(2)
+            .any(|pair| pair[0].handle >= pair[1].handle)
+            || parameter_state
+                .records
+                .windows(2)
+                .any(|pair| pair[0].handle >= pair[1].handle)
+            || parameter_metadata.len() != parameter_state.records.len()
+            || parameter_metadata
+                .iter()
+                .zip(&parameter_state.records)
+                .any(|(descriptor, state)| descriptor.handle != state.handle)
+            || parameter_metadata.iter().any(|descriptor| {
+                codec
+                    .encoded_parameter_metadata_page_len(&ParameterMetadataPage {
+                        last_handle: descriptor.handle,
+                        eof: true,
+                        descriptors: vec![descriptor.clone()],
+                    })
+                    .is_err()
+            })
+            || parameter_state.records.iter().any(|record| {
+                codec
+                    .encoded_parameter_state_page_len(&ParameterStatePage {
+                        observed_sample: parameter_state.observed_sample,
+                        records: vec![*record],
+                    })
+                    .is_err()
+            })
+        {
+            return Err(ControllerResourceAllocationError);
+        }
+        Ok(Self {
+            parameter_metadata,
+            parameter_state,
+        })
+    }
+}
+
 /// Small deterministic provider suitable for protocol conformance fixtures.
 #[derive(Clone, Debug)]
 pub struct MockProvider {
@@ -734,12 +790,27 @@ impl MockProvider {
         Ok(provider)
     }
 
+    /// Construct a provider with an eagerly validated revision-scoped parameter catalog.
+    pub fn try_with_retained_capacity_and_parameters(
+        capacity: ControllerRetainedCapacity,
+        catalog: MockParameterCatalog,
+    ) -> Result<Self, ControllerResourceAllocationError> {
+        let mut provider = Self::try_with_retained_capacity(capacity)?;
+        provider.parameter_metadata = catalog.parameter_metadata;
+        provider.parameter_state = catalog.parameter_state;
+        Ok(provider)
+    }
+
+    fn replace_parameter_catalog(&mut self, catalog: MockParameterCatalog) {
+        self.parameter_metadata = catalog.parameter_metadata;
+        self.parameter_state = catalog.parameter_state;
+        self.automation_parameter = None;
+    }
+
     /// Construct deterministic typed fixtures only after every configured collection is bounded.
     pub fn new(config: MockProviderConfig) -> Result<Self, ParameterProviderError> {
         let validation_codec = ProtocolCodec::default();
-        if config.parameter_metadata.len() > 256
-            || config.parameter_state.records.len() > 256
-            || config.counter_snapshot.values.len() > crate::CounterId::ValidationFailures as usize
+        if config.counter_snapshot.values.len() > crate::CounterId::ValidationFailures as usize
             || config.diagnostics.len() > 256
             || config
                 .parameter_metadata
@@ -816,9 +887,6 @@ impl ControlProvider for MockProvider {
         &mut self,
         request: ParameterMetadataRequest,
     ) -> Result<ParameterMetadataPage, ParameterProviderError> {
-        if self.parameter_metadata.len() > 256 {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
         let descriptors = self
             .parameter_metadata
             .iter()
@@ -843,9 +911,6 @@ impl ControlProvider for MockProvider {
         &mut self,
         request: &ParameterStateRequest,
     ) -> Result<ParameterStatePage, ParameterProviderError> {
-        if self.parameter_state.records.len() > 256 {
-            return Err(ParameterProviderError::LimitExceeded);
-        }
         let mut records = Vec::with_capacity(request.handles.len());
         for handle in &request.handles {
             let Some(record) = self
@@ -3187,7 +3252,10 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::ParameterStateGet {
                 request: parameter_request,
             } => match self.provider.parameter_state(parameter_request) {
-                Ok(page) => self.ok(Body::ParameterState(page)),
+                Ok(mut page) => {
+                    self.populate_parameter_state_values(&mut page);
+                    self.ok(Body::ParameterState(page))
+                }
                 Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::AutomationEnqueue { batch } => {
@@ -3459,6 +3527,33 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             if let Some(value) = resolve_named_nudge_value(&snapshot, current, nudge.size, 1) {
                 nudge.increment = value - current;
+            }
+        }
+    }
+
+    fn populate_parameter_state_values(&mut self, page: &mut ParameterStatePage) {
+        for record in &mut page.records {
+            let Ok(descriptor) = self
+                .provider
+                .parameter_descriptor(ParameterHandle(record.handle))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some((track_id, effect_id)) =
+                miso_engine_session::StableId::parse(&descriptor.track_id)
+                    .zip(miso_engine_session::StableId::parse(&descriptor.effect_id))
+            else {
+                continue;
+            };
+            if let Ok(Some(value)) = self.session.effect_parameter_value(
+                &track_id,
+                descriptor.rack.into_session(),
+                &effect_id,
+                descriptor.parameter_id,
+                descriptor.channel.into_session(),
+            ) {
+                record.value = value;
             }
         }
     }
@@ -3910,6 +4005,21 @@ impl<P: ControlProvider> ProtocolController<P> {
             self.provider.record_canceled_automation(canceled);
         }
         Ok(canceled)
+    }
+}
+
+impl ProtocolController<MockProvider> {
+    /// Replace the revision-scoped parameter catalog after its matched structural session commit.
+    ///
+    /// The caller prepares and validates `catalog` while the affine transaction is outstanding,
+    /// then consumes it only after [`Self::commit_prepared_structural`] succeeds. The ownership
+    /// swap itself cannot allocate or fail.
+    pub fn replace_parameter_catalog(&mut self, catalog: MockParameterCatalog) {
+        assert!(
+            !self.structural_outstanding(),
+            "a prepared structural command freezes the parameter catalog"
+        );
+        self.provider.replace_parameter_catalog(catalog);
     }
 }
 
