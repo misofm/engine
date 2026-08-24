@@ -5303,8 +5303,14 @@ mod tests {
         }
     }
 
-    struct Ramp;
-    impl GraphRuntimeProcessor for Ramp {
+    /// A source that writes the absolute sample index into the left plane and its negation into
+    /// the right, so a rendered block is its own oracle for *when* something changed.
+    ///
+    /// Deliberately not named for the workspace's ramp type: `check-effect-runtime-policy.sh`
+    /// pins that name's definition count at zero (#95), because a private copy of it inside an
+    /// effect is exactly the divergence the rule exists to prevent.
+    struct SampleIndexSource;
+    impl GraphRuntimeProcessor for SampleIndexSource {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.left.len() {
                 let value = (block.first_sample as usize + frame) as f32;
@@ -5364,7 +5370,7 @@ mod tests {
     #[test]
     fn a_console_parameter_command_applies_at_the_next_block_boundary() {
         let (mut producer, control) = control_pair(4);
-        let mut plan = console_effect_plan(0, Some(control), Box::new(Ramp));
+        let mut plan = console_effect_plan(0, Some(control), Box::new(SampleIndexSource));
         let block0 = render_console_blocks(&mut plan, 0, 1);
         assert_eq!(
             &block0[..4],
@@ -5403,7 +5409,7 @@ mod tests {
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
         let (mut producer, control) = control_pair(4);
-        let mut plan = console_effect_plan(LATENCY, Some(control), Box::new(Ramp));
+        let mut plan = console_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
         producer
             .try_push(
                 miso_engine_effect_contract::EffectControlRecordV1::Parameter {
@@ -5459,9 +5465,9 @@ mod tests {
     #[test]
     fn an_idle_console_changes_no_rendered_bit() {
         for latency in [0_u64, 3] {
-            let mut without = console_effect_plan(latency, None, Box::new(Ramp));
+            let mut without = console_effect_plan(latency, None, Box::new(SampleIndexSource));
             let (_producer, control) = control_pair(4);
-            let mut with = console_effect_plan(latency, Some(control), Box::new(Ramp));
+            let mut with = console_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
             let plain = render_console_blocks(&mut without, 0, 4);
             let console = render_console_blocks(&mut with, 0, 4);
             assert_eq!(
@@ -5477,7 +5483,7 @@ mod tests {
     #[test]
     fn the_console_effect_drops_nothing_within_its_prepared_capacity() {
         let (mut producer, control) = control_pair(2);
-        let mut plan = console_effect_plan(0, Some(control), Box::new(Ramp));
+        let mut plan = console_effect_plan(0, Some(control), Box::new(SampleIndexSource));
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             producer
                 .try_push(
