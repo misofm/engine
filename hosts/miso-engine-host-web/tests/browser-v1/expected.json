@@ -1,5 +1,5 @@
 {
-  "schema": "miso.web.browser.expected.v1",
+  "schema": "miso.web.browser.expected.v2",
   "sampleRateHz": 48000,
   "quantumFrames": 128,
   "renderedQuantaBeforeDispose": 3,
@@ -12,68 +12,21 @@
     "resources": "exact repr(C)/configured staging rows plus positive retained-production rows"
   },
   "pcm": {
-    "leftBlocks": [0, 0, 1, "positive-zero"],
-    "rightBlocks": ["positive-zero", "positive-zero", "positive-zero", "positive-zero"],
-    "absoluteTolerance": 0.000001
+    "leftBlocks": [
+      0,
+      0,
+      1,
+      "positive-zero"
+    ],
+    "rightBlocks": [
+      "positive-zero",
+      "positive-zero",
+      "positive-zero",
+      "positive-zero"
+    ]
   },
   "directOracle": {
-    "schema": "miso.web.browser.direct-oracle.v1",
-    "scalar": {
-      "initialStatus": {
-        "state": 2,
-        "lastResult": 0,
-        "backend": 0,
-        "sampleRateHz": 48000,
-        "quantumFrames": 128,
-        "nextAbsoluteSample": "0",
-        "renderedQuanta": "0",
-        "memoryBytes": 2359296
-      },
-      "beforeDisposeStatus": {
-        "state": 2,
-        "lastResult": 0,
-        "backend": 0,
-        "sampleRateHz": 48000,
-        "quantumFrames": 128,
-        "nextAbsoluteSample": "384",
-        "renderedQuanta": "3",
-        "memoryBytes": 2359296
-      },
-      "resources": {
-        "sampleRateHz": 48000,
-        "quantumFrames": 128,
-        "backend": 0,
-        "configBytes": "192",
-        "statusBytes": "80",
-        "sessionTomlBytes": "1048576",
-        "diagnosticBytes": "16384",
-        "sourceIdBytes": "1024",
-        "sourcePcmStagingBytes": "4096",
-        "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3233",
-        "bridgeRetainedBytes": "1074609",
-        "largestBridgeAllocationBytes": "1048576",
-        "sourceTotalBytes": "2562",
-        "sourceOverheadBytes": "1538",
-        "effectScalarStateBytes": "0",
-        "effectScalarScratchBytes": "0",
-        "builtinRetainedBytes": "578",
-        "graphSessionPlusPlanBytes": "15103",
-        "graphIncrementalPlanBytes": "13567",
-        "graphMetadataBytes": "3323",
-        "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "1048576"
-      },
-      "results": {
-        "first": 0,
-        "initialBackpressure": 6,
-        "seek": 0,
-        "repeat": 0,
-        "repeatBackpressure": 6,
-        "final": 0
-      },
-      "pcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
-    },
+    "schema": "miso.web.browser.direct-oracle.v2",
     "simd128": {
       "initialStatus": {
         "state": 2,
@@ -106,17 +59,17 @@
         "sourceIdBytes": "1024",
         "sourcePcmStagingBytes": "4096",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3233",
-        "bridgeRetainedBytes": "1074609",
+        "bridgeMetadataBytes": "3241",
+        "bridgeRetainedBytes": "1074617",
         "largestBridgeAllocationBytes": "1048576",
-        "sourceTotalBytes": "2562",
-        "sourceOverheadBytes": "1538",
+        "sourceTotalBytes": "1534",
+        "sourceOverheadBytes": "510",
         "effectScalarStateBytes": "0",
         "effectScalarScratchBytes": "0",
-        "builtinRetainedBytes": "578",
-        "graphSessionPlusPlanBytes": "15103",
-        "graphIncrementalPlanBytes": "13567",
-        "graphMetadataBytes": "3323",
+        "builtinRetainedBytes": "706",
+        "graphSessionPlusPlanBytes": "20524",
+        "graphIncrementalPlanBytes": "18988",
+        "graphMetadataBytes": "3367",
         "graphDelayBytes": "0",
         "largestNamedAllocationBytes": "1048576"
       },

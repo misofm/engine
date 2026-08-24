@@ -202,14 +202,13 @@ async function main() {
   const expected = JSON.parse(await readFile(process.argv[3], "utf8"));
   exactKeys(source, ["schema", "sourceId", "sampleRateHz", "quantumFrames", "blocks"], "source");
   const sessionToml = await readFile(path.join(fixtureDirectory, "session.toml"));
+  // W4-D1: one shipped artifact, so the direct oracle drives it alone. The cross-backend proof
+  // moved to two independent places: #83's G5 corpus runs the same kernels natively at
+  // Scalar/Simd4/Simd8 and under wasmtime with and without simd128, and `nativePcmF32leSha256`
+  // below is this exact session rendered through the native `AudioWorkletEngineHost`. Equality is
+  // `to_bits` (SHA-256 over little-endian f32 words), never a tolerance.
   const actual = {
-    schema: "miso.web.browser.direct-oracle.v1",
-    scalar: await runBackend(
-      path.join(artifactDirectory, "miso-engine-v2-audio-worklet.scalar.wasm"),
-      0,
-      sessionToml,
-      source,
-    ),
+    schema: "miso.web.browser.direct-oracle.v2",
     simd128: await runBackend(
       path.join(artifactDirectory, "miso-engine-v2-audio-worklet.simd128.wasm"),
       1,

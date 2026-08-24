@@ -21,8 +21,8 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "hosts/miso-engine-host-web/tests/browser-v1"
+# W4-D1: the scalar worklet artifact is no longer built or shipped.
 EXPECTED_ARTIFACTS = (
-    "miso-engine-v2-audio-worklet.scalar.wasm",
     "miso-engine-v2-audio-worklet.simd128.wasm",
     "miso-engine-v2-audio-worklet.js",
     "miso-engine-v2-audio-worklet-host.js",
@@ -109,7 +109,7 @@ def load_inputs() -> tuple[dict, dict]:
     expected = json.loads((FIXTURE / "expected.json").read_text())
     if source.get("schema") != "miso.web.browser.source.v1":
         raise ValueError("unexpected source fixture schema")
-    if expected.get("schema") != "miso.web.browser.expected.v1":
+    if expected.get("schema") != "miso.web.browser.expected.v2":
         raise ValueError("unexpected expected fixture schema")
     if source.get("sampleRateHz") != 48000 or source.get("quantumFrames") != 128:
         raise ValueError("fixture rate/quantum mismatch")
@@ -129,9 +129,9 @@ def load_inputs() -> tuple[dict, dict]:
     }:
         raise ValueError("expected fixture keys")
     direct = expected.get("directOracle", {})
-    if set(direct) != {"schema", "scalar", "simd128"}:
+    if set(direct) != {"schema", "simd128"}:
         raise ValueError("direct oracle keys")
-    if direct.get("schema") != "miso.web.browser.direct-oracle.v1":
+    if direct.get("schema") != "miso.web.browser.direct-oracle.v2":
         raise ValueError("direct oracle schema")
     session = (FIXTURE / "session.toml").read_text()
     for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 256"):
@@ -329,6 +329,11 @@ def float32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
+def pcm_bits(pcm: list[list[float]]) -> bytes:
+    """Little-endian f32 words. `==` on floats would equate `-0.0` and `+0.0`."""
+    return b"".join(struct.pack("<f", sample) for channel in pcm for sample in channel)
+
+
 def pcm_f32le_sha256(pcm: list[list[float]]) -> str:
     digest = hashlib.sha256()
     for channel in pcm:
@@ -340,13 +345,14 @@ def pcm_f32le_sha256(pcm: list[list[float]]) -> str:
 def validate_result(result: dict, source: dict, expected: dict) -> None:
     if set(result) != {"schema", "runs", "failure"}:
         raise AssertionError("browser result keys")
-    if result.get("schema") != "miso.web.browser.result.v1":
+    if result.get("schema") != "miso.web.browser.result.v2":
         raise AssertionError("browser result schema")
     runs = result.get("runs")
-    if not isinstance(runs, list) or len(runs) != 4:
-        raise AssertionError("exactly four fresh contexts required")
-    expected_backends = ["scalar", "scalar", "simd128", "simd128"]
-    tolerance = expected["pcm"]["absoluteTolerance"]
+    if not isinstance(runs, list) or len(runs) != 2:
+        raise AssertionError("exactly two fresh contexts required")
+    # W4-D1: one shipped artifact, so both runs are simd128. The cross-backend leg is #83's G5
+    # corpus plus the native digest asserted by direct-oracle.mjs, both `to_bits` identities.
+    expected_backends = ["simd128", "simd128"]
     for index, (run, backend) in enumerate(zip(runs, expected_backends, strict=True)):
         if set(run) != {
             "backend", "exposedMainQuantum", "memoryBytes", "memoryStable",
@@ -401,12 +407,9 @@ def validate_result(result: dict, source: dict, expected: dict) -> None:
                 raise AssertionError(f"run {index} PCM frames")
         if pcm_f32le_sha256(pcm) != expected["directOracle"][backend]["pcmF32leSha256"]:
             raise AssertionError(f"run {index} independent direct PCM")
-    if runs[0]["pcm"] != runs[1]["pcm"] or runs[2]["pcm"] != runs[3]["pcm"]:
+    # Packed bytes, not `==`: Python and JavaScript both equate `-0.0` with `+0.0`.
+    if pcm_bits(runs[0]["pcm"]) != pcm_bits(runs[1]["pcm"]):
         raise AssertionError("fresh-context determinism")
-    for scalar, simd in zip(runs[0]["pcm"], runs[2]["pcm"], strict=True):
-        for left, right in zip(scalar, simd, strict=True):
-            if abs(left - right) > tolerance:
-                raise AssertionError("scalar/simd parity")
     failure = result.get("failure")
     if failure != {
         "tag": "miso.error.v1",
@@ -421,7 +424,7 @@ def validate_result(result: dict, source: dict, expected: dict) -> None:
 
 def check_oracle(artifacts: pathlib.Path) -> None:
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen five-file set")
+        raise ValueError("artifact directory is not the exact frozen four-file set")
     runtime = shutil.which("node") or shutil.which("bun")
     if runtime is None:
         raise RuntimeError("Node.js-compatible runtime required for raw-Wasm oracle")
@@ -440,7 +443,7 @@ def check_oracle(artifacts: pathlib.Path) -> None:
 def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
     artifacts = args.artifacts.resolve()
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen five-file set")
+        raise ValueError("artifact directory is not the exact frozen four-file set")
     if args.output.exists() or args.output.with_suffix(args.output.suffix + ".sha256").exists():
         raise FileExistsError("refusing to overwrite browser evidence")
     require_clean_candidate()
