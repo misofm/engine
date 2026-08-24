@@ -10,6 +10,7 @@ name = "miso_engine_builtins_bench"
 path = "src/main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
 miso-engine-conformance.workspace = true

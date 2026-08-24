@@ -1,6 +1,8 @@
 //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
 #![allow(missing_docs)]
 
+use miso_engine_bench_support::json::escape;
+use miso_engine_bench_support::stats::per_mille as percentile;
 use miso_engine_graph_compiler::Backend;
 use std::{
     env,
@@ -431,11 +433,6 @@ fn record(
     )
 }
 
-fn percentile(sorted: &[u128], per_mille: usize) -> u128 {
-    let rank = (per_mille * sorted.len()).div_ceil(1000).max(1);
-    sorted[rank - 1]
-}
-
 fn taps() -> [SendTap; 7] {
     [
         SendTap::Input,
@@ -572,15 +569,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("String write");
     }
     output
-}
-
-fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 fn string_array(values: &[String]) -> String {

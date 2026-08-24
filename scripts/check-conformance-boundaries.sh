@@ -60,8 +60,9 @@ expected_conformance=$'miso-engine-core\nmiso-engine-dsp-reference\nmiso-engine-
     printf 'conformance boundary failure: conformance dependencies changed\n' >&2
     exit 1
 }
-[[ "$(dependency_names tools/miso-engine-conformance-bench/Cargo.toml)" == 'miso-engine-conformance' ]] || {
-    printf 'conformance boundary failure: benchmark may depend only on conformance\n' >&2
+expected_conformance_bench=$'miso-engine-bench-support\nmiso-engine-conformance'
+[[ "$(dependency_names tools/miso-engine-conformance-bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
+    printf 'conformance boundary failure: benchmark may depend only on conformance and the shared bench harness\n' >&2
     exit 1
 }
 

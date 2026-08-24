@@ -1,6 +1,8 @@
 //! Descriptive benchmark for the accepted effect interchange boundary.
 #![allow(missing_docs)]
 
+use miso_engine_bench_support::json;
+use miso_engine_bench_support::stats::nearest_rank;
 use std::{
     env,
     hint::black_box,
@@ -883,11 +885,6 @@ fn run_workload(workload: &str, inputs: &WorkloadInputs) -> (u64, Vec<u8>) {
     }
 }
 
-fn nearest_rank(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
-    let rank = sorted.len().saturating_mul(numerator).div_ceil(denominator);
-    sorted[rank.saturating_sub(1)]
-}
-
 fn required_env(name: &str) -> String {
     let value = env::var(name).unwrap_or_else(|_| panic!("missing environment {name}"));
     assert!(!value.is_empty(), "empty environment {name}");
@@ -905,21 +902,13 @@ fn optional_env(name: &str, missing: &mut Vec<String>) -> String {
 }
 
 fn json_string(value: &str) -> String {
-    let mut output = String::with_capacity(value.len() + 2);
-    output.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            value if value.is_control() => panic!("control character in metadata"),
-            value => output.push(value),
-        }
-    }
-    output.push('"');
-    output
+    // The control-character guard is this subject's own: metadata that carries one is a runner
+    // defect, not something to escape past. The escaping itself is the shared one (#104 F4).
+    assert!(
+        !value.chars().any(char::is_control),
+        "control character in metadata"
+    );
+    format!("\"{}\"", json::escape(value))
 }
 
 struct Metadata {

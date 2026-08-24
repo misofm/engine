@@ -1,10 +1,10 @@
 //! Bounded descriptive benchmark for conformance primitives.
 
+use miso_engine_bench_support::json::escape;
+use miso_engine_bench_support::stats::per_mille as percentile_nearest_rank;
 use std::{
     collections::BTreeSet,
-    env,
-    fmt::Write as _,
-    fs,
+    env, fs,
     hint::black_box,
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -177,14 +177,6 @@ fn json_record(
     )
 }
 
-fn percentile_nearest_rank(sorted: &[u128], per_mille: usize) -> u128 {
-    let rank = per_mille
-        .checked_mul(sorted.len())
-        .expect("bounded percentile")
-        .div_ceil(1_000);
-    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
-}
-
 struct Metadata {
     timestamp_epoch_seconds: u64,
     git_commit: String,
@@ -342,25 +334,6 @@ fn physical_core_count() -> String {
     } else {
         cores.len().to_string()
     }
-}
-
-fn escape(value: &str) -> String {
-    let mut output = String::new();
-    for character in value.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            character if character.is_control() => {
-                write!(&mut output, "\\u{:04x}", character as u32)
-                    .expect("writing to String cannot fail");
-            }
-            character => output.push(character),
-        }
-    }
-    output
 }
 
 fn json_string_array(values: &[String]) -> String {

@@ -1,13 +1,11 @@
 //! Frozen issue-035 benchmark emitter. The runner is the sole authorized timing entrypoint.
 
-#![allow(unsafe_code)]
-
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_bench_support::json;
+use miso_engine_bench_support::stats;
 use miso_engine_graph_compiler::Backend;
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    time::Instant,
-};
+use std::time::Instant;
 
 use miso_engine_builtins::{
     BuiltinChain, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock, Matrix2x2,
@@ -19,7 +17,7 @@ use miso_engine_builtins_compiler::{
 use miso_engine_conformance::DualAccumulatorDelayFactory;
 use miso_engine_core::realtime::{
     PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
-    audit::{self, ForbiddenOperation, record_allocator_violation},
+    audit::{self},
 };
 use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
 use miso_engine_effect_contract::{NativeEffectFactory, NativeEffectRegistry};
@@ -59,42 +57,6 @@ const WORKLOADS: [Workload; 5] = [
     Workload::MeterSuccessFull,
     Workload::Prepare256Tracks,
 ];
-
-struct AuditedAllocator;
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: forwards valid layouts to the system allocator; armed render allocation aborts.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forwards the allocator-provided layout unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: forwards the original pointer and layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: forwards the original allocation arguments unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Workload {
@@ -813,6 +775,10 @@ const fn unbounded_graph_caps() -> GraphCompileCaps {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     assert_eq!(
         std::env::args().count(),
         1,
@@ -1775,24 +1741,7 @@ fn json_raw(name: &str, value: String) -> String {
 }
 
 fn json_string(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            '\t' => quoted.push_str("\\t"),
-            character if character.is_control() => {
-                use core::fmt::Write;
-                write!(quoted, "\\u{:04x}", character as u32).expect("String write");
-            }
-            character => quoted.push(character),
-        }
-    }
-    quoted.push('"');
-    quoted
+    format!("\"{}\"", json::escape(value))
 }
 
 struct Percentiles {
@@ -1808,7 +1757,7 @@ impl Percentiles {
         let mut sorted = samples.to_vec();
         sorted.sort_unstable();
         assert!(!sorted.is_empty(), "measured batches");
-        let rank = |n: usize, d: usize| sorted[(sorted.len() * n).div_ceil(d).saturating_sub(1)];
+        let rank = |n: usize, d: usize| stats::nearest_rank(&sorted, n, d);
         Self {
             min: sorted[0],
             p50: rank(50, 100),

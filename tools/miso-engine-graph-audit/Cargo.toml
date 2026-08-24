@@ -28,6 +28,7 @@ name = "miso_engine_graph_audit_compressor"
 path = "src/compressor_main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 miso-engine-lane.workspace = true
 miso-engine-compressor.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }

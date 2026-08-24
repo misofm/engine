@@ -1,18 +1,15 @@
 //! Frozen descriptive benchmark for the production native dependency-wave renderer.
 
-#![allow(unsafe_code)]
-
 use core::num::NonZeroUsize;
+use miso_engine_bench_support::alloc as bench_alloc;
+use miso_engine_bench_support::stats::nearest_rank as percentile;
 use miso_engine_graph_compiler::Backend;
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    time::Instant,
-};
+use std::time::Instant;
 
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_core::realtime::{
     PlanarBufferMut, RenderIo, RenderTime,
-    audit::{self, AuditSnapshot, ForbiddenOperation, record_allocator_violation},
+    audit::{self, AuditSnapshot},
 };
 use miso_engine_effect_compiler::EffectPreparedSession;
 use miso_engine_graph::{
@@ -28,44 +25,6 @@ use miso_engine_session::{
 
 const OBSERVATIONS: usize = 1_000;
 const QUANTUM: usize = 128;
-
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every operation forwards the allocator's unchanged pointer/layout contract to System.
-// Any allocation or free on an armed render worker aborts rather than unwinding through GlobalAlloc.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original pointer/layout pair is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original allocation contract and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -129,6 +88,10 @@ impl GraphRuntimeProcessor for Identity {
 }
 
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     assert_eq!(
         std::env::args_os().count(),
         1,
@@ -252,11 +215,6 @@ fn emit_record(
         llvm,
         governor,
     );
-}
-
-fn percentile(values: &[u64], numerator: usize, denominator: usize) -> u64 {
-    let rank = values.len().saturating_mul(numerator).div_ceil(denominator);
-    values[rank.saturating_sub(1).min(values.len() - 1)]
 }
 
 fn env(name: &str) -> String {

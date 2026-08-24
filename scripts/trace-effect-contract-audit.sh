@@ -9,7 +9,7 @@ command -v jq >/dev/null 2>&1 || { printf 'jq is required\n' >&2; exit 1; }
 mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
-strace -ff -qq -o "$trace_prefix" "$binary" --audit "$blocks" --trace-markers >"$trace_root/audit.json"
+strace -ff -qq -s 200 -o "$trace_prefix" "$binary" --audit "$blocks" --trace-markers >"$trace_root/audit.json"
 marker_file=""
 while IFS= read -r candidate; do
     if rg -q 'MISO_ENGINE_EFFECT_RT_BEGIN' "$candidate" && rg -q 'MISO_ENGINE_EFFECT_RT_END' "$candidate"; then

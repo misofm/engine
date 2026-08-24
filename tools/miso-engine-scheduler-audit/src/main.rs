@@ -1,16 +1,12 @@
 //! Fixed 10,000-callback audit of the shared Issue-039 q128 native graph fixture.
 
-#![allow(unsafe_code)]
-
 use core::num::NonZeroUsize;
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    sync::mpsc,
-};
+use miso_engine_bench_support::alloc as bench_alloc;
+use std::sync::mpsc;
 
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanarBufferMut, RenderIo, RenderTime, SwapOutcome,
-    audit::{self, AuditSnapshot, ForbiddenOperation, record_allocator_violation},
+    audit::{self, AuditSnapshot},
     plan_exchange,
 };
 use miso_engine_graph::{NativeGraphWorkerPoolV1, NativeWorkerPoolConfigV1, SchedulerSelectionV1};
@@ -25,48 +21,11 @@ const WORKERS: usize = 3;
 /// One q128 block at 48 kHz, in nanoseconds: the pacing interval of the paced mode.
 const BLOCK_PERIOD_NS: u128 = 2_666_666;
 
-struct AuditedAllocator;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AuditedAllocator = AuditedAllocator;
-
-// SAFETY: every operation forwards the allocator's unchanged pointer/layout contract to System.
-// An allocation or free on any armed render worker aborts instead of unwinding through GlobalAlloc.
-unsafe impl GlobalAlloc for AuditedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the allocator-provided layout is forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if record_allocator_violation(ForbiddenOperation::Deallocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original pointer/layout pair is forwarded unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if record_allocator_violation(ForbiddenOperation::Allocation) {
-            std::process::abort();
-        }
-        // SAFETY: the original allocation contract and requested size are forwarded unchanged.
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
-
 fn main() {
+    // #104 F4: prove the shared audited allocator is the one serving this process. A global
+    // allocator registered by a dependency that is never named may not be linked at all, and a
+    // silently absent audit reports success for every gate below it.
+    bench_alloc::assert_installed();
     assert_eq!(std::env::args_os().count(), 1, "audit accepts no arguments");
 
     // Paced mode renders at the real 2.667 ms cadence so the workers actually park between

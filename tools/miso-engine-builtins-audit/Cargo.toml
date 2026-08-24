@@ -18,6 +18,7 @@ name = "miso_engine_builtins_audit_fixture"
 path = "src/fixture_main.rs"
 
 [dependencies]
+miso-engine-bench-support.workspace = true
 miso-engine-builtins.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-dsp-reference.workspace = true
