@@ -23,6 +23,9 @@ run_target() {
 
     mkdir -p "$run_directory"
     cp "$seed_directory"/*.hex "$run_directory/"
+    # lane's D4 guard requires x86-64-v3; cargo-fuzz rebuilds RUSTFLAGS and would drop the
+    # workspace pin, so thread it through explicitly (#84).
+    RUSTFLAGS="-C target-feature=+avx2,+fma${RUSTFLAGS:+ $RUSTFLAGS}" \
     cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target_name" "$run_directory" -- \
         "-runs=$FUZZ_RUNS" \
         "-seed=$2" \
