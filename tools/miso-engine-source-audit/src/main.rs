@@ -157,7 +157,7 @@ fn main() {
     audit::warm_up();
     audit::reset();
     let mut resumed_at = None;
-    eprintln!("MISO_SOURCE_RT_BEGIN");
+    eprintln!("MISO_ENGINE_SOURCE_RT_BEGIN");
     for block in 0..BLOCKS {
         if block == 1 {
             controller
@@ -226,7 +226,7 @@ fn main() {
             resumed_at = Some(u64::from(QUANTUM) * 3);
         }
     }
-    eprintln!("MISO_SOURCE_RT_END");
+    eprintln!("MISO_ENGINE_SOURCE_RT_END");
     let snapshot = audit::snapshot();
     assert_eq!(output_pcm.as_ptr() as usize, output_address);
     assert_eq!(resumed_at, Some(u64::from(QUANTUM) * 3));

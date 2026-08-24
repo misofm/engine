@@ -24,7 +24,7 @@ const F64_TOLERANCE: f64 = 1e-12;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const EQUATION_VERSION: u64 = 0x4930_3435_534f_4c32; // I045_SOL2
-const TRANSCRIPT_ENV: &str = "MISO_ISSUE_045_TRANSCRIPT";
+const TRANSCRIPT_ENV: &str = "MISO_ENGINE_TRANSCRIPT_045";
 
 struct Transcript {
     path: PathBuf,
@@ -36,7 +36,7 @@ impl Transcript {
     fn create() -> Self {
         let path = std::env::var_os(TRANSCRIPT_ENV)
             .map(PathBuf::from)
-            .expect("the final Issue-045 run requires MISO_ISSUE_045_TRANSCRIPT");
+            .expect("the final Issue-045 run requires MISO_ENGINE_TRANSCRIPT_045");
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)

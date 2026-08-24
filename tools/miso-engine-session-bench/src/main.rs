@@ -331,7 +331,7 @@ impl Metadata {
         let governor_or_power_mode =
             fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
                 .map(|text| text.trim().to_owned())
-                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_POWER_MODE"));
+                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"));
         let rustc_version = command(&["rustc", "-V"]);
         let llvm_version = field(&compiler_verbose, "LLVM version: ");
         let target_triple = field(&compiler_verbose, "host: ");
@@ -341,7 +341,7 @@ impl Metadata {
         let target_cpu = variable("MISO_ENGINE_BENCH_TARGET_CPU");
         let compile_target_features = variable("MISO_ENGINE_BENCH_TARGET_FEATURES");
         let runtime_or_browser = variable("MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER");
-        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD");
+        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE");
         let fields = [
             ("cpu_model", &cpu_model),
             ("physical_cores", &physical_cores),

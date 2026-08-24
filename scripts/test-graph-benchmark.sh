@@ -56,9 +56,9 @@ expected_bytes="$(wc -c <"$template/frozen.raw.jsonl" | tr -d ' ')"
 cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'cargo-stub\n' >>"$MISO_TEST_LAUNCH_LOG"
-case "${MISO_TEST_MODE:?}" in
-    success) cat "$MISO_TEST_FROZEN_RAW" ;;
+printf 'cargo-stub\n' >>"$MISO_ENGINE_TEST_LAUNCH_LOG"
+case "${MISO_ENGINE_TEST_MODE:?}" in
+    success) cat "$MISO_ENGINE_TEST_FROZEN_RAW" ;;
     workload_failure) printf '{"partial":"workload"}\n'; exit 73 ;;
     interrupted_partial) printf '{"partial":"interrupted"}\n'; kill -TERM "$BASHPID" ;;
     validator_failure) printf '{}\n' ;;
@@ -77,8 +77,8 @@ new_case() {
 
 run_runner() {
     local mode=$1
-    MISO_TEST_MODE="$mode" MISO_TEST_LAUNCH_LOG="$launch_log" \
-        MISO_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" \
+    MISO_ENGINE_TEST_MODE="$mode" MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
+        MISO_ENGINE_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" \
         PATH="$case_root/bin:$PATH" bash "$case_root/scripts/run-graph-compiler-benchmark.sh"
 }
 
@@ -217,8 +217,8 @@ new_case inverted-status-mutation
 sed '0,/exit "\$status"/s//exit 0/' "$case_root/scripts/run-graph-compiler-benchmark.sh" >"$case_root/mutated-runner.sh"
 chmod 755 "$case_root/mutated-runner.sh"
 set +e
-MISO_TEST_MODE=workload_failure MISO_TEST_LAUNCH_LOG="$launch_log" \
-    MISO_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" PATH="$case_root/bin:$PATH" \
+MISO_ENGINE_TEST_MODE=workload_failure MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_ENGINE_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" PATH="$case_root/bin:$PATH" \
     bash "$case_root/mutated-runner.sh" >/dev/null 2>&1
 status=$?
 set -e
@@ -230,8 +230,8 @@ sed -e 's/^if ! ($/if !/' \
     "$case_root/scripts/run-graph-compiler-benchmark.sh" >"$case_root/mutated-runner.sh"
 chmod 755 "$case_root/mutated-runner.sh"
 bash -n "$case_root/mutated-runner.sh"
-if MISO_TEST_MODE=success MISO_TEST_LAUNCH_LOG="$launch_log" \
-    MISO_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" PATH="$case_root/bin:$PATH" \
+if MISO_ENGINE_TEST_MODE=success MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_ENGINE_TEST_FROZEN_RAW="$case_root/frozen.raw.jsonl" PATH="$case_root/bin:$PATH" \
     bash "$case_root/mutated-runner.sh" >/dev/null 2>&1; then
     printf 'detached if mutation preserved the successful runner contract\n' >&2
     exit 1

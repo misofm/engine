@@ -141,8 +141,8 @@ struct BenchmarkIdentities {
 impl BenchmarkIdentities {
     fn from_environment() -> Self {
         Self {
-            candidate_commit: required_identity("MISO_ENGINE_BUILTINS_BENCH_CANDIDATE_COMMIT", 40),
-            binary_sha256: required_identity("MISO_ENGINE_BUILTINS_BENCH_BINARY_SHA256", 64),
+            candidate_commit: required_identity("MISO_ENGINE_BENCH_CANDIDATE_COMMIT", 40),
+            binary_sha256: required_identity("MISO_ENGINE_BENCH_BINARY_SHA256", 64),
         }
     }
 
@@ -825,13 +825,13 @@ fn main() {
         fixture_sha256, INPUT_MANIFEST_SHA256,
         "frozen fixture manifest"
     );
-    eprintln!("MISO_BUILTINS_BENCH_PHASE workload_started");
+    eprintln!("MISO_ENGINE_BENCH_PHASE workload_started");
     let mut render_states = prepare_render_round_states();
     for rate_hz in RATES {
         warmup_prepare(rate_hz);
     }
-    eprintln!("MISO_BUILTINS_BENCH_PHASE warmup_complete");
-    eprintln!("MISO_BUILTINS_BENCH_PHASE timed_started");
+    eprintln!("MISO_ENGINE_BENCH_PHASE warmup_complete");
+    eprintln!("MISO_ENGINE_BENCH_PHASE timed_started");
     for (index, plan) in measured_record_plans().into_iter().enumerate() {
         let measurement = if plan.workload.is_prepare() {
             measure_prepare(plan.rate_hz)
@@ -855,7 +855,7 @@ fn main() {
             )
         );
         if (index + 1) % (WORKLOADS.len() * RATES.len()) == 0 {
-            eprintln!("MISO_BUILTINS_BENCH_PHASE round_{}_complete", plan.round);
+            eprintln!("MISO_ENGINE_BENCH_PHASE round_{}_complete", plan.round);
         }
     }
 }

@@ -78,31 +78,31 @@ run_mode() {
     }
 
     local marker
-    for marker in MISO_039_PHASE_PREPARED MISO_039_PHASE_ARMED MISO_039_PHASE_DISARMED \
-        MISO_039_PHASE_RETIRED; do
+    for marker in MISO_ENGINE_SCHEDULER_PHASE_PREPARED MISO_ENGINE_SCHEDULER_PHASE_ARMED MISO_ENGINE_SCHEDULER_PHASE_DISARMED \
+        MISO_ENGINE_SCHEDULER_PHASE_RETIRED; do
         local count
         count=$( (rg --no-filename -o --fixed-strings "$marker" "${trace_files[@]}" || true) |
             wc -l | tr -d '[:space:]')
         [[ "$count" == 1 ]] || fail "$mode: expected exactly one $marker marker"
     done
 
-    mapfile -t prepared_marker_files < <(rg -l --fixed-strings MISO_039_PHASE_PREPARED "${trace_files[@]}")
+    mapfile -t prepared_marker_files < <(rg -l --fixed-strings MISO_ENGINE_SCHEDULER_PHASE_PREPARED "${trace_files[@]}")
     [[ "${#prepared_marker_files[@]}" == 1 ]] || fail "$mode: prepared marker spans threads"
     local coordinator_trace="${prepared_marker_files[0]}"
-    rg -q --fixed-strings MISO_039_PHASE_ARMED "$coordinator_trace" ||
+    rg -q --fixed-strings MISO_ENGINE_SCHEDULER_PHASE_ARMED "$coordinator_trace" ||
         fail "$mode: armed marker moved threads"
-    rg -q --fixed-strings MISO_039_PHASE_DISARMED "$coordinator_trace" ||
+    rg -q --fixed-strings MISO_ENGINE_SCHEDULER_PHASE_DISARMED "$coordinator_trace" ||
         fail "$mode: disarmed marker moved threads"
 
     local armed disarmed
-    armed=$(marker_timestamp MISO_039_PHASE_ARMED "$coordinator_trace")
-    disarmed=$(marker_timestamp MISO_039_PHASE_DISARMED "$coordinator_trace")
+    armed=$(marker_timestamp MISO_ENGINE_SCHEDULER_PHASE_ARMED "$coordinator_trace")
+    disarmed=$(marker_timestamp MISO_ENGINE_SCHEDULER_PHASE_DISARMED "$coordinator_trace")
     [[ -n "$armed" && -n "$disarmed" ]] || fail "$mode: strace timestamps missing from markers"
     awk -v a="$armed" -v d="$disarmed" 'BEGIN { exit !(a < d) }' ||
         fail "$mode: armed interval has no positive ordering"
 
     local prepared_line
-    prepared_line=$(rg -n --fixed-strings MISO_039_PHASE_PREPARED "$coordinator_trace" | cut -d: -f1)
+    prepared_line=$(rg -n --fixed-strings MISO_ENGINE_SCHEDULER_PHASE_PREPARED "$coordinator_trace" | cut -d: -f1)
     mapfile -t worker_tids < <(
         sed -n "1,$((prepared_line - 1))p" "$coordinator_trace" |
             awk '$NF ~ /^[0-9]+$/ && ($0 ~ /clone[(]/ || $0 ~ /clone3[(]/ || $0 ~ /clone resumed>/) { print $NF }'

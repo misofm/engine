@@ -3,7 +3,7 @@
 //! Drives the two production shapes -- an eight-lane homogeneous bank and a scalar instance with a
 //! connected sidechain -- for [`BLOCKS`] blocks inside an armed render scope, and reports whether
 //! anything allocated, locked, logged or reached the operating system. The markers are what
-//! `strace` brackets: nothing between `MISO_GATE_EXPANDER_RT_BEGIN` and `..._RT_END` may be a
+//! `strace` brackets: nothing between `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` and `..._RT_END` may be a
 //! syscall.
 //!
 //! Zero allocation is the claim under audit. The gate allocates exactly two `Box<[f32]>` rings per
@@ -113,7 +113,7 @@ fn main() {
 
     audit::warm_up();
     audit::reset();
-    eprintln!("MISO_GATE_EXPANDER_RT_BEGIN");
+    eprintln!("MISO_ENGINE_GATE_EXPANDER_RT_BEGIN");
     audit::in_render_scope(|| {
         for block in 0..BLOCKS {
             // A 1 kHz tone that is gated on and off every 100 ms, so both one-pole rates, the hold
@@ -174,7 +174,7 @@ fn main() {
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     });
-    eprintln!("MISO_GATE_EXPANDER_RT_END");
+    eprintln!("MISO_ENGINE_GATE_EXPANDER_RT_END");
     let snapshot = audit::snapshot();
     assert_eq!(bank_left.as_ptr() as usize, bank_left_address);
     assert_eq!(left.as_ptr() as usize, left_address);

@@ -28,10 +28,10 @@ if [[ -n "$(git -C "$repo_root" status --short)" ]]; then
   exit 2
 fi
 
-browser=${MISO_CHROMIUM_BINARY:-}
-driver=${MISO_CHROMEDRIVER_BINARY:-}
+browser=${MISO_ENGINE_CHROMIUM_BINARY:-}
+driver=${MISO_ENGINE_CHROMEDRIVER_BINARY:-}
 if [[ -z "$browser" || ! -x "$browser" || -z "$driver" || ! -x "$driver" ]]; then
-  echo "set MISO_CHROMIUM_BINARY and MISO_CHROMEDRIVER_BINARY to matched executables" >&2
+  echo "set MISO_ENGINE_CHROMIUM_BINARY and MISO_ENGINE_CHROMEDRIVER_BINARY to matched executables" >&2
   exit 2
 fi
 

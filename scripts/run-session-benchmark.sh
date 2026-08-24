@@ -7,14 +7,14 @@ set -euo pipefail
 target_features="${RUSTFLAGS:-target-default}"
 output="$(
     MISO_ENGINE_BENCH_POWER_SOURCE="${MISO_ENGINE_BENCH_POWER_SOURCE:-unknown}" \
-    MISO_ENGINE_BENCH_POWER_MODE="${MISO_ENGINE_BENCH_POWER_MODE:-unknown}" \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="${MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE:-unknown}" \
     MISO_ENGINE_BENCH_OPT_LEVEL=3 \
     MISO_ENGINE_BENCH_LTO=off \
     MISO_ENGINE_BENCH_CODEGEN_UNITS=16 \
     MISO_ENGINE_BENCH_TARGET_CPU=target-default \
     MISO_ENGINE_BENCH_TARGET_FEATURES="$target_features" \
     MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER=native-cli \
-    MISO_ENGINE_BENCH_BACKGROUND_LOAD="not measured; descriptive baseline" \
+    MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="not measured; descriptive baseline" \
     cargo run --locked --release -q -p miso-engine-session-bench
 )"
 

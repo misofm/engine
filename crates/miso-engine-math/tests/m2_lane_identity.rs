@@ -181,7 +181,7 @@ fn check(
     }
 
     let actual = digest(&oracle);
-    if std::env::var_os("MISO_MATH_PIN").is_some() {
+    if std::env::var_os("MISO_ENGINE_MATH_PIN").is_some() {
         println!("{name} digest: {:?}", actual);
         return;
     }

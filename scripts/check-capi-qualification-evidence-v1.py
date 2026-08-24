@@ -268,8 +268,8 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
     if not isinstance(output_address, int) or output_address <= 0 or realtime_raw != expected_audits()[1]:
         raise ValueError("raw realtime audit differs")
     trace = (stage / "realtime-trace.1760548").read_text().splitlines()
-    begin = [index for index, line in enumerate(trace) if "MISO_RT_BEGIN" in line]
-    end = [index for index, line in enumerate(trace) if "MISO_RT_END" in line]
+    begin = [index for index, line in enumerate(trace) if "MISO_ENGINE_RT_BEGIN" in line]
+    end = [index for index, line in enumerate(trace) if "MISO_ENGINE_RT_END" in line]
     if len(begin) != 1 or len(end) != 1 or end[0] != begin[0] + 1:
         raise ValueError("armed realtime trace contains a syscall")
 

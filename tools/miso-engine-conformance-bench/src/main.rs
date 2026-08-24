@@ -237,7 +237,7 @@ impl Metadata {
         let governor_or_power_mode =
             fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
                 .map(|text| text.trim().to_owned())
-                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_POWER_MODE"));
+                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"));
         let compiler = command(&["rustc", "-V"]);
         let llvm_version = field(&compiler_verbose, "LLVM version: ");
         let target_triple = field(&compiler_verbose, "host: ");
@@ -246,7 +246,7 @@ impl Metadata {
         let codegen_units = variable("MISO_ENGINE_BENCH_CODEGEN_UNITS");
         let target_cpu = variable("MISO_ENGINE_BENCH_TARGET_CPU");
         let compile_target_features = variable("MISO_ENGINE_BENCH_TARGET_FEATURES");
-        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD");
+        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE");
         let fields = [
             ("git_commit", &git_commit),
             ("workspace_dirty", &workspace_dirty),

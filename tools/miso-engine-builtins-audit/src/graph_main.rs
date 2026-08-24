@@ -362,14 +362,14 @@ fn traced_range(
     end_exclusive: u64,
     plan_id: u64,
 ) {
-    eprintln!("MISO_ISSUE069_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN");
     for block in first..end_exclusive {
         let report = render(owner, output, block);
         assert_eq!(report.swap, SwapOutcome::DeferredRetirementFull);
         assert_eq!(report.active_epoch.0, 1);
         assert_eq!(report.render.plan_id, plan_id);
     }
-    eprintln!("MISO_ISSUE069_GRAPH_RT_END");
+    eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_END");
 }
 
 fn traced_render(
@@ -377,9 +377,9 @@ fn traced_render(
     output: &mut [f32; QUANTUM * 2],
     block: u64,
 ) -> RealtimeRenderReport {
-    eprintln!("MISO_ISSUE069_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN");
     let report = render(owner, output, block);
-    eprintln!("MISO_ISSUE069_GRAPH_RT_END");
+    eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_END");
     report
 }
 

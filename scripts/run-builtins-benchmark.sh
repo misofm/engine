@@ -81,10 +81,10 @@ artifact_identity() {
 refresh_progress() {
     workload_started=0 timed_started=0 warmup_passes=0 measured_rounds_completed=0
     if [[ -f "$stderr_output" && ! -L "$stderr_output" ]] && command -v awk >/dev/null 2>&1; then
-        workload_started="$(awk '$0 == "MISO_BUILTINS_BENCH_PHASE workload_started" {n++} END {print n + 0}' "$stderr_output")"
-        timed_started="$(awk '$0 == "MISO_BUILTINS_BENCH_PHASE timed_started" {n++} END {print n + 0}' "$stderr_output")"
-        warmup_passes="$(awk '$0 == "MISO_BUILTINS_BENCH_PHASE warmup_complete" {n++} END {print n + 0}' "$stderr_output")"
-        measured_rounds_completed="$(awk '$0 == "MISO_BUILTINS_BENCH_PHASE round_1_complete" || $0 == "MISO_BUILTINS_BENCH_PHASE round_2_complete" {n++} END {print n + 0}' "$stderr_output")"
+        workload_started="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE workload_started" {n++} END {print n + 0}' "$stderr_output")"
+        timed_started="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE timed_started" {n++} END {print n + 0}' "$stderr_output")"
+        warmup_passes="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE warmup_complete" {n++} END {print n + 0}' "$stderr_output")"
+        measured_rounds_completed="$(awk '$0 == "MISO_ENGINE_BENCH_PHASE round_1_complete" || $0 == "MISO_ENGINE_BENCH_PHASE round_2_complete" {n++} END {print n + 0}' "$stderr_output")"
     fi
 }
 publish_disposition() {
@@ -261,8 +261,8 @@ exec {stderr_fd}>"$stderr_output"
 failure_reason=workload_failed
 launch_attempted=1
 set +e
-MISO_ENGINE_BUILTINS_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
-MISO_ENGINE_BUILTINS_BENCH_BINARY_SHA256="$binary_sha256" \
+MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
+MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha256" \
 "$binary" >&"$raw_fd" 2>&"$stderr_fd"
 workload_status=$?
 set -e

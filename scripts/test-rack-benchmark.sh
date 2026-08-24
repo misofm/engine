@@ -175,24 +175,24 @@ cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p target/release
-cp "$MISO_TEST_FAKE_BENCH" target/release/miso_engine_rack_bench
+cp "$MISO_ENGINE_TEST_FAKE_BENCH" target/release/miso_engine_rack_bench
 chmod 755 target/release/miso_engine_rack_bench
 EOF
 cat >"$template/bin/rustc" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${MISO_TEST_RUSTC_PIPE_FAIL:-0}" == 1 && "${1:-}" == -vV ]]; then
+if [[ "${MISO_ENGINE_TEST_RUSTC_PIPE_FAIL:-0}" == 1 && "${1:-}" == -vV ]]; then
     printf 'host: x86_64-unknown-linux-gnu\nLLVM version: 22.1.6\n'
     exit 73
 fi
-exec "$MISO_TEST_REAL_RUSTC" "$@"
+exec "$MISO_ENGINE_TEST_REAL_RUSTC" "$@"
 EOF
 cat >"$template/scripts/fixtures/fake-bench.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$MISO_ENGINE_RACK_BENCH_ROUND" >>"$MISO_TEST_LAUNCH_LOG"
-mode=${MISO_TEST_BENCH_MODE:-success}
-round=$MISO_ENGINE_RACK_BENCH_ROUND
+printf '%s\n' "$MISO_ENGINE_BENCH_ROUND" >>"$MISO_ENGINE_TEST_LAUNCH_LOG"
+mode=${MISO_ENGINE_TEST_BENCH_MODE:-success}
+round=$MISO_ENGINE_BENCH_ROUND
 if [[ "$mode" == interrupt && "$round" == warmup ]]; then
     kill -TERM "$PPID"
     exit 143
@@ -218,7 +218,7 @@ if [[ "$mode" == invalid ]]; then
 fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 base="$root/scripts/fixtures/rack-benchmark-validator-record.json"
-common=(--argjson round "$round" --arg candidate "$MISO_ENGINE_RACK_BENCH_CANDIDATE_SHA256" --arg binary "$MISO_ENGINE_RACK_BENCH_BINARY_SHA256")
+common=(--argjson round "$round" --arg candidate "$MISO_ENGINE_BENCH_CANDIDATE_SHA256" --arg binary "$MISO_ENGINE_BENCH_BINARY_SHA256")
 jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary' "$base"
 jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="host_selected_eight_track_bank"|.workload_id="issue038.host_selected_eight_track_bank.48000hz.q128"|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=0|.output_sha256="5555555555555555555555555555555555555555555555555555555555555555"' "$base"
 jq -c "${common[@]}" '.round=$round|.candidate_commit_sha256=$candidate|.binary_sha256=$binary|.workload_kind="mixed_twelve_track_graph"|.workload_id="issue038.mixed_twelve_track_graph.48000hz.q128"|.tracks=12|.bank_backend="Simd8"|.bank_width=8|.bank_count=1|.scalar_tail_count=2|.scalar_fallback_count=2|.identity_lane_count=2|.input_sha256="6666666666666666666666666666666666666666666666666666666666666666"|.output_sha256="7777777777777777777777777777777777777777777777777777777777777777"' "$base"
@@ -236,10 +236,10 @@ new_case() {
 }
 run_case() {
     local mode=$1
-    MISO_TEST_BENCH_MODE="$mode" \
-    MISO_TEST_LAUNCH_LOG="$launch_log" \
-    MISO_TEST_FAKE_BENCH="$case_root/scripts/fixtures/fake-bench.sh" \
-    MISO_TEST_REAL_RUSTC="$(command -v rustc)" \
+    MISO_ENGINE_TEST_BENCH_MODE="$mode" \
+    MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_ENGINE_TEST_FAKE_BENCH="$case_root/scripts/fixtures/fake-bench.sh" \
+    MISO_ENGINE_TEST_REAL_RUSTC="$(command -v rustc)" \
     PATH="$case_root/bin:$PATH" \
     bash "$case_root/scripts/run-rack-benchmark.sh"
 }
@@ -298,7 +298,7 @@ expect_failure_reason validation_failed
 [[ ! -e "$case_root/artifacts/issue038/rack-benchmark.accepted.jsonl" ]]
 
 new_case pipe-failure
-if MISO_TEST_RUSTC_PIPE_FAIL=1 run_case success >/dev/null 2>&1; then
+if MISO_ENGINE_TEST_RUSTC_PIPE_FAIL=1 run_case success >/dev/null 2>&1; then
     printf 'runner swallowed metadata pipeline failure\n' >&2
     exit 1
 fi

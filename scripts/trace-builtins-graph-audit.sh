@@ -19,7 +19,7 @@ mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
 strace -ff -qq -ttt -o "$trace_prefix" "$binary" >"$trace_root/audit.json"
-"$validator" "$trace_root" MISO_ISSUE069_GRAPH_RT_BEGIN MISO_ISSUE069_GRAPH_RT_END 4 \
+"$validator" "$trace_root" MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN MISO_ENGINE_BUILTINS_GRAPH_RT_END 4 \
   >"$trace_root/validator.json"
 jq -e '
   .schema_version == 1 and .trace_files >= 2 and .intervals == 4 and .violations == 0

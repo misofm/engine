@@ -90,7 +90,7 @@ fn main() {
 
     audit::warm_up();
     audit::reset();
-    eprintln!("MISO_PARAMETRIC_EQ_RT_BEGIN");
+    eprintln!("MISO_ENGINE_PARAMETRIC_EQ_RT_BEGIN");
     audit::in_render_scope(|| {
         for block in 0..BLOCKS {
             left.fill(if block & 1 == 0 { 0.125 } else { -0.375 });
@@ -115,7 +115,7 @@ fn main() {
             assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         }
     });
-    eprintln!("MISO_PARAMETRIC_EQ_RT_END");
+    eprintln!("MISO_ENGINE_PARAMETRIC_EQ_RT_END");
     let snapshot = audit::snapshot();
     assert_eq!(left.as_ptr() as usize, left_address);
     assert_eq!(right.as_ptr() as usize, right_address);

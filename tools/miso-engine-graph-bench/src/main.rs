@@ -524,7 +524,7 @@ fn metadata() -> Metadata {
         .trim()
         .to_owned(),
         os: format!("{} {}", env::consts::OS, command("uname", &["-r"])),
-        governor_or_power_mode: value("MISO_ENGINE_BENCH_POWER_MODE", &mut missing),
+        governor_or_power_mode: value("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE", &mut missing),
         power_source: value("MISO_ENGINE_BENCH_POWER_SOURCE", &mut missing),
         rustc,
         llvm,
@@ -533,7 +533,7 @@ fn metadata() -> Metadata {
         opt_level: value("MISO_ENGINE_BENCH_OPT_LEVEL", &mut missing),
         lto: value("MISO_ENGINE_BENCH_LTO", &mut missing),
         codegen_units: value("MISO_ENGINE_BENCH_CODEGEN_UNITS", &mut missing),
-        background_load: value("MISO_ENGINE_BENCH_BACKGROUND_LOAD", &mut missing),
+        background_load: value("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE", &mut missing),
         missing,
     }
 }

@@ -124,24 +124,24 @@ cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p target/release
-cp "$MISO_TEST_FAKE_BENCH" target/release/miso_engine_scheduler_bench
+cp "$MISO_ENGINE_TEST_FAKE_BENCH" target/release/miso_engine_scheduler_bench
 chmod 755 target/release/miso_engine_scheduler_bench
 EOF
 cat >"$template/bin/rustc" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${MISO_TEST_RUSTC_PIPE_FAIL:-0}" == 1 && "${1:-}" == -vV ]]; then
+if [[ "${MISO_ENGINE_TEST_RUSTC_PIPE_FAIL:-0}" == 1 && "${1:-}" == -vV ]]; then
     printf 'host: x86_64-unknown-linux-gnu\nLLVM version: 22.1.6\n'
     exit 73
 fi
-exec "$MISO_TEST_REAL_RUSTC" "$@"
+exec "$MISO_ENGINE_TEST_REAL_RUSTC" "$@"
 EOF
 cat >"$template/scripts/fixtures/fake-bench.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$MISO_ENGINE_SCHEDULER_BENCH_ROUND" >>"$MISO_TEST_LAUNCH_LOG"
-mode=${MISO_TEST_BENCH_MODE:-success}
-round=$MISO_ENGINE_SCHEDULER_BENCH_ROUND
+printf '%s\n' "$MISO_ENGINE_BENCH_ROUND" >>"$MISO_ENGINE_TEST_LAUNCH_LOG"
+mode=${MISO_ENGINE_TEST_BENCH_MODE:-success}
+round=$MISO_ENGINE_BENCH_ROUND
 if [[ "$mode" == interrupt && "$round" == warmup ]]; then kill -TERM "$PPID"; exit 143; fi
 if [[ "$mode" == warmup_fail && "$round" == warmup ]]; then printf 'synthetic warmup failure\n' >&2; exit 71; fi
 if [[ "$mode" == round1_fail && "$round" == 1 ]]; then printf '{"partial":"round1"}\n'; exit 72; fi
@@ -150,7 +150,7 @@ if [[ "$round" == warmup ]]; then round=1; fi
 if [[ "$mode" == invalid ]]; then printf '{}\n{}\n{}\n'; exit 0; fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 base="$root/scripts/fixtures/scheduler-benchmark-validator-record.json"
-common=(--argjson round "$round" --arg candidate "$MISO_ENGINE_SCHEDULER_BENCH_CANDIDATE_SHA256" --arg binary "$MISO_ENGINE_SCHEDULER_BENCH_BINARY_SHA256")
+common=(--argjson round "$round" --arg candidate "$MISO_ENGINE_BENCH_CANDIDATE_SHA256" --arg binary "$MISO_ENGINE_BENCH_BINARY_SHA256")
 jq -c "${common[@]}" '.round=$round|.candidate_sha256=$candidate|.binary_sha256=$binary' "$base"
 jq -c "${common[@]}" '.round=$round|.candidate_sha256=$candidate|.binary_sha256=$binary|.mode="two_lane"|.selected_lanes=2|.worker_count=1' "$base"
 jq -c "${common[@]}" '.round=$round|.candidate_sha256=$candidate|.binary_sha256=$binary|.mode="four_lane"|.selected_lanes=4|.worker_count=3' "$base"
@@ -168,9 +168,9 @@ new_case() {
 }
 run_case() {
     local mode=$1
-    MISO_TEST_BENCH_MODE="$mode" MISO_TEST_LAUNCH_LOG="$launch_log" \
-    MISO_TEST_FAKE_BENCH="$case_root/scripts/fixtures/fake-bench.sh" \
-    MISO_TEST_REAL_RUSTC="$(command -v rustc)" PATH="$case_root/bin:$PATH" \
+    MISO_ENGINE_TEST_BENCH_MODE="$mode" MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
+    MISO_ENGINE_TEST_FAKE_BENCH="$case_root/scripts/fixtures/fake-bench.sh" \
+    MISO_ENGINE_TEST_REAL_RUSTC="$(command -v rustc)" PATH="$case_root/bin:$PATH" \
     bash "$case_root/scripts/run-scheduler-benchmark.sh"
 }
 expect_failure_reason() {
@@ -212,7 +212,7 @@ expect_failure_reason validation_failed
 [[ ! -e "$case_root/artifacts/issue009/scheduler-benchmark.accepted.jsonl" ]]
 
 new_case pipe-failure
-if MISO_TEST_RUSTC_PIPE_FAIL=1 run_case success >/dev/null 2>&1; then printf 'runner swallowed metadata pipeline failure\n' >&2; exit 1; fi
+if MISO_ENGINE_TEST_RUSTC_PIPE_FAIL=1 run_case success >/dev/null 2>&1; then printf 'runner swallowed metadata pipeline failure\n' >&2; exit 1; fi
 expect_failure_reason metadata_failed
 [[ ! -e "$launch_log" ]]
 

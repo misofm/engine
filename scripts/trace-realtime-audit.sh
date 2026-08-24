@@ -25,7 +25,7 @@ strace -ff -qq -o "$trace_prefix" "$binary" \
 
 marker_file=""
 while IFS= read -r candidate; do
-    if rg -q 'MISO_RT_BEGIN' "$candidate" && rg -q 'MISO_RT_END' "$candidate"; then
+    if rg -q 'MISO_ENGINE_RT_BEGIN' "$candidate" && rg -q 'MISO_ENGINE_RT_END' "$candidate"; then
         [[ -z "$marker_file" ]] || {
             printf 'multiple trace threads contain both realtime markers\n' >&2
             exit 1
@@ -41,8 +41,8 @@ done < <(find "$trace_root" -maxdepth 1 -type f -name 'trace.*' | sort)
 
 unexpected="$({
     awk '
-        /MISO_RT_BEGIN/ { inside = 1; next }
-        /MISO_RT_END/ { inside = 0; found_end = 1; next }
+        /MISO_ENGINE_RT_BEGIN/ { inside = 1; next }
+        /MISO_ENGINE_RT_END/ { inside = 0; found_end = 1; next }
         inside { print }
         END { if (!found_end) exit 2 }
     ' "$marker_file"

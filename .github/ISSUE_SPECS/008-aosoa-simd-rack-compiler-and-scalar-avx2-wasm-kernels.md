@@ -105,7 +105,7 @@ not created and the invocation count remains zero.
   `08b0fa64586c2325`. It also verifies distinct L/R inputs, cross-track state isolation,
   same-wave admission, connected-sidechain fallback, factory-error ownership, observer handle
   order, canonical graph bytes, PDC delays and tails.
-- With `MISO_ENGINE_ISSUE8_AUDIT=1`, the same prepared mixed plan completed exactly 100,000
+- With `MISO_ENGINE_AUDIT_008=1`, the same prepared mixed plan completed exactly 100,000
   renders of 128 frames in a release test. The output backing address remained stable and the
   armed audit counters for allocation, free, lock, log, file I/O, network I/O and syscall were
   all zero. The host dispatch reported the exact full-bank count and scalar-tail remainder before

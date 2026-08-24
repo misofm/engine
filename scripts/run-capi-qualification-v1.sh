@@ -103,15 +103,15 @@ strace -ff -qq -o "$trace_prefix" "$build/release/miso_engine_realtime_audit" \
     --blocks 1000000 --audit --trace-markers >"$stage/realtime-audit.json"
 marker_file=""
 while IFS= read -r candidate; do
-    if rg -q 'MISO_RT_BEGIN' "$candidate" && rg -q 'MISO_RT_END' "$candidate"; then
+    if rg -q 'MISO_ENGINE_RT_BEGIN' "$candidate" && rg -q 'MISO_ENGINE_RT_END' "$candidate"; then
         [[ -z "$marker_file" ]] || fail 'multiple realtime marker traces'
         marker_file="$candidate"
     fi
 done < <(find "$stage" -maxdepth 1 -type f -name 'realtime-trace.*' | sort)
 [[ -n "$marker_file" ]] || fail 'realtime marker trace missing'
 unexpected="$(awk '
-    /MISO_RT_BEGIN/ { inside = 1; next }
-    /MISO_RT_END/ { inside = 0; found = 1; next }
+    /MISO_ENGINE_RT_BEGIN/ { inside = 1; next }
+    /MISO_ENGINE_RT_END/ { inside = 0; found = 1; next }
     inside { print }
     END { if (!found) exit 2 }
 ' "$marker_file")"

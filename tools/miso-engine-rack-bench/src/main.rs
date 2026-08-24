@@ -148,7 +148,7 @@ fn main() {
 }
 
 fn round_from_runner() -> u32 {
-    match std::env::var("MISO_ENGINE_RACK_BENCH_ROUND").as_deref() {
+    match std::env::var("MISO_ENGINE_BENCH_ROUND").as_deref() {
         Ok("warmup") => 0,
         Ok("1") => 1,
         Ok("2") => 2,
@@ -777,8 +777,8 @@ struct Identities {
 impl Identities {
     fn collect() -> Self {
         Self {
-            candidate_commit_sha256: required_sha256("MISO_ENGINE_RACK_BENCH_CANDIDATE_SHA256"),
-            binary_sha256: required_sha256("MISO_ENGINE_RACK_BENCH_BINARY_SHA256"),
+            candidate_commit_sha256: required_sha256("MISO_ENGINE_BENCH_CANDIDATE_SHA256"),
+            binary_sha256: required_sha256("MISO_ENGINE_BENCH_BINARY_SHA256"),
             fixture_sha256: hex_digest(Sha256::digest(FIXTURE_BYTES)),
         }
     }
@@ -799,22 +799,28 @@ struct Metadata {
 impl Metadata {
     fn collect() -> Self {
         const FIELDS: [(&str, &str); 16] = [
-            ("architecture", "MISO_ENGINE_BENCH_ARCHITECTURE"),
-            ("background_load_note", "MISO_ENGINE_BENCH_BACKGROUND_LOAD"),
+            ("architecture", "MISO_ENGINE_BENCH_CPU_ARCHITECTURE"),
+            (
+                "background_load_note",
+                "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+            ),
             ("codegen_units", "MISO_ENGINE_BENCH_CODEGEN_UNITS"),
             ("cpu_model", "MISO_ENGINE_BENCH_CPU_MODEL"),
-            ("governor_or_power_mode", "MISO_ENGINE_BENCH_GOVERNOR"),
+            (
+                "governor_or_power_mode",
+                "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+            ),
             ("kernel", "MISO_ENGINE_BENCH_KERNEL"),
             ("llvm_version", "MISO_ENGINE_BENCH_LLVM_VERSION"),
-            ("logical_cores", "MISO_ENGINE_BENCH_LOGICAL_CORES"),
+            ("logical_cores", "MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT"),
             ("lto", "MISO_ENGINE_BENCH_LTO"),
             ("opt_level", "MISO_ENGINE_BENCH_OPT_LEVEL"),
             ("os", "MISO_ENGINE_BENCH_OS"),
-            ("physical_cores", "MISO_ENGINE_BENCH_PHYSICAL_CORES"),
+            ("physical_cores", "MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT"),
             ("profile", "MISO_ENGINE_BENCH_PROFILE"),
             ("rust_version", "MISO_ENGINE_BENCH_RUST_VERSION"),
             ("target_features", "MISO_ENGINE_BENCH_TARGET_FEATURES"),
-            ("target_triple", "MISO_ENGINE_BENCH_TARGET"),
+            ("target_triple", "MISO_ENGINE_BENCH_TARGET_TRIPLE"),
         ];
         let fields = FIELDS
             .into_iter()

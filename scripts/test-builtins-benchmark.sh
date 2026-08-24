@@ -200,7 +200,7 @@ cat >"$lifecycle_template/bin/git" <<'EOF'
 set -euo pipefail
 case "$*" in
   *'branch --show-current'*) printf '%s\n' codex/batch-benchmark-072 ;;
-  *rev-parse*) printf '%s\n' "$MISO_TEST_CANDIDATE" ;;
+  *rev-parse*) printf '%s\n' "$MISO_ENGINE_TEST_CANDIDATE" ;;
   *status*) exit 0 ;;
   *) exit 91 ;;
 esac
@@ -216,7 +216,7 @@ case "$1" in
     hash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ;;
   *target/issue35/builtins-benchmark.disposition.json)
     hash=e722148752733cb16cbfa1534c7bc10d048cea31182ea58c8af4eb1627ee44ce ;;
-  *) exec "$MISO_TEST_REAL_SHA256SUM" "$@" ;;
+  *) exec "$MISO_ENGINE_TEST_REAL_SHA256SUM" "$@" ;;
 esac
 printf '%s  %s\n' "$hash" "$1"
 EOF
@@ -228,22 +228,22 @@ truncate -s 974 "$lifecycle_template/target/issue35/builtins-benchmark.dispositi
 cat >"$lifecycle_template/target/issue72/miso_engine_builtins_bench" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'sealed-binary\n' >>"$MISO_TEST_LAUNCH_LOG"
-phase() { printf 'MISO_BUILTINS_BENCH_PHASE %s\n' "$1" >&2; }
-case "${MISO_TEST_MODE:?}" in
+printf 'sealed-binary\n' >>"$MISO_ENGINE_TEST_LAUNCH_LOG"
+phase() { printf 'MISO_ENGINE_BENCH_PHASE %s\n' "$1" >&2; }
+case "${MISO_ENGINE_TEST_MODE:?}" in
   success)
     phase workload_started; phase warmup_complete; phase timed_started
-    jq -c 'select(.round == 1)' "$MISO_TEST_RECORDS"; phase round_1_complete
-    jq -c 'select(.round == 2)' "$MISO_TEST_RECORDS"; phase round_2_complete ;;
+    jq -c 'select(.round == 1)' "$MISO_ENGINE_TEST_RECORDS"; phase round_1_complete
+    jq -c 'select(.round == 2)' "$MISO_ENGINE_TEST_RECORDS"; phase round_2_complete ;;
   workload_failure) phase workload_started; printf '{"partial":"workload"}\n'; exit 73 ;;
   round_one_failure)
     phase workload_started; phase warmup_complete; phase timed_started
-    jq -c 'select(.round == 1)' "$MISO_TEST_RECORDS"; phase round_1_complete; exit 73 ;;
+    jq -c 'select(.round == 1)' "$MISO_ENGINE_TEST_RECORDS"; phase round_1_complete; exit 73 ;;
   interrupted_partial) phase workload_started; printf '{"partial":"interrupted"}\n'; kill -TERM "$BASHPID" ;;
   validator_failure)
     phase workload_started; phase warmup_complete; phase timed_started
-    jq -c 'select(.round == 1)' "$MISO_TEST_RECORDS"; phase round_1_complete
-    jq -c 'select(.round == 2)' "$MISO_TEST_RECORDS"; phase round_2_complete
+    jq -c 'select(.round == 1)' "$MISO_ENGINE_TEST_RECORDS"; phase round_1_complete
+    jq -c 'select(.round == 2)' "$MISO_ENGINE_TEST_RECORDS"; phase round_2_complete
     printf '{}\n' ;;
   *) exit 91 ;;
 esac
@@ -320,9 +320,9 @@ new_lifecycle_case() {
 run_lifecycle_runner() {
   local mode=$1
   shift
-  MISO_TEST_MODE="$mode" MISO_TEST_CANDIDATE="$candidate" \
-    MISO_TEST_REAL_SHA256SUM="$(command -v sha256sum)" \
-    MISO_TEST_LAUNCH_LOG="$launch_log" MISO_TEST_RECORDS="$case_root/records.jsonl" \
+  MISO_ENGINE_TEST_MODE="$mode" MISO_ENGINE_TEST_CANDIDATE="$candidate" \
+    MISO_ENGINE_TEST_REAL_SHA256SUM="$(command -v sha256sum)" \
+    MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" MISO_ENGINE_TEST_RECORDS="$case_root/records.jsonl" \
     PATH="$case_root/bin:$PATH" bash "$case_root/scripts/run-builtins-benchmark.sh" "$@"
 }
 expect_no_scratch_launch() {
@@ -617,22 +617,22 @@ case "$1" in
     hash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ;;
   *target/issue35/builtins-benchmark.disposition.json)
     hash=e722148752733cb16cbfa1534c7bc10d048cea31182ea58c8af4eb1627ee44ce ;;
-  *) exec "$MISO_TEST_REAL_SHA256SUM" "$@" ;;
+  *) exec "$MISO_ENGINE_TEST_REAL_SHA256SUM" "$@" ;;
 esac
 printf '%s  %s\n' "$hash" "$1"
 EOF
 cat >"$preflight_template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$MISO_TEST_PREFLIGHT_CARGO_LOG"
+printf '%s\n' "$*" >>"$MISO_ENGINE_TEST_PREFLIGHT_CARGO_LOG"
 if [[ " $* " == *' build '* ]]; then
   mkdir -p "$CARGO_TARGET_DIR/release"
   cat >"$CARGO_TARGET_DIR/release/miso_engine_builtins_bench" <<'INNER'
 #!/usr/bin/env bash
-printf 'launched\n' >>"$MISO_TEST_PREFLIGHT_LAUNCH_LOG"
+printf 'launched\n' >>"$MISO_ENGINE_TEST_PREFLIGHT_LAUNCH_LOG"
 INNER
   chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_builtins_bench"
-  if [[ "${MISO_TEST_PREFLIGHT_DRIFT:-0}" == 1 ]]; then
-    printf 'drift\n' >>"$MISO_TEST_PREFLIGHT_ROOT/Cargo.toml"
+  if [[ "${MISO_ENGINE_TEST_PREFLIGHT_DRIFT:-0}" == 1 ]]; then
+    printf 'drift\n' >>"$MISO_ENGINE_TEST_PREFLIGHT_ROOT/Cargo.toml"
   fi
 fi
 EOF
@@ -677,11 +677,11 @@ write_fake_nonbenchmark() {
 }
 invoke_scratch_preflight() {
   local root=$1 drift=${2:-0}
-  MISO_TEST_REAL_SHA256SUM="$real_sha256sum" \
-  MISO_TEST_PREFLIGHT_CARGO_LOG="$root/cargo.log" \
-  MISO_TEST_PREFLIGHT_LAUNCH_LOG="$root/launch.log" \
-  MISO_TEST_PREFLIGHT_ROOT="$root" \
-  MISO_TEST_PREFLIGHT_DRIFT="$drift" \
+  MISO_ENGINE_TEST_REAL_SHA256SUM="$real_sha256sum" \
+  MISO_ENGINE_TEST_PREFLIGHT_CARGO_LOG="$root/cargo.log" \
+  MISO_ENGINE_TEST_PREFLIGHT_LAUNCH_LOG="$root/launch.log" \
+  MISO_ENGINE_TEST_PREFLIGHT_ROOT="$root" \
+  MISO_ENGINE_TEST_PREFLIGHT_DRIFT="$drift" \
   PATH="$root/bin" "$root/bin/bash" "$root/scripts/preflight-builtins-benchmark.sh"
 }
 run_scratch_preflight() {

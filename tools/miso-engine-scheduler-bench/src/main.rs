@@ -134,7 +134,7 @@ fn main() {
         1,
         "benchmark accepts no arguments"
     );
-    let round = std::env::var("MISO_ENGINE_SCHEDULER_BENCH_ROUND").expect("runner supplies round");
+    let round = std::env::var("MISO_ENGINE_BENCH_ROUND").expect("runner supplies round");
     let round_number = match round.as_str() {
         "warmup" => 0_u32,
         "1" => 1,
@@ -205,14 +205,14 @@ fn emit_record(
     let worker_forbidden_total = workers
         .iter()
         .fold(0_u64, |sum, snapshot| sum.saturating_add(snapshot.total()));
-    let candidate = env("MISO_ENGINE_SCHEDULER_BENCH_CANDIDATE_SHA256");
-    let binary = env("MISO_ENGINE_SCHEDULER_BENCH_BINARY_SHA256");
+    let candidate = env("MISO_ENGINE_BENCH_CANDIDATE_SHA256");
+    let binary = env("MISO_ENGINE_BENCH_BINARY_SHA256");
     let cpu = env("MISO_ENGINE_BENCH_CPU_MODEL");
     let os = env("MISO_ENGINE_BENCH_OS");
     let kernel = env("MISO_ENGINE_BENCH_KERNEL");
     let rust = env("MISO_ENGINE_BENCH_RUST_VERSION");
     let llvm = env("MISO_ENGINE_BENCH_LLVM_VERSION");
-    let governor = env("MISO_ENGINE_BENCH_GOVERNOR");
+    let governor = env("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE");
     println!(
         concat!(
             "{{\"schema_version\":1,\"issue\":9,\"mode\":\"{}\",\"round\":{},",

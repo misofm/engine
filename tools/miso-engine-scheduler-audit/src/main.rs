@@ -112,7 +112,7 @@ fn main() {
     assert_eq!(replacement_observers.record_count(), 0);
 
     // This marker is emitted after the pool is prepared and before any render scope.
-    eprintln!("MISO_039_PHASE_PREPARED");
+    eprintln!("MISO_ENGINE_SCHEDULER_PHASE_PREPARED");
     let worker_tids = worker_thread_ids();
     assert_eq!(worker_tids.len(), WORKERS, "one TID per prepared worker");
     let (mut publisher, mut owner, retirer) = plan_exchange(
@@ -136,7 +136,7 @@ fn main() {
     let wall_before = std::time::Instant::now();
 
     // The armed interval is delimited outside `RealtimePlanOwner::render` and worker dispatch.
-    eprintln!("MISO_039_PHASE_ARMED");
+    eprintln!("MISO_ENGINE_SCHEDULER_PHASE_ARMED");
     for block in 0..CALLBACKS {
         if paced {
             // A calibrated busy-wait, never a clock read: some kernels trace `clock_gettime`.
@@ -178,7 +178,7 @@ fn main() {
         }
     }
     // All coordinator/worker audit reads occur only after every render scope returned.
-    eprintln!("MISO_039_PHASE_DISARMED");
+    eprintln!("MISO_ENGINE_SCHEDULER_PHASE_DISARMED");
     let wall_seconds = wall_before.elapsed().as_secs_f64();
     let cpu_after = worker_cpu_ticks(&worker_tids);
     let worker_cpu_fraction: Vec<f64> = cpu_before
@@ -215,7 +215,7 @@ fn main() {
         drop(retired);
         drop(owner);
         // The active replacement and its scheduler are destroyed off the render thread.
-        eprintln!("MISO_039_PHASE_RETIRED");
+        eprintln!("MISO_ENGINE_SCHEDULER_PHASE_RETIRED");
         sender
             .send(std::thread::current().id())
             .expect("retirement result");

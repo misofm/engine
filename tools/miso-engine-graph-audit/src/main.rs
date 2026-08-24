@@ -133,9 +133,9 @@ fn main() {
     audit::warm_up();
     audit::reset();
 
-    eprintln!("MISO_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
     let first = render_graph_block(&mut owner, &mut output, 0);
-    eprintln!("MISO_GRAPH_RT_END");
+    eprintln!("MISO_ENGINE_GRAPH_RT_END");
     assert_eq!(first.swap, SwapOutcome::Applied);
     assert_eq!(first.render.plan_id, 7);
     swaps_accepted += 1;
@@ -147,9 +147,9 @@ fn main() {
             PublishError::Incompatible(_) => panic!("replacement envelope mismatch"),
             PublishError::EpochExhausted(_) => panic!("replacement epoch exhausted"),
         });
-    eprintln!("MISO_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
     let deferred = render_graph_block(&mut owner, &mut output, 1);
-    eprintln!("MISO_GRAPH_RT_END");
+    eprintln!("MISO_ENGINE_GRAPH_RT_END");
     assert_eq!(deferred.swap, SwapOutcome::DeferredRetirementFull);
     assert_eq!(deferred.render.plan_id, 7);
     swaps_deferred += 1;
@@ -162,7 +162,7 @@ fn main() {
         0
     );
 
-    eprintln!("MISO_GRAPH_RT_BEGIN");
+    eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
     for block in 2..blocks {
         let report = render_graph_block(&mut owner, &mut output, block);
         if block == 2 {
@@ -173,7 +173,7 @@ fn main() {
         }
         assert_eq!(report.render.plan_id, 8);
     }
-    eprintln!("MISO_GRAPH_RT_END");
+    eprintln!("MISO_ENGINE_GRAPH_RT_END");
 
     let snapshot = audit::snapshot();
     command_sender

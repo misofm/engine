@@ -90,7 +90,7 @@ fn\s+discontinuity_reset\(               4  95
 MANIFEST
 }
 
-if [[ "${MISO_PRINT_HELPER_MANIFEST:-}" == "1" ]]; then
+if [[ "${MISO_ENGINE_PRINT_HELPER_MANIFEST:-}" == "1" ]]; then
     duplicated_helper_manifest
     exit 0
 fi

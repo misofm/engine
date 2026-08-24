@@ -5,13 +5,13 @@ rounds="${1:-2}"
 [[ "$rounds" == 1 || "$rounds" == 2 ]] || { printf 'usage: %s [1|2]\n' "$0" >&2; exit 2; }
 output="$(
     MISO_ENGINE_BENCH_POWER_SOURCE="${MISO_ENGINE_BENCH_POWER_SOURCE:-unknown}" \
-    MISO_ENGINE_BENCH_POWER_MODE="${MISO_ENGINE_BENCH_POWER_MODE:-unknown}" \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="${MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE:-unknown}" \
     MISO_ENGINE_BENCH_OPT_LEVEL=3 \
     MISO_ENGINE_BENCH_LTO=off \
     MISO_ENGINE_BENCH_CODEGEN_UNITS=16 \
     MISO_ENGINE_BENCH_TARGET_CPU=baseline \
     MISO_ENGINE_BENCH_TARGET_FEATURES=runtime-dispatch-baseline \
-    MISO_ENGINE_BENCH_BACKGROUND_LOAD="not measured; descriptive baseline" \
+    MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="not measured; descriptive baseline" \
     cargo run --locked --release -q -p miso-engine-conformance-bench -- --rounds "$rounds"
 )"
 [[ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" == "$((rounds * 2))" ]] || { printf 'benchmark record count mismatch\n' >&2; exit 1; }

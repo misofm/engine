@@ -24,9 +24,9 @@ llvm_version="$(rustc -Vv 2>/dev/null | awk -F': ' '/LLVM version/ { print $2; e
 llvm_version="${llvm_version:-unknown}"
 
 output="$(
-    MISO_ENGINE_BENCH_CPU="$cpu" \
-    MISO_ENGINE_BENCH_POWER_MODE="$power_mode" \
-    MISO_ENGINE_BENCH_COMPILER="$compiler" \
+    MISO_ENGINE_BENCH_CPU_MODEL="$cpu" \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$power_mode" \
+    MISO_ENGINE_BENCH_RUST_VERSION="$compiler" \
     MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" \
     MISO_ENGINE_BENCH_TARGET_TRIPLE="$(rustc -vV | awk '/host/ { print $2; exit }')" \
     MISO_ENGINE_BENCH_TARGET_FEATURES="runtime-dispatch-baseline" \

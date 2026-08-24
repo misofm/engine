@@ -157,7 +157,7 @@ fn audit_process(blocks: u64, markers: bool) {
     audit::warm_up();
     audit::reset();
     if markers {
-        eprintln!("MISO_EFFECT_RT_BEGIN");
+        eprintln!("MISO_ENGINE_EFFECT_RT_BEGIN");
     }
     for block_index in 0..blocks {
         let extreme = if block_index & 1 == 0 {
@@ -185,7 +185,7 @@ fn audit_process(blocks: u64, markers: bool) {
         black_box((&left, &right));
     }
     if markers {
-        eprintln!("MISO_EFFECT_RT_END");
+        eprintln!("MISO_ENGINE_EFFECT_RT_END");
     }
     let snapshot = audit::snapshot();
     assert_eq!(snapshot.total(), 0);
@@ -364,10 +364,10 @@ fn benchmark() {
             };
             println!(
                 "{{\"schema_version\":1,\"workload\":\"{workload}\",\"round\":{round},\"observations\":{observations},\"warmup\":0,\"units\":\"ns\",\"min\":{min},\"p50\":{p50},\"p95\":{p95},\"p99\":{p99},\"p99_9\":{p99_9},\"max\":{max},\"frames\":128,\"items\":{items},\"bytes\":{bytes},\"allocations\":{allocations},\"deallocations\":{deallocations},\"fixture_hash\":\"26e35dacebe4922d7fd7bf63d6cdc6c7084128bf64390a35a17907e249cb1e0b\",\"fixture_count\":4,\"sample_rate\":48000,\"quantum\":128,\"width\":{width},\"cpu\":\"{}\",\"os\":\"{}\",\"governor\":\"{}\",\"rust\":\"{}\",\"llvm\":\"{}\",\"target\":\"{}\",\"features\":\"{}\",\"opt\":\"3\",\"lto\":\"off\",\"codegen_units\":16,\"missing_metadata\":\"environment values reported as unknown\"}}",
-                metadata("MISO_ENGINE_BENCH_CPU"),
+                metadata("MISO_ENGINE_BENCH_CPU_MODEL"),
                 env::consts::OS,
-                metadata("MISO_ENGINE_BENCH_POWER_MODE"),
-                metadata("MISO_ENGINE_BENCH_COMPILER"),
+                metadata("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"),
+                metadata("MISO_ENGINE_BENCH_RUST_VERSION"),
                 metadata("MISO_ENGINE_BENCH_LLVM_VERSION"),
                 metadata("MISO_ENGINE_BENCH_TARGET_TRIPLE"),
                 metadata("MISO_ENGINE_BENCH_TARGET_FEATURES")
