@@ -17,6 +17,20 @@ fn one_track_session(quantum: u32) -> String {
     canonical_session_toml(&model).expect("canonical one-track session")
 }
 
+/// The browser fixture's identity session, re-shaped for one test.
+///
+/// Identity end to end: no polarity, trim, HPF or LPF, no effects in any rack, unity fader, and a
+/// hard-left/hard-right pan whose 2x2 matrix is the identity. The output is therefore the submitted
+/// source frames, which is what makes the submitted ramp its own oracle.
+fn identity_session(quantum: u32, ring_frames: u32, length_samples: u64) -> String {
+    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+        .expect("accepted identity fixture");
+    model.quantum_frames = quantum;
+    model.limits.pcm_ring_frames = u64::from(ring_frames);
+    model.sources[0].mapping.region.length_samples = length_samples;
+    canonical_session_toml(&model).expect("canonical identity session")
+}
+
 fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
     let mut host =
         AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(48_000, quantum));
@@ -570,4 +584,122 @@ fn facade_source_rules_reach_the_browser_host() {
     );
     assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
     assert_eq!(host.status().state, STATE_READY, "no rejection is sticky");
+}
+
+/// #106 F3. The pinned default ring capacity at every launch rate and a spread of quanta.
+///
+/// The oracle is the derivation in [`default_source_ring_frames`]'s documentation, evaluated by
+/// hand: `(ceil(100 ms * fs / quantum) + 2) * quantum`.
+///
+/// Red mutation: change the `+ 2` to `+ 1` -> 48 000/128 yields 4 992, not 5 120.
+#[test]
+fn default_ring_covers_stall_tolerance() {
+    assert_eq!(SOURCE_STALL_TOLERANCE_MS, 100);
+    for (sample_rate_hz, quantum, expected) in [
+        (48_000_u32, 128_u32, 5_120_u32),
+        (44_100, 128, 4_736),
+        (88_200, 128, 9_088),
+        (96_000, 128, 9_856),
+        (48_000, 256, 5_376),
+        (48_000, 64, 4_928),
+    ] {
+        let frames = default_source_ring_frames(sample_rate_hz, quantum);
+        assert_eq!(frames, expected, "{sample_rate_hz} Hz / {quantum} frames");
+        assert_eq!(
+            frames % quantum,
+            0,
+            "a ring capacity is a whole number of quanta"
+        );
+        let stall_frames = u64::from(sample_rate_hz) * u64::from(SOURCE_STALL_TOLERANCE_MS) / 1000;
+        assert!(
+            u64::from(frames) >= stall_frames + 2 * u64::from(quantum),
+            "the ring must cover the stall plus the consumer and recycle quanta"
+        );
+        assert_eq!(
+            WebPrepareConfigV1::launch_defaults(sample_rate_hz, quantum).source_ring_frames,
+            expected,
+            "launch defaults are the only place the formula is applied"
+        );
+    }
+}
+
+/// #106 F3. A full default ring renders the whole stall tolerance with no submission at all.
+///
+/// The identity session passes source frames to the output unchanged, so the oracle is the
+/// submitted ramp itself -- compared as `to_bits`, never as floats, because `==` equates `-0.0`
+/// with `+0.0`. Filling until backpressure and then rendering 38 quanta in silence is exactly the
+/// 100 ms main-thread stall the default ring exists to hide.
+///
+/// Red mutation: set `SOURCE_STALL_TOLERANCE_MS = 50` (a 21-quantum ring) -> the ring runs dry and
+/// the first starved quantum renders zeros instead of the ramp.
+#[test]
+fn ring_prefill_survives_stall() {
+    const QUANTUM: u32 = 128;
+    const RATE: u32 = 48_000;
+    let ring_frames = default_source_ring_frames(RATE, QUANTUM);
+    let stall_quanta = (u64::from(SOURCE_STALL_TOLERANCE_MS) * u64::from(RATE) / 1000)
+        .div_ceil(u64::from(QUANTUM)) as u32;
+    assert_eq!(stall_quanta, 38, "100 ms at 48 kHz / 128 is 38 quanta");
+
+    let length_samples = u64::from(ring_frames) + 2 * u64::from(QUANTUM);
+    let toml = identity_session(QUANTUM, ring_frames, length_samples);
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(RATE, QUANTUM));
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        host.diagnostic()
+    );
+
+    // A distinct value per absolute frame, so a stale or repeated block cannot pass by accident.
+    let ramp = |block: u32, index: u32| (block * QUANTUM + index) as f32 / 65_536.0;
+    let mut submitted: Vec<Vec<f32>> = Vec::new();
+    loop {
+        let block = submitted.len() as u32;
+        let left: Vec<f32> = (0..QUANTUM).map(|index| ramp(block, index)).collect();
+        let right = vec![0.0_f32; QUANTUM as usize];
+        let planes: [&[f32]; 2] = [&left, &right];
+        let start = u64::from(block) * u64::from(QUANTUM);
+        let end_of_region = start + u64::from(QUANTUM) == length_samples;
+        let result = host.submit_source(
+            b"fixture-source",
+            1,
+            start,
+            RATE,
+            &planes,
+            QUANTUM,
+            end_of_region,
+        );
+        if result == RESULT_BACKPRESSURE {
+            break;
+        }
+        assert_eq!(result, RESULT_OK, "block {block}");
+        submitted.push(left);
+        assert!(
+            submitted.len() < 128,
+            "the ring must saturate, not grow forever"
+        );
+    }
+    assert!(
+        submitted.len() as u32 >= stall_quanta,
+        "a full default ring holds at least the stall tolerance: {} < {stall_quanta}",
+        submitted.len()
+    );
+
+    // The stall: 38 quanta rendered with no submission whatsoever.
+    for block in 0..stall_quanta as usize {
+        assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+        let output = host.output_pcm().expect("prepared output");
+        let left = &output[..QUANTUM as usize];
+        for (index, sample) in left.iter().enumerate() {
+            assert_eq!(
+                sample.to_bits(),
+                submitted[block][index].to_bits(),
+                "block {block} frame {index} underran the stall"
+            );
+        }
+    }
+    assert_eq!(host.status().rendered_quanta, u64::from(stall_quanta));
 }

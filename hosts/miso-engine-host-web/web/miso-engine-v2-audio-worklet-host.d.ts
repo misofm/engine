@@ -24,6 +24,29 @@
 // and emits positive-zero silence. `dispose()` -- delivered on the port, never inside `process()`
 // -- is the single point at which that storage is freed.
 //
+// # Streaming model
+//
+// Sources stream just-in-time into bounded per-source rings. One message carries exactly one
+// quantum of planar PCM (the final chunk of a region may be shorter). Up to
+// `sourceRingFrames / quantumFrames` chunks may be unsettled per source ID at once -- there is
+// nowhere for a further chunk to go -- plus one unsettled seek per source and one unsettled status.
+// A request over its bound rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so
+// the caller keeps its planes and can retry.
+//
+// The default ring covers a 100 ms main-thread stall: `(ceil(100ms * fs / quantum) + 2) * quantum`
+// frames, which is 5 120 frames (40 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. It is
+// a prefill ahead of the render position and adds no output latency.
+//
+// Two options deliberately not taken, recorded so they are not rediscovered as bugs:
+//
+//   1. Zero-copy submission (`source_reserve` / `source_commit`) and a chunk size decoupled from
+//      the quantum. Both need a `miso-engine-source` contract change, which is that crate's issue
+//      (#101); today `validate_submission_metadata` requires exactly one quantum unless the chunk
+//      ends the region.
+//   2. A `SharedArrayBuffer` ring under `crossOriginIsolated === true`, which would remove the
+//      message round trip entirely. It requires the engine's atomics-free policy to be revisited
+//      and is an owner decision, not a host change.
+//
 // # Compilation happens on the rendering thread
 //
 // Session TOML is compiled inside the `AudioWorkletProcessor` constructor, which runs on the

@@ -179,9 +179,28 @@ function isUnsupportedBrowser(value) {
     && hasExactFields(value, ["tag", "requestId", "result", "capability"]);
 }
 
+/// The browser-side streaming model (#106 F3).
+///
+/// The engine streams sources just-in-time into bounded per-source rings, so the main realm must be
+/// allowed to run ahead of the render position: with exactly one request in flight the feed can
+/// never be deeper than one message round trip, and any main-thread stall longer than that
+/// underruns every source. The bound is therefore per source and equal to the ring depth in quanta
+/// -- there is nowhere for a further chunk to go -- rather than one for the whole host.
+///
+/// Seeks stay at one unsettled per source because the ring carries a single command slot. Status
+/// stays at one because a second answer would carry no new information. Dispose is terminal and
+/// waits for nothing: the worklet handles messages in arrival order, so every earlier request is
+/// already settled by the time its acknowledgement is posted.
+///
+/// Nothing is dropped silently: a request over its bound is rejected locally, before transfer, with
+/// a typed `RESULT_BACKPRESSURE` and its planes still owned by the caller.
 class MisoAudioWorkletHostV1 {
   #port;
-  #pending = null;
+  #pending = new Map();
+  #inFlightSources = new Map();
+  #inFlightSeeks = new Map();
+  #inFlightStatus = 0;
+  #ringBlocks;
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
@@ -189,7 +208,7 @@ class MisoAudioWorkletHostV1 {
   #sampleRateHz;
   #quantumFrames;
 
-  constructor(node, backend, sampleRateHz, quantumFrames, resources, memoryBytes) {
+  constructor(node, backend, sampleRateHz, quantumFrames, resources, memoryBytes, ringBlocks) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
       backend: { value: backend, enumerable: true },
@@ -199,21 +218,36 @@ class MisoAudioWorkletHostV1 {
     this.#numericBackend = numericBackend(backend);
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
+    this.#ringBlocks = ringBlocks;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
-    this.#port.onmessageerror = () => this.#fail(webError(
-      255,
-      this.#pending?.requestId ?? 0,
-    ));
+    this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
-    this.node.onprocessorerror = () => this.#fail(webError(
-      255,
-      this.#pending?.requestId ?? 0,
-    ));
+    this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+  }
+
+  // Request IDs are strictly monotonic and the worklet handles messages in arrival order, so the
+  // first key of the insertion-ordered map is the oldest unsettled request.
+  #oldestRequestId() {
+    for (const requestId of this.#pending.keys()) return requestId;
+    return 0;
+  }
+
+  #release(pending) {
+    this.#pending.delete(pending.requestId);
+    if (pending.response === "source") {
+      const count = (this.#inFlightSources.get(pending.sourceId) ?? 1) - 1;
+      if (count <= 0) this.#inFlightSources.delete(pending.sourceId);
+      else this.#inFlightSources.set(pending.sourceId, count);
+    } else if (pending.response === "seek") {
+      this.#inFlightSeeks.delete(pending.sourceId);
+    } else if (pending.response === "status") {
+      this.#inFlightStatus -= 1;
+    }
   }
 
   #receive(message) {
-    const pending = this.#pending;
+    const pending = this.#pending.get(message?.requestId) ?? null;
     const errorFields = message?.planes === undefined
       ? ["tag", "requestId", "result"]
       : ["tag", "requestId", "result", "planes"];
@@ -222,14 +256,14 @@ class MisoAudioWorkletHostV1 {
         ? validReturnedPlanes(message.planes, pending.planeShape)
         : message.planes === undefined;
       if (validRequestId(message.requestId) && validResult(message.result)
-          && pending !== null && message.requestId === pending.requestId && validPlanes) {
+          && pending !== null && validPlanes) {
         this.#fail(Object.freeze(message));
       } else {
-        this.#fail(webError(255, pending?.requestId ?? 0));
+        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()));
       }
       return;
     }
-    if (pending === null || message?.requestId !== pending.requestId) {
+    if (pending === null) {
       this.#fail(webError(255, message?.requestId ?? 0));
       return;
     }
@@ -258,7 +292,7 @@ class MisoAudioWorkletHostV1 {
       this.#fail(webError(255, message.requestId));
       return;
     }
-    this.#pending = null;
+    this.#release(pending);
     if (pending.response === "dispose" && message.result !== RESULT_OK) {
       pending.reject(webError(message.result, message.requestId));
     } else {
@@ -266,19 +300,50 @@ class MisoAudioWorkletHostV1 {
     }
   }
 
+  // An error is sticky for the whole host, so every unsettled request is rejected with it. The
+  // maps are cleared first so a `reject` handler that re-enters sees a settled host.
   #fail(error) {
     this.#stickyError = error;
-    if (this.#pending !== null) {
-      const pending = this.#pending;
-      this.#pending = null;
-      pending.reject(error);
+    const unsettled = [...this.#pending.values()];
+    this.#pending.clear();
+    this.#inFlightSources.clear();
+    this.#inFlightSeeks.clear();
+    this.#inFlightStatus = 0;
+    for (const pending of unsettled) pending.reject(error);
+  }
+
+  // The per-kind bound. `true` means the request has nowhere to go and is refused locally, before
+  // any transfer, so the caller keeps its planes and can retry.
+  #saturated(response, sourceId) {
+    if (response === "source") {
+      return (this.#inFlightSources.get(sourceId) ?? 0) >= this.#ringBlocks;
+    }
+    if (response === "seek") return this.#inFlightSeeks.has(sourceId);
+    if (response === "status") return this.#inFlightStatus >= 1;
+    return false; // dispose is terminal and waits for nothing
+  }
+
+  #reserve(response, sourceId) {
+    if (response === "source") {
+      this.#inFlightSources.set(sourceId, (this.#inFlightSources.get(sourceId) ?? 0) + 1);
+    } else if (response === "seek") {
+      this.#inFlightSeeks.set(sourceId, true);
+    } else if (response === "status") {
+      this.#inFlightStatus += 1;
     }
   }
 
-  #request(message, transfer = [], response, allowSticky = false, expectedPlanes = undefined) {
+  #request(
+    message,
+    transfer = [],
+    response,
+    allowSticky = false,
+    expectedPlanes = undefined,
+    sourceId = undefined,
+  ) {
     if (this.#disposed) return Promise.reject(webError(3, message.requestId));
     if (this.#stickyError !== null && !allowSticky) return Promise.reject(this.#stickyError);
-    if (this.#pending !== null) {
+    if (this.#saturated(response, sourceId)) {
       return Promise.reject(webError(RESULT_BACKPRESSURE, message.requestId));
     }
     if (!validRequestId(message.requestId) || message.requestId <= this.#lastRequestId) {
@@ -286,17 +351,20 @@ class MisoAudioWorkletHostV1 {
     }
     this.#lastRequestId = message.requestId;
     return new Promise((resolve, reject) => {
-      this.#pending = {
+      const pending = {
         requestId: message.requestId,
+        sourceId,
         resolve,
         reject,
         response,
         planeShape: expectedPlanes === undefined ? undefined : planeShape(expectedPlanes),
       };
+      this.#pending.set(pending.requestId, pending);
+      this.#reserve(response, sourceId);
       try {
         this.#port.postMessage(message, transfer);
       } catch (error) {
-        this.#pending = null;
+        this.#release(pending);
         reject(webError(255, message.requestId));
       }
     });
@@ -320,7 +388,14 @@ class MisoAudioWorkletHostV1 {
       return Promise.reject(webError(1, request?.requestId ?? 0));
     }
     const transfer = [...new Set(request.planes.map((plane) => plane.buffer))];
-    return this.#request({ tag: "miso.source.v1", ...request }, transfer, "source", false, request.planes);
+    return this.#request(
+      { tag: "miso.source.v1", ...request },
+      transfer,
+      "source",
+      false,
+      request.planes,
+      request.sourceId,
+    );
   }
 
   seekSource(request) {
@@ -330,7 +405,14 @@ class MisoAudioWorkletHostV1 {
         || typeof request.sourceFrame !== "bigint" || request.sourceFrame < 0n) {
       return Promise.reject(webError(1, request?.requestId ?? 0));
     }
-    return this.#request({ tag: "miso.seek.v1", ...request }, [], "seek");
+    return this.#request(
+      { tag: "miso.seek.v1", ...request },
+      [],
+      "seek",
+      false,
+      undefined,
+      request.sourceId,
+    );
   }
 
   status() {
@@ -442,6 +524,10 @@ export async function createMisoAudioWorkletHost(options) {
       options.quantumFrames,
       ready.resources,
       ready.memoryBytes,
+      // The per-source in-flight bound is the ring depth in quanta. `validLimits` has already
+      // established that both are nonzero u32s, and `validate_config` in Rust rejects a ring that
+      // is not a whole number of quanta, so this division is exact for any session that prepares.
+      Math.floor(options.limits.sourceRingFrames / options.quantumFrames) || 1,
     );
   } catch (error) {
     cleanupNode(node);

@@ -47,8 +47,14 @@ them. Any identity change writes positive-zero output and becomes sticky reprepa
 memory byte length may not change after compile. Transferred source buffers become owned by the
 worklet message, are copied into bounded Wasm staging, and are transferred back in the matching ACK
 or error before the pending call settles, including validation failure or engine backpressure.
-There is exactly one in-flight source/control request: the main wrapper sends the next only after the
-matching ACK, providing typed browser-side backpressure without `SharedArrayBuffer` or `Atomics`.
+**Amended by #106 F3.** The in-flight bound is per request kind, not one for the whole host: up to
+`sourceRingFrames / quantumFrames` unsettled source chunks *per source ID*, one unsettled seek per
+source (the ring carries one command slot), one unsettled status, and dispose waits for nothing. A
+request over its bound rejects locally with typed `BACKPRESSURE` before any transfer, so the caller
+keeps its planes; nothing is dropped silently and no `SharedArrayBuffer` or `Atomics` is involved.
+The original rule -- one in-flight request of any kind -- capped the source feed at one message
+round trip, so any main-thread stall longer than that underran every source, which is the opposite
+of the just-in-time streaming the engine is built around.
 
 The caller supplies explicit `quantumFrames` for preparation alongside the actual
 `BaseAudioContext.sampleRate`; both must equal the strict session. The main realm compares
@@ -177,10 +183,13 @@ transfer list by underlying buffer so multiple planar views over one buffer do n
 transferable. Preserve each view's exact type/offset/length. Once `postMessage` succeeds the worklet
 owns those buffers; its ACK/error returns the original plane views with the unique buffers in the
 response transfer list on every result, including `BACKPRESSURE`, so the resolved/rejected result
-restores caller ownership for reuse or retry. The one pending slot covers submit, seek, status and
-dispose. ACK/error, `messageerror`, `processorerror` and disposal each settle and clear it exactly
-once; a concurrent call rejects locally with typed `BACKPRESSURE`. Repeated dispose after the first
-settled disposal resolves without another message or Wasm call.
+restores caller ownership for reuse or retry. **Amended by #106 F3.** Pending requests are held in
+an insertion-ordered map keyed by request ID rather than in a single slot; request IDs stay strictly
+monotonic and the worklet handles messages in arrival order, so acknowledgements arrive in request
+order. ACK/error settles and releases exactly one entry; `messageerror`, `processorerror` and a
+sticky failure reject *every* unsettled entry, because a failure is sticky for the whole host. A
+call over its per-kind bound rejects locally with typed `BACKPRESSURE`. Repeated dispose after the
+first settled disposal resolves without another message or Wasm call.
 
 `submitSource` and `seekSource` resolve with the complete frozen `MisoAckV1` object, never a nested
 payload or numeric result alone. It is exactly
@@ -226,13 +235,18 @@ file may change.
    values; atomic compile; source submit/final/backpressure/seek; 64/128/256 quantum preparation;
    exact resource equal/one-below caps; stable post-prepare pointers; disposal order; and no memory
    growth across representative render calls.
-2. Scalar and simd128 Wasm artifacts build from one sealed source/lock in unique scratch. Object
-   checks reuse Issue 068 rules: scalar has no SIMD/atomics; simd has required base `f32x4`
-   operations, no relaxed SIMD/atomics; neither imports shared memory, WASI, filesystem, network,
-   clocks, threads or an allocator callable from `process`.
-3. Hermetic JS tests prove exact message schema, one-in-flight ACK/backpressure, selected-module
-   fallback, transferred-buffer ownership, cached-view invalidation detection, `+0.0` silence and
-   sticky errors without launching a browser workload.
+2. **Amended by #083 W4-D1: one simd128 Wasm artifact** builds from one sealed source/lock in unique
+   scratch; the scalar worklet artifact is no longer built or shipped, and the loader has no
+   fallback selection. Object checks reuse Issue 068 rules: the artifact has the required base
+   `f32x4` operations and no relaxed SIMD or atomics, and imports no shared memory, WASI,
+   filesystem, network, clocks, threads or an allocator callable from `process`. #106 adds the
+   call-graph gate: the render export's direct-call closure reaches no allocator, deallocator or
+   drop glue, and owns no trap outside the one documented core site.
+3. Hermetic JS tests prove exact message schema, the per-kind in-flight bounds and their local
+   `BACKPRESSURE` (amended by #106 F3), the typed `miso.unsupported.v1` refusal when the init-time
+   `simd128` probe fails (amended by #083 W4-D1), transferred-buffer ownership, cached-view
+   invalidation detection, `+0.0` silence, render-export trap containment and sticky errors without
+   launching a browser workload.
 4. One representative installed Chromium/Chrome local `OfflineAudioContext` gate runs both forced
    scalar and supported simd128 at 48 kHz and an explicit actual-browser `quantumFrames` value,
    confirms each nonzero exposed main/worklet quantum matches it, renders the same
