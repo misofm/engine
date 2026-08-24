@@ -14,7 +14,18 @@ miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 sha2.workspace = true
 
+[features]
+default = []
+# The `#[unsafe(no_mangle)]` C entry point of `src/ffi.rs`. Off by default because a `no_mangle`
+# symbol in an rlib is re-exported by every `cdylib` that links it: with the export unconditional,
+# `miso_engine_effect_descriptor_v1_inspect` appeared in the browser AudioWorklet artifact and broke
+# its frozen 15-export gate (#106 E7; recorded as red on `main` in ISSUE_SPECS/083). The safe
+# `inspect_effect_descriptor_v1` function and every Rust test are unconditional; only the extern "C"
+# wrapper is gated, and the three scripts that build this crate's own cdylib enable it.
+c-abi = []
+
 [dev-dependencies]
+miso-engine-effect-package = { path = ".", features = ["c-abi"] }
 miso-engine-compressor.workspace = true
 miso-engine-delay.workspace = true
 miso-engine-gate-expander.workspace = true

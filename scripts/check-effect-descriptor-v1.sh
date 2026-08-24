@@ -22,7 +22,7 @@ CARGO_TARGET_DIR="$scratch_directory/native-target" \
 wasm_target="$scratch_directory/wasm-target"
 RUSTFLAGS='-C target-feature=-simd128' CARGO_TARGET_DIR="$wasm_target" \
     cargo rustc --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
-        -p miso-engine-effect-package --lib --release --target wasm32-unknown-unknown -- \
+        -p miso-engine-effect-package --features c-abi --lib --release --target wasm32-unknown-unknown -- \
         --emit=obj
 wasm_module="$wasm_target/wasm32-unknown-unknown/release/miso_engine_effect_package.wasm"
 [[ -f "$wasm_module" ]] || {

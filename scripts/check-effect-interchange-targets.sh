@@ -74,8 +74,8 @@ for mode in scalar simd; do
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
         cargo check --locked --all-targets --target wasm32-unknown-unknown "${packages[@]}"
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
-        cargo rustc --locked -p miso-engine-effect-package --target wasm32-unknown-unknown \
-        --lib -- --crate-type=cdylib
+        cargo rustc --locked -p miso-engine-effect-package --features c-abi \
+        --target wasm32-unknown-unknown --lib -- --crate-type=cdylib
     wasm="$(find "$target_dir/wasm32-unknown-unknown/debug" -maxdepth 1 -name '*.wasm' -type f -print -quit)"
     [[ -n "$wasm" ]] || { printf 'effect interchange target matrix: missing Wasm object\n' >&2; exit 1; }
     metadata="$scratch/$mode.wasm-metadata.txt"
