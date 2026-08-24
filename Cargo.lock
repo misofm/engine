@@ -966,6 +966,7 @@ dependencies = [
 name = "miso-engine-host-core"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-builtins",
  "miso-engine-builtins-compiler",
  "miso-engine-core",
  "miso-engine-effect-compiler",

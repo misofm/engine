@@ -204,3 +204,79 @@ fn matrix_ramp_reaches_target() {
     chain.process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
     assert_eq!(left, [0.5, 0.0]);
 }
+
+/// Issue #137 D1: an explicit ramp window travels with the retarget, and becomes the lane's own.
+///
+/// `matrix_ll/lr/rl/rr` are the only builtin parameters whose declared update rate is
+/// `BuiltinParameterUpdateRate::BlockTarget`, so this is the one live builtin setter the parameter
+/// ABI admits. The window and the target are one event because a console moves both together.
+///
+/// Red mutation: drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over`
+/// -> the second retarget below runs over the prepared window of 0 instead of the requested 4, so
+/// it settles on the first frame and `after_one` equals the target instead of a quarter of the way.
+#[test]
+fn explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted() {
+    let target = Matrix2x2 {
+        ll: 0.5,
+        lr: 0.25,
+        rl: -0.25,
+        rr: 0.75,
+    };
+    let mut chain = chain_with(0);
+    let matrix = test_support::chain_matrix_mut(&mut chain);
+    matrix
+        .set_target_smoothed(target, 4)
+        .expect("in-domain target");
+    let after_one = step(&mut chain);
+    assert_ne!(
+        after_one, target,
+        "a four-sample window does not settle in one"
+    );
+    for _ in 0..3 {
+        step(&mut chain);
+    }
+    assert_eq!(
+        current(&chain),
+        target,
+        "the window settles exactly on its last update"
+    );
+
+    // The window was adopted: the plain prepared-window setter now uses four samples too.
+    let second = Matrix2x2 {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+    };
+    test_support::chain_matrix_mut(&mut chain)
+        .set_target(second)
+        .expect("in-domain target");
+    assert_ne!(step(&mut chain), second, "the adopted window still ramps");
+
+    // A zero window is an immediate, unsmoothed jump, which is what a console asks for when the
+    // session declared no pan smoothing.
+    test_support::chain_matrix_mut(&mut chain)
+        .set_target_smoothed(target, 0)
+        .expect("in-domain target");
+    assert_eq!(
+        current(&chain),
+        target,
+        "a zero window settles at the event"
+    );
+
+    // The domain check is the same one the prepared path runs.
+    assert!(
+        test_support::chain_matrix_mut(&mut chain)
+            .set_target_smoothed(
+                Matrix2x2 {
+                    ll: 2.0,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+                0,
+            )
+            .is_err(),
+        "an out-of-domain coefficient is refused by the live setter too"
+    );
+}

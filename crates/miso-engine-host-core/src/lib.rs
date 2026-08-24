@@ -79,9 +79,10 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use prepare::{
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PreparedHost,
-    compile_host_session, count_effects, parse_host_session, prepare_host_runtime,
-    prepare_host_session,
+    HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostPrepareReport,
+    HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects,
+    parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
+    prepare_host_session, prepare_host_session_with_console,
 };
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,

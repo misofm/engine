@@ -10,6 +10,7 @@ name = "miso_engine_host_core"
 crate-type = ["rlib"]
 
 [dependencies]
+miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
 miso-engine-core.workspace = true
 miso-engine-effect-compiler.workspace = true
@@ -20,6 +21,8 @@ miso-engine-session.workspace = true
 miso-engine-source.workspace = true
 
 [dev-dependencies]
+miso-engine-builtins.workspace = true
+miso-engine-builtins-compiler.workspace = true
 miso-engine-source.workspace = true
 
 [lints]

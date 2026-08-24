@@ -4,7 +4,13 @@
 //! Everything that differed between the two copies is a field of [`HostPrepareCaps`]; everything
 //! else was identical, down to the order of the checks.
 
-use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use core::num::{NonZeroU32, NonZeroUsize};
+
+use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
+use miso_engine_builtins_compiler::{
+    BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
+    prepare_session_builtins_with_console,
+};
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
@@ -212,6 +218,51 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
+/// What a live console asks preparation to attach (issue #137 D1/D2).
+///
+/// Both halves are optional and independent, and the default attaches neither, so
+/// [`prepare_host_runtime`] is exactly `prepare_host_runtime_with_console(.., &Default::default())`
+/// and a host that wants no console allocates nothing extra.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostConsoleRequestV1 {
+    /// Bounded per-track control-queue depth, or `None` for no live control channel.
+    ///
+    /// The channel carries the one live-updatable builtin surface the builtin parameter ABI
+    /// declares (`matrix_ll/lr/rl/rr`, `BuiltinParameterUpdateRate::BlockTarget`).
+    pub control_queue_depth: Option<NonZeroUsize>,
+    /// Per-track meter window in frames, or `None` for no meters.
+    pub meter_period_frames: Option<NonZeroU32>,
+    /// Bounded per-track meter snapshot queue depth.
+    pub meter_queue_depth: NonZeroUsize,
+    /// Which chain boundary the per-track meters observe.
+    pub meter_tap: MeterTap,
+}
+
+impl Default for HostConsoleRequestV1 {
+    fn default() -> Self {
+        Self {
+            control_queue_depth: None,
+            meter_period_frames: None,
+            meter_queue_depth: NonZeroUsize::MIN,
+            meter_tap: MeterTap::PostMatrix,
+        }
+    }
+}
+
+/// The control-side halves of an attached live console, in canonical track order.
+///
+/// `tracks` is the compiled session's normalized track order and is the addressing authority: a
+/// host addresses a track by its index in this vector, and `track_controls[i]` / `meters[i]`
+/// belong to `tracks[i]` whenever they are present.
+pub struct HostConsoleHandlesV1 {
+    /// Canonical normalized track identities.
+    pub tracks: Vec<Box<str>>,
+    /// One control producer per track, in `tracks` order; empty when no channel was requested.
+    pub track_controls: Vec<TrackControlProducer>,
+    /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
+    pub meters: Vec<MeterConsumer>,
+}
+
 /// One prepared session: the render plan, the control-side source set, and the resource report.
 ///
 /// Field order is the drop order: the plan (which owns the source consumers) drops before the
@@ -307,16 +358,43 @@ pub fn prepare_host_session(
     Ok((compiled, prepared))
 }
 
+/// Parse, compile and prepare one session with a live console attached (issue #137 D1/D2).
+pub fn prepare_host_session_with_console(
+    toml: &str,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequestV1,
+) -> Result<(CompiledSession, PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
+    let compiled = compile_host_session(toml, caps)?;
+    let (prepared, handles) = prepare_host_runtime_with_console(&compiled, caps, console)?;
+    Ok((compiled, prepared, handles))
+}
+
 /// Prepare the render plan and source control set for an already compiled session.
 ///
 /// This is the whole shared pipeline: counts, shape, source rings, effects, builtins, the graph
 /// compile, the source binding, the identity bindings and the resource report, in that fixed order.
 /// A rejection always names the first rule the session broke.
-#[allow(clippy::too_many_lines)]
 pub fn prepare_host_runtime(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
+    let (prepared, handles) =
+        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequestV1::default())?;
+    debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
+    Ok(prepared)
+}
+
+/// Prepare the render plan, source control set and live-console handles for a compiled session.
+///
+/// Issue #137 D1/D2. The console halves are prepared inside the same transaction as the plan, so a
+/// session that cannot carry the requested console is rejected before anything is published: there
+/// is no partially attached console. Requesting nothing is exactly [`prepare_host_runtime`].
+#[allow(clippy::too_many_lines)]
+pub fn prepare_host_runtime_with_console(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequestV1,
+) -> Result<(PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -451,9 +529,55 @@ pub fn prepare_host_runtime(
         return Err(resource("host.effect.resource.limit"));
     }
 
-    let builtins = prepare_session_builtins(
+    // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
+    // order, so `HostConsoleHandlesV1::tracks` and the requested channels cannot disagree.
+    let console_tracks: Vec<Box<str>> = model
+        .tracks
+        .iter()
+        .map(|track| Box::<str>::from(track.id.as_str()))
+        .collect();
+    let control_requests: Vec<TrackControlRequest> = match console.control_queue_depth {
+        None => Vec::new(),
+        Some(depth) => console_tracks
+            .iter()
+            .map(|track| TrackControlRequest {
+                track_id: track.to_string(),
+                queue_capacity: depth,
+            })
+            .collect(),
+    };
+    let meter_requests: Vec<MeterRequest> = match console.meter_period_frames {
+        None => Vec::new(),
+        Some(period) => console_tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                // Handles are `index + 1` so they are nonzero and stable in canonical track
+                // order; nothing outside this function invents a meter handle.
+                let handle = u64::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .and_then(core::num::NonZeroU64::new)
+                    .ok_or_else(|| platform("host.count"))?;
+                Ok(MeterRequest {
+                    handle: MeterHandle(handle),
+                    track_id: track.to_string(),
+                    tap: console.meter_tap,
+                    config: MeterConfig {
+                        period_frames: period,
+                        peak_hold_frames: 0,
+                        peak_decay_db_per_second: 0.0,
+                        queue_capacity: console.meter_queue_depth,
+                        reset_generation: 0,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, PrepareDiagnostics>>()?,
+    };
+    let builtins = prepare_session_builtins_with_console(
         compiled,
-        &[],
+        &meter_requests,
+        &control_requests,
         BuiltinCompileCaps {
             maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
             maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
@@ -562,8 +686,43 @@ pub fn prepare_host_runtime(
     let bound = artifact
         .into_bound_with_source_set(bindings, source_set)
         .map_err(|failure| graph_failure(failure.code))?;
-    if !bound.meter_consumers.is_empty() {
+    // Issue #137 D2: exactly the requested console halves come back, in canonical track order.
+    // A session that produced a meter or control channel nobody asked for is still a hard
+    // rejection -- that was the pre-#137 rule and it is what keeps an unrequested observer from
+    // silently entering a production plan.
+    if bound.meter_consumers.len() != meter_requests.len()
+        || bound.track_controls.len() != control_requests.len()
+    {
         return Err(graph_failure("host.meter.unexpected"));
+    }
+    let mut track_controls = bound.track_controls;
+    let mut meters = bound.meter_consumers;
+    track_controls.sort_by(|left, right| left.track_id.cmp(&right.track_id));
+    meters.sort_by(|left, right| left.track_id.cmp(&right.track_id));
+    let console_order = |values: &[Box<str>], expected: &[Box<str>]| values == expected;
+    let mut sorted_tracks = console_tracks.clone();
+    sorted_tracks.sort_unstable();
+    if !track_controls.is_empty()
+        && !console_order(
+            &track_controls
+                .iter()
+                .map(|value| value.track_id.clone())
+                .collect::<Vec<_>>(),
+            &sorted_tracks,
+        )
+    {
+        return Err(graph_failure("host.control.order"));
+    }
+    if !meters.is_empty()
+        && !console_order(
+            &meters
+                .iter()
+                .map(|value| value.track_id.clone())
+                .collect::<Vec<_>>(),
+            &sorted_tracks,
+        )
+    {
+        return Err(graph_failure("host.meter.order"));
     }
 
     let control_retained_bytes = sources
@@ -602,11 +761,18 @@ pub fn prepare_host_runtime(
         largest_engine_allocation_bytes,
     };
 
-    Ok(PreparedHost {
-        plan: bound.plan,
-        sources,
-        report,
-    })
+    Ok((
+        PreparedHost {
+            plan: bound.plan,
+            sources,
+            report,
+        },
+        HostConsoleHandlesV1 {
+            tracks: console_tracks,
+            track_controls,
+            meters,
+        },
+    ))
 }
 
 /// Total effect instances across every rack of every track.

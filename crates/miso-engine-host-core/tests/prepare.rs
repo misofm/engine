@@ -415,3 +415,103 @@ fn contract_types_are_send_and_not_sync() {
     assert_send::<miso_engine_host_core::SourceControlSet>();
     assert_send::<miso_engine_core::realtime::PreparedRenderPlan>();
 }
+
+/// Issue #137 D1/D2: the live-console halves are prepared inside the plan transaction, addressed
+/// by the canonical normalized track order, and bounded exactly as requested.
+///
+/// Red mutation: drop the `bound.track_controls.len() != control_requests.len()` leg of the
+/// console arity check in `prepare_host_runtime_with_console` and make
+/// `prepare_session_builtins_with_console` skip one requested channel -> this test still finds
+/// nine tracks but only eight producers, so the `zip` below panics on the missing channel.
+#[test]
+fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() {
+    use core::num::{NonZeroU32, NonZeroUsize};
+    use miso_engine_host_core::{HostConsoleRequestV1, prepare_host_session_with_console};
+
+    let mut console_caps = caps();
+    console_caps.maximum_meter_streams = 16;
+    console_caps.maximum_meter_items = 1 << 16;
+    console_caps.maximum_meter_bytes = 1 << 24;
+    let console = HostConsoleRequestV1 {
+        control_queue_depth: Some(NonZeroUsize::new(4).expect("nonzero")),
+        meter_period_frames: Some(NonZeroU32::new(128).expect("nonzero")),
+        meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
+        ..HostConsoleRequestV1::default()
+    };
+    let (compiled, prepared, mut handles) =
+        prepare_host_session_with_console(SESSION, &console_caps, &console).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
+    let expected: Vec<String> = compiled
+        .normalized_model()
+        .tracks
+        .iter()
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        handles
+            .tracks
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>(),
+        expected,
+        "console track order is the canonical normalized order"
+    );
+    assert_eq!(handles.track_controls.len(), expected.len());
+    assert_eq!(handles.meters.len(), expected.len());
+    for (index, track) in expected.iter().enumerate() {
+        assert_eq!(&*handles.track_controls[index].track_id, track.as_str());
+        assert_eq!(&*handles.meters[index].track_id, track.as_str());
+    }
+    assert!(prepared.report.builtin_meter_payload_bytes > 0);
+
+    // The control queue is bounded and a full queue hands the record back rather than dropping it.
+    let record = miso_engine_builtins_compiler::TrackControlRecordV1 {
+        matrix: miso_engine_builtins::Matrix2x2 {
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+        },
+        smoothing_samples: 0,
+    };
+    let producer = &mut handles.track_controls[0].producer;
+    for _ in 0..4 {
+        producer
+            .try_push(record)
+            .expect("bounded depth admits four");
+    }
+    let full = producer
+        .try_push(record)
+        .expect_err("fifth is backpressure");
+    assert_eq!(full.value, record, "a full queue returns the record");
+}
+
+/// Issue #137: a host that asks for no console gets none, and pays for none.
+#[test]
+fn no_console_request_attaches_nothing_and_charges_nothing() {
+    use miso_engine_host_core::{
+        HostConsoleRequestV1, compile_host_session as compile, prepare_host_runtime_with_console,
+    };
+
+    let compiled = compile(SESSION, &caps()).expect("compiled fixture");
+    let (plain, handles) =
+        prepare_host_runtime_with_console(&compiled, &caps(), &HostConsoleRequestV1::default())
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
+    assert!(handles.track_controls.is_empty());
+    assert!(handles.meters.is_empty());
+    assert_eq!(handles.tracks.len(), 9);
+    assert_eq!(plain.report.builtin_meter_payload_bytes, 0);
+    let baseline = prepare_host_runtime(&compiled, &caps())
+        .unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+        .report;
+    assert_eq!(
+        plain.report.builtin_processor_payload_bytes, baseline.builtin_processor_payload_bytes,
+        "an unattached console changes no processor byte"
+    );
+    assert_eq!(plain.report, baseline);
+}

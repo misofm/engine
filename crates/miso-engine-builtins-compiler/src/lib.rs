@@ -1,6 +1,7 @@
 //! Off-render preparation adapter for issue-007 builtins.
 #![allow(missing_docs)]
 
+use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(feature = "test-support")]
@@ -21,7 +22,8 @@ use miso_engine_builtins::{
     PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
-    Consumer, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
+    Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
+    bounded_spsc, bounded_spsc_retained_payload,
 };
 use miso_engine_effect_contract::BankWidth;
 use miso_engine_graph::{
@@ -57,6 +59,48 @@ pub struct MeterRequest {
     pub config: MeterConfig,
 }
 
+/// One live-console control record for a track's smoothed 2x2 matrix/pan stage (issue #137 D1).
+///
+/// # Why the matrix stage and nothing else
+///
+/// `BUILTIN_PARAMETER_DESCRIPTORS_V1` is the builtin parameter ABI, and it is explicit about which
+/// builtin parameters may move after preparation: `matrix_ll/lr/rl/rr` declare
+/// `BuiltinParameterUpdateRate::BlockTarget` with `BuiltinSmoothingPolicy::LinearNUpdates`, and
+/// every other builtin row -- `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db`, `mute`
+/// -- declares `PreparedOnly`. This channel therefore carries exactly the one live-updatable
+/// builtin surface the contract already admits, and it changes no declared update rate.
+///
+/// The record is `Copy` and fixed-size, so the queue is a plain `bounded_spsc` and the render-side
+/// drain allocates nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackControlRecordV1 {
+    /// New 2x2 target, already domain-checked by the producer.
+    pub matrix: Matrix2x2,
+    /// Ramp length in sample updates for this retarget.
+    pub smoothing_samples: u32,
+}
+
+/// One requested live-console control channel, addressed by session track ID (issue #137 D1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackControlRequest {
+    /// Session-stable track identity. It must name a track of the compiled session.
+    pub track_id: String,
+    /// Exact bounded depth of this track's control queue. A full queue is typed backpressure.
+    pub queue_capacity: NonZeroUsize,
+}
+
+/// The control-side producer half of one prepared live-console control channel.
+///
+/// The consumer half is owned by the track's matrix processor inside the render plan, exactly as
+/// `MeterConsumer` is the mirror image for metering. A producer must be dropped before the plan
+/// that owns its consumer.
+pub struct TrackControlProducer {
+    /// Session-stable track identity this channel addresses.
+    pub track_id: Box<str>,
+    /// Bounded producer endpoint; `try_push` returns the record on a full queue.
+    pub producer: Producer<TrackControlRecordV1>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BuiltinDiagnostic {
     pub code: &'static str,
@@ -88,6 +132,10 @@ pub struct PreparedBuiltinsSession {
     bank_inputs: Vec<(Box<str>, InputBuiltins)>,
     observers: Vec<GraphNodeObserverBinding>,
     meter_consumers: Vec<MeterConsumer>,
+    /// Issue #137 D1: control-side producers, sealed alongside the consumers bound into the
+    /// matrix processors. Declared after `processors` so a dropped preparation releases the
+    /// producers before the consumers that own the ring storage.
+    track_controls: Vec<TrackControlProducer>,
     tails: Vec<(Box<str>, BuiltinTail)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
@@ -295,6 +343,8 @@ struct BuiltinSessionSeal {
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
+    /// Issue #137 D1: `(track_id, queue_capacity)` per live-console control channel, sorted.
+    controls: Vec<(Box<str>, usize)>,
     resources: BuiltinResourceEstimate,
 }
 
@@ -471,11 +521,18 @@ pub struct PreparedBuiltinsGraphArtifact<R> {
     builtin_processors: Vec<miso_engine_graph::GraphNodeBinding>,
     builtin_observers: Vec<GraphNodeObserverBinding>,
     report: R,
+    /// Issue #137 D1: control producers travel with the artifact so the one-way binding hands
+    /// them to the caller together with the plan that owns their consumers.
+    track_controls: Vec<TrackControlProducer>,
     meter_consumers: Vec<MeterConsumer>,
 }
 
 /// The one-way result of consuming and binding a sealed builtin graph artifact.
+///
+/// Field order is drop order: `track_controls` producers are released before the `plan` that owns
+/// their consumer endpoints, and `meter_consumers` outlive the plan that owns their producers.
 pub struct PreparedBuiltinsGraphBound {
+    pub track_controls: Vec<TrackControlProducer>,
     pub plan: PreparedRenderPlan,
     pub meter_consumers: Vec<MeterConsumer>,
 }
@@ -483,6 +540,7 @@ pub struct PreparedBuiltinsGraphBound {
 /// Native dependency-wave result of consuming and binding a sealed builtin graph artifact.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct PreparedBuiltinsNativeGraphBound {
+    pub track_controls: Vec<TrackControlProducer>,
     pub prepared: miso_engine_graph::PreparedNativeGraphPlanV1,
     pub meter_consumers: Vec<MeterConsumer>,
 }
@@ -784,6 +842,12 @@ impl PreparedBuiltinsSession {
         self.meter_consumers.len()
     }
 
+    /// Number of sealed live-console control channels (issue #137 D1).
+    #[must_use]
+    pub fn track_control_count(&self) -> usize {
+        self.track_controls.len()
+    }
+
     /// Read-only builtin tails used by graph lowering.
     pub fn tails(&self) -> impl Iterator<Item = (&str, BuiltinTail)> {
         self.tails
@@ -848,6 +912,20 @@ impl PreparedBuiltinsSession {
                 "$.builtins.meter_consumers",
             ));
         }
+        // Issue #137 D1: the control seal is the producer set, so a lost, duplicated, or
+        // retargeted control channel is a prepared-set mismatch exactly like a lost meter.
+        let mut actual_controls: Vec<(Box<str>, usize)> = self
+            .track_controls
+            .iter()
+            .map(|control| (control.track_id.clone(), control.producer.capacity()))
+            .collect();
+        actual_controls.sort_unstable();
+        if self.seal.controls != actual_controls {
+            diagnostics.push(diag(
+                "builtin.prepared.control_set",
+                "$.builtins.track_controls",
+            ));
+        }
         if self.seal.resources != self.resources {
             diagnostics.push(diag(
                 "builtin.prepared.resource_report",
@@ -871,6 +949,7 @@ impl PreparedBuiltinsSession {
             builtin_processors: self.processors,
             builtin_observers: self.observers,
             report,
+            track_controls: self.track_controls,
             meter_consumers: self.meter_consumers,
         }
     }
@@ -960,6 +1039,7 @@ impl PreparedBuiltinsSession {
             builtin_processors: self.processors,
             builtin_observers: self.observers,
             report,
+            track_controls: self.track_controls,
             meter_consumers: self.meter_consumers,
         }
     }
@@ -1198,6 +1278,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
         };
         Ok(PreparedBuiltinsGraphBound {
+            track_controls: self.track_controls,
             plan,
             meter_consumers: self.meter_consumers,
         })
@@ -1284,6 +1365,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         bindings.observers.append(&mut self.builtin_observers);
         match self.graph.bind_with_source_set(bindings, source_set) {
             Ok(plan) => Ok(PreparedBuiltinsGraphBound {
+                track_controls: self.track_controls,
                 plan,
                 meter_consumers: self.meter_consumers,
             }),
@@ -1312,6 +1394,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                         builtin_processors,
                         builtin_observers,
                         report: self.report,
+                        track_controls: self.track_controls,
                         meter_consumers: self.meter_consumers,
                     },
                     bindings: GraphRuntimeBindings {
@@ -1394,6 +1477,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         bindings.observers.append(&mut self.builtin_observers);
         match self.graph.bind_native(bindings, config) {
             Ok(prepared) => Ok(PreparedBuiltinsNativeGraphBound {
+                track_controls: self.track_controls,
                 prepared,
                 meter_consumers: self.meter_consumers,
             }),
@@ -1422,6 +1506,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                         builtin_processors,
                         builtin_observers,
                         report: self.report,
+                        track_controls: self.track_controls,
                         meter_consumers: self.meter_consumers,
                     },
                     bindings: GraphRuntimeBindings {
@@ -1523,6 +1608,24 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    prepare_session_builtins_with_console(session, requests, &[], caps)
+}
+
+/// Prepare builtins with live-console control channels attached (issue #137 D1).
+///
+/// `controls` requests one bounded control channel per named track; the consumer half is bound
+/// into that track's matrix processor and the producer half is returned in the prepared session
+/// for the host to drive off render. A track named twice, or a track the session does not
+/// declare, is a preparation diagnostic -- never a silently ignored request.
+///
+/// [`prepare_session_builtins`] is exactly this call with no control channels, so a host that does
+/// not want a console pays nothing: no queue is allocated and the matrix processors carry `None`.
+pub fn prepare_session_builtins_with_console(
+    session: &CompiledSession,
+    requests: &[MeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
         caps.maximum_total_state_bytes,
@@ -1579,6 +1682,18 @@ pub fn prepare_session_builtins(
             diagnostics.push(diag("builtin.meter.unknown_track", &meter_path(request)));
         }
     }
+    let mut control_tracks = BTreeSet::new();
+    for control in controls {
+        if !control_tracks.insert(control.track_id.as_str()) {
+            diagnostics.push(diag("builtin.control.duplicate", &control_path(control)));
+        }
+        if !known_tracks.contains(control.track_id.as_str()) {
+            diagnostics.push(diag(
+                "builtin.control.unknown_track",
+                &control_path(control),
+            ));
+        }
+    }
     for track in &session.normalized_model().tracks {
         match track_parameters(track, caps.maximum_smoothing_samples)
             .and_then(|parameters| BuiltinChain::new(session.sample_rate().0, parameters))
@@ -1589,7 +1704,7 @@ pub fn prepare_session_builtins(
             }
         }
     }
-    let resource_plan = match resource_plan(session, requests) {
+    let resource_plan = match resource_plan(session, requests, controls) {
         Ok(value) => Some(value),
         Err(error) => {
             diagnostics.push(error);
@@ -1621,6 +1736,12 @@ pub fn prepare_session_builtins(
     let mut processors = Vec::with_capacity(processor_count);
     let mut bank_inputs = Vec::with_capacity(track_count);
     let mut tails = Vec::with_capacity(track_count);
+    let mut control_capacity: BTreeMap<&str, NonZeroUsize> = BTreeMap::new();
+    for control in controls {
+        control_capacity.insert(control.track_id.as_str(), control.queue_capacity);
+    }
+    let mut track_controls = Vec::with_capacity(controls.len());
+    let mut control_seal: Vec<(Box<str>, usize)> = Vec::with_capacity(controls.len());
     for track in &session.normalized_model().tracks {
         let parameters = track_parameters(track, caps.maximum_smoothing_samples)
             .expect("preflighted parameters");
@@ -1645,11 +1766,32 @@ pub fn prepare_session_builtins(
             stage_node(graph_id.clone(), TrackStage::PostFader),
             Box::new(FaderProcessor(fader)),
         ));
+        let matrix_processor: Box<dyn GraphRuntimeProcessor> =
+            match control_capacity.get(track.id.as_str()) {
+                None => Box::new(MatrixProcessor(matrix)),
+                Some(capacity) => {
+                    let (producer, control) =
+                        bounded_spsc::<TrackControlRecordV1>(*capacity, QueueGeneration(0))
+                            .map_err(|_| {
+                                BuiltinDiagnosticSet::sorted(vec![diag(
+                                    "builtin.control.prepare",
+                                    &format!("$.controls[track_id={}]", track.id.as_str()),
+                                )])
+                            })?;
+                    track_controls.push(TrackControlProducer {
+                        track_id: Box::<str>::from(track.id.as_str()),
+                        producer,
+                    });
+                    control_seal.push((Box::<str>::from(track.id.as_str()), capacity.get()));
+                    Box::new(ConsoleMatrixProcessor { matrix, control })
+                }
+            };
         processors.push(miso_engine_graph::GraphNodeBinding::new(
             stage_node(graph_id, TrackStage::PostMatrix),
-            Box::new(MatrixProcessor(matrix)),
+            matrix_processor,
         ));
     }
+    control_seal.sort_unstable();
     let mut observers = Vec::with_capacity(requests.len());
     let mut meter_consumers = Vec::with_capacity(requests.len());
     let mut request_seals = Vec::with_capacity(requests.len());
@@ -1705,21 +1847,28 @@ pub fn prepare_session_builtins(
             requests: request_seals.clone(),
             observers: observer_seal,
             consumers: consumer_seal,
+            controls: control_seal,
             resources,
         },
         processors,
         bank_inputs,
         observers,
         meter_consumers,
+        track_controls,
         tails,
         requests: request_seals,
         resources,
     })
 }
 
+fn control_path(request: &TrackControlRequest) -> String {
+    format!("$.controls[track_id={}]", request.track_id)
+}
+
 fn resource_plan(
     session: &CompiledSession,
     requests: &[MeterRequest],
+    controls: &[TrackControlRequest],
 ) -> Result<BuiltinResourcePlan, BuiltinDiagnostic> {
     let track_count = session.normalized_model().tracks.len();
     let processor_count = track_count
@@ -1734,6 +1883,10 @@ fn resource_plan(
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, processor_count)?;
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    let controlled: BTreeSet<&str> = controls
+        .iter()
+        .map(|control| control.track_id.as_str())
+        .collect();
     for track in &session.normalized_model().tracks {
         let bytes = track.id.as_str().len();
         // The three graph IDs are independently cloned into their stage bindings, alongside the
@@ -1744,10 +1897,15 @@ fn resource_plan(
                 .add_bytes(bytes)
                 .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
         }
+        let matrix_layout = if controlled.contains(track.id.as_str()) {
+            core::alloc::Layout::new::<ConsoleMatrixProcessor>()
+        } else {
+            core::alloc::Layout::new::<MatrixProcessor>()
+        };
         processor
             .add_layout(core::alloc::Layout::new::<InputProcessor>())
             .and_then(|_| processor.add_layout(core::alloc::Layout::new::<FaderProcessor>()))
-            .and_then(|_| processor.add_layout(core::alloc::Layout::new::<MatrixProcessor>()))
+            .and_then(|_| processor.add_layout(matrix_layout))
             .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
@@ -1756,6 +1914,56 @@ fn resource_plan(
     add_vector_layout::<MeterRequestSeal>(&mut meter, request_count)?;
     add_vector_layout::<(Box<str>, TrackStage, u64)>(&mut meter, request_count)?;
     add_vector_layout::<(u64, Box<str>, MeterTap)>(&mut meter, request_count)?;
+    // Issue #137 D1: the live-console control channels are charged to the processor accumulator,
+    // because they are per-track processor storage rather than meter storage: the producer vector,
+    // its seal, and one bounded ring per requested track.
+    add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
+    add_vector_layout::<(Box<str>, usize)>(&mut processor, controls.len())?;
+    for control in controls {
+        let queue = bounded_spsc_retained_payload::<TrackControlRecordV1>(control.queue_capacity)
+            .map_err(|_| {
+            diag(
+                "builtin.resource.arithmetic_overflow",
+                &control_path(control),
+            )
+        })?;
+        processor
+            .add_layout(
+                core::alloc::Layout::from_size_align(
+                    queue.ring_header_bytes,
+                    queue.ring_header_align,
+                )
+                .map_err(|_| {
+                    diag(
+                        "builtin.resource.arithmetic_overflow",
+                        &control_path(control),
+                    )
+                })?,
+            )
+            .and_then(|_| {
+                core::alloc::Layout::from_size_align(
+                    queue.slot_payload_bytes,
+                    queue.slot_payload_align,
+                )
+                .ok()
+                .and_then(|layout| processor.add_layout(layout))
+            })
+            .ok_or_else(|| {
+                diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &control_path(control),
+                )
+            })?;
+        // The public producer identity and the sealed control identity are retained separately.
+        for _ in 0..2 {
+            processor.add_bytes(control.track_id.len()).ok_or_else(|| {
+                diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &control_path(control),
+                )
+            })?;
+        }
+    }
     let mut meter_items = 0_u64;
     for request in requests {
         let queue =
@@ -1876,6 +2084,36 @@ impl GraphRuntimeProcessor for MatrixProcessor {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.0.process(block);
+        Ok(())
+    }
+}
+
+/// The matrix/pan stage of one track that a live console drives (issue #137 D1).
+///
+/// It is a separate type from [`MatrixProcessor`] on purpose: a session prepared without a console
+/// keeps the exact processor storage, and therefore the exact `engine_owned_processor_payload_bytes`
+/// row, it had before this channel existed. "Metering and control off cost nothing" is a byte
+/// identity here, not a figure of speech.
+///
+/// The drain runs at the top of the block, before any audio is touched, so an admitted retarget
+/// takes effect at exactly the block boundary the control side was told it would: every sample of
+/// the block starting at `block.first_sample` is rendered by the post-command ramp. `try_pop`
+/// moves one `Copy` record and `set_target_smoothed` performs four divisions; neither allocates,
+/// locks, nor drops, which is what keeps the shipped artifact's render call-graph gate green.
+struct ConsoleMatrixProcessor {
+    matrix: MatrixBuiltins,
+    control: Consumer<TrackControlRecordV1>,
+}
+impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        while let Ok(record) = self.control.try_pop() {
+            self.matrix
+                .set_target_smoothed(record.matrix, record.smoothing_samples)
+                .map_err(render_error)?;
+        }
+        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
+            .map_err(render_error)?;
+        self.matrix.process(block);
         Ok(())
     }
 }
@@ -2340,6 +2578,7 @@ mod tests {
                 Box::new(NoopObserver),
             )],
             report: 0x22_73,
+            track_controls: Vec::new(),
             meter_consumers: Vec::new(),
         };
         let bindings = GraphRuntimeBindings {
@@ -3888,6 +4127,96 @@ mod tests {
         assert_eq!(
             transcript_hash, 1_799_220_726_181_273_071,
             "updated only through a deliberate frozen-case change"
+        );
+    }
+
+    /// Issue #137 D1: a live-console control request is validated like a meter request, sealed
+    /// like a meter consumer, and charges only the tracks that asked for one.
+    ///
+    /// Red mutation: delete the `control_tracks.insert` / `known_tracks.contains` legs in
+    /// `prepare_session_builtins_with_console` -> the duplicate and unknown-track requests are
+    /// accepted, and the assertions below on `builtin.control.duplicate` /
+    /// `builtin.control.unknown_track` fail with an `Ok` preparation.
+    #[test]
+    fn console_control_requests_are_validated_sealed_and_charged_per_track() {
+        let compiled = session();
+        let track = compiled.normalized_model().tracks[0].id.as_str().to_owned();
+        let depth = NonZeroUsize::new(3).expect("nonzero");
+
+        let baseline = prepare_session_builtins(&compiled, &[], caps()).expect("baseline");
+        let attached = prepare_session_builtins_with_console(
+            &compiled,
+            &[],
+            &[TrackControlRequest {
+                track_id: track.clone(),
+                queue_capacity: depth,
+            }],
+            caps(),
+        )
+        .expect("attached console");
+        assert_eq!(baseline.track_control_count(), 0);
+        assert_eq!(attached.track_control_count(), 1);
+        assert!(
+            attached
+                .resource_report()
+                .engine_owned_processor_payload_bytes
+                > baseline
+                    .resource_report()
+                    .engine_owned_processor_payload_bytes,
+            "an attached channel is charged"
+        );
+        assert!(
+            attached.validate_for_session(&compiled).0.is_empty(),
+            "the control seal matches the producers it was built from"
+        );
+        assert_eq!(
+            attached.processor_count(),
+            baseline.processor_count(),
+            "a console changes no processor count, only one processor's type"
+        );
+
+        let duplicate = prepare_session_builtins_with_console(
+            &compiled,
+            &[],
+            &[
+                TrackControlRequest {
+                    track_id: track.clone(),
+                    queue_capacity: depth,
+                },
+                TrackControlRequest {
+                    track_id: track.clone(),
+                    queue_capacity: depth,
+                },
+            ],
+            caps(),
+        )
+        .map(|_| ())
+        .expect_err("a track may hold one control channel");
+        assert!(
+            duplicate
+                .0
+                .iter()
+                .any(|value| value.code == "builtin.control.duplicate"),
+            "{duplicate:?}"
+        );
+
+        let unknown = prepare_session_builtins_with_console(
+            &compiled,
+            &[],
+            &[TrackControlRequest {
+                track_id: "no-such-track".to_owned(),
+                queue_capacity: depth,
+            }],
+            caps(),
+        )
+        .map(|_| ())
+        .expect_err("an undeclared track has no channel");
+        assert!(
+            unknown
+                .0
+                .iter()
+                .any(|value| value.code == "builtin.control.unknown_track"),
+            "{unknown:?}"
         );
     }
 }
