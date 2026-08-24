@@ -456,7 +456,7 @@ static void comprehensive_smoke(const char *fixture_path) {
         uint32_t record_index;
     } mutation_case;
     const mutation_case mutations[] = {
-        {8, 2, MISO_ENGINE_EFFECT_DESCRIPTOR_HEADER_V1, 8, UINT32_MAX},
+        {8, 3, MISO_ENGINE_EFFECT_DESCRIPTOR_HEADER_V1, 8, UINT32_MAX},
         {10, 104, MISO_ENGINE_EFFECT_DESCRIPTOR_HEADER_V1, 10, UINT32_MAX},
         {28, 0, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1, 28, UINT32_MAX},
         {28, 8, MISO_ENGINE_EFFECT_DESCRIPTOR_ENUM_V1, 28, UINT32_MAX},
