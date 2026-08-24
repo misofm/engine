@@ -51,7 +51,7 @@ done
 echo "web AudioWorklet transitive process-policy mutations passed"
 mutated_utf8="$mutation_dir/worklet-utf8.js"
 sed 's/(codePoint >>> 18) | 0xf0/(codePoint >>> 18) | 0xe0/' "$worklet" >"$mutated_utf8"
-if MISO_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \
+if MISO_ENGINE_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \
   node "$repo_root/scripts/test-web-audioworklet.mjs" >/dev/null 2>&1; then
   echo "worklet UTF-8 four-byte lead mutation escaped byte-parity test" >&2
   exit 1

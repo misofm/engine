@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const root = new URL("../", import.meta.url);
 const hostUrl = new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js", root);
-const workletUrl = process.env.MISO_WEB_WORKLET_TEST_MODULE === undefined
+const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
   ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js", root)
-  : pathToFileURL(process.env.MISO_WEB_WORKLET_TEST_MODULE);
+  : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
 
 const limits = Object.freeze({
   sessionTomlBytes: 4096,
