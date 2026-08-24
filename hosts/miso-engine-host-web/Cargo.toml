@@ -13,7 +13,13 @@ crate-type = ["rlib", "cdylib"]
 # types it names in its own ABI and the facade. `miso-engine-builtins-compiler`,
 # `-effect-compiler`, `-graph`, `-graph-compiler`, `-session`, `-source` and `-target-smoke` were
 # direct dependencies of the deleted second copy of that pipeline (#106 F1).
+# `-builtins` and `-builtins-compiler` came back as direct dependencies with issue #137: the live
+# console's record types (`Matrix2x2`, `TrackControlRecordV1`, `MeterSnapshot`) are named by this
+# crate's own ABI, exactly as the render types are. The compile pipeline still lives entirely in
+# `miso-engine-host-core`.
 [dependencies]
+miso-engine-builtins.workspace = true
+miso-engine-builtins-compiler.workspace = true
 miso-engine-core.workspace = true
 miso-engine-host-core.workspace = true
 

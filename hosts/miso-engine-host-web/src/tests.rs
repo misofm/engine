@@ -90,15 +90,61 @@ fn frozen_layouts_and_values_are_exact() {
             BUFFER_SOURCE_ID,
             BUFFER_SOURCE_PCM,
             BUFFER_DIAGNOSTIC,
-            BUFFER_OUTPUT_PCM
+            BUFFER_OUTPUT_PCM,
+            BUFFER_COMMAND,
+            BUFFER_METER_FRAME
         ],
-        [1, 2, 3, 4, 5]
+        [1, 2, 3, 4, 5, 6, 7]
+    );
+    // Issue #137 D1: the two console words are the first two of the frozen configuration's four
+    // reserved words. Every V1 writer already sets them to zero, which is exactly "default command
+    // queue depth, no meters attached", so the 192-byte layout and every existing caller stand.
+    assert_eq!(size_of::<WebCommandReportV1>(), 48);
+    assert_eq!(COMMAND_REPORT_BYTES, 48);
+    assert_eq!(COMMAND_RECORD_BYTES, 48);
+    assert_eq!(MAXIMUM_COMMAND_RECORDS, 256);
+    assert_eq!(DEFAULT_COMMAND_QUEUE_RECORDS, 64);
+    assert_eq!(DEFAULT_METER_BLOCKS, 12);
+    assert_eq!(
+        [
+            COMMAND_PAN,
+            COMMAND_MATRIX,
+            COMMAND_FADER_DB,
+            COMMAND_MUTE,
+            COMMAND_EFFECT_PARAM,
+            COMMAND_EFFECT_BYPASS
+        ],
+        [1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        [
+            COMMAND_REASON_NONE,
+            COMMAND_REASON_MALFORMED,
+            COMMAND_REASON_UNKNOWN_TRACK,
+            COMMAND_REASON_UNKNOWN_RACK,
+            COMMAND_REASON_UNKNOWN_EFFECT,
+            COMMAND_REASON_UNKNOWN_PARAMETER,
+            COMMAND_REASON_DOMAIN,
+            COMMAND_REASON_UNSUPPORTED_KIND,
+            COMMAND_REASON_BACKPRESSURE,
+            COMMAND_REASON_WRONG_STATE
+        ],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(offset_of!(WebPrepareConfigV1, struct_size), 0);
     assert_eq!(offset_of!(WebPrepareConfigV1, quantum_frames), 12);
     assert_eq!(offset_of!(WebPrepareConfigV1, maximum_tracks), 40);
     assert_eq!(offset_of!(WebPrepareConfigV1, maximum_meter_bytes), 152);
-    assert_eq!(offset_of!(WebPrepareConfigV1, reserved), 160);
+    assert_eq!(
+        offset_of!(WebPrepareConfigV1, console_command_queue_records),
+        160
+    );
+    assert_eq!(offset_of!(WebPrepareConfigV1, console_meter_blocks), 168);
+    assert_eq!(offset_of!(WebPrepareConfigV1, reserved), 176);
+    assert_eq!(offset_of!(WebCommandReportV1, result), 8);
+    assert_eq!(offset_of!(WebCommandReportV1, rejected_index), 16);
+    assert_eq!(offset_of!(WebCommandReportV1, applied_at_sample), 24);
+    assert_eq!(offset_of!(WebCommandReportV1, reserved), 32);
     assert_eq!(offset_of!(WebStatusV1, state), 8);
     assert_eq!(offset_of!(WebStatusV1, next_absolute_sample), 32);
     assert_eq!(offset_of!(WebStatusV1, reserved), 48);
@@ -851,4 +897,409 @@ mod serde_pin {
             simd128: hex_after(text, "\"pcmF32leSha256\":"),
         }
     }
+}
+
+/// Stage one `miso.command.v1` record into the fixed command buffer at `index`.
+#[allow(clippy::too_many_arguments)]
+fn stage_command(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    kind: u32,
+    rack: u8,
+    channel: u8,
+    track_index: u32,
+    effect_index: u32,
+    parameter_id: u32,
+    smoothing_samples: u32,
+    values: [f32; 4],
+) {
+    let record_bytes = COMMAND_RECORD_BYTES as usize;
+    let staging = host
+        .command_staging_mut()
+        .expect("prepared command staging");
+    let record = &mut staging[index * record_bytes..(index + 1) * record_bytes];
+    record.fill(0);
+    record[0] = u8::try_from(kind).expect("frozen kind");
+    record[1] = rack;
+    record[2] = channel;
+    record[4..8].copy_from_slice(&track_index.to_le_bytes());
+    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
+    record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
+    record[16..20].copy_from_slice(&smoothing_samples.to_le_bytes());
+    for (slot, value) in values.iter().enumerate() {
+        record[24 + slot * 4..28 + slot * 4].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
+fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
+    let toml = identity_session(quantum, quantum, u64::from(quantum) * 64);
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    config.source_ring_frames = quantum;
+    config.console_meter_blocks = meter_blocks;
+    config.maximum_meter_streams = 16;
+    config.maximum_meter_items = 1 << 16;
+    config.maximum_meter_bytes = 1 << 24;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+    host
+}
+
+/// Feed one full quantum of a constant left plane and render it.
+fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
+    let quantum = host.config().quantum_frames as usize;
+    let left = vec![value; quantum];
+    let right = vec![value; quantum];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            generation,
+            block * quantum as u64,
+            48_000,
+            &planes,
+            quantum as u32,
+            false,
+        ),
+        RESULT_OK,
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+}
+
+/// #137 E1: a command's acknowledgement names the exact sample it takes effect at, and the
+/// rendered output changes at that sample and not one sample before.
+///
+/// The fixture is identity end to end, so a constant input renders to that same constant. A
+/// `COMMAND_MATRIX` that halves `ll` therefore has exactly one observable consequence: the left
+/// plane halves. The test asserts the last block before `applied_at_sample` is untouched and the
+/// first block at `applied_at_sample` is fully changed -- the matrix stage drains its queue at the
+/// top of the block, so the transition is on a block boundary and is exact, not approximate.
+///
+/// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
+/// `ConsoleMatrixProcessor::process` to *after* `self.matrix.process(block)` -> the reported
+/// sample is one block early and `at_applied` still renders the pre-command value.
+#[test]
+fn command_ack_names_the_exact_application_sample() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    let quantum = QUANTUM as usize;
+
+    feed_and_render(&mut host, 1, 0, 0.5);
+    let before = host.output_pcm().expect("output").to_vec();
+    assert!(
+        before[..quantum].iter().all(|value| *value == 0.5),
+        "identity fixture renders its input"
+    );
+
+    // Admit the retarget between two blocks; the report names the block that will carry it.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let report = *host.command_report();
+    assert_eq!(report.result, RESULT_OK);
+    assert_eq!(report.reason, COMMAND_REASON_NONE);
+    assert_eq!(report.admitted, 1);
+    assert_eq!(
+        report.applied_at_sample,
+        u64::from(QUANTUM),
+        "the next block is the one that drains the queue"
+    );
+    assert_eq!(report.applied_at_sample, host.status().next_absolute_sample);
+
+    feed_and_render(&mut host, 1, 1, 0.5);
+    let at_applied = host.output_pcm().expect("output").to_vec();
+    assert!(
+        at_applied[..quantum].iter().all(|value| *value == 0.25),
+        "every sample of the block at applied_at_sample carries the new matrix"
+    );
+    assert!(
+        at_applied[quantum..].iter().all(|value| *value == 0.5),
+        "the right lane is untouched by an ll-only retarget"
+    );
+
+    // A smoothed retarget is still admitted at a block boundary; the ramp starts there.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_PAN,
+        255,
+        255,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [-1.0, 1.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        2 * u64::from(QUANTUM)
+    );
+    feed_and_render(&mut host, 1, 2, 0.5);
+    let ramping = host.output_pcm().expect("output").to_vec();
+    assert!(
+        ramping[0] > 0.25 && ramping[0] < 0.5,
+        "the ramp starts inside the block that reported the sample: {}",
+        ramping[0]
+    );
+    assert!(
+        (ramping[quantum - 1] - 0.5).abs() < 1e-6,
+        "a one-quantum window settles by the end of that block: {}",
+        ramping[quantum - 1]
+    );
+}
+
+/// #137 E3: flooding past the bounded queue is a typed local rejection that admits nothing and
+/// disturbs no rendered sample.
+///
+/// Red mutation: delete the free-room pre-check loop in `admit_commands` -> the flood is admitted
+/// record by record until `try_push` fails, the transaction is no longer all-or-nothing, and the
+/// flooded run's digest differs from the clean run's.
+#[test]
+fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
+    const QUANTUM: u32 = 128;
+    let depth = DEFAULT_COMMAND_QUEUE_RECORDS;
+
+    let mut clean = console_host(QUANTUM, 0);
+    let mut flooded = console_host(QUANTUM, 0);
+    for block in 0..4_u64 {
+        feed_and_render(&mut clean, 1, block, 0.25);
+        feed_and_render(&mut flooded, 1, block, 0.25);
+        // One more record than the queue can hold, submitted as one batch.
+        for index in 0..depth as usize + 1 {
+            stage_command(
+                &mut flooded,
+                index,
+                COMMAND_MATRIX,
+                255,
+                255,
+                0,
+                0,
+                0,
+                0,
+                [0.5, 0.0, 0.0, 1.0],
+            );
+        }
+        assert_eq!(flooded.submit_commands(depth + 1), RESULT_BACKPRESSURE);
+        let report = *flooded.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
+        assert_eq!(report.admitted, 0, "a refused submission admits nothing");
+        assert_eq!(
+            clean.output_pcm().expect("clean output"),
+            flooded.output_pcm().expect("flooded output"),
+            "block {block}: control traffic never disturbs a rendered sample",
+        );
+    }
+    assert_eq!(
+        clean.status().rendered_quanta,
+        flooded.status().rendered_quanta
+    );
+}
+
+/// #137 E4: every unknown target is a typed refusal that leaves the engine exactly as it was.
+///
+/// Red mutation: delete the `track >= track_count` leg in `admit_commands` -> the unknown-track
+/// record reaches `ready.controls.get(track)`, is refused as `UNSUPPORTED` instead of
+/// `INVALID_ARGUMENT`/`UNKNOWN_TRACK`, and the reason assertion below fails.
+#[test]
+fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    feed_and_render(&mut host, 1, 0, 0.75);
+    let baseline = host.output_pcm().expect("output").to_vec();
+    let baseline_status = *host.status();
+
+    /// `(kind, rack, channel, track, effect, parameter, values, result, reason)`.
+    type UnknownTargetCase = (u32, u8, u8, u32, u32, u32, [f32; 4], u32, u32);
+    let cases: [UnknownTargetCase; 7] = [
+        // kind, rack, channel, track, effect, parameter, values, result, reason
+        (
+            COMMAND_MATRIX,
+            255,
+            255,
+            9,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 1.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_TRACK,
+        ),
+        (
+            COMMAND_EFFECT_PARAM,
+            7,
+            2,
+            0,
+            0,
+            1,
+            [0.0; 4],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_RACK,
+        ),
+        (
+            COMMAND_EFFECT_PARAM,
+            1,
+            2,
+            0,
+            3,
+            1,
+            [0.0; 4],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_EFFECT,
+        ),
+        (
+            COMMAND_MATRIX,
+            255,
+            255,
+            0,
+            0,
+            0,
+            [2.0, 0.0, 0.0, 1.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            COMMAND_PAN,
+            255,
+            255,
+            0,
+            0,
+            0,
+            [-2.0, 1.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            COMMAND_FADER_DB,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+            RESULT_UNSUPPORTED,
+            COMMAND_REASON_UNSUPPORTED_KIND,
+        ),
+        (
+            COMMAND_MATRIX,
+            0,
+            255,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 1.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+    ];
+    for (index, case) in cases.into_iter().enumerate() {
+        let (kind, rack, channel, track, effect, parameter, values, result, reason) = case;
+        stage_command(
+            &mut host, 0, kind, rack, channel, track, effect, parameter, 0, values,
+        );
+        assert_eq!(host.submit_commands(1), result, "case {index}");
+        let report = *host.command_report();
+        assert_eq!(report.reason, reason, "case {index}");
+        assert_eq!(report.admitted, 0, "case {index}");
+        assert_eq!(report.rejected_index, 0, "case {index}");
+    }
+    // An unknown kind byte is malformed, not an unknown target.
+    stage_command(&mut host, 0, 0, 255, 255, 0, 0, 0, 0, [0.0; 4]);
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+
+    let status = *host.status();
+    assert_eq!(
+        (
+            status.state,
+            status.next_absolute_sample,
+            status.rendered_quanta
+        ),
+        (
+            baseline_status.state,
+            baseline_status.next_absolute_sample,
+            baseline_status.rendered_quanta
+        ),
+        "no refusal moved the state or the clock",
+    );
+    feed_and_render(&mut host, 1, 1, 0.75);
+    assert_eq!(
+        host.output_pcm().expect("output"),
+        &baseline[..],
+        "a refused command changed no coefficient",
+    );
+}
+
+/// #137 E5: the decimated meter frame equals an offline fold of the rendered PCM, and metering
+/// changes no rendered sample.
+///
+/// The track meter observes the post-matrix boundary and the master peaks are folded over the
+/// host's own output plane, so for this identity fixture both must equal the maximum magnitude of
+/// the submitted block -- exactly, not within a tolerance.
+///
+/// Red mutation: change `console_meter_blocks` handling so the period is `blocks` frames instead
+/// of `blocks * quantum_frames` -> a window closes mid-block, `poll_meters` reports more windows
+/// than blocks rendered, and the cadence assertion fails.
+#[test]
+fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 2;
+    let mut off = console_host(QUANTUM, BLOCKS);
+    let mut on = console_host(QUANTUM, BLOCKS);
+    assert!(on.meters_attached());
+    assert_eq!(on.set_meter_lease(true), RESULT_OK);
+    assert_eq!(off.set_meter_lease(false), RESULT_OK);
+
+    let values = [0.25_f32, 0.5, 0.125, 1.0, 0.0625, 0.75];
+    let mut windows = 0_u32;
+    let mut folded = Vec::new();
+    for (block, value) in values.into_iter().enumerate() {
+        feed_and_render(&mut off, 1, block as u64, value);
+        feed_and_render(&mut on, 1, block as u64, value);
+        assert_eq!(
+            off.output_pcm().expect("off"),
+            on.output_pcm().expect("on"),
+            "block {block}: the meter lease changes no rendered sample",
+        );
+        assert_eq!(off.poll_meters(), 0, "a released lease drains nothing");
+        let count = on.poll_meters();
+        windows += count;
+        if count > 0 {
+            folded.push((block, on.meter_frame().to_vec()));
+        }
+    }
+    assert_eq!(
+        windows as u64,
+        values.len() as u64 / BLOCKS,
+        "one frame per {BLOCKS}-block window and no more",
+    );
+    for (block, frame) in &folded {
+        let expected = values[block - 1].max(values[*block]);
+        assert_eq!(frame[0], expected, "track left peak at block {block}");
+        assert_eq!(frame[1], expected, "track right peak at block {block}");
+        assert_eq!(frame[2], expected, "master left peak at block {block}");
+        assert_eq!(frame[3], expected, "master right peak at block {block}");
+    }
+
+    // A host with no observers refuses the lease rather than reporting zeros.
+    let mut bare = console_host(QUANTUM, 0);
+    assert!(!bare.meters_attached());
+    assert_eq!(bare.set_meter_lease(true), RESULT_UNSUPPORTED);
+    assert_eq!(bare.poll_meters(), 0);
 }

@@ -695,35 +695,30 @@ pub fn prepare_host_runtime_with_console(
     {
         return Err(graph_failure("host.meter.unexpected"));
     }
+    // Canonical normalized track order is the console's addressing authority, so both halves are
+    // permuted into it here rather than into whatever order preparation happened to build them.
+    // A channel whose track is not in that order at all is a hard rejection, never a silent drop.
+    let canonical_index: std::collections::BTreeMap<&str, usize> = console_tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| (&**track, index))
+        .collect();
     let mut track_controls = bound.track_controls;
     let mut meters = bound.meter_consumers;
-    track_controls.sort_by(|left, right| left.track_id.cmp(&right.track_id));
-    meters.sort_by(|left, right| left.track_id.cmp(&right.track_id));
-    let console_order = |values: &[Box<str>], expected: &[Box<str>]| values == expected;
-    let mut sorted_tracks = console_tracks.clone();
-    sorted_tracks.sort_unstable();
-    if !track_controls.is_empty()
-        && !console_order(
-            &track_controls
-                .iter()
-                .map(|value| value.track_id.clone())
-                .collect::<Vec<_>>(),
-            &sorted_tracks,
-        )
+    if track_controls
+        .iter()
+        .any(|value| !canonical_index.contains_key(&*value.track_id))
     {
         return Err(graph_failure("host.control.order"));
     }
-    if !meters.is_empty()
-        && !console_order(
-            &meters
-                .iter()
-                .map(|value| value.track_id.clone())
-                .collect::<Vec<_>>(),
-            &sorted_tracks,
-        )
+    if meters
+        .iter()
+        .any(|value| !canonical_index.contains_key(&*value.track_id))
     {
         return Err(graph_failure("host.meter.order"));
     }
+    track_controls.sort_by_key(|value| canonical_index[&*value.track_id]);
+    meters.sort_by_key(|value| canonical_index[&*value.track_id]);
 
     let control_retained_bytes = sources
         .retained_bytes()
