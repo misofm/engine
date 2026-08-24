@@ -497,15 +497,11 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(code) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(if code == RESULT_BACKPRESSURE {
-                        b"source.backpressure"
-                    } else {
-                        b"source.submit.rejected"
-                    });
+            Err(error) => {
+                // F6: the facade's typed rejection reaches the caller as its own diagnostic
+                // string, instead of one of two strings for seventeen distinct failures.
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
                 code
             }
         }
@@ -550,15 +546,9 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(code) => {
-                session
-                    .last_error
-                    .borrow_mut()
-                    .set(if code == RESULT_BACKPRESSURE {
-                        b"source.seek.backpressure"
-                    } else {
-                        b"source.seek.rejected"
-                    });
+            Err(error) => {
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
                 code
             }
         }
@@ -1570,7 +1560,8 @@ mod tests {
         source_error.data = source_error_storage.as_mut_ptr();
         source_error.capacity_bytes = source_error_storage.len() as u64;
         assert_eq!(last_error(session.cast(), &mut source_error), RESULT_OK);
-        assert_eq!(&source_error_storage, b"source.seek.rejected");
+        // F6: the out-of-region seek now names the rule it broke, not "rejected".
+        assert_eq!(&source_error_storage, b"source.region.outside");
         assert_eq!(
             seek(session, b"fixture-source".as_ptr(), 14, 2, 48_000),
             RESULT_OK

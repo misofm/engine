@@ -207,6 +207,16 @@ impl SourceControlSet {
             .map_err(SourceControlError::Seek)
     }
 
+    /// The mapped source region of the named source, as `start..end` in source frames.
+    ///
+    /// A host reports the region a submission must fall inside; the facade enforces it.
+    #[must_use]
+    pub fn region(&self, id: &[u8]) -> Option<core::ops::Range<u64>> {
+        let index = self.index_of(id)?;
+        let source = &self.sources[index];
+        Some(source.region_start..source.region_end)
+    }
+
     /// Number of sources in the set.
     #[must_use]
     pub fn len(&self) -> usize {
