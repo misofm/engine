@@ -1908,3 +1908,83 @@ fn representative_mutations_have_exact_phase_order_and_diagnostics() {
         (EffectStateDiagnosticCodeV1::Length, 16)
     );
 }
+
+/// Audit #97 F3: the envelope must bind the effect identity it names, with no placeholder anywhere
+/// on the read path. Issue 079's rewrite checks `descriptor_identity` against the bound token and
+/// the effect-ID text against the bound descriptor; these are the negatives that keep both honest,
+/// plus the phase order that reports a stale digest before an identity mismatch.
+#[test]
+fn the_state_envelope_binds_the_effect_identity_it_names() {
+    let (wire, original) = encoded_state();
+    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+
+    let verified =
+        verify_effect_state_v1(bound, &original, EffectStateLimitsV1::default()).unwrap();
+    assert_eq!(verified.effect_id(), DESCRIPTOR.id.as_str());
+    assert_eq!(verified.descriptor_identity(), bound.identity());
+    assert_eq!(validate_effect_state_current_layout_v1(verified), Ok(()));
+
+    // A different, individually valid effect ID of the same length, with the digest recomputed so
+    // the envelope is internally consistent: verification accepts the bytes, and the identity
+    // check is what rejects them.
+    let effect_id_length = get_u32(&original, 124) as usize;
+    assert_eq!(effect_id_length, DESCRIPTOR.id.as_str().len());
+    let mut renamed = original.clone();
+    renamed[224..224 + effect_id_length].copy_from_slice(b"test.stats");
+    refresh_digest(&mut renamed);
+    let renamed_view =
+        verify_effect_state_v1(bound, &renamed, EffectStateLimitsV1::default()).unwrap();
+    assert_eq!(renamed_view.effect_id(), "test.stats");
+    for actual in [
+        validate_effect_state_current_layout_v1(renamed_view).unwrap_err(),
+        validate_effect_state_replay_v1(renamed_view, replay()).unwrap_err(),
+    ] {
+        assert_eq!(
+            (
+                actual.code,
+                actual.detail,
+                actual.item_index,
+                actual.byte_offset,
+                actual.required_bytes,
+            ),
+            (
+                EffectStateDiagnosticCodeV1::Metadata,
+                1,
+                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+                0,
+            )
+        );
+    }
+
+    // The same descriptor-identity flip is a `Digest` failure without the recomputed digest and a
+    // `Descriptor` failure with it: the digest phase runs before the identity phase.
+    let mut stale = original.clone();
+    stale[24] ^= 1;
+    assert_verify_diagnostic(
+        "identity-flip-stale-digest",
+        bound,
+        &stale,
+        EffectStateDiagnosticCodeV1::Digest,
+        0,
+        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+        56,
+        0,
+    );
+    refresh_digest(&mut stale);
+    assert_verify_diagnostic(
+        "identity-flip-fresh-digest",
+        bound,
+        &stale,
+        EffectStateDiagnosticCodeV1::Descriptor,
+        3 << 16,
+        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        0,
+    );
+
+    // No placeholder identity survives anywhere on the read path.
+    let mut canonical = original.clone();
+    refresh_digest(&mut canonical);
+    assert_eq!(canonical, original);
+}

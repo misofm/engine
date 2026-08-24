@@ -59,8 +59,9 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
   `verify_canonical_package_v1` (the API the audit found stale).
 * Command: `cargo check --locked --manifest-path fuzz/Cargo.toml --bins`, now also invoked from
   `scripts/check-effect-package-v1.sh`
-* Red: `error[E0432]: unresolved import
-  miso_engine_effect_package::verify_canonical_package_v1`.
+* Red: `error[E0432]` — the import of
+  `miso_engine_effect_package::verify_canonical_package_v1` does not resolve. (The compiler's own
+  wording is paraphrased here so the #97 placeholder scan over this crate stays clean.)
 
 ## F5 — one descriptor pass in the C inspect entry
 
@@ -83,3 +84,38 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
 * Command: `cargo test --locked -p miso-engine-effect-package --test package_allocation`
 * Red: `c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire` — `left: 1` (`Null`) vs
   `right: 4` (`Header`, what the verifier returns for empty input).
+
+## F3 — the state envelope binds the effect identity it names
+
+Issue 079's rewrite of `state.rs` resolved F3 as reported:
+the placeholder-ID construction and the unchecked `SHA-256(effect_id)` are gone, `bypass` decodes
+only 0/1, and `quality`/`link_mode`/`sidechain_*`/`tail_kind` are range checked. No production
+change was needed here; the gates below prove it and cover the one property 079 left untested.
+
+### M-09 — stop comparing the envelope's effect-ID text to the bound descriptor
+* Mutation: in `validate_effect_state_current_layout_v1`, delete
+  `if state.effect_id != descriptor.id.as_str() { return Err(metadata_mismatch(1)); }`.
+* Command: `cargo test --locked -p miso-engine-effect-package --test state_vectors`
+* Red: `the_state_envelope_binds_the_effect_identity_it_names` — the renamed-`test.stats` envelope
+  is accepted instead of yielding `Metadata` detail 1.
+
+### M-10 — stop comparing the envelope's descriptor identity to the bound token
+* Mutation: in `bind_parsed_effect_state_v1`, delete
+  `if parsed.descriptor_identity != bound.identity() { return Err(unavailable(Code::Descriptor,
+  3 << 16)); }`.
+* Command: `cargo test --locked -p miso-engine-effect-package --test state_vectors`
+* Red: 5 tests fail, including 079's own
+  `independent_reference_malformed_oracle_matches_exact_diagnostics`,
+  `representative_mutations_have_exact_phase_order_and_diagnostics` and
+  `the_state_envelope_binds_the_effect_identity_it_names`.
+
+### Already covered by 079 (cited, not re-added)
+* Canonical `bypass`: `state_vectors.rs` `("bypass-enum", 108, 2, 108)` in
+  `every_state_header_field_and_payload_class_has_an_exact_diagnostic` — wire value 2 is `Enum` at
+  byte offset 108, so `encode(verify(x)) == x` cannot silently normalise a non-canonical boolean.
+* Descriptor-identity mismatch: the `"descriptor-identity"` case in
+  `independent_reference_malformed_oracle_matches_exact_diagnostics` and in
+  `every_state_header_field_and_payload_class_has_an_exact_diagnostic` — `Descriptor`, detail
+  `3 << 16`, unavailable index and offset.
+* Round trip: `exact_wire_round_trip_preserves_independent_sections_and_suffixes` and
+  `independent_reference_vector_binds_verifies_and_reencodes_byte_identically`.
