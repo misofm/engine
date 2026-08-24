@@ -40,8 +40,12 @@ extern "C" {
  * any access.
  *
  * miso_engine_v2_last_error on a plan returns a fixed diagnostic selected by the most recent render
- * call ("render.output.unaligned", "render.contract.rejected", ...) and is empty after a successful
- * render; on a session or engine it returns the most recent control-thread diagnostic.
+ * call, one string per rule -- "render.output.unaligned", "render.output.platform",
+ * "render.output.layout", "render.output.shape", "render.time.discontinuity",
+ * "render.time.overflow", "render.plan.rejected" -- and is empty after a successful render; on a
+ * session or engine it returns the most recent control-thread diagnostic. A rejected source
+ * submission or seek likewise names the rule it broke ("source.region.outside",
+ * "source.generation.stale", "source.channels.mismatch", ...).
  * MISO_ENGINE_V2_UNSUPPORTED is returned by exactly one entry point: miso_engine_v2_engine_create
  * refuses to create an engine on a CPU that cannot execute the instruction set this library was
  * built for (issue 083, master plan D4 -- the engine dispatches nothing at runtime, so the check
