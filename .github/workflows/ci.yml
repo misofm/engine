@@ -69,6 +69,8 @@ jobs:
           bash scripts/test-realtime-policy.sh
           bash scripts/check-realtime-audit-leak.sh
           bash scripts/test-realtime-audit-leak.sh
+          bash scripts/check-artifact-evidence-leak.sh
+          bash scripts/test-artifact-evidence-leak.sh
       - name: Lane numeric-boundary policy and mutation tests
         run: |
           bash scripts/check-lane-policy.sh
@@ -195,14 +197,23 @@ jobs:
           sudo apt-get install -y wabt
       - name: Browser-local realtime path has no atomic opcodes
         run: bash scripts/check-wasm-realtime-atomics.sh
+      # #105 phase 2 C2: an artifact invocation names no evidence crate. Cargo unifies features
+      # across the packages selected by ONE invocation, so building `miso-engine-conformance`
+      # alongside `miso-engine-host-web` put core's `realtime-audit` instrumentation into the wasm
+      # module that ships. The evidence crates keep their cross-target compile coverage in the
+      # separate step below. `scripts/check-artifact-evidence-leak.sh` gates both halves.
       - name: Scalar Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
           ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
       - name: SIMD128 Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
+      - name: Evidence crates compile for Wasm (not an artifact)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # `build-web-audioworklet.sh` produces the one stripped simd128 module (#083 W4-D1);
       # `check-web-audioworklet.sh` asserts the frozen 15-export set, no imports, no shared memory,
@@ -254,8 +265,11 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 aarch64-linux-android
+      # #105 phase 2 C2: the shipped-shape invocation names no evidence crate; see the Wasm job.
       - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+      - name: Evidence crates compile for Android (not an artifact)
+        run: cargo check --locked --target aarch64-linux-android -p miso-engine-dsp-reference -p miso-engine-conformance
 
   ios-check:
     name: iOS pure-Rust compile check
@@ -266,8 +280,11 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 aarch64-apple-ios
+      # #105 phase 2 C2: the shipped-shape invocation names no evidence crate; see the Wasm job.
       - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-conformance -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+      - name: Evidence crates compile for iOS (not an artifact)
+        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-dsp-reference -p miso-engine-conformance
 
   session-fuzz:
     name: bounded session parser and compiler fuzzing
