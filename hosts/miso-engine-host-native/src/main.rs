@@ -1,4 +1,9 @@
 //! Native bootstrap host shell.
+//!
+//! Platform audio I/O is issue 023; this binary only attests the CPU and prints the target smoke
+//! values. The rules a real callback must honour are not restated here: they are the
+//! `# Host callback contract (V1)` section of `miso-engine-host-core`, which is normative for every
+//! embedding. A second transcription of them is exactly the defect #106 F1 removed from this tree.
 
 use std::process::ExitCode;
 

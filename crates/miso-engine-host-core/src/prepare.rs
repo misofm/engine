@@ -216,6 +216,23 @@ pub struct HostPrepareReport {
 ///
 /// Field order is the drop order: the plan (which owns the source consumers) drops before the
 /// control producers, so a producer never outlives its ring.
+///
+/// `Send` and deliberately **not** `Sync` (crate-level `# Host callback contract (V1)`): the plan is
+/// rendered from exactly one thread and the sources are fed from exactly one thread, so a host that
+/// could share this across threads could render from two at once. A shared reference is refused at
+/// compile time:
+///
+/// ```compile_fail
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<miso_engine_host_core::PreparedHost>();
+/// ```
+///
+/// Moving it, on the other hand, is exactly how a host hands preparation to the render thread:
+///
+/// ```
+/// fn requires_send<T: Send>() {}
+/// requires_send::<miso_engine_host_core::PreparedHost>();
+/// ```
 pub struct PreparedHost {
     /// The exclusive render plan. Move it to the render thread once and render there only.
     pub plan: PreparedRenderPlan,

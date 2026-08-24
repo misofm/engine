@@ -689,17 +689,166 @@ fn ring_prefill_survives_stall() {
     );
 
     // The stall: 38 quanta rendered with no submission whatsoever.
-    for block in 0..stall_quanta as usize {
+    for (block, expected) in submitted.iter().enumerate().take(stall_quanta as usize) {
         assert_eq!(host.render_next(), RESULT_OK, "block {block}");
         let output = host.output_pcm().expect("prepared output");
         let left = &output[..QUANTUM as usize];
-        for (index, sample) in left.iter().enumerate() {
+        for (index, (sample, want)) in left.iter().zip(expected).enumerate() {
             assert_eq!(
                 sample.to_bits(),
-                submitted[block][index].to_bits(),
+                want.to_bits(),
                 "block {block} frame {index} underran the stall"
             );
         }
     }
     assert_eq!(host.status().rendered_quanta, u64::from(stall_quanta));
+}
+
+/// #106 F4 (as amended by #83 W4-D1), native leg.
+///
+/// W4-D1 removed the scalar artifact, so the old artifact-level scalar↔simd128 comparison has no
+/// second artifact to compare against. Its replacement is two `to_bits` identities: #83's G5 corpus
+/// (native Scalar/Simd4/Simd8 against both wasm builds under wasmtime) covers the kernels, and this
+/// covers the whole host path -- the same session, the same source transcript, the same three
+/// render calls, rendered natively here and through the shipped simd128 artifact by
+/// `tests/browser-v1/direct-oracle.mjs`, which asserts its own digest equals the pin this test
+/// writes.
+///
+/// The digest is over little-endian `f32` words, so it is a bit comparison: a float comparison
+/// would equate `-0.0` with `+0.0`, and `+0.0` is exactly what a silent or starved block produces.
+///
+/// Red mutation: change `leftBase` of the first block in `tests/browser-v1/source.json` -> both
+/// this test and `direct-oracle.mjs` fail against the pin, and they fail with the same value, which
+/// is the point.
+#[test]
+fn native_identity_session_digest_pins_the_wasm_parity() {
+    use sha2::{Digest, Sha256};
+
+    const QUANTUM: u32 = 128;
+    const RATE: u32 = 48_000;
+
+    // The transcript of `tests/browser-v1/source.json`, replayed exactly as `direct-oracle.mjs`
+    // and `browser-correctness.js` replay it.
+    let block = |base: f32, step: f32| -> Vec<f32> {
+        (0..QUANTUM)
+            .map(|index| base + step * index as f32)
+            .collect()
+    };
+    let first = block(0.125, 0.0009765625);
+    let second = block(-0.25, 0.00048828125);
+    let silent = vec![0.0_f32; QUANTUM as usize];
+
+    let toml = identity_session(QUANTUM, QUANTUM, 256);
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(RATE, QUANTUM));
+    // The browser fixture pins a one-quantum ring, which is what makes its backpressure
+    // observable; the default ring would swallow the second submission.
+    host.config_mut().expect("config state").source_ring_frames = QUANTUM;
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        host.diagnostic()
+    );
+
+    let submit = |host: &mut AudioWorkletEngineHost, left: &[f32], generation, start, last| {
+        let planes: [&[f32]; 2] = [left, &silent];
+        host.submit_source(
+            b"fixture-source",
+            generation,
+            start,
+            RATE,
+            &planes,
+            QUANTUM,
+            last,
+        )
+    };
+
+    let mut blocks: Vec<Vec<f32>> = Vec::new();
+    let mut capture = |host: &AudioWorkletEngineHost| {
+        blocks.push(host.output_pcm().expect("prepared output").to_vec());
+    };
+
+    assert_eq!(submit(&mut host, &first, 1, 0, false), RESULT_OK);
+    assert_eq!(
+        submit(&mut host, &second, 1, u64::from(QUANTUM), true),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    capture(&host);
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    assert_eq!(submit(&mut host, &first, 2, 0, false), RESULT_OK);
+    assert_eq!(
+        submit(&mut host, &second, 2, u64::from(QUANTUM), true),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    capture(&host);
+    assert_eq!(
+        submit(&mut host, &second, 2, u64::from(QUANTUM), true),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    capture(&host);
+
+    // Left plane of every block, then right plane of every block: the oracle's channel order.
+    let mut digest = Sha256::new();
+    for channel in 0..2_usize {
+        for output in &blocks {
+            let plane = &output[channel * QUANTUM as usize..(channel + 1) * QUANTUM as usize];
+            for sample in plane {
+                digest.update(sample.to_bits().to_le_bytes());
+            }
+        }
+    }
+    let native = digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            use core::fmt::Write as _;
+            let _ = write!(&mut text, "{byte:02x}");
+            text
+        });
+
+    let expected: serde_pin::Pin =
+        serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
+    assert_eq!(
+        native, expected.native,
+        "native and the pinned wasm digest must agree bit for bit; \
+         if this moved, the signal path moved"
+    );
+    assert_eq!(
+        native, expected.simd128,
+        "the shipped simd128 artifact renders this session to the same bits as native"
+    );
+}
+
+/// A three-field reader for `expected.json`, so the test needs no JSON dependency.
+///
+/// The file is generated by `direct-oracle.mjs` and is machine-formatted, so the two hashes are
+/// found by their key names rather than by position.
+mod serde_pin {
+    pub(super) struct Pin {
+        pub(super) native: String,
+        pub(super) simd128: String,
+    }
+
+    fn hex_after(text: &str, key: &str) -> String {
+        let start = text
+            .find(key)
+            .unwrap_or_else(|| panic!("expected.json has no {key}"))
+            + key.len();
+        let rest = &text[start..];
+        let open = rest.find('"').expect("value opens") + 1;
+        let close = rest[open..].find('"').expect("value closes") + open;
+        rest[open..close].to_owned()
+    }
+
+    pub(super) fn read(text: &str) -> Pin {
+        Pin {
+            native: hex_after(text, "\"nativePcmF32leSha256\":"),
+            simd128: hex_after(text, "\"pcmF32leSha256\":"),
+        }
+    }
 }

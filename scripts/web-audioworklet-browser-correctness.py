@@ -129,7 +129,7 @@ def load_inputs() -> tuple[dict, dict]:
     }:
         raise ValueError("expected fixture keys")
     direct = expected.get("directOracle", {})
-    if set(direct) != {"schema", "simd128"}:
+    if set(direct) != {"schema", "simd128", "nativePcmF32leSha256"}:
         raise ValueError("direct oracle keys")
     if direct.get("schema") != "miso.web.browser.direct-oracle.v2":
         raise ValueError("direct oracle schema")

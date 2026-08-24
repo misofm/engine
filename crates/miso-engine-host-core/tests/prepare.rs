@@ -398,3 +398,20 @@ fn source_channel_cap_is_optional() {
     };
     prepare_host_session(SESSION, &permitted).expect("stereo source within the cap");
 }
+
+/// The `Send + !Sync` half of the crate-level `# Host callback contract (V1)`.
+///
+/// A host that could share these across threads could render from two threads at once, which the
+/// contract forbids and which no amount of documentation prevents. `Send` is asserted here; the
+/// absence of `Sync` is asserted by the `compile_fail` doctest below, because a negative bound
+/// cannot be written as a runtime assertion.
+///
+/// Red mutation: add `unsafe impl Sync for PreparedHost {}` -> `PreparedHost`'s `compile_fail`
+/// doctest in `src/prepare.rs` starts compiling, and the doctest fails.
+#[test]
+fn contract_types_are_send_and_not_sync() {
+    fn assert_send<T: Send>() {}
+    assert_send::<miso_engine_host_core::PreparedHost>();
+    assert_send::<miso_engine_host_core::SourceControlSet>();
+    assert_send::<miso_engine_core::realtime::PreparedRenderPlan>();
+}
