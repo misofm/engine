@@ -16,8 +16,8 @@
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS, PREPARE_CONFIG_BYTES, RESULT_INTERNAL,
-    RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY, WebPrepareConfigV1,
+    PREPARE_CONFIG_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY,
+    WebPrepareConfigV1,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -125,7 +125,7 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         BUFFER_SOURCE_PCM => resources.source_pcm_staging_bytes,
         BUFFER_DIAGNOSTIC => resources.diagnostic_bytes,
         BUFFER_OUTPUT_PCM => resources.output_pcm_bytes,
-        BUFFER_COMMAND => u64::from(MAXIMUM_COMMAND_RECORDS) * u64::from(COMMAND_RECORD_BYTES),
+        BUFFER_COMMAND => host.command_staging_bytes(),
         BUFFER_METER_FRAME => (host.meter_frame().len() * 4) as u64,
         _ => return 0,
     };

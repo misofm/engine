@@ -2,7 +2,9 @@ const ABI_VERSION = 0x00010000;
 const CONFIG_BYTES = 192;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
+const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
+const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SESSION_TOML = 1;
 const BUFFER_SOURCE_ID = 2;
@@ -289,17 +291,24 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindConsole(init) {
+    this.consoleAttached = init.limits.consoleCommandQueueRecords !== 0n;
     const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
     const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
       this.handle,
       BUFFER_COMMAND,
     );
     const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
-    if (!u32(commandPointer) || commandPointer === 0
-        || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES
-        || !u32(reportPointer) || reportPointer === 0) return false;
-    this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
+    if (!u32(reportPointer) || reportPointer === 0) return false;
     this.commandReport = new DataView(this.memoryBuffer, reportPointer, COMMAND_REPORT_BYTES);
+    if (this.consoleAttached) {
+      if (!u32(commandPointer) || commandPointer === 0
+          || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
+      this.commandStaging = new Uint8Array(this.memoryBuffer, commandPointer, commandCapacity);
+    } else if (commandPointer !== 0 || commandCapacity !== 0) {
+      // A released console must own no staging at all; a nonzero row here would mean the engine
+      // charged for a buffer the ABI says does not exist.
+      return false;
+    }
 
     this.trackCount = this.exports.miso_engine_web_v1_console_track_count(this.handle);
     if (!u32(this.trackCount)) return false;
@@ -586,6 +595,22 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
           && message.records.buffer instanceof SharedArrayBuffer)
         || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
+      return;
+    }
+    if (!this.consoleAttached) {
+      // A session prepared with `consoleCommandQueueRecords === 0n` has no control channel and no
+      // staging buffer. That is a typed refusal of a well-formed request, not a protocol error, so
+      // the batch is acknowledged and its record block goes back to the caller untouched.
+      this.port.postMessage({
+        tag: "miso.ack.v1",
+        requestId: message.requestId,
+        result: RESULT_UNSUPPORTED,
+        reason: COMMAND_REASON_UNSUPPORTED_KIND,
+        rejectedIndex: 0,
+        admitted: 0,
+        appliedAtSample: 0n,
+        records: message.records,
+      }, [message.records.buffer]);
       return;
     }
     this.commandStaging.set(message.records, 0);

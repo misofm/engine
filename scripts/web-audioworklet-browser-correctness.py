@@ -129,14 +129,50 @@ def load_inputs() -> tuple[dict, dict]:
     }:
         raise ValueError("expected fixture keys")
     direct = expected.get("directOracle", {})
-    if set(direct) != {"schema", "simd128", "nativePcmF32leSha256"}:
+    if set(direct) != {
+        "schema",
+        "simd128",
+        "nativePcmF32leSha256",
+        # Issue #137 E2: the command-timeline leg and its native pin.
+        "commandTimeline",
+        "nativeCommandTimelinePcmF32leSha256",
+    }:
         raise ValueError("direct oracle keys")
+    timeline = direct.get("commandTimeline", {})
+    if set(timeline) != {"reports", "beforeDisposeStatus", "pcmF32leSha256"}:
+        raise ValueError("command timeline keys")
+    if timeline.get("pcmF32leSha256") != direct.get("nativeCommandTimelinePcmF32leSha256"):
+        raise ValueError("command timeline native parity")
+    reports = timeline.get("reports", {})
+    if set(reports) != {"matrix", "unknownTrack", "flood", "unsupported", "pan"}:
+        raise ValueError("command timeline report keys")
+    # The typed refusals are part of the pin: an ABI that silently starts accepting an unknown
+    # track, a flood or an unsupported kind is a changed ABI, not a passing test.
+    if reports["matrix"]["appliedAtSample"] != "128" or reports["matrix"]["admitted"] != 1:
+        raise ValueError("matrix command application sample")
+    if reports["pan"]["appliedAtSample"] != "384" or reports["pan"]["admitted"] != 1:
+        raise ValueError("pan command application sample")
+    for name, result, reason in (
+        ("unknownTrack", 1, 2),
+        ("flood", 6, 8),
+        ("unsupported", 7, 7),
+    ):
+        if reports[name]["result"] != result or reports[name]["reason"] != reason:
+            raise ValueError(f"{name} typed refusal")
+        if reports[name]["admitted"] != 0:
+            raise ValueError(f"{name} admitted records")
     if direct.get("schema") != "miso.web.browser.direct-oracle.v2":
         raise ValueError("direct oracle schema")
     session = (FIXTURE / "session.toml").read_text()
     for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 256"):
         if frozen not in session:
             raise ValueError(f"session lacks {frozen}")
+    # Issue #137 E2: the command timeline runs the same identity session over a longer region, and
+    # both legs read this exact file.
+    command_session = (FIXTURE / "command-session.toml").read_text()
+    for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 1024"):
+        if frozen not in command_session:
+            raise ValueError(f"command session lacks {frozen}")
     return source, expected
 
 

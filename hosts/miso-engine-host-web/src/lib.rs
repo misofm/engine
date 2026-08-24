@@ -258,12 +258,14 @@ pub struct WebPrepareConfigV1 {
     pub maximum_meter_items: u64,
     /// Maximum meter bytes.
     pub maximum_meter_bytes: u64,
-    /// Per-track live-console control-queue depth in records, or `0` for
-    /// [`DEFAULT_COMMAND_QUEUE_RECORDS`] (issue #137 D1).
+    /// Per-track live-console control-queue depth in records, or `0` to attach no control channel
+    /// and no command staging at all (issue #137 D1).
     ///
     /// Carved out of the frozen configuration's first reserved word, which every V1 writer already
-    /// sets to zero: an existing caller therefore gets the default and the 192-byte layout is
-    /// unchanged.
+    /// sets to zero. Zero is the honest form of "no live console": no queue is allocated, no
+    /// staging buffer is allocated, the matrix processors keep the exact storage they had before
+    /// this ABI existed, and a submission is refused with [`RESULT_UNSUPPORTED`]. The 192-byte
+    /// layout is unchanged either way.
     pub console_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -633,7 +635,26 @@ impl AudioWorkletEngineHost {
     }
 
     pub(crate) fn command_staging_mut(&mut self) -> Option<&mut [u8]> {
-        self.buffers.as_mut().map(|value| &mut *value.command)
+        self.buffers
+            .as_mut()
+            .map(|value| &mut *value.command)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Exact byte size of the live-console command staging buffer; zero when none was attached.
+    #[must_use]
+    pub fn command_staging_bytes(&self) -> u64 {
+        self.buffers
+            .as_ref()
+            .map_or(0, |value| value.command.len() as u64)
+    }
+
+    /// Whether preparation attached a live-console control channel (issue #137 D1).
+    #[must_use]
+    pub fn console_attached(&self) -> bool {
+        self.ready
+            .as_ref()
+            .is_some_and(|ready| !ready.controls.is_empty())
     }
 
     /// Copy one canonical console track ID into source-ID staging; returns its byte length.
@@ -848,6 +869,9 @@ impl AudioWorkletEngineHost {
         }
         if count > MAXIMUM_COMMAND_RECORDS {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
+        }
+        if !self.console_attached() {
+            return self.finish_commands(RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND, 0, 0);
         }
         let applied_at_sample = self.status.next_absolute_sample;
         let staged = count as usize * COMMAND_RECORD_BYTES as usize;
@@ -1323,7 +1347,12 @@ fn prepare_buffers(
     let output_pcm_bytes = u64::from(config.quantum_frames)
         .checked_mul(8)
         .ok_or(RESULT_PREPARE_REJECTED)?;
-    let command_bytes = u64::from(MAXIMUM_COMMAND_RECORDS)
+    let command_records = if config.console_command_queue_records == 0 {
+        0
+    } else {
+        MAXIMUM_COMMAND_RECORDS
+    };
+    let command_bytes = u64::from(command_records)
         .checked_mul(u64::from(COMMAND_RECORD_BYTES))
         .ok_or(RESULT_PREPARE_REJECTED)?;
     let plane_reference_bytes = u64::from(config.maximum_source_channels)
@@ -1366,7 +1395,7 @@ fn prepare_buffers(
         source_id: boxed_zero_u8(config.source_id_bytes)?,
         source_pcm: boxed_zero_f32(source_samples)?,
         output_pcm: boxed_zero_f32(u64::from(config.quantum_frames) * 2)?,
-        command: boxed_zero_u8(MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES)?,
+        command: boxed_zero_u8(command_records * COMMAND_RECORD_BYTES)?,
         plane_references: boxed_uninit_planes(config.maximum_source_channels)?,
     };
     let mut report = empty_resource_report(selected_backend());
@@ -1589,10 +1618,9 @@ fn compile_ready(
 /// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
 /// render path folds nothing at all. The port lease is a second, finer switch over posting.
 fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
-    let records = if config.console_command_queue_records == 0 {
-        DEFAULT_COMMAND_QUEUE_RECORDS
-    } else {
-        u32::try_from(config.console_command_queue_records).ok()?
+    let control_queue_depth = match config.console_command_queue_records {
+        0 => None,
+        records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
     };
     let meter_period_frames = if config.console_meter_blocks == 0 {
         None
@@ -1601,7 +1629,7 @@ fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
         Some(NonZeroU32::new(blocks.checked_mul(config.quantum_frames)?)?)
     };
     Some(HostConsoleRequestV1 {
-        control_queue_depth: Some(NonZeroUsize::new(records as usize)?),
+        control_queue_depth,
         meter_period_frames,
         // One window per track per post, plus headroom for a control-side stall of a few windows.
         meter_queue_depth: NonZeroUsize::new(8)?,

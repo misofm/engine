@@ -154,6 +154,22 @@ fn frozen_layouts_and_values_are_exact() {
         184
     );
     assert_eq!(offset_of!(WebResourceReportV1, reserved), 192);
+
+    // Issue #137: `bridgeMetadataBytes` in `tests/browser-v1/expected.json` is not a magic number
+    // and never was. It is exactly this formula over the host shell, so when the shell grows the
+    // pinned row moves by exactly that growth and by nothing else -- which is how the two rows
+    // that moved for #137 (`bridgeMetadataBytes`, `bridgeRetainedBytes`, both +152 on wasm32) were
+    // derived rather than read off a run.
+    let host = prepared_host(128);
+    let plane_references = 8 * size_of::<&[f32]>() as u64;
+    assert_eq!(
+        host.resources().bridge_metadata_bytes,
+        size_of::<AudioWorkletEngineHost>() as u64
+            - u64::from(PREPARE_CONFIG_BYTES)
+            - u64::from(STATUS_BYTES)
+            + plane_references,
+        "the bridge metadata row is the host shell minus the two structures charged separately"
+    );
 }
 
 #[test]
@@ -870,6 +886,163 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     );
 }
 
+/// #137 E2, native leg: the same session, source feed and command timeline the shipped artifact
+/// runs in `tests/browser-v1/direct-oracle.mjs`, rendered natively here.
+///
+/// The fixture is identity end to end, so a constant input renders to that same constant and the
+/// only thing that can move a sample is a command. Six blocks, one matrix retarget, one refused
+/// unknown-track record, one refused flood, one refused unsupported kind, and one smoothed pan
+/// retarget: the digest is a statement about *when* each of those took effect, not merely that
+/// they did. The digest is over little-endian `f32` words, so it is a bit comparison.
+///
+/// Red mutation: change the matrix retarget's `applied_at_sample` expectation to `2 * QUANTUM`
+/// -> the assertion fails here, and moving the drain in `ConsoleMatrixProcessor::process` to after
+/// the audio makes both this digest and the wasm oracle's move together, which is the point.
+#[test]
+fn native_command_timeline_digest_pins_the_wasm_parity() {
+    use sha2::{Digest, Sha256};
+
+    const QUANTUM: u32 = 128;
+    const RATE: u32 = 48_000;
+    const DEPTH: u32 = 4;
+
+    // The fixture file is read verbatim, exactly as `direct-oracle.mjs` reads it, so both legs
+    // compile byte-identical input. It is the browser identity session with a six-block region.
+    let toml = include_str!("../tests/browser-v1/command-session.toml");
+    let mut config = WebPrepareConfigV1::launch_defaults(RATE, QUANTUM);
+    config.source_ring_frames = QUANTUM;
+    config.console_command_queue_records = u64::from(DEPTH);
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+    assert_eq!(host.console_tracks().len(), 1);
+
+    let plane = vec![0.25_f32; QUANTUM as usize];
+    let mut blocks: Vec<Vec<f32>> = Vec::new();
+    let mut step = |host: &mut AudioWorkletEngineHost, block: u64| {
+        let planes: [&[f32]; 2] = [&plane, &plane];
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * u64::from(QUANTUM),
+                RATE,
+                &planes,
+                QUANTUM,
+                false,
+            ),
+            RESULT_OK,
+        );
+        assert_eq!(host.render_next(), RESULT_OK);
+        blocks.push(host.output_pcm().expect("prepared output").to_vec());
+    };
+
+    let matrix = |host: &mut AudioWorkletEngineHost, index: usize, track: u32| {
+        stage_command(
+            host,
+            index,
+            COMMAND_MATRIX,
+            255,
+            255,
+            track,
+            0,
+            0,
+            0,
+            [0.5, 0.0, 0.0, 1.0],
+        );
+    };
+
+    step(&mut host, 0);
+    matrix(&mut host, 0, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(host.command_report().applied_at_sample, u64::from(QUANTUM));
+    step(&mut host, 1);
+
+    matrix(&mut host, 0, 5);
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TRACK);
+    for index in 0..DEPTH as usize + 1 {
+        matrix(&mut host, index, 0);
+    }
+    assert_eq!(host.submit_commands(DEPTH + 1), RESULT_BACKPRESSURE);
+    assert_eq!(host.command_report().admitted, 0);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNSUPPORTED_KIND
+    );
+    step(&mut host, 2);
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_PAN,
+        255,
+        255,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [-1.0, 1.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        3 * u64::from(QUANTUM)
+    );
+    step(&mut host, 3);
+    step(&mut host, 4);
+    step(&mut host, 5);
+    assert_eq!(host.status().rendered_quanta, 6);
+
+    let mut digest = Sha256::new();
+    for channel in 0..2_usize {
+        for output in &blocks {
+            let plane = &output[channel * QUANTUM as usize..(channel + 1) * QUANTUM as usize];
+            for sample in plane {
+                digest.update(sample.to_bits().to_le_bytes());
+            }
+        }
+    }
+    let native = digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            use core::fmt::Write as _;
+            let _ = write!(&mut text, "{byte:02x}");
+            text
+        });
+
+    let expected: serde_pin::Pin =
+        serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
+    assert_eq!(
+        native, expected.native_command_timeline,
+        "native and the pinned wasm command-timeline digest must agree bit for bit"
+    );
+    assert_eq!(
+        native, expected.simd128_command_timeline,
+        "the shipped simd128 artifact renders this command timeline to the same bits as native"
+    );
+}
+
 /// A three-field reader for `expected.json`, so the test needs no JSON dependency.
 ///
 /// The file is generated by `direct-oracle.mjs` and is machine-formatted, so the two hashes are
@@ -878,6 +1051,8 @@ mod serde_pin {
     pub(super) struct Pin {
         pub(super) native: String,
         pub(super) simd128: String,
+        pub(super) native_command_timeline: String,
+        pub(super) simd128_command_timeline: String,
     }
 
     fn hex_after(text: &str, key: &str) -> String {
@@ -892,9 +1067,16 @@ mod serde_pin {
     }
 
     pub(super) fn read(text: &str) -> Pin {
+        // `pcmF32leSha256` appears once per oracle leg, in file order: the frozen render
+        // transcript first, then the #137 command timeline.
+        let timeline = text
+            .find("\"commandTimeline\"")
+            .expect("expected.json has no commandTimeline");
         Pin {
             native: hex_after(text, "\"nativePcmF32leSha256\":"),
             simd128: hex_after(text, "\"pcmF32leSha256\":"),
+            native_command_timeline: hex_after(text, "\"nativeCommandTimelinePcmF32leSha256\":"),
+            simd128_command_timeline: hex_after(&text[timeline..], "\"pcmF32leSha256\":"),
         }
     }
 }
