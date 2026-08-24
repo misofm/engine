@@ -3269,6 +3269,8 @@ mod tests {
         });
         let mut plan = match graph.bind_with_source_set(
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: vec![miso_engine_graph::GraphNodeBinding::new(
                     output,
@@ -3691,6 +3693,8 @@ mod tests {
         });
         let old = match graph.bind_with_source_set(
             GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
                 envelope,
                 nodes: vec![miso_engine_graph::GraphNodeBinding::new(
                     output,

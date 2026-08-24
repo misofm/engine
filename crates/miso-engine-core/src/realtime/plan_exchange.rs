@@ -459,6 +459,13 @@ impl RealtimePlanOwner {
     pub fn copy_worker_audit_snapshots(&self, output: &mut [super::audit::AuditSnapshot]) -> usize {
         self.active.1.copy_worker_audit_snapshots(output)
     }
+
+    /// Read the active plan's bounded dispatch counters after callback rendering is disarmed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dispatch_counters(&self) -> [u64; 4] {
+        self.active.1.dispatch_counters()
+    }
 }
 impl Drop for RealtimePlanOwner {
     fn drop(&mut self) {

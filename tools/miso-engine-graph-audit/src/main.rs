@@ -347,6 +347,8 @@ fn prepared_graph(
         observers: Vec::new(),
     });
     match graph.bind(GraphRuntimeBindings {
+        #[cfg(not(target_arch = "wasm32"))]
+        worker_lease: None,
         envelope,
         nodes: vec![
             GraphNodeBinding::new(

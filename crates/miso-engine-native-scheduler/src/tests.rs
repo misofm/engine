@@ -170,6 +170,28 @@ fn preparation_without_workers_selects_sequential() {
     assert_eq!(scheduler.expected_workers(), 0);
 }
 
+/// Exact retained-byte accounting is checked before publication, never on the render path.
+#[test]
+fn an_impossible_pool_shape_is_rejected_before_publication() {
+    let prepared = NativeSchedulerV1::<Job>::prepare(
+        NativeSchedulerConfigV1::new(
+            NonZeroUsize::new(usize::MAX).expect("lanes"),
+            true,
+            NativeWorkerPoolShapeV1 {
+                worker_count: usize::MAX,
+                spin_ns: 1,
+            },
+        ),
+        4,
+        9,
+        budget(),
+    );
+    assert!(
+        matches!(prepared, Err(SchedulerPrepareErrorV1::ResourceOverflow)),
+        "an unbounded worker count cannot be accounted for"
+    );
+}
+
 #[test]
 fn disabled_and_narrow_preparation_select_the_same_sequential_parcels() {
     let transcript = Arc::new(Mutex::new(Vec::new()));
@@ -489,7 +511,9 @@ fn command_queue_full_preserves_unmoved_parcels() {
     }
     assert!(rendered.all_recovered());
     drop(rendered);
-    audit.assert_counts([0, 1, 0, 0], [1, 1, 1, 1]);
+    // Commands are issued highest-partition-first (the wake-tree ordering rule), so partition 3
+    // is already on its worker when partition 2's publication is reported full.
+    audit.assert_counts([0, 0, 0, 1], [1, 1, 1, 1]);
     drop(lease);
     pool.stop_and_join();
 }
@@ -571,9 +595,9 @@ fn worker_errors_return_in_stable_partition_order() {
 fn a_late_worker_is_bounded_marked_dead_and_reaped_later() {
     let audit = Arc::new(ProtocolAudit::new());
     let gate = Arc::new(AtomicU64::new(0));
-    // Small budget so the deadline is missed quickly; the stalled parcel waits on `gate`.
+    // A budget healthy workers beat comfortably and the gated parcel can never meet.
     let (pool, mut lease, mut scheduler) =
-        protocol_pool(FaultInjectionV1::None, 1 << 12).expect("pool");
+        protocol_pool(FaultInjectionV1::None, 1 << 19).expect("pool");
     let mut rendered = protocol_wave(
         11,
         Arc::clone(&audit),
@@ -639,7 +663,9 @@ fn a_late_worker_is_bounded_marked_dead_and_reaped_later() {
     assert!(!rendered.is_trapped(2));
     assert!(rendered.all_recovered());
 
-    // Now the coordinator executes the dead worker's partition inline.
+    // Reaping proves the worker is alive after all, so it is issued to again: a deadline miss
+    // costs one degraded block, not the life of the lease.
+    assert!(!lease.is_worker_dead(1));
     let mut reaped = [None; 3];
     scheduler.begin_block(
         Some(&mut lease),
@@ -648,9 +674,9 @@ fn a_late_worker_is_bounded_marked_dead_and_reaped_later() {
     );
     let report = scheduler
         .render_wave(Some(&mut lease), &mut rendered)
-        .expect("degraded render");
-    assert_eq!(report.dead_partitions_executed, 1);
-    assert_eq!(report.worker_commands, 2);
+        .expect("recovered render");
+    assert_eq!(report.dead_partitions_executed, 0);
+    assert_eq!(report.worker_commands, 3);
     scheduler.end_block(Some(&mut lease));
     drop(rendered);
     drop(lease);

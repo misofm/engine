@@ -58,7 +58,14 @@ pub struct NativeWorkerPoolShapeV1 {
 /// Bounded budgets a plan gives its scheduler, derived from the render quantum at bind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecoveryBudgetV1 {
-    /// Completion-spin iterations before a worker is declared dead (about half a quantum).
+    /// Completion-spin iterations before a worker is declared dead for this block.
+    ///
+    /// The #100 plan proposed half a render quantum on the argument that "a legitimately slow
+    /// partition cannot exceed a whole block's sequential time". Parking makes that argument
+    /// incomplete: the first wave of a block also pays the operating system's wake latency,
+    /// which is not bounded by the quantum, and a false deadline miss is far more expensive than
+    /// a late one. The budget is therefore one full quantum with a floor
+    /// ([`MINIMUM_RECOVERY_NS`]), and a worker that answers later is not held dead.
     pub recovery_iterations: u64,
     /// Idle-spin iterations a worker burns inside an open block before parking (about a quantum).
     pub idle_spin_iterations: u64,
@@ -73,6 +80,12 @@ impl Default for RecoveryBudgetV1 {
     }
 }
 
+/// Floor for the bounded recovery deadline, in nanoseconds.
+///
+/// Short quanta (a 16-frame test block is 333 us at 48 kHz) are shorter than the wake latency of
+/// a loaded host, so the derived budget never falls below this.
+pub const MINIMUM_RECOVERY_NS: u128 = 2_000_000;
+
 /// Explicit control-plane scheduler configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeSchedulerConfigV1 {
@@ -82,6 +95,13 @@ pub struct NativeSchedulerConfigV1 {
     pub enabled: bool,
     /// Shape of the pool whose lease this plan expects to hold.
     pub pool: NativeWorkerPoolShapeV1,
+    /// Control-plane override of the bounded recovery deadline, in nanoseconds.
+    ///
+    /// Zero derives it from the render quantum. A qualification harness that measures
+    /// determinism rather than the deadline sets it long enough that a merely descheduled
+    /// worker is never mistaken for a dead one; the deadline itself is proved by fault
+    /// injection, not by the absence of a miss.
+    recovery_deadline_ns: u64,
     /// Bounded test-only fault at the real scheduler protocol boundary.
     #[cfg(feature = "fault-injection")]
     pub fault: FaultInjectionV1,
@@ -116,11 +136,11 @@ pub enum FaultInjectionV1 {
         /// Zero-based auxiliary worker selected at completion publication.
         worker_id: usize,
     },
-    /// Spin one worker before it executes, so it misses its recovery deadline.
+    /// Spin one worker, once, before it executes, so it misses its recovery deadline.
     StallWorker {
         /// Zero-based auxiliary worker to stall.
         worker_id: usize,
-        /// Dependency level on which to stall.
+        /// Dependency level on which to stall; `u64::MAX` stalls on whichever wave comes first.
         wave_id: u64,
         /// Spin iterations to burn before executing.
         iterations: u64,
@@ -172,9 +192,23 @@ impl NativeSchedulerConfigV1 {
             render_lanes,
             enabled,
             pool,
+            recovery_deadline_ns: 0,
             #[cfg(feature = "fault-injection")]
             fault: FaultInjectionV1::None,
         }
+    }
+
+    /// Override the bounded recovery deadline. Zero restores the quantum-derived default.
+    #[must_use]
+    pub const fn with_recovery_deadline_ns(mut self, nanoseconds: u64) -> Self {
+        self.recovery_deadline_ns = nanoseconds;
+        self
+    }
+
+    /// The configured recovery-deadline override, or zero for the quantum-derived default.
+    #[must_use]
+    pub const fn recovery_deadline_ns(self) -> u64 {
+        self.recovery_deadline_ns
     }
 
     /// Configure one bounded test-only fault at the real scheduler protocol boundary.

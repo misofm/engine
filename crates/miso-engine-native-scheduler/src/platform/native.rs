@@ -26,13 +26,14 @@ use std::{
     thread::{self, JoinHandle, Thread},
 };
 
+/// The wire a parcel travels on. It deliberately carries no fault-injection field: the exact
+/// retained queue payload must be identical in production and in dev-feature builds, so an
+/// injected fault reaches the worker through [`PoolShared`] instead.
 struct WorkerCommand<J> {
     generation: u64,
     wave_id: u64,
     partition_id: usize,
     parcel: J,
-    #[cfg(feature = "fault-injection")]
-    fault: FaultInjectionV1,
 }
 
 /// What a worker did with its parcel.
@@ -71,6 +72,9 @@ struct PoolShared {
     stop: AtomicBool,
     /// Idle spin iterations, published by the lease holder at bind (about one render quantum).
     idle_spin: AtomicU64,
+    /// Bounded worker-side fault, published once by the lease holder. Compiled out of production.
+    #[cfg(feature = "fault-injection")]
+    fault: std::sync::OnceLock<FaultInjectionV1>,
 }
 
 impl PoolShared {
@@ -276,6 +280,8 @@ impl<J: NativeSchedulerJobV1> NativeWorkerPoolV1<J> {
             block_open: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             idle_spin: AtomicU64::new(1 << 14),
+            #[cfg(feature = "fault-injection")]
+            fault: std::sync::OnceLock::new(),
         });
         let mut started = true;
         for sender in &senders {
@@ -413,6 +419,8 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
         let Some(lease) = lease else {
             return 0;
         };
+        #[cfg(feature = "fault-injection")]
+        let _ = lease.shared.fault.set(self.fault);
         lease.shared.block_open.store(true, Ordering::Release);
         let generation = self.generation;
         let mut count = 0_usize;
@@ -454,6 +462,11 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
             }
             match restored {
                 Some(wave_index) => {
+                    // The worker answered: it consumed its command, published its completion and
+                    // is idle again, so it is demonstrably alive. A deadline miss therefore costs
+                    // one degraded block rather than the life of the lease -- a worker that is
+                    // genuinely gone never reaches here and stays skipped forever.
+                    endpoint.dead = false;
                     if let Some(slot) = reaped.get_mut(count) {
                         *slot = Some((wave_index, partition_id));
                         count += 1;
@@ -490,6 +503,8 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
         let Some(lease) = lease.filter(|_| self.selection == SchedulerSelectionV1::Parallel) else {
             return execute_sequential(wave);
         };
+        #[cfg(feature = "fault-injection")]
+        let _ = lease.shared.fault.set(self.fault);
         if wave.partition_count() == 1 {
             return execute_sequential(wave);
         }
@@ -506,7 +521,14 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
         let mut issue_error: Option<SchedulerDispatchErrorV1<J::Error>> = None;
         #[cfg(feature = "fault-injection")]
         let fault = self.fault;
-        for partition_index in 1..wave.partition_count() {
+        // Descending worker order is load-bearing for the wake tree. A worker wakes its children
+        // as soon as it takes its own command, so if the coordinator issued in ascending order
+        // worker 0 could wake worker 1 *before* worker 1's command existed: worker 1 would find
+        // nothing, park again, and no second wake would ever come. Issuing highest-first means a
+        // worker's command implies every higher-numbered worker's command is already published
+        // (its release store is sequenced earlier), so the children a worker wakes always have
+        // work waiting.
+        for partition_index in (1..wave.partition_count()).rev() {
             let worker_id = partition_index - 1;
             if wave.partitions[partition_index].trapped {
                 continue;
@@ -530,8 +552,6 @@ impl<J: NativeSchedulerJobV1> NativeSchedulerV1<J> {
                 wave_id,
                 partition_id: partition_index,
                 parcel,
-                #[cfg(feature = "fault-injection")]
-                fault,
             });
             if let Err(full) = lease.endpoints_mut()[worker_id].commands.try_push(command) {
                 let WorkerMessage::Run(command) = full.value;
@@ -806,6 +826,8 @@ fn worker_loop<J: NativeSchedulerJobV1>(
     mut commands: Consumer<WorkerMessage<J>>,
     mut completions: Producer<WorkerCompletion<J>>,
 ) {
+    #[cfg(feature = "fault-injection")]
+    let mut stalled_once = false;
     let mut spins = 0_u64;
     loop {
         let message = loop {
@@ -835,19 +857,26 @@ fn worker_loop<J: NativeSchedulerJobV1>(
             }
             thread::park();
             shared.workers[id].parked.store(false, Ordering::SeqCst);
+            // Propagate the wake even without a command of our own: a wave may skip this worker
+            // (its partition is trapped, or it is dead for the block) while waking later ones.
+            shared.wake_children(id);
             spins = 0;
         };
         let WorkerMessage::Run(mut command) = message;
         shared.wake_children(id);
         #[cfg(feature = "fault-injection")]
+        let fault = shared.fault.get().copied().unwrap_or_default();
+        #[cfg(feature = "fault-injection")]
         if let FaultInjectionV1::StallWorker {
             worker_id,
             wave_id,
             iterations,
-        } = command.fault
+        } = fault
             && worker_id == id
-            && wave_id == command.wave_id
+            && (wave_id == u64::MAX || wave_id == command.wave_id)
+            && !stalled_once
         {
+            stalled_once = true;
             let mut spin = 0_u64;
             while spin < iterations {
                 core::hint::spin_loop();
@@ -856,7 +885,7 @@ fn worker_loop<J: NativeSchedulerJobV1>(
         }
         #[cfg(feature = "fault-injection")]
         let panic_here = matches!(
-            command.fault,
+            fault,
             FaultInjectionV1::PanicWorker { worker_id, wave_id }
                 if worker_id == id && wave_id == command.wave_id
         );
@@ -874,9 +903,7 @@ fn worker_loop<J: NativeSchedulerJobV1>(
         };
         #[cfg(feature = "fault-injection")]
         let (generation, partition_id) =
-            command
-                .fault
-                .completion_tokens(id, command.generation, command.partition_id);
+            fault.completion_tokens(id, command.generation, command.partition_id);
         #[cfg(not(feature = "fault-injection"))]
         let (generation, partition_id) = (command.generation, command.partition_id);
         let mut pending = Some(WorkerCompletion {

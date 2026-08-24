@@ -690,28 +690,82 @@ mod tests {
         assert_eq!(lease.read(0, other), &[0.5; 4]);
     }
 
+    /// E8. Concurrent leases never touch each other's words.
+    ///
+    /// Every lease fills every word it owns with its own tag, on its own thread, with staggered
+    /// spins so the writes genuinely overlap. Once the wave is joined the coordinator checks the
+    /// whole arena word by word: each buffer must carry exactly its owner's tag, and the silence
+    /// buffer must still be zero. Under Miri or a thread sanitiser this is also the data-race
+    /// probe for `unsafe impl Sync`.
+    ///
+    /// Red mutation (`MUTATIONS.md`): give two leases the same reserved buffer -- the builder
+    /// rejects it (`overlapping_writes_are_rejected`); bypass the builder by widening one lease's
+    /// write set -- this stress reports the foreign tag.
     #[test]
-    fn leases_travel_to_other_threads() {
-        let mut build = builder();
-        let a = build.reserve();
-        let b = build.reserve();
-        build.lease(0, vec![a], Vec::new());
-        build.lease(0, vec![b], Vec::new());
-        let (_arena, leases) = build.finish().expect("valid lease set");
-        let buffers = [a, b];
-        let handles: Vec<_> = leases
-            .into_iter()
-            .zip(buffers)
-            .map(|(mut lease, buffer)| {
-                std::thread::spawn(move || {
-                    lease.write(0, buffer).fill(buffer as f32);
-                    lease
-                })
-            })
+    fn concurrent_leases_never_write_a_foreign_word() {
+        const LEASES: usize = 6;
+        const BUFFERS_PER_LEASE: usize = 5;
+        const ROUNDS: usize = 200;
+        let mut build = ArenaLeaseSetBuilder::new(
+            NonZeroUsize::new(2).expect("planes"),
+            NonZeroUsize::new(17).expect("frames"),
+        );
+        let owned: Vec<Vec<u32>> = (0..LEASES)
+            .map(|_| (0..BUFFERS_PER_LEASE).map(|_| build.reserve()).collect())
             .collect();
-        for (index, handle) in handles.into_iter().enumerate() {
-            let lease = handle.join().expect("worker");
-            assert_eq!(lease.read(0, buffers[index]), &[buffers[index] as f32; 4]);
+        for buffers in &owned {
+            build.lease(0, buffers.clone(), Vec::new());
         }
+        let (arena, leases) = build.finish().expect("valid lease set");
+        let mut leases = leases;
+        for round in 0..ROUNDS {
+            let handles: Vec<_> = leases
+                .drain(..)
+                .enumerate()
+                .map(|(index, mut lease)| {
+                    let buffers = owned[index].clone();
+                    std::thread::spawn(move || {
+                        let tag = (round * LEASES + index) as f32;
+                        for (position, buffer) in buffers.iter().enumerate() {
+                            // Stagger the writes so they overlap rather than serialise.
+                            for _ in 0..(index * 32 + position * 8) {
+                                core::hint::spin_loop();
+                            }
+                            for plane in 0..2 {
+                                lease.write(plane, *buffer).fill(tag);
+                            }
+                        }
+                        lease
+                    })
+                })
+                .collect();
+            leases = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("lease worker"))
+                .collect();
+            for (index, buffers) in owned.iter().enumerate() {
+                let tag = (round * LEASES + index) as f32;
+                for buffer in buffers {
+                    for plane in 0..2 {
+                        assert!(
+                            leases[0]
+                                .read(plane, *buffer)
+                                .iter()
+                                .all(|word| *word == tag),
+                            "round {round}: buffer {buffer} carries a foreign write"
+                        );
+                    }
+                }
+            }
+            assert!(
+                leases[0]
+                    .read(0, ARENA_SILENCE_BUFFER)
+                    .iter()
+                    .chain(leases[0].read(1, ARENA_SILENCE_BUFFER))
+                    .all(|word| *word == 0.0),
+                "the silence buffer is never written"
+            );
+        }
+        assert_eq!(arena.buffers(), LEASES * BUFFERS_PER_LEASE + 1);
     }
 }

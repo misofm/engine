@@ -135,6 +135,8 @@ fn main() {
     .expect("seal graph source set");
     let mut plan = match prepared_graph_plan(envelope, input, output).bind_with_source_set(
         GraphRuntimeBindings {
+            #[cfg(not(target_arch = "wasm32"))]
+            worker_lease: None,
             envelope,
             nodes: vec![GraphNodeBinding::new(
                 GraphNodeId::Output {

@@ -13,10 +13,18 @@
 //!
 //! ## Arena
 //!
-//! Audio is two flat planar `f32` arrays -- `left` and `right` -- of `buffers * frames` words.
-//! Buffer `b`'s frames are `[b * frames, (b + 1) * frames)`. Two distinct buffers are disjoint
-//! slices of one array, so the reduction can hold one mutable output and two shared inputs without
-//! any `unsafe`: see [`split2`] and [`split3`].
+//! Audio lives in one [`DisjointArena`](miso_engine_core::realtime::DisjointArena) per prepared
+//! plan: two planar `f32` planes of `buffers * frames` words, reached only through a checked
+//! [`ArenaLeaseV1`]. Both executors use the same lease API, so node semantics have exactly one
+//! implementation of *where the audio is* as well as of what happens to it.
+//!
+//! The sequential executor holds a single lease over the whole coloured arena. The native
+//! dependency-wave executor gives every parcel its own lease over the *same* arena: each op's
+//! output has a globally unique buffer for the life of the plan, so a consumer reads its
+//! producers' buffers in place, on the worker that needs them, instead of waiting for the
+//! coordinator to copy every inter-parcel edge between waves (#100 F8, #98's F8 hand-off). Only
+//! a delayed edge still copies, and that copy is made by the *consuming* parcel through the same
+//! [`RuntimeOp::staged`] list the sequential executor uses.
 //!
 //! ## Frozen arithmetic
 //!
@@ -33,7 +41,13 @@
 
 use std::collections::BTreeMap;
 
-use miso_engine_core::realtime::RenderError;
+use core::num::NonZeroUsize;
+
+use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError};
+
+/// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
+/// offset by one.
+pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::EffectProcessBlock;
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
@@ -67,49 +81,6 @@ pub(crate) type FrameLane = f32;
 
 // REALTIME_POLICY_BEGIN
 
-/// The frames of one buffer.
-#[inline]
-fn slot(plane: &mut [f32], frames: usize, buffer: usize) -> &mut [f32] {
-    &mut plane[buffer * frames..][..frames]
-}
-
-/// Disjoint views of two **distinct** buffers in one plane: one mutable, one shared.
-#[inline]
-fn split2(plane: &mut [f32], frames: usize, out: usize, a: usize) -> (&mut [f32], &[f32]) {
-    debug_assert_ne!(out, a);
-    if out < a {
-        let (head, tail) = plane.split_at_mut(a * frames);
-        (&mut head[out * frames..][..frames], &tail[..frames])
-    } else {
-        let (head, tail) = plane.split_at_mut(out * frames);
-        (&mut tail[..frames], &head[a * frames..][..frames])
-    }
-}
-
-/// Disjoint views of three **distinct** buffers in one plane: one mutable, two shared.
-#[inline]
-fn split3<'a>(
-    plane: &'a mut [f32],
-    frames: usize,
-    out: usize,
-    a: usize,
-    b: usize,
-) -> (&'a mut [f32], &'a [f32], &'a [f32]) {
-    debug_assert!(out != a && out != b && a != b);
-    let (head, tail) = plane.split_at_mut(out * frames);
-    let (output, after) = tail.split_at_mut(frames);
-    let head: &'a [f32] = head;
-    let after: &'a [f32] = after;
-    let read = move |buffer: usize| -> &'a [f32] {
-        if buffer < out {
-            &head[buffer * frames..][..frames]
-        } else {
-            &after[(buffer - out - 1) * frames..][..frames]
-        }
-    };
-    (output, read(a), read(b))
-}
-
 /// D9 reduction of one plane: stable edge order, left-to-right, block-wide.
 ///
 /// `inputs` are buffer indices in `spec.edges` order, which the compiler sorts by `GraphEdgeId`.
@@ -117,23 +88,22 @@ fn split3<'a>(
 /// how the lowering removes a pass-through's copy -- so `-0.0` survives; `a + b` then accumulates
 /// left to right, exactly as the scalar reference `inputs.reduce(|a, b| a + b)` does.
 #[inline]
-fn reduce_plane(plane: &mut [f32], frames: usize, out: usize, inputs: &[u32]) {
+fn reduce_plane(lease: &mut ArenaLeaseV1, plane: usize, out: u32, inputs: &[u32]) {
     match inputs {
-        [] => slot(plane, frames, out).fill(0.0),
+        [] => lease.write(plane, out).fill(0.0),
         [single] => {
-            let single = *single as usize;
-            if single != out {
-                let (output, input) = split2(plane, frames, out, single);
+            if *single != out {
+                let (output, input) = lease.write_read(plane, out, *single);
                 output.copy_from_slice(input);
             }
         }
         [first, second, rest @ ..] => {
             {
-                let (output, a, b) = split3(plane, frames, out, *first as usize, *second as usize);
+                let (output, a, b) = lease.write_read2(plane, out, *first, *second);
                 sum2_block::<FrameLane>(output, a, b);
             }
             for next in rest {
-                let (output, input) = split2(plane, frames, out, *next as usize);
+                let (output, input) = lease.write_read(plane, out, *next);
                 sum_into_block::<FrameLane>(output, input);
             }
         }
@@ -277,26 +247,16 @@ impl RuntimeUnit {
 // REALTIME_POLICY_BEGIN
 /// Planar per-lane view over the arena slots a bank's members own.
 struct ArenaMembers<'a> {
-    left: &'a mut [f32],
-    right: &'a mut [f32],
-    frames: usize,
+    lease: &'a mut ArenaLeaseV1,
     outputs: &'a [u32],
 }
 
 impl BankMembers for ArenaMembers<'_> {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-        let buffer = self.outputs[lane] as usize;
-        (
-            &self.left[buffer * self.frames..][..self.frames],
-            &self.right[buffer * self.frames..][..self.frames],
-        )
+        self.lease.read_stereo(self.outputs[lane])
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-        let buffer = self.outputs[lane] as usize;
-        (
-            &mut self.left[buffer * self.frames..][..self.frames],
-            &mut self.right[buffer * self.frames..][..self.frames],
-        )
+        self.lease.write_stereo(self.outputs[lane])
     }
 }
 
@@ -304,9 +264,8 @@ impl BankMembers for ArenaMembers<'_> {
 
 /// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
 pub(crate) struct Runtime {
-    pub(crate) left: Box<[f32]>,
-    pub(crate) right: Box<[f32]>,
-    pub(crate) frames: usize,
+    /// This runtime's checked view of the plan's shared arena.
+    pub(crate) lease: ArenaLeaseV1,
     pub(crate) delays: Box<[CompensationDelay]>,
     pub(crate) units: Box<[RuntimeUnit]>,
     /// Scratch for a bank's member output buffers, sized to the widest bank at bind.
@@ -315,8 +274,7 @@ pub(crate) struct Runtime {
 
 impl Runtime {
     pub(crate) fn new(
-        buffers: usize,
-        frames: usize,
+        lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
         units: Vec<RuntimeUnit>,
     ) -> Self {
@@ -329,9 +287,7 @@ impl Runtime {
             .max()
             .unwrap_or(0);
         Self {
-            left: vec![0.0; buffers * frames].into_boxed_slice(),
-            right: vec![0.0; buffers * frames].into_boxed_slice(),
-            frames,
+            lease,
             delays: delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
@@ -341,61 +297,37 @@ impl Runtime {
     // REALTIME_POLICY_BEGIN
     /// The audio of one buffer, for the source set to fill and for the host copy-out.
     pub(crate) fn buffer_mut(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
-        let range = buffer as usize * self.frames..(buffer as usize + 1) * self.frames;
-        (&mut self.left[range.clone()], &mut self.right[range])
+        self.lease.write_stereo(buffer)
     }
 
     /// The audio of one buffer, shared.
     pub(crate) fn buffer(&self, buffer: u32) -> (&[f32], &[f32]) {
-        let range = buffer as usize * self.frames..(buffer as usize + 1) * self.frames;
-        (&self.left[range.clone()], &self.right[range])
+        self.lease.read_stereo(buffer)
     }
 
-    /// Copies one buffer into another and applies a delay line to the copy. This is the native
-    /// coordinator's cross-partition staging step and the sequential executor's delayed-edge step.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn stage_into(&mut self, staging: u32, line: Option<u32>, source: (&[f32], &[f32])) {
-        let frames = self.frames;
-        let staging = staging as usize;
-        slot(&mut self.left, frames, staging).copy_from_slice(source.0);
-        slot(&mut self.right, frames, staging).copy_from_slice(source.1);
-        if let Some(line) = line {
-            let (left, right) = split_planes(&mut self.left, &mut self.right, frames, staging);
-            self.delays[line as usize].process(left, right);
-        }
-    }
-
-    /// Runs unit `index`. Every producer this unit reads precedes it in `units`.
-    ///
-    /// Observers are **not** run here: the native executor renders units on worker threads and
-    /// observes on the coordinator once the parcels are back ([`Runtime::observe_unit`]).
+    /// Runs unit `index`. Every producer this unit reads precedes it in `units`, or was written
+    /// by a strictly earlier wave.
     pub(crate) fn execute(&mut self, index: usize, first_sample: u64) -> Result<(), RenderError> {
         let Self {
-            left,
-            right,
-            frames,
+            lease,
             delays,
             units,
             bank_outputs,
         } = self;
-        let frames = *frames;
-        let left: &mut [f32] = left;
-        let right: &mut [f32] = right;
         let delays: &mut [CompensationDelay] = delays;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => execute_op(op, left, right, frames, delays, first_sample),
+            RuntimeUnit::Op(op) => execute_op(op, lease, delays, first_sample),
             RuntimeUnit::Bank { members, chain } => {
                 for member in members.iter_mut() {
-                    execute_op(member, left, right, frames, delays, first_sample)?;
+                    execute_op(member, lease, delays, first_sample)?;
                 }
                 for (lane, member) in members.iter().enumerate() {
                     bank_outputs[lane] = member.output;
                 }
+                let frames = lease.frames();
                 chain.run(
                     &mut ArenaMembers {
-                        left,
-                        right,
-                        frames,
+                        lease,
                         outputs: &bank_outputs[..members.len()],
                     },
                     u32::try_from(frames).unwrap_or(u32::MAX),
@@ -411,19 +343,12 @@ impl Runtime {
         index: usize,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        let Self {
-            left,
-            right,
-            frames,
-            units,
-            ..
-        } = self;
-        let frames = *frames;
+        let Self { lease, units, .. } = self;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => observe(op, left, right, frames, first_sample),
+            RuntimeUnit::Op(op) => observe(op, lease, first_sample),
             RuntimeUnit::Bank { members, .. } => {
                 for member in members.iter_mut() {
-                    observe(member, left, right, frames, first_sample)?;
+                    observe(member, lease, first_sample)?;
                 }
                 Ok(())
             }
@@ -433,57 +358,41 @@ impl Runtime {
 }
 
 // REALTIME_POLICY_BEGIN
-/// The two planes of one buffer, mutable together (they are separate arrays, so this is safe).
-#[inline]
-fn split_planes<'a>(
-    left: &'a mut [f32],
-    right: &'a mut [f32],
-    frames: usize,
-    buffer: usize,
-) -> (&'a mut [f32], &'a mut [f32]) {
-    (
-        &mut left[buffer * frames..][..frames],
-        &mut right[buffer * frames..][..frames],
-    )
-}
-
 /// The one implementation of node semantics, shared by both executors.
 fn execute_op(
     op: &mut RuntimeOp,
-    left: &mut [f32],
-    right: &mut [f32],
-    frames: usize,
+    lease: &mut ArenaLeaseV1,
     delays: &mut [CompensationDelay],
     first_sample: u64,
 ) -> Result<(), RenderError> {
-    let output = op.output as usize;
+    let output = op.output;
     if matches!(op.kind, NodeKind::SourceInput) {
         // The coordinator's source set already wrote this node's output for this block.
         return Ok(());
     }
+    // A delayed edge is the only inter-parcel copy left, and the *consuming* parcel makes it.
     for staged in &op.staged {
-        let (source, staging) = (staged.source as usize, staged.staging as usize);
         {
-            let (destination, input) = split2(left, frames, staging, source);
+            let (destination, input) = lease.write_read(0, staged.staging, staged.source);
             destination.copy_from_slice(input);
         }
         {
-            let (destination, input) = split2(right, frames, staging, source);
+            let (destination, input) = lease.write_read(1, staged.staging, staged.source);
             destination.copy_from_slice(input);
         }
-        let (staged_left, staged_right) = split_planes(left, right, frames, staging);
+        let (staged_left, staged_right) = lease.write_stereo(staged.staging);
         delays[staged.line as usize].process(staged_left, staged_right);
     }
-    reduce_plane(left, frames, output, &op.inputs);
-    reduce_plane(right, frames, output, &op.inputs);
+    reduce_plane(lease, 0, output, &op.inputs);
+    reduce_plane(lease, 1, output, &op.inputs);
     match &mut op.kind {
         NodeKind::SourceInput | NodeKind::Identity | NodeKind::BankMember => {}
         NodeKind::Route(coefficients) => {
-            let (out_left, out_right) = split_planes(left, right, frames, output);
+            let (out_left, out_right) = lease.write_stereo(output);
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
         }
         NodeKind::Bound(processor) => {
-            let (out_left, out_right) = split_planes(left, right, frames, output);
+            let (out_left, out_right) = lease.write_stereo(output);
             processor.process(GraphBindingBlock {
                 left: out_left,
                 right: out_right,
@@ -494,7 +403,7 @@ fn execute_op(
             let quantum = effect.metadata.quantum;
             match op.sidechain {
                 None => {
-                    let (out_left, out_right) = split_planes(left, right, frames, output);
+                    let (out_left, out_right) = lease.write_stereo(output);
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,
@@ -507,9 +416,8 @@ fn execute_op(
                     let _ = effect.processor.process(block);
                 }
                 Some(sidechain) => {
-                    let sidechain = sidechain as usize;
-                    let (out_left, side_left) = split2(left, frames, output, sidechain);
-                    let (out_right, side_right) = split2(right, frames, output, sidechain);
+                    let ((out_left, out_right), (side_left, side_right)) =
+                        lease.write_read_stereo(output, sidechain);
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,
@@ -527,21 +435,11 @@ fn execute_op(
     Ok(())
 }
 
-fn observe(
-    op: &mut RuntimeOp,
-    left: &[f32],
-    right: &[f32],
-    frames: usize,
-    first_sample: u64,
-) -> Result<(), RenderError> {
+fn observe(op: &mut RuntimeOp, lease: &ArenaLeaseV1, first_sample: u64) -> Result<(), RenderError> {
     if op.observers.is_empty() {
         return Ok(());
     }
-    let buffer = op.output as usize;
-    let (left, right) = (
-        &left[buffer * frames..][..frames],
-        &right[buffer * frames..][..frames],
-    );
+    let (left, right) = lease.read_stereo(op.output);
     for observer in op.observers.iter_mut() {
         observer.observer.observe(GraphObservationBlock {
             left,
@@ -631,10 +529,6 @@ pub(crate) type PlannedUnit = (Option<Membership>, Vec<usize>);
 /// One dependency wave before it is built: its level and its units, in stable key order.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type PlannedWave = (u64, Vec<PlannedUnit>);
-
-/// A unit to observe: `(partition, unit within that parcel)`.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) type ObservedUnit = (usize, usize);
 
 /// The one bank-membership map, built from the plan before either executor exists.
 pub(crate) fn bank_membership(
@@ -835,36 +729,41 @@ fn producing_op(program: &ExecutionProgram, index: u32) -> Option<u32> {
     })
 }
 
-/// Producing op of every op input, in the same stable edge-ID order the program uses.
+/// The op that produced each of an op's inputs, recovered from the lowering's own colouring.
 ///
-/// The lowering records only *buffers*, and colouring reuses those, so the native executor -- which
-/// stages every edge between partitions -- recovers the producer from the semantic graph instead:
-/// `spec.edges` is sorted by `GraphEdgeId` and `lower` fills `Op::inputs` by walking it, so the
-/// i-th main edge into a node is the i-th input of its op.
+/// The native executor gives every op output a globally unique arena buffer, so it has to map the
+/// lowering's *coloured* input buffer back to the op that wrote it. Walking `program.ops` in
+/// schedule order and remembering the last writer of each colour does exactly that: liveness
+/// colouring never reassigns a colour while a consumer still needs it, so the last writer at the
+/// moment a consumer is reached is that consumer's producer. This reuses #98/#99's colouring
+/// rather than forming a second opinion from the semantic graph.
 #[cfg(not(target_arch = "wasm32"))]
-struct EdgeSources {
-    main: Vec<Vec<u32>>,
-    sidechain: Vec<Option<u32>>,
+struct OpProducers {
+    main: Vec<Vec<usize>>,
+    sidechain: Vec<Option<usize>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn edge_sources(spec: &GraphSpec, program: &ExecutionProgram) -> EdgeSources {
-    let count = spec.nodes.len();
-    let mut main = vec![Vec::new(); count];
-    let mut sidechain = vec![None; count];
-    for edge in &spec.edges {
-        let source = crate::program::node_index(spec, &edge.source.node).expect("validated source");
-        let destination =
-            crate::program::node_index(spec, &edge.destination.node).expect("validated node");
-        let producer = producing_op(program, source).expect("validated producer");
-        match edge.destination.kind {
-            crate::GraphPortKind::SidechainInput => {
-                sidechain[destination as usize] = Some(producer);
-            }
-            _ => main[destination as usize].push(producer),
-        }
+fn op_producers(program: &ExecutionProgram) -> OpProducers {
+    let mut owner: Vec<Option<usize>> = vec![None; program.buffers as usize];
+    let mut main = Vec::with_capacity(program.ops.len());
+    let mut sidechain = Vec::with_capacity(program.ops.len());
+    for (index, op) in program.ops.iter().enumerate() {
+        main.push(
+            program
+                .inputs_of(op)
+                .iter()
+                .map(|input| {
+                    owner[input.buffer.0 as usize].expect("every input has a producing op")
+                })
+                .collect(),
+        );
+        sidechain.push(op.sidechain.map(|side| {
+            owner[side.buffer.0 as usize].expect("every sidechain has a producing op")
+        }));
+        owner[op.output.0 as usize] = Some(index);
     }
-    EdgeSources { main, sidechain }
+    OpProducers { main, sidechain }
 }
 
 /// Builds the sequential executor's runtime: one coloured arena, producers read in place.
@@ -875,6 +774,9 @@ pub(crate) fn build_sequential(
     frames: usize,
 ) -> Runtime {
     let mut parts = parts;
+    // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
+    // arena buffer `b + ARENA_BASE`.
+    let arena = |buffer: u32| buffer + ARENA_BASE;
     let taps = taps_by_op(program, spec);
     let grouped = units_of(program, &parts.membership.clone());
     let delays = program
@@ -892,26 +794,26 @@ pub(crate) fn build_sequential(
                 let mut staged = Vec::new();
                 for input in program.inputs_of(op) {
                     match input.delay {
-                        None => inputs.push(input.buffer.0),
+                        None => inputs.push(arena(input.buffer.0)),
                         Some(delay) => {
-                            inputs.push(delay.staging.0);
+                            inputs.push(arena(delay.staging.0));
                             staged.push(StagedInput {
-                                source: input.buffer.0,
-                                staging: delay.staging.0,
+                                source: arena(input.buffer.0),
+                                staging: arena(delay.staging.0),
                                 line: delay.line,
                             });
                         }
                     }
                 }
                 let sidechain = op.sidechain.map(|side| match side.delay {
-                    None => side.buffer.0,
+                    None => arena(side.buffer.0),
                     Some(delay) => {
                         staged.push(StagedInput {
-                            source: side.buffer.0,
-                            staging: delay.staging.0,
+                            source: arena(side.buffer.0),
+                            staging: arena(delay.staging.0),
                             line: delay.line,
                         });
-                        delay.staging.0
+                        arena(delay.staging.0)
                     }
                 });
                 build_op(
@@ -921,7 +823,7 @@ pub(crate) fn build_sequential(
                     inputs,
                     staged,
                     sidechain,
-                    op.output.0,
+                    arena(op.output.0),
                     taps.get(&u32::try_from(*index).expect("op index"))
                         .map(Vec::as_slice),
                 )
@@ -929,7 +831,16 @@ pub(crate) fn build_sequential(
             .collect();
         units.push(finish_unit(&mut parts, membership, members));
     }
-    Runtime::new(program.buffers as usize, frames, delays, units)
+    let mut builder = ArenaLeaseSetBuilder::new(
+        NonZeroUsize::new(2).expect("stereo planes"),
+        NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
+    );
+    let buffers: Vec<u32> = (0..program.buffers).map(|_| builder.reserve()).collect();
+    builder.lease(0, buffers.clone(), buffers);
+    let (_arena, mut leases) = builder
+        .finish()
+        .expect("one lease over one coloured arena is disjoint by construction");
+    Runtime::new(leases.pop().expect("the sequential lease"), delays, units)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -976,7 +887,7 @@ fn finish_unit(
     }
 }
 
-/// Where one op's output lives in the native executor: which wave, which parcel, which slot.
+/// Where one op's output lives in the native executor: which wave, which parcel, which buffer.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NodeLocation {
@@ -985,23 +896,36 @@ pub(crate) struct NodeLocation {
     pub(crate) buffer: u32,
 }
 
-/// One cross-partition edge the coordinator stages between waves (F8's pull model is #100's).
+/// One consumer read that must fall back to silence while its producing partition is trapped.
+///
+/// After a worker misses its deadline the coordinator does not own its parcel any more, so its
+/// output buffers are radioactive: nothing may read them and nothing may write them until the
+/// worker finally returns the parcel. The executor mutes exactly these reads instead (arena
+/// invariant I4) and un-mutes them when the parcel is reaped.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-pub(crate) struct StageOperation {
-    pub(crate) source: NodeLocation,
-    pub(crate) destination_partition: usize,
-    pub(crate) destination_buffer: u32,
-    pub(crate) line: Option<u32>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MutedRead {
+    pub(crate) wave: usize,
+    pub(crate) partition: usize,
+    pub(crate) buffer: u32,
 }
 
-/// The native executor's layout: one arena per parcel, every edge staged.
+/// The partitioning of one wave, chosen by the cost-weighted split at bind.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct WaveLayout {
+    /// Unit indices of the wave, in the order the partitions cover them.
+    pub(crate) unit_order: Vec<usize>,
+    /// `(first_unit, end_unit, partition_id)` over `unit_order`.
+    pub(crate) ranges: Vec<(usize, usize, usize)>,
+}
+
+/// The native executor's layout: one shared arena, one lease per parcel, no coordinator copies.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct NativeRuntime {
     pub(crate) levels: Vec<u64>,
     pub(crate) parcels: Vec<Vec<Runtime>>,
-    pub(crate) stage_operations: Vec<Vec<StageOperation>>,
-    pub(crate) observation: Vec<Vec<ObservedUnit>>,
+    /// Per `(wave, partition)`, every consumer read to mute while that partition is trapped.
+    pub(crate) trapped_edges: Vec<Vec<Vec<MutedRead>>>,
     pub(crate) locations: BTreeMap<GraphNodeId, NodeLocation>,
     pub(crate) output: NodeLocation,
 }
@@ -1027,112 +951,165 @@ pub(crate) fn waves_of(
     waves
 }
 
-/// Builds the native executor's runtime, one arena per parcel.
+/// Builds the native executor's runtime: one plan-wide disjoint arena, destination pulls.
 ///
-/// `ranges` is, per wave, the `(first_unit, end_unit, partition_id)` split the scheduler chose.
+/// Every op output gets a buffer that no other lease may ever write (arena invariant I1), so a
+/// consumer names its producers' buffers directly and reads them in place on its own worker. The
+/// coordinator copies nothing between waves; only a delayed edge still copies, into a staging
+/// buffer the consuming parcel owns and stages itself.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn build_native(
     program: &ExecutionProgram,
     spec: &GraphSpec,
     mut parts: RuntimeParts,
     frames: usize,
-    ranges: &[Vec<(usize, usize, usize)>],
+    layout: &[WaveLayout],
 ) -> NativeRuntime {
     let taps = taps_by_op(program, spec);
-    let sources = edge_sources(spec, program);
+    let producers = op_producers(program);
     let waves = waves_of(program, &parts.membership.clone());
+    let mut builder = ArenaLeaseSetBuilder::new(
+        NonZeroUsize::new(2).expect("stereo planes"),
+        NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
+    );
+    let mut op_arena_output = vec![0_u32; program.ops.len()];
     let mut op_location: Vec<Option<NodeLocation>> = vec![None; program.ops.len()];
-    let mut parcels: Vec<Vec<Runtime>> = Vec::with_capacity(waves.len());
-    let mut stage_operations: Vec<Vec<StageOperation>> = vec![Vec::new(); waves.len()];
-    let mut observation: Vec<Vec<ObservedUnit>> = Vec::with_capacity(waves.len());
     let mut locations = BTreeMap::new();
     let mut levels = Vec::with_capacity(waves.len());
+    let mut built: Vec<Vec<(Vec<CompensationDelay>, Vec<RuntimeUnit>)>> =
+        Vec::with_capacity(waves.len());
+    let mut trapped_edges: Vec<Vec<Vec<MutedRead>>> = Vec::with_capacity(waves.len());
+    // Arena buffer -> the partition that writes it, so a trapped partition's consumers are known.
+    let mut buffer_owner: Vec<(usize, usize)> = vec![(0, 0)];
     for (wave_index, (level, units)) in waves.iter().enumerate() {
         levels.push(*level);
-        let mut wave_parcels = Vec::with_capacity(ranges[wave_index].len());
-        let mut wave_observation = Vec::new();
-        for (first_unit, end_unit, partition) in &ranges[wave_index] {
-            let mut slots = 0_u32;
+        let wave_layout = &layout[wave_index];
+        let mut wave_built = Vec::with_capacity(wave_layout.ranges.len());
+        trapped_edges.push(vec![Vec::new(); wave_layout.ranges.len()]);
+        for (first_unit, end_unit, partition) in &wave_layout.ranges {
             let mut delays: Vec<CompensationDelay> = Vec::new();
-            let mut built = Vec::with_capacity(end_unit - first_unit);
-            for (local, (membership, ops)) in units[*first_unit..*end_unit].iter().enumerate() {
+            let mut writes: Vec<u32> = Vec::new();
+            let mut reads: Vec<u32> = Vec::new();
+            let mut members_built = Vec::with_capacity(end_unit - first_unit);
+            for ordered in &wave_layout.unit_order[*first_unit..*end_unit] {
+                let (membership, ops) = &units[*ordered];
                 let mut members = Vec::with_capacity(ops.len());
                 for op_index in ops {
                     let op = &program.ops[*op_index];
                     let node = op.node as usize;
                     let mut inputs = Vec::with_capacity(op.input_count() as usize);
+                    let mut staged = Vec::new();
+                    let mut pull = |source_op: usize,
+                                    delay: Option<crate::program::DelayRef>,
+                                    delays: &mut Vec<CompensationDelay>,
+                                    writes: &mut Vec<u32>,
+                                    reads: &mut Vec<u32>,
+                                    staged: &mut Vec<StagedInput>|
+                     -> u32 {
+                        let source = op_arena_output[source_op];
+                        reads.push(source);
+                        match delay {
+                            None => source,
+                            Some(delay) => {
+                                let staging = builder.reserve();
+                                writes.push(staging);
+                                delays.push(CompensationDelay::new(
+                                    program.delays[delay.line as usize].samples as usize,
+                                ));
+                                staged.push(StagedInput {
+                                    source,
+                                    staging,
+                                    line: u32::try_from(delays.len() - 1).expect("delay index"),
+                                });
+                                staging
+                            }
+                        }
+                    };
                     for (position, input) in program.inputs_of(op).iter().enumerate() {
-                        let staging = slots;
-                        slots += 1;
-                        inputs.push(staging);
-                        let line = input.delay.map(|delay| {
-                            delays.push(CompensationDelay::new(
-                                program.delays[delay.line as usize].samples as usize,
-                            ));
-                            u32::try_from(delays.len() - 1).expect("delay index")
-                        });
-                        stage_operations[wave_index].push(StageOperation {
-                            source: op_location[sources.main[node][position] as usize]
-                                .expect("producer precedes consumer"),
-                            destination_partition: *partition,
-                            destination_buffer: staging,
-                            line,
-                        });
+                        let buffer = pull(
+                            producers.main[*op_index][position],
+                            input.delay,
+                            &mut delays,
+                            &mut writes,
+                            &mut reads,
+                            &mut staged,
+                        );
+                        inputs.push(buffer);
                     }
                     let sidechain = op.sidechain.map(|side| {
-                        let staging = slots;
-                        slots += 1;
-                        let line = side.delay.map(|delay| {
-                            delays.push(CompensationDelay::new(
-                                program.delays[delay.line as usize].samples as usize,
-                            ));
-                            u32::try_from(delays.len() - 1).expect("delay index")
-                        });
-                        stage_operations[wave_index].push(StageOperation {
-                            source: op_location
-                                [sources.sidechain[node].expect("sidechain source") as usize]
-                                .expect("producer precedes consumer"),
-                            destination_partition: *partition,
-                            destination_buffer: staging,
-                            line,
-                        });
-                        staging
+                        pull(
+                            producers.sidechain[*op_index].expect("sidechain source"),
+                            side.delay,
+                            &mut delays,
+                            &mut writes,
+                            &mut reads,
+                            &mut staged,
+                        )
                     });
-                    let output = slots;
-                    slots += 1;
-                    op_location[*op_index] = Some(NodeLocation {
+                    let output = builder.reserve();
+                    writes.push(output);
+                    if buffer_owner.len() <= output as usize {
+                        // Staging buffers may have been reserved in between; they are read only
+                        // by the parcel that owns them, so their entry is never consulted.
+                        buffer_owner.resize(output as usize + 1, (0, 0));
+                    }
+                    buffer_owner[output as usize] = (wave_index, *partition);
+                    op_arena_output[*op_index] = output;
+                    let location = NodeLocation {
                         wave: wave_index,
                         partition: *partition,
                         buffer: output,
-                    });
-                    locations.insert(
-                        spec.nodes[node].id.clone(),
-                        NodeLocation {
-                            wave: wave_index,
-                            partition: *partition,
-                            buffer: output,
-                        },
-                    );
+                    };
+                    op_location[*op_index] = Some(location);
+                    locations.insert(spec.nodes[node].id.clone(), location);
                     members.push(build_op(
                         &mut parts,
                         spec,
                         op,
                         inputs,
-                        Vec::new(),
+                        staged,
                         sidechain,
                         output,
                         taps.get(&u32::try_from(*op_index).expect("op index"))
                             .map(Vec::as_slice),
                     ));
                 }
-                built.push(finish_unit(&mut parts, *membership, members));
-                wave_observation.push((*partition, local));
+                members_built.push(finish_unit(&mut parts, *membership, members));
             }
-            wave_parcels.push(Runtime::new(slots as usize, frames, delays, built));
+            // Every read of a buffer another partition owns is a mute candidate. Partition zero is
+            // the coordinator's own lane and can never be trapped, so it is never a source here.
+            for source in &reads {
+                let (producer_wave, producer_partition) = buffer_owner[*source as usize];
+                if producer_partition == 0
+                    || (producer_wave == wave_index && producer_partition == *partition)
+                {
+                    continue;
+                }
+                trapped_edges[producer_wave][producer_partition].push(MutedRead {
+                    wave: wave_index,
+                    partition: *partition,
+                    buffer: *source,
+                });
+            }
+            builder.lease(wave_index, writes, reads);
+            wave_built.push((delays, members_built));
         }
-        parcels.push(wave_parcels);
-        observation.push(wave_observation);
+        built.push(wave_built);
     }
+    let (_arena, leases) = builder
+        .finish()
+        .expect("unique per-op buffers and strictly earlier reads are disjoint by construction");
+    let mut leases = leases.into_iter();
+    let parcels = built
+        .into_iter()
+        .map(|wave| {
+            wave.into_iter()
+                .map(|(delays, units)| {
+                    Runtime::new(leases.next().expect("one lease per parcel"), delays, units)
+                })
+                .collect()
+        })
+        .collect();
     let output_node = spec
         .nodes
         .iter()
@@ -1144,8 +1121,7 @@ pub(crate) fn build_native(
     NativeRuntime {
         levels,
         parcels,
-        stage_operations,
-        observation,
+        trapped_edges,
         locations,
         output,
     }
@@ -1161,17 +1137,30 @@ mod tests {
         f32::from(((*state >> 16) & 0xffff) as i16) / 3_276.8
     }
 
-    /// Lays `inputs` out as an arena of `inputs.len() + 1` buffers and reduces into buffer 0.
+    /// Lays `inputs` out as one lease over `inputs.len() + 1` buffers and reduces into the first.
     fn reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
+        let mut lease = single_lease(frames, inputs.len() + 1);
+        let refs: Vec<u32> = (2..=inputs.len() as u32 + 1).collect();
         // The output slot starts at a sentinel, never at zero: a reduction that forgets to write
         // it -- the fan-in-zero fill in particular -- must not be able to pass by accident.
-        let mut plane = vec![f32::from_bits(0x7f7f_7f7f); (inputs.len() + 1) * frames];
+        lease.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
         for (index, input) in inputs.iter().enumerate() {
-            plane[(index + 1) * frames..][..frames].copy_from_slice(input);
+            lease.write(0, refs[index]).copy_from_slice(input);
         }
-        let refs: Vec<u32> = (1..=inputs.len() as u32).collect();
-        reduce_plane(&mut plane, frames, 0, &refs);
-        plane[..frames].to_vec()
+        reduce_plane(&mut lease, 0, 1, &refs);
+        lease.read(0, 1).to_vec()
+    }
+
+    /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
+    fn single_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+        let mut builder = ArenaLeaseSetBuilder::new(
+            NonZeroUsize::new(1).expect("one plane"),
+            NonZeroUsize::new(frames).expect("frames"),
+        );
+        let owned: Vec<u32> = (0..buffers).map(|_| builder.reserve()).collect();
+        builder.lease(0, owned.clone(), owned);
+        let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
+        leases.pop().expect("the lease")
     }
 
     /// E5. Master plan #83 D9: the block reduction is bit-for-bit the scalar left-to-right
@@ -1242,9 +1231,12 @@ mod tests {
     /// E5 continued: an in-place single input is the identity, not a copy through a scratch.
     #[test]
     fn a_single_in_place_input_is_left_untouched() {
-        let mut plane = vec![1.0f32, 2.0, 3.0, 4.0];
-        reduce_plane(&mut plane, 2, 1, &[1]);
-        assert_eq!(plane, vec![1.0f32, 2.0, 3.0, 4.0]);
+        let mut lease = single_lease(2, 2);
+        lease.write(0, 1).copy_from_slice(&[1.0, 2.0]);
+        lease.write(0, 2).copy_from_slice(&[3.0, 4.0]);
+        reduce_plane(&mut lease, 0, 2, &[2]);
+        assert_eq!(lease.read(0, 1), &[1.0, 2.0]);
+        assert_eq!(lease.read(0, 2), &[3.0, 4.0]);
     }
 
     /// E7. The two-segment slice PDC is bit-for-bit a per-sample ring delay, and the result does

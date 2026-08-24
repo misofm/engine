@@ -25,7 +25,8 @@ mod native {
         GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
         GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
         NativeGraphBindConfigV1, NativeGraphPreparedMetadataV1, NativeGraphRenderModeV1,
-        NativeSchedulerConfigV1, TrackStage,
+        NativeGraphWorkerLeaseV1, NativeGraphWorkerPoolV1, NativeSchedulerConfigV1,
+        NativeWorkerPoolConfigV1, NativeWorkerPoolShapeV1, TrackStage,
     };
     use miso_engine_graph_compiler::{
         GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler,
@@ -104,10 +105,17 @@ mod native {
             Ok(())
         }
 
+        /// Records in a canonical order.
+        ///
+        /// Since issue 100 an observer runs on the worker that rendered its node, so the
+        /// *arrival* order across nodes in different parcels is unspecified by design: an
+        /// observer is still invoked exactly once per block per node, and its own audio is
+        /// exactly what the sequential executor sees. The transcript is therefore sorted by
+        /// `(sample_time, node_token, handle)` before anything compares or hashes it.
         fn records(&self) -> Vec<Q128ObserverRecord> {
             let capacity = self.fields.len() / 5;
             let count = self.next.load(Ordering::Relaxed).min(capacity);
-            (0..count)
+            let mut records: Vec<Q128ObserverRecord> = (0..count)
                 .map(|index| {
                     let base = index * 5;
                     Q128ObserverRecord {
@@ -118,23 +126,26 @@ mod native {
                         value_bits: self.fields[base + 4].load(Ordering::Relaxed) as u32,
                     }
                 })
-                .collect()
+                .collect();
+            records.sort_by_key(|record| (record.sample_time, record.node_token, record.handle));
+            records
         }
 
         fn count(&self) -> usize {
             self.next.load(Ordering::Relaxed)
         }
 
+        /// Address-free hash of the canonical (sorted) transcript. See [`Transcript::records`].
         fn stable_hash(&self) -> u64 {
-            let capacity = self.fields.len() / 5;
-            let count = self.next.load(Ordering::Relaxed).min(capacity);
             let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-            for index in 0..count {
-                let base = index * 5;
-                for value in self.fields[base..base + 5]
-                    .iter()
-                    .map(|field| field.load(Ordering::Relaxed))
-                {
+            for record in self.records() {
+                for value in [
+                    record.sample_time,
+                    record.node_token,
+                    record.handle,
+                    u64::from(record.boundary),
+                    u64::from(record.value_bits),
+                ] {
                     for byte in value.to_le_bytes() {
                         hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
                     }
@@ -206,6 +217,8 @@ mod native {
 
     pub struct PreparedQ128Fixture {
         pub plan: miso_engine_core::realtime::PreparedRenderPlan,
+        /// The fixture's own worker pool. It outlives the plan, so it is dropped last.
+        pub pool: Option<NativeGraphWorkerPoolV1>,
         pub metadata: NativeGraphPreparedMetadataV1,
         pub report: GraphCompileReport,
         /// The semantic graph hash, taken while the artifact still owned its plan (#99 F5): the
@@ -267,29 +280,40 @@ mod native {
         plan_id: u64,
         transcript_capacity: usize,
     ) -> Result<PreparedQ128Fixture, String> {
-        prepare_q128_fixture_with_completion_acceptance_order(
+        prepare_fixture_with_track_count(
             sample_rate_hz,
             render_lanes,
             render_mode,
             plan_id,
             transcript_capacity,
-            [0, 1, 2],
+            PoolChoice::Own,
+            Q128_TRACK_COUNT,
+            1 << 29,
+            true,
         )
     }
 
-    /// Prepare the q128 graph with a fixed test-only worker-completion acceptance order.
+    /// Where a prepared fixture's auxiliary workers come from.
+    pub enum PoolChoice {
+        /// The fixture starts and owns its own pool.
+        Own,
+        /// The caller owns the pool. A fixture prepared without a lease renders sequentially
+        /// until the block-boundary hand-over gives it one.
+        External(NativeWorkerPoolShapeV1, Option<NativeGraphWorkerLeaseV1>),
+    }
+
+    /// Prepare the q128 graph against a caller-owned worker pool.
     ///
-    /// The order is carried by the prepared scheduler and controls which real SPSC completion
-    /// parcel the coordinator dequeues next. It is unavailable from normal engine production
-    /// builds and does not alter graph execution, reduction, or observation ordering.
+    /// The audit uses this to prove one persistent pool serves two successive plans: the initial
+    /// plan holds the lease, the replacement is prepared without one, and the swap hands it over.
     #[doc(hidden)]
-    pub fn prepare_q128_fixture_with_completion_acceptance_order(
+    pub fn prepare_q128_fixture_with_pool(
         sample_rate_hz: u32,
         render_lanes: usize,
         render_mode: Q128RenderMode,
         plan_id: u64,
         transcript_capacity: usize,
-        completion_acceptance_order: [u8; 3],
+        pool: PoolChoice,
     ) -> Result<PreparedQ128Fixture, String> {
         prepare_fixture_with_track_count(
             sample_rate_hz,
@@ -297,7 +321,7 @@ mod native {
             render_mode,
             plan_id,
             transcript_capacity,
-            completion_acceptance_order,
+            pool,
             Q128_TRACK_COUNT,
             1 << 29,
             true,
@@ -319,7 +343,7 @@ mod native {
             Q128RenderMode::DependencyWaves,
             plan_id,
             0,
-            [0, 1, 2],
+            PoolChoice::Own,
             track_count,
             maximum_retained_bytes,
             false,
@@ -333,7 +357,7 @@ mod native {
         render_mode: Q128RenderMode,
         plan_id: u64,
         transcript_capacity: usize,
-        completion_acceptance_order: [u8; 3],
+        pool_choice: PoolChoice,
         track_count: usize,
         maximum_retained_bytes: usize,
         require_q128_bank_and_pdc: bool,
@@ -528,20 +552,46 @@ mod native {
                 Arc::clone(&transcript),
             ),
         ];
+        let lanes = NonZeroUsize::new(render_lanes).ok_or_else(|| "q128.lanes".to_owned())?;
+        let (pool, lease, pool_shape) = match (pool_choice, render_mode) {
+            (PoolChoice::External(shape, lease), _) => (None, lease, shape),
+            (PoolChoice::Own, Q128RenderMode::Sequential) => {
+                (None, None, NativeWorkerPoolShapeV1::default())
+            }
+            (PoolChoice::Own, Q128RenderMode::DependencyWaves) => {
+                // The fixture owns its own pool, so two fixtures in one process share nothing.
+                // The fixture accepts absurd lane counts so binding can reject them; it must not
+                // try to start that many threads.
+                let requested = render_lanes.saturating_sub(1).min(
+                    std::thread::available_parallelism()
+                        .map(NonZeroUsize::get)
+                        .unwrap_or(1),
+                );
+                let (pool, lease) = NativeGraphWorkerPoolV1::start(NativeWorkerPoolConfigV1 {
+                    requested_workers: NonZeroUsize::new(requested),
+                    ..NativeWorkerPoolConfigV1::default()
+                })
+                .map_err(|_| "q128.pool".to_owned())?;
+                let shape = pool.shape();
+                (Some(pool), Some(lease), shape)
+            }
+        };
         let bound = artifact
             .into_bound_native(
                 GraphRuntimeBindings {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    worker_lease: lease,
                     envelope,
                     nodes,
                     observers,
                 },
                 NativeGraphBindConfigV1 {
                     render_mode: render_mode.native_mode(),
-                    scheduler: NativeSchedulerConfigV1::new(
-                        NonZeroUsize::new(render_lanes).ok_or_else(|| "q128.lanes".to_owned())?,
-                        true,
-                    )
-                    .with_test_completion_acceptance_order(completion_acceptance_order),
+                    // The fixture is a determinism/allocation harness: a descheduled worker must
+                    // never be mistaken for a dead one here. The bounded recovery deadline is
+                    // proved by fault injection in `miso-engine-graph`, not by this fixture.
+                    scheduler: NativeSchedulerConfigV1::new(lanes, true, pool_shape)
+                        .with_recovery_deadline_ns(5_000_000_000),
                     maximum_retained_bytes,
                 },
             )
@@ -549,6 +599,7 @@ mod native {
         let metadata = bound.prepared.metadata;
         Ok(PreparedQ128Fixture {
             plan: bound.prepared.into_plan(),
+            pool,
             metadata,
             report,
             graph_sha256,
@@ -687,50 +738,91 @@ mod tests {
     const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
     const BLOCKS: u64 = 3;
     const OBSERVERS_PER_BLOCK: usize = 2;
-    const PERTURBATION_SEED: u64 = 0x0000_0000_0009_d37a;
     const PREPARATION_TRACK_COUNTS: [usize; 6] = [1, 3, 4, 5, 12, 17];
 
+    /// E1. The production q128 session renders identical bits at every launch rate and every
+    /// worker-lane count, PCM and observer transcript alike.
+    ///
+    /// Red mutation (`MUTATIONS.md`): return from `recover_issued` before popping any completion
+    /// -- the coordinator reads a parcel the worker is still writing and the PCM diverges.
     #[test]
     fn q128_is_byte_identical_at_every_launch_rate_and_lane_count() {
+        let cores = std::thread::available_parallelism()
+            .map(core::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let lane_counts: Vec<usize> = [2_usize, 4, 8]
+            .into_iter()
+            .filter(|lanes| {
+                if cores >= *lanes {
+                    true
+                } else {
+                    eprintln!("skipping the {lanes}-lane column: {cores} cores available");
+                    false
+                }
+            })
+            .collect();
+        assert!(
+            lane_counts.len() >= 2,
+            "the lane matrix needs at least the two- and four-lane columns"
+        );
         for rate in RATES {
             let mut sequential = fixture(rate, 1, Q128RenderMode::Sequential, 39_001);
-            let mut two_lane = fixture(rate, 2, Q128RenderMode::DependencyWaves, 39_002);
-            let mut four_lane = fixture(rate, 4, Q128RenderMode::DependencyWaves, 39_003);
-            assert_eq!(sequential.graph_sha256, two_lane.graph_sha256);
-            assert_eq!(sequential.graph_sha256, four_lane.graph_sha256);
-            assert_eq!(sequential.pdc_samples, two_lane.pdc_samples);
-            assert_eq!(sequential.pdc_samples, four_lane.pdc_samples);
             assert!(sequential.pdc_samples > 0);
+            let mut parallel: Vec<(usize, PreparedQ128Fixture)> = lane_counts
+                .iter()
+                .enumerate()
+                .map(|(index, lanes)| {
+                    (
+                        *lanes,
+                        fixture(
+                            rate,
+                            *lanes,
+                            Q128RenderMode::DependencyWaves,
+                            39_002 + index as u64,
+                        ),
+                    )
+                })
+                .collect();
+            for (lanes, candidate) in &parallel {
+                assert_eq!(
+                    sequential.graph_sha256, candidate.graph_sha256,
+                    "{lanes} lanes: the semantic graph must not depend on the lane count"
+                );
+                assert_eq!(sequential.pdc_samples, candidate.pdc_samples);
+            }
 
             for block in 0..BLOCKS {
                 let absolute_sample = block * Q128_QUANTUM_FRAMES as u64;
                 let sequential_pcm = render(&mut sequential, absolute_sample);
-                let two_lane_pcm = render(&mut two_lane, absolute_sample);
-                let four_lane_pcm = render(&mut four_lane, absolute_sample);
-                assert_pcm_eq(&sequential_pcm, &two_lane_pcm, rate, block, "two_lane");
-                assert_pcm_eq(&sequential_pcm, &four_lane_pcm, rate, block, "four_lane");
+                for (lanes, candidate) in parallel.iter_mut() {
+                    let pcm = render(candidate, absolute_sample);
+                    assert_pcm_eq(&sequential_pcm, &pcm, rate, block, &format!("{lanes}_lane"));
+                }
             }
 
-            assert_eq!(
-                sequential.plan.qualification_counters(),
-                two_lane.plan.qualification_counters(),
-                "builtin qualification counters at {rate} Hz two lane"
-            );
-            assert_eq!(
-                sequential.plan.qualification_counters(),
-                four_lane.plan.qualification_counters(),
-                "builtin qualification counters at {rate} Hz four lane"
-            );
-            assert_eq!(
-                sequential.observer_records(),
-                two_lane.observer_records(),
-                "observer transcript at {rate} Hz two lane"
-            );
-            assert_eq!(
-                sequential.observer_records(),
-                four_lane.observer_records(),
-                "observer transcript at {rate} Hz four lane"
-            );
+            for (lanes, candidate) in &parallel {
+                assert_eq!(
+                    candidate.plan.dispatch_counters()[1],
+                    0,
+                    "{lanes} lanes at {rate} Hz: a worker missed its deadline, so this \
+                     comparison would be measuring a degraded block"
+                );
+                assert_eq!(
+                    sequential.plan.qualification_counters(),
+                    candidate.plan.qualification_counters(),
+                    "builtin qualification counters at {rate} Hz, {lanes} lanes"
+                );
+                assert_eq!(
+                    sequential.observer_records(),
+                    candidate.observer_records(),
+                    "observer transcript at {rate} Hz, {lanes} lanes"
+                );
+                assert_eq!(
+                    candidate.observer_record_count(),
+                    BLOCKS as usize * OBSERVERS_PER_BLOCK,
+                    "complete observer transcript at {rate} Hz, {lanes} lanes"
+                );
+            }
             assert_eq!(
                 sequential.observer_record_count(),
                 BLOCKS as usize * OBSERVERS_PER_BLOCK,
@@ -739,63 +831,63 @@ mod tests {
         }
     }
 
+    /// E5, descriptive. Renders the production q128 session at 1/2/4/8 lanes and prints the mean
+    /// and worst nanoseconds per block plus the implied serial fraction. It is not a gate: it is
+    /// run once before and once after the change and both tables are pasted into the issue.
+    ///
+    /// Nothing is hashed inside a timed interval and no plan is prepared inside one.
     #[test]
-    fn q128_exactly_32_seeded_completion_acceptance_perturbations_match_sequential() {
-        let perturbations = seeded_completion_acceptance_perturbations();
-        assert_eq!(perturbations.len(), 32);
-        assert_eq!(
-            perturbation_transcript_hash(&perturbations),
-            0x59b0_0a34_1747_bb7d,
-            "frozen completion-acceptance perturbation transcript"
-        );
-
-        let mut baseline = fixture(48_000, 1, Q128RenderMode::Sequential, 39_101);
-        let baseline_pcm = render_blocks(&mut baseline);
-        let baseline_counters = baseline.plan.qualification_counters();
-        let baseline_observers = baseline.observer_records();
-        let baseline_pdc = baseline.pdc_samples;
-
-        for (index, order) in perturbations.into_iter().enumerate() {
-            assert_ne!(order, [0, 1, 2], "perturbation {index} is canonical");
-            let mut perturbed = prepare_q128_fixture_with_completion_acceptance_order(
-                48_000,
-                4,
-                Q128RenderMode::DependencyWaves,
-                39_200 + index as u64,
-                BLOCKS as usize * OBSERVERS_PER_BLOCK,
-                order,
-            )
-            .unwrap_or_else(|error| {
-                panic!("perturbation {index} fixture preparation failed: {error}")
-            });
-            let pcm = render_blocks(&mut perturbed);
-            for (block, (expected, actual)) in baseline_pcm.iter().zip(&pcm).enumerate() {
-                assert_pcm_eq(
-                    expected,
-                    actual,
-                    48_000,
-                    block as u64,
-                    "four_lane_perturbed",
-                );
+    #[ignore = "descriptive measurement, run explicitly"]
+    fn q128_speedup_descriptive() {
+        const WARMUP: u64 = 2_000;
+        const MEASURED: u64 = 20_000;
+        let cores = std::thread::available_parallelism()
+            .map(core::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let mut baseline_ns = 0.0_f64;
+        println!("lanes  mean ns/block  worst ns/block  speed-up  serial fraction");
+        for lanes in [1_usize, 2, 4, 8] {
+            if lanes > cores {
+                println!("{lanes:>5}  (skipped: {cores} cores)");
+                continue;
             }
+            let mode = if lanes == 1 {
+                Q128RenderMode::Sequential
+            } else {
+                Q128RenderMode::DependencyWaves
+            };
+            let mut prepared = fixture(48_000, lanes, mode, 41_000 + lanes as u64);
+            let mut pcm = vec![0.0_f32; Q128_QUANTUM_FRAMES * 2];
+            for block in 0..WARMUP {
+                prepared
+                    .render(&mut pcm, block * Q128_QUANTUM_FRAMES as u64)
+                    .expect("warm-up render");
+            }
+            let mut worst = 0_u128;
+            let started = std::time::Instant::now();
+            for block in 0..MEASURED {
+                let block_start = std::time::Instant::now();
+                prepared
+                    .render(&mut pcm, (WARMUP + block) * Q128_QUANTUM_FRAMES as u64)
+                    .expect("measured render");
+                worst = worst.max(block_start.elapsed().as_nanos());
+            }
+            let mean = started.elapsed().as_nanos() as f64 / MEASURED as f64;
+            if lanes == 1 {
+                baseline_ns = mean;
+            }
+            let speedup = baseline_ns / mean;
+            let workers = lanes as f64;
+            let serial = if lanes == 1 || speedup <= 0.0 {
+                f64::NAN
+            } else {
+                (workers / speedup - 1.0) / (workers - 1.0)
+            };
+            println!("{lanes:>5}  {mean:>13.1}  {worst:>14}  {speedup:>8.2}  {serial:>15.3}");
             assert_eq!(
-                perturbed.pdc_samples, baseline_pdc,
-                "perturbation {index} PDC"
-            );
-            assert_eq!(
-                perturbed.plan.qualification_counters(),
-                baseline_counters,
-                "perturbation {index} counters"
-            );
-            assert_eq!(
-                perturbed.observer_records(),
-                baseline_observers,
-                "perturbation {index} observer transcript"
-            );
-            assert_eq!(
-                perturbed.observer_record_count(),
-                BLOCKS as usize * OBSERVERS_PER_BLOCK,
-                "perturbation {index} complete observer transcript"
+                prepared.plan.dispatch_counters()[1],
+                0,
+                "{lanes} lanes: a deadline miss would make this measurement meaningless"
             );
         }
     }
@@ -870,6 +962,23 @@ mod tests {
                 transcript.partitions_are_canonical,
                 "track count {track_count}"
             );
+            // Issue 100 F2: the split balances prepared cost, not unit count. The greedy
+            // longest-processing-time-first rule only ever places a unit on the least-loaded bin,
+            // whose load is at most the mean at that moment, so no bin can end heavier than
+            // `ceil(total / bins) + heaviest unit`. A count split violates this in every wave
+            // that mixes an eight-member bank with scalar tails.
+            assert!(
+                transcript.weighted_partitions_are_balanced,
+                "cost-weighted partitions for track count {track_count}"
+            );
+            // An independent lower bound on the folded cost: every track input weighs at least
+            // one, and every post-input builtin-bank member contributes four processing slots
+            // (polarity/trim, HPF, LPF, trim/mute) plus its one incoming edge.
+            assert!(
+                transcript.total_unit_weight
+                    >= (track_count + 5 * prepared.prepared_builtin_bank_member_count) as u64,
+                "prepared cost for track count {track_count} is below its structural floor"
+            );
             assert_resource_accounting(&prepared);
             if track_count == 1 {
                 assert_eq!(transcript.largest_wave_width, 1);
@@ -909,10 +1018,21 @@ mod tests {
         // `q128_is_byte_identical_at_every_launch_rate_and_lane_count` and the perturbation
         // suite -- are unchanged and green.
         //
-        //   q128 transcript: 0x1364_823e_5403_eca7 -> 0x645b_3eb0_778d_96dd
-        //   aggregate:       0xebbc_a7d9_be93_d1ca -> 0x386f_8720_9810_7e32
+        // #100 F2 moves them once more: a wave's units are now ordered by the cost-weighted
+        // longest-processing-time-first split rather than by unit key, and the transcript folds
+        // each unit's prepared weight. Neither hash is pinned from production output: every
+        // structural quantity the transcript reports is asserted against an independent
+        // expectation immediately above -- retained builtin bank units and members equal the
+        // prepared counts, partitions stay canonical *and* cost-balanced (no bin heavier than
+        // `ceil(total / bins) + heaviest unit`, which a count split cannot satisfy), the folded
+        // weight clears its structural floor, and `largest_wave_width` is 1 for a single track.
+        // The PCM gates are unchanged and green: the q128 lane matrix now runs 1/2/4/8 lanes at
+        // every launch rate, and `miso-engine-graph`'s 50 generated DAGs run 1/2/4/7.
+        //
+        //   q128 transcript: 0x1364_823e_5403_eca7 -> 0x645b_3eb0_778d_96dd -> 0x49ff_221a_5d9f_385e
+        //   aggregate:       0xebbc_a7d9_be93_d1ca -> 0x386f_8720_9810_7e32 -> 0x6e2c_19ea_9945_fc56
         assert_eq!(
-            q128_transcript.hash, 0x645b_3eb0_778d_96dd,
+            q128_transcript.hash, 0x49ff_221a_5d9f_385e,
             "frozen q128 native wave/unit/partition transcript"
         );
         // Re-derived structurally again for audit #103 W4-4: the matrix folds
@@ -922,8 +1042,8 @@ mod tests {
         //
         //   aggregate: 0x386f_8720_9810_7e32 -> 0x1ba7_2d17_1383_6e52
         assert_eq!(
-            aggregate_hash, 0x1ba7_2d17_1383_6e52,
-            "frozen exact-100 preparation matrix transcript after the audit-#103 plan clock field"
+            aggregate_hash, 0x6e2c_19ea_9945_fc56,
+            "frozen exact-100 preparation matrix transcript after the cost-weighted split"
         );
         let reference = reference.expect("one twelve-track preparation");
         assert!(reference.prepared_builtin_bank_count > 0);
@@ -943,11 +1063,19 @@ mod tests {
             .expect("one-byte-short native retained cap must reject");
         assert_eq!(cap_error, "graph.scheduler.cap");
 
-        let overflow_error =
-            prepare_q128_fixture_for_track_count(12, usize::MAX, 40_102, usize::MAX)
-                .err()
-                .expect("checked scheduler resource overflow must reject");
-        assert_eq!(overflow_error, "graph.scheduler.resource");
+        // An absurd lane request is now clamped by the pool the host actually started rather
+        // than overflowing: effective lanes are `pool workers + 1`. The checked-overflow path
+        // itself is gated in `miso-engine-native-scheduler`
+        // (`an_impossible_pool_shape_is_rejected_before_publication`).
+        let clamped = prepare_q128_fixture_for_track_count(12, usize::MAX, 40_102, usize::MAX)
+            .expect("an oversized lane request is clamped to the started pool");
+        assert!(
+            clamped.metadata.resources.scheduler.selected_lanes
+                <= std::thread::available_parallelism()
+                    .map(core::num::NonZeroUsize::get)
+                    .unwrap_or(1)
+                    + 1
+        );
     }
 
     fn fixture(rate: u32, lanes: usize, mode: Q128RenderMode, plan_id: u64) -> PreparedQ128Fixture {
@@ -966,12 +1094,6 @@ mod tests {
         plan.render(&mut pcm, absolute_sample)
             .unwrap_or_else(|error| panic!("q128 render failed: {error:?}"));
         pcm
-    }
-
-    fn render_blocks(plan: &mut PreparedQ128Fixture) -> Vec<Vec<f32>> {
-        (0..BLOCKS)
-            .map(|block| render(plan, block * Q128_QUANTUM_FRAMES as u64))
-            .collect()
     }
 
     fn matrix_fixture(
@@ -1033,29 +1155,6 @@ mod tests {
             }
         }
         hash
-    }
-
-    fn seeded_completion_acceptance_perturbations() -> [[u8; 3]; 32] {
-        const NONCANONICAL_ORDERS: [[u8; 3]; 5] =
-            [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-        let mut state = PERTURBATION_SEED;
-        core::array::from_fn(|_| {
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut word = state;
-            word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            word ^= word >> 31;
-            NONCANONICAL_ORDERS[word as usize % NONCANONICAL_ORDERS.len()]
-        })
-    }
-
-    fn perturbation_transcript_hash(perturbations: &[[u8; 3]; 32]) -> u64 {
-        perturbations
-            .iter()
-            .flat_map(|order| order.iter().copied())
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-            })
     }
 
     fn assert_pcm_eq(left: &[f32], right: &[f32], rate: u32, block: u64, mode: &str) {
