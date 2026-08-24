@@ -889,18 +889,34 @@ mod tests {
         assert_eq!(accepted_preparations, 100);
         assert!(count_observations.iter().all(|count| *count != 0));
         let q128_transcript = transcript_by_count[4].expect("twelve-track transcript");
-        // Both constants are re-derived structurally for #86 F3: the only inputs that moved are
-        // the builtin bank/tail counts these transcripts fold (12 tracks at W8: 1 full bank +
-        // 4 scalar tails -> 2 banks, the second padded, 0 tails; the table above is the hand
-        // count for every track count).  The PCM gates in this crate --
+        // Both constants are re-derived structurally, twice.
+        //
+        // #86 F3 moved the builtin bank/tail counts these transcripts fold (12 tracks at W8:
+        // 1 full bank + 4 scalar tails -> 2 banks, the second padded, 0 tails; the table above
+        // is the hand count for every track count).
+        //
+        // #98 F2/F5 moves them again: the native executor is now built from the lowered
+        // `ExecutionProgram`, so a `TrackStage` boundary that is a pure alias carries no op and
+        // therefore no scheduling unit, and a dependency level made only of aliases carries no
+        // wave. Twelve tracks lose their three internal rack boundaries each, so the unit count
+        // this hash folds falls by 36 and the retained wave count falls with it; `graph_job_bytes`
+        // (folded by the aggregate) falls for the same reason. Neither hash is pinned from
+        // production output: every structural quantity the transcript reports is asserted against
+        // an independently hand-counted expectation immediately above -- retained builtin bank
+        // units and members equal the prepared counts, partitions stay canonical,
+        // `largest_wave_width` is 1 for a single track -- and `assert_resource_accounting` checks
+        // the byte report against its own arithmetic. The PCM gates in this crate --
         // `q128_is_byte_identical_at_every_launch_rate_and_lane_count` and the perturbation
         // suite -- are unchanged and green.
+        //
+        //   q128 transcript: 0x1364_823e_5403_eca7 -> 0x645b_3eb0_778d_96dd
+        //   aggregate:       0xebbc_a7d9_be93_d1ca -> 0x386f_8720_9810_7e32
         assert_eq!(
-            q128_transcript.hash, 0x1364_823e_5403_eca7,
+            q128_transcript.hash, 0x645b_3eb0_778d_96dd,
             "frozen q128 native wave/unit/partition transcript"
         );
         assert_eq!(
-            aggregate_hash, 0xebbc_a7d9_be93_d1ca,
+            aggregate_hash, 0x386f_8720_9810_7e32,
             "frozen exact-100 preparation matrix transcript after nine-category worker audit storage"
         );
         let reference = reference.expect("one twelve-track preparation");
