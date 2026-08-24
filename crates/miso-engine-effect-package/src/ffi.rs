@@ -2,10 +2,13 @@
 
 #![allow(unsafe_code)]
 
+use crate::EffectDescriptorWireDiagnosticV1;
+#[cfg(feature = "c-abi")]
 use crate::{
     EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectDescriptorWireDiagnosticCodeV1,
-    EffectDescriptorWireDiagnosticV1, verify_effect_descriptor_wire_v1,
+    verify_effect_descriptor_wire_v1,
 };
+#[cfg(feature = "c-abi")]
 use core::slice;
 
 pub const EFFECT_DESCRIPTOR_INSPECTION_ABI_VERSION_V1: u32 = 0x0001_0000;
@@ -86,6 +89,7 @@ pub struct EffectDescriptorSummaryV1 {
     pub identity: [u8; 32],
 }
 
+#[cfg(feature = "c-abi")]
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(
         bytes[offset..offset + 4]
@@ -94,6 +98,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     )
 }
 
+#[cfg(feature = "c-abi")]
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]
@@ -102,6 +107,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     )
 }
 
+#[cfg(feature = "c-abi")]
 unsafe fn write_diagnostic(
     output: *mut EffectDescriptorWireDiagnosticV1,
     value: EffectDescriptorWireDiagnosticV1,
@@ -110,6 +116,7 @@ unsafe fn write_diagnostic(
     unsafe { output.write(value) };
 }
 
+#[cfg(feature = "c-abi")]
 unsafe fn zero_required_counts(
     parameters: *mut u32,
     ports: *mut u32,
@@ -124,6 +131,7 @@ unsafe fn zero_required_counts(
     }
 }
 
+#[cfg(feature = "c-abi")]
 fn null_diagnostic() -> EffectDescriptorWireDiagnosticV1 {
     EffectDescriptorWireDiagnosticV1::new(
         EffectDescriptorWireDiagnosticCodeV1::Null,
@@ -132,6 +140,7 @@ fn null_diagnostic() -> EffectDescriptorWireDiagnosticV1 {
     )
 }
 
+#[cfg(feature = "c-abi")]
 fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRecordV1 {
     EffectDescriptorParameterRecordV1 {
         id: read_u32(bytes, offset),
@@ -157,6 +166,7 @@ fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRec
     }
 }
 
+#[cfg(feature = "c-abi")]
 fn port_record(bytes: &[u8], offset: usize) -> EffectDescriptorPortRecordV1 {
     EffectDescriptorPortRecordV1 {
         id_offset: read_u32(bytes, offset),
@@ -168,6 +178,7 @@ fn port_record(bytes: &[u8], offset: usize) -> EffectDescriptorPortRecordV1 {
     }
 }
 
+#[cfg(feature = "c-abi")]
 fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecordV1 {
     EffectDescriptorQualityRecordV1 {
         quality: read_u32(bytes, offset),
@@ -185,6 +196,7 @@ fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecordV
     }
 }
 
+#[cfg(feature = "c-abi")]
 fn enum_choice_record(bytes: &[u8], offset: usize) -> EffectDescriptorEnumChoiceRecordV1 {
     EffectDescriptorEnumChoiceRecordV1 {
         value_bits: read_u32(bytes, offset),
