@@ -915,9 +915,15 @@ mod tests {
             q128_transcript.hash, 0x645b_3eb0_778d_96dd,
             "frozen q128 native wave/unit/partition transcript"
         );
+        // Re-derived structurally again for audit #103 W4-4: the matrix folds
+        // `resources.total_retained_bytes`, and `PreparedRenderPlan` gained one `u64` when the
+        // sample clock moved into the plan.  The q128 transcript above is unaffected, and every
+        // PCM gate in this crate is unchanged and green.
+        //
+        //   aggregate: 0x386f_8720_9810_7e32 -> 0x1ba7_2d17_1383_6e52
         assert_eq!(
-            aggregate_hash, 0x386f_8720_9810_7e32,
-            "frozen exact-100 preparation matrix transcript after nine-category worker audit storage"
+            aggregate_hash, 0x1ba7_2d17_1383_6e52,
+            "frozen exact-100 preparation matrix transcript after the audit-#103 plan clock field"
         );
         let reference = reference.expect("one twelve-track preparation");
         assert!(reference.prepared_builtin_bank_count > 0);
